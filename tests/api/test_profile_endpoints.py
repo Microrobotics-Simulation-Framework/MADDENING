@@ -61,21 +61,45 @@ class TestSimProfile:
         resp = client.post("/sim/profile?n_steps=3")
         assert resp.status_code == 200
 
-    def test_clamps_n_steps_lower_bound(self, loaded_client):
-        client, _ = loaded_client
-        resp = client.post("/sim/profile?n_steps=0")
-        # Should be clamped to 1 and still succeed
-        assert resp.status_code == 200
+    @pytest.mark.parametrize("query, field", [
+        ("n_steps=0", "n_steps"), ("n_steps=1001", "n_steps"), ("n_steps=10000", "n_steps"),
+        ("n_steps=-1", "n_steps"), ("n_steps=2&n_warmup=-1", "n_warmup"),
+        ("n_steps=2&n_warmup=51", "n_warmup"),
+    ])
+    def test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled(self, loaded_client,
+                                                                       query, field):
+        """As ``POST /sim/run`` answers one past its bound.  Both counts
+        used to be clamped into their bounds (1..1000 steps, 0..50 of
+        warm-up) without a word: 10000 steps asked, 1000 profiled, and a
+        reply that did not say so."""
+        client, server = loaded_client
+        calls = []
+        import maddening.core.simulation.profiler as profiler
+        original = profiler.profile_graph
+        profiler.profile_graph = lambda *a, **k: calls.append(k) or original(*a, **k)
+        try:
+            resp = client.post(f"/sim/profile?{query}")
+        finally:
+            profiler.profile_graph = original
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"][0]["loc"] == ["query", field]
+        assert not calls
 
-    def test_clamps_n_steps_upper_bound(self, loaded_client):
-        client, _ = loaded_client
-        # 10_000 → clamped to 1000.  Don't actually wait for 1000 steps in
-        # a test; the smaller request below proves the clamp is applied
-        # and the request returns. Skip the brute-force version for CI.
-        resp = client.post("/sim/profile?n_steps=10000")
-        # This will be slow (1000 steps) — but the assertion is just
-        # that it succeeds.
-        assert resp.status_code in (200, 408, 504) or resp.status_code < 500
+    @pytest.mark.parametrize("query, steps, warmup", [
+        ("n_steps=1&n_warmup=0", 1, 0), ("n_steps=3&n_warmup=2", 3, 2)])
+    def test_the_counts_asked_are_the_counts_profiled(self, loaded_client, query, steps,
+                                                      warmup):
+        client, _server = loaded_client
+        calls = []
+        import maddening.core.simulation.profiler as profiler
+        original = profiler.profile_graph
+        profiler.profile_graph = lambda *a, **k: calls.append(k) or original(*a, **k)
+        try:
+            resp = client.post(f"/sim/profile?{query}")
+        finally:
+            profiler.profile_graph = original
+        assert resp.status_code == 200, resp.text
+        assert calls == [{"n_steps": steps, "n_warmup": warmup}]
 
     def test_runner_running_returns_409(self, loaded_client):
         client, server = loaded_client

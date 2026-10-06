@@ -69,8 +69,9 @@ token is served under any `Host`.
   `MADDENING_API_TOKEN=$UNSET_VARIABLE` produces, and reading it as
   "authentication off" is the failure this exists to prevent.  **So does a
   token with whitespace before or after it** (a trailing newline from a
-  file, say): a client's `Authorization` header is read stripped, so no
-  client could ever present it, and every request was a 401.
+  file, say): the whitespace around a header's value is not part of the
+  token a client presents, so no client could ever present it, and every
+  request was a 401.
 * Otherwise a `secrets.token_urlsafe(32)` value generated at startup and
   logged once.  If nothing reads your log — a detached container, a
   batch job — set `MADDENING_API_TOKEN` yourself, or point
@@ -90,7 +91,7 @@ token does *not* end up.
 
 | Client | Carrier |
 | --- | --- |
-| HTTP | `Authorization: Bearer <token>`. No authenticated route accepts `?token=`, so a credential never reaches an access log through this API. |
+| HTTP | `Authorization: Bearer <token>`, read by RFC 9110's grammar and no more generously: the scheme in any case (`bearer`, `BEARER`), one or more spaces, then the token, compared exactly. Spaces and tabs around the whole header value are not part of it (an HTTP server removes them); a tab or any other character between the scheme and the token, or inside the value after the token, is no match (401). No authenticated route accepts `?token=`, so a credential never reaches an access log through this API. |
 | WebSocket, non-browser | `Authorization: Bearer <token>` on the handshake. |
 | WebSocket, browser | Subprotocols `["maddening.bearer.<base64url(token)>", "maddening.v1"]`; the server selects `maddening.v1`. Browsers cannot set a header on a handshake. |
 | Bundled UI | Open `/viz/app#token=<token>` — a **fragment**, which the browser never sends, so the token reaches no access log. The page removes it from the address bar immediately and keeps it in `sessionStorage`. `?token=` also works and is sometimes easier to paste, but a query string *does* reach the log. Without either, the page prompts on the first 401. |
@@ -245,7 +246,7 @@ already been applied.
 | POST | `/sim/stop` | Stop the runner. A runner whose thread had died is reported stopped, with `error` |
 | POST | `/sim/reset` | Stop the runner and reset every node; the streams are sent the reset state at step 0. `was_running` is whether a runner was running. When the graph cannot be had in time after the runner was stopped, the 503 says the runner stays stopped, with `was_running` |
 | PUT | `/sim/stride?steps_per_frame=&relay_stride=` | The runner's steps per frame and the relay's stride; a value left out keeps its current value (it used to be reset to 1). Answered at once, whatever the other runner routes wait for |
-| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON). The graph is put back exactly as it was after it -- state, parameters, and an edited graph still waiting for its compile -- and the streams neither show nor count its steps |
+| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON) of `n_steps` steps (1 to 1000, default 50) after `n_warmup` (0 to 50, default 3); a value outside its range is a 422, not clamped. The graph is put back exactly as it was after it -- state, parameters, and an edited graph still waiting for its compile -- and the streams neither show nor count its steps |
 | POST | `/sim/profile/jax/start`, `/sim/profile/jax/stop` | A JAX trace of the steps between them, for at most `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600 s): past either it stops itself and writes its files. The time budget has its own timer, so an idle trace stops at it too |
 | GET | `/sim/profile/jax/status` | Whether a trace runs, its steps and budgets, its directory, and what stopped the last one |
 

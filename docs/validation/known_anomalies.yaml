@@ -9786,9 +9786,13 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      Two timesteps that differ by less than `1e-9` of the larger are still
-      taken as equal, by design (float noise in decimal timesteps is a few
-      `1e-16`).
+      A remainder at or below `1e-9` of the largest timestep is still taken
+      for float noise, by design (the noise in decimal timesteps is a few
+      `1e-16`): two timesteps that differ by less than that are scheduled
+      as one rate.  A timestep that is itself at or below `1e-9` of the
+      largest was taken for noise in the same way, and its node ran on
+      another clock with no error: that is MADD-ANO-227, refused at
+      `compile()` from 0.4.0.
     verification:
       - "tests/core/test_multirate_in_any_units.py::test_a_nanosecond_graph_keeps_its_nodes_clocks_together"
       - "tests/core/test_multirate_in_any_units.py::test_the_base_timestep_is_the_gcd_in_any_unit"
@@ -15263,4 +15267,119 @@ anomalies:
       Open in 0.4.0; cause to be established.
     verification:
       - "tests/property/test_coupling_targeted_search.py::test_a_known_defect_the_search_reached_is_fixed"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-227"
+    title: "Nodes whose timesteps are more than about 1e9 apart, or have no common step the float GCD finds, ran on different clocks with no error"
+    description: >
+      `compile()` takes the base step of a multi-rate graph as the GCD of
+      the scheduled timesteps and steps each node every
+      `round(dt / base)`-th base step.  The GCD takes a remainder at or
+      below `1e-9` of the largest timestep for float noise (an absolute
+      `1e-9` before 0.4.0, MADD-ANO-125), so a timestep that small *was*
+      the noise: nodes at `1.0` and `1e-10` got a base step of `1.0` and
+      rate dividers of 1 and 0, the fast node was stepped once per base
+      step with its own `1e-10`, and after four steps its clock read
+      `4e-10` against the graph's `4.0`.  `add_node`, `compile`,
+      `validate` (which reported "rate dividers: {'slow': 1, 'fast': 0}"
+      as information) and every run succeeded, in process and over REST.
+      Closer together the divider was merely wrong: across more than about
+      six decades the float GCD can stop on a step that is not a common
+      one (`1e-4` and `1.1e-12` gave a base of `1.0000000086e-12` and a
+      divider of 1 for the node at `1.1e-12`, a clock 9% slow).  Measured
+      identically at v0.1.0, v0.2.1 and v0.3.1 (`git archive` of each tag,
+      CPU, jaxlib 0.11.0: dividers `{'slow': 1, 'fast': 0}` for `1.0` and
+      `1e-10`).  Found by the 0.4.0 REST audit.  Resolved in 0.4.0:
+      `compile()` raises `ValueError`, naming the two nodes and their
+      timesteps, when a divider rounds to zero or `divider * base` misses
+      the node's timestep by more than `1e-6` of it
+      (`_graph_specs._rate_dividers`); `validate()` lists it as an error;
+      `POST /graph/nodes` and `DELETE /graph/nodes/{name}` answer 400 for a
+      change that would leave such a graph.  The dividers of every graph
+      that is kept are computed as before (the step-program digests and
+      compile counts are unchanged).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: one node's clock ran at another rate than the graph's with
+      no warning, which is never `minor`.  Not `critical`: it needs
+      timesteps nine decades apart, or more than about six with no short
+      common step, in one multi-rate graph outside a sub-cycling group.
+      `context_dependent` because what a desynchronised node does depends
+      on the model.
+    affected_components:
+      - "maddening.core._graph_specs._multi_gcd"
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep the timesteps of one graph within about six
+      decades of each other and whole multiples of one step, or put the
+      fast and slow nodes in a sub-cycling coupling group (scheduled at its
+      largest member timestep); read `gm._rate_dividers` after `compile()`
+      and check that none is 0.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The GCD is still Euclid's algorithm on floats, so some sets of
+      timesteps that do have a common step are refused rather than
+      scheduled (207 of 21,528 pairs of one- to three-digit decimal
+      timesteps between 1e-12 and 9, none of them closer than six decades;
+      and a set can be refused where a superset of it is kept).  The
+      refusal names the nodes; an exact rational GCD would schedule them.
+    verification:
+      - "tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_a_schedule_that_would_not_keep_a_nodes_clock_does_not_compile"
+      - "tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_any_set_of_timesteps_is_scheduled_on_one_clock_or_refused"
+      - "tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_a_schedule_that_is_kept_has_the_dividers_it_always_had"
+      - "tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_a_node_whose_timestep_the_graph_cannot_schedule_is_not_added"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-228"
+    title: "REST read a boolean or numeric text as a timestep (`true` added a node stepping at 1.0 s), and clamped the counts of POST /sim/profile without saying so"
+    description: >
+      `POST /graph/nodes` declared `timestep: float` and parsed it
+      leniently: `"timestep": true` answered 201 and added a node stepping
+      at `1.0` s, and `"0.5"`, `" 0.25 "` and `"1e-2"` were read as numbers,
+      where the same kinds inside `params` are a 400.  The integer fields
+      of `POST /surrogate/train` took `true` (as 1) and numeric text the
+      same way.  Integer query parameters were read as generously
+      (`n_steps=5.0`, `n_steps=5_0` as 50, `%205%20`), and `POST
+      /sim/profile` clamped `n_steps` into 1..1000 and `n_warmup` into
+      0..50: 5000 steps asked, 1000 profiled, and nothing in the reply said
+      so (`POST /sim/run` answers 422 outside its range).  Measured at
+      v0.1.0, v0.2.1 and v0.3.1 for the timestep (`git archive` of each
+      tag, in process: 201 and a timestep of 1.0 for `true`) and at v0.2.1
+      and v0.3.1 for the profile (`n_steps=0` a 200; the route is new in
+      0.2).  Found by the 0.4.0 REST audit.  Resolved in 0.4.0: every
+      number of every request model is strict (a JSON number; a JSON
+      integer is taken for a float), every integer query parameter is
+      decimal digits inside a declared range, and a value outside it is a
+      422.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the request was answered 2xx with a value the client did not
+      send (a 1.0 s timestep for `true`; 1000 profiled steps for 5000),
+      which is never `minor`.  Not `critical`: it needs a client that sends
+      a boolean or text where the schema says number, or a count outside
+      the documented range, and the 201 echoes the timestep it took.
+    affected_components:
+      - "maddening.api.server.AddNodeRequest"
+      - "maddening.api.server.TrainSurrogateRequest"
+      - "maddening.api.server.SimulationServer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: send JSON numbers for numeric fields and read the
+      `timestep` the 201 echoes; keep `/sim/profile`'s `n_steps` within 1
+      to 1000 and `n_warmup` within 0 to 50.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known for the request models and query parameters; the values
+      inside `params` and `state` (free-form objects) are judged by their
+      routes, which refuse a boolean or text for a numeric parameter.
+    verification:
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_json_number_is_refused"
+      - "tests/property/test_rest_requests_generated_from_the_schema.py::test_every_number_of_every_request_model_refuses_a_boolean_and_text"
+      - "tests/property/test_rest_requests_generated_from_the_schema.py::test_every_integer_query_declares_its_range"
+      - "tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled"
     github_issue: null

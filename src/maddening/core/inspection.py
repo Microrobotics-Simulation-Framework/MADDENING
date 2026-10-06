@@ -669,6 +669,12 @@ def _mapping_text(mapping: Any) -> str:
     return text
 
 
+def _geometry_text(edge: Any) -> str:
+    """``geometry <anchor>.<field>``: the moving geometry the edge's mapping reads."""
+    anchor, field = edge.geometry
+    return f"geometry {anchor}.{field}"
+
+
 def _group_key(group: Any) -> str:
     return "+".join(sorted(group.nodes))
 
@@ -790,6 +796,8 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
         if edge.mapping is not None:
             details.append(f"mapping {_mapping_text(edge.mapping)} "
                            f"(params['mappings'][{edge.key!r}])")
+        if getattr(edge, "geometry", None) is not None:
+            details.append(_geometry_text(edge))
         if edge.additive:
             details.append("additive")
         if edge.source_units or edge.target_units:
@@ -928,6 +936,8 @@ def _edge_label(edge: Any) -> str:
         extra.append(_callable_name(edge.transform))
     if edge.mapping is not None:
         extra.append(_mapping_text(edge.mapping))
+    if getattr(edge, "geometry", None) is not None:
+        extra.append(_geometry_text(edge))
     if edge.additive:
         extra.append("additive")
     return label + (f" ({', '.join(extra)})" if extra else "")
@@ -1333,6 +1343,13 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
         flags.append("converged=False: the returned state is still outside the threshold"
                      + ("; under solver='ift' the gradient through this step is unreliable"
                         if group.solver == "ift" else ""))
+    reason = d.get("not_usable_reason")
+    if reason:
+        # The report withholds every bound, estimate and ``*_usable`` flag
+        # of this group, so the caveats below (which read them) would be
+        # statements about values that are not there.
+        flags.append(f"no bound or estimate reported: {reason}")
+        return flags
     if not d["ratio_usable"]:
         flags.append("ratio_usable=False: the contraction ratio was unusable, so the "
                      "criterion fell back to the raw residual test; converged reports that "

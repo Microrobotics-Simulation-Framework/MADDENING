@@ -173,7 +173,21 @@ def _held():
     return gm
 
 
-GRAPHS = {"plant": _plant, "multirate": _multirate, "coupled": _coupled, "held": _held}
+def _geometry():
+    """Two edges with a geometry-dependent mapping (experimental), one
+    anchor each, and an exported array input: the geometry is node state
+    that moves every step, so an FMU path that froze it, or restored a
+    snapshot without it, steps to other values."""
+    from tests.core import geometry_surface_graphs as surfaces  # noqa: PLC0415
+
+    gm = surfaces.graph(compile=False)
+    gm.add_external_input("grid", "deposit", shape=(surfaces.N_GRID,))
+    gm.compile()
+    return gm
+
+
+GRAPHS = {"plant": _plant, "multirate": _multirate, "coupled": _coupled, "held": _held,
+          "geometry": _geometry}
 
 #: ``build_model_description`` keyword arguments per family: ``held``
 #: exports the spring's input and holds the ball's at zero.

@@ -24,7 +24,13 @@
 #          src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping,
 #          its two layouts, the three sparse kinds and their builders, the
 #          limits) and the structure digest a checkpoint carries for sparse
-#          weights (src/maddening/core/simulation/checkpoint.py).
+#          weights (src/maddening/core/simulation/checkpoint.py);
+#          geometry-dependent mappings (experimental): add_edge(...,
+#          geometry=), the time level a geometry is read at in the step and
+#          in a coupling group (src/maddening/core/_graph_specs.py,
+#          src/maddening/core/coupling/_coupled_block.py), what refuses one,
+#          what a group that resolves one reports, and the multilinear_grid
+#          kind (src/maddening/core/coupling/grid_mapping.py); MAP-026 on.
 # Covered elsewhere, not repeated here: the dense factories' own numerics
 # (rbf_mapping's patch test and conservation, tests/core/test_mapping.py);
 # sysid, ParamSpec and the FMU export as such (sysid_fmu_claims.yaml); the
@@ -1430,3 +1436,973 @@ claims:
     adaptive: n/a
     checkpoint_restart: n/a
     sharded: n/a
+
+# ---------------------------------------------------------------------------
+# Geometry-dependent mappings (experimental): add_edge(..., geometry=), the
+# time level a geometry is read at, the multilinear_grid kind
+# ---------------------------------------------------------------------------
+
+- id: MAP-026
+  area: geometry-dependent mapping
+  claim: >-
+    An edge with a geometry-dependent mapping steps as the same graph with
+    the mapping moved inside its target node (the geometry delivered on an
+    ordinary edge): "The step reads it: the plain step, a coupling group's
+    passes under every solver and acceleration, sub-cycled members,
+    multi-rate graphs, and the gradients through all of them." The geometry
+    is ordinary node state: "integrated by its node, batched by run_sweep,
+    differentiated by jax.grad, and saved by a checkpoint."
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings; What reads a geometry in 0.4.0, and what does not)'
+    - docs/user_guide/geometry_dependent_mappings.md (An example)
+    - 'src/maddening/core/graph_manager.py (GraphManager.add_edge, geometry)'
+  conditions: >-
+    Two bodies whose geometry moves with their mapped input, joined by one
+    or two edges with a test kind whose geometry is its matrix, or with the
+    multilinear_grid kind in one and two dimensions; either anchor on either
+    edge; forward and back edges, an additive port with a transform, a flux
+    hook that reads the mapped input; float32, float64 under x64, and a
+    float32 field with a float64 geometry (mixed dtypes); a multi-rate graph
+    with either body fast; coupling groups under Gauss-Seidel and Jacobi,
+    the ift and fori solvers, no acceleration, fixed relaxation, Aitken,
+    IQN-ILS and IQN-IMVJ, the l2 and mixed norms, one, two, three passes and
+    converged solves, a linear and a quadratic predictor, a member's flux
+    read or scattered inside the group; a sub-cycled member of either end
+    under linear and constant interpolation; the gradient of a loss over the
+    rollout with respect to the initial geometry, the parameter that moves
+    it and a value-side parameter; several draws under one vmap of the step;
+    a run restarted from a checkpoint. The steps compiled (jit) by the
+    graph. Not claimed for 16-bit dtypes, run_adaptive or sharded graphs.
+  oracle: >-
+    the node-inlined twin: the same nodes, names, order and groups, with
+    every geometry-dependent mapping applied inside its target node to a
+    value and a geometry that arrive on ordinary edges. States to 8 ulps of
+    the field's scale (plus the group's own tolerance where a solve stops on
+    its criterion), pass counts equal, residuals to rounding, gradients to
+    rounding of the twin's.
+  tests:
+    - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_gradients_of_an_edge_mapped_graph_are_its_node_inlined_twin_s'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s'
+    - 'tests/property/test_differential_geometry_edges.py::test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_runs'
+    - 'tests/property/test_differential_geometry_edges.py::test_a_run_restarted_from_a_checkpoint_continues_as_the_uninterrupted_run'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_cases_cover_what_the_module_claims'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_inlined_twin_keeps_names_orders_and_groups_and_uses_plain_edges_only'
+  status: verified
+  notes: >-
+    The adaptive steppers and a sharded end are refused (the refusal rows
+    below), so they are excluded here rather than untested. The interface
+    norm over a geometry edge is refused too; the four cases that ran it are
+    kept in the case lists and asserted refused.
+  domains:
+    f32: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    f64: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    mixed_dtype: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    16bit: narrowed
+    jit: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    grad: 'tests/property/test_differential_geometry_edges.py::test_the_gradients_of_an_edge_mapped_graph_are_its_node_inlined_twin_s'
+    vmap: 'tests/property/test_differential_geometry_edges.py::test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_runs'
+    multi_rate: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    sub_cycled: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    predictors_warm_starts: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    adaptive: narrowed
+    checkpoint_restart: 'tests/property/test_differential_geometry_edges.py::test_a_run_restarted_from_a_checkpoint_continues_as_the_uninterrupted_run'
+    sharded: narrowed
+
+- id: MAP-027
+  area: geometry-dependent mapping
+  claim: >-
+    The time level a geometry is read at, per call site: "Source-anchored:
+    the geometry is read exactly as an ordinary edge source.g -> target
+    would be read there, from the same state the edge's value is read from.
+    Where the value is interpolated between two snapshots (a sub-cycled
+    member of a coupling group), the geometry is interpolated between the
+    same two snapshots with the same weight, componentwise, and the mapping
+    is applied to the interpolated value at the interpolated geometry."
+    "Target-anchored: the geometry is field g of the state argument of the
+    hook the boundary inputs are being resolved for". The table of call
+    sites in the guide.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, The time level a geometry is read at)'
+    - src/maddening/core/_graph_specs.py (_edge_geom)
+  conditions: >-
+    linear relays that each hold a matrix advanced by a constant every step,
+    joined by edges whose geometry is that matrix, so that the step has a
+    closed form in which each call site's matrix is named: a forward edge, a
+    back edge, an ungrouped cycle, with source, target and mixed anchors; a
+    coupling group under Gauss-Seidel and Jacobi with the ift and fori
+    solvers, the l2 and mixed norms and a linear predictor; a sub-cycled
+    member (twice and four times) under linear and constant interpolation,
+    including a single pass, where the interpolated geometry is not hidden
+    by convergence; a multi-rate graph of two rates; float32 and float64
+    under x64; resolve_boundary_inputs on a stepped graph. The steps
+    compiled (jit) by the graph. Not claimed for mixed dtypes, 16-bit
+    dtypes, gradients, vmap, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    the float64 monolithic solve of the step
+    (tests/property/coupled_topologies.py, LinearModel) with the matrix each
+    call site reads bound per sub-step, to its rounding and residual
+    allowances; for a single pass, an explicit loop over the pass's updates.
+  tests:
+    - 'tests/property/test_geometry_time_levels.py::test_a_moving_geometry_is_read_at_its_documented_time_level'
+    - 'tests/property/test_geometry_time_levels.py::test_a_single_pass_reads_the_interpolated_geometry_at_every_sub_step'
+    - 'tests/property/test_geometry_time_levels.py::test_resolve_boundary_inputs_reads_the_geometry_of_the_current_state'
+    - 'tests/property/test_geometry_time_levels.py::test_the_cases_cover_every_row_of_the_table'
+  status: verified
+  notes: >-
+    The row "the target's flux hook, plain step" is not in the linear
+    reference (a relay's flux does not read its input); it is held by the
+    node-inlined twin's flux-reading target in the row above. A source read
+    on a back edge has not run yet, so "the current geometry on a back edge"
+    is not a distinct behaviour: the seeded fault that reads the new state
+    for every edge is equivalent.
+  domains:
+    f32: 'tests/property/test_geometry_time_levels.py::test_a_moving_geometry_is_read_at_its_documented_time_level'
+    f64: 'tests/property/test_geometry_time_levels.py::test_a_single_pass_reads_the_interpolated_geometry_at_every_sub_step'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/property/test_geometry_time_levels.py::test_a_moving_geometry_is_read_at_its_documented_time_level'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: 'tests/property/test_geometry_time_levels.py::test_a_moving_geometry_is_read_at_its_documented_time_level'
+    sub_cycled: 'tests/property/test_geometry_time_levels.py::test_a_moving_geometry_is_read_at_its_documented_time_level'
+    predictors_warm_starts: 'tests/property/test_geometry_time_levels.py::test_a_moving_geometry_is_read_at_its_documented_time_level'
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-028
+  area: geometry-dependent mapping
+  claim: >-
+    jax.grad with respect to a geometry, and to a parameter that moves it,
+    is the derivative of the step: the geometry "is ordinary node state: it
+    is integrated by its node, batched by run_sweep, differentiated by
+    jax.grad", through a plain step, a coupling group (the implicit
+    derivative of its fixed point) and a sub-cycled group.
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings)
+    - docs/user_guide/geometry_dependent_mappings.md (An example)
+  conditions: >-
+    the two-body graph with the test kind and with multilinear_grid in one
+    and two dimensions: the gradient of a loss over the rollout with respect
+    to the initial geometry, the parameter that moves it and a value-side
+    parameter, by reverse mode and, once per path, forward mode; a plain
+    step; a group under Gauss-Seidel and Jacobi with the GMRES and dense
+    adjoint solves, Aitken, IQN-ILS, the fori solver and a single pass; a
+    sub-cycled member under linear and constant interpolation. float64 under
+    x64 against central differences, and the float32 gradient of a plain
+    step against the float64 one. The steps compiled (jit) by the graph. Not
+    claimed for mixed dtypes, 16-bit dtypes, vmap, multi-rate graphs,
+    predictors, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    float64 central differences of the same loss (a step of 1e-6, relative
+    error below 1e-6); for float32, the float64 gradient to a relative 1e-3.
+  tests:
+    - 'tests/core/test_geometry_gradients.py::test_the_gradient_with_respect_to_a_moving_geometry_is_the_derivative'
+    - 'tests/core/test_geometry_gradients.py::test_the_geometry_gradient_is_the_derivative_on_every_path'
+    - 'tests/core/test_geometry_gradients.py::test_the_float32_gradient_of_a_plain_step_is_the_float64_one'
+    - 'tests/core/test_geometry_gradients.py::test_the_cases_cover_the_paths_the_module_claims'
+  status: verified
+  domains:
+    f32: 'tests/core/test_geometry_gradients.py::test_the_float32_gradient_of_a_plain_step_is_the_float64_one'
+    f64: 'tests/core/test_geometry_gradients.py::test_the_gradient_with_respect_to_a_moving_geometry_is_the_derivative'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_geometry_gradients.py::test_the_gradient_with_respect_to_a_moving_geometry_is_the_derivative'
+    grad: 'tests/core/test_geometry_gradients.py::test_the_gradient_with_respect_to_a_moving_geometry_is_the_derivative'
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: 'tests/core/test_geometry_gradients.py::test_the_geometry_gradient_is_the_derivative_on_every_path'
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-029
+  area: geometry-dependent mapping
+  claim: >-
+    A geometry that never moves gives the static mapping of the same points:
+    a geometry-dependent mapping is "a pure function of its three
+    arguments", so with the positions held fixed the graph steps as the
+    graph whose edges hold the matrix those positions give.
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings)
+    - 'src/maddening/core/coupling/mapping.py (Mapping, optional attributes)'
+  conditions: >-
+    the two-body graph with its geometry frozen, against its static twin:
+    the test kind and multilinear_grid in one, two and three dimensions, a
+    float64 geometry under a float32 field, groups, a sub-cycled member, a
+    multi-rate graph. The named coupling topologies with every mapped edge a
+    frozen multilinear edge at points on multiples of 1/8 of a cell, against
+    the monolithic reference and against the static build in float32,
+    float64 under x64, bfloat16 and float16 (16 ulps, a gross error only in
+    bfloat16), a multi-rate graph, a sub-cycled group, several draws under
+    one vmap, a group with a predictor, and a checkpoint restart. The steps
+    compiled (jit) by the graph. Not claimed for gradients, run_adaptive or
+    sharded graphs.
+  oracle: >-
+    the static twin (a matrix mapping of the same points on ordinary edges),
+    state for state to rounding; the float64 monolithic solve of the step
+    for the named topologies.
+  tests:
+    - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points'
+    - 'tests/property/test_differential_geometry_edges.py::test_every_frozen_geometry_steps_as_its_static_mapping'
+    - 'tests/property/test_differential_geometry_edges.py::test_a_named_topology_with_frozen_geometry_edges_reproduces_the_monolithic_reference'
+    - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_two_rotations_give_every_mapped_edge_both_anchors_and_both_modes'
+  status: verified
+  domains:
+    f32: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points'
+    f64: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[f64-chain-into-ring-0]'
+    mixed_dtype: 'tests/property/test_differential_geometry_edges.py::test_every_frozen_geometry_steps_as_its_static_mapping'
+    16bit:
+      - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[bfloat16-chain-into-ring-0]'
+      - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[float16-chain-into-ring-0]'
+    jit: 'tests/property/test_differential_geometry_edges.py::test_a_named_topology_with_frozen_geometry_edges_reproduces_the_monolithic_reference[chain-into-ring-0]'
+    grad: narrowed
+    vmap: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[vmap-chain-into-ring-0]'
+    multi_rate: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[multi_rate-chain-into-ring-0]'
+    sub_cycled: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[sub_cycled-chain-into-ring-0]'
+    predictors_warm_starts: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[predictors_warm_starts-chain-into-ring-0]'
+    adaptive: narrowed
+    checkpoint_restart: 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain[checkpoint_restart-chain-into-ring-0]'
+    sharded: narrowed
+
+- id: MAP-030
+  area: geometry-dependent mapping
+  claim: >-
+    A graph without a geometry edge is not affected by the feature: "it
+    compiles to the same programs as before the feature existed
+    (tests/core/test_step_program_digests.py compares the lowered program
+    text of 24 graphs with a capture taken before it)", and traces its step
+    and its scan once.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - tests/core/test_step_program_digests.py (module docstring)
+  conditions: >-
+    24 float32 gate graphs with no geometry edge: the named coupling
+    topologies under two configurations each, with dense and sparse mapped
+    edges, an Aitken group, a group with a predictor, a sub-cycled group, a
+    multi-rate graph, a flux edge outside a group, an RBF edge, and a
+    sharded graph on virtual devices; for each, the sha256 of the lowered
+    text of five programs: the step with traced and with baked parameters
+    (jit), run_scan(3), run_sweep at batch 2 (vmap) and the adaptive step
+    (run_adaptive), per jax version (0.10.2, 0.11.0, 0.11.2). Not claimed
+    for float64 (x64), mixed dtypes, 16-bit dtypes, gradients or
+    checkpoints.
+  oracle: >-
+    a capture of the same programs on the commit before the feature's first
+    source change, committed and frozen
+    (tests/compliance/test_step_program_digests_are_frozen.py); the gate is
+    shown to fail on a numerically neutral edit of the edge path, on a
+    reordering of a node's incoming edges and on a dropped Aitken pass.
+  tests:
+    - 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged'
+    - 'tests/core/test_step_program_digests.py::test_the_programs_of_a_sharded_graph_are_unchanged'
+    - 'tests/core/test_step_program_digests.py::test_a_gate_graph_traces_its_step_and_its_scan_once'
+    - 'tests/core/test_step_program_digests.py::test_the_capture_holds_exactly_the_gate_graphs_of_this_tree'
+    - 'tests/core/test_step_program_digests.py::test_a_numerically_neutral_edit_of_the_edge_path_changes_every_program'
+    - 'tests/core/test_step_program_digests.py::test_resolving_a_node_s_incoming_edges_in_another_order_changes_every_program'
+    - 'tests/core/test_step_program_digests.py::test_dropping_aitken_s_second_pass_changes_the_programs_of_the_aitken_graph'
+  status: verified
+  domains:
+    f32: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged'
+    grad: narrowed
+    vmap: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged'
+    multi_rate: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged[multi-rate/chain-into-ring]'
+    sub_cycled: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged[sub-cycled/chain-into-ring]'
+    predictors_warm_starts: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged[predictor/chain-into-ring]'
+    adaptive: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged'
+    checkpoint_restart: narrowed
+    sharded: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_sharded_graph_are_unchanged'
+
+- id: MAP-031
+  area: geometry-dependent mapping
+  claim: >-
+    A config and a USD stage carry an edge's geometry, and only for an edge
+    that has one: "to_dict / from_dict and a USD stage carry the edge's
+    geometry". to_dict writes "geometry": {"anchor", "field"} only when set;
+    a stage holds maddening:geometryAnchor and maddening:geometryField on
+    the edge prim, written only for such an edge; one of the two without the
+    other is a ValueError naming the edge; any other malformed value is
+    add_edge's own refusal.
+  sources:
+    - docs/user_guide/geometry_dependent_mappings.md (An example)
+    - 'src/maddening/usd/serialization.py (save_graph_to_usd, load_graph_from_usd)'
+    - src/maddening/core/edge.py (EdgeSpec.to_dict)
+  conditions: >-
+    a two-node graph with a geometry edge of either anchor, written to a
+    config and read back, and written to a stage and read back, with a
+    coupling group and without; the loaded graph compiled and stepped beside
+    the original; a graph of plain, mapped and transformed edges and no
+    geometry; a config and a stage with a malformed geometry, with half of
+    one, and with none where the mapping needs one. Host-side: the structure
+    of a file.
+  oracle: >-
+    the edge's geometry before and after, the file's keys or attributes, the
+    exception and the edge it names; the loaded graph's states equal to the
+    original's bit for bit over three steps.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_config_carries_the_geometry_and_from_dict_restores_it'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_config_without_a_geometry_edge_has_no_geometry_key'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_malformed_geometry_in_a_config_is_a_value_error_naming_the_edge'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_config_whose_geometry_dependent_mapping_lost_its_geometry_is_refused'
+    - 'tests/usd/test_usd_edge_geometry.py::test_a_stage_carries_each_edge_s_geometry_and_the_loaded_graph_steps_the_same'
+    - 'tests/usd/test_usd_edge_geometry.py::test_a_stage_of_a_graph_without_a_geometry_edge_has_neither_attribute'
+    - 'tests/usd/test_usd_edge_geometry.py::test_a_stage_with_half_a_geometry_is_refused_naming_the_edge'
+    - 'tests/usd/test_usd_edge_geometry.py::test_a_malformed_geometry_in_a_stage_is_add_edge_s_refusal'
+    - 'tests/usd/test_usd_edge_geometry.py::test_a_stage_whose_geometry_dependent_mapping_lost_both_attributes_is_refused'
+    - 'tests/api/test_surrogate_routes_keep_an_edge_s_geometry.py::test_get_graph_shows_each_edge_s_geometry'
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-032
+  area: geometry-dependent mapping refusals
+  claim: >-
+    What add_edge refuses about a geometry, each with a ValueError that
+    names the edge and says what to do: geometry= without mapping=;
+    geometry= with a static mapping ("it would be ignored"); a
+    geometry-dependent mapping without geometry=; "anything but ("source",
+    <field>) or ("target", <field>): a geometry held by a third node is not
+    supported". A registered kind's factory whose product disagrees with the
+    kind's needs_geometry is refused when the mapping is rebuilt.
+  sources:
+    - docs/user_guide/geometry_dependent_mappings.md (What is refused)
+    - src/maddening/core/_graph_specs.py (_checked_geometry)
+    - 'src/maddening/core/coupling/mapping_registry.py (register_mapping, needs_geometry)'
+  conditions: >-
+    each refusal on a two-node graph with its control beside it (the same
+    call with the one thing put right is accepted): thirty malformed values,
+    another node's name among them; the accepted spellings (a tuple, a list,
+    a dict) normalised to the tuple; a factory registered with
+    needs_geometry and returning a mapping without it, and the reverse,
+    through MappingSpec.build and through from_dict. Host-side: raised
+    before any array is touched.
+  oracle: >-
+    the exception's type and the phrase of its message that says what is
+    wrong; the graph's edges before and after.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_g1_a_geometry_without_a_mapping_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g2_a_geometry_on_a_static_mapping_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g3_a_geometry_dependent_mapping_without_a_geometry_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g4_a_malformed_geometry_or_one_on_another_node_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_every_accepted_spelling_is_normalised_to_the_tuple'
+    - 'tests/core/test_geometry_edge_refusals.py::test_geometry_is_the_last_keyword_only_argument_of_add_edge_and_defaults_to_none'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g13_a_factory_whose_product_disagrees_with_its_registration_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g13_the_test_kind_s_registration_and_product_agree'
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-033
+  area: geometry-dependent mapping refusals
+  claim: >-
+    What compile() refuses about a geometry edge (validate() returns each as
+    an ERROR: issue): "a field the anchor node's state does not hold, or one
+    of its boundary fluxes"; "a field that is not float32 or float64, or
+    whose shape is not the mapping's geometry_shape"; "an edge with a
+    sharded node at either end"; and convergence_norm="interface" on a
+    coupling group with a geometry-dependent mapping on an internal edge.
+  sources:
+    - docs/user_guide/geometry_dependent_mappings.md (What is refused)
+    - src/maddening/core/_graph_specs.py (_geometry_edge_issues)
+    - src/maddening/core/coupling/_group_layout.py (_geometry_edge_coupling_errors)
+  conditions: >-
+    each refusal on a two-node graph, for a source and a target anchor, with
+    its control: an absent field; a flux of the anchor with the geometry's
+    shape; int32, uint32, bool, float16, bfloat16 and key fields, and
+    float32 and float64 accepted; four other shapes; a sharded node, or a
+    node wrapping one, at either end; the interface norm on a group whose
+    internal edge reads a geometry of either anchor, and in the differential
+    and time-level harnesses' interface-norm cases, with the same group
+    compiling under the l2 norm.
+  oracle: >-
+    the RuntimeError from compile() and the ERROR: issue from validate(),
+    with the phrase that says what is wrong and the edge's key; a graph
+    without a geometry edge reports none of them.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_g5_a_geometry_field_the_anchor_does_not_hold_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g6_a_boundary_flux_as_the_geometry_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g7_a_geometry_that_is_not_float32_or_float64_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g7_a_float64_geometry_is_accepted'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g8_a_geometry_of_another_shape_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g9_a_sharded_end_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_every_compile_refusal_is_about_geometry_edges_only'
+    - 'tests/core/test_geometry_edge_refusals.py::test_the_interface_norm_on_a_group_with_a_geometry_edge_is_refused_at_compile'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile'
+    - 'tests/property/test_geometry_time_levels.py::test_the_interface_norm_case_is_refused_at_compile'
+  status: verified
+  domains:
+    f32: 'tests/core/test_geometry_edge_refusals.py::test_a_well_formed_geometry_edge_compiles_and_steps'
+    f64: 'tests/core/test_geometry_edge_refusals.py::test_g7_a_float64_geometry_is_accepted'
+    mixed_dtype: n/a
+    16bit: 'tests/core/test_geometry_edge_refusals.py::test_g7_a_geometry_that_is_not_float32_or_float64_is_refused'
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: 'tests/core/test_geometry_edge_refusals.py::test_g9_a_sharded_end_is_refused'
+
+- id: MAP-034
+  area: geometry-dependent mapping refusals
+  claim: >-
+    The entries that refuse a graph with a geometry edge, before they change
+    or trace anything: run_adaptive and run_adaptive_scan ("any graph with a
+    geometry edge"); replace_node and the REST routes POST
+    /surrogate/activate and POST /surrogate/deactivate, for "a replacement
+    that does not hold the geometry field with the same shape and a float32
+    or float64 dtype; nothing is changed (the REST routes answer 409)";
+    DatasetGenerator, for "a target node fed through a geometry edge".
+  sources:
+    - docs/user_guide/geometry_dependent_mappings.md (What is refused)
+    - src/maddening/core/_graph_specs.py (_refuse_unpreserved_geometry)
+    - src/maddening/api/server.py (_refuse_dropped_geometry)
+    - src/maddening/surrogates/dataset.py (DatasetGenerator)
+  conditions: >-
+    run_adaptive, run_adaptive_scan and the step builder they share, on a
+    graph with one geometry edge, with the same graph under a static mapping
+    running; replace_node of the node a geometry is read from by a node
+    without the field, with it as an integer, as float16 and in another
+    shape, for either anchor, with the graph compared before and after, a
+    replacement that holds it accepted and the other end replaced freely;
+    the two REST routes on a served graph, with the graph, the server's
+    record of the surrogates and the streams compared before and after a
+    409, and the same routes succeeding with a replacement that holds the
+    field; the dataset generator from a graph and from a sweep. float32
+    graphs. Not claimed for float64 (x64).
+  oracle: >-
+    the exception's type and text (the edge, the field, "Nothing was
+    changed."), or the reply's status and detail; the graph's fingerprint
+    before and after.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_g10_the_adaptive_steppers_refuse_a_graph_with_a_geometry_edge'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g10_the_adaptive_steppers_still_run_the_same_graph_with_a_static_mapping'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g11_replacing_the_node_that_holds_a_geometry_with_one_that_does_not_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g11_replacing_the_other_end_of_a_geometry_edge_is_unaffected'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g11_a_replacement_that_holds_the_geometry_keeps_the_edge_s_geometry'
+    - 'tests/api/test_surrogate_routes_keep_an_edge_s_geometry.py::test_activating_a_surrogate_that_drops_a_geometry_is_a_409_and_changes_nothing'
+    - 'tests/api/test_surrogate_routes_keep_an_edge_s_geometry.py::test_reverting_to_an_original_that_does_not_hold_a_geometry_is_a_409_and_changes_nothing'
+    - 'tests/api/test_surrogate_routes_keep_an_edge_s_geometry.py::test_a_surrogate_that_holds_the_geometry_is_activated_and_reverted_with_the_edges_as_they_were'
+    - 'tests/api/test_surrogate_routes_keep_an_edge_s_geometry.py::test_replacing_the_other_end_of_a_geometry_edge_is_not_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g12_the_dataset_generator_refuses_a_target_fed_through_a_geometry_edge'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g12_the_dataset_generator_still_serves_the_source_of_a_geometry_edge'
+  status: verified
+  domains:
+    f32: 'tests/core/test_geometry_edge_refusals.py::test_g11_replacing_the_node_that_holds_a_geometry_with_one_that_does_not_is_refused'
+    f64: narrowed
+    mixed_dtype: n/a
+    16bit: 'tests/core/test_geometry_edge_refusals.py::test_g11_replacing_the_node_that_holds_a_geometry_with_one_that_does_not_is_refused'
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: 'tests/core/test_geometry_edge_refusals.py::test_g10_the_adaptive_steppers_refuse_a_graph_with_a_geometry_edge'
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-035
+  area: geometry-dependent mapping
+  claim: >-
+    "IQN's automatic interface set includes a source-anchored geometry that
+    is internal to the group, since it is part of the iterate." The
+    interface norm does not read a geometry, and is refused for such a group
+    (the compile-time refusal row).
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - src/maddening/core/coupling/_group_layout.py (_interface_state_fields)
+  conditions: >-
+    the two-body graph in a coupling group whose geometry follows the
+    iterate, accelerated by IQN-ILS (Gauss-Seidel and Jacobi, three passes
+    and converged) and by IQN-IMVJ with a linear predictor, with the
+    automatic interface set; float32, and float64 under x64; the gradient
+    through a float64 IQN-ILS group. The steps compiled (jit) by the graph.
+    Not claimed for mixed dtypes, 16-bit dtypes, vmap, multi-rate graphs,
+    sub-cycled groups, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    the node-inlined twin, whose geometry arrives on an ordinary edge and is
+    therefore in its interface set: states to rounding after the same number
+    of passes, which a set without the geometry does not give (the seeded
+    fault that leaves it out fails this comparison).
+  tests:
+    - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/property/test_differential_geometry_edges.py::test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s'
+  status: verified
+  domains:
+    f32: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    f64: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    grad: 'tests/property/test_differential_geometry_edges.py::test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s'
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-036
+  area: geometry-dependent mapping diagnostics
+  claim: >-
+    "The diagnostics do not" read a geometry: "A coupling group whose pass
+    resolves a geometry-dependent mapping (on an edge into a member, from
+    inside the group or from outside) reports its solve, iterations,
+    total_iterations, residual and converged, and withholds everything built
+    on the float floor or on the contraction estimates: the bounds and
+    estimates are NaN (gradient_error_estimate is inf), ratio_usable,
+    spectral_usable, gradient_bound_usable and precision_limited are False,
+    and the entry has a not_usable_reason string that says so."
+    coupling_report() and print_coupling_report() print that reason in place
+    of the caveats that read the withheld values, the report is JSON with
+    the reason in it, and the profiler reads its pass count. The internal
+    _meta entry "still holds what the step computed for such a group; it is
+    not a report and promises nothing."
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
+    - 'src/maddening/core/graph_manager.py (GraphManager.coupling_diagnostics, Returns)'
+    - src/maddening/core/inspection.py (_coupling_flags)
+  conditions: >-
+    a two-member group with diagnostics on, with a geometry edge of either
+    anchor inside it and with one entering it from outside, under the l2 and
+    the mixed norm, at a loose and at a tight tolerance, where the same
+    graphs with the rule switched off report every withheld flag True and
+    every withheld bound finite; every group case of the node-inlined
+    harness, whose solve outcome is compared with the twin's and whose other
+    entries are asserted withheld: float32, float64 under x64, a sub-cycled
+    member, a predictor; the report table, its printed text at three widths,
+    its JSON encoding and the profiler on the grid-and-markers group; a
+    group of the same nodes with static mappings, which keeps its own
+    caveats and has no such key. The steps compiled (jit) by the graph. Not
+    claimed for mixed dtypes, 16-bit dtypes, gradients, vmap, multi-rate
+    graphs, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    each of the ten withheld entries against the documented value, with the
+    same graph's unwithheld report as the control that the entry would
+    otherwise have been usable; the solve outcome against the node-inlined
+    twin's; the printed and encoded text.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed'
+    - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_twin_s_report_keeps_its_own_caveats'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_printed_coupling_report_prints_the_reason'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_a_report_with_the_reason_is_json_and_comes_back_as_it_was'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_profiler_reads_the_pass_count_of_a_group_with_a_geometry_edge'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_raw_meta_slots_are_still_the_step_s_own_while_the_report_withholds_them'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_texts_of_a_graph_without_a_geometry_edge_do_not_mention_one'
+  status: verified
+  notes: >-
+    A probe of an l2 group before the rule existed gave the node-inlined
+    twin's report to every printed digit, bounds included: the values are
+    withheld because no oracle holds them yet for a moving geometry, not
+    because one showed them wrong.
+  domains:
+    f32: 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    f64: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    predictors_warm_starts: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-037
+  area: multilinear_grid kernel
+  claim: >-
+    The multilinear_grid kind's identities: the weights of a point sum to
+    one; "Gather reproduces any field that is multilinear in the
+    coordinates, at every point inside the hull of the lattice"; "Scatter
+    preserves the plain sum"; "apply_T of one mode is apply of the other at
+    the same positions"; the stencil and its weights are those of the
+    guide's formulas; "the result has the field's dtype"; the shaped layout
+    is the flat layout reshaped; a one-dimensional geometry may be a flat
+    array.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
+    - src/maddening/core/coupling/grid_mapping.py (module docstring)
+  conditions: >-
+    grids of one, two and three axes with unequal axes, and a
+    two-dimensional grid with a single point on one axis; points inside the
+    hull, on lattice points and outside; a plain and a three-component
+    field; a float32 and a float64 field with a float32 and a float64
+    geometry in every combination (the mixed dtypes among them, under x64);
+    the kernel called directly, under jit, and under vmap over a batch of
+    geometries; the derivative of a gather with respect to its positions.
+    Not claimed for 16-bit dtypes.
+  oracle: >-
+    an independent reference written from the specification alone, with
+    explicit loops and exact rational arithmetic
+    (tests/core/multilinear_reference.py): the gather and the scatter to a
+    rounding allowance of the field's and the geometry's dtype, the float64
+    kernel to 64 eps of the stencil's absolute sum, the matrix with no entry
+    outside the reference's stencil.
+  tests:
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_weights_of_a_finite_point_sum_to_one'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_stencil_and_its_weights_are_the_reference_s'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_gather_reproduces_a_linear_field_inside_the_hull'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_gather_matches_the_reference_at_every_point'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_float64_kernel_matches_the_reference_to_64_eps'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_scatter_matches_the_reference_in_every_cell'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_scatter_is_the_transpose_of_gather'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_scatter_preserves_the_sum'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_apply_T_is_apply_of_the_other_mode'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_result_has_the_field_s_dtype_whatever_the_geometry_s'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_shaped_layout_is_the_flat_layout_reshaped'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_one_dimensional_geometry_may_be_a_flat_array'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_kernel_under_jit_matches_the_reference'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_batched_call_matches_the_single_calls'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_matches_central_differences_away_from_the_kinks'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_kind_declares_its_geometry_and_has_no_weights'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_factory_refuses_a_grid_or_an_option_it_does_not_support'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_non_floating_field_is_refused_at_trace'
+  status: verified
+  domains:
+    f32: 'tests/core/test_multilinear_grid_kernel.py::test_scatter_is_the_transpose_of_gather[2d-field-float32-geom-float32]'
+    f64: 'tests/core/test_multilinear_grid_kernel.py::test_the_float64_kernel_matches_the_reference_to_64_eps'
+    mixed_dtype: 'tests/core/test_multilinear_grid_kernel.py::test_the_result_has_the_field_s_dtype_whatever_the_geometry_s[field-float32-geom-float64]'
+    16bit: narrowed
+    jit: 'tests/core/test_multilinear_grid_kernel.py::test_the_kernel_under_jit_matches_the_reference'
+    grad: 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_matches_central_differences_away_from_the_kinks'
+    vmap: 'tests/core/test_multilinear_grid_kernel.py::test_a_batched_call_matches_the_single_calls'
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-038
+  area: multilinear_grid kernel
+  claim: >-
+    "A point outside the hull is clamped to it, coordinate by coordinate:
+    gather extrapolates constantly, scatter deposits on the boundary, and
+    the weights still sum to one. A non-finite coordinate is not clamped:
+    every weight of that point is NaN at flat index 0, so gather returns NaN
+    for that point only and scatter puts NaN in the cells of index 0."
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
+    - src/maddening/core/coupling/grid_mapping.py (module docstring)
+  conditions: >-
+    grids of one to three axes; points outside on each side of each axis and
+    far outside (1e30); a NaN, +inf or -inf in one coordinate of one point;
+    float32 and float64 (under x64) geometries. Not claimed for mixed
+    dtypes, 16-bit dtypes, jit, gradients or vmap.
+  oracle: >-
+    the reference's result at the point's projection onto the hull; the
+    result of the same call with the bad point's amount zeroed and its
+    coordinate made finite, everywhere but at that point (gather) or at the
+    cells of index 0 (scatter).
+  tests:
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_point_outside_the_hull_is_its_projection_onto_the_hull'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_diverged_position_reads_nan_and_a_far_one_clamps'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_non_finite_coordinate_poisons_its_own_point_only'
+  status: verified
+  domains:
+    f32: 'tests/core/test_multilinear_grid_kernel.py::test_a_point_outside_the_hull_is_its_projection_onto_the_hull[2d-float32]'
+    f64: 'tests/core/test_multilinear_grid_kernel.py::test_a_point_outside_the_hull_is_its_projection_onto_the_hull[2d-float64]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-039
+  area: multilinear_grid kernel
+  claim: >-
+    The index arithmetic is done "in a static power-of-two frame" of the
+    spacing, "which changes no bit of the quotient and keeps every
+    intermediate a normal number, so a spacing far below one is resolved":
+    scaling every length (origin, spacing, positions) by a power of two
+    changes no bit of the result, and a spacing of 2**-125 is resolved in
+    float32.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
+    - src/maddening/core/_pow2_frame.py (pow2_host_factor)
+  conditions: >-
+    grids of one to three axes, every length scaled by powers of two across
+    the dtype's range, in float32 and float64 (under x64); grids of one and
+    two axes with a spacing of 2**-125 in float32; gather commuting with a
+    shift of the points by one cell. Not claimed for mixed dtypes, 16-bit
+    dtypes, jit, gradients or vmap.
+  oracle: >-
+    the unscaled result, bit for bit; the reference at the scaled grid.
+  tests:
+    - 'tests/core/test_multilinear_grid_kernel.py::test_scaling_every_length_by_a_power_of_two_changes_no_bit'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_spacing_of_2_to_the_minus_125_is_resolved_in_float32'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_gather_commutes_with_a_shift_by_one_cell'
+  status: verified
+  domains:
+    f32: 'tests/core/test_multilinear_grid_kernel.py::test_a_spacing_of_2_to_the_minus_125_is_resolved_in_float32'
+    f64: 'tests/core/test_multilinear_grid_kernel.py::test_scaling_every_length_by_a_power_of_two_changes_no_bit[2d-float64]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-040
+  area: multilinear_grid kernel
+  claim: >-
+    The resolution check: "A position x resolves eps |x|, so on axis a a
+    point is located to eps max(|o_a|, |o_a + (n_a - 1) h_a|) / h_a cells.
+    When that is 1/16 of a cell or more for the dtype the geometry field
+    has, compile() refuses the graph; at 1/1024 or more, validate() reports
+    a warning." An origin or spacing outside the normal range of the
+    geometry's dtype is refused.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
+    - src/maddening/core/coupling/grid_mapping.py (MultilinearGridMapping.geometry_dtype_problems)
+  conditions: >-
+    a float32 geometry on a one-dimensional grid whose extent puts the
+    estimate exactly at, and one point under, each of the two thresholds; a
+    grid at origin 1e6 with spacing 1e-3 (located to about 119 cells); a
+    grid with a subnormal or an overflowing origin or spacing for float32;
+    the same grids with a float64 geometry (under x64), which resolves them.
+    Host-side: decided from the grid and the field's dtype when the graph is
+    validated.
+  oracle: >-
+    the ERROR: or WARNING: issue from validate() and the RuntimeError from
+    compile(), naming the edge, the axis and the cells resolved; no issue
+    one point under a threshold.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_the_resolution_thresholds_are_a_sixteenth_and_a_1024th_of_a_cell'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_grid_far_from_the_origin_of_a_float32_geometry_is_refused_at_compile'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_grid_a_float32_geometry_resolves_only_coarsely_warns_at_compile'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_grid_outside_the_normal_range_of_the_geometry_s_dtype_is_refused'
+  status: verified
+  domains:
+    f32: 'tests/core/test_geometry_edge_refusals.py::test_the_resolution_thresholds_are_a_sixteenth_and_a_1024th_of_a_cell'
+    f64: 'tests/core/test_geometry_edge_refusals.py::test_a_grid_far_from_the_origin_of_a_float32_geometry_is_refused_at_compile'
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-041
+  area: multilinear_grid kernel
+  claim: >-
+    The derivative with respect to a position: "Inside a cell" it "is the
+    slope of the multilinear interpolant along axis a"; "The interpolant has
+    a kink at every lattice plane; there the derivative is that of the cell
+    above the plane (of the last cell at the top of the hull), so on the two
+    faces of the hull it is the interior one-sided derivative, and strictly
+    outside the hull it is zero."
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
+  conditions: >-
+    the derivative of a gather with respect to its positions (jax.grad): at
+    points inside cells of grids of one to three axes, at the lattice points
+    of a one-dimensional grid, on both faces of the hull and outside it;
+    float32, and float64 under x64. Not claimed for mixed dtypes, 16-bit
+    dtypes, jit or vmap.
+  oracle: >-
+    float64 central differences away from the kinks; at a lattice point, on
+    a face and outside, the slope of the named cell or zero, exactly.
+  tests:
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_at_a_lattice_point_is_the_interior_one_sided_one'
+    - 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_matches_central_differences_away_from_the_kinks'
+  status: verified
+  domains:
+    f32: 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_at_a_lattice_point_is_the_interior_one_sided_one[float32]'
+    f64: 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_at_a_lattice_point_is_the_interior_one_sided_one[float64]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: 'tests/core/test_multilinear_grid_kernel.py::test_the_derivative_at_a_lattice_point_is_the_interior_one_sided_one'
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-042
+  area: multilinear_grid kernel
+  claim: >-
+    Determinism of the kernel: "Gather is a fixed left fold over the 2^d
+    corners. Scatter is a scatter-add with repeated indices: on CPU it
+    accumulates in update order (points, then corners), so the result is a
+    deterministic function of the inputs including the order of the points,
+    and a permutation of the points changes it by rounding only."
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
+    - 'src/maddening/core/coupling/grid_mapping.py (module docstring, Determinism)'
+  conditions: >-
+    grids of one to three axes, the points permuted; float32, and float64
+    under x64; on CPU. The statement that scatter accumulates in point order
+    is not asserted bitwise: only that a permutation permutes the gather
+    exactly and moves the scatter by rounding. Not claimed for mixed dtypes,
+    16-bit dtypes, jit, gradients or vmap.
+  oracle: >-
+    the unpermuted result: the gather permuted, bit for bit; the scatter to
+    rounding of the cell's absolute sum.
+  tests:
+    - 'tests/core/test_multilinear_grid_kernel.py::test_a_permutation_of_the_points_permutes_gather_and_leaves_scatter'
+  status: verified
+  domains:
+    f32: 'tests/core/test_multilinear_grid_kernel.py::test_a_permutation_of_the_points_permutes_gather_and_leaves_scatter[2d-float32]'
+    f64: 'tests/core/test_multilinear_grid_kernel.py::test_a_permutation_of_the_points_permutes_gather_and_leaves_scatter[2d-float64]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-043
+  area: geometry-dependent mapping surfaces
+  claim: >-
+    The inspection texts name an edge's geometry: format_graph / print_graph
+    add "geometry <anchor>.<field>" to the edge's description and to_mermaid
+    / to_dot to its label ("each edge's text names its geometry"); the texts
+    of a graph without a geometry edge do not contain the word.
+  sources:
+    - docs/user_guide/geometry_dependent_mappings.md (An example)
+    - src/maddening/core/inspection.py (_geometry_text)
+  conditions: >-
+    the grid-and-markers graph, compiled and not, with one edge of each
+    anchor; the same nodes joined by static mappings. Host-side text.
+  oracle: >-
+    the anchor and field in each edge's own text and in no other edge's; the
+    word absent from the static graph's texts.
+  tests:
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_graph_text_names_each_edge_s_geometry'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_a_diagram_s_edge_label_names_the_geometry'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_an_uncompiled_graph_s_text_names_the_geometry_too'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_texts_of_a_graph_without_a_geometry_edge_do_not_mention_one'
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-044
+  area: geometry-dependent mapping surfaces
+  claim: >-
+    A geometry "is ordinary node state. It is integrated by its node, saved
+    by save_state and restored by load_state"; "The mapping itself has no
+    weights: its entry of gm.params["mappings"] is {}"; "an FMU of such a
+    graph steps as the graph does." A checkpoint therefore holds the
+    geometry under its node and field and no member for the mapping, a
+    restart is the uninterrupted run, and a checkpoint whose geometry has
+    another shape is refused by the state check every field goes through.
+  sources:
+    - docs/user_guide/geometry_dependent_mappings.md (An example)
+    - docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings)
+  conditions: >-
+    the float32 grid-and-markers graph with the multilinear_grid kind on two
+    edges, as a plain step and as a coupling group: saved after three steps
+    and restarted in a fresh graph for three more; the archive's members; an
+    archive with the geometry reshaped. The same graph with an exported
+    array input as an FMU: generated sequences of sets, steps, FMU-state
+    snapshots and restores, resets and re-instantiations through the TCP
+    bridge, the sidecar and the graph. Not claimed for float64 (x64), mixed
+    dtypes, 16-bit dtypes, gradients, vmap, multi-rate graphs, sub-cycled
+    groups, predictors, run_adaptive or sharded graphs.
+  oracle: >-
+    the uninterrupted run, bit for bit; the archive's member names; the
+    three FMU paths against one another on every output and state after
+    every operation.
+  tests:
+    - 'tests/core/test_geometry_edge_surfaces.py::test_a_restart_from_a_checkpoint_is_the_uninterrupted_run'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_a_checkpoint_holds_the_geometry_as_state_and_nothing_for_the_mapping'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_a_checkpoint_of_another_geometry_shape_is_refused_by_the_existing_state_check'
+    - 'tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence[geometry]'
+  status: verified
+  domains:
+    f32: 'tests/core/test_geometry_edge_surfaces.py::test_a_restart_from_a_checkpoint_is_the_uninterrupted_run'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_geometry_edge_surfaces.py::test_a_restart_from_a_checkpoint_is_the_uninterrupted_run'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart:
+      - 'tests/core/test_geometry_edge_surfaces.py::test_a_restart_from_a_checkpoint_is_the_uninterrupted_run'
+      - 'tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence[geometry]'
+    sharded: narrowed

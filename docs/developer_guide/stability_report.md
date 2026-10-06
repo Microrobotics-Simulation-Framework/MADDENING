@@ -52,6 +52,8 @@ import time.  Levels:
 | `maddening.cloud.providers.CloudProvider` | evolving |
 | `maddening.cloud.resume.download_and_load_state` | evolving |
 | `maddening.core.compliance.uq.UncertaintySpec` | evolving |
+| `maddening.core.coupling.grid_mapping.MultilinearGridMapping` | experimental |
+| `maddening.core.coupling.grid_mapping.multilinear_grid_mapping` | experimental |
 | `maddening.core.coupling.group.CouplingGroup` | evolving |
 | `maddening.core.coupling.mapping.StaticLinearMapping` | evolving |
 | `maddening.core.coupling.mapping.matrix_mapping` | evolving |
@@ -221,4 +223,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*201 API surfaces registered.*
+*203 API surfaces registered.*

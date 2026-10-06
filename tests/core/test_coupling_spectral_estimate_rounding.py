@@ -277,3 +277,19 @@ def test_the_products_rounding_is_the_coarsest_fields_not_the_analysis(monkeypat
     gm = _rotation(jnp.bfloat16, 9, diagnostics=True)
     gm.step()
     assert seen and all(e == float(jnp.finfo(jnp.bfloat16).eps) for e in seen), seen
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "MADD-ANO-228: a direction the breakdown test takes for rounding can carry the "
+    "dominant mode of a Jacobian far from normal; open, below the claimed domain"))
+def test_a_discarded_direction_does_not_hide_the_dominant_mode():
+    """Hub seed 373: weighted norm 700 beside a radius of 0.349, read 0.157, settled.
+
+    The second Krylov leftover, 2.4e-5, is under eight float32 roundings of
+    the largest product and is discarded; the Jacobian returns it with
+    its whole gain.
+    """
+    A, dtype = _hub(373)
+    true = float(max(abs(np.linalg.eigvals(A))))
+    rho, _res, _amp, ok = _estimate(A, dtype)
+    assert not ok or abs(rho - true) <= SPECTRAL_SETTLED_FRACTION * (1.0 - true), (rho, true)

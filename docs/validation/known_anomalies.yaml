@@ -15289,7 +15289,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-227"
-    title: "A spectrum reported settled from sampled rounding could be outside its margin: float32 groups of rank six read rho_spectral 0.250 for 0.206 and 0.107 for 0.056, and a direction the breakdown test discarded could hide the dominant mode (0.157 for 0.349), spectral_usable=True"
+    title: "A spectrum reported settled from sampled rounding could be outside its margin: float32 groups of rank six read rho_spectral 0.250 for 0.206 and 0.107 for 0.056, spectral_usable=True"
     description: >
       `spectral_usable` tested how far a fresh Jacobian-vector product's
       disagreement with the Arnoldi relation moves the radius under eight
@@ -15301,12 +15301,8 @@ anomalies:
       weighted Jacobian's norm 200 to 300) read `rho_spectral` 0.250 for
       0.206 and 0.107 for 0.056 with the sampled movement a third to a
       half of the margin -- two of 343 uniform draws on that cell, inside
-      the domain CPL-087 claims; and on float32 fan-out hubs with a
-      field 1e-4 to 1e-2 of the rest, two of 280 settled radii were
-      outside the margin, one because a leftover of 2.4e-5 that the
-      breakdown test took for rounding carried the dominant mode (0.157
-      for 0.349).  All with `spectral_usable=True`; the bounds measured
-      on them held.  No release carries the spectral bound.  Found by
+      the domain CPL-087 claims.  Both with `spectral_usable=True`; the
+      bounds measured on them held.  No release carries the spectral bound.  Found by
       uniform random draws over the targeted search's cells.
     severity: "major"
     safety_relevance: "context_dependent"
@@ -15333,19 +15329,53 @@ anomalies:
       one slow hunt the usable fraction of the radius went from 0.979 to
       about 0.975, and on the float32 rank-six cell from 0.91 to 0.74.
       The measured size is one product's disagreement, taken as the size
-      of every product's rounding.  **Not closed:** a direction the
-      breakdown test discards is still reported by its bare norm, and on
-      the hub family (fields 1e-4 to 1e-2 of the rest, below the domain
-      CPL-087 claims) two of 280 settled radii remain outside the margin.
-      Reporting it as `sqrt(h a)` (what it can do if the Jacobian returns
-      it with its whole gain) left none of 251 wrong but withdrew the flag
-      from every float32 group with `1 - rho` below about 1e-2, where
-      rounding alone leaves `h` near `eps a`; one more product along the
-      discarded direction is what would decide it.  In 16-bit dtypes the
+      of every product's rounding.  A direction the breakdown test
+      discards is outside it (MADD-ANO-228).  In 16-bit dtypes the
       products' rounding leaves little a certificate can pass: a float16
       or bfloat16 group far from normal reads `spectral_usable=False`.
     verification:
       - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
       - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle"
       - "tests/core/test_coupling_report_numbers_carry_each_factor.py::test_the_certificate_refuses_a_radius_rounding_can_move_inward"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-228"
+    title: "A direction the Arnoldi breakdown test takes for rounding can carry the dominant mode of a Jacobian far from normal: float32 fan-out hubs with a field 1e-4 to 1e-2 of the rest read rho_spectral 0.157 for 0.349 and 0.503 for 0.397, settled"
+    description: >
+      The breakdown test discards a new Krylov direction below eight units
+      of the products' rounding and reports its norm `h` in the Arnoldi
+      residual.  For a Jacobian far from normal a direction that small can
+      return to the space with the Jacobian's whole gain and move the
+      radius by up to `sqrt(h ||A||)`.  Measured at matrix level (CPU,
+      jaxlib 0.11.0, float32,
+      `tests/core/test_coupling_spectral_estimate_rounding.py`'s hub
+      family over 400 seeds, fields 1e-4 to 1e-2 of the rest): two of 280
+      settled radii are outside the margin, 0.157 for 0.349 (weighted
+      norm 700, a leftover of 2.4e-5) and 0.503 for 0.397.  Below the
+      domain CPL-087 claims (fields no smaller than a hundredth of what
+      drives them); none found inside it on three seeds of the slow
+      search and 2 800 uniform draws.  No release carries the spectral
+      bound.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported radius outside the margin its flag stands for is a
+      silent wrong result, never `minor`.  Not `critical`: reported, not
+      applied.  `context_dependent` as for the other spectral entries.
+    affected_components:
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Where a field of a float32 group is below a hundredth of what it
+      drives, run the group in float64 or scale the small field's units.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  Reporting the leftover as `sqrt(h a)`, `a` the
+      largest product seen, left none of 251 settled hubs wrong but
+      withdrew the flag from every float32 group with `1 - rho` below
+      about 1e-2 (rounding alone leaves `h` near `eps a`), so it was not
+      adopted; one more Jacobian-vector product along the largest
+      discarded direction is what would decide it.
+    verification:
+      - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_discarded_direction_does_not_hide_the_dominant_mode"
     github_issue: null

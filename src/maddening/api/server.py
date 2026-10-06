@@ -2498,11 +2498,13 @@ def _client_left(websocket: WebSocket, exc: BaseException,
     return isinstance(exc, RuntimeError) and "websocket.close" in str(exc)
 
 
-#: The whole detail of a 500: what failed is in the server's log, with its
+#: The detail of a 500: what failed is in the server's log, with its
 #: traceback, and the reply names no path, value or class of the server's.
+#: The second is a write route's, whose transaction put the graph back.
+_FAILED_UNEXPECTEDLY = "The request failed unexpectedly (the server's log says how)."
 _UNEXPECTED_FAILURE_DETAIL = (
-    "The request failed unexpectedly (the server's log says how). The graph "
-    "was put back exactly as it was before the request.")
+    f"{_FAILED_UNEXPECTEDLY} The graph was put back exactly as it was before "
+    "the request.")
 
 
 class _GraphTransaction:
@@ -3461,6 +3463,17 @@ class SimulationServer:
                 return Response(status_code=exc.status_code, headers=headers)
             return _Reply(status_code=exc.status_code, headers=headers,
                           content={"detail": exc.detail})
+
+        @app.exception_handler(Exception)
+        async def _unexpected_failure(request, exc):
+            # Anything a route did not expect, outside a write route's
+            # transaction (which answers its own 500 after putting the
+            # graph back): the same generic detail, where Starlette's
+            # default is a plain-text body.  Starlette logs the traceback
+            # and re-raises for the server after this reply is sent.
+            logger.error("%s %s failed unexpectedly: %s", request.method,
+                         request.scope.get("path", ""), type(exc).__name__)
+            return _Reply(status_code=500, content={"detail": _FAILED_UNEXPECTEDLY})
 
         app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
@@ -4559,10 +4572,10 @@ class SimulationServer:
             detail = _UNEXPECTED_FAILURE_DETAIL
             if steps_run:
                 detail = (
-                    "The request failed unexpectedly (the server's log says how) "
-                    f"at step {steps_run + 1} of {n_steps}. The graph is left after "
-                    f"the {steps_run} step(s) the run had taken, exactly as it was "
-                    "before the slice of steps that failed.")
+                    f"{_FAILED_UNEXPECTEDLY[:-1]} after {steps_run} of the run's "
+                    f"{n_steps} step(s). The graph is left after those "
+                    f"{steps_run}, exactly as it was before the part of the run "
+                    "that failed; GET /graph/state reads it.")
             return _Reply(status_code=500, content={
                 "detail": detail, "steps_run": steps_run, "n_steps": n_steps})
 
@@ -4604,7 +4617,7 @@ class SimulationServer:
             run that timed out between slices used to answer "Nothing was
             changed; retry shortly" after it had stepped the graph.
             """
-            with self._graph_access("run the graph", write=True):
+            with self._graph_transaction("run the graph", write=True):
                 self._ensure_relay_attached()
                 self._sync_run_active = True
             done, chunk = 0, 1
@@ -4661,6 +4674,8 @@ class SimulationServer:
                                     return _run_failed(exc, 0, 0)
                             state = self._state_json()
                     except HTTPException as exc:
+                        if exc.status_code == 500:
+                            return _run_failed_unexpectedly(done, n_steps)
                         if exc.status_code != 503:
                             raise
                         interrupted = (f"The graph has been in use for "

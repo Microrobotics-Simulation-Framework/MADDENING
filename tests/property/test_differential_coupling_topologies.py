@@ -807,6 +807,24 @@ def _domain_values(topo, knobs, domain) -> list:
 _BATCHED: dict = {}
 
 
+def _batched_start(built, values_list, rename=None):
+    """``(state, params)`` of the batch: member *i* is draw *i*'s own start.
+
+    ``set_initial`` rewrites the graph's state dictionary in place
+    (``reset_state`` updates it and ``set_node_state`` assigns into it), so
+    each member is a copy taken before the next draw is written: a list of
+    the live dictionary holds the last draw once per member.
+    """
+    gm = built.gm
+    states, params = [], []
+    for v in values_list:
+        ct.set_initial(built, v, rename)
+        states.append(jax.tree.map(lambda x: x, gm._state))
+        params.append(ct.params_for(built, v, rename))
+    return (jax.tree.map(lambda *xs: jnp.stack(xs), *states),
+            jax.tree.map(lambda *xs: jnp.stack(xs), *params))
+
+
 def _batched_runs(built, values_list, steps, rename):
     """One trajectory per draw, all three through one ``jax.vmap`` of the step."""
     gm = built.gm
@@ -815,13 +833,7 @@ def _batched_runs(built, values_list, steps, rename):
     if id(gm) not in _BATCHED:
         _BATCHED[id(gm)] = (gm, jax.jit(jax.vmap(gm._raw_step_fn, in_axes=(0, None, 0))))
     step = _BATCHED[id(gm)][1]
-    states, params = [], []
-    for v in values_list:
-        ct.set_initial(built, v, rename)
-        states.append(gm._state)
-        params.append(ct.params_for(built, v, rename))
-    state = jax.tree.map(lambda *xs: jnp.stack(xs), *states)
-    p = jax.tree.map(lambda *xs: jnp.stack(xs), *params)
+    state, p = _batched_start(built, values_list, rename)
     ext = gm._default_external_inputs()
     out = [[] for _ in values_list]
     pres = [None] * len(values_list)
@@ -900,6 +912,59 @@ def _assert_in_domain(domain, built, runs):
         for step in run:
             for fields in step.state.values():
                 assert fields["x"].dtype == want, (domain, fields["x"].dtype)
+
+
+def test_each_member_of_a_vmap_batch_starts_from_its_own_draw():
+    """The ``vmap`` domain's premise: member *i* of the batch is draw *i*.
+
+    ``set_initial`` rewrites the graph's state dictionary in place, so a
+    batch stacked from the live dictionary started every member from the
+    last draw, and the domain compared three runs from one start."""
+    topo, knobs, built = _built_in("vmap", "chain-into-ring", 0)
+    rename = _renaming(topo, 11)
+    _rt, _rk, renamed = _built_in("vmap", "chain-into-ring", 0, rename=rename)
+    values = _domain_values(topo, knobs, "vmap")
+    starts = [{n: np.asarray(v["x0"]) for n, v in draw["nodes"].items()} for draw in values]
+    for i, a in enumerate(starts):
+        for b in starts[i + 1:]:
+            assert any(not np.array_equal(a[n], b[n]) for n in a), (
+                "premise: the draws start apart")
+    for what, graph, names in (("as built", built, {}), ("renamed", renamed, dict(rename))):
+        state, _params = _batched_start(graph, values, names)
+        for i, start in enumerate(starts):
+            for n, x0 in start.items():
+                got = np.asarray(state[names.get(n, n)]["x"][i])
+                assert np.array_equal(got, x0.astype(got.dtype)), (
+                    f"{what}: member {i} of the batch does not start node {n} from draw "
+                    f"{i}: {got} against {x0}")
+
+
+def _started_elsewhere(values: dict) -> dict:
+    """*values* with every node's start moved by a part in 1024."""
+    return {**values, "nodes": {
+        n: {**v, "x0": (np.asarray(v["x0"]) * (1 + 2.0 ** -10)).astype(np.asarray(v["x0"]).dtype)}
+        for n, v in values["nodes"].items()}}
+
+
+def test_a_fault_in_one_member_of_a_vmap_batch_fails_that_member_alone():
+    """The ``vmap`` comparisons can fail, and member by member: of two
+    batches that differ in one draw's start, the comparison fails for that
+    member and holds, bit for bit, for the other two.  (Stacked from the
+    live dictionary, a fault in the first or second draw reached no member
+    and one in the last reached all three.)"""
+    topo, knobs, built = _built_in("vmap", "chain-into-ring", 0)
+    values = _domain_values(topo, knobs, "vmap")
+    clean = _runs_in("vmap", built, values)
+    for member in range(len(values)):
+        faulty = list(values)
+        faulty[member] = _started_elsewhere(values[member])
+        for k, (a, b) in enumerate(zip(clean, _runs_in("vmap", built, faulty))):
+            what = f"draw {k} beside a fault in draw {member}"
+            if k == member:
+                with pytest.raises(AssertionError, match="states differ"):
+                    assert_same_runs(a, b, what=what)
+            else:
+                assert_same_runs(a, b, what=what)
 
 
 # Per push: tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain

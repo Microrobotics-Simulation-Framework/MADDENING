@@ -12644,7 +12644,7 @@ anomalies:
       text as the text it was.  (The first form of the fix, never in a
       release, encoded the 422 as data and so answered 500 for the *text*
       `NaN`, `Infinity` or `-Infinity` -- `POST /sim/run?n_steps=NaN`; see
-      MADD-ANO-203.)
+      MADD-ANO-209.)
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -13810,7 +13810,7 @@ anomalies:
       - "tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes"
       - "tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes"
     github_issue: null
-  - anomaly_id: "MADD-ANO-202"
+  - anomaly_id: "MADD-ANO-208"
     title: "A node named with a NUL, another control character or a surrogate was taken, and its checkpoint, its FMU's model description or the server's own replies could not be read"
     description: >
       `GraphManager.add_node` refused a name holding `/`, `#` or `->`, and
@@ -13872,7 +13872,7 @@ anomalies:
       - "tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_checkpoint_name_some_carrier_cannot_hold_is_a_400_and_no_file"
       - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused"
     github_issue: null
-  - anomaly_id: "MADD-ANO-203"
+  - anomaly_id: "MADD-ANO-209"
     title: "A refusal that echoed a surrogate from the request answered 500"
     description: >
       A 4xx echoes what it refused, and Starlette's JSON encoder cannot
@@ -13882,7 +13882,7 @@ anomalies:
       an unknown node of that name on `POST /graph/edges`, a 422 for a
       field of that text -- answered 500 where the same request with
       `"abc"` answered 400, 404 or 422.  Nothing was changed, except by the
-      node name of MADD-ANO-202.  Reproduced at v0.1.0, v0.2.0, v0.2.1,
+      node name of MADD-ANO-208.  Reproduced at v0.1.0, v0.2.0, v0.2.1,
       v0.3.0 and v0.3.1 (`git archive`, CPU, FastAPI `TestClient`).  Found
       by the sweep of the class of a defect the REST request oracle found
       on the 0.4.0 tree and no release carried: the handler written for
@@ -13921,7 +13921,7 @@ anomalies:
       - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_an_http_exception_is_answered_whatever_its_detail_echoes"
       - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500"
     github_issue: null
-  - anomaly_id: "MADD-ANO-204"
+  - anomaly_id: "MADD-ANO-210"
     title: "A '#' in an edge's field name gave two mapped edges on one field pair a single slot of weights"
     description: >
       An edge's key is `source.field->target.field`, and a second mapped
@@ -13932,7 +13932,7 @@ anomalies:
       and one slot between them, so one edge delivered through the other's
       weights, and `remove_edge` left the slot in `params["mappings"]`.
       Never in a release: mapped edges are new in 0.4.0.  Found by the
-      sweep of the names a graph is given (MADD-ANO-202).
+      sweep of the names a graph is given (MADD-ANO-208).
       Resolved in 0.4.0: `add_edge` and `add_external_input` refuse a field
       name holding `#`, as `add_node` refuses a node's.  (They also refuse
       one that spells `NaN`, `Infinity` or `-Infinity`, which the config

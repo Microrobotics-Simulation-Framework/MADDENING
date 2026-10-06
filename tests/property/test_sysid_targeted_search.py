@@ -93,8 +93,8 @@ out by ``mask=`` that the model was run with moved, each within tens of
 examples (the pull request that added this module gives the counts).  And
 (d) on ``77a04aaf``, before ``fit_lm``'s floor rule told a jump from the
 rounding floor: the per-push draws find a fit converged beside a lower loss
-at their first example, and random draws on three seeds at examples 2, 2
-and 1 (SEEDS).
+at their third example, and random draws on seeds 1, 2 and 3 at examples 8,
+17 and 13 of 20; none after it.
 """
 
 from __future__ import annotations

@@ -7135,7 +7135,7 @@ class GraphManager:
         graph reloads with the calibrated constants."""
         spec = self._nodes[name]
         # A copy all the way down: a list this handed out used to be the
-        # node's own (MADD-ANO-198).
+        # node's own (MADD-ANO-205).
         out = _detached_config(spec.node.params)
         live = self._params_or_default(params).get("nodes", {}).get(name, {})
         snapshot = spec.node.params_pytree()
@@ -11510,7 +11510,7 @@ class GraphManager:
         # ``to_dict`` handed out -- a node's params, a mapped edge's point
         # sets, a sharded wrapper's axis map -- the config shares no
         # container with the graph, so editing it edits nothing else
-        # (MADD-ANO-198).
+        # (MADD-ANO-205).
         return encode_non_finite(_detached_config({
             "nodes": nodes,
             **({"param_specs": overrides} if overrides else {}),

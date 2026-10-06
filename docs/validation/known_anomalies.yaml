@@ -13042,7 +13042,7 @@ anomalies:
       under no lock of the library's, the first time an app is asked for
       `/openapi.json`.  The library's own parameter-write and compile
       probes were such blocks during 0.4.0's development and no longer are
-      (MADD-ANO-197): they change no filter another thread can see, so an
+      (MADD-ANO-204): they change no filter another thread can see, so an
       app built beside one neither loses a filter to it nor leaves it one.
     verification:
       - "tests/api/test_create_app_from_several_threads.py::test_apps_built_in_several_threads_at_once_leave_the_warnings_filters_as_they_were"
@@ -13385,7 +13385,7 @@ anomalies:
       - "tests/core/test_mapping_registry.py::test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took"
       - "tests/core/test_registered_mapping_in_every_domain.py::test_a_weight_that_is_not_a_finite_floating_jax_array_is_refused_in_float64_too"
     github_issue: null
-  - anomaly_id: "MADD-ANO-197"
+  - anomaly_id: "MADD-ANO-204"
     title: "The library's warning probes silenced every thread of the process, and two that overlapped in two threads could leave every warning ignored for good"
     description: >
       In sixteen places the library runs a node's own code a second time
@@ -13499,7 +13499,7 @@ anomalies:
       - "tests/core/test_quiet_warnings.py::test_a_foreign_block_that_closes_inside_a_probe_ends_its_silence_and_leaves_nothing"
       - "tests/core/test_quiet_warnings.py::test_only_the_helper_touches_the_warnings_filters"
     github_issue: null
-  - anomaly_id: "MADD-ANO-198"
+  - anomaly_id: "MADD-ANO-205"
     title: "A config from to_dict() shared its containers with the graph: editing one to build a variant changed the graph it came from"
     description: >
       `GraphManager.to_dict()` and `SimulationNode.to_dict()` handed out
@@ -13572,7 +13572,7 @@ anomalies:
       - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_a_nodes_own_descriptor_shares_no_container_with_the_node"
       - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_a_config_is_plain_data_that_yaml_and_json_write_alike"
     github_issue: null
-  - anomaly_id: "MADD-ANO-199"
+  - anomaly_id: "MADD-ANO-206"
     title: "A bfloat16 state or parameter leaf cannot be restored from a checkpoint"
     description: >
       `save_state` converts every leaf with `np.asarray` and writes it with
@@ -13623,7 +13623,7 @@ anomalies:
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_bfloat16_state_survives_a_checkpoint_restart"
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_what_a_bfloat16_checkpoint_holds_today_is_the_leafs_bits_without_its_name"
     github_issue: null
-  - anomaly_id: "MADD-ANO-200"
+  - anomaly_id: "MADD-ANO-207"
     title: "A checkpoint value loaded into a bfloat16 leaf was cast with no check: a float32 1e-44 loaded as 0.0 and 3.4028235e38 as inf"
     description: >
       `load_state` casts each member of a checkpoint to the live leaf's
@@ -13633,14 +13633,14 @@ anomalies:
       `V` (void).  A bfloat16 leaf therefore got no rule at all.  A
       checkpoint written by a float32 graph and loaded into the same graph
       held in bfloat16 -- its own checkpoint cannot be loaded,
-      MADD-ANO-199, so this is the load such a graph can do -- stored
+      MADD-ANO-206, so this is the load such a graph can do -- stored
       `1e-44` as `0.0`, `-1e-44` as `-0.0` and `3.4028235e38` as `inf`, and
       a float64 `1e39` as `inf`, in a state field and in a parameter leaf
       alike, with nothing said.  Measured on release/0.4.0 at 60c89656
       (CPU, jaxlib 0.11.0).  No release carried it: on the extracted 0.1.0
       to 0.3.1 trees the same load replaced the bfloat16 field with a
       float32 one, values intact, and the cast to the live leaf's dtype is
-      new in 0.4.0.  Found while reproducing MADD-ANO-199.  Resolved in
+      new in 0.4.0.  Found while reproducing MADD-ANO-206.  Resolved in
       0.4.0: the kind is read from JAX's own dtype lattice, so bfloat16,
       the small floats and the 2- and 4-bit integers are each held to the
       rule for their kind, and a leaf dtype that has no rule is a

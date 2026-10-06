@@ -331,7 +331,7 @@ def _detached_config(value: Any) -> Any:
     of a graph -- ``cfg = gm.to_dict(); cfg["nodes"][0]["params"]["k"] =
     5.0`` -- therefore edited the graph it came from, which ran the
     variant's value from its next step or recompile on, with nothing
-    said (MADD-ANO-198).  It also made the config's ``params`` a ``dict``
+    said (MADD-ANO-205).  It also made the config's ``params`` a ``dict``
     subclass, which ``yaml.safe_dump`` refuses.
     """
     if isinstance(value, dict):
@@ -1649,7 +1649,7 @@ class SimulationNode(ABC):
         ``params`` is a copy in plain containers
         (:func:`_detached_config`), not the node's own ``params``.  It
         used to be that mapping itself, so writing into a config wrote
-        into the node (MADD-ANO-198).
+        into the node (MADD-ANO-205).
         """
         return {
             "type": type(self).__name__,

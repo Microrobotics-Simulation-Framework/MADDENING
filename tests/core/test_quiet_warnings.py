@@ -7,7 +7,7 @@ constructor takes a value).  It used to do so with
 list is process-wide and that block saves and restores it, so while one
 thread probed every thread's warnings were dropped, and two probes that
 overlapped in two threads could leave an ``ignore`` for every warning in
-the process for good (MADD-ANO-197).
+the process for good (MADD-ANO-204).
 :func:`maddening.core._quiet_warnings.quiet_warnings` replaces every such
 block; this module pins what it promises, one test per promise, and pins
 with a source scan that nothing else in ``src/`` touches the filters.

@@ -3766,7 +3766,7 @@ claims:
     or float16 checkpoint into a bfloat16 state field (and a bfloat16
     params leaf) at +-1e-44, 3.4028235e38, 1e39, -1e-50, -1e-39, inf and
     NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50 (a file
-    that itself holds a bfloat16 member is refused whole, MADD-ANO-199).
+    that itself holds a bfloat16 member is refused whole, MADD-ANO-206).
     Not claimed for multi-rate graphs, sub-cycled groups or sharded graphs.
   oracle: the ValueError naming the leaf; the graph's state and params bit for bit; the loaded subnormal's sign.
   tests:
@@ -3788,7 +3788,7 @@ claims:
     every tag).  The rule is the FMU's (MADD-ANO-137).  A bfloat16 leaf
     was cast with no check on the 0.4.0 tree, because the rule was chosen
     by the NumPy kind of the leaf's dtype and an extension dtype's is void
-    (MADD-ANO-200, never released).
+    (MADD-ANO-207, never released).
   domains:
     f32: tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
     f64: tests/core/test_params_claims_in_float64.py::test_load_state_into_a_float64_field_loads_what_float32_could_not

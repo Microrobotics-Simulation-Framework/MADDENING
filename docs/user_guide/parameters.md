@@ -317,7 +317,7 @@ that is probing and no other**, and nothing is saved or put back: graphs,
 servers and profilers running in other threads keep every warning of
 their own, and the process's filters afterwards are the ones before.
 (During 0.4.0's development the probes used `warnings.catch_warnings()`,
-which does neither; no release carried it.  MADD-ANO-197.)
+which does neither; no release carried it.  MADD-ANO-204.)
 
 **What MADDENING cannot do** is make `warnings.catch_warnings()` safe for
 *other* code that uses it while your threads run.  That block saves the

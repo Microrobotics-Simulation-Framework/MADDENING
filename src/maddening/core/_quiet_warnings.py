@@ -24,7 +24,7 @@ which is wrong in a process with more than one thread, twice over:
   two threads and left in the order they entered put back each other's
   saved list, and the second one's was the first one's ``ignore``: the
   process kept a filter ignoring every warning **for good**
-  (MADD-ANO-197).  Independent graphs stepped from a thread each did that
+  (MADD-ANO-204).  Independent graphs stepped from a thread each did that
   in 1 to 9 of 40 rounds.
 
 :func:`quiet_warnings` replaces all of them.  It never saves or restores

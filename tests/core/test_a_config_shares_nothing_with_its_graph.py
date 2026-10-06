@@ -8,7 +8,7 @@ change it::
     variant = GraphManager.from_dict(cfg, registry)
 
 ``to_dict()`` used to hand out the graph's own containers, so that edit
-also wrote into ``gm`` (MADD-ANO-198).  In every release from 0.1.0 to
+also wrote into ``gm`` (MADD-ANO-205).  In every release from 0.1.0 to
 0.3.1 the config's ``params`` *was* ``node.params``: the original graph ran
 the variant's value from its next recompile on (a spring's position 0.9626
 against 2.8842 one step later) and wrote it into its own next config, with

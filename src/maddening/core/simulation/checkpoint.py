@@ -519,7 +519,7 @@ def _number_kind(dtype: np.dtype) -> str:
     kind ``"V"`` (void), the kind of raw bytes.  A rule written on
     ``kind`` alone therefore took a bfloat16 leaf for "not a number":
     :func:`_checked_cast` cast a checkpoint's value into one with no
-    check at all (MADD-ANO-200).
+    check at all (MADD-ANO-207).
     """
     if dtype.kind != "V":
         return dtype.kind

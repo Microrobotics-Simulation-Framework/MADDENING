@@ -7,7 +7,7 @@ constructor take it?  does the state keep its layout?), when a sharded
 wrapper checks its inner node's state, when the profiler compiles its
 one-iteration variant.  Each used ``warnings.catch_warnings()`` and
 ``simplefilter("ignore")``, which act on the whole process
-(MADD-ANO-197):
+(MADD-ANO-204):
 
 * while one thread was inside a probe, **every** thread's warnings were
   dropped;

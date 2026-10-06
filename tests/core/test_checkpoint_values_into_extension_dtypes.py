@@ -7,14 +7,14 @@ applies was chosen by the leaf's ``dtype.kind`` -- and NumPy reports
 bfloat16, like every dtype it carries as an extension type, as kind ``"V"``
 (void).  A bfloat16 leaf therefore got **no** rule: a float32 checkpoint
 loaded into a bfloat16 graph stored ``1e-44`` as ``0.0`` and
-``3.4028235e38`` as ``inf`` with nothing said (MADD-ANO-200).  The rule is
+``3.4028235e38`` as ``inf`` with nothing said (MADD-ANO-207).  The rule is
 now chosen from JAX's own dtype lattice, so every floating or integer
 dtype JAX has gets the one for its kind, and a dtype with no rule is
 refused, not assumed lossless.
 
 One thing here is not fixed, and is pinned as it stands: a bfloat16 leaf
 cannot be restored from a checkpoint of its own graph at all
-(MADD-ANO-199, open).  ``save_state`` writes it as two raw bytes per
+(MADD-ANO-206, open).  ``save_state`` writes it as two raw bytes per
 element with no dtype name -- NumPy's ``.npy`` format has none for an
 extension type -- and ``load_state`` refuses raw bytes.
 """
@@ -246,7 +246,7 @@ def test_a_leaf_dtype_with_no_rule_is_refused_not_assumed_lossless():
 
 
 @pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "MADD-ANO-199: save_state writes a bfloat16 leaf as two raw bytes per element "
+    "MADD-ANO-206: save_state writes a bfloat16 leaf as two raw bytes per element "
     "with no dtype name (the .npy format has none for a NumPy extension dtype) and "
     "load_state refuses raw bytes, so a bfloat16 graph cannot be restored from its "
     "own checkpoint; open, deferred to 0.5.0"))
@@ -265,7 +265,7 @@ def test_a_bfloat16_state_survives_a_checkpoint_restart(tmp_path):
 
 
 def test_what_a_bfloat16_checkpoint_holds_today_is_the_leafs_bits_without_its_name(tmp_path):
-    """The other half of MADD-ANO-199, so the entry's description stays
+    """The other half of MADD-ANO-206, so the entry's description stays
     true: the file is written, its member is ``|V2``, and those bytes are
     the leaf's -- nothing is lost on disk, only the name."""
     gm = _graph("bfloat16")

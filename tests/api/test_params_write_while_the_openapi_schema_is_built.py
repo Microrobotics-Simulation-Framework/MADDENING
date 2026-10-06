@@ -14,7 +14,7 @@ So within **one** server a write's probe and FastAPI's block could overlap.
 When FastAPI's block opened while a probe was open and closed after it, the
 list it put back was the one it had saved: the probe's.  That used to be
 ``simplefilter("ignore")`` -- an ``ignore`` for every warning, left in the
-process for good (MADD-ANO-197).  The probe's filter now matches only the
+process for good (MADD-ANO-204).  The probe's filter now matches only the
 thread inside the probe, so the copy FastAPI puts back ignores nothing, and
 the next probe to close takes it out.
 

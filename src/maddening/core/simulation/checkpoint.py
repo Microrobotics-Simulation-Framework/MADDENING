@@ -521,7 +521,7 @@ def _number_kind(dtype: np.dtype) -> str:
     :func:`_checked_cast` cast a checkpoint's value into one with no
     check at all (MADD-ANO-200).
     """
-    if dtype.kind != "V" or dtype.fields is not None or dtype.subdtype is not None:
+    if dtype.kind != "V":
         return dtype.kind
     if jnp.issubdtype(dtype, jnp.floating):
         return "f"

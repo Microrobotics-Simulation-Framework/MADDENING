@@ -155,7 +155,8 @@ def test_the_same_checkpoint_still_loads_into_the_graph_that_wrote_it(tmp_path):
     assert _x(gm).tobytes() == values.tobytes()
 
 
-#: Every JAX dtype NumPy reports as kind "V", by the kind its rule is for.
+#: The dtypes NumPy carries as extension types (kind "V", but for one
+#: 8-bit float), by the kind of number each is to a JAX that has it.
 EXTENSION_KINDS = {
     "bfloat16": "f", "float8_e4m3fn": "f", "float8_e4m3": "f", "float8_e3m4": "f",
     "float6_e2m3fn": "f", "float6_e3m2fn": "f", "float4_e2m1fn": "f",
@@ -163,22 +164,37 @@ EXTENSION_KINDS = {
 }
 
 
+def test_the_right_dtypes_are_told_as_numbers_on_this_jax():
+    """Whatever else this JAX has, bfloat16 and the 8-bit floats are
+    floats and the 4-bit integers are integers: the loop below, which
+    allows for a dtype a JAX does not have, cannot pass by finding none."""
+    from maddening.core.simulation.checkpoint import _number_kind  # noqa: PLC0415
+
+    assert _number_kind(BFLOAT16) == "f"
+    assert _number_kind(np.dtype(ml_dtypes.float8_e4m3fn)) == "f"
+    assert _number_kind(np.dtype(ml_dtypes.int4)) == "i"
+    assert _number_kind(np.dtype(ml_dtypes.uint4)) == "u"
+    assert jnp.zeros(2, BFLOAT16).dtype == BFLOAT16, "premise: a leaf can be bfloat16"
+
+
 @pytest.mark.parametrize("name", sorted(EXTENSION_KINDS))
 def test_an_extension_dtype_is_told_as_the_kind_of_number_it_is(name):
     from maddening.core.simulation.checkpoint import _number_kind  # noqa: PLC0415
 
+    # The kind it is, or -- on a JAX whose lattice does not have the dtype
+    # -- "V", which the cast check refuses: never another number's kind.
     dtype = np.dtype(getattr(ml_dtypes, name))
-    assert _number_kind(dtype) == EXTENSION_KINDS[name]
-    assert jnp.zeros(2, dtype).dtype == dtype, "premise: a JAX array can hold it"
+    assert _number_kind(dtype) in (EXTENSION_KINDS[name], "V")
 
 
 @pytest.mark.parametrize("dtype, kind", [
     (np.float32, "f"), (np.float16, "f"), (np.float64, "f"), (np.complex64, "c"),
     (np.int32, "i"), (np.uint8, "u"), (np.bool_, "b"), ("U4", "U"), ("V2", "V"),
-    ([("a", "<u2")], "V"),
+    ([("a", "<u2")], "V"), ([("bfloat16", "<u2")], "V"), (("<f4", (2,)), "V"),
 ])
 def test_a_numpy_dtype_keeps_its_own_kind(dtype, kind):
-    """Raw bytes and a record stay ``"V"``: neither is a number."""
+    """Raw bytes, a record and a sub-array stay ``"V"``: none is a number
+    (JAX's lattice is asked about each, and says so)."""
     from maddening.core.simulation.checkpoint import _number_kind  # noqa: PLC0415
 
     assert _number_kind(np.dtype(dtype)) == kind

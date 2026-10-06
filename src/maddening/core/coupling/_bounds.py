@@ -541,7 +541,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        the Jacobian's row space (``3 k`` JVPs); and the Newton step's
        second-order miss, ``t* - eta``, carried into each probe's bound.
 
-    ``11 + 4 k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``43 + 5 n_p`` forward), ``n_p``
+    ``11 + 4 k + 5 n_p + 2 k n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``43 + 21 n_p`` forward), ``n_p``
     the number of probes, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
@@ -908,11 +908,22 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     if rows_g is None:
         any_dir = jnp.where(norm(secant_s) > 0, jnp.inf, jnp.zeros_like(norm(secant_s)))
     else:
+        # The direction is handed to the map at order one and the scale
+        # returned afterwards (a power of two, so nothing is rounded): with
+        # both tangents in state units their product left float32's range
+        # for a group near 2**100, and the map's second derivative dropped
+        # out of the norm.  Near 2**-100 it still does (the other tangent,
+        # the adjoint's own, is in state units, and framing it too loses
+        # the term at 2**100 instead): there a nonlinear map's undirected
+        # term is its first-order part alone, 3.5% of the bound on the
+        # pair of ``tests/core/test_coupling_bounds_in_any_units.py``.
+        unit = pow2_frame(s_inv * lift, mode="common")
+
         def g_derivative(row, ts, z):
             """``(I - J)^{-1} dG_row/dx z`` in the scaled coordinates."""
             _, out = jax.jvp(lambda xx: linearisation(xx, row, ts), (x_sg,),
-                             ((z * (s_inv * lift)).astype(x_dtype),))
-            return resolve((s / lift) * out.astype(dtype))
+                             ((z * (s_inv * lift * unit)).astype(x_dtype),))
+            return resolve(((s / lift) / unit) * out.astype(dtype))
 
         dG = jax.vmap(
             lambda row, ts: jax.vmap(lambda z: g_derivative(row, ts, z))(rows_g.T))(

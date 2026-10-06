@@ -858,10 +858,9 @@ SPECTRAL_KRYLOV_STEPS = 8
 #: eigenvalue (Bauer-Fike with constant one).  It is zero, up to
 #: rounding, when the Krylov space is invariant, so the margin costs a
 #: resolved spectrum nothing.  The residual reported is the largest of
-#: that, of what a direction a breakdown discarded can do
-#: (:func:`_discarded_reach`), and of how far one more product moved the
-#: radius -- which is what stands in for it where ``A`` is not normal
-#: (:func:`_compressed_spectrum`).
+#: that, of any direction a breakdown discarded, and of how far one more
+#: product moved the radius -- which is what stands in for it where
+#: ``A`` is not normal (:func:`_compressed_spectrum`).
 SPECTRAL_MARGIN = 2.0
 
 #: The convergence test behind ``spectral_usable``: the Arnoldi
@@ -1019,25 +1018,6 @@ def _probe_coefficients(active):
     c = jax.random.normal(jax.random.PRNGKey(1), active.shape, active.dtype) * active
     nrm = jnp.linalg.norm(c)
     return c / jnp.where(nrm > 0, nrm, 1.0)
-
-
-def _discarded_reach(dropped, anorm):
-    """How far a direction a breakdown discarded can move the radius: ``sqrt(dropped * anorm)``.
-
-    A leftover of norm ``h`` that the breakdown test took for rounding may
-    be a direction of the Jacobian of that size, and nothing computed says
-    how the Jacobian acts on it (that would be one more product per
-    discarded direction).  The most it can do is return to the space with
-    the Jacobian's whole gain: ``[[0, a], [h, 0]]`` has eigenvalues
-    ``+/- sqrt(h a)``, and ``a`` is at least the largest product seen.
-    For a normal Jacobian the movement is ``h`` itself, which this is
-    never below (``h <= a``).  Reported as the bare ``h`` it read as
-    settled on two of 280 settled float32 fan-out hubs with a field 1e-4
-    to 1e-2 of the rest (weighted norm 700 beside a radius of 0.35: a
-    leftover of 2.4e-5 hid the dominant mode, 0.157 for 0.349); with the
-    root, none of 251.
-    """
-    return jnp.sqrt(dropped * anorm)
 
 
 #: Points per circle in :func:`_rounding_keeps_the_radius`.
@@ -1388,10 +1368,13 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     column = Q @ matvec(jnp.where(extended, Q[k], c @ Q[:k]))
     rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
     # A direction a breakdown discarded is a part of ``A q_j`` outside the
-    # space, as ``h_{k+1,k}`` is; what it can do to the radius is
-    # ``_discarded_reach``.
-    residual = jnp.maximum(jnp.maximum(H[k, k - 1], _discarded_reach(dropped, anorm)),
-                           sensitivity)
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.  (Its
+    # bare norm: what it could do to the radius of a Jacobian far from
+    # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
+    # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
+    # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
+    # open below the claimed domain, MADD-ANO-228.)
+    residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         # The certificate, tested rather than assumed: the fraction of
         # ``v_extra`` outside the final space.  Zero (to rounding) when the
@@ -1517,10 +1500,13 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     column = Q @ jnp.asarray(measure(jnp.asarray(matvec(probe_u), dtype)), dtype)
     rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
     # A direction a breakdown discarded is a part of ``A q_j`` outside the
-    # space, as ``h_{k+1,k}`` is; what it can do to the radius is
-    # ``_discarded_reach``.
-    residual = jnp.maximum(jnp.maximum(H[k, k - 1], _discarded_reach(dropped, anorm)),
-                           sensitivity)
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.  (Its
+    # bare norm: what it could do to the radius of a Jacobian far from
+    # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
+    # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
+    # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
+    # open below the claimed domain, MADD-ANO-228.)
+    residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         ex_norm = jnp.linalg.norm(extra_q)
         _e_u, e_q = _outside(Q[:k], _U[:k], extra_u, extra_q)

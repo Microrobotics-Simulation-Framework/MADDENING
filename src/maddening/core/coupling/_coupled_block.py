@@ -1487,7 +1487,7 @@ def _run_coupled_block_impl(
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
                 # secant, a second difference of the adjoint's own matvec.
-                # ``11 + 4 k + 5 n_p`` more JVPs, ``n_p`` the probes (see
+                # ``11 + 4 k + 5 n_p + 2 k n_p`` more JVPs, ``n_p`` the probes (see
                 # ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,

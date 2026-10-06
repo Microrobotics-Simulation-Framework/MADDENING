@@ -140,7 +140,7 @@ class CouplingGroup:
         products for the spectrum (``18`` under the interface norm with
         a mapping or a transform on an internal edge, or a field that
         more than one internal edge reads, whose report takes
-        a second spectrum on the reading the edges deliver) and ``11 + 4 k + 5 n_p``
+        a second spectrum on the reading the edges deliver) and ``11 + 4 k + 5 n_p + 2 k n_p``
         more for the bound per group per step (plus one linearisation and ``k``
         reverse-mode products where the state has more than ``k``
         entries; ``k <= 8``, ``n_p`` the probes: every entry of a

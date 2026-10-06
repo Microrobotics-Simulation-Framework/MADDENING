@@ -14797,7 +14797,7 @@ anomalies:
       - "tests/property/test_sysid_targeted_search.py::test_fit_lm_from_a_far_start_does_not_stop_short_on_the_end_of_a_range"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-218"
+  - anomaly_id: "MADD-ANO-220"
     title: "GraphManager.step, run and run_adaptive store a step that changed the shape of a state leaf"
     description: >
       A node whose `update` returns a leaf of another shape than its

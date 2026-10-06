@@ -5,7 +5,7 @@ A node whose ``update`` returns a leaf of another shape than its
 delivered into a scalar field -- broadcasts the leaf at its first step.
 ``run_scan`` and its siblings refuse such a graph (a scan carry of another
 type).  ``GraphManager.step``, ``run`` and ``run_adaptive`` store the
-result without a word, as they have since 0.1.0 (MADD-ANO-218, open): a
+result without a word, as they have since 0.1.0 (MADD-ANO-220, open): a
 checkpoint saved after the step does not load after ``reset_state``.  The
 REST server refuses such a node where it is added (``POST /graph/nodes``),
 with the comparison tested here (``_param_probes._state_layout_drift``).
@@ -48,7 +48,7 @@ def test_the_scan_entry_points_refuse_a_step_that_changes_a_leafs_shape(entry):
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-218 (open): step, run and run_adaptive store a stepped state whose leaf "
+    "MADD-ANO-220 (open): step, run and run_adaptive store a stepped state whose leaf "
     "has another shape than the state it replaces; the state no longer has the layout "
     "of initial_state(), and its checkpoint does not load after a reset"))
 @pytest.mark.parametrize("entry", ["step", "run", "run_adaptive"])

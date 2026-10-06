@@ -237,7 +237,7 @@ def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list
     (``POST /graph/nodes``): a node whose ``update`` returns a leaf of
     another shape than its ``initial_state()`` built broadcasts it at the
     first step, and :meth:`GraphManager.step` stores the result
-    (MADD-ANO-218).  Host-side: it reads shapes and dtypes, never values,
+    (MADD-ANO-220).  Host-side: it reads shapes and dtypes, never values,
     so tracers and the abstract values of :func:`jax.eval_shape` compare
     like arrays.
     """

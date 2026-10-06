@@ -220,7 +220,7 @@ def group_kwargs(domain: Domain, **kw) -> dict:
 
 
 def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
-         fields=("x", "x"), mappings=None, **group_kw) -> GraphManager:
+         fields=("x", "x"), mappings=None, extra_edges=(), **group_kw) -> GraphManager:
     """``x_a <- g_a x_b + c_a``, ``x_b <- g_b x_a + c_b`` in *domain*, compiled.
 
     Build it inside :func:`entered`.  *group_kw* go to the group, with the
@@ -235,6 +235,11 @@ def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
     its edge feeds, and the edge's cast (the mixed-dtype domain) follows it.
     The matrices are the mapping objects' own weights; :func:`params_with`
     passes others for a step.
+
+    *extra_edges* are further edges between the two members, each
+    ``(source, target, source field, target port)``, added after the pair's
+    own with the same cast: a field that a second internal edge reads, into
+    a port *node* declares beside ``"u"``.
     """
     gm = GraphManager()
     da, db = domain.dtypes
@@ -258,6 +263,10 @@ def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
     else:
         gm.add_edge("b", "a", fields[0], "u", transform=lambda v: v.astype(da), mapping=maps[0])
         gm.add_edge("a", "b", fields[1], "u", transform=lambda v: v.astype(db), mapping=maps[1])
+    for source, target, field, port in extra_edges:
+        to = da if target == "a" else db
+        cast = {} if da == db else {"transform": lambda v, to=to: v.astype(to)}
+        gm.add_edge(source, target, field, port, **cast)
     if domain.multirate:
         gm.add_node(Ticker("tick", DT / 2))
     with warnings.catch_warnings():

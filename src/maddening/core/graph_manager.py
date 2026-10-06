@@ -376,6 +376,44 @@ def _reads_mapping_weights(group, edges, state) -> bool:
     return False
 
 
+def _reading_is_the_fields(interface_edges, float_fields) -> bool:
+    """Is the interface norm's reading the fields it reads, each of them once?
+
+    ``coupling_residual_interface`` sums over a group's internal *edges*:
+    what each one delivers, over its own magnitude.  The state's weights
+    (``_norm_weights`` in the step) give each read *field* its own
+    magnitude's weight once.  The two are one norm exactly when every
+    internal edge with a floating source field delivers that field as it
+    is -- no mapping, no transform -- and no field is read by more than
+    one of them.  Then the report's spectral analysis is taken in the
+    state's weights (``_spectral_rate_at``); otherwise on the reading
+    (``_interface_spectral_rate_at``):
+
+    * a mapping or a transform changes what an entry is and which
+      magnitude it is divided by;
+    * a field that ``k`` internal edges read is counted ``k`` times by
+      the norm and once by the state's weights.  On a star whose hub's
+      field every leaf reads, the residual of the edges times the
+      resolvent of the fields read 0.26 to 0.73 of the true distance
+      with ``spectral_usable=True`` (2 to 16 leaves, Jacobi, float64;
+      MADD-ANO-199).
+
+    Static: *interface_edges* are the group's internal edges and
+    *float_fields* its floating fields by node, so a group keeps one
+    analysis for the life of its compiled step.
+    """
+    read = set()
+    for e in interface_edges:
+        if e.source_field not in float_fields.get(e.source_node, ()):
+            continue
+        if e.transform is not None or e.mapping is not None:
+            return False
+        if (e.source_node, e.source_field) in read:
+            return False
+        read.add((e.source_node, e.source_field))
+    return True
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class ShardingIssue:
@@ -646,7 +684,9 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
 
     :func:`_spectral_rate_at` with ``field_reference``, for a group under
     ``convergence_norm="interface"`` with a mapping or a transform on an
-    internal edge.  That norm measures what each internal edge *delivers*
+    internal edge, or a field that more than one internal edge reads
+    (:func:`_reading_is_the_fields`).  That norm measures what each
+    internal edge *delivers*
     -- its source value through the edge's interface mapping and then its
     transform (``coupling_residual_interface``) -- each over its own
     magnitude; the spectral analysis took its weights from the raw source
@@ -4578,18 +4618,18 @@ def _run_coupled_block_impl(
                     w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
-            # Under ``convergence_norm="interface"`` with a mapping or a
-            # transform on an internal edge the norm reads what each edge
-            # *delivers* -- its source value through the mapping, then the
-            # transform -- so the report's spectral analysis is taken on
-            # that reading (``_interface_spectral_rate_at``); the raw source
-            # fields' weights above measured a different norm.  Static: a
-            # group without such an edge keeps the analysis it had.
-            transformed_reading = use_interface_norm and any(
-                (e.transform is not None or e.mapping is not None)
-                and e.source_field in float_fields.get(e.source_node, ())
-                for e in interface_edges_in_order
-            )
+            # Under ``convergence_norm="interface"`` the norm reads what
+            # each internal edge *delivers* -- its source value through the
+            # mapping, then the transform -- once per edge.  With a mapping
+            # or a transform on an internal edge, or a field that more than
+            # one internal edge reads, that is not the read fields weighted
+            # once each, and the report's spectral analysis is taken on the
+            # reading (``_interface_spectral_rate_at``); the raw source
+            # fields' weights above measured a different norm.  Static
+            # (``_reading_is_the_fields``): every other group keeps the
+            # analysis it had.
+            transformed_reading = use_interface_norm and not _reading_is_the_fields(
+                interface_edges_in_order, float_fields)
             def _reading_parts(s_star):
                 """The interface norm's reading at ``s_star``, as ``(source dtype,
                 value)`` per edge: what each internal edge delivers, in the order

@@ -134,7 +134,8 @@ class CouplingGroup:
         gradient-error bound (``gradient_relative_error_bound``,
         ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
         products for the spectrum (``16`` under the interface norm with
-        a mapping or a transform on an internal edge, whose report takes
+        a mapping or a transform on an internal edge, or a field that
+        more than one internal edge reads, whose report takes
         a second spectrum on the reading the edges deliver) and ``11 + 4 k + 5 n_p``
         more for the bound per group per step (plus one linearisation and ``k``
         reverse-mode products where the state has more than ``k``

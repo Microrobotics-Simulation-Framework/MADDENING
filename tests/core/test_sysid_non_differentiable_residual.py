@@ -129,7 +129,8 @@ def test_fit_lm_beside_a_jump_is_unconverged_and_says_why(ball_fits):
     for texts in warned:
         assert len(texts) == 1
         assert "converged=False" in texts[0] and "MADD-ANO-021" in texts[0]
-        assert "docs/user_guide/parameters.md" in texts[0]
+        # That it names the guide is read in
+        # tests/compliance/test_sysid_non_differentiable_residual_docs.py.
     # Each of them is above the minimum: the run was stopped by a jump, not
     # by the rounding floor.
     for res, texts in stopped:

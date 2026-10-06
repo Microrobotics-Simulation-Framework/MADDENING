@@ -14,7 +14,10 @@ application itself:
   ``test_every_documented_route_has_a_request_generator``, so a new route
   cannot arrive untested.  The surrogate-training routes, the streams and
   every ``/cloud/*`` route are out of scope and listed
-  (:data:`OUT_OF_SCOPE`); no request is ever sent to them;
+  (:data:`OUT_OF_SCOPE`); no request that could be served is ever sent to
+  them (a surrogate route is asked once *without* the token, below, which
+  is refused before the route is reached; ``/cloud/*`` and the streams are
+  sent nothing at all);
 * each route has one or more *seeds* (:data:`SEEDS`): a request the served
   graph takes -- which node, which parameters -- the part a schema cannot
   say.  Every seed is first sent as it is and must be answered as it says;
@@ -51,6 +54,21 @@ and, of the three header rules, which are refusals by their definition:
 5. a request that carries a forwarding header, a ``Host`` that is not a
    name of this machine, or (on a state-changing method) a foreign
    ``Origin``, and no token, is never served.
+
+The graph is served in two configurations: on the default loopback bind,
+and as a network bind requires -- the server told its bind is ``0.0.0.0``
+(no socket is opened), the client presenting the token.  The fuzzer draws
+the configuration with each request, every seed is sent in both, and the
+whole battery runs for a token-holder in the slow lane.  A token-holder is
+held to invariants 1 to 4, and of the header rules to the Origin one.  And
+on the server that demands the token:
+
+6. a request without the token is refused on every route the application
+   has, changes nothing and reveals nothing about the graph
+   (``tests/property/without_the_token.py``).
+
+The write routes also have a seed on a graph with a coupling group, one
+with a mapped edge and one with nodes at three rates.
 
 Sizes are kept harmless: the longest text is 20 000 characters, and no
 drawn count is between 16 and 2**40, so nothing here asks the server for a

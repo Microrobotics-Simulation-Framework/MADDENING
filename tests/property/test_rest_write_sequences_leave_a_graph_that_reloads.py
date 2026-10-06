@@ -59,10 +59,20 @@ returns to a value the graph has already held as often as it proposes a new
 one.  Node names and checkpoint names come from pools of four and three, so
 a node is rebuilt under its old name and an old save is loaded.
 
+An example starts from the rod graph, an empty one, or one of the graphs
+the routes cannot build and users serve
+(``rest_oracle.COUPLED_AND_MAPPED_GRAPHS``): two rods in a coupling group
+under each solver, a rod heating another through a dense and through a
+sparse static mapping, and a spring, a rod and a ball at three rates.
+
+The last section sends requests *while the runner runs* and holds what the
+runner leaves to a replay of the accepted ones on a fresh server.
+
 What it cannot see: a defect in which the served graph and its reload agree
-on a wrong value, a sequence the rules cannot spell (the runner, the
-streams, the surrogate routes and ``/cloud/*`` are out of scope and never
-requested), and concurrency -- one request at a time.  No socket is
+on a wrong value, a sequence the rules cannot spell (the streams, the
+surrogate routes and ``/cloud/*`` are out of scope and never requested),
+and requests that arrive at the same time -- one request at a time, beside
+the runner or not.  No socket is
 opened: the server that demands the token is *told* its bind, and its
 client is in process.
 

@@ -44,6 +44,9 @@ import jax.numpy as jnp
 import pytest
 
 import maddening
+import maddening.core._graph_specs as _graph_specs
+import maddening.core.coupling._coupled_block as _coupled_block
+import maddening.core.coupling._fixed_point as _fixed_point
 import maddening.core.graph_manager as graph_manager
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -134,11 +137,14 @@ def test_the_gate_graphs_are_the_documented_set():
     names = set(GRAPHS)
     named = {n for n in names if n.startswith("named/")}
     assert len(named) == 8 and {n.rsplit("/", 1)[1] for n in named} == {"choice-0", "choice-1"}
-    sparse = {n for n in names if n.startswith("sparse-banded/")}
-    assert len(sparse) == (8 if capture.has_sparse_mappings() else 0)
-    assert names - named - sparse == {"multi-rate/chain-into-ring",
+    assert capture.has_sparse_mappings()
+    sparse = {n for n in names if n.startswith("sparse-ragged/")}
+    assert len(sparse) == 8
+    assert names - named - sparse == {"sparse-scatter/chain-into-ring/choice-0",
+                                      "multi-rate/chain-into-ring",
                                       "sub-cycled/chain-into-ring",
-                                      "predictor/chain-into-ring", "flux-outside-a-group",
+                                      "predictor/chain-into-ring", capture.AITKEN,
+                                      "flux-outside-a-group",
                                       "rbf-edge", capture.SHARDED}
 
 
@@ -173,12 +179,16 @@ def test_a_numerically_neutral_edit_of_the_edge_path_changes_every_program(name,
     """``value * 1.0`` after every edge: no result moves, and every program
     that resolves an edge has another text."""
     base = dict(_digests(name))
-    original = graph_manager._apply_edge                    # noqa: SLF001
+    original = _graph_specs._apply_edge                     # noqa: SLF001
 
     def neutral(*args, **kwargs):
         return original(*args, **kwargs) * 1.0
 
-    monkeypatch.setattr(graph_manager, "_apply_edge", neutral)
+    # Both readers: the plain step reads the attribute of ``_graph_specs``,
+    # the group block holds its own name for it.
+    assert _coupled_block._apply_edge is original           # noqa: SLF001
+    monkeypatch.setattr(_graph_specs, "_apply_edge", neutral)
+    monkeypatch.setattr(_coupled_block, "_apply_edge", neutral)
     mutated = capture.graph_digests(GRAPHS[name])
     changed = {p for p in capture.PROGRAMS if mutated[p] != base[p]}
     lowered = {p for p in capture.PROGRAMS if not base[p].startswith("refused:")}
@@ -209,6 +219,22 @@ def test_resolving_a_node_s_incoming_edges_in_another_order_changes_every_progra
     mutated = capture.graph_digests(GRAPHS[name])
     for program in ("step", "step_baked_params", "scan3", "sweep2"):
         assert mutated[program] != base[program], program
+
+
+def test_dropping_aitken_s_second_pass_changes_the_programs_of_the_aitken_graph(monkeypatch):
+    """The exit rule of the default solver is part of what the gate holds:
+    with ``_TWO_PASS_EXIT`` emptied (Aitken leaving on the first pass under
+    the threshold) every program of the Aitken graph that runs its group
+    has another text, and a graph without Aitken has the same one."""
+    assert _fixed_point._TWO_PASS_EXIT == ("aitken",)       # noqa: SLF001
+    base = dict(_digests(capture.AITKEN))
+    other = "named/chain-into-ring/choice-0"
+    other_base = dict(_digests(other))
+    monkeypatch.setattr(_fixed_point, "_TWO_PASS_EXIT", ())
+    mutated = capture.graph_digests(GRAPHS[capture.AITKEN])
+    for program in ("step", "step_baked_params", "scan3", "sweep2"):
+        assert mutated[program] != base[program], program
+    assert capture.graph_digests(GRAPHS[other]) == other_base
 
 
 def test_the_comparison_reports_a_missing_capture_a_missing_graph_and_a_changed_program():

@@ -28,8 +28,9 @@ graph, say) is recorded as the refusal: its exception type and the digest
 of its message.
 
 The graphs: the four named coupled topologies at two configurations each;
-the same four with sparse mappings where the tree has them; a multi-rate
-graph, a sub-cycled group and a group with a predictor; a flux edge
+the same four with ragged sparse mappings and one with a scatter-layout
+sparse mapping; a multi-rate graph, a sub-cycled group, a group with a
+predictor and a group under Aitken relaxation (its two-pass exit); a flux edge
 outside any group; an uncoupled pair joined by an ``rbf`` mapping; and a
 graph with a sharded node on two virtual CPU devices (which is why this script sets
 ``--xla_force_host_platform_device_count`` before it imports jax).
@@ -82,6 +83,8 @@ HOST_FLAG = "--xla_force_host_platform_device_count"
 #: Virtual CPU devices the sharded graph needs.
 SHARDED_DEVICES = 2
 SHARDED = "sharded"
+#: The graph whose group exits on Aitken's two-pass rule.
+AITKEN = "aitken/chain-into-ring"
 FORMAT = 1
 
 
@@ -141,6 +144,17 @@ def _predictor():
     ct = _ct()
     topo = ct.named_topologies()["chain-into-ring"]
     return _built(topo, [dict(g, predictor="quadratic") for g in ct.topology_knobs(topo, 0)])
+
+
+def _aitken():
+    """``chain-into-ring`` with Aitken relaxation on its group, under the
+    default solver: the one acceleration that must meet the threshold on
+    two consecutive passes before the loop exits."""
+    ct = _ct()
+    topo = ct.named_topologies()["chain-into-ring"]
+    return _built(topo, [dict(acceleration="aitken", iteration_mode="gauss-seidel",
+                              convergence_norm="l2", tolerance=1e-6, max_iterations=200)
+                         for _ in topo.groups])
 
 
 def _flux_outside_a_group():
@@ -218,11 +232,14 @@ def gate_graphs() -> dict:
     if has_sparse_mappings():
         for name in names:
             for choice in (0, 1):
-                graphs[f"sparse-banded/{name}/choice-{choice}"] = functools.partial(
-                    _named, name, choice, mapping_kind="sparse-banded")
+                graphs[f"sparse-ragged/{name}/choice-{choice}"] = functools.partial(
+                    _named, name, choice, mapping_kind="sparse-ragged")
+        graphs["sparse-scatter/chain-into-ring/choice-0"] = functools.partial(
+            _named, "chain-into-ring", 0, mapping_kind="sparse-scatter")
     graphs["multi-rate/chain-into-ring"] = _multi_rate
     graphs["sub-cycled/chain-into-ring"] = _sub_cycled
     graphs["predictor/chain-into-ring"] = _predictor
+    graphs[AITKEN] = _aitken
     graphs["flux-outside-a-group"] = _flux_outside_a_group
     graphs["rbf-edge"] = _rbf_edge
     graphs[SHARDED] = _sharded

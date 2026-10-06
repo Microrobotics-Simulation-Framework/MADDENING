@@ -1138,8 +1138,10 @@ names no directory of the deployment; a 2xx is strict JSON.
 
 A defect either oracle finds is kept as a strict xfail with its minimal
 request, and, where the generators would otherwise report nothing else, a
-tolerance exactly as narrow as the defect that goes when the xfail passes
-(`is_the_known_422_echo_defect` is the example). To show an oracle can
+tolerance exactly as narrow as the defect, pinned by a test of how narrow,
+that goes when the xfail passes (none is left: the three the request oracle
+found on the tree it was written on are fixed, and their cases are under
+"What the battery found" in its file). To show an oracle can
 still fail, run it against an older tree: `git archive <commit> src` into
 a scratch directory, and that `src` on `PYTHONPATH` with this tree's tests.
 

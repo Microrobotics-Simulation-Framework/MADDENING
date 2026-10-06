@@ -2512,7 +2512,13 @@ claims:
     - src/maddening/api/README.md:112 (Graph Structure)
     - src/maddening/api/server.py:2788 (add_node)
     - docs/release_notes/v0.4.0.md:4313 (Hardening from the audit rounds)
-  conditions: an empty graph; a registered and an unregistered type; bad constructor constants.
+  conditions: >-
+    an empty graph; a registered and an unregistered type; bad constructor
+    constants. Also a 400 that adds nothing, asked before the type is looked
+    up or anything is built: a name holding a control character, a surrogate,
+    U+FFFE or U+FFFF (a checkpoint, an FMU's model description or a file
+    could not carry it); and, for a class with a text parameter, a text
+    value that spells NaN, Infinity or -Infinity or holds a surrogate.
   oracle: status codes and the graph's nodes.
   tests:
     - tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -2522,6 +2528,10 @@ claims:
     - tests/api/test_graph_endpoint_validation.py::test_add_node_with_bad_params_is_400_and_not_added
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_node_name_some_carrier_cannot_hold_is_a_400_before_anything_is_built
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_node_name_every_carrier_holds_is_taken_and_its_checkpoint_loads
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_new_node_with_text_the_config_could_not_carry_is_a_400_and_no_node
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused
   status: verified
   domains:
     loopback_bind: tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -2617,13 +2627,23 @@ claims:
     - src/maddening/api/server.py:2914 (add_edge)
     - src/maddening/api/server.py:2946 (remove_edge)
     - docs/release_notes/v0.4.0.md:4597 (Checkpoint paths name a file inside the root)
-  conditions: missing nodes, a missing source field, an edge that does not exist.
+  conditions: >-
+    missing nodes, a missing source field, an edge that does not exist. The
+    target field is not asked whether the target node declares it (a node
+    may read an input it does not declare, and GraphManager.validate passes
+    one): an undeclared target field is a 201 and the graph is reported,
+    saved and reloaded. A field name the config or an edge's key cannot hold
+    -- the text NaN, Infinity or -Infinity, a '#', a control character, a
+    surrogate, U+FFFE or U+FFFF -- is a 400 and adds nothing.
   oracle: status codes and the graph's edges.
   tests:
     - tests/api/test_graph_endpoint_validation.py::test_add_edge_checks_nodes_and_fields
     - tests/api/test_runner_stop_and_stride.py::test_deleting_an_edge_that_does_not_exist_is_a_404
     - tests/api/test_api.py::TestGraphEndpoints::test_add_edge
     - tests/property/test_stateful_api.py::test_edge_from_a_boundary_flux_is_accepted_and_steps
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_an_edge_field_the_config_could_not_carry_is_a_400
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_an_edge_to_a_field_the_target_does_not_declare_is_taken_and_the_graph_reloads
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_an_edge_to_a_target_field_named_as_a_non_finite_token_is_refused_or_saves
   status: verified
   domains:
     loopback_bind: tests/api/test_graph_endpoint_validation.py::test_add_edge_checks_nodes_and_fields
@@ -3483,7 +3503,11 @@ claims:
     saves, loads and in-process gm.params writes, and every malformed value
     of every path parameter, query parameter, body member and proxy header of
     every documented route outside /surrogate, /ws and /cloud (read from the
-    OpenAPI document). Not claimed for simultaneous requests, the runner
+    OpenAPI document), with no request tolerated: a refusal that echoes the
+    text NaN, Infinity or -Infinity, or a surrogate, is the 4xx it was. Not
+    claimed for a graph built in-process that holds a text parameter spelling
+    one of those tokens (GET /graph is to_dict's refusal, MADD-ANO-010), for
+    simultaneous requests, the runner
     running, an in-flight /sim/run, oversized requests, a server shutting down
     or wrapper nodes.
   oracle: an in-process GraphManager driven with the same operations; byte-identity of the state across a refused call.
@@ -3501,15 +3525,14 @@ claims:
     - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_value_of_every_field_is_refused_whole_or_served
     - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_header_is_refused_whole_or_served
     - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_generated_request_is_refused_whole_or_served
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_reply_is_written_for_what_the_default_encoder_refuses
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_every_route_and_both_handlers_reply_through_the_one_encoder
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_no_reply_of_the_server_module_is_built_with_the_default_encoder
   status: verified
   notes: >-
     The promise is stated in the test module, not in a user document; the row
-    is here so the next audit attacks it with the rest.  The request battery
-    found one 5xx on the tree it was written on -- a 422 that echoes the text
-    NaN, Infinity or -Infinity is a 500 (POST /sim/run?n_steps=NaN) -- which it
-    counts and does not fail; the strict xfails of
-    tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500
-    hold it until it is fixed.
+    is here so the next audit attacks it with the rest.
   domains:
     loopback_bind: tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
     non_loopback_bind: tests/property/test_rest_properties_on_a_non_loopback_bind.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step_on_a_non_loopback_bind
@@ -5787,7 +5810,8 @@ claims:
     - src/maddening/api/server.py:3211 (_request_validation_error)
     - src/maddening/core/graph_manager.py:6582 (GraphManager.add_node)
   conditions: >-
-    NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, and
+    NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, the
+    same three as JSON text ("NaN") and a surrogate in the refused value, and
     NaN, the infinities, zero and a negative timestep in-process; 0.005
     taken.
   oracle: >-
@@ -5797,6 +5821,8 @@ claims:
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_422_still_writes_a_refused_number_as_its_token
   status: verified
   domains:
     loopback_bind: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused

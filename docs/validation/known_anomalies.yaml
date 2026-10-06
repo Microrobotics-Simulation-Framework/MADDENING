@@ -14896,4 +14896,67 @@ anomalies:
       - "tests/fmi/test_default_step_is_one_graph_step.py::test_a_numpy_scalar_step_size_is_stored_and_written_as_the_float_it_is"
       - "tests/fmi/test_default_step_is_one_graph_step.py::test_a_step_size_that_is_not_a_finite_positive_number_is_refused_at_build"
       - "tests/fmi/test_default_step_is_one_graph_step.py::test_every_number_a_hand_built_description_writes_is_an_xs_double"
+  - anomaly_id: "MADD-ANO-220"
+    title: "GraphManager.step, run and run_adaptive store a step that changed the shape of a state leaf"
+    description: >
+      A node whose `update` returns a leaf of another shape than its
+      `initial_state()` built broadcasts that leaf at its first step: a
+      list given for a scalar constant (`BallNode(initial_velocity=[0.0,
+      0.0])`, whose scalar `position` becomes `(2,)`; likewise
+      `SpringDamperNode.initial_position`, `HeartPumpNode.venous_pressure`,
+      `RigidBody2DNode.initial_omega`, `RigidBodyNode.gravity` as a nested
+      list), or a vector delivered by an edge into a scalar field that
+      declares no shape.  `GraphManager.step`, `run` and `run_adaptive`
+      store the result without a word, as in every release since 0.1.0.
+      The state then no longer has the layout of `initial_state()`: a
+      checkpoint saved after the step is refused by the same graph after
+      `reset_state()` and by the graph rebuilt from `to_dict()` ("Checkpoint
+      field 'b/position' has shape (2,), graph has ()").  `run_scan`,
+      `run_scan_with_history` and `run_adaptive_scan` have always refused
+      such a graph, loudly (a scan carry of another type).
+
+      Over REST the same nodes were accepted by `POST /graph/nodes` in
+      0.1.0 to 0.3.1, which constructed the node and added it.  That door
+      is closed in 0.4.0: one update is traced the way the graph calls it
+      (the params pytree injected, with every declared boundary input and
+      with none) and held to the fields, shapes and kinds of dtype of the
+      node's initial state; a mismatch or a trace failure is a 400 that
+      names the parameter, and nothing is added.  A constant the step
+      cannot use (`HeartPumpNode` `venous_pressure: null`), after which
+      every `POST /sim/step` answered 400, is refused there too.
+
+      In process the step entry points are unchanged.  A check of the
+      stepped state's keys and shapes in `step` (once per compile,
+      host-side) was written and withdrawn: it refuses the fixture the
+      compile-count gate's own tests use to provoke a retrace
+      (`tests/core/test_compile_counts.py`, a state that grows on its
+      first step), so it waits for a decision on that fixture.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `major`: the step's values are the broadcast of correct values, but
+      the state silently stops being the one `initial_state()`,
+      `reset_state()`, `load_state()` and `to_dict()` describe, so a saved
+      run cannot be restored, and a caller reading a scalar field receives
+      an array.  Whether that matters depends on what consumes the state.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.graph_manager.GraphManager.run"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Give a node's constants the rank its state has (a scalar for a scalar
+      field), and advance a graph you have not checked with `run_scan`,
+      which refuses a step that changes the state's layout.  Over REST,
+      0.4.0 refuses such a node where it is added.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      # A strict xfail: a change that makes the step entry points keep or
+      # refuse the layout is noticed.
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_step_entry_points_keep_the_shape_of_every_state_leaf"
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_scan_entry_points_refuse_a_step_that_changes_a_leafs_shape"
+      - "tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_value_of_a_rank_that_reshapes_the_state_at_the_first_step_is_a_400"
+      - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads"
     github_issue: null

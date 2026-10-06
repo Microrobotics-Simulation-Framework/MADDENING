@@ -474,20 +474,44 @@ def test_a_deactivated_surrogate_is_still_a_member_of_its_group():
     _reloads_and_steps_as_the_graph(gm)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "POST /surrogate/deactivate (experimental) puts back the edges recorded when the "
-    "surrogate was activated, not the edges the node has now: an edge added in process "
-    "while the surrogate was active is dropped by the revert, with a 200"))
-def test_a_deactivated_surrogate_keeps_the_edges_added_while_it_was_active():
-    """The revert removes the surrogate -- and with it every edge it has --
-    and adds the original with the edges of the server's record.  Nothing
-    is left dangling (the graph reloads), but an edge is lost silently."""
+def test_a_deactivated_surrogate_comes_back_with_its_recorded_edges_and_says_what_it_dropped():
+    """The revert (experimental in 0.4.0) removes the surrogate -- and with
+    it every edge it has -- and adds the original with the edges recorded
+    when the surrogate was activated.  An edge added while it was active
+    is not put back, and the reply lists it; nothing is left dangling (the
+    graph reloads).  Keeping such an edge is for 0.5.0."""
     gm = _compiled(_ring(extra=("d",)))
     server, client = _serve(gm)
     recorded = [e for e in gm._edges if "b" in (e.source_node, e.target_node)]  # noqa: SLF001
     server._original_nodes["b"] = (gm.get_node("b"), recorded, [])  # noqa: SLF001
     server._active_surrogates.add("b")  # noqa: SLF001
     gm.add_edge("b", "d", "temperature", "heat_source")
-    assert client.post("/surrogate/deactivate/b").status_code == 200
+    gm.add_edge("d", "b", "temperature", "heat_source")
+    before = {(e.source_node, e.target_node, e.source_field, e.target_field)
+              for e in recorded}
+    resp = client.post("/surrogate/deactivate/b")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["dropped_edges"] == [
+        {"source_node": "b", "target_node": "d", "source_field": "temperature",
+         "target_field": "heat_source"},
+        {"source_node": "d", "target_node": "b", "source_field": "temperature",
+         "target_field": "heat_source"}]
+    after = {(e.source_node, e.target_node, e.source_field, e.target_field)
+             for e in gm._edges if "b" in (e.source_node, e.target_node)}  # noqa: SLF001
+    assert after == before
     _reloads_and_steps_as_the_graph(gm)
-    assert ("b", "d") in [(e.source_node, e.target_node) for e in gm._edges]  # noqa: SLF001
+
+
+def test_a_deactivated_surrogate_with_no_edge_added_since_drops_none():
+    gm = _compiled(_ring(extra=("d",)))
+    server, client = _serve(gm)
+    recorded = [e for e in gm._edges if "b" in (e.source_node, e.target_node)]  # noqa: SLF001
+    server._original_nodes["b"] = (gm.get_node("b"), recorded, [])  # noqa: SLF001
+    server._active_surrogates.add("b")  # noqa: SLF001
+    # An edge between two other nodes is not the surrogate's, and is kept.
+    gm.add_edge("c", "d", "temperature", "heat_source")
+    resp = client.post("/surrogate/deactivate/b")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["dropped_edges"] == []
+    assert ("c", "d") in [(e.source_node, e.target_node) for e in gm._edges]  # noqa: SLF001
+    _reloads_and_steps_as_the_graph(gm)

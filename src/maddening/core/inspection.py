@@ -656,9 +656,17 @@ def _callable_name(fn: Any) -> str:
 
 def _mapping_text(mapping: Any) -> str:
     try:
-        return f"{type(mapping).__name__} {int(mapping.n_source)}->{int(mapping.n_target)}"
+        text = f"{type(mapping).__name__} {int(mapping.n_source)}->{int(mapping.n_target)}"
     except Exception:   # noqa: BLE001
         return type(mapping).__name__
+    try:
+        # A sparse mapping: how many slots a row has and how many are used.
+        slots, entries = getattr(mapping, "k", None), getattr(mapping, "nnz", None)
+        if slots is not None and entries is not None:
+            text += f" (k={int(slots)}, nnz={int(entries)})"
+    except Exception:   # noqa: BLE001
+        pass
+    return text
 
 
 def _group_key(group: Any) -> str:
@@ -666,7 +674,7 @@ def _group_key(group: Any) -> str:
 
 
 def _subcycle_dividers(gm: "GraphManager", group: Any) -> dict[str, int]:
-    from maddening.core.graph_manager import _group_dividers  # noqa: PLC0415
+    from maddening.core.coupling._group_layout import _group_dividers  # noqa: PLC0415
     if not all(n in gm._nodes for n in group.nodes):
         return {}
     return dict(_group_dividers(group, gm._nodes) or {})
@@ -1397,7 +1405,10 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
         notes.append("error_estimate is an estimate, not a bound: it can understate the "
                      "distance to the fixed point by large factors even with "
                      "ratio_usable=True; spectral_error_bound (solver='ift', "
-                     "diagnostics=True) is the bound. See coupling_diagnostics()")
+                     "diagnostics=True) is the bound where spectral_usable is True, for a "
+                     "linear map (asymptotic for a non-linear one), in the group's own norm "
+                     "at the returned state (under 'interface', what each edge delivers: "
+                     "its mapping, then its transform). See coupling_diagnostics()")
         if gm._is_multirate:
             notes.append("multi-rate graph: a group's entry is its most recent applied solve")
     if status.stale and groups:

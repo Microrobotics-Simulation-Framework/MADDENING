@@ -17,8 +17,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.graph_manager import (
-    GraphManager,
+from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import (
     _float_gcd,
     _multi_gcd,
     _META_KEY,

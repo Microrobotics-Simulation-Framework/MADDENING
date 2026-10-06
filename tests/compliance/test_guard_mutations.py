@@ -90,6 +90,7 @@ TRANSPORT = (f"{_CLAIMS}::test_the_shared_in_process_client_is_no_tests_own_word
 CPL = "docs/validation/coupling_claims.yaml"
 RST = "docs/validation/rest_runpod_claims.yaml"
 SYS = "docs/validation/sysid_fmu_claims.yaml"
+MAP = "docs/validation/mapping_claims.yaml"
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -487,7 +488,7 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K4", _CLAIMS, "        if value == NOT_APPLICABLE and d in covered:\n", "        if False:\n",
        CLAIMS, "n/a accepted for a domain the conditions name: an untested domain hidden as "
        "inapplicable"),
-    _M("K5", RST, "    runs. Not claimed for a server shutting down.\n", "    runs.\n", CLAIMS,
+    _M("K5", RST, "    fails. Not claimed for a server shutting down.\n", "    fails.\n", CLAIMS,
        "a narrowed server domain whose conditions no longer exclude it: REST-051 reads as "
        "claimed while the server shuts down"),
     _M("K6", RST, _STEPS_CELLS % _STEPS_SERVED,
@@ -570,7 +571,7 @@ MUTANTS: tuple[Mutant, ...] = (
        "that starts a real server witnesses concurrent"),
     # A cited test under tests/usd needs usd-core.  These must be caught where pytest collects
     # the file (usd-core installed) and where its items are read from source (it is not).
-    _M("K24", SYS, f"    - {_USD_SPEC}::{_USD_GONE}\n", f"    - {_USD_SPEC}::{_USD_GONE}_too\n", CLAIMS,
+    _M("K24", MAP, f"    - {_USD_SPEC}::{_USD_GONE}\n", f"    - {_USD_SPEC}::{_USD_GONE}_too\n", CLAIMS,
        "a row citing a tests/usd test that does not exist: unverifiable where usd-core is "
        "absent, so taken on trust there"),
     _M("K25", CI, "            tests/usd/ \\\n", "", CLAIMS,

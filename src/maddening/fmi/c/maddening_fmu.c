@@ -29,8 +29,15 @@
  * double.  A getter also refuses a reply value its C type cannot hold (a
  * fraction, NaN or an out-of-range number for an integer, anything but
  * 0/1 for a Boolean), so no conversion here is undefined behaviour or a
- * silent truncation; an Int64/UInt64 setter refuses a value a double
- * cannot carry exactly.
+ * silent truncation.  A double holds every value of every FMI type but
+ * two: an Int64 / UInt64 above 2^53 in magnitude is a double only where it
+ * is a multiple of the spacing there.  Such a value is never rounded, in
+ * either direction: an Int64 / UInt64 setter refuses one before anything is
+ * sent, and the bridge refuses a get of a variable holding one (the error
+ * names the variable and the integer), so fmi3GetInt64 / fmi3GetUInt64
+ * return fmi3Error rather than a neighbouring integer.  A double the bridge
+ * does send converts exactly (FITS_I64 / FITS_U64).  A set of negative zero
+ * keeps its sign on the JSON path too ("-0.0", never "-0").
  *
  * The endpoint is read from "<resourcePath>/endpoint.txt" ("host:port"),
  * or from the MADDENING_FMU_ENDPOINT environment variable.
@@ -88,6 +95,43 @@
  * lastSuccessfulTime when it fails, follows fmi3SetFMUState (the bridge's
  * reply carries the restored time) and fmi3Reset (only once the reset
  * succeeded).
+ *
+ * FMU states.  An fmi3FMUState is an object of this wrapper holding one
+ * state blob of the sidecar; it belongs to the instance whose call returned
+ * it.  FMI 3.0.1, "Getting and Setting the Complete FMU State", function by
+ * function:
+ *
+ *   fmi3GetFMUState         *FMUState == NULL allocates.  A non-NULL
+ *                           *FMUState "points to a previously returned
+ *                           FMUState that is no longer needed and can be
+ *                           overwritten": the same object is returned, its
+ *                           memory reused (until 0.4.0's fix every call
+ *                           allocated a new one over it, so the usual
+ *                           rollback loop -- one variable, a get before
+ *                           every step -- leaked one whole state per call).
+ *                           Only a pointer that is a live state of this
+ *                           instance is ever read; any other value is
+ *                           overwritten unread, as it was before.  A failed
+ *                           call leaves *FMUState, and the state it points
+ *                           to, as they were.
+ *   fmi3SetFMUState         never changes the state object: it may be
+ *                           restored any number of times.
+ *   fmi3FreeFMUState        frees the object and stores NULL; a NULL
+ *                           argument, or a NULL *FMUState, is ignored.
+ *   fmi3SerializedFMUStateSize / fmi3SerializeFMUState
+ *                           read the object, and write only the importer's
+ *                           byte vector (at most `size` bytes of it).
+ *   fmi3DeserializeFMUState always "constructs a copy": the standard says
+ *                           nothing about *FMUState on entry, so it is
+ *                           never read (an uninitialised variable is
+ *                           legal) and a state it pointed to is still the
+ *                           importer's to free.
+ *   fmi3FreeInstance        "frees all the allocated memory ... allocated by
+ *                           the functions of the FMU interface": every
+ *                           state of the instance that is still live is
+ *                           freed with it, and must not be used afterwards.
+ *   fmi3Reset, fmi3Terminate leave every state object valid: a state saved
+ *                           before a reset restores after it.
  *
  * Only libc and the FMI 3.0 headers are needed to build:
  *   cc -shared -fPIC -O2 -I<fmi3 headers> maddening_fmu.c -o maddening_fmu.so
@@ -158,7 +202,19 @@ static struct {
 #  define FUZZ_COUNT(field) ((void)0)
 #endif
 
-typedef struct {
+typedef struct Instance Instance;
+
+/* One FMU state: an opaque blob produced by the sidecar (raw npz bytes on
+ * the binary protocol, base64 text on JSON), in a list of its instance's
+ * live states (see "FMU states" at the top of this file). */
+typedef struct FmuState {
+    char *blob; size_t n;            /* n bytes, and a NUL after them */
+    size_t cap;                      /* bytes allocated at blob */
+    Instance *owner;                 /* whose list holds it; NULL for none */
+    struct FmuState *prev, *next;
+} FmuState;
+
+struct Instance {
     sock_t sock;
     char instance_name[256];
     fmi3InstanceEnvironment env;
@@ -183,7 +239,9 @@ typedef struct {
 #else
     locale_t c_numeric;
 #endif
-} Instance;
+    FmuState *states;      /* the FMU states this instance returned that are
+                              still live (fmi3FreeInstance frees them) */
+};
 
 /* ------------------------------------------------- FMI 3.0 state machine */
 
@@ -273,11 +331,63 @@ static double c_strtod(Instance *in, const char *p, char **end) {
 #endif
 }
 
-/* Everything an instance holds, the instance included.  The socket is
- * closed if it is still open; nothing is sent. */
+/* ---------------------------------------------------------- FMU states */
+
+static void state_unlink(FmuState *st) {
+    if (!st->owner) return;
+    if (st->prev) st->prev->next = st->next; else st->owner->states = st->next;
+    if (st->next) st->next->prev = st->prev;
+    st->owner = NULL; st->prev = st->next = NULL;
+}
+
+static void state_destroy(FmuState *st) {
+    state_unlink(st);
+    free(st->blob); free(st);
+}
+
+/* Is `candidate` one of the instance's live states?  Compared by address
+ * only, so a pointer that is not one is never read. */
+static FmuState *state_if_live(const Instance *in, const void *candidate) {
+    if (!in || !candidate) return NULL;
+    for (FmuState *st = in->states; st; st = st->next)
+        if ((const void *)st == candidate) return st;
+    return NULL;
+}
+
+/* A state of `in` (which may be NULL: a state no instance holds) with a
+ * copy of the `n` bytes at `src`: `reuse`, its memory kept, or a new object
+ * when `reuse` is NULL.  NULL when memory runs out, with `reuse` and its
+ * contents as they were. */
+static FmuState *state_filled(Instance *in, FmuState *reuse, const char *src, size_t n) {
+    FmuState *st = reuse;
+    if (!st) {
+        st = (FmuState *)calloc(1, sizeof *st);
+        if (!st) return NULL;
+    }
+    if (n + 1 > st->cap) {
+        char *p = (char *)realloc(st->blob, n + 1);
+        if (!p) { if (!reuse) free(st); return NULL; }
+        st->blob = p; st->cap = n + 1;
+    }
+    if (n > 0) memcpy(st->blob, src, n);
+    st->blob[n] = '\0'; st->n = n;
+    if (!reuse && in) {
+        st->owner = in; st->next = in->states;
+        if (in->states) in->states->prev = st;
+        in->states = st;
+    }
+    return st;
+}
+
+/* Everything an instance holds, the instance included: its buffers, its
+ * locale and every FMU state it returned that the importer has not freed
+ * (FMI 3.0: fmi3FreeInstance "frees all the allocated memory ... allocated
+ * by the functions of the FMU interface").  The socket is closed if it is
+ * still open; nothing is sent. */
 static void instance_release(Instance *in) {
     if (!in) return;
     if (in->sock != SOCK_INVALID) sock_close(in->sock);
+    while (in->states) state_destroy(in->states);
     free(in->req); free(in->resp);
     if (in->c_numeric_ready) {
 #ifdef _WIN32
@@ -720,9 +830,12 @@ static fmi3Status do_set(Instance *in, const char *type, const fmi3ValueReferenc
     w += sprintf(w, ",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
     w += sprintf(w, "],\"values\":[");
+    /* %.17g writes negative zero as "-0", which a JSON reader takes for the
+     * integer 0: the sign was lost on this path (and kept on the binary
+     * one).  "-0.0" is a float to every reader. */
     for (size_t i = 0; i < nvalues; ++i)
-        w += c_snprintf(in, w, in->req_cap - (size_t)(w - in->req), "%s%.17g", i ? "," : "",
-                        values[i]);
+        w += c_snprintf(in, w, in->req_cap - (size_t)(w - in->req), "%s%.17g%s", i ? "," : "",
+                        values[i], (values[i] == 0.0 && signbit(values[i])) ? ".0" : "");
     w += sprintf(w, "]}");
     if ((size_t)(w - in->req) > FRAME_MAX) {
         inst_log(in, fmi3Error, "logStatusError", too_big);
@@ -1048,7 +1161,12 @@ FMI3_Export fmi3Status fmi3Reset(fmi3Instance instance) {
 
 /* An Int64 / UInt64 value the double on the wire cannot carry exactly
  * (|v| > 2^53, most of them) is refused rather than rounded; every other
- * width converts to double exactly. */
+ * width converts to double exactly.  The other direction is the bridge's
+ * to guard, since only it knows the integer: it refuses a get of a
+ * variable holding such a value, so the double a getter is handed is the
+ * integer itself and FITS_I64 / FITS_U64 above convert it exactly (the
+ * bridge used to send the rounded double, which is a whole number in range
+ * and passed them). */
 #define EXACT_ANY(v) 1
 #define EXACT_I64(v) ((double)(v) < 9223372036854775808.0 && (fmi3Int64)(double)(v) == (v))
 #define EXACT_U64(v) ((double)(v) < 18446744073709551616.0 && (fmi3UInt64)(double)(v) == (v))
@@ -1193,10 +1311,8 @@ FMI3_Export fmi3Status fmi3GetVariableDependencies(
     return fmi3OK;
 }
 
-/* ---- FMU state: an opaque blob produced by the sidecar (raw npz bytes
- * on the binary protocol, base64 text on JSON) ---- */
-
-typedef struct { char *blob; size_t n; } FmuState;
+/* ---- FMU state: the functions (the object and its ownership rules are at
+ * the top of this file) ---- */
 
 /* After a successful set_state the bridge's reply carries the restored
  * time ({"ok":true,"t":...}); it becomes the wrapper's clock, which
@@ -1216,36 +1332,38 @@ static fmi3Status adopt_restored_time(Instance *in, fmi3Status st) {
 FMI3_Export fmi3Status fmi3GetFMUState(fmi3Instance instance, fmi3FMUState *FMUState) {
     Instance *in = (Instance *)instance;
     if (!in) return fmi3Error;
+    if (!FMUState) {
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: fmi3GetFMUState needs somewhere to return the state (FMUState is NULL)");
+        return fmi3Error;
+    }
     if (bridge_call(in, "{\"op\":\"get_state\"}") != fmi3OK) return fmi3Error;
     if (in->resp == NULL) return fmi3Error;
+    const char *src;
+    size_t n;
     if (in->resp_binary) {
-        size_t n;
         FUZZ_COUNT(raw_state);
         if (hdr_count(in, &n) || n != in->raw_len) {
             inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary state length mismatch");
             return fmi3Error;
         }
-        FmuState *st = (FmuState *)malloc(sizeof *st);
-        if (!st) return fmi3Fatal;
-        st->blob = (char *)malloc(n + 1);
-        if (!st->blob) { free(st); return fmi3Fatal; }
-        memcpy(st->blob, in->raw, n); st->blob[n] = '\0'; st->n = n;
-        *FMUState = st;
-        FUZZ_COUNT(raw_state_ok);
-        return fmi3OK;
+        src = in->raw;
+    } else {
+        const char *p = strstr(in->resp, "\"state\":\"");
+        if (!p) return fmi3Error;
+        p += 9;
+        const char *q = strchr(p, '"');
+        if (!q) return fmi3Error;
+        src = p; n = (size_t)(q - p);
     }
-    const char *p = strstr(in->resp, "\"state\":\"");
-    if (!p) return fmi3Error;
-    p += 9;
-    const char *q = strchr(p, '"');
-    if (!q) return fmi3Error;
-    FmuState *st = (FmuState *)malloc(sizeof *st);
+    /* FMI 3.0: a non-NULL *FMUState is a state a previous call returned,
+     * "no longer needed", to be overwritten; it is reused, memory and all.
+     * Every call used to allocate a new object over it, which nothing could
+     * free any more.  Only a live state of this instance is taken for one. */
+    FmuState *st = state_filled(in, state_if_live(in, *FMUState), src, n);
     if (!st) return fmi3Fatal;
-    st->n = (size_t)(q - p);
-    st->blob = (char *)malloc(st->n + 1);
-    if (!st->blob) { free(st); return fmi3Fatal; }
-    memcpy(st->blob, p, st->n); st->blob[st->n] = '\0';
     *FMUState = st;
+    if (in->resp_binary) FUZZ_COUNT(raw_state_ok);
     return fmi3OK;
 }
 FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUState) {
@@ -1295,10 +1413,13 @@ FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUSt
     sprintf(in->req, "{\"op\":\"set_state\",\"state\":\"%s\"}", st->blob);
     return adopt_restored_time(in, bridge_call(in, in->req));
 }
+/* Frees the state whichever instance is named (the state knows its own):
+ * the argument was never read, and a NULL one is still accepted. */
 FMI3_Export fmi3Status fmi3FreeFMUState(fmi3Instance instance, fmi3FMUState *FMUState) {
     (void)instance;
+    if (!FMUState) return fmi3OK;            /* "If a NULL pointer is provided, the call is ignored" */
     FmuState *st = (FmuState *)*FMUState;
-    if (st) { free(st->blob); free(st); }
+    if (st) state_destroy(st);
     *FMUState = NULL;
     return fmi3OK;
 }
@@ -1306,7 +1427,7 @@ FMI3_Export fmi3Status fmi3SerializedFMUStateSize(fmi3Instance instance, fmi3FMU
                                                   size_t *size) {
     (void)instance;
     FmuState *st = (FmuState *)FMUState;
-    if (!st) return fmi3Error;
+    if (!st || !size) return fmi3Error;
     *size = st->n;
     return fmi3OK;
 }
@@ -1314,19 +1435,30 @@ FMI3_Export fmi3Status fmi3SerializeFMUState(fmi3Instance instance, fmi3FMUState
                                              fmi3Byte serializedState[], size_t size) {
     (void)instance;
     FmuState *st = (FmuState *)FMUState;
-    if (!st || size < st->n) return fmi3Error;
-    memcpy(serializedState, st->blob, st->n);
+    if (!st || size < st->n || (!serializedState && st->n > 0)) return fmi3Error;
+    if (st->n > 0) memcpy(serializedState, st->blob, st->n);
     return fmi3OK;
 }
+/* Always a new object: FMI 3.0 says nothing about *FMUState on entry here,
+ * so it is not read (see "FMU states" at the top).  A vector longer than a
+ * frame is refused: no fmi3SetFMUState could send it, and size + 1 bytes
+ * are allocated for it. */
 FMI3_Export fmi3Status fmi3DeserializeFMUState(fmi3Instance instance,
                                                const fmi3Byte serializedState[], size_t size,
                                                fmi3FMUState *FMUState) {
-    (void)instance;
-    FmuState *st = (FmuState *)malloc(sizeof *st);
+    Instance *in = (Instance *)instance;
+    if (!FMUState || (!serializedState && size > 0)) {
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: fmi3DeserializeFMUState needs the serialized bytes and "
+                 "somewhere to return the state (a NULL argument)");
+        return fmi3Error;
+    }
+    if (size > FRAME_MAX) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: FMU state exceeds the frame limit");
+        return fmi3Error;
+    }
+    FmuState *st = state_filled(in, NULL, (const char *)serializedState, size);
     if (!st) return fmi3Fatal;
-    st->blob = (char *)malloc(size + 1);
-    if (!st->blob) { free(st); return fmi3Fatal; }
-    memcpy(st->blob, serializedState, size); st->blob[size] = '\0'; st->n = size;
     *FMUState = st;
     return fmi3OK;
 }

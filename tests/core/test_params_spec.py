@@ -117,6 +117,64 @@ def test_constrain_inverts_unconstrain_inside_bounds(k, c, m, e, off, x0):
         assert float(back["nodes"]["s"][key]) == float(p["nodes"]["s"][key])
 
 
+#: ``(transform, bounds, value)`` in float32: the audit's cases, where the
+#: bounds are far wider than the value, beside ordinary ones.
+_ROUND_TRIPS = [
+    ("logit", (0.5, 2.0), 1.25), ("logit", (0.5, 2.0), 0.6),
+    ("logit", (-1.0, 1.0), 0.3), ("logit", (-1.0, 1.0), 1e-3), ("logit", (-1.0, 1.0), 1e-6),
+    ("logit", (-10.0, 10.0), 2.0), ("logit", (-100.0, 1.0), 0.5),
+    ("logit", (-100.0, 1.0), 1e-3), ("logit", (-1e3, 1e3), 3.0),
+    ("logit", (-1e4, 1e4), 3.0), ("logit", (-1e6, 1e6), 2.0), ("logit", (-1e6, 1e6), 3.0),
+    ("logit", (0.0, 1e6), 2.0), ("logit", (1e6, 1e6 + 64.0), 1e6 + 20.0),
+    ("log", (0.0, None), 2.0), ("log", (0.0, None), 1e-6), ("log", (0.0, None), 1e6),
+    ("log", (-100.0, None), 2.0), ("log", (-100.0, None), 1e-3),
+    ("log", (-1e6, None), 2.0), ("log", (-1e6, None), 3.0), ("log", (8.0, None), 8.001),
+]
+
+
+@pytest.mark.parametrize("transform, bounds, value", _ROUND_TRIPS)
+def test_the_round_trip_is_good_to_the_transforms_resolution_not_the_values(
+        transform, bounds, value):
+    """SYS-104, with the resolution stated: ``constrain(unconstrain(p))``
+    is within 16 of the transform's spacings -- ``ParamSpec._resolution``:
+    ``eps * max(|lo|, |hi|, hi - lo)`` for ``logit``, ``eps * |lo|`` for
+    ``log`` -- plus 16 ``eps`` of ``p``, eagerly and under ``jax.jit``, which
+    need not return the same float.  Under bounds a million times wider than
+    the value that spacing is most of the value: a float32 ``2.0`` under
+    ``logit`` bounds ``(-1e6, 1e6)`` comes back up to 0.12 away (the guide
+    said "to a few ulps", without saying of what).  The identity transform
+    returns the value itself."""
+    spec = ParamSpec(bounds=bounds, transform=transform)
+    eps = float(np.finfo(np.float32).eps)
+    lo, hi = bounds
+    size = abs(lo) if transform == "log" else max(abs(lo), abs(hi), hi - lo)
+    spacing = spec._resolution(np.float32)  # noqa: SLF001
+    assert spacing == pytest.approx(eps * size)
+    p = jnp.asarray(value, jnp.float32)
+    spec.check(p)
+    u = spec.to_unconstrained(p)
+    allowed = 16.0 * (spacing + eps * abs(float(p)))
+    for back in (spec.to_constrained(u), jax.jit(spec.to_constrained)(u)):
+        assert back.dtype == jnp.float32
+        assert abs(float(back) - float(p)) <= allowed, (float(back), float(p), allowed)
+    assert ParamSpec(bounds=(lo, hi))._resolution(np.float32) == 0.0  # noqa: SLF001
+    assert float(ParamSpec(bounds=(lo, hi)).to_constrained(p)) == float(p)
+
+
+def test_wide_bounds_cost_a_value_its_digits():
+    """Non-vacuity for the test above: the stated resolution is the bounds',
+    and it is really lost.  Over 200 float32 values near 2 under ``logit``
+    bounds ``(-1e6, 1e6)`` the round trip moves one by more than 1% of
+    itself, and never by more than the spacing, 0.12 of it."""
+    spec = ParamSpec(bounds=(-1e6, 1e6), transform="logit")
+    spacing = spec._resolution(np.float32)  # noqa: SLF001
+    values = jnp.asarray(np.random.default_rng(3).uniform(1.5, 2.5, 200), jnp.float32)
+    back = jax.jit(spec.to_constrained)(spec.to_unconstrained(values))
+    error = np.abs(np.asarray(back, np.float64) - np.asarray(values, np.float64))
+    assert spacing == pytest.approx(0.2384, rel=1e-3)
+    assert error.max() > 0.02 and error.max() <= 16.0 * spacing
+
+
 @given(
     u=st.lists(st.floats(-30.0, 30.0, **finite64), min_size=6, max_size=6),
 )

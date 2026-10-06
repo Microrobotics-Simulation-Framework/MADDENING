@@ -88,16 +88,36 @@ from tests.registered_mapping_kinds import (
     temporary_kind,
     weights_of,
 )
+from tests.sparse_mapping_support import SCATTER, SPARSE_POINT_KINDS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: Where the ``maddening`` under test was imported from: a fresh interpreter
 #: is given the same tree, whichever tree this run is testing.
 SRC = Path(mapping_registry.__file__).resolve().parents[3]
 BUILTIN_KINDS = ["matrix", "nearest_neighbor", "projection_1d", "rbf"]
+#: The sparse kinds the library registers itself, through the public
+#: ``register_mapping`` (``maddening.core.coupling.sparse_mapping``), and
+#: every kind a process has before it registers one of its own.
+SPARSE_KINDS = ["sparse_matrix", "sparse_nearest_neighbor", "sparse_projection_1d"]
+LIBRARY_KINDS = sorted(BUILTIN_KINDS + SPARSE_KINDS)
 EDGE = "a.v -> b.inp"
 INLINE3 = {"inline": [0.0, 0.5, 1.0], "dtype": "float64"}
 PAIR = {"source_points": INLINE3, "target_points": INLINE3}
 REGISTERED = sorted(KINDS)
+#: Every kind that maps one point set onto another and is held to what a
+#: registered kind is held to: the three ``tests/registered_mapping_kinds``
+#: registers, and the library's own ``sparse_nearest_neighbor``.
+PAIR_KINDS = {**KINDS, **SPARSE_POINT_KINDS}
+PAIRS = sorted(PAIR_KINDS)
+#: A valid reference for each array of every such kind and of the two
+#: sparse kinds that take other arrays (``rows.npy`` and ``vals.npy`` are
+#: in the asset directory of the tests that resolve them).
+SPEC_POINTS = {
+    **{kind: PAIR for kind in PAIRS},
+    "sparse_projection_1d": {"source_boundaries": INLINE3, "target_boundaries": INLINE3},
+    "sparse_matrix": {"indices": {"asset": "rows.npy"}, "values": {"asset": "vals.npy"}},
+}
+EVERY_REGISTERED = sorted(SPEC_POINTS)
 
 
 def _config(mapping, n_source=3, n_target=3) -> dict:
@@ -349,19 +369,22 @@ def clean_process(tmp_path_factory) -> dict:
             "weights": weights_of(gm.edges[0].mapping)}
 
 
-def test_a_process_that_registered_nothing_has_exactly_the_built_in_kinds(clean_process):
+def test_a_process_that_registered_nothing_has_exactly_the_kinds_the_library_ships(
+        clean_process):
+    """The four built-in kinds and the three sparse ones, without anyone
+    having imported the modules that define their factories."""
     report = clean_process["report"]
     assert report["spec_from_mapping_spec_alone"] == "nearest_neighbor"
-    assert report["kinds"] == BUILTIN_KINDS
+    assert report["kinds"] == LIBRARY_KINDS
 
 
-def test_the_unknown_kind_refusal_lists_the_four_kinds_when_only_they_are_registered(
+def test_the_unknown_kind_refusal_lists_the_librarys_kinds_when_only_they_are_registered(
         clean_process):
-    """The message a user saw before the registry, to the character."""
+    """The message a user saw before the registry, with the sparse kinds
+    the library has gained since."""
     assert clean_process["report"]["unknown_spec"] == {
         "type": "ValueError",
-        "message": "unknown mapping kind 'spline'; choose from "
-                   "['matrix', 'nearest_neighbor', 'projection_1d', 'rbf']"}
+        "message": f"unknown mapping kind 'spline'; choose from {LIBRARY_KINDS}"}
 
 
 @pytest.mark.parametrize("label, shown", [
@@ -375,8 +398,7 @@ def test_a_kind_that_is_not_a_registered_name_is_an_unknown_kind_whatever_its_ty
     ``TypeError: unhashable type`` out of the table lookup."""
     assert clean_process["report"]["not_a_kind:" + label] == {
         "type": "ValueError",
-        "message": f"unknown mapping kind {shown}; choose from "
-                   "['matrix', 'nearest_neighbor', 'projection_1d', 'rbf']"}
+        "message": f"unknown mapping kind {shown}; choose from {LIBRARY_KINDS}"}
 
 
 def test_a_kind_registered_in_another_process_is_refused_naming_the_edge_and_the_kinds(
@@ -386,7 +408,7 @@ def test_a_kind_registered_in_another_process_is_refused_naming_the_edge_and_the
     assert refused["message"] == (
         "edge coarse.temperature -> fine.heat_source: cannot rebuild interface mapping "
         "(kind 'inverse_distance'): ValueError: unknown mapping kind 'inverse_distance'; "
-        "choose from ['matrix', 'nearest_neighbor', 'projection_1d', 'rbf']")
+        f"choose from {LIBRARY_KINDS}")
     assert clean_process["report"]["add_edge_unregistered"]["type"] == "ValueError"
 
 
@@ -410,7 +432,7 @@ def test_refusing_a_kind_imports_nothing_the_file_named(clean_process):
 def test_the_same_config_loads_once_the_program_imports_the_registering_module(
         clean_process):
     report = clean_process["report"]
-    assert report["kinds_after_import"] == sorted(BUILTIN_KINDS + REGISTERED)
+    assert report["kinds_after_import"] == sorted(LIBRARY_KINDS + REGISTERED)
     rebuilt = {name: np.frombuffer(bytes.fromhex(data), dtype=dtype).reshape(shape)
                for name, (dtype, shape, data) in report["rebuilt"].items()}
     assert_same_weights(rebuilt, clean_process["weights"],
@@ -480,6 +502,7 @@ def test_the_kind_lookup_has_no_import_machinery_to_reach(module):
         mapping_registry: [
             "from maddening.serialization.json_codec import NON_FINITE_TOKENS",
             "import maddening.core.coupling.mapping",
+            "import maddening.core.coupling.sparse_mapping",
         ],
         mapping_spec: [
             "from maddening.core.coupling.mapping import Mapping, _params_contract_problem",
@@ -651,6 +674,43 @@ def test_a_built_in_kind_can_never_be_replaced(kind):
     assert mapping_registry._MAPPING_REGISTRY[kind] is entry
 
 
+@pytest.mark.parametrize("kind", SPARSE_KINDS)
+def test_a_sparse_kind_of_the_library_is_a_registered_kind_that_cannot_be_replaced(kind):
+    """The sparse kinds go through the public ``register_mapping`` -- so
+    everything a registered kind is held to is asked of them at every
+    rebuild -- and their names are taken: a second factory is refused."""
+    entry = mapping_registry._MAPPING_REGISTRY[kind]
+    assert entry.builtin is False
+    assert entry.factory.__module__ == "maddening.core.coupling.sparse_mapping"
+    assert entry.factory._stability_level is StabilityLevel.EXPERIMENTAL
+    assert "label" not in entry.hyperparameters, "'label' names the dense matrix kind"
+    with pytest.raises(ValueError, match=f"Mapping kind '{kind}' is already registered to "
+                                         f"maddening.core.coupling.sparse_mapping"):
+        register_mapping(kind, **_DECLARATION)(_factory)
+    assert mapping_registry._MAPPING_REGISTRY[kind] is entry
+
+
+def test_a_sparse_kinds_name_is_taken_before_any_registration_can_claim_it():
+    """In a process that imports the registry and nothing else, the first
+    ``register_mapping`` call loads the library's sparse kinds before it
+    looks -- and a config naming one loads without an import of its own."""
+    code = ("from maddening.core.coupling.mapping_registry import register_mapping\n"
+            "try:\n"
+            "    register_mapping('sparse_matrix', arrays=('x',), hyperparameters={})"
+            "(lambda x, x_ref=None: None)\n"
+            "except ValueError as exc:\n"
+            "    print('REFUSED', exc)\n"
+            "import sys\n"
+            "print('TREE IMPORTED', 'scipy.spatial' in sys.modules)\n")
+    env = {**os.environ, "JAX_PLATFORMS": "cpu", "PYTHONPATH": str(SRC)}
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          timeout=300, env=env)
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert "REFUSED Mapping kind 'sparse_matrix' is already registered to" in done.stdout
+    # the k-d tree is imported by the builder that needs it, not with the kinds
+    assert done.stdout.strip().splitlines()[-1] == "TREE IMPORTED False"
+
+
 def test_a_built_in_name_is_taken_before_any_registration_can_claim_it():
     """In a process that imports the registry and nothing else, the first
     ``register_mapping`` call loads the built-in kinds before it looks."""
@@ -786,6 +846,18 @@ def _positional_arrays_beside_kwargs(source_points, target_points, /, **hyper_an
     return "called"
 
 
+def _optional_positional_only_scale(scale=1.0, /, source_points=None, target_points=None, *,
+                                    flip=False, name="x", source_points_ref=None,
+                                    target_points_ref=None):
+    return "called"
+
+
+def _name_is_the_rest_of_the_positionals(source_points, target_points, *name, scale=1.0,
+                                         flip=False, source_points_ref=None,
+                                         target_points_ref=None):
+    return "called"
+
+
 def _forgetting_wraps(fn):
     def inner(*args, **kwargs):
         return fn(*args, **kwargs)
@@ -827,6 +899,14 @@ _FACTORY_SPELLINGS = {
         (_without_a_name, r"takes no keyword argument\(s\) \['name'\]"),
     "required_positional_only": (_positional_arrays, _POSITIONAL),
     "required_positional_only_beside_kwargs": (_positional_arrays_beside_kwargs, _POSITIONAL),
+    # A declared name the signature holds where no keyword reaches it: an
+    # optional positional-only parameter, and the name of ``*args``.  The
+    # keyword rule answered for the name alone, so both registered and
+    # failed with a TypeError when a config was loaded.
+    "optional_positional_only_declared":
+        (_optional_positional_only_scale, r"takes no keyword argument\(s\) \['scale'\]"),
+    "declared_name_is_var_positional":
+        (_name_is_the_rest_of_the_positionals, r"takes no keyword argument\(s\) \['name'\]"),
 }
 
 
@@ -935,7 +1015,7 @@ _HYPER_CASES = [
     pytest.param(kind, name, value, message,
                  id=f"{kind}.{name}={str(value)[:12]!r}" if isinstance(value, int)
                  and not isinstance(value, bool) else f"{kind}.{name}={value!r}")
-    for kind in REGISTERED
+    for kind in EVERY_REGISTERED
     for name, declared in mapping_registry._MAPPING_REGISTRY[kind].hyperparameters.items()
     for value, message in _WRONG[declared]
 ]
@@ -949,13 +1029,13 @@ def test_a_registered_hyper_parameter_of_the_wrong_type_is_refused_before_the_fa
     the factory never sees the value."""
     calls = _spy(monkeypatch, kind)
     with pytest.raises(MappingRebuildError, match=message) as refused:
-        _load({"kind": kind, name: value, "points": PAIR})
+        _load({"kind": kind, name: value, "points": SPEC_POINTS[kind]})
     assert refused.value.edge == EDGE and refused.value.kind == kind
     assert f"mapping kind {kind!r}: hyper-parameter {name!r}" in str(refused.value)
     assert isinstance(refused.value.__cause__, ValueError)
     assert calls == []
     with pytest.raises(ValueError, match=message):
-        MappingSpec(kind, {name: value}, PAIR)
+        MappingSpec(kind, {name: value}, SPEC_POINTS[kind])
 
 
 def test_the_hyper_parameter_battery_covers_every_declared_type():
@@ -963,6 +1043,14 @@ def test_the_hyper_parameter_battery_covers_every_declared_type():
                 for t in mapping_registry._MAPPING_REGISTRY[k].hyperparameters.values()}
     assert declared == {str, bool, int, float} == set(_WRONG)
     assert declared == set(mapping_registry._HYPERPARAMETER_TYPES)
+    # ... and every hyper-parameter of every sparse kind is in it
+    battery = {(case.values[0], case.values[1]) for case in _HYPER_CASES}
+    entries = mapping_registry._MAPPING_REGISTRY
+    assert {(kind, name) for kind in SPARSE_KINDS for name in entries[kind].hyperparameters} \
+        == {("sparse_matrix", "n_source"), ("sparse_matrix", "mode"), ("sparse_matrix", "name"),
+            ("sparse_nearest_neighbor", "mode"), ("sparse_nearest_neighbor", "transpose")} \
+        <= battery
+    assert entries["sparse_matrix"].hyperparameters["n_source"] is int
 
 
 @pytest.mark.parametrize("kind", REGISTERED)
@@ -1033,21 +1121,21 @@ def test_the_rbf_factory_itself_refuses_an_integer_no_float64_holds(argument):
         rbf_mapping([0.0, 0.5, 1.0], [0.0, 1.0], **{argument: _HUGE})
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", EVERY_REGISTERED)
 def test_an_unknown_hyper_parameter_of_a_registered_kind_is_refused_before_the_factory(
         monkeypatch, kind):
     calls = _spy(monkeypatch, kind)
     takes = list(mapping_registry._MAPPING_REGISTRY[kind].hyperparameters)
-    for stray in ("sigma", "epsilon", "label_text", "kernel"):
+    for stray in ("sigma", "epsilon", "label_text", "kernel", "label", "k", "layout"):
         with pytest.raises(MappingRebuildError) as refused:
-            _load({"kind": kind, stray: 2.0, "points": PAIR})
+            _load({"kind": kind, stray: 2.0, "points": SPEC_POINTS[kind]})
         assert (f"mapping kind {kind!r} has no hyper-parameter(s) [{stray!r}]; it takes "
                 f"{takes}") in str(refused.value)
         assert refused.value.edge == EDGE and refused.value.kind == kind
     assert calls == []
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 @pytest.mark.parametrize("points, message", [
     ({"source_points": INLINE3}, "takes point sets"),
     ({"source_points": INLINE3, "target_points": INLINE3, "H": INLINE3}, "takes point sets"),
@@ -1070,11 +1158,11 @@ def test_a_registered_spec_with_the_wrong_or_missing_point_sets_is_refused_befor
     assert calls == []
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 def test_a_missing_reference_names_the_keyword_the_kind_declared(kind):
     """The refusal of a point set that was never recorded says which
     factory argument records it, from the kind's own declaration."""
-    described = KINDS[kind]
+    described = PAIR_KINDS[kind]
     big = np.linspace(0.0, 1.0, INLINE_POINT_LIMIT + 1)
     mapping = described.build(big, [0.0, 0.5, 1.0])
     assert mapping.spec.missing_points() == ["source_points"]
@@ -1087,7 +1175,7 @@ def test_a_missing_reference_names_the_keyword_the_kind_declared(kind):
     assert gm.to_dict(strict_mappings=False)["edges"][0]["mapping"]["kind"] == kind
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 @pytest.mark.parametrize("mapping, message", [
     ({"mode": "consistent"}, "has no 'points'"),
     ({"points": [INLINE3, INLINE3]}, "'points' must be a dict"),
@@ -1129,6 +1217,8 @@ def _asset_fixtures(tmp: Path) -> None:
     np.save(tmp / "objects.npy", np.array([{"a": 1}, None, 3], dtype=object),
             allow_pickle=True)
     np.save(tmp / "other.npy", np.array([0.0, 0.25, 1.0]))
+    np.save(tmp / "rows.npy", np.array([[0], [1], [2]]))
+    np.save(tmp / "vals.npy", np.ones((3, 1), np.float32))
     np.savez(tmp / "two.npz", a=np.array([0.0, 0.5, 1.0]), b=np.array([0.0, 0.5, 1.0]))
     (tmp / "bad.npz").write_bytes(b"not a zip archive at all")
     (tmp / "loop.npy").symlink_to(tmp / "loop.npy")
@@ -1204,8 +1294,14 @@ def asset_dir(tmp_path_factory) -> Path:
     return tmp
 
 
-@pytest.mark.parametrize("array", ["source_points", "target_points"])
-@pytest.mark.parametrize("kind", ["nearest_neighbor", *REGISTERED])
+#: Every array of the control (``nearest_neighbor``) and of every kind held
+#: to the registry's contract, the three sparse kinds' included.
+_REFERENCE_SLOTS = [pytest.param(kind, array, id=f"{kind}.{array}")
+                    for kind in ["nearest_neighbor", *EVERY_REGISTERED]
+                    for array in SPEC_POINTS.get(kind, PAIR)]
+
+
+@pytest.mark.parametrize("kind, array", _REFERENCE_SLOTS)
 @pytest.mark.parametrize("case", sorted(_REFUSED_REFERENCES))
 def test_every_reference_limit_holds_for_a_registered_kind_before_its_factory_runs(
         monkeypatch, asset_dir, case, kind, array):
@@ -1213,17 +1309,37 @@ def test_every_reference_limit_holds_for_a_registered_kind_before_its_factory_ru
     the inline limits -- are the resolver's, so a registered kind gets
     them for each of its arrays exactly as a built-in one does
     (``nearest_neighbor`` is the control), and its factory is not called
-    with anything the resolver refused."""
+    with anything the resolver refused.  The boundary arrays of the sparse
+    projection and the index and value arrays of ``sparse_matrix`` are
+    arrays like any other."""
     reference, message = _REFUSED_REFERENCES[case]
     calls = _spy(monkeypatch, kind)
+    valid = SPEC_POINTS.get(kind, PAIR)
     with pytest.raises(MappingRebuildError, match=message) as refused:
-        _load({"kind": kind, "points": {**PAIR, array: reference}}, base_dir=asset_dir)
+        _load({"kind": kind, "n_source": 3, "points": {**valid, array: reference}}
+              if kind == "sparse_matrix" else
+              {"kind": kind, "points": {**valid, array: reference}}, base_dir=asset_dir)
     assert refused.value.edge == EDGE and refused.value.kind == kind
     assert isinstance(refused.value.__cause__, (ValueError, OSError))
     assert calls == []
 
 
-@pytest.mark.parametrize("kind", ["nearest_neighbor", *REGISTERED])
+def test_the_valid_references_of_the_reference_battery_build_every_kind(asset_dir):
+    """The control: with none of its references replaced, each spec the
+    battery above starts from loads -- so each refusal is the replaced
+    reference's."""
+    assert len(_REFERENCE_SLOTS) == 2 * (1 + len(EVERY_REGISTERED))
+    for kind in EVERY_REGISTERED:
+        extra = {"n_source": 3} if kind == "sparse_matrix" else {}
+        sizes = {"n_source": 2} if kind == "sparse_projection_1d" else {}
+        if kind == "sparse_projection_1d":
+            sizes["n_target"] = 2
+        gm = _load({"kind": kind, **extra, "points": SPEC_POINTS[kind]}, base_dir=asset_dir,
+                   **sizes)
+        assert gm.edges[0].mapping.kind == kind
+
+
+@pytest.mark.parametrize("kind", ["nearest_neighbor", *PAIRS])
 def test_a_compressed_asset_past_the_cap_is_refused_before_decompression_for_any_kind(
         monkeypatch, tmp_path, kind):
     np.savez_compressed(tmp_path / "bomb.npz", pts=np.zeros(200_000, np.float64))
@@ -1235,12 +1351,12 @@ def test_a_compressed_asset_past_the_cap_is_refused_before_decompression_for_any
     assert calls == []
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 def test_a_registered_factory_is_called_with_checked_arrays_hyper_parameters_and_references(
         monkeypatch, tmp_path, kind):
     """What the factory is handed: ``factory(**arrays, **hyperparameters,
     **references)``, the arrays being the ones the references resolve to."""
-    described = KINDS[kind]
+    described = PAIR_KINDS[kind]
     source = np.array([0.0, 0.4, 1.0])
     np.save(tmp_path / "source.npy", source)
     hyper = {name: values[-1] for name, values in described.hyper.items()}
@@ -1374,6 +1490,43 @@ def test_a_value_the_factory_itself_refuses_names_the_edge(kind, hyper, points, 
         _load({"kind": kind, **hyper, "points": points})
     assert refused.value.edge == EDGE and refused.value.kind == kind
     assert type(refused.value.__cause__) is ValueError
+
+
+def test_a_registered_kind_is_not_asked_what_a_built_in_factory_asks_of_its_geometry():
+    """The built-in kinds check their coordinates *inside* their factories
+    (MADD-ANO-192); neither the registry nor the reference resolver does.
+    So a built-in kind's refusal reaches the loader through the registry
+    as any factory's ``ValueError`` does, and a registered kind given the
+    same references is called with the same arrays: what its formula does
+    not cover is its own factory's to refuse."""
+    descending = {"inline": [1.0, 0.5, 0.0], "dtype": "float64"}
+    points = {"source_boundaries": descending, "target_boundaries": INLINE3}
+
+    with pytest.raises(MappingRebuildError, match="must be strictly increasing") as refused:
+        _load({"kind": "projection_1d", "points": points}, n_source=2, n_target=2)
+    assert refused.value.edge == EDGE and refused.value.kind == "projection_1d"
+    assert type(refused.value.__cause__) is ValueError
+
+    handed = []
+
+    def unchecked(source_boundaries, target_boundaries, *, source_boundaries_ref=None,
+                  target_boundaries_ref=None):
+        handed.append((np.asarray(source_boundaries).tolist(),
+                       np.asarray(target_boundaries).tolist()))
+        spec = MappingSpec("unchecked", {}, {
+            "source_boundaries": reference_for_array(
+                source_boundaries, source_boundaries_ref, name="source_boundaries"),
+            "target_boundaries": reference_for_array(
+                target_boundaries, target_boundaries_ref, name="target_boundaries")})
+        return StaticLinearMapping(jnp.full((2, 2), 0.5, jnp.float32), kind="unchecked",
+                                   spec=spec)
+
+    with temporary_kind("unchecked", unchecked,
+                        arrays=("source_boundaries", "target_boundaries"),
+                        hyperparameters={}):
+        gm = _load({"kind": "unchecked", "points": points}, n_source=2, n_target=2)
+    assert handed == [([1.0, 0.5, 0.0], [0.0, 0.5, 1.0])]
+    assert gm.edges[0].mapping.kind == "unchecked"
 
 
 def test_a_registered_factory_with_a_required_hyper_parameter_names_it_when_a_spec_omits_it():
@@ -1670,12 +1823,22 @@ def test_a_traced_weight_is_refused_as_traced():
 ], ids=["int32", "bool", "float64", "complex64", "nan"])
 def test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took(matrix):
     """The built-in class is exempt: what its matrix may hold did not
-    change with the registry."""
+    change with the registry.
+
+    What the ``matrix_mapping`` *factory* takes is the factory's own rule,
+    not this check's: it refuses a non-finite ``H`` (MADD-ANO-192), under
+    its own message, before there is a mapping to ask.  The class built
+    directly is still added whatever its matrix holds."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")           # complex -> real casts
-        gm = _vectors(matrix_mapping(matrix))
         gm = _vectors(StaticLinearMapping(jnp.asarray(matrix)))
-    assert len(gm.edges) == 1
+        assert len(gm.edges) == 1
+        if np.all(np.isfinite(matrix)):
+            assert len(_vectors(matrix_mapping(matrix)).edges) == 1
+        else:
+            with pytest.raises(ValueError, match="H holds a non-finite value") as refused:
+                matrix_mapping(matrix)
+            assert "params_pytree()" not in str(refused.value)
 
 
 def test_a_subclass_of_the_built_in_class_is_asked():
@@ -1891,15 +2054,17 @@ def test_a_fit_runs_beside_a_weightless_mapped_edge_and_moves_every_trainable_sh
 
 def _hyper_points(kind: str):
     """Every valid hyper-parameter combination of *kind*, small enough to list."""
-    names = list(KINDS[kind].hyper)
+    names = list(PAIR_KINDS[kind].hyper)
     combos = [{}]
     for name in names:
-        combos = [{**c, name: value} for c in combos for value in KINDS[kind].hyper[name]]
+        combos = [{**c, name: value} for c in combos for value in PAIR_KINDS[kind].hyper[name]]
+    if kind in SPARSE_POINT_KINDS:
+        combos.append(dict(SCATTER))      # the conservative operator as a scatter-add
     return combos
 
 
 _ROUND_TRIPS = [pytest.param(kind, hyper, id=f"{kind}{sorted(hyper.items())}")
-                for kind in REGISTERED for hyper in _hyper_points(kind)]
+                for kind in PAIRS for hyper in _hyper_points(kind)]
 
 
 @pytest.mark.parametrize("form", ["node", "asset", "inline"])
@@ -1911,7 +2076,7 @@ def test_a_registered_kind_round_trips_bitwise_through_a_config(
     codecs and all three reference forms: the config carries the recipe
     and no weight, ``from_dict`` rebuilds every weight bit for bit with an
     equal spec, and writing the reloaded graph gives the same config."""
-    described = KINDS[kind]
+    described = PAIR_KINDS[kind]
     source, target = np.array([0.0, 0.3, 0.55, 1.0]), np.array([0.1, 0.5, 0.9])
     refs = {"node": ({"node": "a", "field": "pts"}, {"node": "b", "field": "pts"}),
             "asset": ({"asset": "points.npz", "key": "source"},
@@ -1950,9 +2115,9 @@ def test_a_registered_kind_round_trips_bitwise_through_a_config(
     assert json.loads(json.dumps(reloaded.to_dict())) == json.loads(json.dumps(config))
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 def test_a_reloaded_registered_kind_steps_exactly_as_the_graph_it_was_saved_from(kind):
-    gm = _rods(KINDS[kind].build)
+    gm = _rods(PAIR_KINDS[kind].build)
     gm.compile()
     reloaded = GraphManager.from_dict(json.loads(json.dumps(gm.to_dict())),
                                       {"HeatNode": HeatNode})
@@ -1965,9 +2130,9 @@ def test_a_reloaded_registered_kind_steps_exactly_as_the_graph_it_was_saved_from
                                           np.asarray(b[name][field]))
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 def test_add_edge_accepts_a_registered_spec_and_its_dict_form(kind):
-    described = KINDS[kind]
+    described = PAIR_KINDS[kind]
     gm = _rods(described.build)
     spec = gm.edges[0].mapping.spec
     for given in (spec, spec.to_dict(), {**spec.to_dict(), "shape": [12, 6]}):
@@ -1980,19 +2145,19 @@ def test_add_edge_accepts_a_registered_spec_and_its_dict_form(kind):
                             weights_of(gm.edges[0].mapping))
 
 
-@pytest.mark.parametrize("kind", [k for k in REGISTERED if KINDS[k].weights])
+@pytest.mark.parametrize("kind", [k for k in PAIRS if PAIR_KINDS[k].weights])
 def test_a_checkpoint_beats_the_config_for_a_registered_kinds_trained_weights(
         tmp_path, kind):
     """Config: the recipe.  Checkpoint: the weights, each under its own
     name.  ``to_dict`` says which weights a config will not carry."""
-    gm = _rods(KINDS[kind].build)
+    gm = _rods(PAIR_KINDS[kind].build)
     gm.compile()
     recipe = weights_of_tree(gm.params["mappings"][C2F])
-    for name in KINDS[kind].weights:
+    for name in PAIR_KINDS[kind].weights:
         gm.params["mappings"][C2F][name] = 1.5 * gm.params["mappings"][C2F][name]
     trained = weights_of_tree(gm.params["mappings"][C2F])
     path = save_state(gm, tmp_path / "ck")
-    names = "', '".join(sorted(KINDS[kind].weights))
+    names = "', '".join(sorted(PAIR_KINDS[kind].weights))
     with pytest.warns(UserWarning, match=rf"live mapping weights \['{names}'\]"):
         config = json.loads(json.dumps(gm.to_dict()))
     reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
@@ -2004,22 +2169,22 @@ def test_a_checkpoint_beats_the_config_for_a_registered_kinds_trained_weights(
                                   np.asarray(gm.step()["fine"]["temperature"]))
 
 
-@pytest.mark.parametrize("kind", [k for k in REGISTERED if KINDS[k].weights])
+@pytest.mark.parametrize("kind", [k for k in PAIRS if PAIR_KINDS[k].weights])
 def test_a_trainable_spec_on_a_registered_kinds_weight_round_trips(kind):
-    gm = _rods(KINDS[kind].build)
-    for name in KINDS[kind].weights:
+    gm = _rods(PAIR_KINDS[kind].build)
+    for name in PAIR_KINDS[kind].weights:
         gm.set_param_spec(C2F, name, ParamSpec(trainable=True, description=f"learned {name}"))
     with pytest.raises(KeyError, match="no weight 'absent'"):
         gm.set_param_spec(C2F, "absent", ParamSpec())
     config = json.loads(json.dumps(gm.to_dict()))
     reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
     reloaded.compile()
-    for name in KINDS[kind].weights:
+    for name in PAIR_KINDS[kind].weights:
         assert reloaded.param_specs()["mappings"][C2F][name].description == f"learned {name}"
         assert reloaded.trainable_mask()["mappings"][C2F][name] is True
 
 
-@pytest.mark.parametrize("kind", REGISTERED)
+@pytest.mark.parametrize("kind", PAIRS)
 def test_a_strict_write_refuses_a_stale_node_reference_of_a_registered_kind(kind):
     """The write-time check of node references reads the spec, whatever
     its kind: a reference to a node that is gone, or whose field moved, is
@@ -2028,7 +2193,7 @@ def test_a_strict_write_refuses_a_stale_node_reference_of_a_registered_kind(kind
     gm = GraphManager()
     for name in ("a", "b", "c"):
         gm.add_node(PVec(name, 1.0, pts=pts))
-    gm.add_edge("a", "b", "v", "inp", mapping=KINDS[kind].build(
+    gm.add_edge("a", "b", "v", "inp", mapping=PAIR_KINDS[kind].build(
         np.asarray(pts), np.asarray(pts), source_ref={"node": "c", "field": "pts"}))
     gm.to_dict()                                           # fine while it exists
     gm.get_node("c").params["pts"] = [0.0, 0.25, 1.0]

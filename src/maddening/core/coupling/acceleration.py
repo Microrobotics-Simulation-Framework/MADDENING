@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core._pow2_frame import pow2_frame, pow2_rescue
+from maddening.core.edge import _delivered
 
 
 # ------------------------------------------------------------------
@@ -229,6 +230,48 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     return scaled, active
 
 
+def _widened(v):
+    """*v* in at least float32: the dtype every norm measures a change in.
+
+    **A 16-bit field is measured in float32, and the norms accumulate
+    there.**  Every norm forms a ratio ``|dx| / (rtol * max|v|)``,
+    squares it and sums the squares over the fields.  In float16 each
+    step overflowed on ordinary data: at the default ``rtol=1e-6`` a
+    change of one float16 ulp is a ratio of about 977, its square is
+    past float16's 65 504, and a mixed or interface residual read
+    ``inf`` on a finite state, which ``strict_convergence`` then
+    reported as divergence; a change of 6.5% overflowed before it was
+    squared.  And the running sum was a weakly typed ``jnp.array(0.0)``,
+    which took the field's float16, so the int32 entry count it was
+    divided by became float16 ``inf`` above 65 504 entries: the RMS of a
+    finite sum read exactly ``0.0``, and a group 4% from its fixed point
+    stopped with ``converged=True``.
+
+    Widening is exact -- every bfloat16 and float16 value is a float32
+    one -- so what is measured is the field's own change, with
+    float32's range and resolution for the arithmetic after it, and the
+    running sums start from a strongly typed float32 zero.  A float32 or
+    float64 field is returned as it is, and adding a zero is exact, so
+    those groups' norms are bit for bit what they were.
+
+    **The 16-bit value is the one the state holds.**  XLA may compute a
+    16-bit operation in float32 and skip the rounding between a node's
+    output and a widening of it (``xla_allow_excess_precision``, on by
+    default, folds a float32 -> bfloat16 -> float32 conversion pair), and
+    the norm then measured the node's *unrounded* output against the
+    stored iterate: half an ulp of motion on a stalled group, and a
+    different half ulp under each solver's fusion -- ``"fori"`` and
+    ``"ift"`` stopped on different passes.  The value is passed through
+    ``optimization_barrier`` before it is widened, so the rounding to its
+    own dtype happens first, as it does for the state.
+    """
+    v = jnp.asarray(v)
+    wide = jnp.promote_types(v.dtype, jnp.float32)
+    if wide == v.dtype:
+        return v
+    return jax.lax.optimization_barrier(v).astype(wide)
+
+
 def coupling_residual_l2(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
@@ -264,7 +307,9 @@ def coupling_residual_l2(
         Scalar norm, compared against ``CouplingGroup.tolerance``, which
         is therefore a *relative* tolerance.
     """
-    total = jnp.array(0.0)
+    # A strongly typed float32 zero: the sum is at least float32 whatever
+    # the fields' dtypes (``_widened``).
+    total = jnp.zeros((), jnp.float32)
     for nn in node_names:
         for field_name in s_new[nn]:
             new_val = s_new[nn][field_name]
@@ -275,7 +320,7 @@ def coupling_residual_l2(
                 continue
             # ``rtol=1.0``: the L2 norm carries its threshold in
             # ``tolerance``, so the scale here is the bare magnitude.
-            scaled, _active = _scaled_change(new_val, old_val, atol, 1.0)
+            scaled, _active = _scaled_change(_widened(new_val), _widened(old_val), atol, 1.0)
             total = total + jnp.sum(scaled ** 2)
     return jnp.sqrt(total)
 
@@ -332,7 +377,9 @@ def coupling_residual_mixed(
     jnp.ndarray
         Scalar RMS error norm.  Converged when <= 1.0.
     """
-    sum_sq = jnp.array(0.0)
+    # Strongly typed, and every term widened (``_widened``): the sum and
+    # the quotient by the entry count are at least float32.
+    sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
     for nn in node_names:
         for field_name in s_new[nn]:
@@ -346,10 +393,73 @@ def coupling_residual_mixed(
             old_val = s_old[nn][field_name]
             if jnp.asarray(new_val).size == 0:
                 continue
-            scaled, active = _scaled_change(new_val, old_val, atol, rtol)
+            scaled, active = _scaled_change(_widened(new_val), _widened(old_val), atol, rtol)
             sum_sq = sum_sq + jnp.sum(scaled ** 2)
             count = count + jnp.where(active, scaled.size, 0)
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
+
+
+def _interface_readings(interface_edges, *states, mappings=None):
+    """What ``convergence_norm="interface"`` reads on each internal edge, at each of *states*.
+
+    **The one definition of how an interface edge is read: as the step
+    delivers it.**  The edge's source field, through the edge's interface
+    mapping and then its transform (:func:`maddening.core.edge._delivered`,
+    the function the step's boundary resolution calls), with the mapping
+    weights the step ran with.  The residual
+    (:func:`coupling_residual_interface`), its float floor
+    (:func:`residual_precision_floor`) and the spectral analysis the
+    report's bound is taken on (``_reading_values`` in
+    ``core/coupling/_coupled_block.py``) all iterate this generator, so they
+    cannot disagree about what the norm measures, and none of them can
+    measure a value the consuming node never sees.
+
+    Yields ``(edge, source_dtype, value, ...)`` in the order of
+    *interface_edges*: one delivered value per state, and the dtype of
+    the source field at the first.  The first state decides which edges
+    are read: an edge whose source field is not floating there (a
+    counter, a flag, a key) carries no norm, and neither does one that
+    delivers no entries.  Later states are read at the same edges and
+    need not hold the fields the first one skips.
+
+    ``mappings`` is the ``"mappings"`` section of the graph parameter
+    pytree the step ran with (``{edge.key: weights}``); ``None`` reads
+    each mapping with its own weights.
+    """
+    for edge in interface_edges:
+        source = states[0][edge.source_node][edge.source_field]
+        if not _is_float_leaf(source):
+            continue            # an integer interface field cannot carry a norm
+        sources = (source,) + tuple(
+            s[edge.source_node][edge.source_field] for s in states[1:])
+        values = tuple(_delivered(edge, v, mappings) for v in sources)
+        if jnp.asarray(values[0]).size == 0:
+            continue
+        yield (edge, jnp.asarray(source).dtype) + values
+
+
+def _reading_eps(source_dtype, value) -> float:
+    """The float resolution of one delivered value: the coarser of its own dtype's and its source's.
+
+    A delivered value is no finer than the field it was computed from.
+    Under ``jax_enable_x64`` a float64 mapping matrix applied to a
+    float32 field, or a transform that returns float64, delivers float64
+    numbers that carry float32 rounding; taken at the delivered dtype's
+    eps the floor was ``2**-29`` of what the source resolves, and a
+    float32 pair stalled at ``residual=0.0`` behind edges that widen
+    read its bound at 6.7e-7 of the true distance with
+    ``spectral_usable=True`` (jaxlib 0.11.0, CPU).  An edge that delivers
+    its source's dtype, or a narrower one, keeps the eps it had.
+    """
+    delivered = jnp.asarray(value).dtype
+    eps = float(jnp.finfo(delivered).eps)
+    if jnp.issubdtype(source_dtype, jnp.floating):
+        # units: dimensionless -- each eps is relative to its own value's
+        # magnitude (the floor counts it per entry in the norm's units,
+        # where every field is divided by its own max|field|); the larger
+        # of the two is the resolution the delivered value really has.
+        eps = max(eps, float(jnp.finfo(source_dtype).eps))
+    return eps
 
 
 def coupling_residual_interface(
@@ -358,12 +468,16 @@ def coupling_residual_interface(
     interface_edges: list,
     atol: float = 0.0,
     rtol: float = 1e-6,
+    mappings: Optional[dict] = None,
 ) -> jnp.ndarray:
     """Interface consistency, on the scale of each interface quantity.
 
-    Computes the difference in interface values (edge source fields)
-    between two successive iterations.  Only the fields that appear
-    on intra-group edges are compared.  The scaling is the one
+    Computes the difference in interface values between two successive
+    iterations: for each intra-group edge, **the value the edge
+    delivers** -- its source field through the edge's interface mapping
+    and then its transform, exactly as the step hands it to the target
+    (:func:`_interface_readings`).  Only the fields that appear on
+    intra-group edges are compared.  The scaling is the one
     :func:`coupling_residual_mixed` documents: relative to the
     quantity's own magnitude, with ``atol`` as a dead band rather than
     as a floor under the scale.
@@ -384,11 +498,17 @@ def coupling_residual_interface(
     rtol : float
         Relative change demanded of every interface quantity above the
         dead band.
+    mappings : dict, optional
+        The ``"mappings"`` section of the graph parameter pytree the
+        step runs with (``{edge.key: weights}``), for the edges that
+        carry an interface mapping; ``None`` applies each mapping with
+        its own weights.  EXPERIMENTAL (new in 0.4.0).
 
     Returns
     -------
     jnp.ndarray
-        Scalar RMS error norm.  Converged when <= 1.0.
+        Scalar RMS error norm.  Converged when <= 1.0.  Each delivered
+        value is measured in at least float32 (see :func:`_widened`).
 
     Notes
     -----
@@ -400,26 +520,20 @@ def coupling_residual_interface(
     edges in an order fixed by the group itself: by each edge's source's
     place in the group's sweep, then its source field, its target's place,
     its target field and its ordinal (``_interface_edge_order`` in
-    ``core/graph_manager.py``), the order the L2 and mixed norms sum the
+    ``core/coupling/_group_layout.py``), the order the L2 and mixed norms sum the
     members in.  So the norm depends neither on the order of the
     ``add_edge`` calls nor on the nodes' names.  Before 0.4.0 it summed in
     the order the edges had been added: the same group built with its
     ``add_edge`` calls reversed reported a residual that differed in its
     last bits.
     """
-    sum_sq = jnp.array(0.0)
+    # Strongly typed, and every term widened (``_widened``): the sum and
+    # the quotient by the entry count are at least float32.
+    sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
-    for edge in interface_edges:
-        new_val = s_new[edge.source_node][edge.source_field]
-        if not _is_float_leaf(new_val):
-            continue            # an integer interface field cannot carry a norm
-        old_val = s_old[edge.source_node][edge.source_field]
-        if edge.transform is not None:
-            new_val = edge.transform(new_val)
-            old_val = edge.transform(old_val)
-        if jnp.asarray(new_val).size == 0:
-            continue
-        scaled, active = _scaled_change(new_val, old_val, atol, rtol)
+    for _edge, _source_dtype, new_val, old_val in _interface_readings(
+            interface_edges, s_new, s_old, mappings=mappings):
+        scaled, active = _scaled_change(_widened(new_val), _widened(old_val), atol, rtol)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
         count = count + jnp.where(active, scaled.size, 0)
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
@@ -491,7 +605,7 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     development, for exactly this reason; no release carried the old
     name) reports a usable *ratio*, not a valid *bound*.  The
     full list of what the estimate rests on is in
-    ``graph_manager._fixed_point_while``; the decision it feeds is in
+    ``coupling._fixed_point._fixed_point_while``; the decision it feeds is in
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
 
     **The spectrum is measured, beside this, under ``solver="ift"``
@@ -869,7 +983,11 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     ``A`` exactly, and ``residual`` is ``0.0``.  A group with more
     independent interface scalars than ``n_steps`` gets Ritz values
     that lie, for a normal ``A``, inside the convex hull of the
-    spectrum -- an estimate of ``rho`` *from below* -- and a
+    spectrum -- an estimate of ``rho`` *from below* -- and for a
+    non-normal ``A`` inside its field of values, which can reach past
+    the spectral radius, so the estimate can then read from either side
+    (1.17 for a weighted cyclic shift of nine entries whose every
+    eigenvalue has modulus 0.95) -- and a
     ``residual`` that is not small, which is what
     :func:`spectral_rate_settled` reports and
     :func:`spectral_error_bound` adds a margin for.  Eight steps
@@ -978,6 +1096,120 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     return rho, residual, amplification
 
 
+def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
+                     extra=None):
+    """:func:`arnoldi_spectral_radius` of the map ``dF/dx`` induces on the coordinates *measure* reads.
+
+    ``measure`` is a linear map from the iterate's coordinates to the
+    coordinates a norm is taken in -- under ``convergence_norm="interface"``
+    the JVP of the interface reading, what each internal edge *delivers*
+    (its source value through the edge's mapping, then its transform)
+    -- and the operator analysed is ``A`` with
+    ``A measure(u) = measure(matvec(u))``.  It is well defined wherever
+    ``matvec`` sends the kernel of ``measure`` to zero, which a coupling
+    pass does when every member reads the iterate only through the edges
+    the norm reads: ``F = G o Phi`` with ``Phi`` the reading, so
+    ``J = G' Phi'`` and ``A = Phi' G'``, which has ``J``'s non-zero
+    spectrum and is the iteration matrix of the reading itself.  Its
+    resolvent is what carries a residual *measured in those coordinates*
+    to the distance measured in them: ``Phi'(x - x*) = (I - A)^{-1}
+    Phi'(x - F(x))`` for an affine map, whatever ``Phi'`` discards.
+
+    ``A`` is never formed.  Each Krylov vector ``q = measure(u)`` is carried
+    with a preimage ``u`` (a Gram-Schmidt combination of preimages is a
+    preimage of the same combination), so the next is ``measure(matvec(u))``
+    -- one product of each per step.  ``u0`` is the start's preimage and
+    ``extra`` is ``(u, q)``, the residual's preimage and the residual in the
+    measured coordinates, which the space continues from at a breakdown as
+    :func:`arnoldi_spectral_radius` continues from ``v_extra``.  Returns
+    ``(rho, residual, amplification)`` with the meanings, conventions and
+    breakdown rule of :func:`arnoldi_spectral_radius`, and agrees with it,
+    to rounding, when ``measure`` is the identity.
+    """
+    if n_steps < 1:
+        raise ValueError(
+            f"_arnoldi_through: n_steps={n_steps} < 1; at least one "
+            "Jacobian-vector product is needed."
+        )
+    u0 = jnp.asarray(u0)
+    q0 = jnp.asarray(measure(u0))
+    k = int(n_steps)
+    n = u0.shape[0]
+    m = q0.shape[0]
+    dtype = q0.dtype
+    u0 = u0.astype(dtype)
+
+    def _unit(u, q):
+        nrm = jnp.linalg.norm(q)
+        ok = nrm > 0
+        s = jnp.where(ok, 1.0 / jnp.where(ok, nrm, 1.0), 1.0)
+        return u * s, q * s
+
+    if extra is not None:
+        extra_u = jnp.asarray(extra[0], dtype)
+        extra_q = jnp.asarray(extra[1], dtype)
+
+    def _outside(Q, U, u, q):
+        """``q`` minus its projection on the rows of ``Q`` (twice), ``u`` alike."""
+        for _sweep in range(2):
+            for i in range(Q.shape[0]):
+                h = jnp.dot(Q[i], q)
+                q = q - h * Q[i]
+                u = u - h * U[i]
+        return u, q
+
+    first_u, first_q = _unit(u0, q0)
+    Q0 = jnp.zeros((k + 1, m), dtype).at[0].set(first_q)
+    U0 = jnp.zeros((k + 1, n), dtype).at[0].set(first_u)
+    H0 = jnp.zeros((k + 1, k), dtype)
+
+    def body(j, carry):
+        Q, U, H = carry
+        w_u = jnp.asarray(matvec(U[j]), dtype)
+        w_q = jnp.asarray(measure(w_u), dtype)
+        scale = jnp.linalg.norm(w_q)
+        for i in range(k + 1):
+            h = jnp.dot(Q[i], w_q)
+            w_q = w_q - h * Q[i]
+            w_u = w_u - h * U[i]
+            H = H.at[i, j].set(h)
+        h_next = jnp.linalg.norm(w_q)
+        grown = h_next > _ARNOLDI_BREAKDOWN_RTOL * scale
+        H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
+        inv = jnp.where(grown, 1.0 / jnp.where(grown, h_next, 1.0), 0.0)
+        q_next = w_q * inv
+        u_next = w_u * inv
+        if extra is not None:
+            e_u, e_q = _outside(Q, U, extra_u, extra_q)
+            e_norm = jnp.linalg.norm(e_q)
+            fresh = e_norm > _ARNOLDI_BREAKDOWN_RTOL * jnp.linalg.norm(extra_q)
+            restart = jnp.logical_and(jnp.logical_not(grown), fresh)
+            e_inv = jnp.where(restart, 1.0 / jnp.where(restart, e_norm, 1.0), 0.0)
+            q_next = jnp.where(restart, e_q * e_inv, q_next)
+            u_next = jnp.where(restart, e_u * e_inv, u_next)
+        Q = Q.at[j + 1].set(q_next)
+        U = U.at[j + 1].set(u_next)
+        return Q, U, H
+
+    Q, _U, H = jax.lax.fori_loop(0, k, body, (Q0, U0, H0))
+    Hk = H[:k, :k]
+    rho = _spectral_radius_small(Hk)
+    sigma = jnp.linalg.svd(jnp.eye(k, dtype=dtype) - Hk, compute_uv=False)
+    sigma_min = sigma[-1]
+    invertible = sigma_min > 0
+    amplification = jnp.where(
+        invertible, 1.0 / jnp.where(invertible, sigma_min, 1.0), jnp.inf,
+    )
+    residual = H[k, k - 1]
+    if extra is not None:
+        ex_norm = jnp.linalg.norm(extra_q)
+        _e_u, e_q = _outside(Q[:k], _U[:k], extra_u, extra_q)
+        missed = jnp.linalg.norm(e_q) / jnp.where(ex_norm > 0, ex_norm, 1.0)
+        missed = jnp.where(missed > _ARNOLDI_BREAKDOWN_RTOL, missed, 0.0)
+        residual = jnp.maximum(residual, missed)
+    return rho, residual, amplification
+
+
 #: Units of ``eps * max|field|`` per entry that a computed residual can
 #: differ from the exact ``F(x) - x`` by -- the constant in
 #: :func:`residual_precision_floor`.
@@ -1022,7 +1254,7 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: whether the node looped inside ``update`` or the framework
 #: sub-cycled it.  So the floor is this constant times the number of
 #: evaluations one coupling pass rounds like
-#: (``maddening.core.graph_manager._group_evaluations``, a module-level
+#: (``maddening.core.coupling._group_layout._group_evaluations``, a module-level
 #: function).  A node's own update counts its sub-cycling divider times
 #: :meth:`SimulationNode.update_evaluations`, which is ``4N`` for the
 #: sub-stepping node above -- 16, 40, 80, 200 and 400 units against
@@ -1090,7 +1322,8 @@ PRECISION_FLOOR_ULPS = 4.0
 
 def residual_precision_floor(state, node_names, convergence_norm="l2",
                              atol: float = 0.0, rtol: float = 1.0,
-                             interface_edges=(), evaluations: float = 1.0):
+                             interface_edges=(), evaluations: float = 1.0,
+                             mappings: Optional[dict] = None):
     """The float resolution of a residual the group's norm reports at *state*.
 
     ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` in every
@@ -1124,12 +1357,18 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         The group's dead band and relative tolerance (``rtol`` is not
         read by the L2 norm, whose threshold is ``tolerance``).
     interface_edges : iterable of EdgeSpec
-        The group's internal edges (read under ``"interface"``).
+        The group's internal edges (read under ``"interface"``, each as
+        the value it delivers: :func:`_interface_readings`).
+    mappings : dict, optional
+        The ``"mappings"`` section of the graph parameter pytree the
+        step ran with, for the internal edges that carry an interface
+        mapping (read under ``"interface"`` only); ``None`` applies each
+        mapping with its own weights.  EXPERIMENTAL (new in 0.4.0).
     evaluations : float
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
         ``GraphManager.coupling_diagnostics`` passes the count of
-        ``maddening.core.graph_manager._group_evaluations``: each node
+        ``maddening.core.coupling._group_layout._group_evaluations``: each node
         counts ``sub-cycling divider * SimulationNode.update_evaluations()``,
         and the pass the worst node's count under Jacobi or the longest
         chain of same-pass reads under Gauss-Seidel; ``1.0`` is a pass
@@ -1138,8 +1377,10 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     Returns
     -------
     jnp.ndarray
-        Scalar, in the units ``residual`` is reported in.  Traceable, so
-        it can be taken inside a jitted step as well as on the host.
+        Scalar, in the units ``residual`` is reported in, computed in at
+        least float32 whatever the fields' dtypes (each field still at its
+        own dtype's eps).  Traceable, so it can be taken inside a jitted
+        step as well as on the host.
 
     Examples
     --------
@@ -1157,32 +1398,38 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     """
     norm = str(convergence_norm)
     use_rtol = 1.0 if norm == "l2" else float(rtol)
+    # ``(value, eps)``: each entry the norm reads, and its float resolution.
     values = []
     if norm == "interface":
-        for edge in interface_edges:
-            v = state[edge.source_node][edge.source_field]
-            if not _is_float_leaf(v):
-                continue
-            if edge.transform is not None:
-                v = edge.transform(v)
-            values.append(jnp.asarray(v))
+        for _edge, source_dtype, v in _interface_readings(
+                interface_edges, state, mappings=mappings):
+            v = jnp.asarray(v)
+            values.append((v, _reading_eps(source_dtype, v)))
     else:
         for nn in node_names:
             for field_name in state[nn]:
                 v = state[nn][field_name]
                 if _is_float_leaf(v):
-                    values.append(jnp.asarray(v))
-    values = [v for v in values if v.size > 0]
+                    v = jnp.asarray(v)
+                    values.append((v, float(jnp.finfo(v.dtype).eps)))
+    values = [(v, eps) for v, eps in values if v.size > 0]
     if not values:
         return jnp.zeros((), jnp.float32)
-    dtype = jnp.result_type(*[v.dtype for v in values])
+    # At least float32, as the norms accumulate (``_widened``): in a 16-bit
+    # dtype ``(eps / rtol)**2`` overflowed for every rtol below about
+    # 3.8e-6 under "mixed" and "interface", and the entry count above
+    # 65 504 under every norm -- the floor read ``inf`` (or NaN) where it is
+    # documented as ``4 eps / rtol``.  Each field keeps its *own* dtype's
+    # eps; only the arithmetic is widened, so a float32 or float64 group's
+    # floor is the one it was.
+    dtype = jnp.promote_types(jnp.result_type(*[v.dtype for v, _eps in values]), jnp.float32)
     sum_sq = jnp.zeros((), dtype)
     count = jnp.zeros((), dtype)
-    for v in values:
-        _scaled, active = _scaled_change(v, v, atol, use_rtol)
-        eps = float(jnp.finfo(v.dtype).eps) / use_rtol
+    for v, own_eps in values:
+        _scaled, active = _scaled_change(_widened(v), _widened(v), atol, use_rtol)
+        eps = own_eps / use_rtol
         n = jnp.where(active, float(v.size), 0.0).astype(dtype)
-        sum_sq = sum_sq + n * (eps * eps)
+        sum_sq = sum_sq + n * jnp.asarray(eps * eps, dtype)
         count = count + n
     if norm != "l2":
         sum_sq = sum_sq / jnp.maximum(count, 1.0)
@@ -1217,7 +1464,8 @@ def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
       the Krylov space is *not* invariant -- the Arnoldi residual is
       zero when the space captured the Jacobian's range, so a resolved
       spectrum pays no margin, and where it is not zero the Ritz radius
-      is an estimate from below and is inflated by the size of what the
+      is an estimate (from below for a normal ``A``, from either side
+      for a non-normal one) and is inflated by the size of what the
       space missed.
 
     Neither is what :func:`error_amplification` could state: it read

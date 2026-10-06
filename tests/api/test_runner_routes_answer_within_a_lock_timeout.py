@@ -30,8 +30,18 @@ from maddening.api import server as server_module
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import BallNode
+from tests.api.rest_claims_support import collector_off
 
 TIMEOUT = 0.25
+
+
+@pytest.fixture
+def collector_is_off():
+    """The garbage collector off for a test that times its requests; named
+    before ``served`` in the test's arguments, so it is off from before the
+    server is built (``collector_off``)."""
+    with collector_off():
+        yield
 
 
 @pytest.fixture
@@ -108,8 +118,8 @@ def test_an_activation_that_cannot_have_the_graph_says_it_stopped_the_runner(ser
 QUEUE_TIMEOUT = 1.0
 
 
-def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(served,
-                                                                            monkeypatch):
+def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(
+        collector_is_off, served, monkeypatch):
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", QUEUE_TIMEOUT)
     server, client = served
     app = client.app

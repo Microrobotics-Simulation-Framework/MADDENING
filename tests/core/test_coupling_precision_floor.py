@@ -43,7 +43,7 @@ _EPS = float(np.finfo(np.float32).eps)
 
 def _pass_evaluations(gm):
     """``(evaluations, declared)`` the report counts for the graph's one group."""
-    from maddening.core.graph_manager import _group_evaluations  # noqa: PLC0415
+    from maddening.core.coupling._group_layout import _group_evaluations  # noqa: PLC0415
 
     (group,) = gm._coupling_groups
     return _group_evaluations(group, gm._nodes, gm._schedule, gm._edges)

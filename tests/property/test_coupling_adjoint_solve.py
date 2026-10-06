@@ -7,7 +7,7 @@ four-DOF two-node cycle.  ``jax.jvp`` on the same graph was fine and
 ``linear_solver="dense"`` was fine: it was the transpose (adjoint)
 solve, and it was ill-conditioning meeting an unreachable float32
 tolerance rather than a Krylov breakdown.  See
-``graph_manager._ift_linear_solve`` for the mechanism and
+``coupling._ift._ift_linear_solve`` for the mechanism and
 ``tests/core/test_coupling_ift_lineax.py`` for the pinned example.
 
 Why this is a property test and not three more examples: the failure

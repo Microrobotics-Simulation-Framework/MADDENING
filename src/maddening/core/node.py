@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Optional, cast
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 
@@ -168,6 +169,16 @@ class _ParamsDict(dict):
     made, although this docstring said one was, and such a write was lost
     to ``gm.params`` and to every run (MADD-ANO-175).
 
+    A mapping *assigned* over this one -- ``node.params = {**node.params,
+    "k": v}`` -- takes over from it (:meth:`_succeed`): the node stores the
+    assigned items in a fresh mapping whose own counts start at zero, which
+    carries what this one had counted and counts each key the assignment
+    changed.  The assignment names one key, and the others are the node's
+    own values handed back, so they are not writes.  Until 0.4.0 shipped
+    the graph read a replaced mapping as a write of *every* key, which put
+    the node's own value over every other constant of that node a fit had
+    calibrated in ``gm.params`` (MADD-ANO-203).
+
     Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
     JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
     pickle, ``copy.deepcopy``) that starts its counts at zero.
@@ -177,10 +188,37 @@ class _ParamsDict(dict):
         super().__init__(*args, **kwargs)
         self._writes = 0
         self._key_writes: dict = {}
+        # The counts of the mappings this one replaced as a node's params,
+        # and one write for each key each replacement changed (``_succeed``).
+        self._carried: dict = {}
+        # Shared by a mapping and everything that succeeds it, so a graph
+        # can tell "the node's params, replaced" from an unrelated mapping.
+        self._lineage: object = object()
 
     def _wrote(self, key) -> None:
         self._writes += 1
         self._key_writes[key] = self._key_writes.get(key, 0) + 1
+
+    def _succeed(self, old: "_ParamsDict") -> None:
+        """Take over from ``old`` as a node's params: carry what it counted,
+        and count a write of each key whose value this mapping changes
+        (:func:`_replaced_keys`: a key added, dropped, or holding another
+        value, bit for bit).  Decided here, when the node is assigned, from
+        what ``old`` holds at that moment."""
+        self._lineage = old._lineage
+        carried = old._write_counts()
+        for key in _replaced_keys(old, self):
+            carried[key] = carried.get(key, 0) + 1
+        self._carried = carried
+
+    def _write_counts(self) -> dict:
+        """``{key: writes}`` since this mapping's lineage began: its own
+        counted writes and what it carries (:meth:`_succeed`).  What a graph
+        compares with the counts it last saw."""
+        counts = dict(self._carried)
+        for key, n in self._key_writes.items():
+            counts[key] = counts.get(key, 0) + n
+        return counts
 
     def __setitem__(self, key, value) -> None:
         super().__setitem__(key, value)
@@ -268,6 +306,11 @@ def _same_value(a, b) -> bool:
         return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
     if isinstance(a, np.generic):
         return a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if isinstance(a, jax.Array) and not isinstance(a, jax.core.Tracer):
+        # A JAX array is immutable, but two of them can hold one value: a
+        # mapping rebuilt around a copy has not written it.
+        return (a.shape == b.shape and a.dtype == b.dtype
+                and np.asarray(a).tobytes() == np.asarray(b).tobytes())
     if isinstance(a, float):
         return (a == b and math.copysign(1.0, a) == math.copysign(1.0, b)) or (a != a and b != b)
     try:
@@ -285,6 +328,22 @@ def _mutated_keys(params, snapshot: dict) -> set:
         return set()
     return {key for key, copied in snapshot.items()
             if key in params and not _same_value(params[key], copied)}
+
+
+def _replaced_keys(old, new) -> set:
+    """The keys a mapping assigned over ``old`` changes: a key ``new`` adds
+    or drops, and one whose value is not ``old``'s, bit for bit
+    (:func:`_same_value`).
+
+    What ``node.params = {**node.params, "k": v}`` writes
+    (:meth:`_ParamsDict._succeed`).  It is the rule an in-place element
+    write follows, the other write no method of the mapping sees: a value
+    is written when it is no longer the value held before.  So a
+    replacement that hands a key the value it already had is not a write of
+    it; ``node.params[key] = value`` is, whatever the value.
+    """
+    return {key for key in set(old) | set(new)
+            if key not in old or key not in new or not _same_value(new[key], old[key])}
 
 
 def _params_dict_flatten_with_keys(d: _ParamsDict):
@@ -315,24 +374,152 @@ def _params_empty(params: Any) -> bool:
         return False
 
 
+def _detached_config(value: Any) -> Any:
+    """*value* copied into plain containers that share nothing mutable
+    with it: what a config hands out.
+
+    A ``dict`` of any class (a node's ``params`` is a counting subclass)
+    comes back as a ``dict``, a ``list`` as a new ``list``, a ``tuple`` as
+    a tuple of copies (a named tuple keeps its class), a NumPy array as a
+    copy; anything else -- a number, a string, a JAX array, none of which
+    can be changed in place -- as it is.
+
+    ``to_dict()`` used to hand out the graph's own containers: a node's
+    ``params`` mapping, the lists inside it, a mapped edge's point sets, a
+    sharded wrapper's ``axis_map``.  Editing a config to build a variant
+    of a graph -- ``cfg = gm.to_dict(); cfg["nodes"][0]["params"]["k"] =
+    5.0`` -- therefore edited the graph it came from, which ran the
+    variant's value from its next step or recompile on, with nothing
+    said (MADD-ANO-205).  It also made the config's ``params`` a ``dict``
+    subclass, which ``yaml.safe_dump`` refuses.
+    """
+    if isinstance(value, dict):
+        return {key: _detached_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_detached_config(item) for item in value]
+    if isinstance(value, tuple):
+        items = [_detached_config(item) for item in value]
+        make = getattr(type(value), "_make", None)      # a named tuple's constructor
+        return make(items) if make is not None else tuple(items)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
+
 def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
     """Would calling ``fn(..., <keyword>=x)`` deliver ``x``?
 
-    True for a signature that names ``keyword`` and for one that forwards
-    ``**kwargs`` (``inspect.Parameter.VAR_KEYWORD``).  A signature that
-    cannot be inspected is ``False``: the refusals built on it fail
-    closed.  :func:`_signature_takes_params` is this rule for
-    ``params``; the sharded wrappers read it for ``static_padded`` and
-    ``shard_info`` too, so one spelling means the same thing for every
-    optional keyword a wrapper forwards.
+    True for a signature that names ``keyword`` as a parameter a keyword
+    can reach, and for one that forwards ``**kwargs``
+    (``inspect.Parameter.VAR_KEYWORD``).  A signature that cannot be
+    inspected is ``False``: the refusals built on it fail closed.
+    :func:`_signature_takes_params` is this rule for ``params``; the
+    sharded wrappers read it for ``static_padded`` and ``shard_info`` too,
+    so one spelling means the same thing for every optional keyword a
+    wrapper forwards.
+
+    A parameter of that name which a keyword cannot reach is ``False``:
+    positional-only (``def f(params, /)``, ``def f(params=None, /)``) or
+    the name of ``*args`` (``def f(*params)``).  Until 0.4.0 shipped the
+    name alone answered ``True`` for those, so the caller passed the
+    keyword and Python raised ``TypeError`` -- from inside the first
+    trace of a step, for a node.  The answer is now the one the question
+    has, and it is only an answer: a hook that holds the name where no
+    keyword reaches it is not thereby a hook without the keyword.  The
+    callers that would otherwise run it without the value refuse it
+    instead (:func:`_refuse_keyword_no_keyword_reaches`, when a node is
+    added to a graph or wrapped; the mapping registry, at registration).
     """
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
         return False
-    return keyword in sig.parameters or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    named = sig.parameters.get(keyword)
+    if named is not None and named.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
+def _named_where_no_keyword_reaches(fn: Any, keyword: str) -> Optional[str]:
+    """How ``fn`` holds the name ``keyword`` where ``fn(..., <keyword>=x)``
+    cannot deliver ``x`` -- ``"as a positional-only parameter"`` or
+    ``"as its *args"`` -- or ``None``.
+
+    Not a second keyword rule: :func:`_signature_takes_keyword` is asked
+    first, and wherever it answers ``True`` this is ``None`` -- a keyword
+    reaches the name, or ``**kwargs`` takes it beside a positional-only
+    parameter of the same name.  Of the signatures it answers ``False``
+    for, this tells the one that holds the name from the one that never
+    mentions it (``None``, like a signature that cannot be inspected).
+    """
+    if _signature_takes_keyword(fn, keyword):
+        return None
+    try:
+        named = inspect.signature(fn).parameters.get(keyword)
+    except (TypeError, ValueError):
+        return None
+    if named is None:
+        return None
+    if named.kind is inspect.Parameter.POSITIONAL_ONLY:
+        return "as a positional-only parameter"
+    if named.kind is inspect.Parameter.VAR_POSITIONAL:
+        return "as its *args"
+    return None
+
+
+def _refuse_keyword_no_keyword_reaches(
+        node: Any, method: str, keyword: str = "params", *, caller: str = "the graph") -> None:
+    """Raise ``ValueError`` when ``node.<method>`` holds the name
+    ``keyword`` where no keyword reaches it
+    (:func:`_named_where_no_keyword_reaches`).
+
+    *caller* passes the hook that value as ``<keyword>=...``.  Until 0.4.0
+    shipped it did so for such a hook too, and Python raised ``TypeError``
+    from inside the first trace.  Answering "takes no such keyword" there
+    and calling the hook without the value would have been quieter and
+    worse: a node that plainly means to take ``params`` would run on its
+    constructor's constants, with every value written to ``gm.params``
+    ignored.  So it is refused where the node is handed over, by name.
+    """
+    fn = getattr(node, method, None)
+    if fn is None:
+        return
+    how = _named_where_no_keyword_reaches(fn, keyword)
+    if how is None:
+        return
+    raise ValueError(
+        f"Node {getattr(node, 'name', None)!r}: {type(node).__name__}.{method}() names "
+        f"`{keyword}` {how}, where no keyword reaches it, and {caller} passes it as "
+        f"`{keyword}=...`.  Accept `{keyword}` as a keyword argument (`{keyword}=None` "
+        f"with no `/` after it), or give the parameter another name if {method}() is "
+        f"not meant to receive it."
     )
+
+
+#: The hooks, beside ``update``, that are handed the node's entry of the
+#: params pytree when the node has one.
+_PARAMS_COUPLING_HOOKS = ("compute_boundary_fluxes", "compute_interface_correction")
+
+
+def _refuse_params_no_keyword_reaches(
+        node: Any, update: str = "update", *, caller: str = "the graph") -> None:
+    """:func:`_refuse_keyword_no_keyword_reaches` for ``params``, on every
+    hook of *node* that would be handed them.
+
+    ``update`` (``update_padded`` for a node wrapped for sharding) always:
+    it is what decides whether the node has an entry in ``gm.params``.
+    The flux and interface-correction hooks when ``update`` takes
+    ``params``: only then is there an entry to hand them, and a hook
+    called without it would compute from the constructor's constants
+    beside an ``update`` on the calibrated ones.  A node whose ``update``
+    takes no ``params`` is never passed any, so what its other hooks name
+    is its own business, as it was in every release.
+    """
+    _refuse_keyword_no_keyword_reaches(node, update, caller=caller)
+    if _method_accepts_params(node, update):
+        for hook in _PARAMS_COUPLING_HOOKS:
+            _refuse_keyword_no_keyword_reaches(node, hook, caller=caller)
 
 
 def _signature_required_arguments(fn: Any) -> Optional[dict[str, bool]]:
@@ -662,6 +849,16 @@ class SimulationNode(ABC):
         lost to the graph (MADD-ANO-175).  A reference to the assigned
         object is therefore not ``node.params``: write through
         ``node.params``.
+
+        The assignment is a write of the keys whose values it changes -- a
+        key added, dropped, or given another value -- and of no other: a
+        constant of this node calibrated in ``gm.params`` stays calibrated
+        when the assignment hands its key back unchanged.  (For a time
+        during 0.4.0 development it was a write of every key, and the
+        one-key idiom silently reverted every other calibrated constant of
+        the node, MADD-ANO-203.)  To write a value the node already holds --
+        to revert a calibration -- write the key: ``node.params[key] =
+        value``.
         """
         try:
             return self.__dict__["params"]
@@ -675,6 +872,11 @@ class SimulationNode(ABC):
         # ``copy`` and every walk of ``vars(node)`` see what they always saw.
         if isinstance(value, Mapping) and not isinstance(value, _ParamsDict):
             value = _ParamsDict(value)
+            old = self.__dict__.get("params")
+            if isinstance(old, _ParamsDict):
+                # The replacement writes the keys it changes, not the ones
+                # it hands back (MADD-ANO-203).
+                value._succeed(old)
         cast(dict, self.__dict__)["params"] = value
 
     # ------------------------------------------------------------------
@@ -1599,10 +1801,16 @@ class SimulationNode(ABC):
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise the node descriptor (not runtime state)."""
+        """Serialise the node descriptor (not runtime state).
+
+        ``params`` is a copy in plain containers
+        (:func:`_detached_config`), not the node's own ``params``.  It
+        used to be that mapping itself, so writing into a config wrote
+        into the node (MADD-ANO-205).
+        """
         return {
             "type": type(self).__name__,
             "name": self.name,
             "timestep": self.delta_t,
-            "params": self.params,
+            "params": _detached_config(self.params),
         }

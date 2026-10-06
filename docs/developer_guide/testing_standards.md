@@ -382,6 +382,10 @@ def test_my_node():
 
 Install with `pip install maddening[verify]`.
 
+### Targeted searches: a score instead of a grid
+
+A grid tests the points someone chose; `tests/property/targeted_search.py` hunts between them. You give `targeted_search(strategy, score, threshold, profile=...)` a strategy that draws every number from a continuous range and a **score**: a function of one drawn example that returns `(value, details)`, where `value` is a non-negative float saying *how wrong* the result is (0 where there is nothing to say, larger the further it is from the claim; `nan` is refused) and `details` is whatever explains it. The helper runs the property `value <= threshold` and passes every value to `hypothesis.target`, so Hypothesis mutates the worst example it has seen towards a worse one, and a failure reports the shrunk example with its score and details. To add a score, write the claim as a distance (the relative error of a fit that says `converged=True`; the gap between a reported loss and the loss of what was returned), return 0 for every outcome that is right without being the expected one (a refusal; an optimum that is not the truth), keep the score continuous below the threshold so the search has something to climb, set the threshold to the tolerance the claim states, and prove the score can fire by running the search on a tree that has the defect it is for. Each search runs twice: under `PER_PUSH` (derandomised, the house floor of examples) and, slow-marked, under `SLOW` (random). Build the problem so that drawn numbers are arguments of the compiled programs and only a change of structure compiles. `tests/property/test_sysid_targeted_search.py` is the worked example: three scores over `fit_lm` on the parameter guide's spring.
+
 ## Test time budget
 
 Every push runs the default lane (everything not marked
@@ -741,6 +745,7 @@ audit area that a user could rely on:
 | `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the precision floor and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
 | `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); `ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the FMI 3.0 export: model description, TCP bridge, sidecar, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
 | `rest_runpod_claims.yaml` | `REST`, `RPD` | the HTTP API: authentication, the `Host` and `Origin` rules, request bounds and budgets, the graph lock and its 409/503, `/graph/*`, `/sim/*`, `/checkpoint/*`, shutdown and the runner behind `/sim/start` (not the experimental surrogate and streaming endpoints); `benchmarks/multigpu/run_pod.py`, its runbook, records, verdicts and exit codes |
+| `mapping_claims.yaml` | `MAP` | interface mappings: the registry of mapping kinds (`register_mapping`: names, declarations, the trust boundary of a file that names a kind, what a factory may raise and must return); what a mapping may put into `gm.params["mappings"]` and how those weights are fitted, checkpointed and exported; the sparse mappings (`StaticSparseMapping`, its two layouts, the three sparse kinds, their limits) and the structure digest a checkpoint carries for sparse weights |
 
 Each row records:
 
@@ -807,8 +812,8 @@ Audits kept breaking claims in a *domain* their conditions covered but no
 test exercised: x64, a predictor inside a windowed fit, a write pending at
 an FMU export. So an inventory can name a `domain_set` at its top level,
 and then every row carries a `domains` mapping that says, for each domain
-of the set, how the claim stands there. The coupling and sysid+FMU
-inventories use the `numeric` set below; the REST and run_pod inventory
+of the set, how the claim stands there. The coupling, sysid+FMU and
+mapping inventories use the `numeric` set below; the REST and run_pod inventory
 uses the `server` set ("The server set", at the end of this section). A
 new set is one entry in the guard's `DOMAIN_SETS`, with the spellings its
 conditions use and the words its tests must name.
@@ -1085,6 +1090,65 @@ names its per-push sibling. Every property is `derandomize=True`, so CI
 draws the same examples on every run. Each oracle was mutation-tested on a
 scratch copy of `src/` (the PR that added them lists the mutants and the
 test that caught each).
+
+### The REST oracles: generated sequences, and requests from the schema
+
+Files: `tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py`,
+`tests/property/test_rest_requests_generated_from_the_schema.py`; the
+invariants both ask are in `tests/property/rest_oracle.py`. The REST tests
+before them are fixed scenarios, and two audit rounds in a row found a
+defect that only a *sequence* reaches (PUT, save, PUT, load, PUT a value
+back) or that is one malformed value on a documented field (a NaN
+`timestep`). These two generate those inputs. Neither predicts an answer:
+whatever the server replies, no reply is a 5xx; a refused request changed
+nothing (the config, every parameter, the whole state, the files under the
+checkpoint root, the streams' clock); an accepted graph reloads
+(`from_dict(to_dict())`, with a checkpoint on top), steps bit for bit as its
+reload and is inside the stability limit its constructor enforces; a 4xx
+names no directory of the deployment; a 2xx is strict JSON.
+
+- **The sequence oracle** is a Hypothesis `RuleBasedStateMachine` over the
+  state-changing routes, with a direct `gm.params` write between requests
+  standing in for a fit. Its vocabulary puts a rod *at* its Fourier limit,
+  returns to values the graph has already held as often as it proposes new
+  ones, and reuses four node names and four checkpoint names, which is what
+  makes a sequence like MADD-ANO-178's reachable. Ten requests a sequence
+  per push, drawn the same on every run; a hundred in the slow lane at the
+  profile's depth. Each historical sequence is also pinned, replayed
+  through the machine's own `do_*` requests.
+  **To add a rule:** write a `do_<request>` method that sends one request
+  through `send()` (which asks the first two invariants) and a `@rule`
+  that draws its arguments and calls it; add the request, in a form the
+  server takes and one it refuses, to
+  `test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused`.
+  The other invariants are asked after every rule without being named. A
+  node class with a stability limit also gets an entry in
+  `rest_oracle.STABILITY_LIMITS` (a test fails for a stock node that has
+  none) and its values in `VOCABULARY`.
+- **The request oracle** reads the routes from the app's OpenAPI document.
+  Each has a *seed* in `SEEDS`: a request the served graph takes, which is
+  the part a schema cannot say. The battery replaces every path parameter,
+  query parameter and body member of every seed, in turn, by every
+  malformed value of its kind, and does the same to the headers a proxy or
+  the HTTP server interprets (in process, and as raw HTTP to a uvicorn
+  server on loopback); a fuzzer draws combinations.
+  **To add a route:** add it to the server, and
+  `test_every_documented_route_has_a_request_generator` fails until `SEEDS`
+  has an entry for it, with every parameter the route declares; the fields
+  and their malformed values follow from the schema. A route whose
+  acceptance leaves its seed valid goes in `KEEPS_ITS_SEED`; a route that
+  changes the state also gets a rule in the sequence oracle. The
+  out-of-scope prefixes (`/surrogate/`, `/ws/`, `/cloud/`) are listed in
+  `OUT_OF_SCOPE`, and nothing is ever sent to them.
+
+A defect either oracle finds is kept as a strict xfail with its minimal
+request, and, where the generators would otherwise report nothing else, a
+tolerance exactly as narrow as the defect, pinned by a test of how narrow,
+that goes when the xfail passes (none is left: the three the request oracle
+found on the tree it was written on are fixed, and their cases are under
+"What the battery found" in its file). To show an oracle can
+still fail, run it against an older tree: `git archive <commit> src` into
+a scratch directory, and that `src` on `PYTHONPATH` with this tree's tests.
 
 ### Coupling and numerics
 
@@ -1370,6 +1434,55 @@ Cannot see: an operation the C API cannot express (a string time), and a
 defect every path shares.  Without a C compiler it compares three paths,
 and `test_the_c_wrapper_is_a_fourth_path_here` says so by skipping.
 
+#### The FMU's clock patterns, with restores, four ways
+
+`tests/property/test_differential_fmu.py` (`CLOCKS`).  Four importers, by
+how they keep their time -- `start + k * h`, a running sum, step sizes a
+little long, points a little late -- each run with no restore, with a save
+and restore after every step, and with one rollback part-way, over the same
+four paths; the wrapper saves into one reused `fmi3FMUState`, as a rollback
+master does.  The oracle: a restore changes no reply.  Every step is
+answered, to the bit, as it is without one, a step taken again after going
+back included.  The reported time is also held to the simulated time in
+exact rational arithmetic, to the documented bound plus three ulps of the
+time (the clock's own float64 rounding; the battery is where that term was
+found).  `tests/fmi/test_a_restore_resumes_the_drift_accounting.py` runs
+the audit's own figures on the bridge alone.
+Cannot see: an archive an importer rewrites (it is taken at its word for
+its time), and a start time given after a restore, which is a new
+reference by design.
+
+#### Every FMI type at its extremes, four ways
+
+`tests/property/test_differential_fmu.py` (`TYPE_VALUES`), under x64.  One
+node with an input and an output of each of the eleven FMI numeric types,
+and the two float parameters a graph can have.  Each type's extreme values
+go in through its typed setter and come back through its typed getter, as
+an input and a step later as an output, over the TCP bridge and the
+compiled wrapper (binary and JSON frames), with the sidecar and the graph
+given the value in the type itself.  A value the float64 wire is reads back
+as itself on every path; an `Int64` / `UInt64` it is not is refused by set
+and, once the model holds it through the FMU-state archive, by get, with
+the four states still identical; a value outside the type is refused by
+every door.  Tolerance: none.
+Cannot see: the half of a fix another half masks.  Negative zero over JSON
+is repaired on both ends (the wrapper writes `-0.0`, the bridge reads
+`-0`), and reverting either alone leaves the battery green; each end has
+its own direct test, and the battery fails only with both reverted.
+
+#### Mutating the C wrapper
+
+The C harnesses (`tests/fmi/c/`) include the wrapper through the macro
+`MADDENING_FMU_C`, which `tests/fmi/test_c_unit.py` sets to
+`maddening.fmi.package.C_SOURCE`.  So a fault seeded in a scratch copy of
+`src/` and run with `PYTHONPATH=<scratch>/src` is compiled into the unit
+tests and the fuzz harness, as it is into the FMU binary; they used to
+include the tree's file by relative path, and no C mutant reached them.
+Two things to check before counting a C mutant as caught: that it built
+without a warning (the build's own no-warnings assertion fails a mutant
+that leaves a parameter unused, which says nothing about the tests), and
+whether it was caught by a `CHECK` or by the binary crashing.
+
 #### The stability filter (metamorphic)
 
 `tests/property/test_metamorphic_fmu_stability_filter.py`.  The
@@ -1390,8 +1503,25 @@ check against the graph.
 | A checkpoint load restores the state and leaves the parameters where they were | acceptance | `test_a_restore_door_takes_what_every_write_door_takes`, the refusal cases (the leaf is never cast, so nothing is refused), the rod and every sharded wrapper's restore case |
 | An open `log` / `logit` bound advertised as itself (inclusive) rather than one float inside | acceptance | `test_every_door_accepts_or_refuses_a_parameter_value_together`; every `test_a_logit_range_no_value_can_enter_is_refused_by_every_door` case |
 | The C wrapper's `fmi3DoStep` reports the step's start as `lastSuccessfulTime` | FMU four ways | `test_four_fmu_paths_agree_after_a_node_params_write`, every case that passes today |
+| `fmi3GetFMUState` allocates a new state over the one it is handed (B1 round 9, F3) | C unit; clocks | `test_c_unit_tests` (the live-allocation count and the pointer); every `every step` clock case |
+| `fmi3FreeInstance` leaves its live states allocated; a reused state's old blob is dropped; unlinking leaves a stale back-link | C unit | `test_c_unit_tests`, by the live-allocation count |
+| `set_state` starts the drift count again at the restored time (F4); the archive records a zero count, or the reported time as the start | clocks | `test_a_restore_between_steps_changes_no_reply_on_any_fmu_path`; `test_a_restore_changes_no_verdict_and_no_reported_time` |
+| A `get` converts an int64 to float64 unchecked; a JSON set stores the rounded neighbour (F5) | types | `test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths[int64-*]`, `[uint64-*]` |
+| `lost_as_integer` takes `max + 1`, a value below the minimum, or a fraction | exact integers | `tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py` |
+| `load_state` judges an integer by a cast there and back | checkpoint | `test_an_integer_of_the_other_signedness_is_refused_not_wrapped` |
 | A structural `node.params` write no longer marks the graph dirty | FMU four ways | the compiled structural cases (the graph path keeps the old model), and the pending ones (the export no longer refuses) |
 | The clocks ignore the stability filter | stability | `test_a_class_level_filters_exactly_its_own_surfaces[clocks]`, `test_changing_one_class_changes_only_its_own_variables` |
+
+One mutant of this round survives, and is recorded rather than replaced:
+the FMU value check put back on its comparison through float64
+(`_checked_value`).  On x86-64 an out-of-range float-to-integer cast wraps,
+so the old comparison and the exact one give the same verdict for every
+input, and no test here can tell them apart; they part only where the cast
+saturates.  The first attempt at that mutant looked caught, and was not: it
+left out the `np.errstate` guard the old code had, so it failed on a
+`RuntimeWarning` raised as an error.  A second "catch" was a build warning
+(an unused parameter), fixed by keeping the parameter used.  Read how a
+mutant died before counting it.
 
 Three first attempts survived and were replaced, each for a reason worth
 knowing: a float32 rounding of `fit_lm`'s *residual* (a residual near zero

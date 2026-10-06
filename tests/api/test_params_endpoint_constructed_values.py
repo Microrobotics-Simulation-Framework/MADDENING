@@ -31,7 +31,8 @@ import pytest
 from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import SimulationServer
-from maddening.core.graph_manager import GraphManager, _node_with_params
+from maddening.core.graph_manager import GraphManager
+from maddening.core._param_probes import _node_with_params
 from maddening.core.node import SimulationNode
 from maddening.nodes.adaptive.wavelet import WaveletAdaptiveNode
 from maddening.nodes.ball import BallNode

@@ -34,7 +34,9 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.simulation.checkpoint import load_state, save_state
 from maddening.nodes.heat import HeatNode
 from maddening.serialization import config as cfg
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 
 N_COARSE, N_FINE = 6, 12
 C2F = "coarse.temperature->fine.heat_source"

@@ -266,7 +266,7 @@ def test_run_scan_with_history_shape_and_final_state(n_steps):
 def test_the_scan_cache_is_bounded():
     """An HTTP handler taking ``n_steps`` from the request cannot grow it
     without limit."""
-    from maddening.core.graph_manager import _SCAN_CACHE_MAX
+    from maddening.core._graph_specs import _SCAN_CACHE_MAX
 
     gm = _spring_graph()
     for n in range(1, _SCAN_CACHE_MAX + 6):

@@ -1,7 +1,7 @@
 """Sharded sparse iterative solvers (added in v0.3.0).
 
 Builds on the IFT branch's matrix-free lineax integration
-(see :func:`maddening.core.graph_manager._ift_linear_solve`).
+(see :func:`maddening.core.coupling._ift._ift_linear_solve`).
 This module extends the same pattern to **distributed** matvec
 operators: the user supplies a callable ``matvec(x) → A · x`` whose
 internal implementation uses ``shard_map`` to run across multiple
@@ -184,7 +184,7 @@ def _framed(solve, b, x0, atol):
     ``1e-8`` passed the test with the zero initial guess before a single
     step -- measured on a 12-unknown SPD system in float32, relative errors
     of 5e-3 at ``||b|| ~ 1e-6`` and 0.4-1.0 at ``1e-9``, every backend
-    reporting ``converged=True``: the defect ``graph_manager._ift_linear_solve``
+    reporting ``converged=True``: the defect ``coupling._ift._ift_linear_solve``
     had (MADD-ANO-113).  ``p`` is ``stop_gradient``-ed: it is piecewise
     constant in ``b``.
 
@@ -433,7 +433,7 @@ def _lineax_solve(
         # max_steps gives the iteration budget.
         solver = lx.CG(rtol=rtol, atol=atol, max_steps=max_iters)
     elif solver_kind == "gmres":
-        # See the restart-gotcha comment in graph_manager._ift_linear_solve.
+        # See the restart-gotcha comment in coupling._ift._ift_linear_solve.
         n = b.shape[0]
         restart_clamped = min(int(n), int(restart))
         solver = lx.GMRES(

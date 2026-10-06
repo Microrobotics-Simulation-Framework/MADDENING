@@ -272,7 +272,6 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     _orig_step = gm.step
 
     def _step_with_clot(external_inputs=None):
-        import warnings as _w
         if _clot_active[0]:
             _ensure_mask_external()
             if external_inputs is None:
@@ -280,9 +279,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
             if "vessel" not in external_inputs:
                 external_inputs["vessel"] = {}
             external_inputs["vessel"]["wall_mask_update"] = _clot_mask[0]
-        with _w.catch_warnings():
-            _w.simplefilter("ignore")
-            return _orig_step(external_inputs)
+        return _orig_step(external_inputs)
 
     gm.step = _step_with_clot
 

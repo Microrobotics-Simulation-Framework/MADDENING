@@ -1296,11 +1296,15 @@ claims:
     422 from the request model, published in /openapi.json.  A node whose
     state would exceed 2*10^7 elements, or whose build would exceed 2 GiB,
     or that would take the graph past 10^8 state elements, is a 400 naming
-    the size: those caps are server constants".
+    the size: those caps are server constants".  These are the size
+    refusals that exist, so that one request of the server's audience (a trusted client on loopback, or a token-holder)
+    cannot exhaust the host by mistake; they are not claimed to stop a
+    token-holder who sets out to exhaust it.
   sources:
     - src/maddening/api/README.md:88 (What the token does not do)
     - docs/release_notes/v0.4.0.md:4281 (One unauthenticated request can no longer name unbounded work)
     - src/maddening/api/server.py:1090 (_allocation_refusal)
+    - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
   conditions: each bound at its edge; the state caps at patched values.
   oracle: the route's status code at the bound and one past it.
   tests:
@@ -1814,16 +1818,20 @@ claims:
     it stopped stays stopped, with was_running"; a 503 with nothing reset
     when the runner's thread will not stop in time, saying the runner was
     told to stop and stays stopped, with was_running (a stop's own 503
-    too).
+    too).  A reset that is refused or fails after the runner was stopped
+    leaves the graph as it was (the route's transaction); the runner stays
+    stopped, which the transaction does not cover.
   sources:
     - src/maddening/api/server.py:3760 (sim_reset)
     - src/maddening/api/server.py:2304 (SimulationServer._after_stopping_the_runner)
     - src/maddening/api/README.md:160 (Simulation Control)
     - docs/release_notes/v0.4.0.md:4724 (The REST round-6 audit, Smaller fixes)
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
   conditions: >-
     a running runner (and none), the graph held by another request when
     POST /sim/reset arrives, timeout patched to 0.25 s; a runner whose stop
-    times out.
+    times out; a failure injected at every point of a reset's body, with
+    no runner.
   oracle: the 503 does not say "Nothing was changed", says the runner stays stopped, and carries was_running; the runner is no longer alive.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_reset_that_stopped_the_runner_does_not_say_nothing_was_changed
@@ -1831,6 +1839,7 @@ claims:
     - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_a_reset_without_a_runner_says_only_that_nothing_was_reset
     - tests/api/test_runner_stop_and_stride.py::test_a_reset_whose_stop_times_out_resets_nothing
     - tests/api/test_runner_stop_and_stride.py::test_a_stop_that_times_out_says_the_runner_stays_stopped
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   notes: failing until fix/p4-13-rest (#205), whose reply said "Nothing was changed" of a runner it had just stopped.
   domains:
@@ -1990,16 +1999,23 @@ claims:
   claim: >-
     "POST /sim/run?n_steps=100: Run N steps ... Returns final state.  While
     it runs, writes are a 409 and reads are served between its slices."
+    The run is one transaction per slice, not per run: a params write
+    accepted between two slices stays when a later slice fails (the 500
+    reports steps_run and the graph is left after the completed slices).
   sources:
     - src/maddening/api/README.md:155 (Simulation Control)
     - src/maddening/api/server.py:3612 (sim_run)
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
   conditions: >-
     300 steps against a 2 ms compiled step; a read and a step sent while it
-    runs. Not claimed for a server shutting down.
+    runs; a params write between the slices of a run whose third slice
+    fails. Not claimed for a server shutting down.
   oracle: the final state equals 300 serial steps exactly; the read answered 200 while the run was alive.
   tests:
     - tests/api/test_concurrent_requests_are_serialised.py::test_a_run_refuses_writes_and_serves_reads_until_it_returns
     - tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_not_interrupted_returns_the_state_as_before
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_params_write_between_two_slices_of_a_run_survives_the_runs_failure
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_run_that_fails_unexpectedly_says_how_many_steps_it_took
   status: verified
   domains:
     loopback_bind: tests/api/test_concurrent_requests_are_serialised.py::test_a_run_refuses_writes_and_serves_reads_until_it_returns
@@ -2030,19 +2046,24 @@ claims:
     - src/maddening/api/server.py:3616 (sim_run)
     - src/maddening/api/server.py:2532 (SimulationServer.request_shutdown)
     - CHANGELOG.md:372 (a 503 from /sim/run names the steps it took)
-  conditions: request_shutdown() mid-run in-process; SIGINT to a uvicorn process on loopback mid-run (slow lane).
+  conditions: >-
+    request_shutdown() mid-run in-process; request_shutdown() mid-run on a
+    uvicorn server on loopback while simultaneous requests read the state and
+    write a parameter; SIGINT to a uvicorn process on loopback mid-run (slow
+    lane).
   oracle: 503 body, the graph's step count equal to steps_run, the process exits within seconds.
   tests:
     - tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_stops_at_its_next_slice_when_shutdown_is_requested
     - tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_sigint_reaches_an_in_flight_run_before_the_servers_own_handler
     - tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_sigint_to_a_loopback_server_mid_run_exits_within_seconds
+    - tests/api/test_rest_claims_under_concurrent_requests.py::test_a_run_among_simultaneous_requests_stops_at_its_next_slice_at_shutdown
   status: verified
   domains:
     loopback_bind: tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_stops_at_its_next_slice_when_shutdown_is_requested
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-052]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-052]'
     no_token: tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_stops_at_its_next_slice_when_shutdown_is_requested
-    concurrent: tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_sigint_to_a_loopback_server_mid_run_exits_within_seconds
+    concurrent: tests/api/test_rest_claims_under_concurrent_requests.py::test_a_run_among_simultaneous_requests_stops_at_its_next_slice_at_shutdown
     runner_active: n/a
     sim_run_active: tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_stops_at_its_next_slice_when_shutdown_is_requested
     large_payload: n/a
@@ -2203,18 +2224,22 @@ claims:
   claim: >-
     "POST /sim/reset: Stop the runner and reset every node.  was_running is
     whether a runner was running" -- one whose thread had died was not; the
-    reset restarts the relay's clock.
+    reset restarts the relay's clock.  A reset that fails at any point
+    leaves the graph and the clock as they were, by the route's
+    transaction.
   sources:
     - src/maddening/api/README.md:160 (Simulation Control)
     - src/maddening/api/server.py:3758 (sim_reset)
     - src/maddening/api/server.py:2397 (SimulationServer._reset_state)
-  conditions: no runner (after a /sim/run); a running runner; a dead runner.
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+  conditions: no runner (after a /sim/run); a running runner; a dead runner; a failure injected at every point of a reset's body, with no runner.
   oracle: the reply's state is the initial state and so is a GET; was_running; relay.elapsed and step_count back to zero.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_reset_with_no_runner_resets_and_says_it_was_not_running
     - tests/api/test_concurrent_requests_are_serialised.py::test_a_reset_beside_a_running_runner_completes
     - tests/api/test_runner_pacing_and_status.py::test_a_reset_after_the_runner_died_says_it_was_not_running
     - tests/api/test_runner_and_relay_clock_the_step_advance.py::test_a_server_reset_restarts_the_frames_clock
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   domains:
     loopback_bind: tests/api/test_routes_answer_what_they_did.py::test_a_reset_with_no_runner_resets_and_says_it_was_not_running
@@ -2237,7 +2262,9 @@ claims:
   area: sim
   claim: >-
     A graph that cannot step is a 400 naming why, and nothing is stepped
-    (POST /sim/step); "A step that raises (a run-time check in the step,
+    or compiled: the refusal leaves the graph as it was, an edited graph
+    still waiting for its compile, by the route's transaction (POST
+    /sim/step); "A step that raises (a run-time check in the step,
     strict_convergence) answers 400 {detail, steps_run, n_steps}: the steps
     before it were taken" (POST /sim/run).
   sources:
@@ -2247,11 +2274,14 @@ claims:
     - src/maddening/api/server.py:671 (_GRAPH_CONFIGURATION_ERRORS)
     - docs/release_notes/v0.4.0.md:4587 (PUT /graph/params refuses what the step cannot run with)
     - docs/release_notes/v0.4.0.md:4724 (The REST round-6 audit, Smaller fixes)
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
   conditions: >-
     a configuration error found when the step is traced (an edge of mismatched
     shapes, constraints the step cannot use), and a run-time check in the step
     (equinox.error_if) raising at the first step, or in the sixth doubling
-    slice of a run after 32 steps were stored. Not claimed for simultaneous
+    slice of a run after 32 steps were stored; a step of an edited graph
+    whose compile refuses; a failure injected at every point of a step's
+    body. Not claimed for simultaneous
     requests.
   oracle: 400 naming the error; steps_run against the graph's state and the relay's count.
   tests:
@@ -2261,6 +2291,8 @@ claims:
     - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_at_its_first_step_is_a_400_and_moves_nothing
     - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_part_way_says_how_many_steps_it_took
     - tests/api/test_sim_run_reports_the_steps_a_failing_run_took.py::test_a_run_that_fails_part_way_reports_the_steps_it_took
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_refused_step_of_an_edited_graph_leaves_it_waiting_for_its_compile
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   notes: >-
     failing until fix/p4-13-rest (#205), whose 400 said "nothing was
@@ -2423,11 +2455,14 @@ claims:
   claim: >-
     POST /sim/profile returns "a Perfetto-loadable JSON trace", refused (409)
     like every write while the runner runs or a /sim/run is in progress; a
-    graph that cannot step is a 400, as on /sim/step.
+    graph that cannot step is a 400, as on /sim/step.  A profile that is
+    refused, or that fails at any point, leaves the graph as it was, and so
+    does one that succeeds: the route rolls its transaction back.
   sources:
     - src/maddening/api/server.py:4226 (sim_profile)
     - src/maddening/api/README.md:213 (Concurrency, limits and shutdown)
-  conditions: a compiled graph; the runner running; a /sim/run in progress; an edge of mismatched shapes (an ExceptionGroup from the compile).
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+  conditions: a compiled graph; the runner running; a /sim/run in progress; an edge of mismatched shapes (an ExceptionGroup from the compile); a failure injected at every point of a profile's body; a profile of a stepped graph and of an edited one, compared object for object.
   oracle: the trace's structure; 409.
   tests:
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_returns_perfetto_json
@@ -2435,6 +2470,8 @@ claims:
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_runner_running_returns_409
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_a_run_is_in_progress
     - tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_profile_that_succeeds_leaves_the_graph_exactly_as_it_was
   status: verified
   notes: That the profile leaves the live state where it was is REST-100.
   domains:
@@ -2502,12 +2539,26 @@ claims:
     "POST /graph/nodes: Add a node ({type, name, timestep, params})" -- an
     unknown type is a 400, an existing name a 409, and a node whose params
     its constructor or one abstract update refuses is a 400 and is not
-    added.
+    added.  A POST /graph/nodes that is refused, or that fails at any
+    point, leaves the graph as it was, by the route's transaction.  The
+    refusals of names and text in the conditions are the ones that exist,
+    stated for the server's audience (a trusted client on loopback, or a token-holder);
+    no wider claim is made about pathological names.
   sources:
     - src/maddening/api/README.md:112 (Graph Structure)
     - src/maddening/api/server.py:2788 (add_node)
     - docs/release_notes/v0.4.0.md:4313 (Hardening from the audit rounds)
-  conditions: an empty graph; a registered and an unregistered type; bad constructor constants.
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+    - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
+  conditions: >-
+    an empty graph; a registered and an unregistered type; bad constructor
+    constants. Also a 400 that adds nothing, asked before the type is looked
+    up or anything is built: a name holding one of U+0000 to U+001F (tab,
+    line feed and carriage return excepted), a surrogate, U+FFFE or U+FFFF
+    (a checkpoint, an FMU's model description or a file could not carry
+    it; any other name, a line break in it included, is taken); and, for a class with a text parameter, a text
+    value that spells NaN, Infinity or -Infinity or holds a surrogate. A
+    failure injected at every point of adding a node and of removing one.
   oracle: status codes and the graph's nodes.
   tests:
     - tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -2517,6 +2568,11 @@ claims:
     - tests/api/test_graph_endpoint_validation.py::test_add_node_with_bad_params_is_400_and_not_added
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_node_name_some_carrier_cannot_hold_is_a_400_before_anything_is_built
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_node_name_every_carrier_holds_is_taken_and_its_checkpoint_loads
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_new_node_with_text_the_config_could_not_carry_is_a_400_and_no_node
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   domains:
     loopback_bind: tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -2607,18 +2663,37 @@ claims:
     (404 for a missing node, 400 for a missing field or flux); DELETE
     /graph/edges removes every edge with those endpoints and fields, and is
     a 404 "when the graph has none (it used to answer 200 and change
-    nothing)".
+    nothing)".  An edge request that is refused, or that fails at any
+    point, leaves the graph as it was, by the route's transaction.  The
+    refusals of field names in the conditions are the ones that exist,
+    stated for the server's audience (a trusted client on loopback, or a token-holder);
+    no wider claim is made about pathological names.
   sources:
     - src/maddening/api/server.py:2914 (add_edge)
     - src/maddening/api/server.py:2946 (remove_edge)
     - docs/release_notes/v0.4.0.md:4597 (Checkpoint paths name a file inside the root)
-  conditions: missing nodes, a missing source field, an edge that does not exist.
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+    - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
+  conditions: >-
+    missing nodes, a missing source field, an edge that does not exist. The
+    target field is not asked whether the target node declares it (a node
+    may read an input it does not declare, and GraphManager.validate passes
+    one): an undeclared target field is a 201 and the graph is reported,
+    saved and reloaded. A field name the config or an edge's key cannot hold
+    -- the text NaN, Infinity or -Infinity, a '#', one of U+0000 to U+001F
+    (tab, line feed and carriage return excepted), a surrogate, U+FFFE or
+    U+FFFF -- is a 400 and adds nothing; a line break in one is taken. A
+    failure injected at every point of adding an edge and of removing one.
   oracle: status codes and the graph's edges.
   tests:
     - tests/api/test_graph_endpoint_validation.py::test_add_edge_checks_nodes_and_fields
     - tests/api/test_runner_stop_and_stride.py::test_deleting_an_edge_that_does_not_exist_is_a_404
     - tests/api/test_api.py::TestGraphEndpoints::test_add_edge
     - tests/property/test_stateful_api.py::test_edge_from_a_boundary_flux_is_accepted_and_steps
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_an_edge_field_the_config_could_not_carry_is_a_400
+    - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_an_edge_to_a_field_the_target_does_not_declare_is_taken_and_the_graph_reloads
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_an_edge_to_a_target_field_named_as_a_non_finite_token_is_refused_or_saves
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   domains:
     loopback_bind: tests/api/test_graph_endpoint_validation.py::test_add_edge_checks_nodes_and_fields
@@ -2710,16 +2785,19 @@ claims:
     256 into uint8), a non-finite one, text, null or a boolean for a numeric
     field is a 400 naming the field, and nothing is written"; "Every field
     is required, coerced to the live leaf's dtype, and must match its
-    shape".
+    shape".  A write that is refused, or that fails at any point, leaves
+    the state as it was, by the route's transaction.
   sources:
     - src/maddening/api/README.md:126 (State)
     - src/maddening/api/server.py:3006 (set_node_state)
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
   conditions: >-
     a missing or extra field, a wrong shape, NaN, 1e39 into float32, the
     largest float32; LBMNode's uint8 wall mask with 0.5, 1.7, -0.25, 256,
     -1, 1e10, 2**64, text, a boolean, null, a list and the non-finite
     tokens, and 0, 1, 2, 255, 7.0; text, a boolean, null, an object and
-    10**400 for a float field.
+    10**400 for a float field; a failure injected at every point of a
+    write's body.
   oracle: 400 naming the field and the state unchanged; 200 for a valid write.
   tests:
     - tests/api/test_graph_endpoint_validation.py::test_put_state_validates_before_writing
@@ -2731,6 +2809,7 @@ claims:
     - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_refuses_a_non_finite_json_number
     - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_a_float_field_refuses_text_booleans_and_what_float_cannot_hold
     - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_the_state_rule_is_the_checkpoint_loads
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   domains:
     loopback_bind: tests/api/test_graph_endpoint_validation.py::test_put_state_validates_before_writing
@@ -3053,12 +3132,14 @@ claims:
   area: params
   claim: >-
     "Any non-finite value and any value the leaf's dtype cannot hold" is a
-    400, the non-finite one "before anything else", and nothing is written.
+    400, the non-finite one "before anything else", and nothing is
+    written: no key of the refused request, by the route's transaction.
   sources:
     - src/maddening/api/README.md:141 (Parameters)
     - src/maddening/api/server.py:3131 (set_node_params_locked)
     - docs/validation/known_anomalies.yaml (MADD-ANO-049)
-  conditions: NaN and +/-Infinity literals, a huge integer, in a live leaf and in a structural value; 1e39 into float32, one element of an array.
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+  conditions: NaN and +/-Infinity literals, a huge integer, in a live leaf and in a structural value; 1e39 into float32, one element of an array; a failure injected at every point of a write of live leaves and of a structural value with a live one.
   oracle: 400 and the params unchanged, no RuntimeWarning.
   tests:
     - tests/api/test_params_endpoint_validation.py::test_put_non_finite_is_rejected_and_not_written
@@ -3066,6 +3147,7 @@ claims:
     - tests/api/test_values_the_leaf_dtype_cannot_hold.py::test_a_parameter_write_of_an_overflowing_value_is_a_clean_400
     - tests/api/test_values_the_leaf_dtype_cannot_hold.py::test_an_array_parameter_with_one_overflowing_element_is_refused
     - tests/property/test_differential_rest_params.py::test_an_overflowing_value_is_refused_without_a_warning
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   domains:
     loopback_bind: tests/api/test_params_endpoint_validation.py::test_put_non_finite_is_rejected_and_not_written
@@ -3087,14 +3169,17 @@ claims:
 - id: REST-081
   area: params
   claim: >-
-    "Validate everything before mutating anything": a 400 on any key of a
-    request leaves every other key unwritten; an unknown key is a 400
+    A 400 on any key of a request leaves every key of it unwritten, by the
+    route's transaction (every key is also checked before any is written,
+    which keeps a refusal cheap and is no longer the guarantee); an
+    unknown key is a 400
     listing the available ones; a string, null, list or boolean for a
     numeric leaf is a 400.
   sources:
     - src/maddening/api/server.py:3162 (set_node_params_locked)
     - CHANGELOG.md:663 (REST API)
-  conditions: a bad key after good ones; unknown keys; wrong types.
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+  conditions: a bad key after good ones; unknown keys; wrong types; a failure injected at every point of a write's body.
   oracle: 400, and node.params and gm.params unchanged.
   tests:
     - tests/api/test_params_endpoint_validation.py::test_put_rejects_whole_request_when_a_later_key_is_invalid
@@ -3104,6 +3189,7 @@ claims:
     - tests/api/test_params_endpoint_validation.py::test_put_null_for_live_float_is_400
     - tests/api/test_graph_endpoint_validation.py::test_put_params_boolean_for_numeric_leaf_is_400
     - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_of_the_live_value_changes_nothing_and_is_a_200
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   domains:
     loopback_bind: tests/api/test_params_endpoint_validation.py::test_put_rejects_whole_request_when_a_later_key_is_invalid
@@ -3418,8 +3504,12 @@ claims:
     every cheap built-in node per push with valid, boundary, out-of-bounds,
     non-finite, oversized, wrong-type, unknown, initial-condition, structural
     and cross-parameter writes; costly nodes and generated graphs in the slow
-    lane. Not claimed for simultaneous requests, the runner running, an
-    in-flight /sim/run or a server shutting down.
+    lane; generated sequences of writes among saves, checkpoint loads, node
+    rebuilds and in-process gm.params writes, with a rod at its Fourier limit
+    (ten requests a sequence per push, a hundred in the slow lane); every
+    malformed value of every member of the request body. Not claimed for
+    simultaneous requests, the runner running, an in-flight /sim/run or a
+    server shutting down.
   oracle: bit-identity with a to_dict/from_dict reload plus checkpoint.
   tests:
     - tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
@@ -3428,6 +3518,10 @@ claims:
     - tests/property/test_differential_rest_params.py::test_a_rest_param_write_into_a_generated_graph_is_refused_whole_or_runs_as_its_reload
     - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_back_the_live_values_take_is_still_a_200_whose_save_reloads
     - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_single_key_written_back_after_a_load_is_asked_with_the_loaded_values
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_any_sequence_of_rest_writes_leaves_a_graph_that_runs_as_its_reload
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_value_of_every_field_is_refused_whole_or_served
   status: verified
   domains:
     loopback_bind: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
@@ -3438,12 +3532,16 @@ claims:
     runner_active: narrowed
     sim_run_active: narrowed
     large_payload: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
-    hostile_input: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
+    hostile_input:
+      - tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
+      - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_value_of_every_field_is_refused_whole_or_served
     shutdown: narrowed
     wrapper_nodes:
       - tests/property/test_differential_param_acceptance.py::test_a_wrapper_node_refuses_a_value_outside_its_bounds_with_nothing_changed
       - tests/property/test_differential_param_acceptance.py::test_a_wrapper_node_holds_a_write_and_a_restore_of_a_value_every_door_takes
-    checkpoint_restore: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
+    checkpoint_restore:
+      - tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
+      - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
     dry_run_cpu: n/a
     relabelled_records: n/a
     mixed_commits: n/a
@@ -3451,20 +3549,47 @@ claims:
 - id: REST-090
   area: params
   claim: >-
-    "The server never answers 5xx"; "a valid call succeeds and leaves the
-    server holding exactly what an in-process GraphManager driven with the
-    same operations holds"; "an invalid call is a 4xx with a message and
-    changes nothing"; "the graph the server reports is a faithful recipe".
+    "A request that is refused, or that fails unexpectedly, leaves the graph
+    exactly as it was": every route that can change the graph runs in one
+    transaction, and a refusal or a failure at any point of it puts back the
+    state, the parameters, the nodes and their own params, the edges, the
+    coupling groups, the external inputs, the compile bookkeeping and the
+    streams' clock.  "An unexpected failure answers 500 with a generic
+    detail" (REST-116).  For the server's audience (a trusted client on loopback, or a token-holder), no
+    request the tests generate is answered 5xx; "a valid call succeeds and
+    leaves the server holding exactly what an in-process GraphManager driven
+    with the same operations holds"; "the graph the server reports is a
+    faithful recipe".  Carve-outs, stated in the guide: POST /sim/run is one
+    transaction per slice (a params write is accepted between slices), so a
+    failure mid-run leaves the graph after the completed slices and reports
+    steps_run; and what is outside the graph is not put back -- files under
+    the checkpoint root, the runner's thread, surrogate jobs, frames already
+    sent, and anything under /cloud.
   sources:
     - tests/property/test_stateful_api.py:1 (module docstring, what the surface promises)
     - CHANGELOG.md:193 (Property-test coverage for the REST surface, stateful machines)
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+    - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
+    - src/maddening/api/server.py:2932 (_graph_transaction)
   conditions: >-
     generated sequences of graph, state, params, sim and checkpoint requests
     over a small scalar node vocabulary; short sequences per push, long ones
-    in the slow lane. Not claimed for simultaneous requests, the runner
+    in the slow lane; for "never answers 5xx" and "an invalid call changes
+    nothing", also generated sequences with a rod at its Fourier limit among
+    saves, loads and in-process gm.params writes, and every malformed value
+    of every path parameter, query parameter, body member and proxy header of
+    every documented route outside /surrogate, /ws and /cloud (read from the
+    OpenAPI document), with no request tolerated: a refusal that echoes the
+    text NaN, Infinity or -Infinity, or a surrogate, is the 4xx it was. For
+    "leaves the graph exactly as it was", a failure injected before and after every step of each write route's body that changes the graph, publishes to the streams or writes the reply,
+    in fixed requests per route and in the generated sequences, and the
+    routes' own refusals, the graph compared object for object. Not
+    claimed for a graph built in-process that holds a text parameter spelling
+    one of those tokens (GET /graph is to_dict's refusal, MADD-ANO-010), for
+    simultaneous requests, the runner
     running, an in-flight /sim/run, oversized requests, a server shutting down
     or wrapper nodes.
-  oracle: an in-process GraphManager driven with the same operations; byte-identity of the state across a refused call.
+  oracle: an in-process GraphManager driven with the same operations; byte-identity of the state across a refused call; every container the graph holds, object for object, across a refused or failed call.
   tests:
     - tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
     - tests/property/test_stateful_api.py::test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step
@@ -3473,8 +3598,30 @@ claims:
     - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_refuses_what_its_dtype_cannot_hold_exactly
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_host_port_of_a_latin1_superscript_is_refused_not_a_500
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_any_sequence_of_rest_writes_leaves_a_graph_that_runs_as_its_reload
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_documented_route_has_a_request_generator
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_value_of_every_field_is_refused_whole_or_served
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_header_is_refused_whole_or_served
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_generated_request_is_refused_whole_or_served
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_reply_is_written_for_what_the_default_encoder_refuses
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_every_route_and_both_handlers_reply_through_the_one_encoder
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_no_reply_of_the_server_module_is_built_with_the_default_encoder
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_refusal_of_the_routes_own_is_answered_as_it_was_and_changes_nothing
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_refused_step_of_an_edited_graph_leaves_it_waiting_for_its_compile
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_profile_that_succeeds_leaves_the_graph_exactly_as_it_was
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_every_route_that_takes_the_graph_to_write_is_in_the_list_or_named_here
+    - tests/core/test_graph_transaction_puts_everything_back.py::test_an_attribute_rebound_or_changed_in_place_is_put_back
   status: verified
-  notes: The promise is stated in the test module, not in a user document; the row is here so the next audit attacks it with the rest.
+  notes: >-
+    The promise is stated in the REST guide since the routes became
+    transactional; it was each route's own (validate first, or its own
+    undo) and stated in the test module only.  The audience is the
+    guide's threat model.  The failures are injected in-process
+    on the default bind; in the other tested domains the cells cite a
+    route's real refusals, which the same transaction undoes.
   domains:
     loopback_bind: tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
     non_loopback_bind: tests/property/test_rest_properties_on_a_non_loopback_bind.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step_on_a_non_loopback_bind
@@ -3484,10 +3631,16 @@ claims:
     runner_active: narrowed
     sim_run_active: narrowed
     large_payload: narrowed
-    hostile_input: tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
+    hostile_input:
+      - tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
+      - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_value_of_every_field_is_refused_whole_or_served
+      - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_malformed_header_is_refused_whole_or_served
+      - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_generated_request_is_refused_whole_or_served
     shutdown: narrowed
     wrapper_nodes: narrowed
-    checkpoint_restore: tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
+    checkpoint_restore:
+      - tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
+      - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
     dry_run_cpu: n/a
     relabelled_records: n/a
     mixed_commits: n/a
@@ -3586,12 +3739,15 @@ claims:
     each asked of what the load changes only, and finiteness and the bounds
     only of a value that is neither the leaf's now nor the node's own, so a
     graph built outside its bounds reloads its own checkpoint"; a missing
-    file is a 404.
+    file is a 404.  A load that is refused, or that fails at any point,
+    leaves the graph as it was -- an edited graph still waiting for its
+    compile -- by the route's transaction.
   sources:
     - src/maddening/api/README.md:148 (Checkpoints)
     - src/maddening/api/server.py:3505 (checkpoint_load)
     - docs/user_guide/parameters.md:208 (Writing parameters over REST)
-  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, the same verdict as PUT /graph/params; a missing path.
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, the same verdict as PUT /graph/params; a missing path; a failure injected at every point of a load, into a compiled graph and into an edited one.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
@@ -3617,6 +3773,8 @@ claims:
     - tests/property/test_differential_param_acceptance.py::test_a_restore_door_takes_back_the_value_the_graph_holds_whatever_its_bounds
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint
     - tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_refusal_of_the_routes_own_is_answered_as_it_was_and_changes_nothing
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-163): the load checked shapes,
@@ -3884,9 +4042,10 @@ claims:
 - id: REST-100
   area: sim
   claim: >-
-    POST /sim/profile: "The live simulation is left as it was: its state and
-    params are restored after the profile, and the streams neither show nor
-    count the profiler's steps"; "the next step is bit-identical to an
+    POST /sim/profile: "The live simulation is left as it was: the graph is
+    put back after the profile, and the streams neither show nor count the
+    profiler's steps" (the route rolls its transaction back, so an edited
+    graph is still waiting for its compile); "the next step is bit-identical to an
     unprofiled graph's, a coupling group's warm start included".
   sources:
     - src/maddening/api/server.py:4226 (sim_profile)
@@ -3895,7 +4054,8 @@ claims:
     - docs/validation/known_anomalies.yaml (MADD-ANO-132)
   conditions: >-
     a single node after 640 steps, a params write before the profile, and a
-    coupling group with a predictor's history in _meta.  What the streams
+    coupling group with a predictor's history in _meta; a stepped graph and
+    an edited one compared object for object.  What the streams
     send is out of scope; the relay's step count and clock are read
     directly.
   oracle: the state, the params leaves and _meta before and after; the next step against a never-profiled twin, bit for bit.
@@ -3904,6 +4064,7 @@ claims:
     - tests/api/test_profile_leaves_the_live_simulation.py::test_the_params_a_profile_runs_with_are_put_back
     - tests/api/test_profile_leaves_the_live_simulation.py::test_the_next_step_after_a_profile_is_the_unprofiled_graphs_next_step
     - tests/api/test_profile_leaves_the_live_simulation.py::test_a_coupling_groups_state_and_warm_start_survive_a_profile
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_profile_that_succeeds_leaves_the_graph_exactly_as_it_was
   status: verified
   domains:
     loopback_bind: tests/api/test_profile_leaves_the_live_simulation.py::test_a_profile_leaves_the_state_and_the_streams_clock_as_they_were
@@ -5545,21 +5706,27 @@ claims:
     runs out answers the same 503 interrupted body, steps_run saying how many
     steps were taken and stored: retry the whole run only when it is 0 (the
     reply then carries Retry-After); otherwise the detail says how many
-    remain."
+    remain."  "A run that fails unexpectedly answers 500 with steps_run":
+    the slice that failed is put back, and the steps of the slices before
+    it stay.
   sources:
     - src/maddening/api/server.py:4030 (sim_run)
     - src/maddening/api/README.md:161 (Simulation Control)
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
   conditions: >-
     the timeout patched to 0.25 s; the test thread taking the lock between two
     slices of a 100 000-step run, between a 1-step run's slice and its final
     read, and between an n_steps=0 run's first access and its compile; the
-    graph free (the control). Not claimed for a server shutting down.
+    graph free (the control); a failure injected at every point of a
+    run's slices and of its final read. Not claimed for a server shutting down.
   oracle: 503 with status interrupted, steps_run equal to the steps the graph took, the remaining count in the detail, Retry-After only at 0; answered at about the timeout.
   tests:
     - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_run_that_cannot_have_the_graph_between_slices_says_how_many_steps_it_took
     - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_the_final_state_read_is_bounded_and_says_every_step_was_taken
     - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing
     - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_run_with_the_graph_free_answers_its_state
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_run_that_fails_unexpectedly_says_how_many_steps_it_took
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-165): a slice's timeout answered
@@ -5704,8 +5871,8 @@ claims:
     refuse the other reserved names; a lookalike (meta, __meta, _Meta,
     _meta_, params) is taken.
   sources:
-    - src/maddening/core/graph_manager.py:6601 (GraphManager.add_node)
-    - src/maddening/core/graph_manager.py:2619 (_RESERVED_STATE_KEYS)
+    - src/maddening/core/graph_manager.py::GraphManager.add_node
+    - src/maddening/core/_graph_specs.py::_RESERVED_STATE_KEYS
   conditions: >-
     each reserved name over REST and in-process; seven lookalikes; the graph
     compiles, steps and saves after a refusal.
@@ -5744,9 +5911,10 @@ claims:
   sources:
     - src/maddening/api/server.py:599 (AddNodeRequest)
     - src/maddening/api/server.py:3211 (_request_validation_error)
-    - src/maddening/core/graph_manager.py:6582 (GraphManager.add_node)
+    - src/maddening/core/graph_manager.py::GraphManager.add_node
   conditions: >-
-    NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, and
+    NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, the
+    same three as JSON text ("NaN") and a surrogate in the refused value, and
     NaN, the infinities, zero and a negative timestep in-process; 0.005
     taken.
   oracle: >-
@@ -5756,6 +5924,8 @@ claims:
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500
+    - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_422_still_writes_a_refused_number_as_its_token
   status: verified
   domains:
     loopback_bind: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
@@ -5780,10 +5950,15 @@ claims:
     POST /checkpoint/load and GraphManager.load_state check every archive
     member's name, shape and dtype from its .npy header before reading any
     member's data, and never read a member the load does not restore: what a
-    load reads is bounded by the live graph's own sizes.
+    load reads is bounded by the live graph's own sizes.  Stated for
+    the server's audience (a trusted client on loopback, or a token-holder):
+    it bounds what a load reads from the members it checks, and is not a
+    claim that an archive a token-holder crafts cannot cost the server
+    memory or time in another way.
   sources:
     - src/maddening/core/simulation/checkpoint.py:402 (_CheckpointArchive)
     - src/maddening/core/simulation/checkpoint.py:196 (_load_from_archive)
+    - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
   conditions: >-
     an extra node member declaring 1 GiB that holds no data; a state field
     and a params leaf declaring another shape; members a load ignores (an
@@ -5922,6 +6097,57 @@ claims:
     hostile_input: n/a
     shutdown: n/a
     wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-116
+  area: errors
+  claim: >-
+    "An unexpected failure answers 500 with a generic detail": "The request
+    failed unexpectedly (the server's log says how)." and, from a route
+    that can change the graph, "The graph was put back exactly as it was
+    before the request."  The reply is JSON, names no path, value or class
+    of the server's and does not quote the error, and the failure is logged
+    with its traceback.
+  sources:
+    - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
+    - src/maddening/api/server.py:2503 (_FAILED_UNEXPECTEDLY, _UNEXPECTED_FAILURE_DETAIL)
+    - src/maddening/api/server.py:2932 (_graph_transaction)
+  conditions: >-
+    an exception raised inside a route that can change the graph (POST
+    /graph/nodes, after the node joined the graph) and inside a read (GET
+    /graph/params); and a failure injected at every point of every write
+    route's body, whose 500 must carry the generic detail and no word of
+    the failure. Not claimed for a non-loopback bind, a request the token
+    is demanded of, simultaneous requests, the runner running, an in-flight
+    /sim/run, a server shutting down or wrapper nodes.
+  oracle: >-
+    the reply's body, exactly; the log record's exception; the graph object
+    for object.
+  tests:
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_outside_a_write_route_is_the_same_generic_500
+    - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
+  status: verified
+  notes: >-
+    The experimental POST /surrogate/deactivate answers this 500 too; it
+    used to quote the graph's error after its own undo
+    (tests/api/test_surrogate_revert.py).  The surrogate routes are out of
+    this inventory's scope.
+  domains:
+    loopback_bind: tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged
+    non_loopback_bind: narrowed
+    token_enforced: narrowed
+    no_token: tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged
+    concurrent: narrowed
+    runner_active: narrowed
+    sim_run_active: narrowed
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: narrowed
+    wrapper_nodes: narrowed
     checkpoint_restore: n/a
     dry_run_cpu: n/a
     relabelled_records: n/a

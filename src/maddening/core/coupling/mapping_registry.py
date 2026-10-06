@@ -119,19 +119,29 @@ _BUILTINS_LOADED = False
 
 
 def _ensure_builtins() -> None:
-    """Import the module that registers the built-in kinds.
+    """Import the modules that register the kinds this library ships.
 
     The built-in factories live in :mod:`maddening.core.coupling.mapping`,
     which registers them as it is imported.  Everything that reads the
     table asks for that import first, so a spec can be validated by a
     program that imported only ``mapping_spec``, and a built-in name is
-    always taken before :func:`register_mapping` can be offered it.  This
-    is the one import the registry performs, and its target is fixed.
+    always taken before :func:`register_mapping` can be offered it.
+
+    The sparse kinds of :mod:`maddening.core.coupling.sparse_mapping` are
+    loaded with them, for the same two reasons: a config that names one
+    loads in a program that imported nothing but the graph, and their
+    names are taken first.  They are registered through the public
+    :func:`register_mapping`, not as built-ins, so everything a registered
+    kind is held to holds for them.
+
+    These are the only imports the registry performs, and their targets
+    are fixed: nothing a file contains chooses one.
     """
     global _BUILTINS_LOADED
     if _BUILTINS_LOADED:
         return
     import maddening.core.coupling.mapping  # noqa: F401, PLC0415
+    import maddening.core.coupling.sparse_mapping  # noqa: F401, PLC0415
 
     _BUILTINS_LOADED = True
 
@@ -262,10 +272,11 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
 
     The rebuild calls ``factory(**arrays, **hyperparameters, **references)``.
     A declared name the factory does not take would only surface there, as
-    a ``TypeError`` while loading someone's config; a required argument
-    nothing declares would too, and so would a required positional-only
-    one, which no keyword reaches.  A callable whose signature cannot be
-    read is taken on trust.
+    a ``TypeError`` while loading someone's config -- one it does not have,
+    and one it has where no keyword reaches it (an optional positional-only
+    parameter, the name of ``*args``); a required argument nothing declares
+    would too, and so would a required positional-only one.  A callable
+    whose signature cannot be read is taken on trust.
 
     Both questions are asked of ``maddening.core.node``, the one module
     that reads a signature.  Whether the factory takes a keyword is the
@@ -276,6 +287,16 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
     required = _signature_required_arguments(factory)
     if required is None:
         return
+    # Before the keyword question: a required positional-only argument is
+    # also a name no keyword reaches, and this is the refusal that says
+    # what is wrong with it.
+    positional = sorted(name for name, by_keyword in required.items() if not by_keyword)
+    if positional:
+        raise ValueError(
+            f"mapping kind {kind!r}: {_qualified(factory)} requires positional-only "
+            f"argument(s) {positional}, which no serialised mapping could supply: "
+            f"the rebuild calls factory(**arrays, **hyperparameters, **references)"
+        )
     absent = sorted(name for name in used if not _signature_takes_keyword(factory, name))
     if absent:
         raise ValueError(
@@ -283,13 +304,6 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
             f"argument(s) {absent}, which the registration declares "
             f"({', '.join(f'{n}: {used[n]}' for n in absent)}); the rebuild "
             f"calls factory(**arrays, **hyperparameters, **references)"
-        )
-    positional = sorted(name for name, by_keyword in required.items() if not by_keyword)
-    if positional:
-        raise ValueError(
-            f"mapping kind {kind!r}: {_qualified(factory)} requires positional-only "
-            f"argument(s) {positional}, which no serialised mapping could supply: "
-            f"the rebuild calls factory(**arrays, **hyperparameters, **references)"
         )
     undeclared = sorted(name for name in required if name not in used)
     if undeclared:

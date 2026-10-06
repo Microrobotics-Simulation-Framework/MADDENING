@@ -34,7 +34,6 @@ import socket
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import warnings
 import jax.numpy as jnp
 
 from maddening.core.graph_manager import GraphManager
@@ -72,9 +71,7 @@ def build_demo_graph() -> GraphManager:
         transform=lambda v: jnp.clip(jnp.abs(v) * 10.0, 0.0, 100.0),
     )
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
 
     return gm
 

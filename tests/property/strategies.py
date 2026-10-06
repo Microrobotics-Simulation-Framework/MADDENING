@@ -26,12 +26,15 @@ transform, additive edges, edge units, live parameter overrides (a
 "calibrated" graph), :class:`ParamSpec` overrides including trainable
 mapping weights, external inputs, interface mappings built by the real
 factories (RBF, nearest neighbour, 1-D projection) from either a
-node-field point reference or an inlined point set -- and by a factory
+node-field point reference or an inlined point set -- by a factory
 *registered* the way another library registers one
 (``tests/registered_mapping_kinds.py``: a mapping class of its own with two
 weights), so every property built on these recipes holds a registered kind
-to what it holds the built-in ones to -- and **coupling groups** over
-random valid combinations of their settings.
+to what it holds the built-in ones to; and by the library's *sparse*
+factories (nearest neighbour in both modes and both conservative forms,
+and the 1-D projection), whose weights are one number per slot of an index
+the parameter tree does not hold -- and **coupling groups** over random
+valid combinations of their settings.
 
 Coupling groups
 ---------------
@@ -111,6 +114,10 @@ from maddening.core.coupling.mapping import (
     projection_1d_mapping,
     rbf_mapping,
 )
+from maddening.core.coupling.sparse_mapping import (
+    sparse_nearest_neighbor_mapping,
+    sparse_projection_1d_mapping,
+)
 from maddening.core.graph_manager import GraphManager
 from maddening.core.params import ParamSpec
 from maddening.core.transforms import scale
@@ -122,6 +129,11 @@ from maddening.nodes.rigid_body_2d import RigidBody2DNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.table import TableNode
 from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS
+
+#: The library's sparse kinds a recipe may draw: the two built from point
+#: sets or boundaries (``sparse_matrix``, like the dense ``matrix``, needs
+#: its arrays saved as assets, which a drawn graph has nowhere to put).
+SPARSE_MAPPING_KINDS = ("sparse_nearest_neighbor", "sparse_projection_1d")
 
 # ``scale(f)`` registers ``"scale_<f>"`` on first call and returns the
 # cached callable afterwards, so importing this module makes the two
@@ -403,12 +415,17 @@ class MappingRecipe:
     #: The registered kind's integer hyper-parameter (how many nearest
     #: sources weigh in; ``0`` is all of them).  The built-in kinds take none.
     neighbours: int = 0
+    #: How the sparse nearest neighbour applies its conservative operator:
+    #: a padded gather or a scatter-add.
+    transpose: str = "gather"
 
     @property
     def weights(self) -> tuple[str, ...]:
         """The names of the weights this mapping puts into
-        ``params["mappings"]``: ``H`` for the built-in dense matrix, a
-        registered kind's own otherwise."""
+        ``params["mappings"]``: ``H`` for the built-in dense matrix, ``W``
+        for a sparse kind, a registered kind's own otherwise."""
+        if self.kind in SPARSE_MAPPING_KINDS:
+            return ("W",)
         return KINDS[self.kind].weights if self.kind in KINDS else ("H",)
 
     @staticmethod
@@ -446,6 +463,16 @@ class MappingRecipe:
             return KINDS[INVERSE_DISTANCE].build(
                 src, tgt, power=self.epsilon, normalise=self.polynomial, mode=self.mode,
                 neighbours=self.neighbours, source_ref=src_ref, target_ref=tgt_ref)
+        if self.kind == "sparse_nearest_neighbor":
+            return sparse_nearest_neighbor_mapping(
+                src, tgt, mode=self.mode, transpose=self.transpose,
+                source_ref=src_ref, target_ref=tgt_ref)
+        if self.kind == "sparse_projection_1d":
+            # Cell boundaries, as for the dense projection.
+            return sparse_projection_1d_mapping(
+                np.linspace(0.0, 1.0, self.n_source + 1, dtype=np.float64),
+                np.linspace(0.0, 1.0, self.n_target + 1, dtype=np.float64),
+            )
         raise AssertionError(self.kind)
 
 
@@ -701,13 +728,14 @@ def _mapping(draw, source: NodeRecipe, source_field: str,
     n_source = source.outputs[source_field].shape[0]
     n_target = target.inputs[target_field].shape[0]
     kind = draw(st.sampled_from(["rbf", "nearest_neighbor", "projection_1d",
-                                 INVERSE_DISTANCE]))
-    if kind == "projection_1d":
+                                 INVERSE_DISTANCE, *SPARSE_MAPPING_KINDS]))
+    if kind in ("projection_1d", "sparse_projection_1d"):
         # Built from cell boundaries, which no node publishes; always
         # inlined, and always conservative.
-        return MappingRecipe("projection_1d", n_source, n_target)
+        return MappingRecipe(kind, n_source, n_target)
     src_ref = _grid_ref(source, source_field)
     tgt_ref = _grid_ref(target, target_field)
+    mode = draw(st.sampled_from(["consistent", "conservative"]))
     return MappingRecipe(
         kind,
         n_source,
@@ -717,8 +745,10 @@ def _mapping(draw, source: NodeRecipe, source_field: str,
         kernel=draw(st.sampled_from(["gaussian", "multiquadric"])),
         epsilon=draw(st.sampled_from([1.0, 2.0, 4.0])),
         polynomial=draw(st.booleans()),
-        mode=draw(st.sampled_from(["consistent", "conservative"])),
+        mode=mode,
         neighbours=draw(st.sampled_from([0, 1, 3])) if kind == INVERSE_DISTANCE else 0,
+        transpose=draw(st.sampled_from(["gather", "scatter"]))
+        if kind == "sparse_nearest_neighbor" and mode == "conservative" else "gather",
     )
 
 

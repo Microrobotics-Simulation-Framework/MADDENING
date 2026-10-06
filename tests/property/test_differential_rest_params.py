@@ -290,10 +290,11 @@ def test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset()
 
 
 #: The mapping kinds the mapped-rod oracles run under: the built-in RBF,
-#: and two kinds registered the way another library registers one
+#: two kinds registered the way another library registers one
 #: (``tests/registered_mapping_kinds.py``): a mapping class of its own with
-#: two weights, and one with no weights at all.
-MAPPED_ROD_KINDS = ("rbf", "inverse_distance", "selection")
+#: two weights, and one with no weights at all; and the library's sparse
+#: nearest neighbour, whose index was built from the referenced points.
+MAPPED_ROD_KINDS = ("rbf", "inverse_distance", "selection", "sparse_nearest_neighbor")
 
 
 def rods_mapped_by_grid(kind: str = "rbf") -> GraphManager:
@@ -310,7 +311,7 @@ def rods_mapped_by_grid(kind: str = "rbf") -> GraphManager:
     """
     from maddening.core.coupling.mapping import rbf_mapping
     from maddening.nodes import HeatNode
-    from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+    from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 
     make = rbf_mapping if kind == "rbf" else REGISTERED_KINDS[kind].build
     gm = GraphManager()

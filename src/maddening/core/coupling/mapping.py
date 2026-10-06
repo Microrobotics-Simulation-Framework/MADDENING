@@ -346,19 +346,26 @@ def rbf_matrix(
     float64 under ``jax_enable_x64``.  Point coordinates are therefore
     static; a mapping that must follow a moving interface is the
     matrix-free ``OnTheFlyMapping`` planned for 0.5.0.
+
+    Both point sets must be finite ``(n,)`` or ``(n, d)`` arrays of the
+    same ``d``, and ``source_points`` must hold at least one point;
+    anything else is a ``ValueError`` naming the argument and the first
+    offending point (a NaN coordinate used to give a matrix of NaN, and
+    an infinite target a row of zeros or of infinities, without a word).
+    Coincident source points are accepted: the ridge shares the weight
+    between them, and with ``ridge=0`` the solve raises
+    ``numpy.linalg.LinAlgError`` (a ``ValueError``).
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if kernel not in _KERNELS:
         raise ValueError(f"Unknown kernel {kernel!r}; choose from {_KERNELS}")
     epsilon = _finite_real("epsilon", epsilon)
     ridge = _finite_real("ridge", ridge)
     dtype = _out_dtype(source_points, target_points)
-    src = _as_points(source_points)
-    tgt = _as_points(target_points)
-    if src.shape[1] != tgt.shape[1]:
-        raise ValueError(
-            f"source and target points must share a dimension, got "
-            f"{src.shape[1]} and {tgt.shape[1]}"
-        )
+    src = _checks.checked_points("source_points", source_points)
+    tgt = _checks.checked_points("target_points", target_points, allow_empty=True)
+    _checks.check_same_dimension(src, tgt)
     n, d = src.shape
     phi_ss = _kernel(_pairwise_r(src, src), epsilon, kernel)
     phi_ts = _kernel(_pairwise_r(tgt, src), epsilon, kernel)
@@ -414,11 +421,27 @@ def rbf_mapping(
     :mod:`~maddening.core.coupling.mapping_spec`); without them a set of
     at most ``INLINE_POINT_LIMIT`` points is inlined into the spec and a
     larger one leaves the mapping unserialisable.
+
+    The point sets are checked as in :func:`rbf_matrix`, under the names
+    given here: the set the interpolant is built on (``source_points`` in
+    consistent mode, ``target_points`` in conservative mode) must hold at
+    least one point.
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
     epsilon = _finite_real("epsilon", epsilon)
     ridge = _finite_real("ridge", ridge)
+    # Checked here as well as in ``rbf_matrix`` so that the refusal names
+    # this function's argument: conservative mode hands the two sets to
+    # ``rbf_matrix`` the other way round.
+    _checks.check_same_dimension(
+        _checks.checked_points("source_points", source_points,
+                               allow_empty=mode != "consistent"),
+        _checks.checked_points("target_points", target_points,
+                               allow_empty=mode == "consistent"),
+    )
     # Annotated: the literal mixes `str` and `float`, so without this the
     # `**kw` expansion offers `str | float` to every keyword parameter.
     kw: dict[str, Any] = dict(kernel=kernel, epsilon=epsilon,
@@ -468,9 +491,26 @@ def nearest_neighbor_mapping(
     source value is *added* to the target point nearest to it, so the
     total is preserved exactly.  ``source_ref`` / ``target_ref`` as in
     :func:`rbf_mapping`.
+
+    Both point sets must be finite ``(n,)`` or ``(n, d)`` arrays of the
+    same ``d``, and the set the nearest point is searched in
+    (``source_points`` in consistent mode, ``target_points`` in
+    conservative mode) must hold at least one point; anything else is a
+    ``ValueError`` naming the argument and the first offending point.  A
+    NaN coordinate used to be *selected*: ``argmin`` returns a NaN
+    distance, so every target read the one source that had no position.
+    Among equidistant points the lowest index is taken.
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
+    _checks.check_same_dimension(
+        _checks.checked_points("source_points", source_points,
+                               allow_empty=mode != "consistent"),
+        _checks.checked_points("target_points", target_points,
+                               allow_empty=mode == "consistent"),
+    )
     if mode == "consistent":
         H = _nn_matrix(source_points, target_points)
     else:
@@ -497,9 +537,31 @@ def projection_1d_mapping(
     ``P[i, j] = |target_i ∩ source_j| / |target_i|``.  ``source_ref`` /
     ``target_ref`` reference the boundary arrays for serialisation, as
     in :func:`rbf_mapping`.
+
+    Each boundary array must be one-dimensional, hold at least two
+    values, be finite and be **strictly increasing**; anything else is a
+    ``ValueError`` naming the argument and the first offending index.
+    The arrays are not sorted or reversed for you, because the field
+    keeps its cell order.  (The overlap formula assumes increasing
+    boundaries: a descending array used to give a matrix of zeros and a
+    non-monotone one rows that sum to more than one, without a word.)
+
+    The two grids need not cover the same interval.  Outside the other
+    grid a cell is treated as empty, so:
+
+    * the integral is preserved, ``sum_i |target_i| (P f)_i = sum_j
+      |source_j| f_j``, when the target grid covers the source grid; a
+      part of the source outside the target is dropped;
+    * a constant is reproduced (a row sums to one) on every target cell
+      the source grid covers; a target cell partly outside it averages
+      in zeros, and one wholly outside it is zero.  Two grids that share
+      no interval therefore give a matrix of zeros: check that they are
+      in the same units and frame.
     """
-    sb = np.asarray(source_boundaries, dtype=np.float64)
-    tb = np.asarray(target_boundaries, dtype=np.float64)
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
+    sb = _checks.checked_boundaries("source_boundaries", source_boundaries)
+    tb = _checks.checked_boundaries("target_boundaries", target_boundaries)
     n_src, n_tgt = sb.size - 1, tb.size - 1
     P = np.zeros((n_tgt, n_src), np.float64)
     for i in range(n_tgt):
@@ -535,9 +597,18 @@ def matrix_mapping(
     own kind stays ``"matrix"`` so the rebuild finds this factory.  The
     asset reference records the content hash of ``H``, so the file read
     back must hold exactly this matrix.
+
+    ``H`` must be finite: a NaN or an infinity is a ``ValueError`` naming
+    its index (``PUT /graph/params`` and ``POST /checkpoint/load`` refuse
+    a non-finite mapping weight too).  A traced ``H`` has no values to
+    check and is taken as given.
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if not isinstance(kind, str) or not kind:
         raise ValueError(f"matrix_mapping: kind must be a non-empty string label, got {kind!r}")
+    if not _checks.is_traced(H):
+        _checks.check_finite("H", H)
     hyper = {"mode": mode} if kind == "matrix" else {"mode": mode, "label": kind}
     ref = None if asset is None else normalise_point_reference(asset, name="H")
     if ref is not None and "asset" not in ref:

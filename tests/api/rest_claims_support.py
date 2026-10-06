@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
+import gc
 import hashlib
 import json
 import math
@@ -38,6 +40,7 @@ import socket
 import threading
 import time
 import warnings
+import weakref
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -100,6 +103,27 @@ def _sharded(node):
     return ShardedStencilNode(node, create_device_mesh(shape=(1,)), {"devices": 0})
 
 
+#: Held while a graph is built here and while REST-006 builds its second
+#: server.  Both run under ``warnings.catch_warnings()`` -- ``build_graph``
+#: compiles inside one, FastAPI builds an app's routes inside others --
+#: and those blocks save and put back the process's warnings filters, so
+#: they are not thread-safe.  The copies of a check the concurrent domain
+#: runs at once built them together, put back each other's filters, and a
+#: warning one copy had silenced was raised in another: an error under this
+#: suite's filter.  (The server's own blocks run under its graph lock, one
+#: at a time.)
+_BUILD_LOCK = threading.RLock()
+
+
+def _one_at_a_time(fn):
+    @functools.wraps(fn)
+    def locked(*args, **kwargs):
+        with _BUILD_LOCK:
+            return fn(*args, **kwargs)
+    return locked
+
+
+@_one_at_a_time
 def build_graph(*, wrapped: bool = False) -> GraphManager:
     """Every node a check writes to, compiled:
 
@@ -155,6 +179,9 @@ class Check:
     patch: dict
     #: (row, domain) -> reason: a cell that is a strict xfail
     xfail: dict
+    #: the check holds a request to a wall-clock bound: it is served with
+    #: the garbage collector off (:func:`collector_off`)
+    timed: bool = False
 
 
 CHECKS: dict[str, Check] = {}
@@ -163,9 +190,11 @@ ALL = frozenset(IN_PROCESS + ("concurrent",))
 
 
 def check(*rows: str, bind: str = "any", skip=(), only=None, server_kw=None, patch=None,
-          xfail=None):
+          xfail=None, timed: bool = False):
     """Register *fn* as the check of *rows*, in every domain but *skip* (or
-    only those in *only*); a check about one bind leaves out the other."""
+    only those in *only*); a check about one bind leaves out the other.
+    *timed*: the check times a request, and :func:`run_check` serves it with
+    the garbage collector off."""
     def register(fn):
         contexts = set(only) if only is not None else set(ALL)
         contexts -= set(skip)
@@ -174,7 +203,7 @@ def check(*rows: str, bind: str = "any", skip=(), only=None, server_kw=None, pat
         if bind == "public":
             contexts.discard("loopback")
         chk = Check(fn, rows, bind, frozenset(contexts), dict(server_kw or {}),
-                    dict(patch or {}), dict(xfail or {}))
+                    dict(patch or {}), dict(xfail or {}), timed)
         for row in rows:
             assert row not in CHECKS, f"{row} has two checks"
             CHECKS[row] = chk
@@ -304,6 +333,35 @@ def wait_for(predicate, timeout: float = 20.0) -> bool:
     return False
 
 
+@contextlib.contextmanager
+def collector_off():
+    """Python's cyclic garbage collector switched off for the block.
+
+    A test here that times a request shares its process with the server it
+    asks, and a full (oldest-generation) collection stops every thread of
+    that process -- the client, the server's event loop and its workers --
+    for as long as it takes: 0.1 to 0.4 s in these tests on an idle core,
+    longer on a busy one.  The collector runs once enough objects have been
+    allocated, so a test that has just built and sent a hundred requests is
+    where one falls, and one that falls inside a timed request is counted
+    as the route's own time.  The two misses reproduced here (jax 0.10.2,
+    one busy core: a stop at 0.54 s and at 0.60 s against 0.5 s) each had
+    a collection of 0.46 s and of 0.42 s inside the request; CI's three,
+    0.70 to 0.76 s, are read the same way.  What the routes are asked for
+    -- not to wait for a worker thread, or for the graph -- has nothing to
+    do with it.
+
+    A collection another thread has already begun is not stopped, so a
+    test enters this before it starts its server or any thread."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
 def stop_runner(server: SimulationServer) -> None:
     with server._runner_lock:
         server._stop_runner()
@@ -405,7 +463,9 @@ def run_check(row: str, domain: str, root: Path) -> None:
     """Run *row*'s check in an in-process *domain*."""
     chk = CHECKS[row]
     assert domain in chk.contexts, (row, domain)
-    with served(domain, chk, root) as ctx:
+    # Off from before the server is built, for a check that times a request.
+    quiet = collector_off() if chk.timed else contextlib.nullcontext()
+    with quiet, served(domain, chk, root) as ctx:
         if domain == "shutdown":
             mid_request_sigterm(chk, ctx)
         else:
@@ -671,6 +731,22 @@ def _a_routable_peer_is_challenged_on_a_loopback_bind(ctx):
     assert ctx.make_client(headers={}, peer=LOOPBACK_PEER).get("/graph").status_code == 200
 
 
+_LOOPBACK_TWINS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _loopback_twin(ctx):
+    """The app of a second server built as *ctx*'s is but told it is bound
+    to 127.0.0.1: built once per served server, under :data:`_BUILD_LOCK`,
+    and shared by the copies of a check running at once."""
+    with _BUILD_LOCK:
+        app = _LOOPBACK_TWINS.get(ctx.server)
+        if app is None:
+            loop = SimulationServer(REGISTRY, graph_manager=build_graph(),
+                                    bind_host="127.0.0.1", checkpoint_root=str(ctx.root))
+            app = _LOOPBACK_TWINS[ctx.server] = loop.create_app()
+        return app
+
+
 @check("REST-006", bind="public", skip=("restored", "wrapper", "shutdown"))
 def _the_401_says_why_and_where_the_token_is(ctx):
     for headers in ({}, {"Authorization": "Bearer"}, {"Authorization": "Token x"}):
@@ -679,9 +755,7 @@ def _the_401_says_why_and_where_the_token_is(ctx):
     # The backstop names the misconfiguration (a routable peer of a
     # server bound, as far as it was told, to loopback) -- asked of a second
     # server built the same way but told it is bound to 127.0.0.1.
-    loop = SimulationServer(REGISTRY, graph_manager=build_graph(), bind_host="127.0.0.1",
-                            checkpoint_root=str(ctx.root))
-    resp = TestClient(loop.create_app(), client=REMOTE_PEER,
+    resp = TestClient(_loopback_twin(ctx), client=REMOTE_PEER,
                       raise_server_exceptions=False).get("/graph")
     refused(resp, 401)
     assert "bind_host" in resp.json()["detail"] or "MADDENING_HOST" in resp.json()["detail"]
@@ -1184,11 +1258,14 @@ def _a_runner_route_answers_within_one_timeout_of_its_arrival(ctx):
     stop_runner(ctx.server)
 
 
-@check("REST-105", only=("public", "sim_run"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
+@check("REST-105", only=("public", "sim_run"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25},
+       timed=True)
 def _the_stride_is_answered_at_once_whatever_the_runner_routes_wait_for(ctx):
     """PUT /sim/stride answers at once and applies its value: behind a long
     holder of the graph with a start and a reset waiting there, and beside
-    an in-flight /sim/run."""
+    an in-flight /sim/run.  Its bound leaves half a second for the request
+    itself, which a full garbage collection inside it can take: the check
+    is served with the collector off (``timed``, :func:`collector_off`)."""
     if ctx.domain == "sim_run":
         elapsed, status = _timed(ctx, "PUT", "/sim/stride", params={"steps_per_frame": 2})
     else:
@@ -1887,7 +1964,12 @@ def _a_file_that_is_not_an_archive_is_a_400_naming_no_internals(ctx):
 
 @check("REST-101", "REST-102")
 def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
-    name = f"keep{ctx.index}.npz"
+    # Copies running at once save in a directory each.  A save writes its
+    # temporary files beside its target, so another copy's first save, in
+    # flight, had its ``.partial`` file beside this copy's -- and the scan
+    # below saw it.  The scan covers every directory but the other copies'.
+    others = [ctx.root / f"copy{j}" for j in range(ctx.copies) if j != ctx.index]
+    name = (f"copy{ctx.index}/" if ctx.copies > 1 else "") + f"keep{ctx.index}.npz"
     assert ctx.client.post("/checkpoint/save", params={"path": name}).status_code == 200
     digest = hashlib.sha256((ctx.root / name).read_bytes()).hexdigest()
     manifest = ctx.root / f"{name}.manifest.json"
@@ -1898,7 +1980,9 @@ def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
         refused(resp, 400, "nothing was written")
         assert str(ctx.root) not in resp.json()["detail"]
         assert hashlib.sha256((ctx.root / name).read_bytes()).hexdigest() == digest
-        assert not [p for p in ctx.root.rglob("*partial*")]
+        left = [p for p in ctx.root.rglob("*partial*")
+                if not any(other in p.parents for other in others)]
+        assert not left, left
     finally:
         manifest.rmdir()
 

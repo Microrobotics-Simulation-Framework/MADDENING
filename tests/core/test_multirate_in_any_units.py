@@ -17,7 +17,8 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.graph_manager import GraphManager, _float_gcd, _multi_gcd
+from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import _float_gcd, _multi_gcd
 from maddening.core.node import SimulationNode
 
 

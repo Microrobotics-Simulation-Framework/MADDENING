@@ -1383,6 +1383,52 @@ def test_arnoldi_leaves_a_residual_where_the_space_is_too_small():
     assert float(spectral_error_bound(1e-3, rho, resid, amp)) > plain
 
 
+class _RingRelay(SimulationNode):
+    """``x <- g * inp + c``, one entry."""
+
+    def __init__(self, name, g, c, x0):
+        super().__init__(name, 1.0)
+        self._p = (g, c, x0)
+
+    def initial_state(self):
+        return {"x": jnp.asarray([self._p[2]], jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        g, c, _x0 = self._p
+        return {"x": jnp.float32(g) * boundary_inputs.get("inp", jnp.zeros((1,), jnp.float32))
+                + jnp.float32(c)}
+
+    def update_evaluations(self):
+        return 1.0
+
+
+def test_a_non_normal_spectrum_larger_than_the_space_can_read_above_its_radius():
+    """CPL-087: past eight interface scalars ``rho_spectral`` can read from either side.
+
+    A Jacobi ring of nine relays ``x_{i+1} <- 0.95 x_i + 0.05`` is a
+    weighted cyclic shift: every eigenvalue has modulus exactly 0.95.  In
+    the norm's weights (``1 / |x_i|``, unequal along the ring) the map is
+    non-normal, its Ritz values lie in its field of values rather than the
+    spectrum's convex hull, and the eight-step estimate reads *above* the
+    radius -- 1.17 where the docstring once said "an estimate from below".
+    ``spectral_usable`` is what reports it.
+    """
+    n = 9
+    x0 = np.random.default_rng(3).normal(size=n)
+    gm = GraphManager()
+    names = [f"R{i:02d}" for i in range(n)]
+    for i, nm in enumerate(names):
+        gm.add_node(_RingRelay(nm, 0.95, 0.05, float(x0[i])))
+    for i in range(n):
+        gm.add_edge(names[i], names[(i + 1) % n], "x", "inp")
+    gm.add_coupling_group(names, max_iterations=5, diagnostics=True, iteration_mode="jacobi")
+    gm.compile()
+    gm.step()
+    d = next(iter(gm.coupling_diagnostics().values()))
+    assert d["rho_spectral"] > 0.95 * (1.0 + 1e-3), dict(d)
+    assert d["spectral_usable"] is False, dict(d)
+
+
 def test_the_spectral_bound_rejects_what_it_cannot_bound():
     """``inf`` at or above one, NaN for nothing computed, never below the residual."""
     assert float(spectral_error_bound(1e-3, 1.0, 0.0, 1.0)) == float("inf")
@@ -1518,7 +1564,7 @@ def test_the_deprecated_names_do_not_survive_a_group_without_the_new_one():
     a future report that drops it) raises rather than warning about a
     key it cannot answer.
     """
-    from maddening.core.graph_manager import _CouplingDiagnostics
+    from maddening.core.coupling._reports import _CouplingDiagnostics
 
     partial = _CouplingDiagnostics({"iterations": 3, "residual": 1e-6})
     with warnings.catch_warnings():

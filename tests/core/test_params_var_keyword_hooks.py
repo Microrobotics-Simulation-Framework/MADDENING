@@ -30,7 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core import graph_manager as gm_mod
+from maddening.core import _graph_specs as specs_mod
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode, _signature_takes_params
 from maddening.core.simulation import hybrid_node as hybrid_mod
@@ -220,8 +220,8 @@ def test_every_hook_probe_reads_the_shared_signature_rule(spelling, expected):
     spring = _SPRINGS[spelling]("s", 0.01)
     assert _signature_takes_params(heat.compute_interface_correction) is expected
     assert _signature_takes_params(spring.compute_boundary_fluxes) is expected
-    assert gm_mod._correction_accepts_params(heat) is expected
-    assert gm_mod._flux_accepts_params(spring) is expected
+    assert specs_mod._correction_accepts_params(heat) is expected
+    assert specs_mod._flux_accepts_params(spring) is expected
     assert hybrid_mod._accepts_params(heat.compute_interface_correction) is expected
     assert hybrid_mod._accepts_params(spring.compute_boundary_fluxes) is expected
     assert verification_mod._flux_accepts_params(spring) is expected

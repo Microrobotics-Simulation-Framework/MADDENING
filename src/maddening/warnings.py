@@ -82,10 +82,15 @@ class PrecisionLimitWarning(UserWarning):
     rounding, not that the computation went wrong.  Raised by
     :func:`maddening.sysid.fim` when the eigenvalue ratio deciding
     ``rank`` lands within a measured factor of the epsilon-scaled
-    cutoff.  The remedy is named in the message and is mechanical --
-    re-run under ``jax_enable_x64`` -- so the warning is filterable by
-    category once a user has decided the answer does not matter to
-    them::
+    cutoff, and by the fitters (:func:`maddening.sysid.fit`,
+    :func:`~maddening.sysid.fit_lm`,
+    :func:`~maddening.sysid.fit_multiple_shooting`) for a parameter whose
+    ``log`` / ``logit`` transform cannot resolve its value to ``sqrt(eps)``
+    of itself -- bounds far wider than the value.  The remedy is named in
+    the message and is mechanical -- re-run under ``jax_enable_x64``, or
+    for a fitted parameter tighten its bounds or use ``transform=None`` --
+    so the warning is filterable by category once a user has decided the
+    answer does not matter to them::
 
         warnings.simplefilter("ignore", PrecisionLimitWarning)
 

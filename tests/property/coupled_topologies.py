@@ -24,6 +24,18 @@ optional interface mapping (``matrix_mapping``: a dense ``H`` from the
 source's size to the target's, a traced parameter) and the ``additive``
 flag; two or more edges into one port sum.
 
+**The mapping kind** (``build(..., mapping_kind=)``, :data:`MAPPING_KINDS`)
+says how a mapped edge holds that ``H``: as the dense matrix (``"matrix"``,
+the default and the code path every caller had), or as a
+``StaticSparseMapping`` over a sparsity pattern fixed per structure
+(:func:`mapping_pattern`).  The pattern is structure -- a sparse mapping's
+index is baked into the compiled step -- so it cannot be drawn per example
+on one compiled graph; :func:`draw_values` zeroes the drawn ``H`` outside
+it instead, before a group's spectral radius is rescaled, and the model
+below is handed that same ``H``.  The reference, the oracle and
+:class:`LinearModel` are therefore the dense ones, unchanged: a sparse edge
+must reproduce what a dense edge with the same matrix does.
+
 **The reference.**  Every node is affine in its pre-step state and its
 inputs, so a step is one linear system: each edge reads its source's new
 value, except a *back edge*, which reads the pre-step value.  The
@@ -93,6 +105,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling.mapping import matrix_mapping
+from maddening.core.coupling.sparse_mapping import (
+    StaticSparseMapping,
+    sparse_matrix_mapping,
+)
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.transforms import scale
@@ -115,6 +131,20 @@ LEAF_KINDS = ("count", "tag", "flag", "key")
 #: folds into it.
 KEY_SEED = 271828
 KEY_FOLD = 7
+
+#: How a mapped edge holds its matrix.  ``"matrix"`` is the dense
+#: ``matrix_mapping``; the others are a ``StaticSparseMapping`` over a
+#: pattern fixed per structure (:func:`mapping_pattern`):
+#:
+#: * ``"sparse-full"``: every entry, in the gather layout -- every row
+#:   full, so no slot is padded and any dense ``H`` is its weights;
+#: * ``"sparse-ragged"``: a seeded pattern with rows of different lengths
+#:   (one row full, the others shorter where the sizes allow), in the
+#:   gather layout: padded slots, masked;
+#: * ``"sparse-scatter"``: the ragged pattern in the scatter layout (a row
+#:   lists the targets of a *source*).
+MAPPING_KINDS = ("matrix", "sparse-full", "sparse-ragged", "sparse-scatter")
+SPARSE_KINDS = MAPPING_KINDS[1:]
 
 #: The reference's working precision.  The defects it measures are of the
 #: order of the graph's own rounding, so it computes them in a precision
@@ -472,17 +502,101 @@ class Built:
     warnings: list
     node_order: tuple
     edge_order: tuple
+    mapping_kind: str = "matrix"
+    #: ``{edge index: Slots}`` for every mapped edge of a sparse build.
+    slots: dict = dataclasses.field(default_factory=dict)
     geometry: Optional[Geometry] = None
 
 
+def mapping_pattern(topo: Topology, edge_index: int, mapping_kind: str) -> Optional[np.ndarray]:
+    """The entries mapped edge *edge_index* holds under *mapping_kind*, as a
+    boolean ``(n_target, n_source)`` mask; ``None`` for ``"matrix"`` (all).
+
+    Fixed per structure, like :func:`fixed_constants`: seeded by the edge's
+    place among the mapped edges and its shape -- not by a name or an edge
+    index -- so a renamed topology, or one with a relay inserted, holds the
+    same pattern.
+    """
+    assert mapping_kind in MAPPING_KINDS, mapping_kind
+    if mapping_kind == "matrix":
+        return None
+    e = topo.edges[edge_index]
+    assert e.mapped, e
+    n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
+    if mapping_kind == "sparse-full":
+        return np.ones((n_dst, n_src), dtype=bool)
+    place = sum(1 for other in topo.edges[:edge_index] if other.mapped)
+    rng = np.random.default_rng(20_000 + 131 * place + 17 * n_dst + n_src)
+    mask = np.zeros((n_dst, n_src), dtype=bool)
+    # Ragged: one row full and every other row a proper, non-empty subset,
+    # so the shorter rows are padded; a single row is a proper subset
+    # itself (where it has more than one column to choose from).
+    full = int(rng.integers(0, n_dst)) if n_dst > 1 else -1
+    for i in range(n_dst):
+        size = n_src if i == full or n_src == 1 else int(rng.integers(1, n_src))
+        mask[i, rng.choice(n_src, size=size, replace=False)] = True
+    return mask
+
+
+@dataclasses.dataclass(frozen=True)
+class Slots:
+    """Where each weight slot of a sparse edge reads the dense ``H``.
+
+    ``index`` is the mapping's row structure (``-1`` in a padded slot);
+    slot ``(r, m)`` holds ``H[target[r, m], source[r, m]]`` where ``valid``.
+    """
+
+    scatter: bool
+    index: np.ndarray
+    target: np.ndarray
+    source: np.ndarray
+    valid: np.ndarray
+
+    def weights(self, H: np.ndarray) -> np.ndarray:
+        H = np.asarray(H)
+        picked = H[np.where(self.valid, self.target, 0), np.where(self.valid, self.source, 0)]
+        return np.where(self.valid, picked, np.zeros((), H.dtype))
+
+
+def pattern_slots(mask: np.ndarray, *, scatter: bool) -> Slots:
+    """The row structure of *mask*: per target its sources (gather), or per
+    source its targets (scatter), each row's entries in descending order
+    (a builder keeps the order it is given), padded to the longest row."""
+    rows_of = mask.T if scatter else mask
+    n_rows = rows_of.shape[0]
+    lists = [np.nonzero(row)[0][::-1] for row in rows_of]
+    k = max(1, max(len(entries) for entries in lists))
+    index = np.full((n_rows, k), -1, dtype=np.int64)
+    for r, entries in enumerate(lists):
+        index[r, :len(entries)] = entries
+    valid = index >= 0
+    own = np.broadcast_to(np.arange(n_rows)[:, None], index.shape)
+    target, source = (index, own) if scatter else (own, index)
+    return Slots(scatter, index, np.asarray(target), np.asarray(source), valid)
+
+
+def _sparse_edge_mapping(slots: Slots, n_src: int, n_dst: int, dtype):
+    """A sparse mapping over *slots* with zero weights (a draw fills them)."""
+    zeros = np.zeros(slots.index.shape, _dt(dtype))
+    if not slots.scatter:
+        return sparse_matrix_mapping(slots.index, zeros, n_source=n_src)
+    counts = slots.valid.sum(axis=1)
+    return StaticSparseMapping(np.where(slots.valid, slots.index, 0), jnp.asarray(zeros),
+                               n_source=n_src, n_target=n_dst, counts=counts,
+                               layout="scatter")
+
+
 def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order=None,
-          compile: bool = True, geometry: Optional[Geometry] = None) -> Built:
+          compile: bool = True, mapping_kind: str = "matrix",
+          geometry: Optional[Geometry] = None) -> Built:
     """A :class:`GraphManager` for *topo*, nodes and edges added in the given orders.
 
     *knobs* is one ``CouplingGroup`` configuration for every group, or a
     sequence of them, one per group; knobs a configuration leaves inert are
     dropped (:func:`coupled_graphs.live_knobs`).  ``compile()``'s
-    ``UserWarning`` texts are recorded rather than raised.  *geometry*
+    ``UserWarning`` texts are recorded rather than raised.  *mapping_kind*
+    (one of :data:`MAPPING_KINDS`) says how every mapped edge holds its
+    matrix; ``"matrix"`` is the dense mapping every caller had.  *geometry*
     builds the mapped edges it names as geometry-dependent mappings, with
     their geometry fields on both ends; the returned ``topo`` carries them.
     """
@@ -498,6 +612,7 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
     for name in node_order:
         nd = topo.node(name)
         gm.add_node(make_node(nd, dtype, constants.get(name)))
+    slots = {}
     for i in edge_order:
         e = topo.edges[i]
         mapping = None
@@ -507,7 +622,12 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
             extra = {"geometry": (anchors[i], geometry.field(i))}
         elif e.mapped:
             n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
-            mapping = matrix_mapping(np.zeros((n_dst, n_src), _dt(dtype)))
+            if mapping_kind == "matrix":
+                mapping = matrix_mapping(np.zeros((n_dst, n_src), _dt(dtype)))
+            else:
+                slots[i] = pattern_slots(mapping_pattern(topo, i, mapping_kind),
+                                         scatter=mapping_kind.endswith("scatter"))
+                mapping = _sparse_edge_mapping(slots[i], n_src, n_dst, dtype)
         gm.add_edge(e.src, e.dst, e.field, f"u{e.port}", transform=e.transform,
                     additive=e.additive, mapping=mapping, **extra)
     per_group = knobs if isinstance(knobs, (list, tuple)) else [knobs] * len(topo.groups)
@@ -531,7 +651,8 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
             if "multi-rate" in str(w.message):
                 continue
             recorded.append(str(w.message))
-    return Built(gm, topo, str(dtype), keys, recorded, node_order, edge_order, geometry)
+    return Built(gm, topo, str(dtype), keys, recorded, node_order, edge_order,
+                 mapping_kind, slots, geometry)
 
 
 # ---------------------------------------------------------------------------
@@ -546,8 +667,14 @@ def _spectral_radius(M: np.ndarray) -> float:
 
 def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
                 nonnormal: bool = False, bias_scale: float = 1.0, dtype="float32",
-                group_cfgs=None, geometry: Optional[Geometry] = None) -> dict:
+                group_cfgs=None, mapping_kind: str = "matrix",
+                geometry: Optional[Geometry] = None) -> dict:
     """Gains, biases, mapping matrices and initial states; each group at rate *rho*.
+
+    Under a sparse *mapping_kind* every drawn ``H`` is zeroed outside its
+    edge's pattern (:func:`mapping_pattern`) before the groups are rescaled,
+    so ``values["H"]`` is the matrix a sparse edge and a dense edge both
+    hold.  ``"matrix"`` draws what it always drew.
 
     ``{"nodes": {name: {"G": [...], "b": ..., "x0": ...}}, "H": {edge: ...}}``.
     With *geometry*, also ``"geometry": {(node, field): {"start": ...,
@@ -581,6 +708,9 @@ def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
         if e.mapped:
             n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
             values["H"][i] = rng.normal(size=(n_dst, n_src)) / np.sqrt(n_src)
+            pattern = mapping_pattern(topo, i, mapping_kind)
+            if pattern is not None:
+                values["H"][i] = np.where(pattern, values["H"][i], 0.0)
     if geometry is not None:
         _draw_geometry(topo, rng, values, geometry, dtype)
     # Ports that read anything other than their own group's members are
@@ -687,7 +817,9 @@ def _rescale_group(topo, values, gi, rho, constants, dtype, group_cfgs):
 
 
 def params_for(built: Built, values: dict, rename: Optional[dict] = None) -> dict:
-    """``gm.params`` with every four-argument node's gains, bias and every mapping's ``H``."""
+    """``gm.params`` with every four-argument node's gains, bias and every
+    mapping's weights: ``H`` itself for a dense edge, ``H`` read through the
+    edge's pattern into ``W`` for a sparse one."""
     gm = built.gm
     rename = rename or {}
     base = gm.params
@@ -705,8 +837,12 @@ def params_for(built: Built, values: dict, rename: Optional[dict] = None) -> dic
             nodes[live][f"d{field}"] = jnp.asarray(g["move"], nodes[live][f"d{field}"].dtype)
     mappings = {k: dict(p) for k, p in base.get("mappings", {}).items()}
     for i, key in built.mapping_keys.items():
-        if "H" in mappings[key]:        # a geometry-dependent mapping has no weights
-            mappings[key]["H"] = jnp.asarray(values["H"][i], mappings[key]["H"].dtype)
+        if not mappings[key]:           # a geometry-dependent mapping has no weights
+            continue
+        (leaf, live), = mappings[key].items()
+        weights = values["H"][i] if i not in built.slots else built.slots[i].weights(
+            values["H"][i])
+        mappings[key][leaf] = jnp.asarray(weights, live.dtype)
     return {**base, "nodes": nodes, "mappings": mappings}
 
 
@@ -901,14 +1037,6 @@ def group_in_larger_loop(topo: Topology, gi: int) -> bool:
 # ---------------------------------------------------------------------------
 # The float64 reference
 # ---------------------------------------------------------------------------
-
-
-def _norm_rows(topo: Topology, gi: int, norm: str) -> list:
-    """The norm's entries, as ``(node, index)``: every member's ``x``, or each internal edge's source."""
-    if norm == "interface":
-        return [(topo.edges[i].src, k) for i in topo.internal_edges(gi)
-                for k in range(topo.node(topo.edges[i].src).n)]
-    return [(m, k) for m in topo.groups[gi] for k in range(topo.node(m).n)]
 
 
 class LinearModel:
@@ -1315,34 +1443,96 @@ class LinearModel:
                    self.group_constant(gi, pre, state))
         return {m: x[off[m]:off[m] + self.topo.node(m).n] for m in members}
 
-    def norm_parts(self, gi: int, state: dict, F: Optional[np.ndarray] = None):
+    def norm_fields(self, gi: int, *, raw: bool = False) -> list:
+        """The fields group *gi*'s norm reads: ``[(B, gamma), ...]``.
+
+        Each ``B`` maps the members' stacked ``x`` to one field, and the
+        norm divides every entry of a field by ``rtol`` times that
+        field's own largest magnitude.  Under ``"l2"`` and ``"mixed"`` a
+        field is a member's ``x``.  Under ``"interface"`` it is **what one
+        internal edge delivers**: the source's ``x`` through the edge's
+        mapping matrix ``H``, then its transform's factor -- the value the
+        step hands the target, with the weights the step ran with.  (An
+        internal flux edge under that norm is refused at compile,
+        CPL-075.)  While the library read the source's ``x`` there and
+        left ``H`` out, this model restated that rule and agreed with it.
+
+        ``gamma`` bounds the float evaluation of the reading itself,
+        relative to ``|B| |x|``: a mapped edge's delivered value is an
+        inner product the norm computes again from the stored field
+        (``(n + 1) eps``); every other field is read as stored, a
+        power-of-two factor being exact.
+
+        ``raw=True`` gives the fields the *gradient* bound's norm is
+        documented in under ``"interface"``: the source fields the edges
+        read, before any mapping or transform.
+        """
+        norm = self.cfgs[gi].get("convergence_norm", "l2")
+        members, off, k = self._group_layout(gi)
+        fields = []
+        if norm != "interface":
+            for m in members:
+                n = self.topo.node(m).n
+                B = np.zeros((n, k))
+                B[:, off[m]:off[m] + n] = np.eye(n)
+                fields.append((B, 0.0))
+            return fields
+        for i in self.topo.internal_edges(gi):
+            e = self.topo.edges[i]
+            assert e.field == "x", f"the interface norm cannot read a flux edge: {e}"
+            n_src = self.topo.node(e.src).n
+            if raw or not e.mapped:
+                block = np.eye(n_src)
+                gamma = 0.0
+            else:
+                block = np.asarray(self._rnd(self.values["H"][i]), np.float64)
+                gamma = (n_src + 1) * self.eps
+            if not raw:
+                block = TRANSFORM_FACTORS[e.transform] * block
+            B = np.zeros((block.shape[0], k))
+            B[:, off[e.src]:off[e.src] + n_src] = block
+            fields.append((B, gamma))
+        return fields
+
+    def norm_parts(self, gi: int, state: dict, F: Optional[np.ndarray] = None, *,
+                   raw: bool = False):
         """``(S, w, rtol_eff, rms)`` of the group's norm at the returned state.
 
-        ``S`` selects the norm's entries from the members' stacked ``x``
-        (each member once for ``"l2"`` / ``"mixed"``, each internal edge's
-        source for ``"interface"``); ``w`` weights each entry by
-        ``1 / (rtol max|field|)`` at *state* (``rtol`` 1 under ``"l2"``);
-        a field with no magnitude leaves the norm, as ``atol = 0`` makes
-        it.  ``rms`` divides the sum of squares by the count.
+        ``S`` maps the members' stacked ``x`` to the norm's entries (the
+        rows of :meth:`norm_fields`: each member once for ``"l2"`` /
+        ``"mixed"``, what each internal edge delivers for
+        ``"interface"``); ``w`` weights each entry by ``1 / (rtol
+        max|field|)`` at *state* (``rtol`` 1 under ``"l2"``); a field
+        with no magnitude leaves the norm, as ``atol = 0`` makes it.
+        ``rms`` divides the sum of squares by the count.
         """
         cfg = self.cfgs[gi]
         norm = cfg.get("convergence_norm", "l2")
         rtol_eff = 1.0 if norm == "l2" else float(cfg.get("rtol", 1e-6))
-        members, off, k = self._group_layout(gi)
-        rows = _norm_rows(self.topo, gi, norm)
-        S = np.zeros((len(rows), k))
-        w = np.zeros(len(rows))
-        for r, (node, idx) in enumerate(rows):
-            S[r, off[node] + idx] = 1.0
-            ref = float(np.max(np.abs(np.asarray(state[node]["x"], np.float64))))
-            w[r] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
+        members, _off, _k = self._group_layout(gi)
+        x = np.concatenate([np.asarray(state[m]["x"], np.float64) for m in members])
+        blocks, weights = [], []
+        for B, _gamma in self.norm_fields(gi, raw=raw):
+            ref = float(np.max(np.abs(B @ x))) if B.shape[0] else 0.0
+            blocks.append(B)
+            weights.append(np.full(B.shape[0], 1.0 / (rtol_eff * ref) if ref > 0 else 0.0))
+        S = np.vstack(blocks) if blocks else np.zeros((0, len(x)))
+        w = np.concatenate(weights) if weights else np.zeros(0)
         extra = self._geometry_norm_entries(gi, norm, state)
         if extra:
             # Entries the norm counts and that carry no residual: rows that
             # select nothing.
-            S = np.vstack([S, np.zeros((extra, k))])
+            S = np.vstack([S, np.zeros((extra, S.shape[1]))])
             w = np.concatenate([w, np.ones(extra)])
         return S, w, rtol_eff, norm != "l2"
+
+    def _field_slices(self, gi: int) -> list:
+        """``[(rows of S, B, gamma), ...]``, one per field of :meth:`norm_fields`."""
+        out, at = [], 0
+        for B, gamma in self.norm_fields(gi):
+            out.append((slice(at, at + B.shape[0]), B, gamma))
+            at += B.shape[0]
+        return out
 
     def group_report_consistency(self, gi: int, pre: dict, state: dict, residual: float):
         """``(defect_norm, bound, detail)``: is the reported residual that of the returned state?
@@ -1360,6 +1550,15 @@ class LinearModel:
         (``rtol max(|x|, |F(x)| + |eta|)``), ``epsilon`` the members'
         rounding (:meth:`rounding`).  Holds whatever the acceleration, the
         predictor and the solver did to reach the state, converged or not.
+
+        ``S`` is the norm's own reading (:meth:`norm_fields`), which under
+        ``"interface"`` is what each internal edge delivers.  Every member
+        reads the others only through those edges, so ``L = B S`` for some
+        ``B`` and ``S (I - L) S^+`` applied to ``S r`` is ``(I - S B) S r``
+        exactly, whether or not ``S`` has an inverse.  A mapped edge's
+        delivered value is computed again by the norm, in float: both
+        readings the residual compared carry that rounding (``gamma |S|
+        |x|``, :meth:`norm_fields`), which is allowed for beside ``eta``.
         """
         members, off, k = self._group_layout(gi)
         L, U = self.group_pass(gi)
@@ -1385,38 +1584,55 @@ class LinearModel:
         eps_vec = np.concatenate([self.rounding(m, pre, read) for m in members])
         eta = np.abs(np.linalg.inv(np.eye(k) - L)) @ eps_vec
         S, w, rtol_eff, rms = self.norm_parts(gi, state)
+        absS = np.abs(S)
+        fields = self._field_slices(gi)
+        # Per entry of the reading: how far the float pass's reading can be
+        # from the exact pass's (``|S| eta``), and how far a reading the
+        # norm computed can be from the exact reading of the same state
+        # (``read_x`` at the returned state, ``read_F`` after the pass).
+        s_eta = absS @ eta
+        read_x = np.zeros(len(w))
+        read_F = np.zeros(len(w))
         rho_up = np.zeros(len(w))
-        rows = _norm_rows(self.topo, gi, self.cfgs[gi].get("convergence_norm", "l2"))
-        for r, (node, idx) in enumerate(rows):
-            sl = slice(off[node], off[node] + self.topo.node(node).n)
-            rho_up[r] = rtol_eff * max(float(np.max(np.abs(x[sl]))),
-                                       float(np.max(np.abs(F[sl]) + eta[sl])))
+        for rows, B, gamma in fields:
+            read_x[rows] = gamma * (np.abs(B) @ np.abs(x))
+            read_F[rows] = gamma * (np.abs(B) @ (np.abs(F) + eta))
+            if B.shape[0]:
+                rho_up[rows] = rtol_eff * max(
+                    float(np.max(np.abs(B @ x) + read_x[rows])),
+                    float(np.max(np.abs(B @ F) + s_eta[rows] + read_F[rows])))
+        read = read_x + read_F
         Splus = np.linalg.pinv(S)
         A = (w[:, None] * S) @ (np.eye(k) - L) @ Splus @ np.diag(rho_up)
         K_up = float(np.linalg.norm(A, 2))
         N = len(w)
         R2 = float(residual) * (np.sqrt(N) if rms else 1.0) * (1.0 + (N + 4) * self.eps)
-        bound = K_up * R2 + float(np.linalg.norm(w * (S @ eps_vec)))
+        A_read = np.abs((w[:, None] * S) @ (np.eye(k) - L) @ Splus)
+        bound = (K_up * R2 + float(np.linalg.norm(w * (absS @ eps_vec)))
+                 + float(np.linalg.norm(A_read @ read)))
         dnorm = float(np.linalg.norm(w * (S @ d)))
         scale = np.sqrt(N) if rms else 1.0
         # The other direction: the reported residual *is* ``||F(x) - x||`` of
         # the returned state (``coupling_diagnostics``: "for the state x this
         # step returned").  The float pass is within ``eta`` of ``F`` per
-        # entry, which moves the norm by at most ``||D S eta||`` (``D`` the
-        # returned-state weights, never below the residual's own); the
-        # residual's weights move by at most ``max eta / ref`` per field; the
-        # norm's own evaluation by ``(N + 4) eps``.
+        # entry, which moves the norm by at most ``||D |S| eta||`` (``D`` the
+        # returned-state weights, never below the residual's own), and the
+        # two readings it compared by their own rounding; the residual's
+        # weights move by at most ``(max |S| eta + reading) / ref`` per
+        # field; the norm's own evaluation by ``(N + 4) eps``.
         r_true = F - x
         w_true = np.zeros(N)
         delta = 0.0
-        for row, (node, idx) in enumerate(rows):
-            sl = slice(off[node], off[node] + self.topo.node(node).n)
-            ref = max(float(np.max(np.abs(x[sl]))), float(np.max(np.abs(F[sl]))))
-            w_true[row] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
+        for rows, B, _gamma in fields:
+            if not B.shape[0]:
+                continue
+            ref = max(float(np.max(np.abs(B @ x))), float(np.max(np.abs(B @ F))))
+            w_true[rows] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
             if ref > 0:
-                delta = max(delta, float(np.max(eta[sl])) / ref)
+                delta = max(delta, float(np.max(s_eta[rows] + np.maximum(
+                    read_x[rows], read_F[rows]))) / ref)
         R_true = float(np.linalg.norm(w_true * (S @ r_true))) / scale
-        R_tol = (float(np.linalg.norm(w * (S @ eta))) / scale
+        R_tol = (float(np.linalg.norm(w * (s_eta + read))) / scale
                  + 2.0 * delta * R_true
                  + (N + 4) * self.eps * max(float(residual), R_true))
         return dnorm / scale, bound / scale, dict(K_up=K_up, eps=float(np.max(eps_vec)),
@@ -1523,10 +1739,20 @@ class LinearModel:
             scale = np.sqrt(len(w)) if rms else 1.0
             _m, off, _k = self._group_layout(gi)
             for m in members:
+                # ``||w (S d)|| <= bound scale``, so each entry the norm
+                # reads of this member's defect is within ``bound scale /
+                # w``; the defect itself is those entries through the
+                # pseudo-inverse of the member's rows -- where they
+                # determine it.  A member the norm reads through a mapping
+                # that loses a direction (or does not read at all) has no
+                # allowance, and the monolithic comparison is skipped.
                 sl = slice(off[m], off[m] + topo.node(m).n)
-                wm = np.max(w[(S[:, sl] != 0).any(axis=1)]) if np.any(S[:, sl]) else 0.0
-                allowance[m] = (np.full(topo.node(m).n, bound * scale / wm)
-                                if wm > 0 else None)
+                rows = (S[:, sl] != 0).any(axis=1) & (w > 0)
+                C = S[rows][:, sl]
+                if C.size and np.linalg.matrix_rank(C) == topo.node(m).n:
+                    allowance[m] = np.abs(np.linalg.pinv(C)) @ (bound * scale / w[rows])
+                else:
+                    allowance[m] = None
             entry = {"defect": dnorm, "bound": bound}
             if rep.get("converged") and thresholds is not None:
                 dist, tol = self.converged_distance(gi, pre, state, thresholds[gi])
@@ -1748,7 +1974,10 @@ def named_topologies() -> dict:
       reader;
     * ``chain-into-ring``: a chain of outside nodes into a two-member ring,
       a node beside the group reading the chain and the group additively,
-      and a reader added first.
+      and a reader added first.  The ring's forward edge carries an
+      interface mapping and then a transform, its return edge a transform
+      alone, so configuration 2 -- the interface norm -- reads one edge of
+      each kind as the step delivers it.
     """
     out = {}
 
@@ -1818,7 +2047,7 @@ def named_topologies() -> dict:
     b.edge("c0", "c1", field="q")
     b.edge("c1", "c2", transform="negate")
     b.edge("c2", "g0")
-    b.edge("g0", "g1")
+    b.edge("g0", "g1", transform="negate", mapped=True)
     b.edge("g1", "g0", transform="scale_0.5")
     p = b.edge("c1", "w")
     b.edge("g0", "w", port=p)
@@ -1826,6 +2055,41 @@ def named_topologies() -> dict:
     b.group("g0", "g1")
     out["chain-into-ring"] = b.build("chain-into-ring")
     return out
+
+
+def mapped_topologies() -> dict:
+    """Structures for the mapping kinds, with interfaces wide enough for a
+    sparsity pattern to have rows of different lengths.
+
+    The mapped edges of :func:`named_topologies` all join a node of size 2
+    and one of size 1, so a pattern over them has one row or one column: no
+    row can be shorter than another.  Here the interfaces have 2, 3 and 4
+    entries:
+
+    * ``mapped-ring-wide``: a ring group ``m0 (3) -> m1 (4) -> m2 (4) ->
+      m0`` whose three edges are all mapped (one between equal sizes), a
+      fourth mapped edge inside the group that shares a port with an
+      unmapped edge from outside, a mapped *flux* edge between two outside
+      nodes, and two mapped edges on one field pair into a reader (so two
+      mappings share an edge key but for its ordinal).
+    """
+    b = TopologyBuilder()
+    b.node("drv", 2, alpha=1.0, beta=1.0, flux=True)
+    b.node("pre", 3, alpha=0.25, leaves=("tag",))
+    b.node("m0", 3, alpha=0.5, beta=1.0, leaves=("count",))
+    b.node("m1", 4, alpha=-0.25, leaves=("flag",))
+    b.node("m2", 4, alpha=0.25)
+    b.node("out", 3, alpha=0.5, leaves=("count", "tag"))
+    b.edge("drv", "pre", field="q")
+    b.edge("m0", "m1")
+    b.edge("m1", "m2", mapped=True)
+    b.edge("m2", "m0", transform="negate")
+    p = b.edge("pre", "m0")
+    b.edge("m1", "m0", port=p, transform="scale_0.5")
+    p = b.edge("m2", "out")
+    b.edge("m2", "out", port=p, transform="scale_2.0")
+    b.group("m0", "m1", "m2")
+    return {"mapped-ring-wide": b.build("mapped-ring-wide")}
 
 
 def topology_knobs(topo: Topology, choice: int = 0) -> list:

@@ -2498,37 +2498,57 @@ def _client_left(websocket: WebSocket, exc: BaseException,
     return isinstance(exc, RuntimeError) and "websocket.close" in str(exc)
 
 
-def _graph_structure_snapshot(gm) -> dict:
-    """Shallow copies of every container a structural edit mutates.
-
-    Nodes, edges and parameter arrays are shared with the live graph --
-    ``add_node`` / ``remove_node`` / ``add_edge`` rebind the containers
-    rather than mutating their contents, so copying one level is enough
-    to put the graph back exactly as it was.  Restoring is what makes an
-    endpoint that rebuilds a subgraph atomic: a failed rebuild leaves the
-    caller with an error and the server with a graph that still compiles.
-    """
-    return {
-        "nodes": dict(gm._nodes),
-        "state": dict(gm._state),
-        "edges": list(gm._edges),
-        "external_inputs": list(gm._external_inputs),
-        "param_spec_overrides": {k: dict(v) for k, v in gm._param_spec_overrides.items()},
-        "params": {k: (dict(v) if isinstance(v, dict) else v)
-                   for k, v in gm.params.items()},
-        "dirty": gm._dirty,
-    }
+#: The detail of a 500: what failed is in the server's log, with its
+#: traceback, and the reply names no path, value or class of the server's.
+#: The second is a write route's, whose transaction put the graph back.
+_FAILED_UNEXPECTEDLY = "The request failed unexpectedly (the server's log says how)."
+_UNEXPECTED_FAILURE_DETAIL = (
+    f"{_FAILED_UNEXPECTEDLY} The graph was put back exactly as it was before "
+    "the request.")
 
 
-def _restore_graph_structure(gm, snapshot: dict) -> None:
-    """Undo every structural edit made since :func:`_graph_structure_snapshot`."""
-    gm._nodes = snapshot["nodes"]
-    gm._state = snapshot["state"]
-    gm._edges = snapshot["edges"]
-    gm._external_inputs = snapshot["external_inputs"]
-    gm._param_spec_overrides = snapshot["param_spec_overrides"]
-    gm.params = snapshot["params"]
-    gm._dirty = snapshot["dirty"]
+class _GraphTransaction:
+    """What ``SimulationServer._graph_transaction`` records, holding the
+    graph lock, and :meth:`rollback` puts back: the graph (everything
+    ``GraphManager._transaction_snapshot`` reaches), the server's own record
+    of the surrogates, whether the relay observes the graph, and the
+    streams' clock and frame."""
+
+    _RELAY_FIELDS = ("_snapshot", "_sim_time", "_step_count", "_timestep", "_elapsed")
+
+    def __init__(self, server: "SimulationServer") -> None:
+        self._server = server
+        self._graph = server.gm._transaction_snapshot(
+            also=(server._original_nodes, server._active_surrogates))
+        self._relay_attached = server._relay_attached
+        self._layout_generation = server._layout_generation
+        relay = server.relay
+        with relay._lock:
+            self._relay_seq = relay._seq
+            self._relay = {name: getattr(relay, name) for name in self._RELAY_FIELDS}
+        self.rolled_back = False
+
+    def rollback(self) -> None:
+        """Put everything back as it was when the transaction began.  The
+        streams are sent the restored frame, and the binary streams their
+        schema again, only when the block had changed them."""
+        server = self._server
+        server.gm._transaction_restore(self._graph)
+        server._relay_attached = self._relay_attached
+        relay = server.relay
+        with relay._lock:
+            for name, value in self._relay.items():
+                setattr(relay, name, value)
+            if relay._seq != self._relay_seq:
+                # A frame of the abandoned state may have been sent: a new
+                # sequence number makes every stream send the restored one.
+                relay._seq += 1
+        if server._layout_generation != self._layout_generation:
+            # The block added or removed a node, or compiled: the binary
+            # streams were told the layout changed, and are told again.
+            server._binary_encoder = None
+            server._layout_generation += 1
+        self.rolled_back = True
 
 
 #: Held while :meth:`SimulationServer.create_app` builds an application, so
@@ -2806,8 +2826,11 @@ class SimulationServer:
             self._ensure_relay_attached()
 
     def _ensure_runner(self) -> RealtimeRunner:
+        # Asked on every call, not only when the runner is created: a
+        # start that failed in its transaction leaves the runner it created
+        # and puts the graph's observers back without the relay.
+        self._ensure_relay_attached()
         if self.runner is None:
-            self._ensure_relay_attached()
             with self._stride_lock:
                 self.runner = RealtimeRunner(self.gm, self.relay,
                                              steps_per_frame=self._steps_per_frame,
@@ -2904,6 +2927,48 @@ class SimulationServer:
             yield
         finally:
             self._graph_lock.release()
+
+    @contextlib.contextmanager
+    def _graph_transaction(self, action: str, *, write: bool = False,
+                           deadline: Optional[float] = None):
+        """:meth:`_graph_access` for a route that can change the graph, as
+        one transaction: everything the graph holds is recorded once the
+        lock is held, and put back if the block does not finish -- it raises
+        a refusal (an ``HTTPException``), or anything else.  So a request
+        that is refused, or that fails unexpectedly, leaves the graph
+        exactly as it was, whatever the route had done by then; the
+        unexpected failure is logged with its traceback and answered 500
+        with :data:`_UNEXPECTED_FAILURE_DETAIL`, which names nothing of the
+        server's.
+
+        Recorded and put back (``GraphManager._transaction_snapshot``):
+        every attribute of the graph and every container reachable from one
+        -- state, params, nodes and their own ``params``, edges, coupling
+        groups, external inputs, compile bookkeeping -- with this server's
+        own record of the surrogates (``_original_nodes``,
+        ``_active_surrogates``), whether the relay observes the graph, and
+        the streams' clock and frame.  Arrays are shared, not copied.
+
+        Not covered, and left to the route: a file under the checkpoint
+        root, the runner's thread and its started / stopping flags, a
+        surrogate job, a JAX trace, frames a stream has already sent, and
+        observers of the graph already notified.
+
+        Yields the transaction, whose ``rollback()`` a route calls before
+        it *returns* a refusal instead of raising one.
+        """
+        with self._graph_access(action, write=write, deadline=deadline):
+            transaction = _GraphTransaction(self)
+            try:
+                yield transaction
+            except BaseException as exc:
+                transaction.rollback()
+                if isinstance(exc, HTTPException) or not isinstance(exc, Exception):
+                    raise
+                logger.exception("Could not %s: the request failed unexpectedly "
+                                 "and the graph was put back as it was", action)
+                raise HTTPException(
+                    status_code=500, detail=_UNEXPECTED_FAILURE_DETAIL) from None
 
     @contextlib.contextmanager
     def _runner_control(self, action: str, deadline: float):
@@ -3369,6 +3434,17 @@ class SimulationServer:
             return _Reply(status_code=exc.status_code, headers=headers,
                           content={"detail": exc.detail})
 
+        @app.exception_handler(Exception)
+        async def _unexpected_failure(request, exc):
+            # Anything a route did not expect, outside a write route's
+            # transaction (which answers its own 500 after putting the
+            # graph back): the same generic detail, where Starlette's
+            # default is a plain-text body.  Starlette logs the traceback
+            # and re-raises for the server after this reply is sent.
+            logger.error("%s %s failed unexpectedly: %s", request.method,
+                         request.scope.get("path", ""), type(exc).__name__)
+            return _Reply(status_code=500, content={"detail": _FAILED_UNEXPECTEDLY})
+
         app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
             _WebSocketAuthMiddleware,
@@ -3564,7 +3640,7 @@ class SimulationServer:
                         detail=(f"node '{req.name}' {refusal}; this is told from "
                                 "its params, before anything of that size is built"),
                     )
-            with self._graph_access("add a node", write=True):
+            with self._graph_transaction("add a node", write=True):
                 # The graph-wide budget: each node was held to the per-node
                 # cap, and nothing bounded how many of them a caller added.
                 held = sum(_state_elements(fields) for name, fields in self.gm._state.items()
@@ -3642,7 +3718,7 @@ class SimulationServer:
             ``POST /sim/run`` is in progress.  The streams are sent the
             graph without it (they used to go on serving the removed node,
             and the binary stream re-sent a schema that had it)."""
-            with self._graph_access("remove a node", write=True):
+            with self._graph_transaction("remove a node", write=True):
                 try:
                     self.gm.remove_node(name)
                 except KeyError as exc:
@@ -3657,7 +3733,7 @@ class SimulationServer:
             validate (shapes that do not match) used to be taken beside a
             running runner, whose next step raised and whose thread died
             while the routes went on reporting it started."""
-            with self._graph_access("add an edge", write=True):
+            with self._graph_transaction("add an edge", write=True):
                 for n in (req.source_node, req.target_node):
                     if n not in self.gm._nodes:
                         raise HTTPException(status_code=404, detail=f"No node '{n}'.")
@@ -3688,7 +3764,7 @@ class SimulationServer:
             the graph has none (it used to answer 200 and change nothing).
             Refused (409) while the runner runs or a ``POST /sim/run`` is in
             progress."""
-            with self._graph_access("remove an edge", write=True):
+            with self._graph_transaction("remove an edge", write=True):
                 if not any(
                     e.source_node == req.source_node and e.target_node == req.target_node
                     and e.source_field == req.source_field
@@ -3710,7 +3786,7 @@ class SimulationServer:
         def compile_graph() -> dict[str, Any]:
             """Compile the graph; a graph it cannot compile is a 400 naming
             why (an edge it cannot validate was a 500)."""
-            with self._graph_access("compile the graph"):
+            with self._graph_transaction("compile the graph"):
                 try:
                     self.gm.compile()
                 except _GRAPH_CONFIGURATION_ERRORS as exc:
@@ -3752,7 +3828,7 @@ class SimulationServer:
             (:func:`_state_value_refusal`).  Each field's value
             count is checked against the live field before anything is
             converted to an array."""
-            with self._graph_access("write a node's state", write=True):
+            with self._graph_transaction("write a node's state", write=True):
                 if node_name not in self.gm._nodes:
                     raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
                 live = self.gm.get_node_state(node_name)
@@ -3873,7 +3949,7 @@ class SimulationServer:
             its steps: the graph lock makes the whole write one change as
             far as any step is concerned.
             """
-            with self._graph_access("write a node's params"):
+            with self._graph_transaction("write a node's params"):
                 return set_node_params_locked(node_name, req)
 
         def set_node_params_locked(node_name: str, req: SetNodeParamsRequest) -> dict[str, Any]:
@@ -3911,12 +3987,14 @@ class SimulationServer:
             # of the live pytree (surrogate weights, sharded wrappers whose
             # inner node owns the params).
             available = sorted(set(node.params) | set(live))
-            # Validate everything before mutating anything: an
+            # Every key is checked before any is written: an
             # out-of-bounds slider value is a 400 here, not a NaN later.
             # Every check a live leaf needs (dtype coercion, shape,
-            # finiteness, bounds) runs in this first loop; the second
-            # loop only writes, so a 400 on the third key of a request
-            # leaves the first two untouched too.
+            # finiteness, bounds) runs in this first loop and the second
+            # only writes.  That order is no longer what leaves the first
+            # two keys unwritten when the third is refused -- the route's
+            # transaction is, wherever the refusal comes from -- but it
+            # keeps a refusal cheap and the checks in one place.
             staged: dict[str, Any] = {}
             # What a structural (non-leaf) key would store in node.params:
             # the JSON value in the parameter's own numeric type.
@@ -4248,7 +4326,7 @@ class SimulationServer:
                     status_code=400,
                     detail=f"could not save checkpoint {name!r}, nothing was written: "
                            f"{too_long}")
-            with self._graph_access("save a checkpoint"):
+            with self._graph_transaction("save a checkpoint"):
                 self._ensure_relay_attached()
                 clock = {"sim_time": self.relay.elapsed,
                          "step_count": self.relay.step_count}
@@ -4342,7 +4420,7 @@ class SimulationServer:
             used to serve the state from before the load until the next
             step, and to go on counting from the step before it.
             """
-            with self._graph_access("load a checkpoint", write=True):
+            with self._graph_transaction("load a checkpoint", write=True):
                 target = _checkpoint_path(path, loading=True)
                 try:
                     found = target.is_file()
@@ -4357,11 +4435,14 @@ class SimulationServer:
                 )
                 try:
                     # load_state compiles a dirty graph before it reads
-                    # anything; done first here so the undo below starts
-                    # after it.
+                    # anything; done first here so ``before`` is the
+                    # compiled graph's.
                     if self.gm._dirty or self.gm._compiled_step is None:
                         self.gm.compile()
-                    undo = _state_and_params_snapshot(self.gm)
+                    # Not an undo (a refusal is undone by the route's
+                    # transaction, the compile above included): the values
+                    # the checks below are asked against.
+                    before = _state_and_params_snapshot(self.gm)
                     self.gm.load_state(str(target))
                 except CheckpointFormatError:
                     # NumPy's own reasons -- how to load the file unsafely --
@@ -4387,7 +4468,7 @@ class SimulationServer:
                 # leave a graph whose save did not reload and whose steps
                 # diverged.
                 loaded = _state_and_params_snapshot(self.gm)
-                _restore_state_and_params(self.gm, undo)
+                _restore_state_and_params(self.gm, before)
                 try:
                     refusal = _loaded_params_refusal(self.gm, loaded[1])
                 except Exception as exc:  # noqa: BLE001 - a check that cannot run refuses
@@ -4405,12 +4486,11 @@ class SimulationServer:
                 # that value in gm.params.  The graph refuses such a leaf at
                 # the next step, and this API has no reset_params: every
                 # later /sim/step would be a 500 while GET /graph/params
-                # served the checkpoint's value.  Refused here instead, with
-                # the load undone.
+                # served the checkpoint's value.  Refused here instead; the
+                # route's transaction undoes the load.
                 try:
                     self.gm._refuse_baked_param_writes(self.gm.params, live=False)
                 except ValueError as exc:
-                    _restore_state_and_params(self.gm, undo)
                     raise HTTPException(
                         status_code=400,
                         detail=f"checkpoint {path!r} does not fit this graph, nothing "
@@ -4432,7 +4512,7 @@ class SimulationServer:
             started, whose next step would overwrite this one's, or while a
             ``POST /sim/run`` is in progress.  Concurrent requests are
             stepped one after another: N of them take N steps."""
-            with self._graph_access("step the graph", write=True):
+            with self._graph_transaction("step the graph", write=True):
                 self._ensure_relay_attached()
                 try:
                     self.gm.step()
@@ -4456,6 +4536,21 @@ class SimulationServer:
                                f"and the graph is left after the {steps_run} step(s) "
                                "it took)")
             return _Reply(status_code=400, content={
+                "detail": detail, "steps_run": steps_run, "n_steps": n_steps})
+
+        def _run_failed_unexpectedly(steps_run: int, n_steps: int) -> _Reply:
+            """The 500 of a ``POST /sim/run`` one of whose slices failed
+            unexpectedly after *steps_run* steps had been stored by the
+            slices before it: that slice was put back, and those steps were
+            taken, which the reply says."""
+            detail = _UNEXPECTED_FAILURE_DETAIL
+            if steps_run:
+                detail = (
+                    f"{_FAILED_UNEXPECTEDLY[:-1]} after {steps_run} of the run's "
+                    f"{n_steps} step(s). The graph is left after those "
+                    f"{steps_run}, exactly as it was before the part of the run "
+                    "that failed; GET /graph/state reads it.")
+            return _Reply(status_code=500, content={
                 "detail": detail, "steps_run": steps_run, "n_steps": n_steps})
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
@@ -4496,7 +4591,7 @@ class SimulationServer:
             run that timed out between slices used to answer "Nothing was
             changed; retry shortly" after it had stepped the graph.
             """
-            with self._graph_access("run the graph", write=True):
+            with self._graph_transaction("run the graph", write=True):
                 self._ensure_relay_attached()
                 self._sync_run_active = True
             done, chunk = 0, 1
@@ -4510,7 +4605,11 @@ class SimulationServer:
                     t0 = time.perf_counter()
                     taken: list = []
                     try:
-                        with self._graph_access("run the graph"):
+                        # One transaction a slice, not one a run: the lock
+                        # is released between slices, where a PUT
+                        # /graph/params is taken, and putting the graph back
+                        # as it was before the run would undo that write.
+                        with self._graph_transaction("run the graph"):
                             try:
                                 self.gm.run(k, callback=lambda i, _s: taken.append(i))
                             except _GRAPH_CONFIGURATION_ERRORS as exc:
@@ -4520,6 +4619,8 @@ class SimulationServer:
                                 steps_run = done + len(taken)
                                 return _run_failed(exc, steps_run, n_steps)
                     except HTTPException as exc:
+                        if exc.status_code == 500:
+                            return _run_failed_unexpectedly(done, n_steps)
                         if exc.status_code != 503:
                             raise
                         # The graph lock not had in time between two
@@ -4539,7 +4640,7 @@ class SimulationServer:
                     # used to wait for the graph lock with none, behind a
                     # long holder for as long as it held it.
                     try:
-                        with self._graph_access("read the run's final state"):
+                        with self._graph_transaction("read the run's final state"):
                             if n_steps == 0:
                                 try:
                                     self.gm.run(0)      # compiles a graph edited since
@@ -4547,6 +4648,8 @@ class SimulationServer:
                                     return _run_failed(exc, 0, 0)
                             state = self._state_json()
                     except HTTPException as exc:
+                        if exc.status_code == 500:
+                            return _run_failed_unexpectedly(done, n_steps)
                         if exc.status_code != 503:
                             raise
                         interrupted = (f"The graph has been in use for "
@@ -4610,7 +4713,7 @@ class SimulationServer:
                 self._reap_dead_runner()
                 if self._runner_started:
                     raise HTTPException(status_code=409, detail="Runner is already started.")
-                with self._graph_access("start the runner", write=True, deadline=deadline):
+                with self._graph_transaction("start the runner", write=True, deadline=deadline):
                     if not self.gm._nodes:
                         # The runner's thread read gm.timestep on its first
                         # frame and died ("No nodes registered.") after the
@@ -4726,7 +4829,7 @@ class SimulationServer:
                 except HTTPException as exc:
                     return self._stop_refused(exc, was_running)
             try:
-                with self._graph_access("reset the graph", write=True, deadline=deadline):
+                with self._graph_transaction("reset the graph", write=True, deadline=deadline):
                     self._ensure_relay_attached()
                     self._reset_state()
                     self.gm._dirty = True
@@ -5031,8 +5134,8 @@ class SimulationServer:
         def activate_locked(node_name: str, result: Any, was_running: bool,
                             deadline: float) -> dict[str, Any]:
             """``POST /surrogate/activate``, from the graph lock on."""
-            with self._graph_access("activate a surrogate", write=True,
-                                    deadline=deadline):
+            with self._graph_transaction("activate a surrogate", write=True,
+                                         deadline=deadline):
                 if node_name not in self.gm._nodes:
                     raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
                 # Save original node info for deactivation
@@ -5088,8 +5191,8 @@ class SimulationServer:
                 was_running = self._runner_running()
                 self._stop_runner_or_refuse("deactivate a surrogate")
             try:
-                with self._graph_access("deactivate a surrogate", write=True,
-                                        deadline=deadline):
+                with self._graph_transaction("deactivate a surrogate", write=True,
+                                             deadline=deadline):
                     return {**deactivate_locked(node_name), "was_running": was_running}
             except HTTPException as exc:
                 return self._after_stopping_the_runner(exc, "deactivated", was_running)
@@ -5098,11 +5201,13 @@ class SimulationServer:
             """``POST /surrogate/deactivate``, holding the graph lock."""
             orig_node, orig_edges, orig_ext = self._original_nodes[node_name]
 
-            # The revert rebuilds a subgraph, so it is all-or-nothing: on
-            # any failure the live graph goes back to the surrogate it had,
-            # rather than being left with the original node, half its edges
-            # and no compiled step.
-            snapshot = _graph_structure_snapshot(self.gm)
+            # The revert rebuilds a subgraph, and is all-or-nothing by the
+            # route's transaction: anything raised here leaves the live
+            # graph with the surrogate it had, compiled as it was, and is
+            # answered the generic 500 (the reason is in the server's log).
+            # The route used to keep its own copy of the graph's structure,
+            # recompile after putting it back, and quote the error.
+            #
             # A mapped edge's weights live in ``gm.params["mappings"][key]``,
             # and its ParamSpec overrides under the same key; ``remove_node``
             # drops both, and the ``compile()`` below re-snapshots the
@@ -5122,64 +5227,50 @@ class SimulationServer:
             }
             problems: list[str] = []
             try:
-                try:
-                    self.gm.remove_node(node_name)
-                except KeyError:
-                    pass
+                self.gm.remove_node(node_name)
+            except KeyError:
+                pass
 
-                self.gm.add_node(orig_node)
-                for edge in orig_edges:
-                    try:
-                        # Every EdgeSpec field, not just the endpoints: a
-                        # dropped ``mapping`` breaks the shapes, and a
-                        # dropped ``additive`` silently overwrites a
-                        # boundary input the graph used to add to.  Derived
-                        # from the dataclass, so a field added to EdgeSpec
-                        # cannot quietly stop being restored here.
-                        self.gm.add_edge(**edge.add_edge_kwargs())
-                    except Exception as exc:  # noqa: BLE001 - reported below
-                        problems.append(f"edge {edge.key}: {exc}")
-                for ei in orig_ext:
-                    try:
-                        self.gm.add_external_input(
-                            ei.target_node, ei.target_field, ei.shape, ei.dtype,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - reported below
-                        problems.append(
-                            f"external input {ei.target_node}.{ei.target_field}: {exc}")
-                if problems:
-                    raise RuntimeError("; ".join(problems))
-                restored_keys = {e.key for e in self.gm._edges}
-                missing = sorted(set(saved_mapping_params) - restored_keys)
-                if missing:
-                    # ``add_edge`` recomputes ``ordinal``, and the key it
-                    # builds from it names the weights' slot: put them back
-                    # under a key no edge answers to and they are attached
-                    # to nothing, or to the wrong edge.
-                    raise RuntimeError(
-                        f"restored edges do not carry the saved mapping "
-                        f"key(s) {missing}"
-                    )
-                if saved_mapping_params:
-                    self.gm.params.setdefault("mappings", {}).update(
-                        saved_mapping_params)
-                for edge_key, overrides in saved_edge_specs.items():
-                    for param_key, spec in overrides.items():
-                        self.gm.set_param_spec(edge_key, param_key, spec)
-                self.gm.compile()
-            except Exception as exc:
-                _restore_graph_structure(self.gm, snapshot)
+            self.gm.add_node(orig_node)
+            for edge in orig_edges:
                 try:
-                    self.gm.compile()
-                except Exception:  # pragma: no cover - the graph compiled a moment ago
-                    logger.exception(
-                        "Rolling back surrogate deactivation of %r left an "
-                        "uncompilable graph", node_name)
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Could not restore '{node_name}'; the surrogate is "
-                           f"still active: {exc}",
+                    # Every EdgeSpec field, not just the endpoints: a
+                    # dropped ``mapping`` breaks the shapes, and a
+                    # dropped ``additive`` silently overwrites a
+                    # boundary input the graph used to add to.  Derived
+                    # from the dataclass, so a field added to EdgeSpec
+                    # cannot quietly stop being restored here.
+                    self.gm.add_edge(**edge.add_edge_kwargs())
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    problems.append(f"edge {edge.key}: {exc}")
+            for ei in orig_ext:
+                try:
+                    self.gm.add_external_input(
+                        ei.target_node, ei.target_field, ei.shape, ei.dtype,
+                    )
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    problems.append(
+                        f"external input {ei.target_node}.{ei.target_field}: {exc}")
+            if problems:
+                raise RuntimeError("; ".join(problems))
+            restored_keys = {e.key for e in self.gm._edges}
+            missing = sorted(set(saved_mapping_params) - restored_keys)
+            if missing:
+                # ``add_edge`` recomputes ``ordinal``, and the key it
+                # builds from it names the weights' slot: put them back
+                # under a key no edge answers to and they are attached
+                # to nothing, or to the wrong edge.
+                raise RuntimeError(
+                    f"restored edges do not carry the saved mapping "
+                    f"key(s) {missing}"
                 )
+            if saved_mapping_params:
+                self.gm.params.setdefault("mappings", {}).update(
+                    saved_mapping_params)
+            for edge_key, overrides in saved_edge_specs.items():
+                for param_key, spec in overrides.items():
+                    self.gm.set_param_spec(edge_key, param_key, spec)
+            self.gm.compile()
 
             self._active_surrogates.discard(node_name)
             self._reset_state()
@@ -5200,27 +5291,24 @@ class SimulationServer:
             interactive flame-graph view of per-node + coupling
             overhead.
 
-            The live simulation is left as it was: its state and params are
-            restored after the profile, and the streams neither show nor
-            count the profiler's steps.
+            The live simulation is left as it was: the graph is put back
+            after the profile, and the streams neither show nor count the
+            profiler's steps.
             """
-            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
-                _restore_state_and_params,
-                _state_and_params_snapshot,
-            )
             from maddening.core.simulation.profiler import (
                 profile_graph, profile_report_to_perfetto,
             )
             n_steps = max(1, min(1000, int(n_steps)))
             n_warmup = max(0, min(50, int(n_warmup)))
-            with self._graph_access("profile the graph", write=True):
+            with self._graph_transaction("profile the graph", write=True) as transaction:
                 # The profiler resets the graph to its initial state and
-                # steps it: the live state, the params and the streams are
-                # put back as they were.  The route used to leave the graph
-                # at the profiler's last step -- 0.09 s into a run that had
-                # been at 10 s -- while the streams' clock went on from 10 s.
-                undo = _state_and_params_snapshot(self.gm)
-                dirty = self.gm._dirty
+                # steps it: the route's transaction is rolled back when it
+                # succeeds as well, so the live state, the params, the
+                # compile bookkeeping (an edited graph is still waiting for
+                # its compile) and the streams are as they were.  The route
+                # used to leave the graph at the profiler's last step --
+                # 0.09 s into a run that had been at 10 s -- while the
+                # streams' clock went on from 10 s.
                 try:
                     with self._relay_detached():
                         report = profile_graph(self.gm, n_steps=n_steps, n_warmup=n_warmup)
@@ -5230,9 +5318,7 @@ class SimulationServer:
                     # RuntimeError was, and an edge of mismatched shapes (an
                     # ExceptionGroup from the compile) was a 500.
                     raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
-                finally:
-                    _restore_state_and_params(self.gm, undo)
-                    self.gm._dirty = self.gm._dirty or dirty
+                transaction.rollback()
             return profile_report_to_perfetto(report)
 
         @app.post("/sim/profile/jax/start", tags=["sim"], response_model=None)

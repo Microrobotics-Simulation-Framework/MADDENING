@@ -112,7 +112,11 @@ def test_a_failing_surrogate_deactivate_leaves_the_graph_compilable():
 
     response = client.post("/surrogate/deactivate/B")
     assert response.status_code == 500
-    assert "B" in response.json()["detail"]
+    # The generic detail of every unexpected failure: it used to quote the
+    # graph's own error ("edge references non-existent source node 'A'").
+    detail = response.json()["detail"]
+    assert "failed unexpectedly" in detail and "put back" in detail
+    assert "'A'" not in response.text and "non-existent" not in response.text
 
     assert list(gm._edges) == before_edges
     assert sorted(gm._nodes) == before_nodes

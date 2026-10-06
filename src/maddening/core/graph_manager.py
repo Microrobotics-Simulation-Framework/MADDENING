@@ -12131,6 +12131,26 @@ class GraphManager:
         self._recover_from_escaped_tracers()
         load_state(self, path)
 
+    def _transaction_snapshot(self, also=(), *, leaves=None):
+        """Everything this graph holds, as it is now, for
+        :meth:`_transaction_restore` to put back: the state, the params
+        tree, the nodes and their own ``params``, the edges, the coupling
+        groups, the external inputs and every piece of compile bookkeeping
+        (``maddening.core._graph_transaction`` says how, and what it shares
+        instead of copying -- every array, so the cost does not grow with
+        the size of a field).  *also*: further objects to record with it (a
+        server's own containers that describe the graph).  Reads nothing
+        through a property, so it takes in no pending ``node.params`` write
+        and compiles nothing: the graph it records is the one it found."""
+        from maddening.core._graph_transaction import _Snapshot
+        return _Snapshot([self, *also], leaves=leaves)
+
+    def _transaction_restore(self, snapshot) -> None:
+        """Put back what :meth:`_transaction_snapshot` recorded: every
+        attribute of this graph, and every container reachable from one, is
+        as it was, in place.  Notifies no observer."""
+        snapshot.restore()
+
     # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------

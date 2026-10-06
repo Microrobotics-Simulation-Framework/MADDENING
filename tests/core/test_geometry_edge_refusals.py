@@ -207,6 +207,39 @@ def _refused_add_edge(phrases, **edge):
     return message
 
 
+class _TwoArgumentMapping:
+    """A mapping written before ``geom`` existed: ``apply`` takes the field
+    and the weights and nothing else."""
+
+    kind = "test_two_argument"
+    mode = "consistent"
+    n_source, n_target = N_SOURCE, N_TARGET
+
+    def params_pytree(self):
+        return {}
+
+    def apply(self, field, weights):
+        return field[:N_TARGET] * jnp.float32(2.0)
+
+    def apply_T(self, field, weights):
+        return jnp.concatenate([field * jnp.float32(2.0), jnp.zeros(N_SOURCE - N_TARGET)])
+
+
+def test_an_edge_without_a_geometry_still_makes_the_two_argument_call():
+    """``apply(value, weights)``, as before the feature: a mapping whose
+    ``apply`` has no third parameter steps on an ordinary edge.  (The
+    program-text gate cannot see this: the shipped kinds accept
+    ``geom=None``, and passing it changes no program.)"""
+    gm = _graph(mapping=_TwoArgumentMapping())
+    gm.compile()
+    gm.step()
+    # b.x <- 0.5 * [1, 2] + 2 * a.x[:2], with a.x read after a's own update.
+    a = np.asarray(gm.get_node_state("a")["x"])
+    assert np.array_equal(np.asarray(gm.get_node_state("b")["x"]),
+                          np.float32(0.5) * np.arange(1, N_TARGET + 1, dtype=np.float32)
+                          + np.float32(2.0) * a[:N_TARGET])
+
+
 def test_g1_a_geometry_without_a_mapping_is_refused():
     _refused_add_edge(["was given without a mapping", "pass mapping=", "drop geometry="],
                       geometry=("source", "g"))

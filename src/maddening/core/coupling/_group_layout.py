@@ -6,6 +6,7 @@ Moved verbatim out of ``maddening.core.graph_manager``.  Private.
 
 from __future__ import annotations
 
+import copy
 import math
 from typing import Optional
 
@@ -13,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling.acceleration import float_fields_of
+from maddening.core.coupling.group import CouplingGroup
 
 
 def _interface_edge_order(edges, member_order) -> list:
@@ -49,6 +51,10 @@ def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
                 ifields.setdefault(edge.source_node, set()).add(edge.source_field)
             else:
                 ifields.setdefault(edge.source_node, set()).update(fields.keys())
+            if edge.geometry is not None and edge.geometry[0] == "source":
+                # A geometry the edge reads from its producer is read
+                # from the iterate too, as a second edge would read it.
+                ifields.setdefault(edge.source_node, set()).add(edge.geometry[1])
     return {nn: tuple(sorted(fs)) for nn, fs in ifields.items()} if ifields else None
 
 
@@ -283,6 +289,48 @@ def _subcycling_ratio_errors(group, nodes) -> list[str]:
             + " -- or change the macro timestep."
         )
     return errors
+
+
+def _group_geometry_edges(group, edges) -> list:
+    """The edges with a geometry-dependent mapping that *group*'s pass
+    resolves: every one into a member, from inside the group or outside."""
+    return [e for e in edges if e.geometry is not None and e.target_node in group.nodes]
+
+
+#: Why a group whose pass resolves a geometry-dependent mapping reports no
+#: bound (``coupling_diagnostics()[key]["not_usable_reason"]``).
+_GEOMETRY_DIAGNOSTICS_REASON = (
+    "the group resolves geometry-dependent mapping(s) on edge(s) {keys}; in 0.4.0 the "
+    "coupling diagnostics do not read a moving geometry (the float floor and the "
+    "bounds built on it leave it out), so no bound or estimate is reported for this "
+    "group. iterations, residual and converged are the solve's own."
+)
+
+
+def _geometry_edge_coupling_errors(group, edges) -> list[str]:
+    """``ERROR:`` issues for a group setting a geometry-dependent mapping
+    cannot serve (experimental; empty for every other group).
+
+    ``convergence_norm="interface"`` measures the change, between
+    iterates, of what each internal edge delivers from its source field.
+    For an edge whose mapping reads a geometry that reading needs the
+    geometry of each iterate too, which the norm does not read in 0.4.0:
+    refused, naming the norms that measure the state instead.
+    """
+    if group.convergence_norm != "interface":
+        return []
+    names = sorted(group.nodes)
+    return [
+        f"ERROR: coupling group {names} uses convergence_norm='interface', which "
+        f"measures the values the group's internal edges carry, but edge {e.key!r} "
+        f"carries its value through a geometry-dependent mapping (geometry "
+        f"{e.geometry[0]}.{e.geometry[1]}), and the norm does not read a moving "
+        f"geometry in 0.4.0.  Use convergence_norm='mixed' or 'l2', which measure "
+        f"the members' state, the geometry included."
+        for e in edges
+        if e.geometry is not None
+        and e.source_node in group.nodes and e.target_node in group.nodes
+    ]
 
 
 def _flux_edge_coupling_errors(group, nodes, edges, state) -> list[str]:
@@ -694,3 +742,33 @@ def _non_finite_reads_as_diverged(state_finite, residual, amplification):
         jnp.where(state_finite, residual, jnp.full_like(residual, jnp.inf)),
         jnp.where(state_finite, amplification, jnp.zeros_like(amplification)),
     )
+
+
+def _group_without_member(group: CouplingGroup, name: str) -> Optional[CouplingGroup]:
+    """*group* as ``GraphManager.remove_node`` leaves it when node *name*
+    is removed: the same object when it does not name the node; ``None``
+    (the group is removed) when fewer than two members would remain;
+    otherwise a group of the remaining members with every option kept --
+    ``accelerated_fields`` without the node's entry, and ``None`` (the
+    interface fields) when no other entry selects a field, which
+    ``CouplingGroup`` refuses to be told with an empty mapping.  The
+    options were validated, and warned about, when the group was made."""
+    if name not in group.nodes:
+        return group
+    nodes = group.nodes - {name}
+    if len(nodes) < 2:
+        return None
+    accelerated = group.accelerated_fields
+    if accelerated is not None:
+        accelerated = {k: v for k, v in accelerated.items() if k != name}
+        if not any(accelerated.values()):
+            accelerated = None
+    # A copy with the two fields set, not ``dataclasses.replace``: that
+    # runs ``__post_init__`` again, which warns again about every option
+    # the group was already warned about when it was made.  Nothing here
+    # needs validating a second time: the members are a subset, and the
+    # selection is a subset that still selects a field, or ``None``.
+    smaller = copy.copy(group)
+    object.__setattr__(smaller, "nodes", frozenset(nodes))
+    object.__setattr__(smaller, "accelerated_fields", accelerated)
+    return smaller

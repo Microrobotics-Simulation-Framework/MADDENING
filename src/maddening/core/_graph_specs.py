@@ -177,14 +177,219 @@ def _strong_typed(tree):
     return jax.tree.map(_fix, tree)
 
 
-def _apply_edge(edge: EdgeSpec, value, params):
+def _edge_geom(edge: EdgeSpec, src_state, consumer_state):
+    """The geometry *edge*'s mapping reads at one call site, or ``None``.
+
+    A source-anchored geometry is read from *src_state*, the same state
+    dict the edge's value is looked up in, so it has the value's time
+    level.  A target-anchored one is the named field of *consumer_state*:
+    the ``state`` argument of the hook (``update`` or
+    ``compute_boundary_fluxes``) the boundary inputs are being resolved
+    for.  *consumer_state* may be a zero-argument callable, called only
+    for a target-anchored geometry: a call site whose consumer state is
+    built after its boundary inputs then traces nothing new, and nothing
+    in another order, for every edge without one.
+    """
+    if edge.geometry is None:
+        return None
+    anchor, field = edge.geometry
+    if anchor == "source":
+        return src_state[edge.source_node][field]
+    held: Any = consumer_state() if callable(consumer_state) else consumer_state
+    return held[field]
+
+
+_GEOMETRY_ANCHORS = ("source", "target")
+
+
+def _checked_geometry(key: str, geometry, mapping) -> Optional[tuple[str, str]]:
+    """``add_edge``'s *geometry* as the tuple an :class:`EdgeSpec` holds.
+
+    Raises ``ValueError`` for a malformed value, for a geometry without a
+    geometry-dependent mapping, and for a geometry-dependent mapping
+    without a geometry.  ``None`` with any other mapping, or with no
+    mapping, is the edge every graph had.
+    """
+    reads = mapping is not None and bool(getattr(mapping, "needs_geometry", False))
+    if geometry is None:
+        if reads:
+            raise ValueError(
+                f"add_edge({key}): mapping {mapping!r} reads a moving geometry and "
+                f"none was given. Pass geometry=(\"source\", <state field>) or "
+                f"geometry=(\"target\", <state field>)."
+            )
+        return None
+    given = geometry
+    pair = None
+    if isinstance(geometry, dict):
+        if set(geometry) == {"anchor", "field"}:
+            pair = (geometry["anchor"], geometry["field"])
+    elif isinstance(geometry, (list, tuple)) and len(geometry) == 2:
+        pair = tuple(geometry)
+    if (pair is None or not all(isinstance(x, str) and x for x in pair)
+            or pair[0] not in _GEOMETRY_ANCHORS):
+        raise ValueError(
+            f"add_edge({key}): geometry must be (\"source\", <field>) or "
+            f"(\"target\", <field>), a state field of this edge's own source or "
+            f"target node; got {given!r}. A geometry held by any other node is not "
+            f"supported in 0.4.0: carry it in the source or target node's state."
+        )
+    if mapping is None:
+        raise ValueError(
+            f"add_edge({key}): geometry={pair!r} was given without a mapping. A "
+            f"geometry is the moving interface an interface mapping reads; pass "
+            f"mapping=<a geometry-dependent mapping> or drop geometry=."
+        )
+    if not reads:
+        raise ValueError(
+            f"add_edge({key}): mapping {mapping!r} is static (it reads no geometry), "
+            f"but geometry={pair!r} was given and would be ignored. Drop geometry=, or "
+            f"use a geometry-dependent mapping kind."
+        )
+    return (pair[0], pair[1])
+
+
+def _mapping_field_leads(mapping) -> Optional[tuple[tuple, tuple]]:
+    """``(source lead, target lead)`` of a mapping that declares
+    ``field_shapes()``: the leading axes of the field it reads and of the
+    field it delivers.  ``None`` for a mapping without the method, which
+    acts on axis 0 (``n_source`` in, ``n_target`` out) as every mapping
+    did."""
+    shapes = getattr(mapping, "field_shapes", None)
+    if shapes is None:
+        return None
+    source_lead, target_lead = shapes()
+    return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
+
+
+_GEOMETRY_DTYPES = ("float32", "float64")
+
+
+def _geometry_edge_issues(edges, nodes, state) -> list[str]:
+    """``validate()``'s issues about the geometry each edge names.
+
+    ``ERROR:`` for a geometry on an edge with a sharded end, one that is
+    not a state field of its anchor node (absent, or one of its boundary
+    fluxes), one that is not float32 or float64, and one whose shape the
+    mapping does not read; plus whatever the mapping itself says about
+    positions held in that dtype (``geometry_dtype_problems``, optional:
+    errors and ``WARNING:`` advisories).  Empty for a graph without a
+    geometry edge.
+    """
+    from maddening.core.node import SimulationNode  # noqa: PLC0415
+
+    issues: list[str] = []
+    for e in edges:
+        if e.geometry is None:
+            continue
+        anchor, field = e.geometry
+        for which, name in (("source", e.source_node), ("target", e.target_node)):
+            obj = nodes[name].node if name in nodes else None
+            for _ in range(64):
+                if obj is None:
+                    break
+                if getattr(obj, "_mesh", None) is not None:
+                    issues.append(
+                        f"ERROR: edge {e.key}: its {which} node {name!r} is sharded "
+                        f"({type(obj).__name__}). A geometry-dependent mapping is not "
+                        f"supported on an edge with a sharded end in 0.4.0. Use an "
+                        f"unsharded node on both ends.")
+                    break
+                nxt = getattr(obj, "physics_node", None)
+                obj = getattr(obj, "_inner", None) if nxt is None else nxt
+        holder = e.source_node if anchor == "source" else e.target_node
+        if holder not in state or holder not in nodes:
+            continue        # a missing node is reported by the edge checks
+        fields = state[holder]
+        if field not in fields:
+            node = nodes[holder].node
+            is_flux = (
+                type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes
+                and field in node.compute_boundary_fluxes(fields, {}, 0.0))
+            if is_flux:
+                issues.append(
+                    f"ERROR: edge {e.key}: geometry field {field!r} of {holder!r} is a "
+                    f"boundary flux (compute_boundary_fluxes), not a state field. A "
+                    f"geometry must be a state field in 0.4.0: a flux is recomputed "
+                    f"within a step and has no single time level. Hold the geometry in "
+                    f"{holder!r}'s state.")
+            else:
+                issues.append(
+                    f"ERROR: edge {e.key}: geometry field {field!r} is not in the state "
+                    f"of its {anchor} node {holder!r}. State fields: {sorted(fields)}.")
+            continue
+        value = fields[field]
+        dtype = getattr(value, "dtype", None)
+        if str(dtype) not in _GEOMETRY_DTYPES:
+            issues.append(
+                f"ERROR: edge {e.key}: geometry field {holder}.{field} has dtype {dtype}; "
+                f"a geometry must be a float32 or float64 array.")
+            continue
+        shape = tuple(int(n) for n in np.shape(value))
+        want = tuple(getattr(e.mapping, "geometry_shape", ()))
+        accepts = getattr(e.mapping, "accepts_geometry_shape", None)
+        if not (accepts(shape) if callable(accepts) else shape == want):
+            issues.append(
+                f"ERROR: edge {e.key}: geometry field {holder}.{field} has shape {shape}, "
+                f"but mapping {e.mapping!r} reads a geometry of shape {want}.")
+            continue
+        problems = getattr(e.mapping, "geometry_dtype_problems", None)
+        if callable(problems):
+            found: Any = problems(dtype)
+            errors, advisories = found
+            issues.extend(f"ERROR: edge {e.key}: {text}." for text in errors)
+            issues.extend(f"WARNING: edge {e.key}: {text}." for text in advisories)
+    return issues
+
+
+def _refuse_unpreserved_geometry(edges, name: str, original, replacement) -> None:
+    """Raise ``ValueError`` if replacing node *name* (*original*) by
+    *replacement* would drop a geometry an edge reads from it.
+
+    For each edge anchored on *name*, the replacement's
+    ``initial_state()`` must hold the geometry field with the same shape
+    and a float32 or float64 dtype.  Asked before anything is removed, so
+    a refusal leaves the graph as it was.  Replacing the other end of a
+    geometry edge is not this function's concern.
+    """
+    new_state = None
+    for e in edges:
+        if e.geometry is None:
+            continue
+        anchor, field = e.geometry
+        if (e.source_node if anchor == "source" else e.target_node) != name:
+            continue
+        old = original.initial_state().get(field)
+        if old is None:
+            continue        # never valid: ``validate()`` reports it
+        if new_state is None:
+            new_state = replacement.initial_state()
+        new = new_state.get(field)
+        if (new is None or tuple(np.shape(new)) != tuple(np.shape(old))
+                or str(getattr(new, "dtype", None)) not in _GEOMETRY_DTYPES):
+            raise ValueError(
+                f"replace_node({name!r}): edge {e.key} reads its geometry from "
+                f"{name}.{field} (shape {tuple(np.shape(old))}, {old.dtype}), which the "
+                f"replacement {type(replacement).__name__} does not hold. Nothing was "
+                f"changed."
+            )
+
+
+def _geometry_edge_keys(edges) -> list[str]:
+    """The keys of the edges of *edges* that read a geometry."""
+    return [e.key for e in edges if e.geometry is not None]
+
+
+def _apply_edge(edge: EdgeSpec, value, params, geom=None):
     """Mapping (interface transfer) first, then the scalar transform.
 
     The step's edge rule (:func:`maddening.core.edge._delivered`) with the
     step's resolved parameters: the mapping weights are ``params``'s
     ``mappings`` entry for the edge, baked or traced as the step has them.
+    *geom* is the geometry of a geometry-dependent mapping
+    (:func:`_edge_geom`); an edge without one ignores it.
     """
-    return _delivered(edge, value, None if params is None else params.mappings)
+    return _delivered(edge, value, None if params is None else params.mappings, geom)
 
 
 def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:

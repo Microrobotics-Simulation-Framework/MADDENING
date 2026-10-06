@@ -131,7 +131,7 @@ ROUTES = {
         lambda s: "extra" in s.gm._nodes),  # noqa: SLF001
     "remove a node": (
         None, lambda c: c.delete("/graph/nodes/rod"),
-        200, ("GraphManager.remove_node", "StateRelay.restore"),
+        200, ("GraphManager._remove_node", "StateRelay.restore"),
         lambda s: "rod" not in s.gm._nodes),  # noqa: SLF001
     "add an edge": (
         None, lambda c: c.post("/graph/edges", json=EDGE),
@@ -525,7 +525,7 @@ def test_a_failure_at_any_point_of_a_surrogate_activation_or_revert_changes_noth
     resp, tried, _, _ = fail_at_every_point(
         served, lambda: served.client.post("/surrogate/deactivate/rod"), "deactivate")
     assert resp.status_code == 200, resp.text
-    for step in ("GraphManager.remove_node", "GraphManager.add_node", "GraphManager.compile",
+    for step in ("GraphManager._remove_node", "GraphManager.add_node", "GraphManager.compile",
                  "GraphManager.reset_state"):
         assert any(f"after {step}" in point for point in tried), (step, tried)
     assert served.gm._nodes["rod"].node is original  # noqa: SLF001

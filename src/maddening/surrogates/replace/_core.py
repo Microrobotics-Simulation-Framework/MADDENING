@@ -79,7 +79,8 @@ def replace_node(
     replaced node survives the swap: ``additive``, ``source_units`` /
     ``target_units``, the interface ``mapping`` and its live weights in
     ``gm.params["mappings"]``, plus any :class:`ParamSpec` overrides set
-    on a mapped edge.  The graph therefore produces the same numbers
+    on a mapped edge.  A coupling group the node belongs to keeps it as a
+    member, with every option.  The graph therefore produces the same numbers
     before and after the replacement, up to the surrogate's own error.
 
     Parameters
@@ -168,8 +169,17 @@ def replace_node(
         for ei in saved_external
     ]
 
-    # Remove original (this also removes edges and external inputs)
-    gm.remove_node(original_name)
+    # A geometry-dependent mapping reads a state field of this node: the
+    # replacement must hold it, or nothing is changed.
+    from maddening.core._graph_specs import _refuse_unpreserved_geometry  # noqa: PLC0415
+    _refuse_unpreserved_geometry(gm._edges, original_name,
+                                 gm._nodes[original_name].node, surrogate_node)
+
+    # Remove original (this also removes edges and external inputs).  As a
+    # replacement: a coupling group the node belongs to keeps it as a
+    # member -- ``remove_node`` itself takes the node out of its group --
+    # and the surrogate added below under the same name is that member.
+    gm._remove_node(original_name, replacing=True)
 
     # Add surrogate
     gm.add_node(surrogate_node)

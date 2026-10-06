@@ -99,7 +99,10 @@ BUILTIN_KINDS = ["matrix", "nearest_neighbor", "projection_1d", "rbf"]
 #: ``register_mapping`` (``maddening.core.coupling.sparse_mapping``), and
 #: every kind a process has before it registers one of its own.
 SPARSE_KINDS = ["sparse_matrix", "sparse_nearest_neighbor", "sparse_projection_1d"]
-LIBRARY_KINDS = sorted(BUILTIN_KINDS + SPARSE_KINDS)
+#: The geometry-dependent reference kind (experimental), registered like
+#: the sparse ones through the public door.
+GEOMETRY_KINDS = ["multilinear_grid"]
+LIBRARY_KINDS = sorted(BUILTIN_KINDS + SPARSE_KINDS + GEOMETRY_KINDS)
 EDGE = "a.v -> b.inp"
 INLINE3 = {"inline": [0.0, 0.5, 1.0], "dtype": "float64"}
 PAIR = {"source_points": INLINE3, "target_points": INLINE3}
@@ -371,8 +374,9 @@ def clean_process(tmp_path_factory) -> dict:
 
 def test_a_process_that_registered_nothing_has_exactly_the_kinds_the_library_ships(
         clean_process):
-    """The four built-in kinds and the three sparse ones, without anyone
-    having imported the modules that define their factories."""
+    """The four built-in kinds, the three sparse ones and the
+    geometry-dependent one, without anyone having imported the modules
+    that define their factories."""
     report = clean_process["report"]
     assert report["spec_from_mapping_spec_alone"] == "nearest_neighbor"
     assert report["kinds"] == LIBRARY_KINDS
@@ -501,6 +505,7 @@ def test_the_kind_lookup_has_no_import_machinery_to_reach(module):
     assert deferred == {
         mapping_registry: [
             "from maddening.serialization.json_codec import NON_FINITE_TOKENS",
+            "import maddening.core.coupling.grid_mapping",
             "import maddening.core.coupling.mapping",
             "import maddening.core.coupling.sparse_mapping",
         ],
@@ -557,8 +562,14 @@ def test_the_registry_record_is_a_dataclass_that_can_gain_a_defaulted_field():
     assert dataclasses.is_dataclass(record) and record.__dataclass_params__.frozen
     fields = {f.name: f for f in dataclasses.fields(record)}
     assert list(fields) == ["kind", "factory", "arrays", "hyperparameters", "references",
-                            "builtin"]
+                            "builtin", "needs_geometry"]
     assert fields["builtin"].default is False
+    # The field this test anticipated: defaulted, so it changed no entry.
+    assert fields["needs_geometry"].default is False
+    assert {k for k, e in mapping_registry._MAPPING_REGISTRY.items() if e.needs_geometry} \
+        >= set(GEOMETRY_KINDS)
+    assert not any(mapping_registry._MAPPING_REGISTRY[k].needs_geometry
+                   for k in BUILTIN_KINDS + SPARSE_KINDS)
 
     @dataclasses.dataclass(frozen=True)
     class Grown(record):
@@ -583,8 +594,10 @@ def test_the_public_signature_is_the_one_documented():
         ("arrays", "KEYWORD_ONLY", True),
         ("hyperparameters", "KEYWORD_ONLY", True),
         ("references", "KEYWORD_ONLY", False),
+        ("needs_geometry", "KEYWORD_ONLY", False),
     ]
     assert signature.parameters["references"].default is None
+    assert signature.parameters["needs_geometry"].default is False
 
 
 @pytest.mark.parametrize("kind", [None, 7, 3.0, True, b"rbf", ["rbf"], ("a",), {"a": 1}, ""])
@@ -2200,7 +2213,12 @@ def test_a_strict_write_refuses_a_stale_node_reference_of_a_registered_kind(kind
     with pytest.raises(ValueError, match="no longer describes the points") as moved:
         gm.to_dict()
     assert "a.v->b.inp" in str(moved.value)
-    gm.remove_node("c")
+    with pytest.raises(ValueError, match="Cannot remove node 'c'"):
+        gm.remove_node("c")
+    # remove_node() refuses this removal while the edge holds the reference
+    # (MADD-ANO-214); the write-time check is for a graph that lost the node
+    # some other way.
+    gm._remove_node("c", replacing=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="unknown node 'c'"):
         gm.to_dict()
     assert gm.to_dict(strict_mappings=False)["edges"][0]["mapping"]["kind"] == kind

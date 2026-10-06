@@ -2632,10 +2632,24 @@ claims:
   sources:
     - src/maddening/api/README.md:114 (Graph Structure)
     - src/maddening/api/server.py:2900 (remove_node)
-  conditions: a node with edges to two others.
-  oracle: no edge names the node afterwards; the graph compiles and steps.
+  conditions: >-
+    a node with edges to two others; a member of a coupling group of two
+    and of three (the group loses the member and keeps its options, a group
+    of one is removed, and the reply's coupling_groups says which); a node
+    with a surrogate record.  400, nothing removed, for a node whose points
+    a mapping on an edge between two other nodes was built from.  A node
+    added back under the name is not a member of the group again, and no
+    route adds a group.
+  oracle: >-
+    no edge, external input, coupling group or surrogate record names the
+    node afterwards; the graph compiles and steps, and its save reloads and
+    steps as it does.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_removing_a_node_removes_every_edge_that_touches_it
+    - tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_the_route_removes_a_member_and_the_graph_still_steps_and_reloads
+    - tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_the_route_refuses_a_node_a_remaining_mapping_was_built_from
+    - tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_the_route_forgets_a_surrogate_recorded_under_the_removed_name
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_graph_whose_coupling_group_lost_a_member_still_reloads
     - tests/api/test_api.py::TestGraphEndpoints::test_remove_node
     - tests/api/test_api.py::TestGraphEndpoints::test_remove_nonexistent_node
   status: verified
@@ -3104,9 +3118,21 @@ claims:
   sources:
     - src/maddening/api/README.md:141 (Parameters)
     - docs/validation/known_anomalies.yaml (MADD-ANO-063)
-  conditions: a mapped edge whose source points reference the rod's grid.
-  oracle: 400 and nothing written; 200 for a leaf the mapping does not depend on.
+  conditions: >-
+    a mapped edge (RBF, registered kinds, dense and sparse static) whose
+    points reference the rod's grid; the length written alone, with a
+    diffusivity that makes it stable in the same request, and after a PUT,
+    a fit, a POST /checkpoint/load or a load_state left the live
+    diffusivity away from the value the rod was built with.
+  oracle: >-
+    400 and nothing written, the same verdict whatever brought the live
+    values; 200 for a leaf the mapping does not depend on, and the save
+    then reloads and steps as the graph.
   tests:
+    - tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_route_refuses_a_length_under_a_mapping_whatever_brought_the_other_leaf
+    - tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_route_refuses_a_length_written_with_the_diffusivity_that_allows_it
+    - tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_a_calibration_of_the_mapped_rod_is_taken_after_every_door
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from
     - tests/core/test_mapping_point_reference_writes.py::test_the_route_refuses_a_length_under_a_reference_and_writes_nothing
     - tests/core/test_mapping_point_reference_writes.py::test_the_route_still_takes_a_calibration_of_the_mapped_rod
     - tests/core/test_mapping_point_reference_writes.py::test_the_route_refuses_a_parameter_field_a_reference_names

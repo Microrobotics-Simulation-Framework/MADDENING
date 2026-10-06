@@ -14540,6 +14540,133 @@ anomalies:
       - "tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-214"
+    title: "remove_node left a coupling group naming the removed node: every compile and step failed until a node of that name was added, and DELETE /graph/nodes answered 200"
+    description: >
+      `GraphManager.remove_node` removed the node's edges, external inputs,
+      live parameters and `ParamSpec` overrides, and left any coupling
+      group listing it.  `validate()`, `compile()` and every step then
+      raised ("coupling group references non-existent node"), and on
+      0.4.0's development builds, where `to_dict()` writes the groups, the
+      graph's own save was refused by `from_dict` ("cannot be rebuilt: No
+      node named ...").  `DELETE /graph/nodes/{name}` answered 200 to it;
+      `POST /sim/step` and `/graph/compile` were then a 400, and no route
+      removes a group.  Run at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1
+      (two HeatNode rods in a group, one removed): the group still named
+      both and the step raised.  Found by the extended REST write-sequence
+      oracle.  Resolved in 0.4.0: the node takes its membership with it,
+      as it takes its edges.  A group loses the member and keeps its
+      options (an `accelerated_fields` entry for the node goes too, and
+      the option becomes `None` when no other entry selects a field); a
+      group left with fewer than two members is removed.  `remove_node`
+      warns (`UserWarning`) for each group that changes and the route's
+      reply says the same in `coupling_groups`.  `replace_node` and the
+      surrogate routes, which put a node of the name back, keep the
+      membership.  A node whose points an interface mapping on an edge
+      between two other nodes was built from is not removed (`ValueError`,
+      400): that edge would remain with a reference `to_dict()` cannot
+      resolve.  `DELETE` also forgets the server's surrogate record of the
+      node, and the edges other surrogate records hold to it.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: nothing was computed from the graph in that condition, every
+      compile and step raised naming the group and the node.  `minor`
+      because the cost was a graph that could not run until repaired, and
+      over REST a 200 for the request that put it there.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.remove_node"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On 0.1.0 to 0.3.1 call remove_coupling_group() for the node's group
+      before remove_node(), and add the group again without it; or add a
+      node of the same name back before the next compile.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Changed behaviour: removing a member and adding a node back under
+      its name no longer leaves it a member; the group must be added
+      again (the warning says so).  Over REST no route adds a group, so a
+      group that lost a member this way is not restored by the routes.
+      `POST /surrogate/deactivate` (experimental) still restores the edges
+      recorded at activation rather than the node's current ones (pinned
+      as a strict xfail).
+    verification:
+      - "tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_group_of_three_loses_the_member_and_keeps_its_options"
+      - "tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_group_left_with_one_member_goes_with_the_node"
+      - "tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_removing_every_node_in_every_order_leaves_a_graph_that_reloads"
+      - "tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_replaced_member_stays_in_its_group_with_every_option"
+      - "tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_the_route_removes_a_member_and_the_graph_still_steps_and_reloads"
+      - "tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_graph_whose_coupling_group_lost_a_member_still_reloads"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-215"
+    title: "A length that moves the points a mapped edge was built from was taken after a fit or a checkpoint load had moved another leaf, or with that leaf in the same request: the mapping kept the old grid and the save did not reload"
+    description: >
+      The check that a params write does not move the points an interface
+      mapping was built from (MADD-ANO-063) rebuilt the node from the
+      values it was *constructed* with plus the written key, and counted
+      the constructor refusing that as "cannot be told".  A fit, a
+      `gm.params` write and a checkpoint load move a live leaf and leave
+      the constructed value.  On a mapped HeatNode rod built at Fourier
+      number 0.15 whose diffusivity a load had lowered to a third, `PUT
+      /graph/params {"length": 0.5}` -- Fourier 0.6 at the constructed
+      diffusivity, 0.2 at the live one -- was refused by nothing: the
+      mapping check could not build the rod, and the check that asks the
+      constructor asks it with the live value, which takes it.  The route
+      answered 200 (0.75 was refused at the same point, and 0.5 without
+      the load), the rod ran on the new length while the edge kept the
+      operator of the old grid, and `from_dict` refused the graph's own
+      save (`PointReferenceError`).  Dense and sparse static mappings
+      alike; a fit in place of the load did the same; so did one request
+      writing the length with the lower diffusivity, with no load at all;
+      and so did a `gm.params` write of the length in process, which no
+      check asked of the constructor (it ran even where the length is
+      unstable at every value the graph holds).  The same reading made
+      `PUT` refuse a structural value (`stencil_order: 4`) that the live
+      diffusivity allows, after a fit or a load, and take it after a
+      `PUT` of the same diffusivity.  Found by the extended REST
+      write-sequence oracle.  No release carried it: point references and
+      the check are new in 0.4.0's development (not in the source of
+      v0.1.0 to v0.3.1).  Resolved in 0.4.0: both checks build the node a
+      save would reload -- the node's params with the live leaves over
+      them, then the write -- for each key and for the whole write; where
+      the constructor refuses every candidate, a key from which the
+      referenced points are derived is reported as moving them.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a 200, or a run in process, on a rod and a mapping that
+      disagreed about the grid, and a save that did not load.  Never
+      `minor`; registered although no release carried it, because it is
+      major.  Not `critical`: it needs a mapped edge built from a node
+      point reference, and a length written beside a diffusivity that had
+      been moved away from the constructed one or was written with it.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager"
+      - "maddening.api.server._params_write_refusal"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: do not write a parameter a mapped edge's referenced points
+      are derived from; rebuild the node and the edge.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      MADD-ANO-022 is unchanged: an explicit or traced params pytree is not
+      a write and is not checked.  The fallback reports a key as moving
+      the points when another value of it does, so a value the constructor
+      refuses is refused for the mapping even if that one value would
+      have left the points where they were.
+    verification:
+      - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_route_refuses_a_length_under_a_mapping_whatever_brought_the_other_leaf"
+      - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_route_refuses_a_length_written_with_the_diffusivity_that_allows_it"
+      - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_a_length_in_gm_params_under_a_mapping_is_refused_whatever_brought_the_other_leaf"
+      - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_a_checkpoint_carrying_a_length_is_refused_whatever_brought_the_other_leaf"
+      - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_a_structural_value_the_live_leaves_allow_is_taken_after_every_door"
+      - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_points_are_read_off_the_node_built_from_the_live_leaves"
+      - "tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from"
   - anomaly_id: "MADD-ANO-216"
     title: "fit_lm reported converged=True beside a jump of a residual that is not differentiable in the trained parameters, at a loss far above the minimum and with no warning"
     description: >

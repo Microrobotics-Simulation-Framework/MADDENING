@@ -249,6 +249,10 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
+        # Per group key, the keys of the geometry-dependent mapped edges
+        # the compiled step's pass resolves (experimental; empty for a
+        # group without one).  Such a group reports no bound.
+        self._committed_geometry_edges: dict[str, tuple] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
         # ``(name, entries)``; written when the step is traced.
@@ -834,23 +838,78 @@ class GraphManager:
                     out.append((edge.key, arg, ref["field"]))
         return out
 
-    def _mapped_points_moved_by(self, owner: str,
-                                changes: dict[str, Any]) -> Optional[list[tuple[str, str, str]]]:
+    def _saved_params_bases(self, owner: str, live: Optional[dict]) -> list[dict]:
+        """The params a guard rebuilds node ``owner`` from when it asks what
+        a save of the graph would reload, most faithful first: the node's
+        own ``params`` with the live leaves ``live`` written over them
+        (what :meth:`to_dict` writes; ``live=None`` reads the graph's own
+        leaves, through no property), then the node's own ``params`` alone.
+
+        The second is there for a graph whose live leaves cannot be read
+        or that its constructor refuses.  It used to be the only one: a
+        guard then judged a write beside the values the node was *built*
+        with, which a fit or a checkpoint load leaves behind, and its
+        answer changed with them (:meth:`_mapped_points_moved_by`).
+        """
+        shared = getattr(self._nodes[owner].node, "params", None)
+        shared = dict(shared) if isinstance(shared, dict) else {}
+        if live is None:
+            live = (self._params.get("nodes") or {}).get(owner)
+        bases = []
+        try:
+            saved = self._node_params_with_leaves(owner, live)
+        except Exception:  # noqa: BLE001 - the graph cannot say what it would save
+            saved = None
+        if saved is not None:
+            bases.append({**shared, **saved})
+        bases.append(shared)
+        return bases
+
+    def _mapped_points_moved_by(self, owner: str, changes: dict[str, Any],
+                                live: Optional[dict] = None, *,
+                                _probing: bool = False,
+                                ) -> Optional[list[tuple[str, str, str]]]:
         """The point references of :meth:`_mapping_node_references` whose
         points a node rebuilt with ``changes`` written into its params reads
-        differently from one rebuilt without them; ``[]`` when none moves,
-        ``None`` when that cannot be told (no reference to ``owner``, no key
-        of ``changes`` is a constructor parameter, or the node is not rebuilt
-        from its params -- the constructor refusing the new values is
-        :meth:`_constructor_write_reason`'s to report, not this).
+        differently from the node rebuilt from its own; ``[]`` when none
+        moves, ``None`` when that cannot be told (no reference to ``owner``,
+        no key of ``changes`` is a constructor parameter, or the node is not
+        rebuilt from its params -- the constructor refusing the new values
+        is the callers' other checks' to report, not this).
 
         Rebuilt the way :meth:`from_dict` rebuilds a saved node, from its
         class and params -- the node, or the node a wrapper wraps, whichever
         is rebuilt that way (:func:`_params_holders`) -- and the field read
         by the rule a point reference resolves by
         (``mapping_spec._node_point_field``).  Both sides are rebuilt, so
-        nothing about the live node (a sharded slice, a value a fit moved in
-        ``gm.params`` alone) enters the comparison: only ``changes`` does.
+        nothing about the live node object (a sharded slice) enters the
+        comparison.
+
+        The node with ``changes`` is the one a save would reload: built from
+        the node's params with the live leaves ``live`` (the node's leaves
+        of :attr:`params` before the write; ``None`` reads the graph's)
+        written over them, then ``changes`` (:meth:`_saved_params_bases`).
+        It used to be built from the node's own params alone, and the
+        constructor refusing *those* with ``changes`` counted as "cannot be
+        told": after a fit or a checkpoint load had moved another leaf (a
+        rod's diffusivity, down), a ``length`` that is unstable at the
+        diffusivity the rod was built with and stable at the one it runs
+        with was refused by no check -- this one could not build the node,
+        and the check that asks the constructor asked it with the live
+        value, which takes it.  ``PUT /graph/params`` answered 200, a
+        ``gm.params`` write ran, the mapping kept the old grid's operator
+        and the save did not load.  The same in one request that writes the
+        length with a diffusivity it is stable at, so the callers ask this
+        of a whole write as well as of each key.
+
+        Where the constructor refuses ``changes`` whatever they are written
+        beside, the node cannot be built to read its points, and each
+        changed key is asked instead whether *another* value of it moves
+        them (:meth:`_points_moved_by_some_value`): a key the points are
+        derived from is reported as moving them.  So the answer no longer
+        waits on a different check to refuse the value: ``gm.params`` has no
+        check that asks the constructor, and took a rod's unstable
+        ``length`` under a mapping.
         """
         refs = self._mapping_node_references(owner)
         spec = self._nodes.get(owner)
@@ -878,10 +937,24 @@ class GraphManager:
                 before = build(dict(shared))
             except Exception:  # noqa: BLE001 - not rebuilt from its params
                 continue
-            try:
-                after = build({**shared, **changes})
-            except Exception:  # noqa: BLE001 - the constructor's refusal, reported elsewhere
-                return None
+            after = None
+            for base in self._saved_params_bases(owner, live):
+                try:
+                    after = build({**base, **changes})
+                except Exception:  # noqa: BLE001 - the constructor's refusal, reported elsewhere
+                    continue
+                break
+            if after is None:
+                if _probing:
+                    return None
+                moved = []
+                for key, value in changes.items():
+                    if _param_probes._leaf_values_equal(value, shared[key]):
+                        continue
+                    for found in self._points_moved_by_some_value(owner, key) or ():
+                        if found not in moved:
+                            moved.append(found)
+                return moved or None
             moved = []
             for edge_key, arg, field_name in refs:
                 try:
@@ -898,7 +971,8 @@ class GraphManager:
             return moved
         return None
 
-    def _mapping_point_write_reason(self, owner: str, changes: dict[str, Any]) -> Optional[str]:
+    def _mapping_point_write_reason(self, owner: str, changes: dict[str, Any],
+                                    live: Optional[dict] = None) -> Optional[str]:
         """Why writing ``changes`` into node ``owner``'s params would leave
         an interface mapping on the points of the old values, or ``None``.
 
@@ -915,9 +989,12 @@ class GraphManager:
         and the mapping interpolating from the old grid, and the config
         :meth:`to_dict` then wrote did not load (:meth:`from_dict` rebuilds
         the mapping from the new grid, and the recorded ``sha256`` refuses
-        it).  ``changes`` maps keys to the values ``node.params`` would hold.
+        it).  ``changes`` maps keys to the values ``node.params`` would hold;
+        ``live`` is the node's live leaves beside which they are written
+        (:meth:`_mapped_points_moved_by`).
         """
-        return self._moved_points_reason(owner, self._mapped_points_moved_by(owner, changes))
+        return self._moved_points_reason(
+            owner, self._mapped_points_moved_by(owner, changes, live))
 
     def _moved_points_reason(self, owner: str,
                              moved: Optional[list[tuple[str, str, str]]]) -> Optional[str]:
@@ -946,6 +1023,14 @@ class GraphManager:
         write reaches the compiled step directly and no later check sees
         it.  ``None`` when the leaf moves no referenced point set, or that
         cannot be told."""
+        return self._moved_points_reason(owner, self._points_moved_by_some_value(owner, key))
+
+    def _points_moved_by_some_value(self, owner: str,
+                                    key: str) -> Optional[list[tuple[str, str, str]]]:
+        """:meth:`_mapped_points_moved_by` for the node's own value of
+        ``key`` moved by half again, or by half if the constructor refuses
+        that; ``None`` when neither can be built or the value is not a
+        number."""
         spec = self._nodes.get(owner)
         if spec is None or not self._mapping_node_references(owner):
             return None
@@ -958,9 +1043,9 @@ class GraphManager:
             return None
         for factor in (1.5, 0.5):
             probe = np.where(arr == 0.0, 1.0, arr * factor)
-            moved = self._mapped_points_moved_by(owner, {key: probe.tolist()})
+            moved = self._mapped_points_moved_by(owner, {key: probe.tolist()}, _probing=True)
             if moved is not None:
-                return self._moved_points_reason(owner, moved)
+                return moved
         return None
 
     def _unused_node_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
@@ -1108,7 +1193,8 @@ class GraphManager:
         return not all(_param_probes._leaf_values_equal(a, b) for a, b in zip(consts_a, consts_b))
 
     def _constructor_write_reason(self, owner: str, key: str, value: Any,
-                                  others: Optional[dict[str, Any]] = None) -> Optional[str]:
+                                  others: Optional[dict[str, Any]] = None,
+                                  live: Optional[dict] = None) -> Optional[str]:
         """Why the node's own constructor refuses its params with
         ``params[key] = value`` -- and the other changes of the same write,
         *others*, applied with it -- or ``None`` when it takes them or that
@@ -1131,6 +1217,15 @@ class GraphManager:
         params dict, and is the one built from them), whichever is rebuilt
         from its current params as :meth:`from_dict` would rebuild it; a
         node that is not rebuilt that way is not asked.
+
+        Asked with the params a save would carry -- the node's own with its
+        live leaves ``live`` (``None``: the graph's) over them
+        (:meth:`_saved_params_bases`) -- since those are what
+        :meth:`from_dict` calls the constructor with.  With the node's own
+        values alone, a ``stencil_order: 4`` that is stable at the
+        diffusivity a checkpoint load had installed was refused for the
+        diffusivity the rod was built with, and taken on a graph with the
+        same live values that had reached them by a ``PUT``.
         """
         node = self._nodes[owner].node
         shared = getattr(node, "params", None)
@@ -1146,7 +1241,8 @@ class GraphManager:
             except Exception:  # noqa: BLE001 - not rebuilt from its params
                 continue
             try:
-                build({**(shared or {}), **(others or {}), key: value})
+                build({**self._saved_params_bases(owner, live)[0], **(others or {}),
+                       key: value})
             except Exception as exc:  # noqa: BLE001 - the constructor refuses it
                 return (
                     f"{cls.__name__}'s constructor refuses it ({type(exc).__name__}: "
@@ -1298,8 +1394,13 @@ class GraphManager:
                         # Read by the node's own step, and still not a value
                         # the running graph can take: a mapped edge was
                         # built from points the node derives from it.
+                        # Beside the node's other leaves in this tree: the
+                        # node a save would reload is built from them all.
                         reason = self._mapping_point_write_reason(
-                            owner, {key: np.asarray(value).tolist()})
+                            owner, {key: np.asarray(value).tolist()},
+                            live={k: v for k, v in leaves.items() if not any(
+                                isinstance(x, jax.core.Tracer)
+                                for x in jax.tree.leaves(v))})
                         consequence = (
                             "To change it, rebuild the node "
                             "with the new value and the mapped edge from its new "
@@ -1434,11 +1535,20 @@ class GraphManager:
         :attr:`params` (or ``params``) written over them, as plain Python
         scalars/lists.  This is what serialisation stores, so a calibrated
         graph reloads with the calibrated constants."""
+        live = self._params_or_default(params).get("nodes", {}).get(name, {})
+        return self._node_params_with_leaves(name, live)
+
+    def _node_params_with_leaves(self, name: str, live: Optional[dict]) -> dict:
+        """:meth:`effective_node_params` for the leaves ``live`` (``{key:
+        value}`` of one node), read through no property: the params a save
+        of the graph would carry for the node if those were its live
+        leaves.  The guards on a params write ask it of the leaves a write
+        would leave, from inside the check :attr:`params` itself runs."""
         spec = self._nodes[name]
         # A copy all the way down: a list this handed out used to be the
         # node's own (MADD-ANO-205).
         out = _detached_config(spec.node.params)
-        live = self._params_or_default(params).get("nodes", {}).get(name, {})
+        live = live if isinstance(live, dict) else {}
         snapshot = spec.node.params_pytree()
         for key, value in live.items():
             # Only constructor params can be written back; a derived leaf
@@ -1546,6 +1656,8 @@ class GraphManager:
         source_units: Optional[str] = None,
         target_units: Optional[str] = None,
         mapping: Optional[Any] = None,
+        *,
+        geometry: Optional[Any] = None,
     ) -> None:
         """Add a data-dependency edge between two nodes.
 
@@ -1563,6 +1675,19 @@ class GraphManager:
         :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
         A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
         its dict form) is rebuilt first with :meth:`point_resolver`.
+
+        ``geometry`` (experimental) names the moving geometry a
+        geometry-dependent mapping reads: ``("source", field)`` or
+        ``("target", field)``, a state field of this edge's own source or
+        target node (the dict ``{"anchor": ..., "field": ...}`` is taken
+        too).  There is no default anchor.  A source-anchored geometry is
+        read at the time level the edge's value is read at; a
+        target-anchored one is the field of the state the target's hook
+        is called with.  It is required by a mapping whose
+        ``needs_geometry`` is true and refused with any other; the
+        field's presence, dtype (float32 or float64) and shape (the
+        mapping's ``geometry_shape``) are checked by :meth:`validate`.
+        An edge without one behaves exactly as it did.
 
         The *transform* parameter accepts either a callable or a
         string name registered via ``@register_transform``.  String
@@ -1587,6 +1712,8 @@ class GraphManager:
             carriage return), a surrogate or U+FFFE / U+FFFF.  A
             target field the target node does not declare is taken (a node
             may read an input it does not declare).
+            Also if ``geometry`` is malformed, is given without a
+            geometry-dependent mapping, or is missing for one.
         """
         for what, name in (("source", source_field), ("target", target_field)):
             refusal = _graph_specs._field_name_refusal(name)
@@ -1608,6 +1735,8 @@ class GraphManager:
                     mapping = MappingSpec.from_dict(mapping)
                 mapping = mapping.build(self.point_resolver())
             self._check_mapping_shapes(source, source_field, target, target_field, mapping)
+        geometry = _graph_specs._checked_geometry(
+            f"{source}.{source_field}->{target}.{target_field}", geometry, mapping)
         ordinal = 0
         if mapping is not None:
             # Mapping weights live in params["mappings"][edge.key]; a
@@ -1622,7 +1751,7 @@ class GraphManager:
             )
         edge = EdgeSpec(source, target, source_field, target_field,
                         transform, additive, source_units, target_units,
-                        mapping=mapping, ordinal=ordinal)
+                        mapping=mapping, ordinal=ordinal, geometry=geometry)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
@@ -1655,10 +1784,19 @@ class GraphManager:
                 f"mapping {mapping!r} on {source}.{source_field} -> "
                 f"{target}.{target_field}: {problem}"
             )
+        leads = _graph_specs._mapping_field_leads(mapping)
         src_spec = self._nodes.get(source)
         if src_spec is not None:
             src_state = src_spec.node.initial_state()
-            if source_field in src_state:
+            if source_field in src_state and leads is not None:
+                have = tuple(np.shape(src_state[source_field])[:len(leads[0])])
+                if have != leads[0]:
+                    raise ValueError(
+                        f"mapping {mapping!r} reads a field whose leading axes are "
+                        f"{leads[0]}, which does not match {source}.{source_field} "
+                        f"(shape {tuple(np.shape(src_state[source_field]))})"
+                    )
+            elif source_field in src_state:
                 n = int(np.prod(np.shape(src_state[source_field])[:1] or (1,)))
                 if mapping.n_source != n:
                     raise ValueError(
@@ -1668,8 +1806,16 @@ class GraphManager:
         tgt_spec = self._nodes.get(target)
         if tgt_spec is not None:
             bspec = tgt_spec.node.boundary_input_spec().get(target_field)
-            shape = tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ()
-            if shape and mapping.n_target != int(shape[0]):
+            shape: tuple[Any, ...] = (
+                tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ())
+            if shape and leads is not None:
+                if tuple(int(n) for n in shape[:len(leads[1])]) != leads[1]:
+                    raise ValueError(
+                        f"mapping {mapping!r} delivers a field whose leading axes are "
+                        f"{leads[1]}, which does not match {target}.{target_field} "
+                        f"declared shape {shape}"
+                    )
+            elif shape and mapping.n_target != int(shape[0]):
                 raise ValueError(
                     f"mapping n_target={mapping.n_target} does not match "
                     f"{target}.{target_field} declared shape {shape}"
@@ -1724,7 +1870,9 @@ class GraphManager:
                 value = fluxes[edge.source_node][edge.source_field]
             else:
                 value = src_fields[edge.source_field]
-            value = _graph_specs._apply_edge(edge, value, resolved)
+            value = _graph_specs._apply_edge(
+                edge, value, resolved,
+                _graph_specs._edge_geom(edge, state, lambda: state[node_name]))
             if edge.additive and edge.target_field in out:
                 out[edge.target_field] = out[edge.target_field] + value
             else:
@@ -1774,12 +1922,94 @@ class GraphManager:
         self._dirty = True
 
     def remove_node(self, name: str) -> None:
-        """Remove a node and all edges / external inputs that reference it."""
+        """Remove a node and everything of the graph that names it.
+
+        * Every edge to or from the node, and every external input into
+          it, is removed with it (with a mapped edge's live weights and
+          :class:`~maddening.core.params.ParamSpec` overrides), as are the
+          node's own live parameters and overrides.
+        * A coupling group loses the node as a member and keeps its
+          options; an ``accelerated_fields`` entry for the node goes with
+          it, and if that leaves the option selecting no field it becomes
+          ``None`` (the interface fields, the default).  A group left with
+          fewer than two members is removed, options and all: one node is
+          not iterated against itself.  Until 0.4.0 the group went on
+          naming the removed node -- :meth:`validate`, :meth:`compile` and
+          every step then failed ("coupling group references non-existent
+          node") and the graph's own :meth:`to_dict` did not load, until a
+          node of that name was added (``MADD-ANO-214``).  A
+          ``UserWarning`` names each group that changes: to rebuild a
+          member under its name and keep the group, add the group again
+          (:meth:`remove_coupling_group`, :meth:`add_coupling_group`) after
+          the node and its edges -- adding the node and its edges back
+          used to be enough, the group having gone on naming it.
+        * Refused (``ValueError``, nothing removed) when an interface
+          mapping on an edge between two *other* nodes was built from a
+          ``{"node": name, "field": ...}`` point reference: that edge
+          would stay, with a reference :meth:`to_dict` could no longer
+          resolve.  Remove the edge first.
+
+        Raises
+        ------
+        KeyError
+            The graph has no node of that name.
+        ValueError
+            A mapping on an edge that would remain references the node's
+            points.
+        """
+        # From the state that is kept (see ``add_node``); here, so that its
+        # warning names the caller as it did.
+        self._recover_from_escaped_tracers()
+        for message in self._remove_node(name, replacing=False):
+            warnings.warn(message, UserWarning, stacklevel=2)
+
+    def _remove_node(self, name: str, *, replacing: bool) -> list[str]:
+        """:meth:`remove_node`, returning what it would warn about (one
+        sentence for each coupling group that changed) instead of warning.
+        With ``replacing``, for a caller that adds a node of the same name
+        back before anything else reads the graph
+        (``surrogates.replace.replace_node``, which restores the edges
+        itself): the coupling groups and the point references of other
+        edges' mappings go on naming it."""
+        notes: list[str] = []
         # From the state that is kept (see ``add_node``).
         self._recover_from_escaped_tracers()
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
+        if not replacing:
+            kept = {e.key for e in self._edges
+                    if e.source_node != name and e.target_node != name}
+            held = sorted({
+                f"{edge_key} ({arg}: {name}.{field_name})"
+                for edge_key, arg, field_name in self._mapping_node_references(name)
+                if edge_key in kept})
+            if held:
+                raise ValueError(
+                    f"Cannot remove node '{name}': the interface mapping on edge "
+                    f"{', '.join(held)} was built from its points, and that edge "
+                    "would remain with a reference to_dict() could not resolve.  "
+                    "Remove the edge first (remove_edge).")
+            # Built before anything is removed: CouplingGroup's own
+            # validation can refuse, and must leave the graph whole.
+            groups = []
+            for group in self._coupling_groups:
+                smaller = _group_layout._group_without_member(group, name)
+                if smaller is not None:
+                    groups.append(smaller)
+                if smaller is not group:
+                    notes.append(
+                        f"Removing node '{name}' "
+                        + ("removed the coupling group of "
+                           f"{sorted(group.nodes)} with it (one member would remain)"
+                           if smaller is None else
+                           f"took it out of the coupling group of {sorted(group.nodes)}, "
+                           f"which keeps its options over {sorted(smaller.nodes)}")
+                        + ".  A node added back under the name is not a member: add "
+                          "the group again (add_coupling_group) after the node and "
+                          "its edges.")
         del self._nodes[name]
+        if not replacing:
+            self._coupling_groups[:] = groups
         # ``pop`` rather than ``del``: a graph whose state entry is missing
         # must still be removable, so the removal cannot itself fail
         # half-way and leave ``_nodes`` and ``_state`` disagreeing.
@@ -1805,6 +2035,7 @@ class GraphManager:
                 self.params["mappings"].pop(key, None)
         self._dirty = True
         self._notify(EVENT_NODE_REMOVED, name)
+        return notes
 
     def remove_edge(
         self,
@@ -2010,6 +2241,10 @@ class GraphManager:
                             f"Available: {list(self._state[e.source_node].keys())}"
                         )
 
+        # Geometry-dependent mappings (experimental): what each edge's
+        # geometry must be.  Nothing for a graph without one.
+        issues.extend(_graph_specs._geometry_edge_issues(self._edges, self._nodes, self._state))
+
         # Edge validation: shape, dtype, units against BoundaryInputSpec
         for e in self._edges:
             if e.target_node not in self._nodes:
@@ -2027,7 +2262,13 @@ class GraphManager:
             if src_val is not None:
                 src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
                 spec_shape = tuple(spec.shape)
-                if e.mapping is not None and src_shape:
+                leads = (None if e.mapping is None
+                         else _graph_specs._mapping_field_leads(e.mapping))
+                if leads is not None and src_shape:
+                    # A mapping that declares its field shapes replaces
+                    # the leading axes it reads by the ones it delivers.
+                    src_shape = leads[1] + src_shape[len(leads[0]):]
+                elif e.mapping is not None and src_shape:
                     # The mapping changes axis 0 to its n_target; the
                     # rest of the shape (vector components) passes through.
                     src_shape = (int(e.mapping.n_target),) + src_shape[1:]
@@ -2159,6 +2400,7 @@ class GraphManager:
             issues.extend(_group_layout._flux_edge_coupling_errors(
                 group, self._nodes, self._edges, self._state,
             ))
+            issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._edges))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
 
@@ -2821,6 +3063,11 @@ class GraphManager:
                       if e.source_node in g.nodes and e.target_node in g.nodes))
             for g in self._coupling_groups
         }
+        self._committed_geometry_edges = {
+            "+".join(sorted(g.nodes)): tuple(
+                e.key for e in _group_layout._group_geometry_edges(g, self._edges))
+            for g in self._coupling_groups
+        }
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -3125,6 +3372,12 @@ class GraphManager:
                 self._validate_params(params)
             return _graph_specs._ResolvedParams(params.get("nodes", {}), params.get("mappings", {}))
 
+        # Nodes with an incoming edge whose mapping reads a geometry from
+        # the node's own state (experimental; empty for every other graph).
+        target_geometry_nodes = frozenset(
+            e.target_node for e in self._edges
+            if e.geometry is not None and e.geometry[0] == "target")
+
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None,
@@ -3138,6 +3391,11 @@ class GraphManager:
                 (use new_state) even if they are in back_edge_set.
             """
             boundary_inputs: dict[str, Any] = {}
+            # Static: whether an incoming edge reads a geometry from this
+            # node's own state.  Only then is what each edge read kept,
+            # for the flux hook below.
+            reads_own_geometry = node_name in target_geometry_nodes
+            delivered: list = []
 
             for edge in edges_by_target[node_name]:
                 # Determine source state: back-edges read from full_state
@@ -3158,7 +3416,15 @@ class GraphManager:
                     value = flux_state[src_nn][edge.source_field]
                 else:
                     value = src_state[src_nn][edge.source_field]
-                value = _graph_specs._apply_edge(edge, value, node_params)
+                raw = value
+                # A geometry (experimental) is read where the value was:
+                # from ``src_state`` for a source anchor, and for a target
+                # anchor from the state ``update`` is about to receive.
+                value = _graph_specs._apply_edge(
+                    edge, value, node_params,
+                    _graph_specs._edge_geom(edge, src_state, new_state[node_name]))
+                if reads_own_geometry:
+                    delivered.append((edge, raw, src_state, value))
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -3181,6 +3447,28 @@ class GraphManager:
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
             if type(spec.node).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
+                if reads_own_geometry:
+                    # The flux hook is called with the post-update state,
+                    # so a geometry this node holds is read from that
+                    # state: the edges are resolved again, in the same
+                    # order, each from the value it read above.
+                    boundary_inputs = {}
+                    for edge, raw, src_state, value in delivered:
+                        if edge.geometry is not None and edge.geometry[0] == "target":
+                            value = _graph_specs._apply_edge(
+                                edge, raw, node_params,
+                                _graph_specs._edge_geom(edge, src_state, new_node_state))
+                        if edge.additive and edge.target_field in boundary_inputs:
+                            boundary_inputs[edge.target_field] = (
+                                boundary_inputs[edge.target_field] + value
+                            )
+                        else:
+                            boundary_inputs[edge.target_field] = value
+                    if node_name in has_external:
+                        node_ext = external_inputs.get(node_name, {})
+                        for ei in ext_by_target[node_name]:
+                            if ei.target_field in node_ext:
+                                boundary_inputs[ei.target_field] = node_ext[ei.target_field]
                 fluxes = _graph_specs._node_fluxes(
                     spec, new_node_state, boundary_inputs, spec.timestep,
                     node_params.nodes.get(node_name),
@@ -4151,6 +4439,28 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
+            **A group that resolves a geometry-dependent mapping**
+            (experimental: an edge into a member, from inside the group
+            or outside it, added with ``add_edge(..., geometry=...)``)
+            reports the solve's own ``"iterations"``,
+            ``"total_iterations"``, ``"residual"`` and ``"converged"``
+            and nothing else of the above: the diagnostics do not read a
+            moving geometry in 0.4.0, so ``"amplification"``,
+            ``"error_estimate"``, ``"rho_spectral"``,
+            ``"spectral_error_bound"`` and
+            ``"gradient_relative_error_bound"`` are NaN,
+            ``"gradient_error_estimate"`` is ``inf``, and
+            ``"ratio_usable"``, ``"spectral_usable"``,
+            ``"gradient_bound_usable"`` and ``"precision_limited"`` are
+            ``False``.  Such an entry has one more key,
+            ``"not_usable_reason"`` : str, which names the edges and
+            says why; no other group's entry has it.  The values are
+            withheld **here**: the internal ``_meta`` entry of the state
+            (which ``GET /graph/state`` of the REST server and an FMU
+            state archive carry verbatim) still holds what the step
+            itself computed for such a group, and those raw slots are
+            not a report and promise nothing.
+
             **After** :meth:`run_adaptive` **or** :meth:`run_adaptive_scan`
             the report describes the last accepted attempt's two kept
             half steps, the two solves ``strict_convergence`` checks:
@@ -4391,6 +4701,31 @@ class GraphManager:
                     ),
                     "precision_limited": precision_limited,
                 })
+                geometry_keys = self._committed_geometry_edges.get(key, ())
+                if geometry_keys:
+                    # Experimental, 0.4.0: the diagnostics do not read a
+                    # moving geometry, so a group whose pass resolves a
+                    # geometry-dependent mapping reports the solve's own
+                    # outcome and nothing built on the float floor or on
+                    # the contraction estimates: every bound is NaN (the
+                    # gradient estimate ``inf``, as where the ratio is
+                    # rejected), every ``*_usable`` flag False, and the
+                    # report says why.
+                    result[key].update({
+                        "amplification": float("nan"),
+                        "error_estimate": float("nan"),
+                        "ratio_usable": False,
+                        "gradient_error_estimate": float("inf"),
+                        "rho_spectral": float("nan"),
+                        "spectral_error_bound": float("nan"),
+                        "spectral_usable": False,
+                        "gradient_relative_error_bound": float("nan"),
+                        "gradient_bound_usable": False,
+                        "precision_limited": False,
+                        "not_usable_reason": (
+                            _group_layout._GEOMETRY_DIAGNOSTICS_REASON.format(
+                                keys=list(geometry_keys))),
+                    })
         return result
 
     # ------------------------------------------------------------------
@@ -5040,6 +5375,7 @@ class GraphManager:
         check only the ones they keep, as a multi-rate step checks only
         the solves it applies (MADD-ANO-044).
         """
+        self._refuse_adaptive_geometry("_build_dt_step_fn")
         schedule = list(self._schedule)
         nodes_dict = dict(self._nodes)
         back_edge_set = set(self._back_edges)
@@ -5223,6 +5559,19 @@ class GraphManager:
             _reports._fold_kept_half_step_reports, tuple(coupling_groups))
         return dt_step_fn
 
+    def _refuse_adaptive_geometry(self, entry: str) -> None:
+        """Raise for a graph with a geometry-dependent mapping: the
+        adaptive steppers take half steps and discard attempts, and the
+        time level a geometry is read at across those is not defined."""
+        keys = _graph_specs._geometry_edge_keys(self._edges)
+        if keys:
+            raise RuntimeError(
+                f"{entry}: this graph has geometry-dependent mapping(s) on edge(s) "
+                f"{keys}, which the adaptive steppers do not support in 0.4.0: the time "
+                f"level a geometry is read at across half steps and rejected attempts "
+                f"is not defined yet. Use step / run_scan."
+            )
+
     def _adaptive_multirate_message(self, entry: str) -> str:
         """Why ``run_adaptive*`` refuses this (multi-rate) graph.
 
@@ -5335,6 +5684,7 @@ class GraphManager:
         # had just stopped being multi-rate.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive"))
+        self._refuse_adaptive_geometry("run_adaptive")
         self._refuse_xla_loop_hazards("run_adaptive", scan=False)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
@@ -5515,6 +5865,7 @@ class GraphManager:
         # After the recompile, for the reason given in ``run_adaptive``.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive_scan"))
+        self._refuse_adaptive_geometry("run_adaptive_scan")
         self._refuse_xla_loop_hazards("run_adaptive_scan", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
@@ -5984,6 +6335,7 @@ class GraphManager:
                 source_units=ed.get("source_units"),
                 target_units=ed.get("target_units"),
                 mapping=mapping,
+                geometry=ed.get("geometry"),
             )
         for owner, overrides in config.get("param_specs", {}).items():
             for key, spec_dict in overrides.items():
@@ -6504,6 +6856,9 @@ class GraphManager:
         * ``precision_limited=True`` -- the residual is rounding, and
           ``converged`` can be ``True`` on a stalled iterate;
         * ``spectral_usable=False`` where a spectral bound was computed;
+        * in place of the three above, ``not_usable_reason`` for a group
+          that resolves a geometry-dependent mapping (experimental): its
+          bounds, estimates and ``*_usable`` flags are withheld;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

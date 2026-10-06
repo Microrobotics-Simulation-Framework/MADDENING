@@ -1159,6 +1159,12 @@
           "default": "0",
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "ordinal"
+        },
+        {
+          "annotation": "Optional[tuple[str, str]]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "geometry"
         }
       ],
       "returns": "None"
@@ -1245,6 +1251,12 @@
               "default": "None",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "mapping"
+            },
+            {
+              "annotation": "Optional[Any]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "geometry"
             }
           ],
           "returns": "None"

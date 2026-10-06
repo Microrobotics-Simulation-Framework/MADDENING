@@ -203,6 +203,13 @@ LIMIT_KEYS = {"HeatNode": ("thermal_diffusivity", "length", "stencil_order")}
 FITTED = {"HeatNode": ("thermal_diffusivity", "length"),
           "SpringDamperNode": ("stiffness", "damping", "mass", "rest_length"),
           "BallNode": ("gravity",)}
+#: The parameters only ``initial_state()`` reads (a table's position is
+#: its whole state): a write takes effect at the next reset, and a load
+#: that changes one installs it in the node as the write does.
+INITIAL_CONDITIONS = {"HeatNode": ("initial_temperature",),
+                      "SpringDamperNode": ("initial_position", "initial_velocity"),
+                      "BallNode": ("initial_position", "initial_velocity"),
+                      "TableNode": ("position",)}
 #: Parameters a new node is always given: a rod left at its default
 #: temperature of zero, between rod ends at zero, never moves, and a graph
 #: that never moves steps as any reload of it does.
@@ -835,6 +842,32 @@ class RestWriteSequences(RuleBasedStateMachine):
                          label="slot")
         self.do_load(slot)
 
+    @precondition(lambda self: self.served is not None and self._nodes() and self.saved)
+    @rule(data=st.data())
+    def put_an_initial_condition_then_load(self, data):
+        """An initial condition written, then a save loaded -- usually one
+        made before the write, which holds another value of it.  Every
+        such load was a 400 (the load moved ``gm.params`` and not the
+        node's own value, and the graph refuses a leaf only
+        ``initial_state()`` reads that differs from it); the two requests
+        are drawn together because ten requests seldom put them in this
+        order.  Both are sent under every invariant, the injected failures
+        included: a load that is refused or fails after the write leaves
+        the written graph."""
+        name = self._draw_node(data, ghost=False)
+        keys = INITIAL_CONDITIONS.get(type(self.gm._nodes[name].node).__name__, ())  # noqa: SLF001
+        if not keys:
+            return
+        key = data.draw(st.sampled_from(keys), label="key")
+        put = self.do_put(name, {key: self._draw_value(data, name, key)},
+                          rule_name="put an initial condition")
+        if put.status_code == 200:
+            self.check_graph(self.last)
+        slot = data.draw(st.sampled_from(sorted(self.saved)), label="slot")
+        load = self.do_load(slot)
+        if put.status_code == 200 and load.status_code == 200:
+            type(self).counts["loaded after an initial condition was written"] += 1
+
     # ------------------------------------------------------------------
     # invariants 3, 4 and 5, after every rule
     # ------------------------------------------------------------------
@@ -1281,6 +1314,42 @@ def test_a_value_written_back_after_a_fit_is_held_to_the_stability_limit():
         assert step(machine.do_put, "rod", {"length": 0.75}).status_code == 200
         resp = step(machine.do_put, "rod", {"thermal_diffusivity": ALPHAS[-1]})
         assert resp.status_code == 400, resp.text
+
+
+def test_a_save_made_before_an_initial_condition_was_written_still_loads():
+    """Save, write an initial condition, load the save: a 200 on every
+    stock node, as ``PUT`` of the save's value is; the node then holds the
+    save's value, and a reset builds its state from it.  The load was a 400
+    ("does not fit this graph") for each of these six parameters."""
+    RestWriteSequences.counts = collections.Counter()
+    with replay() as (machine, step):
+        assert step(machine.do_add_node, "extra", "TableNode", DT,
+                    {"position": 0.0}).status_code == 201
+        # compiled, so the save holds the new node's parameters (a save of
+        # a graph still waiting for its compile holds its state alone)
+        assert step(machine.do_compile).status_code == 200
+        assert step(machine.do_save, "a.npz").status_code == 200
+        saved = {(name, key): _jsonable(spec.node.params[key])
+                 for name, spec in machine.gm._nodes.items()  # noqa: SLF001
+                 for key in INITIAL_CONDITIONS[type(spec.node).__name__]}
+        # a quarter more: exact in float32, and inside every bound
+        written = {where: (np.asarray(value, np.float32) + 0.25).tolist()
+                   for where, value in saved.items()}
+        assert len(written) == 6, sorted(written)
+        for (name, key), value in written.items():
+            assert not _same(saved[(name, key)], value)
+            assert step(machine.do_put, name, {key: value}).status_code == 200
+            load = step(machine.do_load, "a.npz")
+            assert load.status_code == 200, (name, key, load.text)
+            node = machine.gm._nodes[name].node  # noqa: SLF001
+            assert _same(node.params[key], saved[(name, key)]), (name, key)
+            assert _same(machine.gm.params["nodes"][name][key], saved[(name, key)])
+            assert step(machine.do_reset).status_code == 200
+            assert step(machine.do_step).status_code == 200
+    counts = RestWriteSequences.counts
+    assert counts[("load", "accepted")] == len(written), dict(counts)
+    # ... and a failure was injected at every point of each load (invariant 6)
+    assert counts[("load", "failed at a point")] >= len(written), dict(counts)
 
 
 def test_a_value_written_back_after_a_load_is_held_to_the_stability_limit():

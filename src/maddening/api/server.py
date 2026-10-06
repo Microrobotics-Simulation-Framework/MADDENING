@@ -83,7 +83,7 @@ try:
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
-    from pydantic import BaseModel, Field, field_validator
+    from pydantic import BaseModel, BeforeValidator, Field, field_validator
     from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as _exc:
     raise ImportError(
@@ -439,6 +439,31 @@ MAX_STEPS_PER_FRAME = MAX_RUN_STEPS
 #: Nth step, and a stride past one run's length would never publish one.
 MAX_RELAY_STRIDE = MAX_RUN_STEPS
 
+#: Bounds of ``POST /sim/profile?n_steps=&n_warmup=``: the request holds a
+#: worker while it steps.  They used to be applied by clamping -- 5000
+#: steps asked, 1000 profiled, and nothing in the reply said so -- and are
+#: now the query's declared range, a 422 outside it as on ``/sim/run``.
+_MAX_PROFILE_STEPS = 1000
+_MAX_PROFILE_WARMUP = 50
+
+_DECIMAL_INTEGER = re.compile(r"-?[0-9]+", re.ASCII)
+
+
+def _decimal_integer_text(value: Any) -> Any:
+    """A count in a query string is its decimal digits and nothing else.
+    The default parse also took ``" 5 "``, ``"5.0"``, ``"5_0"`` (as 50) and
+    ``"+5"``: text a client did not mean as that number, or would not expect
+    to be read as one."""
+    if isinstance(value, str) and _DECIMAL_INTEGER.fullmatch(value) is None:
+        raise ValueError("expected a decimal integer (ASCII digits only)")
+    return value
+
+
+#: Asked of every integer query parameter, written after its ``Query`` in
+#: an ``Annotated`` (the bounds are then applied to the integer, and this
+#: to the text before it is parsed).
+_DECIMAL = BeforeValidator(_decimal_integer_text)
+
 #: How long ``POST /sim/stop`` (and every route that stops the runner
 #: first) waits for the runner's thread to finish the step it is in.
 #: Past it the route answers 503 and keeps the runner: the thread is
@@ -730,7 +755,11 @@ class AddNodeRequest(BaseModel):
     # A finite number > 0: NaN or Infinity added the node and then answered
     # 500 (its reply could not be encoded), every step a 400 until it was
     # deleted; 0 or a negative value stepped it not at all, or backwards.
-    timestep: float = Field(gt=0, allow_inf_nan=False)
+    # Strict: a number, and not what can be read as one.  ``true`` added a
+    # node at 1.0 s, and ``"0.5"``, ``" 0.25 "`` and ``"1e-2"`` were taken,
+    # where the same kinds in ``params`` are a 400.  A JSON integer is a
+    # number.
+    timestep: float = Field(gt=0, allow_inf_nan=False, strict=True)
     params: dict[str, Any] = {}
 
     @field_validator("params")
@@ -783,12 +812,14 @@ class SetNodeParamsRequest(BaseModel):
 
 class TrainSurrogateRequest(BaseModel):
     node_name: str
-    n_data_steps: int = Field(500, ge=1, le=MAX_SURROGATE_DATA_STEPS)
-    n_epochs: int = Field(100, ge=1, le=MAX_SURROGATE_EPOCHS)
+    # Strict, as AddNodeRequest.timestep is: a JSON integer, not a boolean
+    # (``true`` was one step), numeric text or a float.
+    n_data_steps: int = Field(500, ge=1, le=MAX_SURROGATE_DATA_STEPS, strict=True)
+    n_epochs: int = Field(100, ge=1, le=MAX_SURROGATE_EPOCHS, strict=True)
     hidden_sizes: list[
-        Annotated[int, Field(ge=1, le=MAX_SURROGATE_LAYER_WIDTH)]
+        Annotated[int, Field(ge=1, le=MAX_SURROGATE_LAYER_WIDTH, strict=True)]
     ] = Field([64, 64], min_length=1, max_length=MAX_SURROGATE_LAYERS)
-    batch_size: int = Field(64, ge=1, le=MAX_SURROGATE_BATCH_SIZE)
+    batch_size: int = Field(64, ge=1, le=MAX_SURROGATE_BATCH_SIZE, strict=True)
 
     # The width and depth bounds hold one number each; the hidden weights
     # grow with width squared times depth, so that is bounded too.
@@ -4788,14 +4819,14 @@ class SimulationServer:
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
         def sim_run(
-            n_steps: int = Query(
-                100, ge=0, le=MAX_RUN_STEPS,
+            n_steps: Annotated[int, Query(
+                ge=0, le=MAX_RUN_STEPS,
                 description="Steps to run synchronously.  Zero is a no-op "
                             "that returns the current state.  The upper "
                             "bound exists because the request holds a "
                             "worker for its whole duration; for a longer "
                             "run use POST /sim/start.",
-            ),
+            ), _DECIMAL] = 100,
         ) -> Any:
             """Run *n_steps* steps and return the state.
 
@@ -5073,19 +5104,19 @@ class SimulationServer:
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
         async def sim_set_stride(
-            steps_per_frame: Optional[int] = Query(
-                None, ge=1, le=MAX_STEPS_PER_FRAME,
+            steps_per_frame: Annotated[Optional[int], Query(
+                ge=1, le=MAX_STEPS_PER_FRAME,
                 description="Physics steps batched per wall-clock frame in the "
                             "runner, at most MAX_STEPS_PER_FRAME (one POST "
                             "/sim/run's worth).  Kept for a runner started "
                             "later.  Left out: the current value is kept.",
-            ),
-            relay_stride: Optional[int] = Query(
-                None, ge=1, le=MAX_RELAY_STRIDE,
+            ), _DECIMAL] = None,
+            relay_stride: Annotated[Optional[int], Query(
+                ge=1, le=MAX_RELAY_STRIDE,
                 description="Capture only every Nth step in the relay, at "
                             "least 1 and at most MAX_RELAY_STRIDE.  Left out: "
                             "the current value is kept.",
-            ),
+            ), _DECIMAL] = None,
         ) -> Any:
             """Adjust physics-to-render rate decoupling.
 
@@ -5542,11 +5573,22 @@ class SimulationServer:
         # -- profile endpoints (v0.2 #9) -----------------------------------
 
         @app.post("/sim/profile", tags=["sim"], response_model=None)
-        def sim_profile(n_steps: int = 50, n_warmup: int = 3) -> dict[str, Any]:
+        def sim_profile(
+            n_steps: Annotated[int, Query(
+                ge=1, le=_MAX_PROFILE_STEPS,
+                description="Steps to profile; the bound keeps the request's "
+                            "latency bounded."), _DECIMAL] = 50,
+            n_warmup: Annotated[int, Query(
+                ge=0, le=_MAX_PROFILE_WARMUP,
+                description="Steps run before the profiled ones, not timed."),
+                _DECIMAL] = 3,
+        ) -> dict[str, Any]:
             """Run a step-time profile and return a Perfetto-loadable JSON trace.
 
-            POST with ``?n_steps=N`` to override (default 50, capped at
-            1000 to keep request latency bounded).  The response is a
+            POST with ``?n_steps=N`` to override (default 50, at most 1000
+            to keep request latency bounded; ``n_warmup`` at most 50).  A
+            value outside its range is a 422, as on ``POST /sim/run``: it
+            used to be clamped into it without a word.  The response is a
             Perfetto-format JSON trace; save the body as ``profile.json``
             and drag-and-drop into https://ui.perfetto.dev for an
             interactive flame-graph view of per-node + coupling
@@ -5559,8 +5601,6 @@ class SimulationServer:
             from maddening.core.simulation.profiler import (
                 profile_graph, profile_report_to_perfetto,
             )
-            n_steps = max(1, min(1000, int(n_steps)))
-            n_warmup = max(0, min(50, int(n_warmup)))
             with self._graph_transaction("profile the graph", write=True) as transaction:
                 # The profiler resets the graph to its initial state and
                 # steps it: the route's transaction is rolled back when it

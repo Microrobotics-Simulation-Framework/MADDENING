@@ -245,7 +245,7 @@ already been applied.
 | POST | `/sim/stop` | Stop the runner. A runner whose thread had died is reported stopped, with `error` |
 | POST | `/sim/reset` | Stop the runner and reset every node; the streams are sent the reset state at step 0. `was_running` is whether a runner was running. When the graph cannot be had in time after the runner was stopped, the 503 says the runner stays stopped, with `was_running` |
 | PUT | `/sim/stride?steps_per_frame=&relay_stride=` | The runner's steps per frame and the relay's stride; a value left out keeps its current value (it used to be reset to 1). Answered at once, whatever the other runner routes wait for |
-| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON). The graph is put back exactly as it was after it -- state, parameters, and an edited graph still waiting for its compile -- and the streams neither show nor count its steps |
+| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON) of `n_steps` steps (1 to 1000, default 50) after `n_warmup` (0 to 50, default 3); a value outside its range is a 422, not clamped. The graph is put back exactly as it was after it -- state, parameters, and an edited graph still waiting for its compile -- and the streams neither show nor count its steps |
 | POST | `/sim/profile/jax/start`, `/sim/profile/jax/stop` | A JAX trace of the steps between them, for at most `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600 s): past either it stops itself and writes its files. The time budget has its own timer, so an idle trace stops at it too |
 | GET | `/sim/profile/jax/status` | Whether a trace runs, its steps and budgets, its directory, and what stopped the last one |
 

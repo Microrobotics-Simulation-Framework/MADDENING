@@ -213,6 +213,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **The REST guide says who the server is for, and its transaction is now the routes' only undo**: `src/maddening/api/README.md` states the audience (a trusted client on loopback, or a token-holder), what the server defends against and what it does not (a token-holder's crafted archives, resource exhaustion, pathological names; TLS), and the promise that a refused or failed request leaves the graph as it was, with its carve-outs; the REST claims rows are narrowed to it.
+  The experimental `POST /surrogate/deactivate`'s 500 is the generic one (it quoted the graph's error), and `POST /sim/profile` puts the whole graph back, so an edited graph is still waiting for its compile after a profile.
+  Action: none; read a failed surrogate revert's reason in the server's log.
 - **A REST write that fails, at any point, leaves the graph exactly as it was**: every route that can change the graph (nodes, edges, compile, `PUT /graph/state`, `PUT /graph/params`, checkpoint save and load, `/sim/step`, each slice of `/sim/run`, `/sim/start`, `/sim/reset`, `/sim/profile`, surrogate activate and deactivate) runs in one transaction that records the graph under the lock and puts it back when the route refuses or fails unexpectedly; each route used to validate first or undo for itself, and a failure after its first write left what was written.
   An unexpected failure is now a JSON 500 with a generic detail (the traceback is in the server's log), where it was a plain-text 500; a refused `POST /sim/step` or `/checkpoint/load` of an edited graph no longer leaves it compiled; a `POST /sim/run` that fails unexpectedly after some slices answers 500 with `steps_run`.
   Action: none; not covered, and unchanged: files under the checkpoint root, the runner's thread, surrogate jobs, frames a stream already sent, `/cloud`.

@@ -75,7 +75,16 @@ shipped it took any `master_dt`, so a 0.01 s graph served with
 the time its state was at (MADD-ANO-100).  `default_step_size=` may
 advertise a coarser communication step, such as five graph steps; the
 bridge then runs five per `doStep`, and `master_dt` is still the graph's
-step.  One `doStep` runs at most `max_steps_per_request` graph steps
+step.  The advertised step is a finite, positive Python or NumPy number
+(stored and written as a Python float) and a whole number of graph steps
+to within rounding, four ulps: `5 * gm.timestep`, or `0.07` for seven
+steps of 0.01, but not a float32-rounded `0.05`.  Anything else is refused
+by `build_model_description`, naming the nearest whole multiple, and by a
+bridge given a hand-built description.  (During 0.4.0's development a step
+up to a millionth of a graph step off was accepted and refused part-way
+through the run, at the fourteenth `doStep` for `float(np.float32(0.05))`
+on a 0.01 s graph; and a NumPy scalar was written as
+`stepSize="np.float64(0.05)"`, which no importer reads, MADD-ANO-219.)  One `doStep` runs at most `max_steps_per_request` graph steps
 (100000 by default, `FmuTcpBridge(..., max_steps_per_request=)`), and a
 long one stops at the first graph step after `stop()`, committing nothing.
 `fmi3GetFMUState` / `fmi3SetFMUState` / serialization round-trip the
@@ -158,7 +167,8 @@ about 9.1 hours (32768 s) at 1e-9 s, about 3.4e10 s at 1e-3 s -- is refused, at
 `fmi3SetFMUState`; the message names the largest time the master step
 resolves.  Start nearer zero, or serve a graph with a larger timestep.
 An importer that computes each point as `start + k * h`, as FMPy does, is
-never refused below that time.  One that keeps a running sum of its step
+never refused below that time, at the advertised step size as at any whole
+number of master steps.  One that keeps a running sum of its step
 sizes gathers up to half an ulp of the time per step, and is refused, with
 nothing advanced, once that passes a tenth of a step: after about 1.2
 million steps from 1 s at a 1e-9 s step, and not before about forty million
@@ -219,6 +229,19 @@ refused the FMU's own max; it is now two floats in.  A `log` leaf with no
 lower bound is bounded by 0 all the same: its `min` is the smallest positive
 normal of its type.  It used to carry no `min`, and a bridge whose sidecar
 had no `param_specs` accepted and ran `mass = -1` (MADD-ANO-148).
+
+**An input's type is its declared dtype, and so is the number the graph
+runs.**  `gm.add_external_input(node, field)` declares `float32` unless
+told otherwise, also under `jax_enable_x64`; the FMU variable is then a
+`Float32`, set with `fmi3SetFloat32`.  The graph casts a value handed to
+`gm.step`, `gm.run_scan` or any other entry point to the same dtype at the
+step boundary, so the FMU and the graph run the same number from the same
+value in float32 and under x64.  For a float64 input on an x64 graph
+declare it: `gm.add_external_input(node, field, dtype=jnp.float64)` exports
+a `Float64`.  Until 0.4.0 shipped the step ran a supplied value in the
+dtype it arrived in, so an x64 graph ran `0.1` as a float64 where its FMU
+ran `float32(0.1)` (MADD-ANO-218); a graph whose supplied values the cast
+changes says so once per input, with a `UserWarning` naming the keyword.
 
 The stability filter is by node: a node's outputs, parameters and external
 inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` /

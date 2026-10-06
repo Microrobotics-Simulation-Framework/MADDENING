@@ -438,8 +438,8 @@ class ParamSpec:
         # above was a subnormal number, the clip stored it as 0.0, and
         # ``check`` refused what ``constrain`` returned.
         tiny = float(fi.tiny)
-        inner_lo = max(inner_lo, (0.0 if abs(lo) < tiny else lo) + tiny)
-        inner_hi = min(inner_hi, (0.0 if abs(hi) < tiny else hi) - tiny)
+        inner_lo = max(inner_lo, (0.0 if abs(lo) < tiny else lo) + tiny)  # units: the leaf's own, at its dtype's smallest normal
+        inner_hi = min(inner_hi, (0.0 if abs(hi) < tiny else hi) - tiny)  # units: the leaf's own, at its dtype's smallest normal
         if inner_lo > inner_hi:                    # no interior float at all
             inner_lo = inner_hi = 0.5 * (lo + hi)
         return inner_lo, inner_hi

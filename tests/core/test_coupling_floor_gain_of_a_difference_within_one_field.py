@@ -104,10 +104,17 @@ def _stalled(mode):
 
 def test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded():
     """The control: under Jacobi the entries are coordinates of the iterate,
-    the resolvent carries their cross gain, and the bound covers the stall."""
+    the resolvent carries their cross gain, and the bound covers the stall.
+
+    The flag is withdrawn on it all the same, for the radius: the weighted
+    Jacobian has norm 1 400 beside a radius of 0.99, float32 reads 0.9951
+    (ten of the flag's margins off, on the bound's safe side), and the
+    spectral estimate's rounding probe measures that it is not settled.
+    """
     d, true = _stalled("jacobi")
-    assert d["precision_limited"] and d["spectral_usable"] and true > 1e-4, (dict(d), true)
+    assert d["precision_limited"] and true > 1e-4, (dict(d), true)
     assert d["spectral_error_bound"] >= true, (d["spectral_error_bound"] / true, dict(d))
+    assert not d["spectral_usable"] and abs(d["rho_spectral"] - 0.99) > 5e-4, dict(d)
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(

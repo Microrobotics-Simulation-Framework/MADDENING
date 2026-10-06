@@ -989,10 +989,11 @@ def _spectral_radius(H):
     backward stable for a non-normal matrix -- each square cancels to
     ``||N^2|| / ||N||^2`` of its terms, and what rounding leaves is
     squared again -- and in float32 it read a Hessenberg matrix whose
-    five eigenvalues all have modulus 0.8918 as 0.8969, and the pass it
-    compressed (a float32 ring of five relays, one field a fiftieth of
-    its driver) as 0.901 for 0.889 with the spectrum reported settled;
-    over 1 500 random graded matrices of dimension 2 to 8 it was off by
+    five eigenvalues all have modulus 0.8918 as 0.8969, a float32 ring
+    of five relays (one field a fiftieth of its driver) as 0.0512 for
+    0.0500, and graded cyclic matrices of five as 0.9555 for 0.9152 and
+    0.5986 for 0.5141, each with the spectrum reported settled; over
+    1 500 random graded matrices of dimension 2 to 8 it was off by
     more than 1% of ``1 - rho`` on 237, ``eigvals`` on 40 (the float32
     rounding of the matrix itself).  NaN for a matrix that is not finite.
     """

@@ -384,9 +384,9 @@ class _Map16(SimulationNode):
         return {"x": (p["a"] + p["g"] * boundary_inputs["u"]).astype(jnp.float16)}
 
 
-def _mixed_dtype_graph(x0):
+def _mixed_dtype_graph(x0, g=0.99):
     gm = GraphManager()
-    gm.add_node(_Map16("a", 1.0, 0.99, x0))
+    gm.add_node(_Map16("a", 1.0, g, x0))
     gm.add_node(_Relay("b", x0))
     gm.add_edge(source="b", target="a", source_field="x", target_field="u")
     gm.add_edge(source="a", target="b", source_field="x", target_field="u",
@@ -397,8 +397,16 @@ def _mixed_dtype_graph(x0):
     return gm
 
 
-def test_a_float16_field_beside_a_float32_one_is_floored_at_float16():
+@pytest.mark.parametrize("g, short, usable", [(0.95, 0.007, True), (0.99, 0.03, False)])
+def test_a_float16_field_beside_a_float32_one_is_floored_at_float16(g, short, usable):
     """The gradient bound's floor, and the step it probes across, at each field's own resolution.
+
+    At ``g = 0.95`` (0.78% short) the bound is right *and usable*.  At
+    ``g = 0.99``, the case below, it is right and the flag is withdrawn:
+    float16 products round at 1e-3 of the Jacobian's norm, the spectral
+    estimate measures that they leave ``1 - rho`` known to 7% (the flag's
+    margin is 5%), and the gradient bound is usable only where the
+    spectrum is.
 
     ``x_a`` (float16) ``<- 1 + 0.99 u``, ``x_b`` (float32) ``<- x_a``,
     started at the lowest float16 value the map leaves where it is:
@@ -411,31 +419,31 @@ def test_a_float16_field_beside_a_float32_one_is_floored_at_float16():
     The spectral bound beside it, whose floor is taken field by field,
     was right all along and is the control.
     """
-    g32, a32 = float(np.float32(0.99)), 1.0
+    g32, a32 = float(np.float32(g)), 1.0
     x_star = a32 / (1.0 - g32)
     stalled = [
         float(v) for v in (np.nextafter(np.float16(x_star), np.float16(0))
-                           - np.float16(0.0625) * np.float16(k) for k in range(64))
+                           - np.spacing(np.float16(x_star)) * np.float16(k) for k in range(64))
         if np.float16(np.float32(a32 + g32 * float(v))) == v
     ]
     x0 = min(stalled)
-    gm = _mixed_dtype_graph(x0)
+    gm = _mixed_dtype_graph(x0, g)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
     assert d["residual"] == 0.0 and d["iterations"] == 1, f"fixture premise: stalled: {d}"
-    assert (x_star - x0) / x_star > 0.03, f"fixture premise: {x0} is 3% short"
+    assert (x_star - x0) / x_star > short, f"fixture premise: {x0} is {short:.1%} short"
     distance = _l2_distance(gm, x_star)
     assert d["spectral_error_bound"] >= distance, "the control: per-field floor"
     x_b = float(gm.get_node_state("b")["x"])
     ift = x_b / (1.0 - g32)                   # the IFT tangent at the returned iterate
     exact = a32 / (1.0 - g32) ** 2            # d x*/dg at the fixed point
     true_error = abs(ift - exact) / abs(ift)
-    assert true_error > 0.03, "fixture premise: the gradient is 3% off"
+    assert true_error > short, f"fixture premise: the gradient is {short:.1%} off"
     assert d["gradient_relative_error_bound"] >= true_error, (
         f"gradient bound {d['gradient_relative_error_bound']:.3e} under the true "
         f"relative error {true_error:.3e} on a float16 field"
     )
-    assert d["gradient_bound_usable"] is True, d
+    assert d["gradient_bound_usable"] is usable and d["spectral_usable"] is usable, d
 
 
 # ---------------------------------------------------------------------------

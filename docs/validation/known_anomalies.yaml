@@ -14914,7 +14914,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-220"
-    title: "The spectral radius of the compressed Jacobian was taken by repeated squaring, which is not backward stable for a non-normal matrix: a float32 ring of five read rho_spectral 0.901 for 0.889, spectral_usable=True"
+    title: "The spectral radius of the compressed Jacobian was taken by repeated squaring, which is not backward stable for a non-normal matrix: a float32 ring of five read rho_spectral 0.0512 for 0.0500, and graded matrices of five 0.9555 for 0.9152, spectral_usable=True"
     description: >
       `arnoldi_spectral_radius` took the radius of its small Hessenberg
       matrix from Gelfand's formula by 24 squarings
@@ -14922,12 +14922,17 @@ anomalies:
       matrix product does.  Each square of a non-normal matrix cancels to
       `||N^2|| / ||N||^2` of its terms and what rounding leaves is squared
       again.  Measured (CPU, jaxlib 0.11.0, float32): a Hessenberg matrix
-      whose five eigenvalues all have modulus 0.8918 read 0.8969, and the
-      group it came from -- a Jacobi ring of five scalar relays under a
-      fixed relaxation, one field a fiftieth of what drives it, another in
-      units 1e6 times larger -- reported `rho_spectral=0.901` for 0.889,
-      1.3% of the radius and twice the 5% of `1 - rho` that
-      `spectral_usable=True` stands for.  Over 1 500 random graded
+      whose five eigenvalues all have modulus 0.8918 read 0.8969.  A
+      Jacobi ring of five scalar relays under a fixed relaxation, one
+      field a fiftieth of what drives it and another in units 1e6 times
+      larger, reported `rho_spectral=0.05124` for 0.05000 (2.5% of a
+      radius documented as exact to float32, 4.8 times what a
+      backward-stable computation is allowed there) and 0.8938 for
+      0.8894, both with `spectral_usable=True`.  On the matrix alone, two
+      of forty seeded graded cyclic matrices of five read 0.9555 for
+      0.9152 and 0.5986 for 0.5141 with the spectrum reported settled,
+      8.5 and 3.5 times the 5% of `1 - rho` the flag stands for.  Over
+      1 500 random graded
       matrices of dimension 2 to 8 in float32 the squaring was off by more
       than 1% of `1 - rho` on 237 and `eigvals` on 40.  In float64 the
       same squaring held the radius to about 1e-6 relative, which is why

@@ -780,11 +780,10 @@ FIXED = {
     "a-space-continued-from-the-residual-is-probed-for-rounding": (
         Case(41, 614, 0.5827283898433404, True, 0.014131225734819956, 0.0, 1.0, 0,
              2.944906874682467e-07, 0), "radius_strict", False),
-    # A float32 ring of five, one field a fiftieth of its driver: 0.901 for
-    # 0.889, the repeated squaring's own rounding (eigvals reads 0.8894).
+    # A float32 ring of five, one field a fiftieth of its driver: 0.0512
+    # for 0.0500, the repeated squaring's own rounding (eigvals: 0.049998).
     "a-float32-ring-of-five-the-squaring-misread": (
-        Case(23, 0, 0.889427129235508, True, 0.02025875358340762, 0.0, 1.0, 6, 0.0, 0),
-        "radius", True),
+        Case(23, 0, 0.05, True, 0.02025875358340762, 0.0, 1.0, 6, 0.0, 0), "radius", True),
 }
 
 

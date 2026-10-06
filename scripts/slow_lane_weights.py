@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{sum(len(f) for f in lanes.values())} file measurements on {len(lanes)} lanes; "
           f"{len(table)} files at or over {args.min_seconds} s in the table")
     for path in gone:
-        print(f"  measured but no longer in the tree, left out: {path}")
+        print(f"  measured but not a file in the tree, left out: {path}")
     print(f"\nheaviest files (minutes per lane: {', '.join(sorted(lanes))})")
     for path in sorted(table, key=lambda p: (-table[p], p))[:args.top]:
         per_lane = " ".join(f"{lanes[lane].get(path, 0.0) / 60:6.1f}" for lane in sorted(lanes))

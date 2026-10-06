@@ -483,7 +483,7 @@ split deals the files listed in `tests/slow_lane_weights.json` (seconds per
 file on its slower JAX lane, from a slow-lane run's JUnit artifacts),
 longest first, each onto the shard with the least time so far. A file the
 table does not list (a new one, or one under ten seconds) goes by the hash
-of its path. That predicts about an hour of test time on every shard.
+of its path. That predicts 57 to 67 minutes of test time on every shard.
 
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The

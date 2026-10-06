@@ -75,9 +75,9 @@ PINS_FOR = 4
 #: The suffix of a shard spec that asks for the weighted split.
 WEIGHTED = "weighted"
 #: The job count ``slow-tests.yml`` runs per JAX version.  Six, not the four
-#: of the per-push lane: the measured lane is about 355 minutes of tests, so
-#: four balanced shards would sit at 90 minutes each with nothing to spare
-#: for the tests added since.
+#: of the per-push lane: the measured lane is 360 to 395 minutes of tests
+#: (the two JAX versions), so four balanced shards would sit at 96 to 100
+#: minutes each, with nothing to spare; six sit at about 65.
 SLOW_LANE_SHARDS = 6
 #: Measured seconds per test file for the weighted split, next to this
 #: module.  ``scripts/slow_lane_weights.py`` writes it from the JUnit

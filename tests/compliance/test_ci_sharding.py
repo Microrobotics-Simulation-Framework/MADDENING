@@ -330,7 +330,7 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
     assert table["seconds"] == {real_a: 61, real_c: 90}
     assert [(r["run"], r["commit"]) for r in table["runs"]] == [("11", "abc1234"), ("22", "def5678")]
     assert table["runs"][1]["artifacts"] == ["slow-durations-py3.12-jax0.10.2-shard2of2"]
-    assert "no longer in the tree, left out: tests/test_gone.py" in proc.stdout
+    assert "not a file in the tree, left out: tests/test_gone.py" in proc.stdout
     assert _sharding.load_weights(out) == table["seconds"]
     # The prediction, per lane: c (90) opens shard 1, a (61) shard 2; b is
     # unlisted and goes by hash.

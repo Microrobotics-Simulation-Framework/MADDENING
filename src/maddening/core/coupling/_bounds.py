@@ -24,7 +24,7 @@ def _F_dispatch(step_pure, x, consts):
 
 
 def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
-                      resolution=None, field_reference=None):
+                      resolution=None, field_reference=None, map_eps=None):
     """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.
 
     With ``field_reference`` -- a function from a flat state to the flat
@@ -99,6 +99,12 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
     weighted coordinates (:func:`_residual_resolution`); it defaults to
     ``PRECISION_FLOOR_ULPS * eps`` of the flat vector's dtype, which is
     the right number only for a group whose fields all share that dtype.
+    ``map_eps`` is the ``eps`` of the coarsest floating dtype among the
+    group's fields (a Python float): the rounding of the products the
+    Arnoldi iteration is built from, which sets its breakdown test and
+    the backward error its result is good to
+    (:data:`~maddening.core.coupling.acceleration._ARNOLDI_NOISE_ULPS`).
+    It defaults to the flat vector's own ``eps``.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
         SPECTRAL_MARGIN,
@@ -139,7 +145,8 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         r_w = _framed_difference(_F_dispatch(step_pure, xx, cc).astype(work),
                                  xx.astype(work), ww)
         v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, work)
-        rho, resid, amp = arnoldi_spectral_radius(matvec, v0, v_extra=r_w)
+        rho, resid, amp = arnoldi_spectral_radius(
+            matvec, v0, v_extra=r_w, noise_eps=_map_eps(xx.dtype, map_eps))
         # The share of ``D' r`` the group's residual does not see: the
         # dead-banded fields (weight 0 in ``dd``, positive in ``ww``).
         kept = dd > 0
@@ -187,7 +194,8 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
 
 
 def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
-                                weights, spectral_weights, resolution, reference):
+                                weights, spectral_weights, resolution, reference,
+                                map_eps=None):
     """``(rho, arnoldi_residual, amplification, ratio)`` in the interface norm's own coordinates.
 
     :func:`_spectral_rate_at` with ``field_reference``, for a group under
@@ -225,7 +233,8 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     spectrum, float floor); ``reference(x)`` is, at each entry of the
     reading, its edge's ``max|Phi_e(x)|``, which gives the pair-to-returned
     ratio (MADD-ANO-146).  The share of a dead-banded edge's residual is
-    folded into the factor as there.  NaN on a non-finite state.
+    folded into the factor as there.  ``map_eps`` as there.  NaN on a
+    non-finite state.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
         SPECTRAL_MARGIN,
@@ -263,7 +272,8 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
         r_y = _framed_difference(reading(fx).astype(work), reading(xx).astype(work), ww)
         r_x = _framed_difference(fx.astype(work), xx.astype(work), wxx)
         u0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, work) * live.astype(work)
-        rho, resid, amp = _arnoldi_through(matvec, measure, u0, extra=(r_x, r_y))
+        rho, resid, amp = _arnoldi_through(
+            matvec, measure, u0, extra=(r_x, r_y), noise_eps=_map_eps(xx.dtype, map_eps))
         kept = dd > 0
         r_kept = jnp.linalg.norm(jnp.where(kept, r_y, 0.0))
         r_unread = jnp.linalg.norm(jnp.where(kept, 0.0, r_y))
@@ -290,6 +300,11 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
         jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan, nan),
         (x_sg, consts_sg, wx, dd0, ww0, rr0),
     )
+
+
+def _map_eps(dtype, map_eps=None) -> float:
+    """The products' rounding: *map_eps*, or ``eps`` of the state's own *dtype*."""
+    return float(jnp.finfo(dtype).eps) if map_eps is None else float(map_eps)
 
 
 def _analysis_dtype(dtype):

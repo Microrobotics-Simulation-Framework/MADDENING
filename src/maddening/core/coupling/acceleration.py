@@ -893,9 +893,10 @@ SPECTRAL_SETTLED_FRACTION = 0.05
 #: ``eps * a`` over the cells of
 #: ``tests/property/test_coupling_targeted_search.py`` in float32 and
 #: float64 (jaxlib 0.10.2, 0.11.0, 0.11.2); eight is 3.5x that.  Whatever was
-#: discarded is not forgotten: its size is the backward error
-#: :func:`_backward_error` reports, which the resolvent norm is widened
-#: by and the radius's sensitivity is probed at.
+#: discarded is not forgotten: it is a part of ``A q_j`` the space does
+#: not hold, so its norm is reported in the Arnoldi residual beside
+#: ``h_{k+1,k}``, and the one more product the radius's sensitivity is
+#: probed with (:func:`_compressed_spectrum`) sees it.
 #:
 #: A second, scale-free test stands beside it (Daniel, Gragg, Kaufman
 #: and Stewart's reorthogonalisation criterion): the vector is
@@ -910,15 +911,10 @@ _ARNOLDI_NOISE_ULPS = 8.0
 #: this fraction of its norm through the second Gram-Schmidt sweep.
 _ARNOLDI_REORTH_KEEP = 0.5
 
-#: Fixed-seed perturbations of the compressed Jacobian, each of the size
-#: of the analysis's backward error, by which the radius's sensitivity
-#: to rounding is measured (:func:`_radius_sensitivity`).
-_SENSITIVITY_PROBES = 4
-
-#: How many backward errors each sensitivity probe is: a random
-#: perturbation finds a fraction of the worst movement a perturbation of
-#: its norm can cause, so the probes are this many times the measured
-#: backward error.
+#: How many times the disagreement of one fresh product with the
+#: Arnoldi relation is applied when the radius's sensitivity to rounding
+#: is probed (:func:`_compressed_spectrum`): the compression was built
+#: from eight products and the probe samples the rounding of one.
 _SENSITIVITY_SAFETY = 4.0
 
 #: Squarings in the Gelfand estimate of a small matrix's spectral
@@ -969,55 +965,51 @@ def _noise_eps(dtype, noise_eps) -> float:
     return eps if noise_eps is None else max(eps, float(noise_eps))
 
 
-def _radius_sensitivity(Hk, rho, active, size):
-    """How far perturbations of norm *size* move the spectral radius of ``Hk``.
-
-    The largest ``|rho(Hk + E) - rho(Hk)|`` over
-    :data:`_SENSITIVITY_PROBES` fixed-seed perturbations ``E`` of
-    Frobenius norm *size*, confined to the rows and columns the Krylov
-    basis filled (*active*).  *size* is the analysis's backward error
-    (times :data:`_SENSITIVITY_SAFETY`): the compressed matrix is the
-    exact compression of a Jacobian within that distance of the one
-    evaluated, so a radius that such a perturbation moves is a radius the
-    analysis has not determined.  For a normal matrix the movement is at
-    most *size* (Bauer-Fike with constant one); a non-normal one can turn
-    it into far more, and nothing in a Ritz value says so -- a field
-    1e-4 of its driver on a float32 fan-out hub read 0.574 for a radius
-    of 0.092 with a zero Arnoldi residual.  Only ``k x k`` matrix
-    products: no Jacobian-vector product.
-    """
-    k = Hk.shape[0]
-    mask = active[:, None] * active[None, :]
-    E = jax.random.normal(jax.random.PRNGKey(1), (_SENSITIVITY_PROBES, k, k), Hk.dtype) * mask
-    norms = jnp.sqrt(jnp.sum(E * E, axis=(1, 2)))
-    E = E * (size / jnp.where(norms > 0, norms, 1.0))[:, None, None]
-    moved = jax.vmap(_spectral_radius_small)(Hk[None] + E)
-    spread = jnp.max(jnp.abs(moved - rho))
-    return jnp.where(jnp.isfinite(size), spread, jnp.inf)
+def _probe_coefficients(active):
+    """A fixed-seed unit combination of the basis vectors a Krylov space filled."""
+    c = jax.random.normal(jax.random.PRNGKey(1), active.shape, active.dtype) * active
+    nrm = jnp.linalg.norm(c)
+    return c / jnp.where(nrm > 0, nrm, 1.0)
 
 
-def _compressed_spectrum(Hk, active, backward):
+def _compressed_spectrum(Hk, coefficients, defect):
     """``(rho, sensitivity, amplification)`` of a Krylov-compressed Jacobian.
 
-    *backward* is the norm of the perturbation of the Jacobian the
-    compression is exact for: the largest direction a breakdown
-    discarded, and never less than one rounding of the products.
-    ``amplification`` is ``1 / (sigma_min(I - Hk) - backward)``: a
-    singular value moves by at most the norm of a perturbation (Weyl),
-    so this is the resolvent norm of every matrix that close, the
-    evaluated Jacobian's among them, and ``inf`` where one of them is
-    singular.
+    ``amplification`` is ``1 / sigma_min(I - Hk)``, the norm of the
+    compressed map's resolvent at 1.
+
+    ``sensitivity`` is how far the radius moves when the compression is
+    made to agree with one more product.  The Arnoldi relation says what
+    ``A z`` is for any combination ``z = Q c`` of the basis: ``Q Hk c``.
+    The caller evaluates that product afresh and passes the disagreement
+    *defect* ``= Q^T A z - Hk c``, which is rounding's doing (and a
+    discarded direction's) and has rounding's own shape: large only where
+    the products' entries are large.  ``Hk + s * defect c^T`` is the
+    compression that agrees with the fresh product, and
+    ``|rho(Hk + s defect c^T) - rho(Hk)|`` -- with ``s`` =
+    :data:`_SENSITIVITY_SAFETY`, one product standing for the eight the
+    compression was built from -- is a measured sample of what rounding
+    did to the radius.  For a normal Jacobian it is of the order of the
+    defect; a non-normal one can turn a rounding into far more, and
+    nothing in a Ritz value says so: a field 1e-4 of its driver on a
+    float32 fan-out hub read 0.574 for a radius of 0.092 with a zero
+    Arnoldi residual.  A perturbation of the same *norm* in a random
+    direction is not the measure: an offset or a small field grades the
+    weighted Jacobian (norm 725 beside a radius of 0.7), rounding leaves
+    its small entries alone, and a random perturbation moved a radius by
+    0.2 that the analysis had right to 3e-5.
     """
     k = Hk.shape[0]
     rho = _spectral_radius_small(Hk)
     sigma = jnp.linalg.svd(jnp.eye(k, dtype=Hk.dtype) - Hk, compute_uv=False)
-    sigma_min = sigma[-1] - backward
+    sigma_min = sigma[-1]
     invertible = sigma_min > 0
     amplification = jnp.where(
         invertible, 1.0 / jnp.where(invertible, sigma_min, 1.0), jnp.inf,
     )
-    sensitivity = _radius_sensitivity(Hk, rho, active, _SENSITIVITY_SAFETY * backward)
-    return rho, sensitivity, amplification
+    probed = _spectral_radius_small(
+        Hk + _SENSITIVITY_SAFETY * defect[:, None] * coefficients[None, :])
+    return rho, jnp.abs(probed - rho), amplification
 
 
 def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
@@ -1188,9 +1180,14 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     Q, H, anorm, dropped = jax.lax.fori_loop(0, k, body, (Q0, H0, zero, zero))
     Hk = H[:k, :k]
     active = (jnp.sum(Q[:k] * Q[:k], axis=1) > 0).astype(dtype)
-    rho, sensitivity, amplification = _compressed_spectrum(
-        Hk, active, jnp.maximum(dropped, eps * anorm))
-    residual = jnp.maximum(H[k, k - 1], sensitivity)
+    # One more product, along a combination of the basis, against what
+    # the Arnoldi relation says it is (``_compressed_spectrum``).
+    c = _probe_coefficients(active)
+    defect = Q[:k] @ matvec(c @ Q[:k]) - Hk @ c
+    rho, sensitivity, amplification = _compressed_spectrum(Hk, c, defect)
+    # A direction a breakdown discarded is a part of ``A q_j`` outside the
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.
+    residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         # The certificate, tested rather than assumed: the fraction of
         # ``v_extra`` outside the final space.  Zero (to rounding) when the
@@ -1306,9 +1303,13 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     Q, _U, H, anorm, dropped = jax.lax.fori_loop(0, k, body, (Q0, U0, H0, zero, zero))
     Hk = H[:k, :k]
     active = (jnp.sum(Q[:k] * Q[:k], axis=1) > 0).astype(dtype)
-    rho, sensitivity, amplification = _compressed_spectrum(
-        Hk, active, jnp.maximum(dropped, eps * anorm))
-    residual = jnp.maximum(H[k, k - 1], sensitivity)
+    c = _probe_coefficients(active)
+    probe_q = jnp.asarray(measure(jnp.asarray(matvec(c @ _U[:k]), dtype)), dtype)
+    defect = Q[:k] @ probe_q - Hk @ c
+    rho, sensitivity, amplification = _compressed_spectrum(Hk, c, defect)
+    # A direction a breakdown discarded is a part of ``A q_j`` outside the
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.
+    residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         ex_norm = jnp.linalg.norm(extra_q)
         _e_u, e_q = _outside(Q[:k], _U[:k], extra_u, extra_q)

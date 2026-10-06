@@ -128,7 +128,8 @@ def test_arnoldi_continues_from_the_residual_at_a_breakdown():
     r = jnp.array([1.0, 0.0, 0.0, 1.0])
     exact = float(jnp.linalg.norm(jnp.linalg.solve(jnp.eye(4) - A, r)))
     _rho, res, amp = arnoldi_spectral_radius(lambda v: A @ v, v0)
-    assert float(res) == 0.0, "fixture premise: the space breaks down, 'settled'"
+    # Zero but for the radius's measured sensitivity to rounding.
+    assert float(res) < 1e-5, "fixture premise: the space breaks down, 'settled'"
     assert float(amp) * float(jnp.linalg.norm(r)) < exact, (
         "fixture premise: the one-vector space's resolvent understates on r"
     )

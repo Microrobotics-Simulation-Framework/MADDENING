@@ -1341,18 +1341,20 @@ def test_arnoldi_reports_nothing_for_a_nilpotent_map_and_a_zero_start():
     """Nothing amplified means nothing extrapolated -- and no NaN.
 
     A nilpotent map has spectral radius zero and a non-zero Jacobian.
-    Arnoldi breaks down exactly (residual ``0.0``), but the Hessenberg
-    it leaves is nilpotent only in exact arithmetic: float32 puts
-    ~1e-8 of rounding in ``H @ H`` and Gelfand's formula, which is an
-    upper bound by construction, reads ``sqrt`` of that.  So the radius
-    is pinned below 1e-3 rather than at zero -- the bound it feeds is
-    ``residual / (1 - 1e-4)``, i.e. the residual -- and the exact zero
-    is asserted where it is exact: on a start vector nothing can
-    amplify.
+    Arnoldi breaks down exactly, but the Hessenberg it leaves is
+    nilpotent only in exact arithmetic: float32 puts ~1e-8 of rounding in
+    ``H @ H`` and Gelfand's formula, which is an upper bound by
+    construction, reads ``sqrt`` of that.  So the radius is pinned below
+    1e-3 rather than at zero -- the bound it feeds is ``residual / (1 -
+    1e-4)``, i.e. the residual -- and so is the residual: a Jordan block
+    is the matrix whose radius rounding moves most (by the square root of
+    a perturbation), and the residual carries that measured sensitivity
+    (``_radius_sensitivity``).  The exact zero is asserted where it is
+    exact: on a start vector nothing can amplify.
     """
     N = jnp.array([[0.0, 1.0], [0.0, 0.0]])
     rho, resid, amp = arnoldi_spectral_radius(_matvec(N), jnp.ones(2))
-    assert 0.0 <= float(rho) < 1e-3 and float(resid) == 0.0
+    assert 0.0 <= float(rho) < 1e-3 and 0.0 <= float(resid) < 1e-3
     assert float(amp) == pytest.approx(
         float(jnp.linalg.norm(jnp.linalg.inv(jnp.eye(2) - N), 2)), rel=1e-3,
     ), "the resolvent of a nilpotent map is exact: (I - N)^-1 = I + N"

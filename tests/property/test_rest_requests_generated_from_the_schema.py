@@ -61,6 +61,7 @@ refuses to send to an out-of-scope path).
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import json
@@ -863,6 +864,34 @@ def test_every_malformed_value_of_every_field_is_refused_whole_or_served(key, in
                  lambda v: not v.where.startswith("header"))
 
 
+@contextlib.contextmanager
+def jax_recorder_not_run() -> Iterator[None]:
+    """JAX's own trace recorder, not run, for the cases that send one
+    route many requests per push.
+
+    Every served ``POST /sim/profile/jax/start`` started ``jax.profiler``'s
+    recorder, and the oracle stops what a request started before it
+    compares anything.  On the CI runners that pair cost about a second:
+    the header battery's case for the route (some fifty requests) took
+    26.5 s and 31.3 s on the two lanes, past the per-test budget, and the
+    per-push fuzzer's 14.0 s (the header case is 1.7 s on a workstation,
+    0.6 s without the recorder).
+    What a header or a drawn field is answered does not depend on the
+    recorder, so here the session, its directory and the route's own state
+    are the real ones and only the two calls into JAX are not made.
+
+    The recorder still runs per push where the route's own fields are sent
+    (``test_every_malformed_value_of_every_field_...``) and in
+    ``tests/api/test_jax_trace_stops_itself.py``, and in the slow lane for
+    the fuzzer at the profile's depth."""
+    import jax.profiler
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(jax.profiler, "start_trace", lambda *args, **kwargs: None)
+        patch.setattr(jax.profiler, "stop_trace", lambda *args, **kwargs: None)
+        yield
+
+
 @pytest.mark.parametrize("key", sorted(IN_SCOPE) + sorted(FRAMEWORK))
 def test_every_malformed_header_is_refused_whole_or_served(key):
     """The battery over the headers a proxy or the server interprets, on
@@ -870,7 +899,8 @@ def test_every_malformed_header_is_refused_whole_or_served(key):
     header, a Host that is not this machine's or a foreign Origin on a
     write is never served without the token."""
     op = IN_SCOPE.get(key) or FRAMEWORK[key]
-    _run_battery(op, SEEDS.get(key, (Seed(),))[:1], lambda v: v.where.startswith("header"))
+    with jax_recorder_not_run():
+        _run_battery(op, SEEDS.get(key, (Seed(),))[:1], lambda v: v.where.startswith("header"))
 
 
 # ---------------------------------------------------------------------------
@@ -1167,10 +1197,12 @@ def check_generated_request(op: Operation, seed: Seed, changes: list) -> None:
 def test_a_generated_request_is_refused_whole_or_served(key, data):
     """A seed with drawn values in up to three of its fields: no 5xx, a
     refusal changes nothing and names no server path, a 2xx is strict
-    JSON."""
+    JSON.  (JAX's recorder is not run: see :func:`jax_recorder_not_run`.
+    The slow sibling below runs it.)"""
     op = IN_SCOPE[key]
     seed, changes = data.draw(generated_requests(op, SEEDS[key]))
-    check_generated_request(op, seed, changes)
+    with jax_recorder_not_run():
+        check_generated_request(op, seed, changes)
 
 
 # Per push: tests/property/test_rest_requests_generated_from_the_schema.py::test_a_generated_request_is_refused_whole_or_served

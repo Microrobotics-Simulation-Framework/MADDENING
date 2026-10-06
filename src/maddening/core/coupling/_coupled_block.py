@@ -26,6 +26,7 @@ from maddening.core.coupling.acceleration import (
 from maddening.core._graph_specs import (
     _META_KEY,
     _apply_edge,
+    _edge_geom,
     _correction_accepts_params,
     _node_fluxes,
     _node_update,
@@ -420,11 +421,18 @@ def _run_coupled_block_impl(
         # Fall back (will KeyError if truly missing)
         return src_state[src_nn][edge.source_field]
 
-    def _resolve_boundary(nn, s, flux_s=None, strict=True):
+    def _resolve_boundary(nn, s, flux_s=None, strict=True, consumer=None):
         """Resolve boundary inputs for node nn from state s.
 
         ``strict=False`` omits inputs whose flux is not available yet
         (used to seed fluxes from the previous iterate before a pass).
+
+        *consumer* is the ``state`` argument of the hook these inputs are
+        for (or a zero-argument callable returning it): what an edge with
+        a target-anchored geometry reads its geometry from.  A
+        source-anchored geometry is read from the dict the value is read
+        from.  Both are read here, inside the pass, from the pass's own
+        tracers: that is what makes the group's gradient see them.
         """
         boundary_inputs: dict[str, Any] = {}
         for edge in edges_by_target[nn]:
@@ -435,7 +443,8 @@ def _run_coupled_block_impl(
             value = _resolve_value(edge, src_state, flux_s, strict=strict)
             if value is _MISSING:
                 continue
-            value = _apply_edge(edge, value, node_params)
+            value = _apply_edge(edge, value, node_params,
+                                _edge_geom(edge, src_state, consumer))
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
                     boundary_inputs[edge.target_field] + value
@@ -495,9 +504,11 @@ def _run_coupled_block_impl(
                         if nn in flux_producing_nodes:
                             flux_s[nn] = _node_fluxes(
                                 nodes[nn], s[nn],
-                                _resolve_boundary(nn, s, flux_s, strict=strict),
+                                _resolve_boundary(nn, s, flux_s, strict=strict,
+                                                  consumer=s[nn]),
                                 _get_dt(nn), _np(nn))
-            out = _node_update(nodes[dst], dst_pre, _resolve_boundary(dst, s, flux_s),
+            out = _node_update(nodes[dst], dst_pre,
+                               _resolve_boundary(dst, s, flux_s, consumer=dst_pre),
                                _get_dt(dst), _np(dst))
             return {f: v for f, v in out.items()
                     if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)}
@@ -512,7 +523,7 @@ def _run_coupled_block_impl(
         return gain
 
     def _resolve_boundary_interpolated(nn, s_prev, s_cur, alpha,
-                                        flux_s=None, s_prev_prev=None):
+                                        flux_s=None, s_prev_prev=None, consumer=None):
         """Resolve boundary inputs with time interpolation.
 
         alpha=0 means start (s_prev values), alpha=1 means end (s_cur).
@@ -520,10 +531,33 @@ def _run_coupled_block_impl(
         """
         boundary_inputs: dict[str, Any] = {}
         for edge in edges_by_target[nn]:
+            geom = None
             if edge in back_edge_set and edge not in group_internal:
                 src_state = full_state
                 value = _resolve_value(edge, src_state, flux_s)
+                geom = _edge_geom(edge, src_state, consumer)
             elif edge in group_internal:
+                if edge.geometry is None:
+                    pass
+                elif edge.geometry[0] != "source":
+                    geom = _edge_geom(edge, s_cur, consumer)
+                else:
+                    # A source-anchored geometry is interpolated as the
+                    # value below is, between the same two (or three)
+                    # snapshots with the same weight, componentwise, and
+                    # the mapping is applied to the interpolated pair.
+                    g_field = edge.geometry[1]
+                    g_prev = s_prev[edge.source_node][g_field]
+                    g_cur = s_cur[edge.source_node][g_field]
+                    if use_quadratic_interp and s_prev_prev is not None:
+                        g_pp = s_prev_prev[edge.source_node][g_field]
+                        geom = (
+                            (1.0 - 3.0 * alpha + 2.0 * alpha * alpha) * g_pp
+                            + (4.0 * alpha - 4.0 * alpha * alpha) * g_prev
+                            + (-alpha + 2.0 * alpha * alpha) * g_cur
+                        )
+                    else:
+                        geom = g_prev + alpha * (g_cur - g_prev)
                 if use_quadratic_interp and s_prev_prev is not None:
                     # Quadratic Lagrange through 3 points:
                     # (0, v_pp), (0.5, v_prev), (1, v_cur)
@@ -545,7 +579,8 @@ def _run_coupled_block_impl(
                     )
             else:
                 value = _resolve_value(edge, s_cur, flux_s)
-            value = _apply_edge(edge, value, node_params)
+                geom = _edge_geom(edge, s_cur, consumer)
+            value = _apply_edge(edge, value, node_params, geom)
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
                     boundary_inputs[edge.target_field] + value
@@ -570,11 +605,11 @@ def _run_coupled_block_impl(
             if use_subcycling and (use_linear_interp or use_quadratic_interp):
                 bi = _resolve_boundary_interpolated(
                     nn, s_prev, s_cur, alpha,
-                    flux_s=flux_s, s_prev_prev=s_prev_prev,
+                    flux_s=flux_s, s_prev_prev=s_prev_prev, consumer=sub_state,
                 )
             else:
                 # constant: use end-of-step values
-                bi = _resolve_boundary(nn, s_cur, flux_s)
+                bi = _resolve_boundary(nn, s_cur, flux_s, consumer=sub_state)
             new_sub = _node_update(nodes[nn], sub_state, bi, sub_dt, _np(nn))
             new_sub = _apply_interface_overrides(
                 new_sub, sub_state, bi, sub_dt, nodes[nn].node,
@@ -603,7 +638,8 @@ def _run_coupled_block_impl(
             for strict in (False, True):
                 for nn in group_node_names:
                     if nn in flux_producing_nodes:
-                        bi0 = _resolve_boundary(nn, latest_results, flux_s, strict=strict)
+                        bi0 = _resolve_boundary(nn, latest_results, flux_s, strict=strict,
+                                                consumer=latest_results[nn])
                         flux_s[nn] = _node_fluxes(
                             nodes[nn], latest_results[nn], bi0, _get_dt(nn), _np(nn),
                         )
@@ -616,7 +652,10 @@ def _run_coupled_block_impl(
                 )
                 # Interface overrides already applied per sub-step
             else:
-                bi = _resolve_boundary(nn, s, flux_s)
+                # The member integrates from its pre-step state, which is
+                # therefore what a target-anchored geometry is read from;
+                # lazily, so ``_pre`` is traced where it always was.
+                bi = _resolve_boundary(nn, s, flux_s, consumer=lambda nn=nn: _pre(nn))
                 pre = _pre(nn)
                 s[nn] = _node_update(nodes[nn], pre, bi, _get_dt(nn), _np(nn))
                 s[nn] = _apply_interface_overrides(
@@ -626,7 +665,7 @@ def _run_coupled_block_impl(
                 )
             # Compute fluxes for this node
             if nn in flux_producing_nodes:
-                bi_for_flux = _resolve_boundary(nn, s, flux_s)
+                bi_for_flux = _resolve_boundary(nn, s, flux_s, consumer=s[nn])
                 flux_s[nn] = _node_fluxes(
                     nodes[nn], s[nn], bi_for_flux, _get_dt(nn), _np(nn),
                 )
@@ -646,7 +685,8 @@ def _run_coupled_block_impl(
             for strict in jacobi_flux_sweeps:
                 for nn in group_node_names:
                     if nn in flux_producing_nodes:
-                        bi = _resolve_boundary(nn, latest_results, flux_s, strict=strict)
+                        bi = _resolve_boundary(nn, latest_results, flux_s, strict=strict,
+                                               consumer=latest_results[nn])
                         flux_s[nn] = _node_fluxes(
                             nodes[nn], latest_results[nn], bi, _get_dt(nn), _np(nn),
                         )
@@ -662,7 +702,8 @@ def _run_coupled_block_impl(
                 # Interface overrides already applied per sub-step
             else:
                 # Optionally place computation on assigned device
-                bi = _resolve_boundary(nn, latest_results, flux_s)
+                bi = _resolve_boundary(nn, latest_results, flux_s,
+                                       consumer=lambda nn=nn: _pre(nn))
                 pre = _pre(nn)
                 if multigpu_device_map is not None and nn in multigpu_device_map:
                     dev_idx = multigpu_device_map[nn]

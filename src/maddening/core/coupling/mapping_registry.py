@@ -105,12 +105,15 @@ class _MappingKind:
     references: dict[str, str]
     #: Shipped with the library; can never be replaced or removed.
     builtin: bool = False
+    #: The kind's mappings read a moving geometry (``Mapping.apply``'s
+    #: third argument): an edge carrying one names it with ``geometry=``.
+    needs_geometry: bool = False
 
     def declaration(self) -> tuple:
         """What was declared, without the factory, for comparing two
         registrations of one kind."""
         return (self.arrays, tuple(self.hyperparameters.items()),
-                tuple(self.references.items()))
+                tuple(self.references.items()), self.needs_geometry)
 
 
 _MAPPING_REGISTRY: dict[str, _MappingKind] = {}
@@ -144,6 +147,10 @@ def _ensure_builtins() -> None:
     import maddening.core.coupling.sparse_mapping  # noqa: F401, PLC0415
 
     _BUILTINS_LOADED = True
+    # After the flag: the geometry-dependent reference kind (experimental)
+    # registers through the public ``register_mapping``, which asks for
+    # the built-ins itself.
+    import maddening.core.coupling.grid_mapping  # noqa: F401, PLC0415
 
 
 def _lookup(kind: Any) -> Optional[_MappingKind]:
@@ -206,7 +213,7 @@ def _check_kind_name(kind: Any) -> None:
 
 
 def _declare(kind: str, factory: Callable[..., Any], arrays: Any, hyperparameters: Any,
-             references: Any, *, builtin: bool) -> _MappingKind:
+             references: Any, *, builtin: bool, needs_geometry: bool = False) -> _MappingKind:
     """Validate one declaration and return its entry (nothing is stored)."""
     array_names = _names(kind, "arrays", arrays)
 
@@ -263,8 +270,14 @@ def _declare(kind: str, factory: Callable[..., Any], arrays: Any, hyperparameter
             used[name] = role
 
     _check_signature(kind, factory, used)
+    if not isinstance(needs_geometry, bool):
+        raise TypeError(
+            f"mapping kind {kind!r}: needs_geometry must be True or False, got "
+            f"{needs_geometry!r}"
+        )
     return _MappingKind(kind=kind, factory=factory, arrays=array_names,
-                        hyperparameters=hyper, references=refs, builtin=builtin)
+                        hyperparameters=hyper, references=refs, builtin=builtin,
+                        needs_geometry=needs_geometry)
 
 
 def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str]) -> None:
@@ -316,7 +329,7 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
 
 
 def _add(kind: Any, factory: Any, arrays: Any, hyperparameters: Any, references: Any,
-         *, builtin: bool) -> None:
+         *, builtin: bool, needs_geometry: bool = False) -> None:
     """Register *factory* as *kind*, or raise; the one way into the table.
 
     The same factory with the same declaration is a no-op, so a module
@@ -344,7 +357,8 @@ def _add(kind: Any, factory: Any, arrays: Any, hyperparameters: Any, references:
             f"{_qualified(factory)}."
         )
     entry = _declare(kind, factory, arrays, hyperparameters, references,
-                     builtin=builtin or (existing is not None and existing.builtin))
+                     builtin=builtin or (existing is not None and existing.builtin),
+                     needs_geometry=needs_geometry)
     if existing is None:
         _MAPPING_REGISTRY[kind] = entry
     elif existing.declaration() != entry.declaration():
@@ -353,7 +367,9 @@ def _add(kind: Any, factory: Any, arrays: Any, hyperparameters: Any, references:
             f"{_qualified(existing.factory)} with a different declaration (arrays "
             f"{list(existing.arrays)}, hyper-parameters "
             f"{ {n: t.__name__ for n, t in existing.hyperparameters.items()} }, "
-            f"references {existing.references}); registering it again must repeat "
+            f"references {existing.references}"
+            + (", needs_geometry=True" if existing.needs_geometry else "")
+            + "); registering it again must repeat "
             f"that declaration."
         )
 
@@ -365,6 +381,7 @@ def register_mapping(
     arrays: Sequence[str],
     hyperparameters: Mapping[str, type],
     references: Optional[Mapping[str, str]] = None,
+    needs_geometry: bool = False,
 ) -> Callable[[_F], _F]:
     """Decorator that registers a mapping factory under a kind name.
 
@@ -402,6 +419,9 @@ def register_mapping(
     references : mapping of str to str, optional
         For each array, the factory keyword that carries its reference.
         ``"<array>_ref"`` when omitted.
+    needs_geometry : bool, optional
+        Whether the kind's mappings read a moving geometry (see the
+        notes).  ``False`` by default.
 
     Returns
     -------
@@ -436,7 +456,18 @@ def register_mapping(
       :func:`~maddening.core.coupling.mapping_spec.reference_for_array`,
       passing the reference keyword through), so that what is saved is
       what was built;
-    * whose ``params_pytree()`` meets the contract below.
+    * whose ``params_pytree()`` meets the contract below;
+    * whose ``needs_geometry`` attribute (absent means ``False``) equals
+      the *needs_geometry* the kind was registered with.
+
+    **A geometry-dependent kind** (``needs_geometry=True``, experimental)
+    builds mappings that read a moving geometry: ``apply(field, weights,
+    geom)`` takes it as a third argument, the mapping declares the exact
+    shape of the array it reads as ``geometry_shape``, and the edge that
+    carries it names a state field of its own source or target node with
+    ``add_edge(..., geometry=(anchor, field))``.  Such a mapping must be a
+    pure function of its three arguments: no cache keyed on values and
+    nothing carried between steps.
 
     The mapping may be a
     :class:`~maddening.core.coupling.mapping.StaticLinearMapping` -- a
@@ -477,7 +508,8 @@ def register_mapping(
     _check_kind_name(kind)
 
     def decorator(factory: _F) -> _F:
-        _add(kind, factory, arrays, hyperparameters, references, builtin=False)
+        _add(kind, factory, arrays, hyperparameters, references, builtin=False,
+             needs_geometry=needs_geometry)
         return factory
 
     return decorator

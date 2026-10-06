@@ -236,8 +236,17 @@ class DatasetGenerator:
         sees the field it sees in the step, never the history's time axis.
 
         An edge that reads a flux output is a ``KeyError``: fluxes are not
-        part of a state history.
+        part of a state history.  A target fed through a geometry-dependent
+        mapping is a ``ValueError``: the time level its geometry is read
+        at is the step's, not a sample's.
         """
+        for edge in gm._edges:
+            if edge.target_node == target_node and edge.geometry is not None:
+                raise ValueError(
+                    f"DatasetGenerator: node {target_node!r} receives edge {edge.key} "
+                    f"through a geometry-dependent mapping; its boundary inputs cannot "
+                    f"be rebuilt from a state history in 0.4.0."
+                )
         sources = sorted({e.source_node for e in gm._edges if e.target_node == target_node})
 
         def resolve(state):

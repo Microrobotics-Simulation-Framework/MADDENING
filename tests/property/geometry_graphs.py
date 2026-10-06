@@ -451,6 +451,81 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
     return gm
 
 
+# =============================================================================
+# PHASE 1 OF GEOMETRY EDGES (0.4.0): THE ONE PLACE THIS HARNESS IS NARROWED
+#
+# The harness was written for diagnostics that read a moving geometry.  In
+# 0.4.0 they do not, by decision, and the library says so instead of
+# reporting numbers that leave the geometry out:
+#
+# * a coupling group whose pass resolves a geometry-dependent mapping reports
+#   the solve's own outcome (``SOLVE_OUTCOME``) and nothing else: every bound
+#   NaN (the gradient estimate ``inf``), every ``*_usable`` flag False, and
+#   ``not_usable_reason`` saying why (:func:`assert_not_diagnosed`);
+# * ``convergence_norm="interface"`` on a group with a geometry-dependent
+#   mapping on an internal edge is refused by ``compile()``
+#   (:func:`assert_interface_norm_refused`).
+#
+# The tests that compared those diagnostics with the node-inlined twin's, and
+# the cases that ran the interface norm, read this block.  Nothing was
+# deleted: set ``DIAGNOSTICS_READ_GEOMETRY = True`` when a later phase makes
+# the diagnostics read the geometry, and the original comparisons and cases
+# run again.
+# =============================================================================
+
+#: Whether coupling diagnostics account for a moving geometry.
+DIAGNOSTICS_READ_GEOMETRY = False
+#: What a report still says about a group with a geometry edge.
+SOLVE_OUTCOME = ("iterations", "total_iterations", "residual", "converged")
+_NOT_USABLE = {"amplification": "nan", "error_estimate": "nan", "ratio_usable": False,
+               "gradient_error_estimate": "inf", "rho_spectral": "nan",
+               "spectral_error_bound": "nan", "spectral_usable": False,
+               "gradient_relative_error_bound": "nan", "gradient_bound_usable": False,
+               "precision_limited": False}
+
+
+def interface_norm_refused(knobs) -> bool:
+    """Whether a group with these knobs and a geometry-dependent mapping on
+    an internal edge is refused at compile (phase 1)."""
+    return (not DIAGNOSTICS_READ_GEOMETRY and knobs is not None
+            and dict(knobs).get("convergence_norm") == "interface")
+
+
+def assert_not_diagnosed(report, keys) -> None:
+    """*report* (one group of ``coupling_diagnostics()``) says the solve's
+    outcome, no bound, no usable flag, and why, naming the edges *keys*."""
+    assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason"}, sorted(report)
+    for name, want in _NOT_USABLE.items():
+        got = report[name]
+        if want == "nan":
+            assert np.isnan(got), (name, got)
+        elif want == "inf":
+            assert got == float("inf"), (name, got)
+        else:
+            assert got is want, (name, got)
+    reason = report["not_usable_reason"]
+    assert isinstance(reason, str) and "geometry-dependent mapping" in reason, reason
+    assert "do not read a moving geometry" in reason, reason
+    for key in keys:
+        assert key in reason, (key, reason)
+    assert np.isfinite(report["residual"]) and int(report["iterations"]) >= 1, report
+
+
+def assert_interface_norm_refused(make, keys) -> None:
+    """``make()`` builds and compiles a graph whose group uses the interface
+    norm over the geometry edges *keys*: a ``RuntimeError`` from ``compile()``
+    naming each edge and the norms that work."""
+    import pytest  # noqa: PLC0415
+
+    with pytest.raises(RuntimeError) as refused:
+        make()
+    message = str(refused.value)
+    for phrase in ("convergence_norm='interface'", "geometry-dependent mapping",
+                   "does not read a moving geometry in 0.4.0",
+                   "Use convergence_norm='mixed' or 'l2'", *keys):
+        assert phrase in message, (phrase, message)
+
+
 # ---------------------------------------------------------------------------
 # The two-body graph
 # ---------------------------------------------------------------------------

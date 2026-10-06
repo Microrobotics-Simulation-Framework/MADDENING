@@ -224,6 +224,48 @@ GRADIENTS_SLOW = [
 
 
 # ---------------------------------------------------------------------------
+# PHASE 1 (see the block of that name in ``geometry_graphs``)
+# ---------------------------------------------------------------------------
+
+
+def GEOMETRY_EDGE_KEYS(c: gg.Case) -> list:
+    """The keys of *c*'s geometry edges (both end in the group when it has one)."""
+    with gg.x64(c.needs_x64):
+        gm = gg.build(gg.two_body(c), compile=False)
+    return [e.key for e in gm.edges if e.geometry is not None]
+
+
+def _runnable(cases) -> list:
+    """*cases* without those ``compile()`` refuses in phase 1."""
+    def knobs(c):       # a case, or a ``pytest.param`` holding one
+        return (c.values[0] if hasattr(c, "values") else c).knobs
+    return [c for c in cases if not gg.interface_norm_refused(knobs(c))]
+
+
+#: The cases ``compile()`` refuses in phase 1: the interface norm over a
+#: geometry edge.  Each is asserted refused, per push.
+REFUSED_IN_PHASE_1 = [c for c in PER_PUSH + SLOW if gg.interface_norm_refused(c.knobs)]
+
+
+@pytest.mark.parametrize("c", REFUSED_IN_PHASE_1, ids=repr)
+def test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile(c):
+    """Phase 1: the norm would read what the edge delivers without its
+    geometry, so the group is refused and the message names the norms that
+    measure the state.  The node-inlined twin, which has plain edges only,
+    compiles."""
+    with gg.x64(c.needs_x64):
+        gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)),
+                                         GEOMETRY_EDGE_KEYS(c))
+        gg.build(gg.inline_geometry(gg.two_body(c)))
+
+
+def test_the_phase_1_refusals_are_the_interface_norm_cases_and_only_those():
+    assert gg.DIAGNOSTICS_READ_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
+    assert all(c.group is not None and c.down and c.up for c in REFUSED_IN_PHASE_1)
+    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.DIAGNOSTICS_READ_GEOMETRY
+
+
+# ---------------------------------------------------------------------------
 # The comparison
 # ---------------------------------------------------------------------------
 
@@ -292,6 +334,12 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         else:
             lo, hi = sorted((res_a, res_b))
             assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, res_a, res_b)
+        if not gg.DIAGNOSTICS_READ_GEOMETRY:
+            # PHASE 1 (see ``geometry_graphs``): beyond the solve's outcome,
+            # compared above, the edge-mapped group reports no bound and
+            # says why.  The comparison below is what a later phase restores.
+            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c))
+            continue
         # Everything else a report says: the same keys, the same verdicts,
         # and after the same number of passes the same numbers to within a
         # factor of two (they are estimates; the residual above is not).
@@ -346,7 +394,7 @@ def assert_steps_as_its_inlined_twin(c: gg.Case) -> float:
     return worst
 
 
-@pytest.mark.parametrize("c", PER_PUSH, ids=repr)
+@pytest.mark.parametrize("c", _runnable(PER_PUSH), ids=repr)
 def test_an_edge_mapped_graph_steps_as_its_node_inlined_twin(c):
     """Per push; slow sibling :func:`test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin`."""
     assert_steps_as_its_inlined_twin(c)
@@ -355,7 +403,7 @@ def test_an_edge_mapped_graph_steps_as_its_node_inlined_twin(c):
 # Slow: two graphs compiled per case, forty cases.
 # Per push: tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin
 @pytest.mark.slow
-@pytest.mark.parametrize("c", SLOW, ids=repr)
+@pytest.mark.parametrize("c", _runnable(SLOW), ids=repr)
 def test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin(c):
     assert_steps_as_its_inlined_twin(c)
 
@@ -430,7 +478,7 @@ def assert_same_gradients(c: gg.Case) -> None:
                 f"(relative) from the node-inlined graph's")
 
 
-@pytest.mark.parametrize("c", GRADIENTS_PER_PUSH, ids=repr)
+@pytest.mark.parametrize("c", _runnable(GRADIENTS_PER_PUSH), ids=repr)
 def test_the_gradients_of_an_edge_mapped_graph_are_its_node_inlined_twin_s(c):
     """Per push; slow sibling :func:`test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s`."""
     assert_same_gradients(c)
@@ -439,7 +487,7 @@ def test_the_gradients_of_an_edge_mapped_graph_are_its_node_inlined_twin_s(c):
 # Slow: a gradient through three steps of two graphs compiled per case.
 # Per push: tests/property/test_differential_geometry_edges.py::test_the_gradients_of_an_edge_mapped_graph_are_its_node_inlined_twin_s
 @pytest.mark.slow
-@pytest.mark.parametrize("c", GRADIENTS_SLOW, ids=repr)
+@pytest.mark.parametrize("c", _runnable(GRADIENTS_SLOW), ids=repr)
 def test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s(c):
     assert_same_gradients(c)
 
@@ -458,6 +506,13 @@ def test_a_report_s_float_floor_counts_a_source_anchored_geometry():
     c = case("floor", kind="multilinear", geom_dtype="float64", adv=0.3, **SOURCES,
              group=dict(max_iterations=80, convergence_norm="interface", rtol=1e-6,
                         diagnostics=True))
+    if not gg.DIAGNOSTICS_READ_GEOMETRY:
+        # PHASE 1 (see ``geometry_graphs``): the interface norm over a
+        # geometry edge is refused; the comparison below is a later phase's.
+        with gg.x64(True):
+            gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)),
+                                             GEOMETRY_EDGE_KEYS(c))
+        return
     with gg.x64(True):
         edge, inline = gg.graphs(c)
         for step in range(1, 4):
@@ -535,7 +590,7 @@ def assert_batched_run_matches(c: gg.Case) -> None:
             "premise: the members of the batch differ")
 
 
-@pytest.mark.parametrize("c", BATCHED_PER_PUSH, ids=repr)
+@pytest.mark.parametrize("c", _runnable(BATCHED_PER_PUSH), ids=repr)
 def test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_runs(c):
     """Per push; slow sibling :func:`test_every_batched_run_matches_its_twin_and_its_single_runs`."""
     assert_batched_run_matches(c)
@@ -544,7 +599,7 @@ def test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_r
 # Slow: a vmapped scan of two graphs and a single one compiled per case.
 # Per push: tests/property/test_differential_geometry_edges.py::test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_runs
 @pytest.mark.slow
-@pytest.mark.parametrize("c", BATCHED_SLOW, ids=repr)
+@pytest.mark.parametrize("c", _runnable(BATCHED_SLOW), ids=repr)
 def test_every_batched_run_matches_its_twin_and_its_single_runs(c):
     assert_batched_run_matches(c)
 
@@ -561,7 +616,7 @@ _RESTART_CASES = [
 
 # Per push: tests/property/test_differential_geometry_edges.py::test_a_run_restarted_from_a_checkpoint_continues_as_the_uninterrupted_run
 # (on the plain graph; the slow parameters are the same check on groups)
-@pytest.mark.parametrize("c", _RESTART_CASES, ids=repr)
+@pytest.mark.parametrize("c", _runnable(_RESTART_CASES), ids=repr)
 def test_a_run_restarted_from_a_checkpoint_continues_as_the_uninterrupted_run(c, tmp_path):
     """A geometry is ordinary node state and a geometry-dependent mapping
     carries nothing between steps: saved after two steps and loaded into
@@ -705,7 +760,7 @@ def assert_frozen_equals_static(c: gg.Case) -> None:
         assert np.max(np.abs(gf - gs)) <= rel * np.max(np.abs(gs)), (c.label, gf, gs)
 
 
-@pytest.mark.parametrize("c", FROZEN_CASES, ids=repr)
+@pytest.mark.parametrize("c", _runnable(FROZEN_CASES), ids=repr)
 def test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points(c):
     """Per push; slow sibling :func:`test_every_frozen_geometry_steps_as_its_static_mapping`."""
     assert_frozen_equals_static(c)
@@ -714,7 +769,7 @@ def test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points(c):
 # Slow: two graphs and two gradients compiled per case.
 # Per push: tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points
 @pytest.mark.slow
-@pytest.mark.parametrize("c", FROZEN_SLOW, ids=repr)
+@pytest.mark.parametrize("c", _runnable(FROZEN_SLOW), ids=repr)
 def test_every_frozen_geometry_steps_as_its_static_mapping(c):
     assert_frozen_equals_static(c)
 

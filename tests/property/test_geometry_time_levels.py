@@ -187,11 +187,28 @@ CASES = {
 }
 #: Per push: one of each call site.  The rest is the same check on the
 #: other anchors, schedules and norms.
+# PHASE 1 (see the block of that name in ``geometry_graphs``): the interface
+# norm over a geometry edge is refused at compile, so that case is asserted
+# refused (``test_the_interface_norm_case_is_refused_at_compile``) and the
+# group's per-push case is the one with a predictor until a later phase.
+from tests.property import geometry_graphs as _gg  # noqa: E402
+
+
+def _refused_in_phase_1(name: str) -> bool:
+    make, _order, knobs, pattern = CASES[name]
+    topo = make()
+    return any(_gg.interface_norm_refused(g) for g in knobs) and any(
+        topo.internal(topo.edges[i]) for i in _anchors(topo, pattern).anchor)
+
+
+_GROUP_PER_PUSH = ("group, mixed anchors, interface norm" if _gg.DIAGNOSTICS_READ_GEOMETRY
+                   else "group, linear predictor")
 _PER_PUSH = ("forward, source anchor", "ungrouped cycle, mixed anchors, built b, a",
-             "group, mixed anchors, interface norm",
+             _GROUP_PER_PUSH,
              "sub-cycled target, linear, target anchors", "two rates, source anchors")
 _CASE_PARAMS = [name if name in _PER_PUSH else pytest.param(name, marks=pytest.mark.slow)
-                for name in CASES]
+                for name in CASES if not _refused_in_phase_1(name)]
+_REFUSED_CASES = [name for name in CASES if _refused_in_phase_1(name)]
 
 
 @functools.lru_cache(maxsize=8)
@@ -269,6 +286,27 @@ def assert_steps_on_the_time_level_table(name: str, dtype: str, steps: int = _ST
 def test_a_moving_geometry_is_read_at_its_documented_time_level(name, dtype):
     """Every row of the module's table, against the exact solve."""
     assert_steps_on_the_time_level_table(name, dtype)
+
+
+@pytest.mark.parametrize("name", _REFUSED_CASES)
+def test_the_interface_norm_case_is_refused_at_compile(name):
+    """Phase 1: ``compile()`` refuses the interface norm on a group with a
+    geometry-dependent mapping on an internal edge, naming the edge."""
+    make, order, knobs, pattern = CASES[name]
+    topo = make()
+    geometry = _anchors(topo, pattern)
+    unbuilt = ct.build(topo, knobs, dtype="float32", node_order=order, geometry=geometry,
+                       compile=False)
+    keys = [unbuilt.mapping_keys[i] for i in geometry.anchor if topo.internal(topo.edges[i])]
+    assert keys
+    _gg.assert_interface_norm_refused(
+        lambda: ct.build(topo, knobs, dtype="float32", node_order=order, geometry=geometry),
+        keys)
+
+
+def test_exactly_the_interface_norm_case_is_refused_in_phase_1():
+    assert _gg.DIAGNOSTICS_READ_GEOMETRY or _REFUSED_CASES == [
+        "group, mixed anchors, interface norm"]
 
 
 def test_the_cases_cover_every_row_of_the_table():

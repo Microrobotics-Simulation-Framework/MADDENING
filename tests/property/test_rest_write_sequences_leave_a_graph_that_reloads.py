@@ -41,7 +41,15 @@ through the state-changing routes in whatever order Hypothesis picks --
    (``tests/property/injected_failures.py``) -- and after each the graph
    must be exactly as it was: by invariant 2's snapshot, and object for
    object (``tests/property/graph_fingerprint.py``).  A refusal of the
-   request's own is held to the same object-for-object comparison.
+   request's own is held to the same object-for-object comparison;
+7. on a server that demands the token, the same request *without* it is
+   refused and reveals nothing.  Half the examples serve their graph as a
+   network bind requires -- the server told its bind is ``0.0.0.0``, the
+   client presenting the token on every request -- and are held to
+   invariants 1 to 6 as the others are; and before each request the same
+   request is sent in one of the ways of not presenting the token
+   (``tests/property/without_the_token.py``): 401, nothing changed, and a
+   body that is the one a server with an empty graph gives.
 
 What makes the historical sequences reachable is the vocabulary.  A rod is
 drawn *at* its limit, not safely inside it: its diffusivity, length,
@@ -54,7 +62,9 @@ a node is rebuilt under its old name and an old save is loaded.
 What it cannot see: a defect in which the served graph and its reload agree
 on a wrong value, a sequence the rules cannot spell (the runner, the
 streams, the surrogate routes and ``/cloud/*`` are out of scope and never
-requested), and concurrency -- one request at a time, on a loopback bind.
+requested), and concurrency -- one request at a time.  No socket is
+opened: the server that demands the token is *told* its bind, and its
+client is in process.
 
 Nothing here can reach a cloud provider: no rule sends a request to
 ``/cloud/*``, and the module runs under
@@ -98,6 +108,7 @@ from tests.property.differential import no_cloud_launch, note, quiet
 from tests.property.graph_fingerprint import assert_exactly_as_it_was, served_fingerprint
 from tests.property.injected_failures import fail_at_every_point, injection_points
 from tests.property.node_catalogue import f32
+from tests.property.without_the_token import CREDENTIALS, assert_refused_without_the_token
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -287,6 +298,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         #: (node, key) -> the value the node was built with
         self.built_with: dict = {}
         self.last = "the start"
+        #: the configuration the graph is served in (``rest_oracle.BINDS``)
+        self.bind = "loopback"
         #: the kind of the last request sent ("add edge", "put params", ...)
         self.last_kind = "start"
         #: whether the last rule and its invariants ran to their end
@@ -300,12 +313,14 @@ class RestWriteSequences(RuleBasedStateMachine):
     # plumbing
     # ------------------------------------------------------------------
 
-    def begin(self, start: str) -> None:
+    def begin(self, start: str, bind: str = "loopback") -> None:
+        assert bind in O.BINDS, bind
         gm = rod_graph() if start == "rod" else GraphManager()
-        self.served = O.serve(gm)
+        self.bind = bind
+        self.served = O.serve(gm, token_enforced=bind == "token")
         for name, spec in gm._nodes.items():  # noqa: SLF001
             self._remember_construction(name, spec.node)
-        self.last = f"the start ({start})"
+        self.last = f"the start ({start}, {bind})"
         if gm._nodes:  # noqa: SLF001
             assert self.do_save(START_SLOT).status_code == 200
 
@@ -339,6 +354,14 @@ class RestWriteSequences(RuleBasedStateMachine):
             kwargs["params"] = params
         what = O.describe(method, url, body if body is not None else params)
         served = self.served
+        counts = type(self).counts
+        if served.token_enforced:
+            # Invariant 7, before the request itself: the same request
+            # without the token (each way of not presenting it in turn).
+            turn = counts["sent without the token"]
+            counts["sent without the token"] += assert_refused_without_the_token(
+                served, method, url, what,
+                credentials=(CREDENTIALS[turn % len(CREDENTIALS)],), **kwargs)
 
         def moved_on(fired, failed):
             # A run that failed after some of its steps left the graph
@@ -351,15 +374,17 @@ class RestWriteSequences(RuleBasedStateMachine):
         resp, injected, before, fingerprint = fail_at_every_point(
             served, lambda: served.client.request(method, url, **kwargs), what,
             partial=_partial_run, on_failure=moved_on)
-        type(self).counts["failures injected"] += len(injected)
-        type(self).counts[(rule_name, "failed at a point")] += bool(injected)
+        counts["failures injected"] += len(injected)
+        counts[f"failures injected ({self.bind})"] += len(injected)
+        counts[(rule_name, "failed at a point")] += bool(injected)
         note(f"{what} -> {resp.status_code} {resp.text[:300]}")
         O.assert_no_server_error(resp, what)
         if resp.status_code < 300:
             O.assert_strict_json(resp, what)
         outcome = "accepted" if resp.status_code < 400 else "refused"
         event(f"{rule_name}: {outcome}")
-        type(self).counts[(rule_name, outcome)] += 1
+        counts[(rule_name, outcome)] += 1
+        counts[f"{outcome} ({self.bind})"] += 1
         if resp.status_code >= 400 and not _partial_run(resp):
             O.assert_nothing_changed(before, O.snapshot(self.served), what)
             assert_exactly_as_it_was(fingerprint, served_fingerprint(self.served),
@@ -430,9 +455,9 @@ class RestWriteSequences(RuleBasedStateMachine):
     # start
     # ------------------------------------------------------------------
 
-    @initialize(start=st.sampled_from(("rod",) * 7 + ("empty",)))
-    def start(self, start):
-        self.begin(start)
+    @initialize(start=st.sampled_from(("rod",) * 7 + ("empty",)), bind=st.sampled_from(O.BINDS))
+    def start(self, start, bind):
+        self.begin(start, bind)
 
     # ------------------------------------------------------------------
     # structure
@@ -839,6 +864,15 @@ def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
     assert len({key[0] for key, n in counts.items()
                 if isinstance(key, tuple) and key[1] == "failed at a point" and n}) >= 8, \
         dict(counts)
+    # Both configurations were served, and in each requests were accepted,
+    # refused and failed at a point; a token-holder's every request was
+    # first sent without the token (invariant 7).
+    for bind in O.BINDS:
+        assert counts[f"accepted ({bind})"] >= 15 and counts[f"refused ({bind})"] >= 4, \
+            dict(counts)
+        assert counts[f"failures injected ({bind})"] >= 100, dict(counts)
+    assert counts["sent without the token"] == \
+        counts["accepted (token)"] + counts["refused (token)"], dict(counts)
 
 
 # Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
@@ -880,13 +914,13 @@ def test_every_stock_node_is_classified_by_its_stability_limit():
 # before its fix the request is accepted and an invariant fails instead.
 
 @contextlib.contextmanager
-def replay(start: str = "rod"):
+def replay(start: str = "rod", bind: str = "loopback"):
     """A fixed sequence through the machine: ``step(machine.do_x, ...)``
     sends the request under invariants 1 and 2 and then asks 3 to 5, as the
     machine does after every rule, and the sequence ends with the last step
     every generated example ends with."""
     machine = RestWriteSequences()
-    machine.begin(start)
+    machine.begin(start, bind)
     machine.check_graph(machine.last)
 
     def step(do, *args):

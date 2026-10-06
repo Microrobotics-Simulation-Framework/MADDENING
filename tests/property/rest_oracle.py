@@ -140,6 +140,9 @@ class Served:
     #: whether the graph could step when :func:`check_accepted_graph` last
     #: looked (a graph is served able to)
     could_step: bool = True
+    #: whether the server was told its bind is not loopback, so that every
+    #: route demands the token (the client presents it on every request)
+    token_enforced: bool = False
 
     @property
     def gm(self) -> GraphManager:
@@ -152,24 +155,42 @@ class Served:
             self.tmp.cleanup()
 
 
+#: The token of a server that demands one, and the header its holder sends.
+#: Not a credential: the server it opens is in this process.
+TOKEN = "rest-oracle-token-not-a-credential"
+BEARER = {"Authorization": f"Bearer {TOKEN}"}
+#: The two configurations the oracles serve a graph in: the default, a
+#: loopback bind where no request carries a token, and the one a network
+#: bind requires.
+BINDS = ("loopback", "token")
+
+
 def serve(gm: Optional[GraphManager] = None, *, registry: Optional[dict] = None,
-          **server_kw: Any) -> Served:
-    """A server for *gm* (an empty graph when ``None``) on a loopback bind,
-    its checkpoint root an empty directory."""
+          token_enforced: bool = False, **server_kw: Any) -> Served:
+    """A server for *gm* (an empty graph when ``None``), its checkpoint
+    root an empty directory: on a loopback bind, or with *token_enforced*
+    told that its bind is ``0.0.0.0`` -- the switch that makes every route
+    demand the token -- and reached by a client that presents the token on
+    every request.  No socket is opened either way: the client is in
+    process, and its peer is a loopback address."""
     registry = dict(REGISTRY if registry is None else registry)
     tmp = tempfile.TemporaryDirectory(prefix="maddening-rest-oracle-")
     root = Path(tmp.name).resolve() / "checkpoints"
     root.mkdir()
+    if token_enforced:
+        server_kw.update(bind_host="0.0.0.0", api_token=TOKEN)
     server = SimulationServer(registry, graph_manager=gm, checkpoint_root=str(root),
                               **server_kw)
+    assert server.auth.enforced is token_enforced
     # ``raise_server_exceptions=False``: an unhandled exception comes back
     # as the 500 a real client would get, which is what invariant 1 reads.
-    client = LoopbackTestClient(server.create_app(), raise_server_exceptions=False)
+    client = LoopbackTestClient(server.create_app(), raise_server_exceptions=False,
+                                headers=dict(BEARER) if token_enforced else None)
     # Entered: the app's lifespan runs, as it does under a real server, and
     # every request shares one event loop (a client that is not entered
     # starts a thread and a loop per request, most of a request's cost here).
     client.__enter__()
-    return Served(server, client, root, registry, tmp)
+    return Served(server, client, root, registry, tmp, token_enforced=token_enforced)
 
 
 # ---------------------------------------------------------------------------

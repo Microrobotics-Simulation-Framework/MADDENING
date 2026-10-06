@@ -89,6 +89,12 @@ from maddening.nodes.lbm import LBMNode
 from tests.conftest import EXAMPLES_FLOOR
 from tests.property import rest_oracle as O
 from tests.property.differential import no_cloud_launch, note, quiet
+from tests.property.without_the_token import (
+    CREDENTIALS,
+    assert_refused_without_the_token,
+    send_without_the_token,
+    the_refusal,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -216,11 +222,14 @@ GRAPHS: dict[str, Callable[[], GraphManager]] = {"standard": standard_graph,
 SAVED = "saved.npz"
 
 
-def serve(graph: str = "standard") -> O.Served:
+def serve(graph: str = "standard", bind: str = "loopback") -> O.Served:
+    """*graph* on a loopback bind, or (``bind="token"``) on a server that
+    demands the token, reached by a client that presents it."""
+    assert bind in O.BINDS, bind
     registry = dict(O.REGISTRY)
     if graph == "lattice":
         registry["LBMNode"] = LBMNode        # so the graph's save reloads
-    served = O.serve(GRAPHS[graph](), registry=registry)
+    served = O.serve(GRAPHS[graph](), registry=registry, token_enforced=bind == "token")
     resp = served.client.post("/checkpoint/save", params={"path": SAVED})
     assert resp.status_code == 200, resp.text
     return served
@@ -411,6 +420,13 @@ def settle(served: O.Served) -> None:
         profiler.stop_jax_trace()
 
 
+def _wire_headers(req: Request) -> list:
+    """Header values as latin-1 bytes, the way they travel: a non-ASCII
+    digit in a port is one byte the client library would not write as text."""
+    return [(name.encode("ascii"), value.encode("latin-1"))
+            for name, value in req.headers.items()]
+
+
 def exchange(served: O.Served, op: Operation, req: Request, *,
              must_refuse: bool = False) -> tuple[list, Any]:
     """Send *req* and hold the reply to the invariants: ``(problems, reply)``.
@@ -436,12 +452,8 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
         raise NotSent(url)
     assert not left_running(served), f"{left_running(served)} before {req.describe()}"
     before = O.snapshot(served)
-    # Header values as latin-1 bytes, the way they travel: a non-ASCII
-    # digit in a port is one byte the client library would not write as text.
-    headers = [(name.encode("ascii"), value.encode("latin-1"))
-               for name, value in req.headers.items()]
-    resp = served.client.request(req.method, url, content=req.content(), headers=headers,
-                                 follow_redirects=False)
+    resp = served.client.request(req.method, url, content=req.content(),
+                                 headers=_wire_headers(req), follow_redirects=False)
     status, problems = resp.status_code, []
     started = left_running(served)
     settle(served)
@@ -607,11 +619,16 @@ class Variant:
     apply: Callable[[Request], None]
     refuse: Optional[str] = None
 
-    def must_refuse(self, op: Operation) -> bool:
-        if self.refuse == REFUSE:
-            return True
+    def must_refuse(self, op: Operation, bind: str = "loopback") -> bool:
+        """Whether a rule refuses the request by its definition.  From a
+        token-holder (``bind="token"``) only the Origin rule does: a valid
+        token is served under any Host and with any forwarding header."""
         if self.refuse == REFUSE_WRITES:
             return op.method in ("POST", "PUT", "PATCH", "DELETE")
+        if bind == "token":
+            return False
+        if self.refuse == REFUSE:
+            return True
         if self.refuse == REFUSE_UNAUTHENTICATED:
             return op.path not in UNAUTHENTICATED_PATHS
         return False
@@ -820,10 +837,11 @@ def test_every_seed_names_every_parameter_its_route_declares():
 # The battery
 # ---------------------------------------------------------------------------
 
-def _run_battery(op: Operation, seeds: tuple, chosen: Callable[[Variant], bool]) -> None:
+def _run_battery(op: Operation, seeds: tuple, chosen: Callable[[Variant], bool],
+                 bind: str = "loopback") -> None:
     problems, sent = [], 0
     for seed in seeds:
-        served = serve(seed.graph)
+        served = serve(seed.graph, bind)
         try:
             plain, resp = exchange(served, op, request_of(op, seed, served))
             assert not plain and resp.status_code == seed.status, (
@@ -835,10 +853,11 @@ def _run_battery(op: Operation, seeds: tuple, chosen: Callable[[Variant], bool])
                 if not pristine and op.key not in KEEPS_ITS_SEED:
                     settle(served)
                     served.close()
-                    served = serve(seed.graph)
+                    served = serve(seed.graph, bind)
                 req = request_of(op, seed, served)
                 variant.apply(req)
-                found, resp = exchange(served, op, req, must_refuse=variant.must_refuse(op))
+                found, resp = exchange(served, op, req,
+                                       must_refuse=variant.must_refuse(op, bind))
                 sent += 1
                 problems += [f"[{seed.label or 'seed'}] {variant.where} = {variant.what}: {p}"
                              for p in found]
@@ -1160,11 +1179,12 @@ def _close_served():
     _SERVED.clear()
 
 
-def check_generated_request(op: Operation, seed: Seed, changes: list) -> None:
-    key = (op.key, seed.graph)
+def check_generated_request(op: Operation, seed: Seed, changes: list,
+                            bind: str = "loopback", credential: int = 0) -> None:
+    key = (op.key, seed.graph, bind)
     served = _SERVED.get(key)
     if served is None:
-        served = _SERVED[key] = serve(seed.graph)
+        served = _SERVED[key] = serve(seed.graph, bind)
     req = request_of(op, seed, served)
     try:
         for change in changes:
@@ -1172,10 +1192,18 @@ def check_generated_request(op: Operation, seed: Seed, changes: list) -> None:
     except (KeyError, IndexError, TypeError):
         # A change to a member an earlier change removed: nothing to send.
         return
-    note(req.describe())
+    note(f"{req.describe()} ({bind})")
     try:
+        if bind == "token" and op.path not in UNAUTHENTICATED_PATHS \
+                and _in_scope(posixpath.normpath(unquote(req.url().split("?", 1)[0])) + "/"):
+            # The same request, whatever it is, without the token: the 401
+            # comes before anything of it is read.
+            assert_refused_without_the_token(
+                served, req.method, req.url(), req.describe(),
+                credentials=(CREDENTIALS[credential % len(CREDENTIALS)],),
+                object_for_object=False, content=req.content(), headers=_wire_headers(req), follow_redirects=False)
         problems, resp = exchange(served, op, req,
-                                  must_refuse=any(c.must_refuse(op) for c in changes))
+                                  must_refuse=any(c.must_refuse(op, bind) for c in changes))
     except NotSent:
         return
     except BaseException:
@@ -1203,8 +1231,10 @@ def test_a_generated_request_is_refused_whole_or_served(key, data):
     The slow sibling below runs it.)"""
     op = IN_SCOPE[key]
     seed, changes = data.draw(generated_requests(op, SEEDS[key]))
+    bind = data.draw(st.sampled_from(O.BINDS), label="bind")
+    credential = data.draw(st.integers(0, len(CREDENTIALS) - 1), label="without the token")
     with jax_recorder_not_run():
-        check_generated_request(op, seed, changes)
+        check_generated_request(op, seed, changes, bind, credential)
 
 
 # Per push: tests/property/test_rest_requests_generated_from_the_schema.py::test_a_generated_request_is_refused_whole_or_served
@@ -1215,7 +1245,193 @@ def test_a_generated_request_to_any_route_is_refused_whole_or_served(key, data):
     """The property above at the profile's depth, drawn anew on every run."""
     op = IN_SCOPE[key]
     seed, changes = data.draw(generated_requests(op, SEEDS[key]))
-    check_generated_request(op, seed, changes)
+    bind = data.draw(st.sampled_from(O.BINDS), label="bind")
+    credential = data.draw(st.integers(0, len(CREDENTIALS) - 1), label="without the token")
+    check_generated_request(op, seed, changes, bind, credential)
+
+
+# ---------------------------------------------------------------------------
+# A server that demands the token
+# ---------------------------------------------------------------------------
+# The configuration a network bind requires: the server is told its bind is
+# ``0.0.0.0`` (no socket is opened; the client is in process), so every
+# route but ``/healthz`` and the static ``/viz/*`` pages demands the token.
+# A token-holder's requests are held to the invariants above -- the fuzzer
+# draws the configuration with each request, and the whole battery runs for
+# a token-holder in the slow lane -- and the routes are asked the one
+# question only this configuration has (``tests/property/without_the_token.py``).
+
+#: Routes no request is sent to even without the token: a request to
+#: ``/cloud/*`` is never made by this suite, whatever should answer it, and
+#: a stream's handshake is not an HTTP request (its refusal is
+#: ``tests/api/test_bearer_auth.py``'s).
+NEVER_SENT = ("/cloud/", "/ws/")
+#: Paths that are no route of a server that demands the token, asked as
+#: well: the three FastAPI serves on a loopback bind only, and no route.
+UNROUTED = tuple(f"GET {path}" for path in framework_routes(_APP)) + ("GET /no/such/route",)
+
+
+def token_app():
+    return SimulationServer({}, bind_host="0.0.0.0", api_token=O.TOKEN).create_app()
+
+
+def routed(app) -> list[str]:
+    """Every ``"METHOD /path"`` *app* routes, documented or not."""
+    return sorted(f"{method} {route.path}" for route in app.routes
+                  for method in (getattr(route, "methods", None) or ("GET",)))
+
+
+#: Every route of a server that demands the token but the never-sent ones,
+#: read once at import to parametrise the test (the fail-closed test
+#: builds its own app).
+_ASKED_WITHOUT_THE_TOKEN = [key for key in routed(token_app())
+                            if not key.split(" ", 1)[1].startswith(NEVER_SENT)]
+
+
+def test_every_route_of_a_server_that_demands_the_token_is_asked_without_it():
+    """Fail closed: every route of a freshly built server that demands the
+    token -- in the OpenAPI document or not, in this module's scope or not
+    (the surrogate routes are refused before they are reached) -- is in the
+    list the test below is parametrised by, or is under a never-sent
+    prefix; the server that demands the token has every documented route
+    the loopback one has; and the never-sent prefixes are routed, so the
+    exclusion is not a stale one."""
+    routes = routed(token_app())
+    unasked = [key for key in routes if key not in _ASKED_WITHOUT_THE_TOKEN
+               and not key.split(" ", 1)[1].startswith(NEVER_SENT)]
+    assert not unasked, f"routes never asked without the token: {unasked}"
+    assert not [key for key in OPERATIONS if key not in routes], (
+        "a documented route of the loopback server is not routed when the token is demanded")
+    assert set(SEEDS) <= set(_ASKED_WITHOUT_THE_TOKEN)
+    for prefix in NEVER_SENT:
+        assert any(key.split(" ", 1)[1].startswith(prefix) for key in routes), prefix
+    assert not [key for key in routes if key in UNROUTED]
+    exempt = {key.split(" ", 1)[1] for key in routes} & UNAUTHENTICATED_PATHS
+    assert exempt == UNAUTHENTICATED_PATHS, sorted(UNAUTHENTICATED_PATHS - exempt)
+
+
+@pytest.fixture(scope="module")
+def demands_the_token():
+    """The standard graph on a server that demands the token, and a server
+    with an empty graph that does: nothing sent without the token changes
+    either, so one of each serves every case."""
+    served, blank = serve("standard", "token"), O.serve(token_enforced=True)
+    try:
+        yield served, blank
+    finally:
+        settle(served)
+        served.close()
+        blank.close()
+
+
+def _requests_of(key: str, served: O.Served) -> list[Request]:
+    """The requests a route is asked without the token: each of its seeds
+    for the standard graph -- a request the route would serve -- or, for a
+    route with no seed, one with every path parameter filled in and an
+    empty JSON object for a body."""
+    method, path = key.split(" ", 1)
+    if key in SEEDS:
+        return [request_of(IN_SCOPE[key], seed, served) for seed in SEEDS[key]
+                if seed.graph == "standard"]
+    names = [part[1:-1] for part in path.split("/") if part.startswith("{")]
+    with_body = method in ("POST", "PUT", "PATCH", "DELETE")
+    return [Request(method, path, {name: "x" for name in names}, [],
+                    {} if with_body else ABSENT,
+                    {"content-type": "application/json"} if with_body else {})]
+
+
+@pytest.mark.parametrize("key", _ASKED_WITHOUT_THE_TOKEN + list(UNROUTED))
+def test_without_the_token_every_route_is_refused_and_reveals_nothing(key, demands_the_token):
+    """On a server that demands the token, a request that does not present
+    it -- in each of the ways of not presenting it -- is answered 401 with
+    ``WWW-Authenticate: Bearer`` on every route, changes nothing, starts
+    nothing, and its body is byte for byte the one a server with an empty
+    graph gives another request: it says nothing about the graph.  The
+    request is one the route would serve (its seed), so what refuses it is
+    the missing token and nothing else.
+
+    The five paths documented as never authenticated are served, and say
+    nothing about the graph either: each reply is the one the server with
+    an empty graph gives."""
+    served, blank = demands_the_token
+    path = key.split(" ", 1)[1]
+    assert not path.startswith(NEVER_SENT)
+    requests = _requests_of(key, served)
+    assert requests
+    for req in requests:
+        kwargs = dict(content=req.content(), headers=_wire_headers(req), follow_redirects=False)
+        if path not in UNAUTHENTICATED_PATHS:
+            assert assert_refused_without_the_token(
+                served, req.method, req.url(), req.describe(), **kwargs) == len(CREDENTIALS)
+            continue
+        before = O.snapshot(served)
+        for label, authorization, query_token in CREDENTIALS:
+            sent = dict(authorization=authorization, query_token=query_token, **kwargs)
+            resp = send_without_the_token(served, req.method, req.url(), **sent)
+            assert resp.status_code == 200, (key, label, resp.status_code, resp.text[:200])
+            assert resp.content == send_without_the_token(
+                blank, req.method, req.url(), **sent).content, (
+                f"{key}, sent with {label}, is not what a server with an empty graph answers")
+            assert resp.content != the_refusal()
+        O.assert_nothing_changed(before, O.snapshot(served), f"{key} without the token")
+
+
+def test_every_seed_is_answered_for_a_token_holder_as_it_is_on_loopback():
+    """Every route's seed request, sent by a token-holder to a server that
+    demands the token, is answered as the seed says -- the status the
+    loopback battery starts from -- under the same invariants: so the
+    refusals above are the missing token's, and the routes a token-holder
+    reaches are the ones a loopback client does."""
+    problems, served = [], {}
+    try:
+        for key in sorted(SEEDS):
+            op = IN_SCOPE[key]
+            for seed in SEEDS[key]:
+                if seed.graph not in served:
+                    served[seed.graph] = serve(seed.graph, "token")
+                found, resp = exchange(served[seed.graph], op,
+                                       request_of(op, seed, served[seed.graph]))
+                problems += [f"{key} [{seed.label or 'seed'}]: {p}" for p in found]
+                if resp.status_code != seed.status:
+                    problems.append(f"{key} [{seed.label or 'seed'}]: {resp.status_code}, "
+                                    f"where a loopback client is answered {seed.status}: "
+                                    f"{resp.text[:200]}")
+                if not (resp.status_code >= 400 or op.method == "GET"
+                        or key in KEEPS_ITS_SEED):
+                    settle(served[seed.graph])
+                    served.pop(seed.graph).close()
+    finally:
+        for left in served.values():
+            settle(left)
+            left.close()
+    assert not problems, "\n".join(problems)
+
+
+#: The routes whose header battery runs for a token-holder on every push: a
+#: write with a body and a read.  Every route's runs in the slow lane.
+_TOKEN_HOLDER_PER_PUSH = ("PUT /graph/params/{node_name}", "GET /graph/state")
+
+
+@pytest.mark.parametrize("key", _TOKEN_HOLDER_PER_PUSH)
+def test_every_malformed_header_from_a_token_holder_is_refused_whole_or_served(key):
+    """The header battery from a token-holder, on a server that demands the
+    token: no 5xx, a refusal changes nothing, and a foreign Origin on a
+    write is never served -- the one header rule that binds a token-holder
+    (a valid token is served under any Host and with a forwarding header,
+    and the invariants are asked of whatever is answered)."""
+    with jax_recorder_not_run():
+        _run_battery(IN_SCOPE[key], SEEDS[key][:1], lambda v: v.where.startswith("header"),
+                     bind="token")
+
+
+# Per push: tests/property/test_rest_requests_generated_from_the_schema.py::test_a_generated_request_is_refused_whole_or_served
+@pytest.mark.slow  # the whole battery again, for a token-holder: about 20 s over every route
+@pytest.mark.parametrize("key, index", _SEEDED)
+def test_every_malformed_value_and_header_from_a_token_holder_is_refused_whole_or_served(
+        key, index):
+    """The whole battery -- every field of every seed, and every header --
+    from a token-holder on a server that demands the token."""
+    _run_battery(IN_SCOPE[key], SEEDS[key][index:index + 1], lambda v: True, bind="token")
 
 
 # ---------------------------------------------------------------------------

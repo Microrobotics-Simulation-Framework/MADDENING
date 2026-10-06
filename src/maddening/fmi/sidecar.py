@@ -69,6 +69,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core._exact_integers import lost_as_integer
 from maddening.core.params import check_bounds
 from maddening.fmi.directional_derivatives import (
     DirectionalDerivativeKind,
@@ -188,7 +189,10 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
         finite, or if ``dtype`` cannot hold it: a float32 leaf set to
         ``1e39`` would be stored (and read back) as ``inf``, and one set to
         ``1e-50`` as ``0.0`` -- the value lost entirely, its sign included;
-        an integer would wrap or truncate silently, and a boolean leaf
+        an integer would wrap or truncate silently (an integer leaf takes a
+        whole number of its own range, judged without rounding it:
+        :func:`maddening.core._exact_integers.lost_as_integer`), and a
+        boolean leaf
         takes a boolean or exactly 0 or 1 -- ``0.5``, ``2.0`` and ``-3.0``
         used to be stored as ``True`` by their truthiness, from a ``set``
         and from an FMU-state archive alike.  A value that rounds to a
@@ -207,16 +211,21 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
         raise ValueError(
             f"{what}: a Boolean takes true / false or exactly 1 / 0, got "
             f"{np.array2string(a, threshold=8)}; nothing was written")
+    if np.issubdtype(target, np.integer) and bool(np.any(lost_as_integer(a, target))):
+        # Before the cast, and without rounding either side.  The check used
+        # to compare the cast with the value through float64, which made an
+        # int64 above 2**53 equal to its rounded neighbour and a float64 of
+        # 2**63 equal to the largest int64 wherever the out-of-range cast
+        # saturates (it wraps on x86 and saturates on ARM).
+        raise ValueError(f"{what}: value does not fit its type {dtype}")
     with np.errstate(over="ignore", invalid="ignore"):
         cast = a.astype(dtype)
     if np.issubdtype(cast.dtype, np.floating):
         # Finite, and not a non-zero value flushed to +-0 by the cast: both
         # lose the value, at either end of the type's range.
         fits = bool(np.all(np.isfinite(cast)) and not np.any((a != 0) & (cast == 0)))
-    elif np.issubdtype(cast.dtype, np.integer):
-        fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
     else:
-        fits = True                     # bool: only 0 / 1 reach here (above)
+        fits = True      # an integer: checked above; bool: only 0 / 1 reach here
     if not fits:
         raise ValueError(f"{what}: value does not fit its type {dtype}")
     return cast

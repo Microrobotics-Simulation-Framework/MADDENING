@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core._exact_integers import lost_as_integer
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
@@ -546,7 +547,11 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     and is kept; a value that is already ``inf`` or ``NaN`` is stored as
     it was (a diverged state, a ``NaN``-seeded diagnostics slot).  An
     integer that would wrap or truncate, and a non-finite value for an
-    integer leaf, are refused too.
+    integer leaf, are refused too -- an integer of the other signedness
+    included (``-1`` for an unsigned leaf, 4000000000 for an ``int32``
+    one), which a cast there and back cannot see
+    (:func:`maddening.core._exact_integers.lost_as_integer`) -- and so is a
+    complex value with an imaginary part for a real leaf.
 
     The live leaf may be of a dtype NumPy knows only as an extension type
     (bfloat16; :func:`_number_kind`): it is held to the same rule.  A
@@ -574,11 +579,26 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     if target_kind in "fc":
         finite = np.isfinite(a) if source_kind in "fc" else np.ones(a.shape, bool)
         lost = (finite & ~np.isfinite(cast)) | ((a != 0) & (cast == 0))
+        if source_kind == "c" and target_kind == "f":
+            lost = lost | (np.imag(a) != 0)    # the cast drops an imaginary part
+    elif target.kind in "iu":
+        # By range and wholeness, never by a cast there and back: that is a
+        # bijection between a signed and an unsigned type of one width, so
+        # -1 for a uint64 leaf came back as -1 and loaded as
+        # 18446744073709551615; and a comparison through float64 rounds
+        # both sides above 2**53.
+        lost = lost_as_integer(a, target)
     elif target_kind in "iu":
-        if source_kind in "fc":
-            lost = ~np.isfinite(a) | (cast.astype(np.float64) != a.astype(np.float64))
-        else:
-            lost = cast.astype(a.dtype) != a
+        # One of JAX's 2- and 4-bit integers, which NumPy has no ``iinfo``
+        # for: the same rule -- in range, whole, no imaginary part -- on
+        # the bounds JAX gives.  They are at most 15 in magnitude, so
+        # float64 holds each of them, and any value near them, exactly.
+        info = jnp.iinfo(target)
+        wide = np.real(a).astype(np.float64)
+        with np.errstate(invalid="ignore"):
+            lost = ~((wide >= info.min) & (wide <= info.max) & (wide == np.trunc(wide)))
+        if source_kind == "c":
+            lost = lost | (np.imag(a) != 0)
     elif target_kind == "b":
         lost = (a != 0) & (a != 1)
     else:

@@ -45,6 +45,14 @@ from maddening.core.compliance.stability import stability
 _TRANSFORMS = (None, "log", "logit")
 
 
+def _sigmoid(x):
+    """The logistic function in float64 on the host, accurate at both ends
+    (``exp(-|x|)`` never overflows, and neither branch subtracts)."""
+    x = np.asarray(x, dtype=np.float64)
+    e = np.exp(-np.abs(x))
+    return np.where(x >= 0, 1.0 / (1.0 + e), e / (1.0 + e))
+
+
 @functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
 def _clip_into_bounds(u, lo, hi):
     """``jnp.clip(u, lo, hi)`` whose derivative *at* a bound is the
@@ -339,20 +347,84 @@ class ParamSpec:
             inner_lo = inner_hi = 0.5 * (lo + hi)
         return inner_lo, inner_hi
 
-    def _optimiser_interval(self, dtype) -> tuple[float, float]:
-        """The optimiser coordinates ``u`` over which :meth:`to_constrained`
-        is the transform itself, not a clamp.
+    def _resolution(self, dtype) -> float:
+        """The absolute spacing of the values this spec's transform can
+        return for a leaf of ``dtype``: how far ``constrain(unconstrain(p))``
+        may land from ``p``, whatever ``p``'s own size.
 
-        Outside it ``to_constrained`` returns a clamped value whose
-        derivative is 0, so an optimiser that steps there has no gradient
-        back: the bounds of a ``transform=None`` leaf, and for ``log`` /
-        ``logit`` the coordinates where ``exp`` leaves its floor or
-        overflows, or the sigmoid lands on the representable interior's
-        edge.  Each end is moved inward until the value it maps to is
-        strictly inside the clamp, at ``dtype``'s rounding, so a coordinate
-        projected onto it keeps a non-zero derivative.  ``(-inf, inf)`` for
-        an unbounded identity leaf, and for a ``logit`` interval with no
-        interior float to clamp to.
+        The maps rebuild the value as ``lo + something`` in the leaf's
+        dtype -- ``lo + exp(u)``, ``lo + (hi - lo) * sigmoid(u)`` -- so what
+        they can return is spaced like the floats near the bounds, not like
+        the floats near the value: ``eps * |lo|`` for ``log`` (nothing when
+        ``lo`` is 0: ``exp(u)`` alone keeps the value's own resolution) and
+        ``eps * max(|lo|, |hi|, hi - lo)`` for ``logit``.  A float32 ``2.0``
+        under ``logit`` bounds ``(-1e6, 1e6)`` therefore comes back from the
+        round trip up to 0.12 away.  ``0.0`` for the identity transform, which
+        returns the value itself.  The fitters warn at their start about a
+        leaf whose value this spacing leaves fewer than half the working
+        precision's digits of (``maddening.sysid``).
+        """
+        if self.transform is None or not jnp.issubdtype(dtype, jnp.floating):
+            return 0.0
+        eps = float(np.finfo(dtype).eps)
+        lo_b, hi_b = self.bounds
+        if self.transform == "log":
+            return eps * abs(self._lo())
+        assert lo_b is not None and hi_b is not None
+        lo, hi = float(lo_b), float(hi_b)
+        return eps * max(abs(lo), abs(hi), hi - lo)
+
+    def _usable_margin(self, fi) -> float:
+        """How far inside a bound the fitters keep a ``log`` / ``logit``
+        value: ``sqrt(eps)`` of the bounds' own size.
+
+        Within a few :meth:`_resolution` spacings of a bound the transform
+        is flat in every way a fitter can see: the distance to the bound has
+        no digits left, a unit step of the coordinate moves the value by an
+        ulp or two, and the derivative ``dp/du`` is about ``eps`` of the
+        range.  A coordinate carried there cannot be stepped back (the
+        linear model's step is ``1/eps`` long) and its loss cannot be told
+        from its neighbours'.  At ``sqrt(eps)`` of the bounds' size the
+        distance to the bound keeps half the working precision's digits and
+        ``dp/du`` is ``sqrt(eps)`` of the range, so both the step back and
+        the acceptance test are resolved.  The price is the values nearer a
+        bound than that -- 3.5e-4 of the range in float32, 1.5e-8 in float64
+        -- which a fit under this transform cannot return; a fit that ends
+        on the margin says so (``maddening.sysid``), and a parameter that
+        belongs on its bound wants ``transform=None``, which clips.
+        """
+        root = math.sqrt(float(fi.eps))
+        lo_b, hi_b = self.bounds
+        if self.transform == "log":
+            return root * abs(self._lo())
+        assert lo_b is not None and hi_b is not None
+        lo, hi = float(lo_b), float(hi_b)
+        # Capped so the interval never inverts: bounds a few float spacings
+        # apart keep their middle half.
+        return min(root * max(abs(lo), abs(hi), hi - lo), 0.25 * (hi - lo))
+
+    def _optimiser_interval(self, dtype) -> tuple[float, float]:
+        """The optimiser coordinates ``u`` a fitter may step to: where
+        :meth:`to_constrained` is the transform itself, not a clamp, and --
+        for ``log`` / ``logit`` -- where the transform still resolves the
+        distance to its bound (:meth:`_usable_margin`).
+
+        Outside the clamp ``to_constrained`` returns a value whose derivative
+        is 0, so an optimiser that steps there has no gradient back: the
+        bounds of a ``transform=None`` leaf, and for ``log`` / ``logit`` the
+        coordinates where ``exp`` leaves its floor or overflows, or the
+        sigmoid lands on the representable interior's edge.  Until 0.4.0's
+        fix the interval of a ``log`` / ``logit`` leaf ended just inside that
+        clamp, where ``dp/du`` is about ``4 * eps`` of the range: a
+        Levenberg-Marquardt step that overshot was accepted there, every
+        later candidate was ``1/eps`` long and landed on the opposite edge,
+        and the fit ended on the bound (MADD-ANO-104).  It now ends
+        ``sqrt(eps)`` of the bounds' size inside each bound, so no step can
+        land where the slope is below ``sqrt(eps)`` of the range.  Each end
+        is then moved inward until the value it maps to is strictly inside
+        the clamp, at ``dtype``'s rounding.  ``(-inf, inf)`` for an unbounded
+        identity leaf, and for a ``logit`` interval with no interior float
+        to clamp to.
         """
         lo_b, hi_b = self.bounds
         if self.transform is None:
@@ -362,7 +434,10 @@ class ParamSpec:
         fi = np.finfo(dtype)
         if self.transform == "log":
             floor, ceiling = self._log_floor(fi), float(fi.max)
-            u_lo, u_hi = math.log(floor), math.log(ceiling)
+            # ``_usable_margin`` is 0 for a zero bound, where ``exp(u)``
+            # keeps the value's own resolution down to the floor.
+            u_lo = math.log(max(floor, self._usable_margin(fi)))
+            u_hi = math.log(ceiling)
             lo = self._lo()
 
             def inside(u):
@@ -373,7 +448,9 @@ class ParamSpec:
             if not inner_lo < inner_hi:
                 return -math.inf, math.inf
             lo, hi = float(lo_b), float(hi_b)  # type: ignore[arg-type]
-            t_lo, t_hi = (inner_lo - lo) / (hi - lo), (inner_hi - lo) / (hi - lo)
+            margin = self._usable_margin(fi)
+            usable_lo, usable_hi = max(inner_lo, lo + margin), min(inner_hi, hi - margin)
+            t_lo, t_hi = (usable_lo - lo) / (hi - lo), (usable_hi - lo) / (hi - lo)
             u_lo = math.log(t_lo) - math.log1p(-t_lo)
             u_hi = math.log(t_hi) - math.log1p(-t_hi)
 
@@ -391,6 +468,62 @@ class ParamSpec:
             return u
 
         return inward(u_lo, 1.0), inward(u_hi, -1.0)
+
+    # -- the tangent of a transform, for a step solved on its linear model --
+    #
+    # A Gauss-Newton or Marquardt step is solved on the model's linearisation
+    # in the optimiser coordinate ``u``, and that linearisation holds only as
+    # far as the transform is straight.  Where it is flat (a sigmoid near a
+    # bound) the step that the tangent says moves the value by 0.1 is
+    # ``0.1 / (dp/du)`` long, and taken along the curve it carries the value
+    # across the whole range.  The two readings of one step ``v`` -- along
+    # the curve, ``p(u + v)``, and along the tangent, ``p(u) + p'(u) v`` --
+    # agree to first order, and :func:`maddening.sysid.fit_lm` takes whichever
+    # moves the value less.  The two helpers below give it the tangent's
+    # reading in the coordinate's own terms; both are host-side float64 and
+    # depend on the transform's shape alone (the bounds cancel).
+
+    def _tangent_box(self, u, u_lo: float, u_hi: float):
+        """``(v_lo, v_hi)``: the steps ``v`` at which the tangent at ``u``
+        reaches the values of ``u_lo`` and ``u_hi`` -- how far a step solved
+        on the linear model may go before its value leaves the interval.
+
+        ``log``: ``p - lo = exp(u)``, so ``v = expm1(u_edge - u)``.
+        ``logit``: with ``s = sigmoid(u)``, ``v = (s_edge - s) / (s (1 - s))``,
+        written ``-sigmoid(u_edge) * expm1(u - u_edge) / s`` so that it is
+        exact where the two sigmoids differ in their last bits only.  At
+        ``u == u_edge`` it is exactly 0, and for a ``u`` beyond an edge the
+        box excludes 0: every step then moves at least to that edge.
+        """
+        u = np.asarray(u, dtype=np.float64)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+            if self.transform == "log":
+                return np.expm1(u_lo - u), np.expm1(u_hi - u)
+            s = _sigmoid(u)
+            return (-_sigmoid(u_lo) * np.expm1(u - u_lo) / s,
+                    -_sigmoid(u_hi) * np.expm1(u - u_hi) / s)
+
+    def _tangent_shift(self, u, v):
+        """``du`` with ``p(u + du) == p(u) + p'(u) * v``: the coordinate
+        change that moves the value as far as the tangent step ``v`` does.
+
+        ``log``: ``log1p(v)``.  ``logit``: ``log1p((1 - s) v) - log1p(-s v)``
+        with ``s = sigmoid(u)``.  Infinite, with ``v``'s sign, where the
+        tangent step would carry the value past a bound -- there the step
+        along the curve is the shorter of the two.
+        """
+        u = np.asarray(u, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+            if self.transform == "log":
+                inside = v > -1.0
+                shift = np.log1p(np.where(inside, v, 0.0))
+            else:
+                grow, shrink = _sigmoid(-u) * v, -_sigmoid(u) * v
+                inside = (grow > -1.0) & (shrink > -1.0)
+                shift = (np.log1p(np.where(inside, grow, 0.0))
+                         - np.log1p(np.where(inside, shrink, 0.0)))
+        return np.where(inside, shift, np.copysign(np.inf, v))
 
     def to_constrained(self, u):
         u = jnp.asarray(u)

@@ -22,8 +22,14 @@
  *   -DLIBFUZZER: exports LLVMFuzzerTestOneInput for clang -fsanitize=fuzzer
  */
 
+/* The wrapper source under test: tests/fmi/test_c_unit.py names the imported
+ * package's (maddening.fmi.package.C_SOURCE), so a mutant of it on
+ * PYTHONPATH is what is fuzzed; built by hand, the tree's own. */
 #define MADDENING_FUZZ_COUNTERS 1
-#include "../../../src/maddening/fmi/c/maddening_fmu.c"
+#ifndef MADDENING_FMU_C
+#  define MADDENING_FMU_C "../../../src/maddening/fmi/c/maddening_fmu.c"
+#endif
+#include MADDENING_FMU_C
 
 #include <stdint.h>
 

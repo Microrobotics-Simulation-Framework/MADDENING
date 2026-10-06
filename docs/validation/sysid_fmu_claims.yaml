@@ -1582,19 +1582,42 @@ claims:
   claim: >-
     "Every leaf no step moved is the value that went in, bit for bit -- not
     merely close": the leaves outside the resolved mask, and the masked
-    ones a run that stopped before its first update never stepped.
+    ones a run that stopped before its first update never stepped; "And it
+    is the value the model was run at: a leaf the fit does not move is
+    never passed through its transform, whatever that is, in the result or
+    in any evaluation of the objective."
   sources:
-    - src/maddening/sysid.py:3400 (FitResult)
+    - src/maddening/sysid.py:4819 (FitResult)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
-    a log leaf, which exp(log(p)) would move by an ulp; a spec-frozen leaf
-    under multiple shooting. Not claimed for 16-bit floats.
-  oracle: bitwise equality.
+    a log leaf, which exp(log(p)) would move by an ulp; a leaf left out by
+    mask= or frozen by its spec under a logit or offset log 1e6 times wider
+    than its value, whose round trip is 1% off in float32; a fitted leaf
+    under such a transform in a run that takes no step (n_iter=0, a tol met
+    at the start); a spec-frozen leaf under multiple shooting. Not claimed
+    for 16-bit floats.
+  oracle: >-
+    bitwise equality, and object identity for a leaf the fit was not asked
+    to move, of the result and of the arrays every model evaluation was
+    handed.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
     - tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_does_take_a_step_still_reports_the_leaf_as_moved
     - tests/core/test_sysid_contract_examples.py::test_multiple_shooting_leaves_a_spec_frozen_leaf_bit_identical
+    - tests/property/test_sysid_one_evaluation.py::test_the_arrays_a_fit_returns_are_the_arrays_it_evaluated
+    - tests/property/test_sysid_one_evaluation.py::test_a_fit_that_takes_no_step_evaluates_and_returns_its_start
+    - tests/property/test_sysid_one_evaluation.py::test_a_multiple_shooting_fit_returns_the_arrays_it_evaluated
+    - tests/property/test_sysid_one_evaluation.py::test_a_leaf_left_out_by_the_mask_is_run_at_the_value_given
+    - tests/property/test_sysid_one_evaluation.py::test_every_fitter_evaluates_what_it_returns
   status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): the result returned a leaf no step moved as
+    given, and the objective ran its constrain(unconstrain(p)) round trip
+    whenever the eager round trip happened to be exact -- a damping left
+    out by mask= at 2.0 under logit (-1e6, 1e6) was run at 2.0266 and the
+    stiffness fitted beside it came back 30.06 for a truth of 30,
+    converged=True (MADD-ANO-202).  The claim now covers what the model is
+    run at, and the tests read the arrays each evaluation received.
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
     f64: tests/core/test_sysid_claims_under_x64.py::test_every_leaf_no_step_moved_is_the_value_that_went_in_under_x64
@@ -1681,20 +1704,39 @@ claims:
   claim: >-
     "The optimiser works in the unconstrained coordinates ... so a positive
     parameter cannot cross zero and a bounded one cannot leave its
-    interval"; every fitter keeps a log / logit coordinate "short of where
-    exp floors or overflows and the sigmoid meets the edge of its
-    representable range".
+    interval"; "Every fitter keeps each optimiser coordinate where its
+    transform can be stepped on: ... a log / logit leaf at least sqrt(eps)
+    of its bounds' own size inside each bound (3.5e-4 of the range in
+    float32, 1.5e-8 in float64), and short of where exp floors or
+    overflows".
   sources:
-    - src/maddening/sysid.py:3625 (fit)
+    - src/maddening/sysid.py:4967 (fit)
+    - src/maddening/core/params.py:377 (ParamSpec._usable_margin, _optimiser_interval)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
-    a logit leaf pushed hard either way; log and logit coordinates near
-    their clamp. Not claimed for 16-bit floats.
-  oracle: the returned values strictly inside their bounds.
+    a logit leaf pushed hard either way; logit bounds of any sign and size,
+    an offset and a plain log leaf, bounds a few float spacings apart (the
+    middle half); float32, float64 and float32 leaves in an x64 graph. The
+    margin is where the fit ends, not a tolerance on the answer: SYS-145
+    is the warning a fit that ends there gives, SYS-144 the way back. Not
+    claimed for 16-bit floats.
+  oracle: >-
+    the returned values strictly inside their bounds, and on the margin
+    (sqrt(eps) of the bounds' size from the bound) when pushed onto it;
+    the interval's ends against the transform's closed form.
   tests:
     - tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_log_and_a_logit_coordinate_are_kept_where_constrain_is_not_clamped
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_usable_interval_ends_where_the_transform_still_resolves_its_bound
+    - tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
   status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): the interval ended just inside the clamp,
+    where dp/du is about 4 eps of the range, and the tests of this row
+    asked that a fit "stays inside", which a fit trapped on that edge does.
+    The interval now ends sqrt(eps) of the bounds' size inside each bound
+    and the tests hold a pushed coordinate to that margin and to its
+    warning; coming back from the edge is SYS-144's (MADD-ANO-104).
   domains:
     f32: tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
     f64: tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
@@ -1739,6 +1781,125 @@ claims:
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_brings_a_clipped_coordinate_back_into_its_range
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-144
+  area: fit_lm
+  claim: >-
+    "A step of a log / logit coordinate is read along the transform's curve
+    or along its tangent, whichever moves the value less ... Where the
+    transform is flat ... the tangent's is the shorter: the step the same
+    parameter would take under transform=None ... Where a step heads for a
+    bound the curve's is the shorter: it closes the distance by a factor of
+    e at most and never lands on the bound ... wherever the same fit with
+    the parameter under transform=None and the same bounds recovers its
+    optimum, this one does too".
+  sources:
+    - src/maddening/sysid.py:5513 (fit_lm)
+    - src/maddening/sysid.py:1627 (_CoordinateBounds)
+    - src/maddening/core/params.py:486 (ParamSpec._tangent_box, _tangent_shift)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: >-
+    the guide's spring (stiffness 30, a damping, 100 noiseless position
+    samples), the damping under log, an offset log and logit, the truth
+    and the start each at 5%, 50% and 95% of the range and a few float
+    spacings inside each edge, the stiffness started 0.1, 0.5, 1.5, 10 and
+    30 times its truth, the third leaf frozen by its spec or left out by
+    mask=, float32 and float64: every cell for fit_lm (a truth on an edge
+    is recovered to the margin, with SYS-145's warning).  For fit and
+    fit_multiple_shooting, whose steps are not solved on a linear model and
+    are about lr however steep the loss, the same holds on an annealed
+    schedule where the stiffness starts 0.1 to 1.5 times its truth -- from
+    10 or 30 times too stiff the loss has other basins, which Adam in a log
+    coordinate reaches and Adam in the value's own does not -- and a start
+    on an edge is named before the run (SYS-145).  float32 leaves in an
+    x64 graph per push.  Not claimed for 16-bit floats.
+  oracle: >-
+    differential: the same fit with the damping under the identity
+    transform and the same bounds, which clips; the transform's closed form
+    to 60 digits for the two readings of a step.
+  tests:
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range
+    - tests/property/test_sysid_truth_recovery.py::test_a_start_on_the_edge_of_a_logit_range_comes_back
+    - tests/property/test_sysid_truth_recovery.py::test_the_transformed_fit_recovers_the_truth_wherever_its_control_does
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_step_is_read_along_the_shorter_of_the_curve_and_the_tangent
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_tangent_of_a_transform_is_its_own
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_an_identity_fit_is_stepped_exactly_as_before
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): from the edge of a logit range, where dp/du
+    was about 4 eps of the bounds, every Levenberg-Marquardt candidate was
+    1/eps long in the coordinate and landed on the opposite edge, the
+    twelve damped retries with it; a fit that an early overshoot carried
+    there ended on its bound, converged=False, no warning -- 20 of 60
+    starts under x64 on the guide's spring, where the control recovered the
+    truth from all 60 (MADD-ANO-104).
+  domains:
+    f32: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[float32-upper-edge]'
+    f64: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[x64-upper-edge-from-the-guides-start]'
+    mixed_dtype: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[mixed-upper-edge-from-the-guides-start]'
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-145
+  area: fitters
+  claim: >-
+    "a log / logit parameter cannot be fitted onto its bound: a fit that
+    ends on that margin -- its data pull the parameter to the bound, or it
+    started out there and could not come back within its budget -- says so
+    in a RuntimeWarning naming the parameter"; fit and
+    fit_multiple_shooting also name, before they run, a parameter started
+    on (or beyond) that margin.
+  sources:
+    - src/maddening/sysid.py:4967 (fit)
+    - src/maddening/sysid.py:1914 (_warn_starts_on_an_edge, _warn_on_an_edge)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: >-
+    a truth a few float spacings inside a logit bound (fit_lm, float32 and
+    float64: the fit stops sqrt(eps) of the bounds' size inside the bound);
+    a loss that pushes a logit and a log coordinate onto their edges with
+    Adam steps of 50 (fit: float32, float64 and float32 leaves in an x64
+    graph); a multiple-shooting run started on the edge.  The Adam fitters
+    return their lowest-loss iterate, so a parameter the run's last iterate
+    held on an edge is named with the value returned for it.  Read from the
+    value, in every cell of SYS-144's grid: no fit ends on an edge of its
+    transform's range without the warning.  An Adam fit whose optimum is on
+    a bound closes on the margin without arriving (its step shrinks as the
+    slope it remembers does): it ends short of the edge, on no edge, and
+    is not named.  Not claimed for 16-bit floats.
+  oracle: >-
+    the warning's text (the fitter, the parameter, which edge, the
+    transform, the remedy); the returned value against the margin; the
+    control, which clips, sitting on the bound with no warning.
+  tests:
+    - tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so
+    - tests/property/test_sysid_truth_recovery.py::test_the_transformed_fit_recovers_the_truth_wherever_its_control_does
+    - tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): a fit that ended with a logit damping on its
+    bound gave no warning in any of 96 starts.
+  domains:
+    f32: 'tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so[fit_lm-float32]'
+    f64: 'tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so[fit_lm-x64]'
+    mixed_dtype: 'tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64[mixed]'
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
     vmap: n/a
     multi_rate: n/a
     sub_cycled: n/a
@@ -2307,27 +2468,48 @@ claims:
     returned exactly as selected; the parameters are too unless the guard
     held a direction ..., in which case the returned pair's loss is within
     the guard's tolerance of best_loss ... and not necessarily equal to it";
-    FitResult: best_loss "is the value before the hold_undetermined guard".
+    FitResult: best_loss "is the value before the hold_undetermined guard",
+    and "Where the guard holds nothing it is the loss of exactly params,
+    bit for bit, because there is one evaluation: the fitters map their
+    coordinates to physical parameters once, by one compiled function, run
+    the model on the arrays it returns, and hand those arrays back"; "The
+    value is the fitter's own program's: a loss you compute yourself from
+    params agrees with it to rounding, not to the bit."
   sources:
-    - src/maddening/sysid.py:4951 (fit_multiple_shooting)
-    - src/maddening/sysid.py:3938 (FitResult, best_loss)
+    - src/maddening/sysid.py:6206 (fit_multiple_shooting)
+    - src/maddening/sysid.py:4795 (FitResult, best_loss)
+    - src/maddening/sysid.py:1397 (_PhysicalMap)
   conditions: >-
     a run the guard does not hold (the pair exact) and one it holds (within
-    the tolerance). Not claimed for 16-bit floats.
-  oracle: windowed_loss at the returned params and window states.
+    the tolerance); every transform, fitted, left out by mask= and frozen,
+    with bounds up to 1e6 times the value, in float32, float64 and mixed
+    precision, under fit, fit_lm and fit_multiple_shooting; the callback's
+    arrays too. Exact means the fitter's compiled program at the arrays
+    returned; the caller's own evaluation of the same loss is held to a
+    factor, not to the bit. Not claimed for 16-bit floats.
+  oracle: >-
+    windowed_loss at the returned params and window states; the arrays
+    each model-side program received (a recorder standing in for
+    sysid._compile_model) against FitResult.params, bit for bit, and that
+    evaluation's loss against best_loss.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
     - tests/core/test_sysid_claims_edges.py::test_best_loss_is_the_loss_of_exactly_the_params_returned
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_gauss_newton_iterate_is_evaluated_as_it_is_returned
+    - tests/property/test_sysid_one_evaluation.py::test_the_arrays_a_fit_returns_are_the_arrays_it_evaluated
+    - tests/property/test_sysid_one_evaluation.py::test_without_the_guard_best_loss_is_the_loss_of_exactly_the_result
+    - tests/property/test_sysid_one_evaluation.py::test_a_multiple_shooting_fit_returns_the_arrays_it_evaluated
+    - tests/property/test_sysid_one_evaluation.py::test_best_loss_is_the_loss_of_the_parameters_returned_under_a_wide_logit
+    - tests/property/test_sysid_one_evaluation.py::test_every_fitter_evaluates_what_it_returns
   status: verified
   notes: >-
     f64 domain failing on d2429a6: a log leaf no step moved was returned as
     it went in while the run evaluated its exp(log(p)) round trip, so
     best_loss differed from the returned pair's loss by the loss's change
-    over that ulp (5.2e-13 relative at k = 30.03). Fixed: the objectives of
-    fit, fit_lm and fit_multiple_shooting evaluate exactly the parameters
-    to_params returns (_exact_physical_params), so without the guard the
-    pair is exact in float32 and float64.
+    over that ulp (5.2e-13 relative at k = 30.03). Fixed then by making
+    the objectives of fit, fit_lm and fit_multiple_shooting select the
+    value that went in for a leaf no step moved, so that without the guard
+    the pair is exact in float32 and float64.
     fit_lm's other way to an iterate, the Gauss-Newton step its floor rule
     takes (SYS-080), is evaluated through the same objective: best_loss is
     that candidate's loss as the run's last act, and the next iteration's
@@ -2336,6 +2518,14 @@ claims:
     exactly the pair returned" and FitResult "the value before the guard",
     and round 7 (B1, on 04bc3e5) measured a held pair 1.9e-9 off best_loss.
     The two docstrings now say the same, which is what the test asserts.
+    Round 9 (B1, on e301c41), the third round to find two evaluations of
+    theta -> params disagreeing in their last bits: the jitted objective
+    and the eager gm.constrain behind FitResult.params landed on different
+    points of a logit's grid -- best_loss 1.27e-8 for parameters whose loss
+    is 4.5e-10 under logit (-1e4, 1e4), a returned damping of 2.0 for an
+    objective run at 2.0266 under (-1e6, 1e6).  One evaluation was removed:
+    _PhysicalMap is the only map, its arrays are what the model-side
+    programs take and what the result holds (MADD-ANO-202).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
     f64:
@@ -2999,24 +3189,34 @@ claims:
   area: ParamSpec
   claim: >-
     "gm.constrain(u) # back to physical values, always inside bounds";
-    constrain inverts unconstrain inside bounds; both maps are jittable and
+    constrain inverts unconstrain inside bounds "to the transform's own
+    resolution, which its bounds set and not the value: within 16 of its
+    spacings -- eps * max(|lo|, |hi|, hi - lo) for logit, eps * |lo| for log
+    -- plus 16 eps of the value"; both maps are jittable and
     differentiable.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-    - src/maddening/core/params.py:909 (constrain)
+    - src/maddening/core/params.py:1042 (constrain)
+    - src/maddening/core/params.py:350 (ParamSpec._resolution)
     - docs/release_notes/v0.4.0.md (ParamSpec and the optimiser surface)
   conditions: >-
     any coordinates, including extreme ones, for constrain landing inside
     bounds and unconstrain(constrain(u)) being finite, for bounds the
     leaf's dtype holds (others are refused, SYS-131); the inverse --
-    constrain(unconstrain(p)) == p to a few ulps -- for a p inside the
-    clamp's interior, at least 4 * eps * max(|lo|, |hi|, hi - lo) from a
-    logit bound (within that margin p comes back on the clamp, up to 800
-    ulps away for bounds (-100, 1)); list leaves. Not claimed for mixed
-    dtypes, 16-bit floats or vmap.
-  oracle: the bounds; the round trip; jax.jit and jax.grad.
+    |constrain(unconstrain(p)) - p| <= 16 * (ParamSpec._resolution(dtype) +
+    eps * |p|), eager and under jax.jit, which need not return the same
+    float -- for a p inside the clamp's interior, at least 4 * eps *
+    max(|lo|, |hi|, hi - lo) from a logit bound (within that margin p comes
+    back on the clamp), and values and bounds between 1e-6 and 1e6 in size
+    (a log value at the far ends of its dtype's range adds eps * |p| *
+    |log(p - lo)|: measured 4.4 of 16 over that range, 11 for logit in
+    float64); bounds up to 1e6 times wider than the value, where that
+    resolution is 12% of a float32 value; list leaves. Not claimed for
+    mixed dtypes, 16-bit floats or vmap.
+  oracle: the bounds; the round trip against the stated resolution; jax.jit and jax.grad.
   tests:
     - tests/core/test_params_spec.py::test_constrain_inverts_unconstrain_inside_bounds
+    - tests/core/test_params_spec.py::test_the_round_trip_is_good_to_the_transforms_resolution_not_the_values
     - tests/core/test_params_spec.py::test_constrain_lands_inside_bounds_for_any_coordinates
     - tests/core/test_params_spec.py::test_unconstrain_of_constrain_is_finite_for_any_coordinate
     - tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
@@ -3070,6 +3270,54 @@ claims:
     f64: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
     mixed_dtype: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
     16bit: tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-146
+  area: fitters
+  claim: >-
+    "A fitted log / logit leaf is returned at the resolution of its
+    transform, which is set by its bounds and not by its value ... Where
+    that leaves fewer than half the working precision's digits of a value
+    -- more than sqrt(eps) of it: a float32 3.0 under logit bounds 1e4 wide
+    -- the fitters say so in a PrecisionLimitWarning naming the leaf, at
+    their start (and again for a leaf that only ends up so)".
+  sources:
+    - src/maddening/sysid.py:4819 (FitResult)
+    - src/maddening/sysid.py:1849 (_warn_unresolved_values)
+    - src/maddening/core/params.py:350 (ParamSpec._resolution)
+    - docs/user_guide/parameters.md (ParamSpec)
+  conditions: >-
+    a float32 damping of 3 fitted under logit bounds (0.5, 3.5) and
+    (-1e3, 1e3) (no warning: the spacing is under sqrt(eps) of the value)
+    and (-1e4, 1e4) and (-1e6, 1e6) (named, with the spacing and the
+    remedy).  Only a leaf the fit moves is judged: one it does not is never
+    passed through its transform (SYS-054).  A value of exactly 0 has no
+    magnitude to be relative to and is not judged.  Not claimed for
+    float64 (x64), mixed dtypes or 16-bit floats.
+  oracle: >-
+    the spacing eps * max(|lo|, |hi|, hi - lo) against sqrt(eps) of the
+    value; the warning's category and text.
+  tests:
+    - tests/property/test_sysid_one_evaluation.py::test_a_value_its_transform_cannot_resolve_is_named_at_the_start_of_the_fit
+    - tests/property/test_sysid_one_evaluation.py::test_best_loss_is_the_loss_of_the_parameters_returned_under_a_wide_logit
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): SYS-104 said "to a few ulps" without saying
+    of what; under logit (-1e6, 1e6) a float32 fit placed a damping of 2 to
+    0.12 and said nothing.
+  domains:
+    f32: tests/property/test_sysid_one_evaluation.py::test_a_value_its_transform_cannot_resolve_is_named_at_the_start_of_the_fit
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
     jit: n/a
     grad: n/a
     vmap: n/a
@@ -3447,7 +3695,8 @@ claims:
     counting mapping, so writes made through node.params afterwards count
     as well"; "an element written in place into a list, a NumPy array or a
     nested dict ... is found by comparing each such value with a copy taken
-    at the last sync".
+    at the last sync"; "The assignment is a write of the keys whose values
+    it changes ... and of no other" (SYS-147).
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - docs/validation/known_anomalies.yaml (MADD-ANO-122)
@@ -3487,6 +3736,9 @@ claims:
     to a list-valued parameter, against _ParamsDict's "the graph also
     compares values".  The setter now stores a counting mapping and the
     sync compares mutable values (MADD-ANO-175).
+    Round 9 (B1, on e301c41): the replacement was read as a write of every
+    key and reverted the node's other calibrated constants; it writes the
+    keys it changes (SYS-147, MADD-ANO-203).
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
     f64: narrowed
@@ -3539,6 +3791,61 @@ claims:
     compile kept gm.params' value and compile() warned.
   domains:
     f32: tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
+
+- id: SYS-147
+  area: params pytree
+  claim: >-
+    "The assignment is a write of the keys whose values it changes -- a key
+    added, dropped, or given another value, bit for bit -- and of no other:
+    the keys it hands back unchanged are the node's own values, not writes,
+    so a constant of that node you calibrated in gm.params stays calibrated
+    ... node.params = {**node.params, "k": v} with the v the node already
+    held writes nothing, while node.params["k"] = v is a write whatever the
+    value."
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+    - src/maddening/core/node.py:148 (_ParamsDict, _succeed)
+    - src/maddening/core/graph_manager.py:5654 (_sync_node_param_writes)
+  conditions: >-
+    a calibrated constant beside the key assigned; a key handed back with
+    the value the node held; a keyed write pending on the mapping replaced
+    (also of an unchanged value), through two replacements; a list or
+    array value shared by the replacement, written in place before and
+    after it, replaced by an equal one and by a different one; a counting
+    mapping from elsewhere stored as it is; 400 generated sequences of
+    keyed writes, replacements, gm.params writes and reads against "the
+    later write wins".  Not claimed for float64 (x64), mixed dtypes, 16-bit
+    floats, multi-rate graphs, sub-cycled groups or sharded graphs.
+  oracle: >-
+    gm.params, the value the next step integrates with and the saved
+    configuration; a reference model of the two stores and the keys
+    written since the last sync.
+  tests:
+    - tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_that_hands_a_key_back_unchanged_is_not_a_write_of_it
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_carries_the_writes_the_old_mapping_had_pending
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_and_an_in_place_write_do_not_hide_each_other
+    - tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes
+    - tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): node.params = {**node.params, "damping": 5.0}
+    after a stiffness calibrated to 45 put the stiffness back to the node's
+    30, with no warning (MADD-ANO-203).
+  domains:
+    f32: tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     f64: narrowed
     mixed_dtype: narrowed
     16bit: narrowed
@@ -3755,19 +4062,27 @@ claims:
     leaf's dtype cannot hold: a finite value that would overflow to inf, a
     non-zero one that would flush to 0, an integer that would wrap (... a
     value that rounds to a subnormal loads, and one already inf or NaN loads
-    as it was)"; a refused load leaves the graph as it was.
+    as it was)"; "an integer of the other signedness included (-1 for an
+    unsigned leaf, 4000000000 for an int32 one) ... and so is a complex
+    value with an imaginary part for a real leaf"; a refused load leaves
+    the graph as it was.
   sources:
-    - src/maddening/core/simulation/checkpoint.py:132 (load_state, Raises)
-    - docs/validation/known_anomalies.yaml (the load_state cast entry)
+    - src/maddening/core/simulation/checkpoint.py:133 (load_state, Raises)
+    - src/maddening/core/simulation/checkpoint.py:392 (_checked_cast)
+    - docs/validation/known_anomalies.yaml (the load_state cast entries)
   conditions: >-
     a float64 checkpoint into float32 state and params at +-1e39, +-1e-50,
     +-1e-40, 3.4e38, +-0, inf and NaN; an int64 2**40, a fraction and NaN
-    into an int32 field; through POST /checkpoint/load; a float32, float64
-    or float16 checkpoint into a bfloat16 state field (and a bfloat16
-    params leaf) at +-1e-44, 3.4028235e38, 1e39, -1e-50, -1e-39, inf and
-    NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50 (a file
-    that itself holds a bfloat16 member is refused whole, MADD-ANO-206).
-    Not claimed for multi-rate graphs, sub-cycled groups or sharded graphs.
+    into an int32 field; an integer of the other signedness, of the field's
+    own width and wider, into unsigned and signed fields of 8, 16 and 32
+    bits, with the type's own extremes loading; a complex value with and
+    without an imaginary part; through POST /checkpoint/load; a float32,
+    float64 or float16 checkpoint into a bfloat16 state field (and a
+    bfloat16 params leaf) at +-1e-44, 3.4028235e38, 1e39, -1e-50, -1e-39,
+    inf and NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50 (a
+    file that itself holds a bfloat16 member is refused whole,
+    MADD-ANO-206). Not claimed for multi-rate graphs, sub-cycled groups or
+    sharded graphs.
   oracle: the ValueError naming the leaf; the graph's state and params bit for bit; the loaded subnormal's sign.
   tests:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
@@ -3776,6 +4091,9 @@ claims:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_params_leaf_is_held_to_the_same_rule
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_that_would_wrap_is_refused_and_one_that_fits_loads
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_the_rest_route_answers_the_refusal_naming_no_path
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_of_the_other_signedness_is_refused_not_wrapped
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_complex_value_with_an_imaginary_part_is_refused_for_a_real_field
+    - tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_the_two_values_the_old_comparisons_took
     - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_cannot_hold_is_refused
     - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_can_hold_loads_as_the_cast_rounds_it
     - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_parameter_leaf_of_bfloat16_is_held_to_the_same_rule
@@ -3785,10 +4103,15 @@ claims:
     From v0.1.0 to v0.3.1 load_state narrowed a float64 checkpoint with
     jnp.array, and the 0.4.0 tree cast it to the live dtype, both with no
     check: 1e39 loaded as inf and -1e-50 as -0.0, silently (reproduced at
-    every tag).  The rule is the FMU's (MADD-ANO-137).  A bfloat16 leaf
-    was cast with no check on the 0.4.0 tree, because the rule was chosen
-    by the NumPy kind of the leaf's dtype and an extension dtype's is void
-    (MADD-ANO-207, never released).
+    every tag).  The rule is the FMU's (MADD-ANO-137).
+    Wrong on e301c41 for an integer of the other signedness: the check cast
+    to the leaf's type and back, which cannot see a same-width sign change,
+    so -1 for a uint32 field loaded as 4294967295 (MADD-ANO-200; found in
+    the sibling sweep of B1 round 9's F5).  The tags kept the checkpoint's
+    own dtype and did not wrap.  A bfloat16 leaf was cast with no check on
+    the 0.4.0 tree, because the rule was chosen by the NumPy kind of the
+    leaf's dtype and an extension dtype's is void (MADD-ANO-207, never
+    released).
   domains:
     f32: tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
     f64: tests/core/test_params_claims_in_float64.py::test_load_state_into_a_float64_field_loads_what_float32_could_not
@@ -4696,23 +5019,44 @@ claims:
 - id: FMU-010
   area: model description
   claim: >-
-    "The instantiationToken covers every variable's start, bounds,
+    "The instantiationToken covers every variable's start, bounds, unit,
     variability, value reference and clocks, besides its name, type,
-    causality and shape.  An FMU packaged from a description with other
-    start values or bounds than the one a bridge serves fails
-    fmi3InstantiateCoSimulation against it with a token mismatch."
+    causality and shape: everything the description advertises for a
+    variable but its description text.  An FMU packaged from a description
+    with other start values, bounds or units than the one a bridge serves
+    fails fmi3InstantiateCoSimulation against it with a token mismatch."
   sources:
     - docs/user_guide/fmu_export.md (Variables)
-    - src/maddening/fmi/model_description.py:208 (ModelDescription, instantiation_token)
-  conditions: another start, other bounds, clocks, variability, value references and shapes under the same names.
-  oracle: the tokens; the compiled FMU's instantiation.
+    - src/maddening/fmi/model_description.py:226 (ModelDescription, instantiation_token)
+    - src/maddening/fmi/model_description.py:868 (_NOT_IN_THE_TOKEN, _token_part)
+  conditions: >-
+    another start, other bounds, another unit (a parameter's, re-declared
+    with set_param_spec; one removed), clocks, variability, value
+    references and shapes under the same names; every field of FMIVariable,
+    each either hashed or listed as not covered with its reason (the
+    description text, and the graph address the name carries); every
+    attribute to_xml writes on a variable element.
+  oracle: >-
+    the tokens; the compiled FMU's instantiation; FMIVariable's own field
+    list and the XML's attribute names.
   tests:
     - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_another_parameter_start_gives_another_token
     - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_other_bounds_give_another_token
     - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_clocks_and_variability_are_part_of_the_token
     - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_an_fmu_with_other_start_values_does_not_instantiate_against_the_bridge
     - tests/fmi/test_fmu_claims_edges.py::test_the_token_covers_value_references_and_shapes
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_another_unit_gives_another_token
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_a_description_text_is_not_part_of_the_token
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_every_attribute_of_a_variable_is_hashed_or_named_as_not_covered
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_what_the_xml_writes_for_a_variable_is_under_the_token
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_an_fmu_packaged_before_a_unit_was_redeclared_does_not_instantiate
   status: verified
+  notes: >-
+    Wrong on e301c41 (B1 round 9, F8): the bridge holds its description to
+    the graph's unit (FMU-033) and the token left the unit out, so an FMU
+    packaged when stiffness was declared in N/m instantiated against a
+    bridge serving the description that says kN/m.  The unit is hashed, and
+    what is left out is named.
   domains:
     f32: n/a
     f64: n/a
@@ -5195,11 +5539,20 @@ claims:
     fmi3EnterInitializationMode, at a doStep that would reach it and at
     fmi3SetFMUState ... An importer that computes each point as start + k *
     h ... is never refused below that time.  One that keeps a running sum
-    ... is refused ... once that passes a tenth of a step".
+    ... is refused ... once that passes a tenth of a step"; the bound holds
+    "to the rounding of the float64 clock itself (... at most three ulps of
+    the time between them, under 0.02 of a step wherever the clock resolves
+    a step)"; "Saving and restoring a state does not move that count.  The
+    start time and the master steps taken since are part of the FMU state
+    ... a master that saves and restores between steps (a rollback master)
+    is held to the same bound, and gets the same answer to every step, as
+    one that does not ... An archive without the count ... is refused by
+    name ... fmi3EnterInitializationMode still names a new start".
   sources:
     - docs/user_guide/fmu_export.md (Instances and time)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
     - src/maddening/fmi/tcp_bridge.py:368 (_ROUNDING_SLACK_MAX)
+    - src/maddening/fmi/tcp_bridge.py:1753 (FmuTcpBridge._restored_reference)
   conditions: >-
     Times whose 16 ulps are at most a tenth of the master step -- below 32 s
     at 1e-12 s, 32768 s at 1e-9 s, 3.4e10 s at 1e-3 s -- which is the domain
@@ -5213,15 +5566,28 @@ claims:
     (refused within a tenth of a step); an honest running sum and start + k
     * h over a million steps, from starts of 0, 1 and 1000 s, and the
     running sum's refusal past the cap (about 1.2 million steps from 1 s at
-    1e-9 s); a restore; the compiled wrapper. The tolerance is a millionth
-    of a master step wherever 16 ulps of the time are below that (times
-    under about 2.8e8 master steps from 0); above it the ulp slack, capped
-    at a tenth of a step, is the larger part. Not claimed for mixed dtypes
-    or 16-bit floats.
+    1e-9 s); a restore; the compiled wrapper. Across restores: four
+    importers (start + k * h; a running sum; step sizes 0.45 millionths
+    long; points 0.05 of a step late) with no restore, a save and restore
+    after every step and one rollback part-way, on the bridge alone at
+    30000 s and 1e-9 s and over the bridge, the sidecar, the graph and the
+    compiled wrapper at 20000 s and 7e-10 s; the bridge's own archives, which
+    it writes and takes unmodified (an archive is the importer's word for
+    its time: one rewritten to carry another time with a matching reference
+    restores, and one whose time is half a step or more from its reference
+    does not); an archive without the reference; a reference of another
+    type, sign or size. The bound is a millionth plus a tenth of a step and
+    three ulps of the largest time involved, in exact arithmetic. The
+    tolerance is a millionth of a master step wherever 16 ulps of the time
+    are below that (times under about 2.8e8 master steps from 0); above it
+    the ulp slack, capped at a tenth of a step, is the larger part. Not
+    claimed for mixed dtypes or 16-bit floats.
   oracle: >-
     the time variable and the state; the bridge's drift tolerance against
     the importer's clock; the refusal and its message; an independent
-    search for the resolution limit.
+    search for the resolution limit; the reply to every step with and
+    without restores, to the bit; the simulated time in exact rational
+    arithmetic.
   tests:
     - tests/fmi/test_communication_points.py::test_a_discontinuous_communication_point_is_refused_and_advances_nothing
     - tests/fmi/test_communication_points.py::test_a_point_within_the_tolerance_is_adopted
@@ -5241,8 +5607,26 @@ claims:
     - tests/fmi/test_communication_points.py::test_a_restored_time_the_clock_cannot_resolve_is_refused
     - tests/fmi/test_communication_points.py::test_at_a_large_accepted_ratio_a_biased_clock_is_stopped_within_a_tenth_of_a_step
     - tests/fmi/test_communication_points.py::test_an_honest_running_sum_is_refused_once_its_rounding_passes_a_tenth_of_a_step
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_an_importer_is_accepted_for_as_many_steps_as_the_bound_allows
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_restore_changes_no_verdict_and_no_reported_time
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_the_archive_carries_the_start_time_and_the_steps_taken_since
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_start_time_given_after_a_restore_is_a_new_reference
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_an_archive_without_the_reference_is_refused
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_reference_the_bridge_never_writes_is_refused
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_reference_in_another_integer_type_restores
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_an_edited_time_inside_half_a_step_restores_and_is_then_held_to_the_drift_bound
+    - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_every_archive_a_bridge_writes_is_far_inside_the_half_step_rule
+    - tests/property/test_differential_fmu.py::test_four_fmu_paths_hold_each_clock_pattern_to_the_drift_bound
+    - tests/property/test_differential_fmu.py::test_a_restore_between_steps_changes_no_reply_on_any_fmu_path
   status: verified
   notes: >-
+    Wrong on e301c41 (B1 round 9, F4): set_state started the drift
+    reference again at the restored time, so with a save and restore after
+    every step a biased importer was never refused and an honest running
+    sum drifted 1.78 master steps in 4000 (MADD-ANO-197).  The same battery
+    met a running sum 0.0013 of a step past "a millionth plus a tenth": the
+    reported and the simulated time are each a float64 sum, and the claim
+    now carries that rounding.
     Failing on d2429a6 (B1 round 8, M4) at a large ratio of time to master
     step: the uncapped ulp slacks were 1.8 master steps at 1000 s and 1e-12
     s, a doStep a whole step ahead was adopted, and a clock running 40% fast
@@ -5269,6 +5653,8 @@ claims:
     checkpoint_restart:
       - tests/fmi/test_communication_points.py::test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot
       - tests/fmi/test_communication_points.py::test_a_restored_time_the_clock_cannot_resolve_is_refused
+      - tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_restore_changes_no_verdict_and_no_reported_time
+      - tests/property/test_differential_fmu.py::test_a_restore_between_steps_changes_no_reply_on_any_fmu_path
     sharded: n/a
 
 - id: FMU-025
@@ -5333,19 +5719,32 @@ claims:
     1e308 is refused, not stored as inf, and so is one set to 1e-50, which
     would be stored as 0.0; a value that rounds to a subnormal (1e-40)
     keeps its sign and magnitude and is held"; every value must be "in
-    range for the dtype of the array it replaces".
+    range for the dtype of the array it replaces"; "An integer leaf takes a
+    whole number of its own range, judged without rounding it".
   sources:
     - docs/user_guide/fmu_export.md (Robustness, The trust boundary)
-    - src/maddening/fmi/tcp_bridge.py:723 (checked_value)
+    - src/maddening/fmi/tcp_bridge.py:870 (checked_value)
+    - src/maddening/core/_exact_integers.py:33 (lost_as_integer)
   conditions: >-
     a value past FLT_MAX; a non-zero value below a float32's smallest
-    subnormal, of either sign; a value that rounds to a subnormal. Not
-    claimed for 16-bit floats.
-  oracle: the reply and the value read back.
+    subnormal, of either sign; a value that rounds to a subnormal; for
+    every integer type, its minimum and maximum, one beyond each, a
+    fraction, and a value of every other integer type (signed against
+    unsigned of one width in both directions); 2**63 and 2**64 as floats
+    for the two widest. Not claimed for 16-bit floats.
+  oracle: >-
+    the reply and the value read back; Python integers for the integer
+    types.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_a_float32_value_beyond_its_range_at_either_end_is_refused
     - tests/fmi/test_bridge_security_and_stepping.py::test_set_refuses_values_that_overflow_the_variable_dtype
     - tests/fmi/test_a_value_its_type_rounds_to_zero_is_refused.py::test_every_write_path_refuses_a_value_that_would_be_stored_as_zero
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_value_outside_a_64_bit_integer_type_is_refused
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_the_value_check_refuses_what_an_integer_type_cannot_hold
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_the_value_check_keeps_an_integer_the_type_holds_exactly
+    - tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_an_integer_is_kept_exactly_when_the_target_type_holds_it
+    - tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_a_float_is_an_integer_of_the_type_only_if_whole_and_in_range
+    - tests/property/test_differential_fmu.py::test_a_value_an_fmi_type_cannot_hold_is_refused_by_every_door
   status: verified
   notes: >-
     Ambiguous in the first edition: a float32 set to 1e-50 was accepted
@@ -5354,6 +5753,14 @@ claims:
     FmuSidecar.set_params, and REST's twin of it, refuse a non-zero value
     whose cast is +-0.  "Representable" cannot mean exact (0.1 is not a
     float32); the guide now says "in range".
+    The integer check was moved off a comparison through float64 (B1 round
+    9, F5's sibling sweep), which rounds both sides and whose verdict at
+    2**63 and 2**64 follows what the platform's out-of-range cast returns.
+    Verified on x86-64 only, where the cast wraps and the old comparison
+    gave the same verdicts as the new one for every input tried: a mutant
+    restoring it survives.  The exact check's bounds are pinned in
+    tests/core; that the old one misbehaved on a saturating platform is by
+    reading, not by a run.
   domains:
     f32: tests/fmi/test_fmu_claims_edges.py::test_a_float32_value_beyond_its_range_at_either_end_is_refused
     f64: tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_variable_is_checked_in_its_own_type
@@ -6134,11 +6541,11 @@ claims:
   area: transport
   claim: >-
     The C wrapper "refuses a reply value its getter's C type cannot hold
-    ..., and an fmi3SetInt64 / fmi3SetUInt64 value a double cannot carry
-    exactly (above 2^53 in magnitude) is refused"; numbers on the JSON path
-    are written and read in the C locale; TCP_NODELAY is set; a get reply
-    must carry exactly nValues; the wrapper's clock follows a restore and a
-    reset.
+    ..., so no conversion is undefined behaviour"; "fmi3SetInt64 /
+    fmi3SetUInt64 refuse [a value a float64 cannot hold] before anything is
+    sent"; numbers on the JSON path are written and read in the C locale;
+    TCP_NODELAY is set; a get reply must carry exactly nValues; the
+    wrapper's clock follows a restore and a reset.
   sources:
     - docs/user_guide/fmu_export.md (Float64 on the wire, Robustness)
   conditions: a C compiler; a comma-decimal locale.
@@ -6519,6 +6926,244 @@ claims:
     - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_variability_rejected
     - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_dtype_rejected
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+# ---------------------------------------------------------------------------
+# FMU: state objects, 64-bit integers, the two zeros, selected outputs
+# (B1 round 9)
+# ---------------------------------------------------------------------------
+
+- id: FMU-059
+  area: FMU state
+  claim: >-
+    "An fmi3FMUState belongs to the instance whose call returned it, and the
+    wrapper follows FMI 3.0's ownership rules function by function.
+    fmi3GetFMUState allocates when *FMUState is NULL; handed back a state
+    it returned before ..., it reuses that object and returns the same
+    pointer, so a master that keeps one variable and saves before every
+    step holds one state ... A call that fails leaves the variable and its
+    state as they were.  fmi3SetFMUState never changes the state it
+    restores.  fmi3DeserializeFMUState always constructs a new state ...
+    fmi3FreeFMUState frees one and stores NULL; fmi3FreeInstance frees
+    every state of the instance that is still live ... fmi3Reset and
+    fmi3Terminate leave states valid: one saved before a reset restores
+    after it."
+  sources:
+    - docs/user_guide/fmu_export.md (Building and packaging, FMU states and their memory)
+    - src/maddening/fmi/c/maddening_fmu.c:97 (header comment, FMU states)
+  conditions: >-
+    a C compiler. One state variable handed back over forty gets, with
+    longer, shorter and empty states, on the JSON and the binary wire form;
+    a refused get, a reply without a state and a length mismatch; an
+    allocation that fails while a held state must grow, and with no state
+    yet; a pointer that is not a live state of the instance (another
+    instance's, or no pointer at all), which is overwritten unread; set
+    twice and after a refusal; a serialize into a vector that is too
+    small, exact and larger, and with NULL arguments; a deserialize into a
+    variable still naming a live state, of an empty vector, of NULL
+    arguments and of a vector longer than a frame; the head, the middle
+    and the tail of an instance's states freed, a second free and a NULL
+    argument; an instance freed with states still live; terminate and
+    reset with states live.  The count of live allocations of the wrapper
+    and the test binary, which must end at zero; the address sanitizer's
+    leak check and valgrind over the same binary.
+  oracle: >-
+    the pointer returned; the count of live allocations (a state is two);
+    the state's bytes; the sanitizers; a restore through the compiled
+    wrapper against a live bridge.
+  tests:
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
+    - tests/fmi/test_c_unit.py::test_the_c_harnesses_are_built_from_the_imported_packages_source
+    - tests/fmi/test_an_fmu_state_object_belongs_to_its_instance.py::test_get_fmu_state_into_a_held_variable_returns_the_same_object
+    - tests/fmi/test_an_fmu_state_object_belongs_to_its_instance.py::test_a_failed_get_leaves_the_held_state_as_it_was
+    - tests/fmi/test_an_fmu_state_object_belongs_to_its_instance.py::test_deserialize_always_makes_a_new_state_and_set_changes_none
+    - tests/fmi/test_an_fmu_state_object_belongs_to_its_instance.py::test_states_survive_terminate_and_reset_and_are_freed_with_the_instance
+    - tests/property/test_differential_fmu.py::test_a_restore_between_steps_changes_no_reply_on_any_fmu_path
+  status: verified
+  notes: >-
+    Missing from the inventory, and wrong, on e301c41 (B1 round 9, F3):
+    fmi3GetFMUState allocated a new object over the one it was handed on
+    every call, so the rollback pattern leaked one whole state per call in
+    the importer's process (2.8 kB a call for one spring, 82 kB for a
+    20000-cell rod), and fmi3FreeInstance left live states allocated.  The
+    C unit test's test_get_fmu_state_reuses_the_state_object_it_is_handed,
+    test_the_fmu_state_functions_keep_to_fmi_ownership and
+    test_free_instance_frees_the_states_that_are_still_live hold the rules,
+    function by function.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_an_fmu_state_object_belongs_to_its_instance.py::test_states_survive_terminate_and_reset_and_are_freed_with_the_instance
+    sharded: n/a
+
+- id: FMU-060
+  area: values
+  claim: >-
+    "A float64 holds every value of every FMI type but two: an Int64 or
+    UInt64 above 2^53 in magnitude is a float64 only where it is a multiple
+    of the spacing there ... Such a value is never rounded, in either
+    direction and on every path.  fmi3SetInt64 / fmi3SetUInt64 refuse one
+    before anything is sent, and the bridge refuses a JSON set of one to an
+    integer variable.  A get of a variable holding one ... is refused by
+    the bridge, naming the variable and the integer, so fmi3GetInt64 /
+    fmi3GetUInt64 return fmi3Error instead of a neighbouring integer ... A
+    value a float64 is crosses exactly at any magnitude, and the FMU-state
+    archive carries every value in its own type.  (For a float variable an
+    integer literal means the nearest float ...)"
+  sources:
+    - docs/user_guide/fmu_export.md (Float64 on the wire, typed calls)
+    - src/maddening/fmi/tcp_bridge.py:697 (_wire_float64, _flat_numbers)
+    - src/maddening/fmi/c/maddening_fmu.c:25 (header comment)
+  conditions: >-
+    x64, where the 64-bit types exist; a C compiler for the wrapper's path.
+    Every FMI type -- the two floats, the eight integers and Boolean -- as
+    an input set and read back, and as an output a step later, at its
+    extreme values (each integer width's minimum and maximum, the largest
+    integers a float64 holds, the float extremes and subnormals, negative
+    zero), through the TCP bridge, the sidecar, the graph and the compiled
+    wrapper over binary and over JSON frames; the two float parameter
+    types the same way; an Int64 / UInt64 that is no float64 set (refused,
+    nothing written), installed through the FMU-state archive and then read
+    (refused, nothing read) as an input, as an output, as one entry of an
+    array and beside another variable in one get; a value outside each
+    type through set and through the archive in every carrier type.
+  oracle: >-
+    Python integers and each type's own bytes: the value given to the
+    sidecar and the graph in the type itself; the refusal naming the
+    variable and the integer; the four states identical.
+  tests:
+    - tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths
+    - tests/property/test_differential_fmu.py::test_a_value_an_fmi_type_cannot_hold_is_refused_by_every_door
+    - tests/property/test_differential_fmu.py::test_a_float_parameter_carries_its_extreme_values_on_all_four_paths
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_get_of_an_int64_a_float64_cannot_hold_is_refused_not_rounded
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_get_of_an_input_holding_such_a_value_is_refused_too
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_an_int64_that_is_a_float64_crosses_exactly_at_any_magnitude
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_one_entry_of_an_array_variable_refuses_the_get_and_names_the_entry
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_json_set_of_an_integer_a_float64_cannot_hold_is_refused
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_one_such_integer_in_an_array_set_refuses_the_whole_set
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_float_variable_takes_the_nearest_float_of_an_integer_literal
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
+  status: verified
+  notes: >-
+    Wrong on e301c41 (B1 round 9, F5): a get widened the model's int64 to
+    float64, so fmi3GetInt64 answered fmi3OK with 9007199254740992 for a
+    model holding 9007199254740993, and a JSON set of 2**53 + 1 was stored
+    as 2**53 (MADD-ANO-198).  A limit, and a loud one: such a value is not
+    readable or settable through the FMU's variables.
+  domains:
+    f32: n/a
+    f64: tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths
+    mixed_dtype: tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: FMU-061
+  area: transport
+  claim: >-
+    "Negative zero keeps its sign on both wire forms: the wrapper used to
+    write it as -0 on the JSON path, which a JSON reader takes for the
+    integer 0, and the bridge now reads that literal as -0.0 from any
+    client."
+  sources:
+    - docs/user_guide/fmu_export.md (Float64 on the wire, typed calls)
+    - src/maddening/fmi/tcp_bridge.py:429 (_json_int)
+  conditions: >-
+    the compiled wrapper's setters and getters of both float types over
+    JSON frames and over binary frames, as an input and as an output a step
+    later; a JSON client writing -0, -0.0 and -0e0 on a real socket; an
+    integer variable, which has one zero; -0 as a time and as a value
+    reference, where it is still the integer 0.
+  oracle: the sign bit of the value held and of the value read back.
+  tests:
+    - tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths
+    - tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_the_json_literal_minus_zero_is_stored_as_negative_zero
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
+  status: verified
+  notes: >-
+    Found by the typed battery while fixing F5 (MADD-ANO-199): over JSON
+    frames fmi3SetFloat64(-0.0) stored +0.0, and over binary frames -0.0.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: FMU-062
+  area: model description
+  claim: >-
+    "selected_outputs=[(node, field), ...] exports a subset of the outputs.
+    A pair that names no output this FMU can export is a ValueError naming
+    the node and the field: a node the graph does not have, a field that is
+    not one of its node's state fields, or a node whose stability level the
+    FMU does not export ... An entry that is not a pair of names
+    ("spring.position", the form selected_inputs takes) is refused too,
+    with the pair to pass."
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/model_description.py:988 (build_model_description, selected_outputs)
+  conditions: >-
+    a selection of valid pairs, as tuples and as lists, an empty one and
+    none, with and without clocks; a misspelt field, an input's name, a
+    parameter's name, an unknown node, a dotted node name split wrongly and
+    empty names, each alone and among valid pairs, with every such pair
+    named at once and nothing warned about first; a string, a list of
+    strings, a two-letter string, a triple, a single, a non-string part, a
+    mapping and bytes; an evolving node's field with and without
+    include_evolving, and an experimental node's; the same mistake in
+    selected_inputs.
+  oracle: the ValueError and the names it carries; the outputs exported.
+  tests:
+    - tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_a_selection_exports_exactly_the_outputs_it_names
+    - tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_a_pair_that_names_no_state_field_is_refused_naming_it
+    - tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_every_such_pair_is_named_at_once
+    - tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_an_entry_that_is_not_a_pair_of_names_is_refused
+    - tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_an_output_of_a_node_this_fmu_does_not_export_is_refused_by_name
+    - tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_the_same_mistake_in_selected_inputs_is_still_refused
+    - tests/fmi/test_multi_clock.py::test_selected_outputs_only_emit_needed_clocks
+  status: verified
+  notes: >-
+    Missing from the inventory, and silent, on e301c41 (B1 round 9, F7):
+    selected_outputs=[("spring", "positon")] exported no outputs and said
+    nothing, at v0.3.0 and v0.3.1 too (MADD-ANO-201).
   domains:
     f32: n/a
     f64: n/a

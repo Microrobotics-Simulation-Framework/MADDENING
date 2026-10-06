@@ -1484,10 +1484,10 @@ def generated_nodes(draw):
     cls, timestep, _ = _KIND_CLASSES[class_name]
     defaults = _numeric_defaults(cls)
     params = {}
-    # (A class with no numeric parameter is added with its defaults.)
-    names = st.lists(st.sampled_from(sorted(defaults)), max_size=3, unique=True) \
-        if defaults else st.just([])
-    for name in draw(names, label="parameters"):
+    # Up to three of them, drawn as the head of a permutation (nothing is
+    # rejected); a class with no numeric parameter is added with its defaults.
+    count = draw(st.integers(0, min(3, len(defaults))), label="parameters changed")
+    for name in draw(st.permutations(sorted(defaults)), label="parameters")[:count]:
         params[name] = draw(st.one_of(
             st.sampled_from([*_other_ranks(defaults[name]), None, {}]), _JSON,
             st.floats(-4.0, 4.0, width=32)), label=name)

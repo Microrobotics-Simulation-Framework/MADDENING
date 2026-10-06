@@ -193,7 +193,7 @@ not loopback; `/healthz` and `/viz/*` never do.
 |--------|------|-------------|
 | GET | `/graph` | Return graph structure (nodes, edges, external inputs) |
 | POST | `/graph/nodes` | Add a node (`{type, name, timestep, params}`). The streams are sent the graph with it |
-| DELETE | `/graph/nodes/{name}` | Remove a node and its connected edges. A coupling group loses it as a member and keeps its options; a group left with fewer than two members is removed. 400 when a mapping on an edge between two other nodes was built from the node's points. The streams are sent the graph without it |
+| DELETE | `/graph/nodes/{name}` | Remove a node and its connected edges. A coupling group loses it as a member and keeps its options; a group left with fewer than two members is removed (the reply's `coupling_groups` says which changed; a node added back under the name is not a member, and no route adds a group). 400 when a mapping on an edge between two other nodes was built from the node's points. The streams are sent the graph without it |
 | POST | `/graph/edges` | Add an edge (`{source_node, target_node, source_field, target_field}`) |
 | DELETE | `/graph/edges` | Remove an edge (same body as POST) |
 | POST | `/graph/compile` | Compile the graph (topo-sort + JIT). Returns schedule |

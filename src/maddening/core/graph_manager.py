@@ -1895,9 +1895,12 @@ class GraphManager:
           naming the removed node -- :meth:`validate`, :meth:`compile` and
           every step then failed ("coupling group references non-existent
           node") and the graph's own :meth:`to_dict` did not load, until a
-          node of that name was added (``MADD-ANO-214``).  To rebuild a
+          node of that name was added (``MADD-ANO-214``).  A
+          ``UserWarning`` names each group that changes: to rebuild a
           member under its name and keep the group, add the group again
-          (:meth:`add_coupling_group`) after the node and its edges.
+          (:meth:`remove_coupling_group`, :meth:`add_coupling_group`) after
+          the node and its edges -- adding the node and its edges back
+          used to be enough, the group having gone on naming it.
         * Refused (``ValueError``, nothing removed) when an interface
           mapping on an edge between two *other* nodes was built from a
           ``{"node": name, "field": ...}`` point reference: that edge
@@ -1912,14 +1915,21 @@ class GraphManager:
             A mapping on an edge that would remain references the node's
             points.
         """
-        self._remove_node(name, replacing=False)
+        # From the state that is kept (see ``add_node``); here, so that its
+        # warning names the caller as it did.
+        self._recover_from_escaped_tracers()
+        for message in self._remove_node(name, replacing=False):
+            warnings.warn(message, UserWarning, stacklevel=2)
 
-    def _remove_node(self, name: str, *, replacing: bool) -> None:
-        """:meth:`remove_node`; with ``replacing``, for a caller that adds
-        a node of the same name back before anything else reads the graph
+    def _remove_node(self, name: str, *, replacing: bool) -> list[str]:
+        """:meth:`remove_node`, returning what it would warn about (one
+        sentence for each coupling group that changed) instead of warning.
+        With ``replacing``, for a caller that adds a node of the same name
+        back before anything else reads the graph
         (``surrogates.replace.replace_node``, which restores the edges
         itself): the coupling groups and the point references of other
         edges' mappings go on naming it."""
+        notes: list[str] = []
         # From the state that is kept (see ``add_node``).
         self._recover_from_escaped_tracers()
         if name not in self._nodes:
@@ -1939,11 +1949,22 @@ class GraphManager:
                     "Remove the edge first (remove_edge).")
             # Built before anything is removed: CouplingGroup's own
             # validation can refuse, and must leave the graph whole.
-            groups = [
-                kept_group for kept_group in (
-                    _group_layout._group_without_member(group, name)
-                    for group in self._coupling_groups)
-                if kept_group is not None]
+            groups = []
+            for group in self._coupling_groups:
+                smaller = _group_layout._group_without_member(group, name)
+                if smaller is not None:
+                    groups.append(smaller)
+                if smaller is not group:
+                    notes.append(
+                        f"Removing node '{name}' "
+                        + ("removed the coupling group of "
+                           f"{sorted(group.nodes)} with it (one member would remain)"
+                           if smaller is None else
+                           f"took it out of the coupling group of {sorted(group.nodes)}, "
+                           f"which keeps its options over {sorted(smaller.nodes)}")
+                        + ".  A node added back under the name is not a member: add "
+                          "the group again (add_coupling_group) after the node and "
+                          "its edges.")
         del self._nodes[name]
         if not replacing:
             self._coupling_groups[:] = groups
@@ -1972,6 +1993,7 @@ class GraphManager:
                 self.params["mappings"].pop(key, None)
         self._dirty = True
         self._notify(EVENT_NODE_REMOVED, name)
+        return notes
 
     def remove_edge(
         self,

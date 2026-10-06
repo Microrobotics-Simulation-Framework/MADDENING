@@ -3730,7 +3730,8 @@ class SimulationServer:
             """Remove a node, with its edges and external inputs.  A
             coupling group loses it as a member and keeps its options; a
             group left with fewer than two members is removed (no route
-            adds one back).  A surrogate activated under the name is
+            adds one back); the reply's ``coupling_groups`` says which, when
+            one changed.  A surrogate activated under the name is
             forgotten with it.  400 when a mapping on an edge between two
             other nodes was built from the node's points: remove that edge
             first.  Refused (409) while the runner runs or a
@@ -3739,7 +3740,8 @@ class SimulationServer:
             and the binary stream re-sent a schema that had it)."""
             with self._graph_transaction("remove a node", write=True):
                 try:
-                    self.gm.remove_node(name)
+                    # What remove_node() warns about, for the reply.
+                    notes = self.gm._remove_node(name, replacing=False)
                 except KeyError as exc:
                     raise HTTPException(status_code=404, detail=str(exc))
                 except ValueError as exc:
@@ -3747,10 +3749,20 @@ class SimulationServer:
                 # The server's own record of a surrogate under that name
                 # goes with the node: a later deactivate used to add the
                 # recorded original back, with its edges, into a graph the
-                # node had been deleted from.
+                # node had been deleted from.  And the edges another
+                # surrogate's record holds to or from the node go with it,
+                # as the graph's own do: that deactivate used to fail on
+                # them (a 500), for good.
                 self._original_nodes.pop(name, None)
                 self._active_surrogates.discard(name)
+                for other, (orig, edges, ext) in list(self._original_nodes.items()):
+                    kept = [e for e in edges
+                            if name not in (e.source_node, e.target_node)]
+                    if len(kept) != len(edges):
+                        self._original_nodes[other] = (orig, kept, ext)
                 self._publish_state()
+            if notes:
+                return {"status": "ok", "coupling_groups": "  ".join(notes)}
             return {"status": "ok"}
 
         @app.post("/graph/edges", tags=["graph"], status_code=201, response_model=None)

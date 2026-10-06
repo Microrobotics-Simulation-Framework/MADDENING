@@ -89,7 +89,8 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
 
     The matvec is the same ``jax.jvp`` of the one-pass map the IFT
     tangent rule builds (see ``_ift_solve_jvp``); it is applied
-    ``SPECTRAL_KRYLOV_STEPS`` times, which with the one evaluation of
+    ``SPECTRAL_KRYLOV_STEPS + 1`` times (the last is the product the
+    estimate checks itself against), which with the one evaluation of
     ``F`` is the whole cost.  The inputs are ``stop_gradient``-ed so the
     estimate is forward-only bookkeeping like the rest of the
     diagnostics: under ``jax.grad`` nothing here is linearised, and the

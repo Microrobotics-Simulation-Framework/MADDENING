@@ -14638,3 +14638,218 @@ anomalies:
       - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_points_are_read_off_the_node_built_from_the_live_leaves"
       - "tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-216"
+    title: "The Arnoldi breakdown test was 1e-5 of the product in every dtype: rho_spectral read 0.379 for 0.5 and spectral_error_bound 0.61x the true distance, spectral_usable=True"
+    description: >
+      The spectral estimate of `coupling_diagnostics()` (`solver="ift"`,
+      `diagnostics=True`) grows a Krylov space by Arnoldi steps on the
+      pass's Jacobian in the norm's weights, and treated a new direction
+      as a breakdown -- rounding, to be discarded -- when its norm was
+      below 1e-5 of `||A q_j||`, in float32 and float64 alike
+      (`_ARNOLDI_BREAKDOWN_RTOL`).  Discarding a direction of norm `h`
+      replaces the Jacobian by one at distance `h` from it; in float64
+      that was eleven orders above the products' rounding, and a
+      non-normal Jacobian turns a perturbation into a larger movement of
+      its eigenvalues.  Measured on the release branch before the fix
+      (CPU, jaxlib 0.10.2, 0.11.0 and 0.11.2, float64): a ring of three
+      relays under Jacobi with one field 1e-4 of what drives it read
+      `rho_spectral=0.379` for an exact 0.5; a pair of three-entry
+      members with non-normal gains and no small field (the weighted
+      Jacobian's norm 56 beside a radius of 0.0839) read 0.0832; the
+      derandomised per-push draw of jaxlib 0.11.2 read 0.0202 for 0.0156;
+      and three slow modes within 1e-5 of each other at a gain of
+      `1 - 1e-6` were taken for one invariant direction, so the residual's
+      part along the others was not in the space the resolvent was taken
+      on and `spectral_error_bound` read 0.61x the true distance.  Every
+      one with `spectral_usable=True`.  The same constant decided whether
+      the residual had entered the space.  No release carried it: the
+      spectral bound is new in 0.4.0's development (absent at v0.3.1).
+      Found by the coupling audit's seventh round and by the targeted
+      search of `tests/property/test_coupling_targeted_search.py`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A spectral radius that is wrong, and a bound below the distance it
+      bounds, with the flag that says to rely on them set: a silent wrong
+      result, never `minor`.  Not `critical`: the numbers are reported,
+      not applied -- the iteration, `converged` and the state are
+      unaffected.  `context_dependent` because whether the bound gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The breakdown test is now a multiple of the products' own rounding
+      (`_ARNOLDI_NOISE_ULPS * eps * ||A||`, `eps` that of the coarsest
+      dtype the map evaluates in) beside a reorthogonalisation criterion,
+      and what it discards is reported in the Arnoldi residual.  The
+      multiple is measured, not derived: a map whose products round more
+      coarsely than eight units keeps a rounding as a direction, which
+      enlarges the space and loosens the resolvent factor without
+      invalidating it.
+    verification:
+      - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
+      - "tests/property/test_coupling_targeted_search.py::test_a_settled_spectral_radius_is_the_radius_per_push"
+      - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_direction_far_above_rounding_is_kept_in_float64"
+      - "tests/core/test_coupling_spectral_estimate_rounding.py::test_near_degenerate_modes_are_not_taken_for_one"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-217"
+    title: "A coupling loop that passes through a change of a field below that field's float rounding is not in rho_spectral: a float32 sub-cycled ring with a field 1e-6 of its driver reads 1e-12 for 1.25e-4, spectral_usable=True"
+    description: >
+      `rho_spectral` is computed from Jacobian-vector products of the
+      group's one-pass map, evaluated in the group's own dtype.  Where one
+      member's field is far smaller than the field it drives, the loop
+      gain passes through a change of the driven field that is a small
+      fraction of that field's magnitude, and a product whose tangent has
+      a component of ordinary size on the driven field carries the loop's
+      contribution only to one `eps` of that component.  Measured (CPU,
+      jaxlib 0.11.0, float32): a Gauss-Seidel ring of three scalar relays
+      under the interface norm, one member sub-cycled at half the
+      timestep, one field 1e-6 of what it drives.  The loop moves the
+      driven field by 3.5e-8 of its magnitude, below float32's `eps`; the
+      sub-cycled member's boundary interpolation `a + alpha * (b - a)`
+      rounds the tangent of the new source value at one `eps` of the old
+      one's, so the product is exact along the small field alone and
+      loses the loop along every other vector.  `rho_spectral` reads
+      1.1e-12 for a radius of 1.25e-4 with `spectral_usable=True`.  The
+      float32 pass itself does the same -- the iteration stalls after one
+      pass at `residual=0.0` -- and `spectral_error_bound` holds there
+      (the floor carries it).  Unchanged by the breakdown test's
+      threshold (MADD-ANO-216), and not visible to the estimate's own
+      checks: the products agree with each other.  No release carries
+      the spectral bound.  Found by the targeted search over fields down
+      to 1e-8 of their drivers.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported spectral radius that is not the exact map's, flag set: a
+      silent wrong result, never `minor`.  Not `critical`: the absolute
+      error is the radius of a loop float32 cannot iterate (1.25e-4 here),
+      the bound measured on it holds, and nothing is applied.
+      `context_dependent` because the reading of `rho_spectral` is the
+      program's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Read `rho_spectral` as the radius of the pass as the group's dtype
+      evaluates it.  Where a field of a float32 group is below about
+      1e-4 of a field it drives, run the group in float64 (the same ring
+      reads the radius to 1e-9 there), or scale the small field's units.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  The claim on `rho_spectral` (CPL-087) is made for
+      fields no smaller than a hundredth of what they drive; between 1e-2
+      and 1e-4 in float32 the estimate's measured rounding sensitivity
+      withdraws `spectral_usable` where the radius is undetermined (a
+      fan-out hub at 1e-4), and below that a loop can drop out of the
+      products without trace.
+    verification:
+      - "tests/property/test_coupling_targeted_search.py::test_a_known_defect_the_search_reached_is_fixed"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-218"
+    title: "The spectral radius of the compressed Jacobian was taken by repeated squaring, which is not backward stable for a non-normal matrix: a float32 ring of five read rho_spectral 0.901 for 0.889, spectral_usable=True"
+    description: >
+      `arnoldi_spectral_radius` took the radius of its small Hessenberg
+      matrix from Gelfand's formula by 24 squarings
+      (`_spectral_radius_small`), chosen because it lowers wherever a
+      matrix product does.  Each square of a non-normal matrix cancels to
+      `||N^2|| / ||N||^2` of its terms and what rounding leaves is squared
+      again.  Measured (CPU, jaxlib 0.11.0, float32): a Hessenberg matrix
+      whose five eigenvalues all have modulus 0.8918 read 0.8969, and the
+      group it came from -- a Jacobi ring of five scalar relays under a
+      fixed relaxation, one field a fiftieth of what drives it, another in
+      units 1e6 times larger -- reported `rho_spectral=0.901` for 0.889,
+      1.3% of the radius and twice the 5% of `1 - rho` that
+      `spectral_usable=True` stands for.  Over 1 500 random graded
+      matrices of dimension 2 to 8 in float32 the squaring was off by more
+      than 1% of `1 - rho` on 237 and `eigvals` on 40.  In float64 the
+      same squaring held the radius to about 1e-6 relative, which is why
+      `rho_spectral` was documented "to float32".  No release carried it.
+      Found by the targeted search once the breakdown test (MADD-ANO-216)
+      no longer masked it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A wrong spectral radius with its flag set is a silent wrong result,
+      never `minor`.  Not `critical`: reported, not applied, and the
+      squaring errs upward, which loosens the bound built on it.
+      `context_dependent` as for the other spectral entries.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0 on CPU and GPU.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The radius is now `max |eigvals|` (LAPACK, backward stable) on the
+      backends where JAX lowers a non-symmetric eigenvalue problem -- CPU,
+      and GPU, where JAX calls LAPACK on the host.  On any other backend
+      the squaring is still used, with the error measured above.  The GPU
+      path was not run for this change (no GPU testing in this cycle).
+    verification:
+      - "tests/core/test_coupling_spectral_estimate_rounding.py::test_the_compressed_radius_is_the_eigenvalues_not_the_squaring"
+      - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-219"
+    title: "spectral_usable tested only the Arnoldi residual, which bounds a Ritz value's error for a normal Jacobian alone: a non-normal group of twelve scalars read rho_spectral 0.941 for 0.735 and a float32 hub 0.574 for 0.092, flag set"
+    description: >
+      `spectral_usable` reported the spectrum settled when the Arnoldi
+      residual `h_{k+1,k}` was at most 5% of `1 - rho_spectral`.  That
+      residual is how far a Ritz value can be from an eigenvalue only for
+      a normal Jacobian (Bauer-Fike with constant one); for a non-normal
+      one the distance is the residual times a condition number nothing
+      measured, and the same holds for the rounding of the products.
+      Measured before the fix (CPU, jaxlib 0.11.0): a Jacobi pair of
+      six-entry members with non-normal gains (twelve scalars, more than
+      the eight Krylov steps resolve; the weighted Jacobian's norm 109),
+      float64, read `rho_spectral=0.941` for a radius of 0.735 with a
+      residual under the margin; and a float32 fan-out hub under the
+      interface norm with a field 1e-4 of what drives it, whose weighted
+      Jacobian has norm 3 300 beside a radius of 0.092, read 0.574 (0.363
+      with exact eigenvalues of the same compression) with a residual of
+      zero -- float32 rounding of the products moves that radius by more
+      than itself.  Both with `spectral_usable=True`.  No release carried
+      it.  Found by the coupling audit's seventh round (the hub) and by
+      the targeted search (the pair).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A wrong spectral radius with its flag set is a silent wrong result,
+      never `minor`.  Not `critical`: reported, not applied.
+      `context_dependent` as for the other spectral entries.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+      - "maddening.core.coupling.acceleration.spectral_rate_settled"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The estimate now spends one more Jacobian-vector product on a check
+      of itself and reports, in the Arnoldi residual, how far that product
+      moves the radius: the ninth Krylov vector where the space was still
+      growing, and where it had broken down the product's disagreement
+      with the Arnoldi relation, applied under eight sign patterns.  Both
+      are measurements along one direction, not bounds: a spectrum whose
+      error lies in a direction the one product does not excite can still
+      read settled.  The targeted search holds the outcome on its cells
+      (no settled radius outside the margin on three seeds of its slow
+      profile).  MADD-ANO-217 is a case the check cannot see.
+    verification:
+      - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
+      - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle"
+    github_issue: null

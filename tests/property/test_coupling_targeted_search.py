@@ -772,6 +772,12 @@ FIXED = {
     "a-non-normal-spectrum-past-eight-is-not-settled": (
         Case(45, 434, 0.7345602069808425, True, 0.1, 0.0, 1.0, 0, 3.4603590782731456e-06, 2),
         "radius", False),
+    # Twelve float32 scalars under Gauss-Seidel (rank six), one field 0.014
+    # of its driver: 0.576 for 0.340.  The space had been continued from
+    # the residual, so a ninth column says nothing: the rounding probe does.
+    "a-space-continued-from-the-residual-is-probed-for-rounding": (
+        Case(41, 614, 0.5827283898433404, True, 0.014131225734819956, 0.0, 1.0, 0,
+             2.944906874682467e-07, 0), "radius_strict", False),
     # A float32 ring of five, one field a fiftieth of its driver: 0.901 for
     # 0.889, the repeated squaring's own rounding (eigvals reads 0.8894).
     "a-float32-ring-of-five-the-squaring-misread": (

@@ -99,8 +99,11 @@ def test_the_l2_tolerance_is_one_threshold_for_the_whole_group():
 # ---------------------------------------------------------------------------
 
 
-def test_arnoldi_costs_n_steps_jacobian_vector_products():
-    """CPL-013: ``n_steps`` products, with or without ``v_extra``; the spectrum costs eight."""
+def test_arnoldi_costs_n_steps_plus_one_jacobian_vector_products():
+    """CPL-013: ``n_steps + 1`` products, with or without ``v_extra``; the spectrum costs nine.
+
+    The one more is the product the estimate checks itself against.
+    """
     A = jnp.asarray(np.diag([0.9, -0.3, 0.1]), F32)
     calls = []
 
@@ -110,30 +113,30 @@ def test_arnoldi_costs_n_steps_jacobian_vector_products():
 
     with jax.disable_jit():
         arnoldi_spectral_radius(matvec, jnp.ones(3), n_steps=8)
-        assert len(calls) == 8
+        assert len(calls) == 9
         calls.clear()
         arnoldi_spectral_radius(matvec, jnp.ones(3), n_steps=8,
                                 v_extra=jnp.asarray([1.0, 0.0, 0.0]))
-        assert len(calls) == 8
+        assert len(calls) == 9
         calls.clear()
         arnoldi_spectral_radius(matvec, jnp.ones(3), n_steps=5)
-        assert len(calls) == 5
+        assert len(calls) == 6
 
-    # The group-level spectrum: eight Jacobian-vector products of the
+    # The group-level spectrum: nine Jacobian-vector products of the
     # one-pass map, plus one evaluation of the map itself for the residual.
     counts = _count_map_evaluations(
         lambda step, x, consts, w: _spectral_rate_at(step, x, consts, w))
-    assert counts == {"jvp": 8, "primal": 1}, counts
+    assert counts == {"jvp": 9, "primal": 1}, counts
 
 
 
-def test_the_spectrum_on_a_transformed_reading_costs_eight_more_products():
-    """CPL-013: "16 under the interface norm with a transform on an internal edge".
+def test_the_spectrum_on_a_transformed_reading_costs_nine_more_products():
+    """CPL-013: "18 under the interface norm with a transform on an internal edge".
 
     The report of such a group takes a second spectrum, on the norm's
-    reading (``_interface_spectral_rate_at``): eight more Jacobian-vector
+    reading (``_interface_spectral_rate_at``): nine more Jacobian-vector
     products of the one-pass map and one evaluation of it, beside the
-    eight of the state's own spectrum.  The reading's products are of the
+    nine of the state's own spectrum.  The reading's products are of the
     transforms alone.
     """
     def reading(x):
@@ -145,7 +148,7 @@ def test_the_spectrum_on_a_transformed_reading_costs_eight_more_products():
                                            jnp.zeros(2, F32), lambda xx: jnp.abs(reading(xx)))
 
     counts = _count_map_evaluations(on_the_reading)
-    assert counts == {"jvp": 8, "primal": 1}, counts
+    assert counts == {"jvp": 9, "primal": 1}, counts
 
 
 def _loop_vmap(f, in_axes=0, out_axes=0):

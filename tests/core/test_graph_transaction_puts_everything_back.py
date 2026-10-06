@@ -24,6 +24,7 @@ reachable from the graph.  These tests hold it to that from outside --
 
 from __future__ import annotations
 
+import dataclasses
 import types
 
 import jax
@@ -355,9 +356,16 @@ def test_an_object_from_outside_the_package_is_shared_unless_it_is_a_node_or_dat
         def update(self, state, boundary_inputs, dt):
             return state
 
-    plain, node = Plain(), Elsewhere("n", DT)
-    snapshot = _Snapshot([{"plain": plain, "node": node}])
+    @dataclasses.dataclass
+    class Record:
+        items: list
+
+    plain, node, record = Plain(), Elsewhere("n", DT), Record([1])
+    snapshot = _Snapshot([{"plain": plain, "node": node, "held": (record,)}])
     plain.value, node.added = 2, True
+    record.items.append(2)
+    record.items = [3]
     snapshot.restore()
     assert plain.value == 2
     assert not hasattr(node, "added")
+    assert record.items == [1]

@@ -253,6 +253,8 @@ def test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged(served,
     nothing of what failed; the traceback is in the log."""
     injector = Injector(served)
     before = served_fingerprint(served)
+    generation = served.server._layout_generation  # noqa: SLF001
+    served.server._get_binary_encoder()  # noqa: SLF001
     injector.arm(2)        # after the node joined the graph and before it is published
     with caplog.at_level(logging.ERROR, logger="maddening.api.server"):
         try:
@@ -267,6 +269,10 @@ def test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged(served,
         "put back exactly as it was before the request.")}
     assert "second" not in served.gm._nodes  # noqa: SLF001
     assert_exactly_as_it_was(before, served_fingerprint(served), "the failed POST /graph/nodes")
+    # The binary streams were told the layout changed when the node joined;
+    # they are told again, and the encoder of the abandoned layout is dropped.
+    assert served.server._layout_generation == generation + 2  # noqa: SLF001
+    assert served.server._binary_encoder is None  # noqa: SLF001
     logged = [r for r in caplog.records if r.exc_info and r.exc_info[0] is InjectedFailure]
     assert logged and "add a node" in logged[0].getMessage()
     # And the name is free: the same request, with no failure, is taken.

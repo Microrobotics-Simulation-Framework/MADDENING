@@ -235,6 +235,10 @@ class GraphManager:
         # already warned about, which are never warned about again.
         self._underflow_check_pending = False
         self._underflow_warned: set[str] = set()
+        # The state-layout check of a stepped state
+        # (``_store_stepped_state``): pending until the first step after
+        # each compile has been compared with the state it replaced.
+        self._layout_check_pending = True
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -3088,6 +3092,7 @@ class GraphManager:
 
         self._dirty = False
         self._underflow_check_pending = bool(self._coupling_groups)
+        self._layout_check_pending = True
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -3715,6 +3720,46 @@ class GraphManager:
     # ------------------------------------------------------------------
     # Escaped tracers
     # ------------------------------------------------------------------
+
+    def _store_stepped_state(self, new_state: dict) -> None:
+        """:meth:`_store_state` for the result of one compiled step, which
+        must have the layout of the state it replaces.
+
+        A node whose ``update`` returns a leaf of another shape -- a
+        constant given as a list where the node's state is a scalar, an
+        edge delivering a vector into a scalar field -- broadcast the leaf
+        at its first step, and :meth:`step` and :meth:`run` stored the
+        result without a word: the state no longer had the layout of
+        ``initial_state()``, so a checkpoint saved after the step did not
+        load into the graph after :meth:`reset_state` or into the graph
+        rebuilt from :meth:`to_dict`.  :meth:`run_scan` and its siblings
+        have always refused it, loudly, as a scan carry of another type.
+        Refused here by name, and nothing is stored.
+
+        Compared once per compile (the step is one compiled program, so
+        its output layout is fixed by its input's), on shapes and keys
+        only, host-side: no trace, and nothing is added to the step.
+        """
+        if self._layout_check_pending:
+            self._refuse_layout_drift(new_state)
+            self._layout_check_pending = False
+        self._store_state(new_state)
+
+    def _refuse_layout_drift(self, new_state: dict) -> None:
+        """Raise if *new_state* has not the keys and shapes of the state
+        the graph holds (see :meth:`_store_stepped_state`)."""
+        drift = _param_probes._state_layout_drift(
+            self._state, new_state, dtypes=False)
+        if drift:
+            raise ValueError(
+                "one step changes the layout of the graph's state, so the "
+                "stepped state could not be saved and reloaded, reset or "
+                "scanned: " + "; ".join(drift) + " (leaves are named "
+                "node/field).  A node's update() must return its state "
+                "with the shapes initial_state() gave it: check the "
+                "node's constructor values and the shapes its edges "
+                "deliver.  Nothing was stored."
+            )
 
     def _store_state(self, new_state: dict) -> None:
         """Write *new_state* back, remembering whether it is traced.
@@ -4785,7 +4830,7 @@ class GraphManager:
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
-        self._store_state(self._call_surfacing_strict(
+        self._store_stepped_state(self._call_surfacing_strict(
             step_fn, self._state, external_inputs, params))
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
@@ -4846,7 +4891,7 @@ class GraphManager:
         params = self._params_or_default(params)
 
         for i in range(n_steps):
-            self._store_state(self._call_surfacing_strict(
+            self._store_stepped_state(self._call_surfacing_strict(
                 step_fn, self._state, external_inputs, params))
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
@@ -5785,6 +5830,9 @@ class GraphManager:
                 n_rejected += 1
             dt = float(dt_next)
 
+        # Its accepted steps are host-side, like step()'s: asked once of
+        # the state the run would leave.
+        self._refuse_layout_drift(state)
         self._store_state(state)
         info = {
             "n_steps": n_steps,

@@ -200,6 +200,85 @@ def _declared_boundary_zeros(node) -> dict:
     }
 
 
+def _leaf_layout(leaf: Any) -> tuple[tuple, Any]:
+    """``(shape, dtype)`` of a state leaf -- an array, a Python number, or
+    the ``ShapeDtypeStruct`` an abstract trace returns -- with the dtype as
+    JAX would hold it (a NumPy ``float64`` is ``float32`` without x64)."""
+    shape = getattr(leaf, "shape", None)
+    shape = tuple(np.shape(leaf)) if shape is None else tuple(shape)
+    dtype = getattr(leaf, "dtype", None)
+    if dtype is None:
+        dtype = jnp.result_type(leaf)
+    return shape, np.dtype(jax.dtypes.canonicalize_dtype(dtype))
+
+
+def _leaf_path(path: tuple) -> str:
+    """``node/field`` for a pytree key path."""
+    parts = []
+    for entry in path:
+        for attr in ("key", "idx", "name"):
+            if hasattr(entry, attr):
+                parts.append(str(getattr(entry, attr)))
+                break
+        else:
+            parts.append(str(entry))
+    return "/".join(parts)
+
+
+def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list[str]:
+    """How the state layout *after* differs from *before*: one line per
+    leaf that is missing, new, of another shape or (with *dtypes*) of
+    another kind of dtype (boolean, integer, float, complex); empty when
+    the two trees have the same layout.  A dtype's width is not compared:
+    with x64 enabled every stock node's update returns ``float64`` for the
+    ``float32`` its ``initial_state()`` builds, and the state reloads.
+
+    The one comparison behind the graph's refusal to store a step that
+    changed its state's layout (:meth:`GraphManager.step`) and the REST
+    server's dry run of a new node (``POST /graph/nodes``).  Host-side: it
+    reads shapes and dtypes, never values, so tracers and the abstract
+    values of :func:`jax.eval_shape` compare like arrays.
+    """
+    old = {_leaf_path(p): leaf for p, leaf in jax.tree_util.tree_flatten_with_path(before)[0]}
+    new = {_leaf_path(p): leaf for p, leaf in jax.tree_util.tree_flatten_with_path(after)[0]}
+    found = []
+    for name in old:
+        if name not in new:
+            found.append(f"{name!r} is missing after the update")
+            continue
+        shape_before, dtype_before = _leaf_layout(old[name])
+        shape_after, dtype_after = _leaf_layout(new[name])
+        if shape_before != shape_after:
+            found.append(f"{name!r} has shape {shape_before} before the update "
+                         f"and {shape_after} after it")
+        elif dtypes and dtype_before.kind != dtype_after.kind:
+            found.append(f"{name!r} has dtype {dtype_before} before the update "
+                         f"and {dtype_after} after it")
+    found.extend(f"{name!r} appears only after the update" for name in new if name not in old)
+    return found
+
+
+def _node_update_layout_drift(spec: _NodeSpec, state: Any, node_params: Any,
+                              boundary_inputs: Optional[dict] = None, *,
+                              dtypes: bool = True) -> list[str]:
+    """:func:`_state_layout_drift` of one ``update`` of *spec*'s node on
+    *state*, traced abstractly the way the graph calls it
+    (:func:`~maddening.core._graph_specs._node_update`: *node_params*
+    injected where the node takes them).  *boundary_inputs* is what the
+    graph would deliver: ``{}`` for a node with no edges, and by default a
+    zero for every input the node declares.  Nothing is computed.  Raises
+    whatever the node's code raises while it is traced."""
+    if boundary_inputs is None:
+        try:
+            boundary_inputs = _declared_boundary_zeros(spec.node)
+        except Exception:  # noqa: BLE001 - the descriptor is advisory
+            boundary_inputs = {}
+    after = jax.eval_shape(
+        lambda st, b, p: _node_update(spec, st, b, spec.timestep, p),
+        state, boundary_inputs, node_params)
+    return _state_layout_drift(state, after, dtypes=dtypes)
+
+
 def _refers_to(value: Any, targets: list, shared: dict, depth: int = 0) -> bool:
     """Does ``value`` reach one of ``targets`` (by identity), the dict
     ``shared``, or an object whose ``params`` is ``shared``?  Followed

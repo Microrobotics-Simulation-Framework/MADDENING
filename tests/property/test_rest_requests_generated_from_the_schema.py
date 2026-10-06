@@ -386,6 +386,30 @@ class NotSent(Exception):
 #: The three strings ``maddening.serialization.json_codec`` writes a
 #: non-finite float as.
 TOKEN_TEXTS = ("NaN", "Infinity", "-Infinity")
+def left_running(served: O.Served) -> list[str]:
+    """What a request has started that goes on by itself: the runner,
+    whose thread steps the graph, and a JAX trace."""
+    from maddening.core.simulation import profiler
+
+    running = []
+    runner = served.server.runner
+    if runner is not None and runner.is_alive:
+        running.append("the runner")
+    if profiler.jax_trace_active():
+        running.append("a JAX trace")
+    return running
+
+
+def settle(served: O.Served) -> None:
+    """Stop what an accepted request may have started: the runner, a trace."""
+    from maddening.core.simulation import profiler
+
+    with served.server._runner_lock:  # noqa: SLF001
+        served.server._stop_runner()  # noqa: SLF001
+    if profiler.jax_trace_active():
+        profiler.stop_jax_trace()
+
+
 def exchange(served: O.Served, op: Operation, req: Request, *,
              must_refuse: bool = False) -> tuple[list, Any]:
     """Send *req* and hold the reply to the invariants: ``(problems, reply)``.
@@ -394,11 +418,22 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
     path parameter is quoted whole, so the path the server routes is the
     route's own with one opaque segment; a request whose path would name
     an out-of-scope route if something on the way decoded and normalised
-    it (``../../cloud/status``) is not sent either (:class:`NotSent`)."""
+    it (``../../cloud/status``) is not sent either (:class:`NotSent`).
+
+    Every comparison is of a graph nothing is stepping.  ``POST /sim/start``
+    starts the runner, whose thread steps the graph from then on: a
+    checkpoint saved while it runs and the live state read a moment later
+    differ by the steps taken between them, so "the state the reload
+    restores" failed or passed by the scheduler (it failed on the CI
+    runners and passed on a workstation).  So nothing is running when the
+    request is sent, and what it started is stopped, its thread joined,
+    before anything is read -- and a request that was *refused* must have
+    started nothing, which is asked first."""
     url = req.url()
     assert _in_scope(url) and _in_scope(req.template), f"{url} is out of scope"
     if not _in_scope(posixpath.normpath(unquote(url.split("?", 1)[0])) + "/"):
         raise NotSent(url)
+    assert not left_running(served), f"{left_running(served)} before {req.describe()}"
     before = O.snapshot(served)
     # Header values as latin-1 bytes, the way they travel: a non-ASCII
     # digit in a port is one byte the client library would not write as text.
@@ -407,6 +442,11 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
     resp = served.client.request(req.method, url, content=req.content(), headers=headers,
                                  follow_redirects=False)
     status, problems = resp.status_code, []
+    started = left_running(served)
+    settle(served)
+    assert not left_running(served), f"{started} could not be stopped after {req.describe()}"
+    if started and status >= 400:
+        problems.append(f"{status}, and the request left {' and '.join(started)} running")
     if status >= 500:
         changed = O.differences(before, O.snapshot(served))
         problems.append(f"{status}: {resp.text[:300]}" + (
@@ -438,16 +478,6 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
         except AssertionError as exc:
             problems.append(f"{status}: {str(exc)[:500]}")
     return problems, resp
-
-
-def settle(served: O.Served) -> None:
-    """Stop what an accepted request may have started: the runner, a trace."""
-    from maddening.core.simulation import profiler
-
-    with served.server._runner_lock:  # noqa: SLF001
-        served.server._stop_runner()  # noqa: SLF001
-    if profiler.jax_trace_active():
-        profiler.stop_jax_trace()
 
 
 # ---------------------------------------------------------------------------
@@ -952,6 +982,73 @@ def test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused():
         assert loaded.status_code == 200, loaded.text
     finally:
         served.close()
+
+
+def test_what_a_request_started_is_stopped_before_the_graph_is_compared(monkeypatch):
+    """``POST /sim/start`` answers and its runner goes on stepping the
+    graph; a comparison made while it does is decided by the scheduler
+    (three cases of this file failed on the CI runners and passed on a
+    workstation).  By the time the accepted graph is looked at, the runner
+    and the JAX trace a request started are stopped, and none is left when
+    the exchange returns."""
+    running_when_compared = []
+    compare = O.check_accepted_graph
+
+    def recorded(served, *args, **kwargs):
+        running_when_compared.append(left_running(served))
+        return compare(served, *args, **kwargs)
+
+    monkeypatch.setattr(O, "check_accepted_graph", recorded)
+    for key in ("POST /sim/start", "POST /sim/profile/jax/start"):
+        op, served = IN_SCOPE[key], serve()
+        try:
+            problems, resp = exchange(served, op, request_of(op, SEEDS[key][0], served))
+            assert resp.status_code == 200 and not problems, (key, resp.text, problems)
+            assert not left_running(served), key
+        finally:
+            settle(served)
+            served.close()
+    assert running_when_compared == [[], []]
+
+
+def test_a_refused_request_that_left_the_runner_running_is_a_problem():
+    """The other half, shown able to fail: a route that starts the runner
+    and then refuses is reported, whatever the scheduler does, and the
+    runner is stopped all the same."""
+    served = serve()
+    try:
+        @served.client.app.post("/probe/start-and-refuse", response_model=None)
+        def _start_and_refuse():
+            served.server._ensure_runner().start()  # noqa: SLF001
+            raise server_module.HTTPException(status_code=409, detail="refused, after starting")
+
+        op = IN_SCOPE["POST /sim/start"]
+        probe = Request("POST", "/probe/start-and-refuse", {}, [], ABSENT, {})
+        problems, resp = exchange(served, op, probe)
+        assert resp.status_code == 409
+        assert any("left the runner running" in problem for problem in problems), problems
+        assert not left_running(served)
+        # ... and the route itself, refused, starts nothing.
+        started = request_of(op, SEEDS["POST /sim/start"][0], served)
+        started.headers["Origin"] = "http://evil.example"
+        problems, resp = exchange(served, op, started, must_refuse=True)
+        assert resp.status_code == 403 and not problems, (resp.text, problems)
+    finally:
+        settle(served)
+        served.close()
+
+
+def test_the_runner_a_request_started_does_not_outlive_its_app():
+    """No runner thread survives its server: the app's shutdown stops the
+    runner ``POST /sim/start`` started, without the test's help."""
+    served = serve()
+    try:
+        assert served.client.post("/sim/start").status_code == 200
+        runner = served.server.runner
+        assert runner is not None and runner.is_alive
+    finally:
+        served.close()
+    assert not runner.is_alive and served.server.runner is None
 
 
 # ---------------------------------------------------------------------------

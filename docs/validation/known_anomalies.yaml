@@ -14798,7 +14798,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-218"
-    title: "A step that changed the shape of a state leaf was stored silently, and POST /graph/nodes accepted a node that does so or that the graph cannot step"
+    title: "GraphManager.step, run and run_adaptive store a step that changed the shape of a state leaf"
     description: >
       A node whose `update` returns a leaf of another shape than its
       `initial_state()` built broadcasts that leaf at its first step: a
@@ -14808,65 +14808,56 @@ anomalies:
       `RigidBody2DNode.initial_omega`, `RigidBodyNode.gravity` as a nested
       list), or a vector delivered by an edge into a scalar field that
       declares no shape.  `GraphManager.step`, `run` and `run_adaptive`
-      stored the result without a word, in every release since 0.1.0.  The
-      state then no longer had the layout of `initial_state()`: a
-      checkpoint saved after the step was refused by the same graph after
-      `reset_state()` and by the graph rebuilt from `to_dict()`.
-      `run_scan`, `run_scan_with_history` and `run_adaptive_scan` have
-      always refused such a graph, loudly (a scan carry of another type).
+      store the result without a word, as in every release since 0.1.0.
+      The state then no longer has the layout of `initial_state()`: a
+      checkpoint saved after the step is refused by the same graph after
+      `reset_state()` and by the graph rebuilt from `to_dict()` ("Checkpoint
+      field 'b/position' has shape (2,), graph has ()").  `run_scan`,
+      `run_scan_with_history` and `run_adaptive_scan` have always refused
+      such a graph, loudly (a scan carry of another type).
 
-      Over REST, `POST /graph/nodes` constructed the node and added it
-      (0.1.0 to 0.3.1); during 0.4.0's development it traced one `update`
-      first, but without the params pytree and discarding what the update
-      returned.  So the list above was a 201, and so was a constant the
-      step reads from the params pytree and cannot use (`HeartPumpNode`
-      `venous_pressure: null` or `{}`), after which every `POST /sim/step`
-      was a 400 until the node was deleted while `POST /graph/compile`
-      answered 200.  `PUT /graph/params` refused each of these values.
-
-      Fixed as one class.  `step`, `run` and `run_adaptive` compare the
-      stepped state's keys and shapes with the state it replaces, once per
-      compile and host-side (no trace, no change to the compiled step),
-      and raise `ValueError` naming `node/field`; nothing is stored.
-      `POST /graph/nodes` traces one update the way the graph calls it
+      Over REST the same nodes were accepted by `POST /graph/nodes` in
+      0.1.0 to 0.3.1, which constructed the node and added it.  That door
+      is closed in 0.4.0: one update is traced the way the graph calls it
       (the params pytree injected, with every declared boundary input and
-      with none) and holds what it returns to the node's initial state by
-      the same comparison, plus the kind of each dtype; a mismatch or a
-      trace failure is a 400 that names the parameter it is told from, and
-      nothing is added.
+      with none) and held to the fields, shapes and kinds of dtype of the
+      node's initial state; a mismatch or a trace failure is a 400 that
+      names the parameter, and nothing is added.  A constant the step
+      cannot use (`HeartPumpNode` `venous_pressure: null`), after which
+      every `POST /sim/step` answered 400, is refused there too.
+
+      In process the step entry points are unchanged.  A check of the
+      stepped state's keys and shapes in `step` (once per compile,
+      host-side) was written and withdrawn: it refuses the fixture the
+      compile-count gate's own tests use to provoke a retrace
+      (`tests/core/test_compile_counts.py`, a state that grows on its
+      first step), so it waits for a decision on that fixture.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      `major`: the step's values were the broadcast of correct values, but
-      the state silently stopped being the one `initial_state()`,
+      `major`: the step's values are the broadcast of correct values, but
+      the state silently stops being the one `initial_state()`,
       `reset_state()`, `load_state()` and `to_dict()` describe, so a saved
-      run could not be restored, and a caller reading a scalar field
-      received an array.  Whether that matters depends on what consumes the
-      state.
+      run cannot be restored, and a caller reading a scalar field receives
+      an array.  Whether that matters depends on what consumes the state.
     affected_components:
       - "maddening.core.graph_manager.GraphManager.step"
       - "maddening.core.graph_manager.GraphManager.run"
       - "maddening.core.graph_manager.GraphManager.run_adaptive"
-      - "maddening.api.server (POST /graph/nodes)"
-    affected_versions: ">=0.1.0, <0.4.0"
+    affected_versions: ">=0.1.0"
     workaround: >
-      On an affected version, give a node's constants the rank its state
-      has, and advance a graph you have not checked with `run_scan`, which
-      refuses a step that changes the state's layout.
-    resolution_status: "resolved"
-    resolution_version: "0.4.0"
-    residual_risk: >
-      In-process `add_node` still accepts any node: the refusal comes at
-      the first step, by name.  The step's comparison is of keys and shapes;
-      a dtype that changes width across a step (every stock node's `float32`
-      state under `jax_enable_x64`) is not refused, there or at the REST
-      door, which compares the kind of dtype only.  A node whose update
-      needs a boundary input it declares is still accepted over REST and
-      cannot step until its edge is added (the step says so).
+      Give a node's constants the rank its state has (a scalar for a scalar
+      field), and advance a graph you have not checked with `run_scan`,
+      which refuses a step that changes the state's layout.  Over REST,
+      0.4.0 refuses such a node where it is added.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
     verification:
-      - "tests/core/test_a_step_keeps_the_state_layout.py::test_a_step_that_changes_a_leafs_shape_is_refused_by_name_and_stores_nothing"
-      - "tests/core/test_a_step_keeps_the_state_layout.py::test_a_vector_delivered_into_a_scalar_field_is_refused_at_the_step"
+      # A strict xfail: a change that makes the step entry points keep or
+      # refuse the layout is noticed.
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_step_entry_points_keep_the_shape_of_every_state_leaf"
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_scan_entry_points_refuse_a_step_that_changes_a_leafs_shape"
       - "tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_value_of_a_rank_that_reshapes_the_state_at_the_first_step_is_a_400"
-      - "tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_constant_the_step_cannot_read_from_the_params_pytree_is_a_400"
       - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads"
     github_issue: null

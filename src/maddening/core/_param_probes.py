@@ -233,11 +233,13 @@ def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list
     with x64 enabled every stock node's update returns ``float64`` for the
     ``float32`` its ``initial_state()`` builds, and the state reloads.
 
-    The one comparison behind the graph's refusal to store a step that
-    changed its state's layout (:meth:`GraphManager.step`) and the REST
-    server's dry run of a new node (``POST /graph/nodes``).  Host-side: it
-    reads shapes and dtypes, never values, so tracers and the abstract
-    values of :func:`jax.eval_shape` compare like arrays.
+    The comparison behind the REST server's dry run of a new node
+    (``POST /graph/nodes``): a node whose ``update`` returns a leaf of
+    another shape than its ``initial_state()`` built broadcasts it at the
+    first step, and :meth:`GraphManager.step` stores the result
+    (MADD-ANO-218).  Host-side: it reads shapes and dtypes, never values,
+    so tracers and the abstract values of :func:`jax.eval_shape` compare
+    like arrays.
     """
     old = {_leaf_path(p): leaf for p, leaf in jax.tree_util.tree_flatten_with_path(before)[0]}
     new = {_leaf_path(p): leaf for p, leaf in jax.tree_util.tree_flatten_with_path(after)[0]}

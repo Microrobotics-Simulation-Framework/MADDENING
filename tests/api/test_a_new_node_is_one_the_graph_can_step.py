@@ -9,8 +9,7 @@ checkpoint it had just saved -- and a constant the step reads from the
 pytree (``HeartPumpNode`` ``venous_pressure: null``) was a 201 after which
 every step was a 400 until the node was deleted.  ``PUT /graph/params``
 refused both values.  The dry run now traces the update the way the graph
-calls it and compares what it returns with ``initial_state()``, by the
-comparison ``GraphManager.step`` applies to a stepped state.
+calls it and compares what it returns with ``initial_state()``.
 """
 import os
 

@@ -1,15 +1,14 @@
-"""A step leaves the graph's state with the layout it had.
+"""A step should leave the graph's state with the layout it had.
 
 A node whose ``update`` returns a leaf of another shape than its
 ``initial_state()`` built -- a list given for a scalar constant, a vector
 delivered into a scalar field -- broadcasts the leaf at its first step.
-``GraphManager.step``, ``run`` and ``run_adaptive`` stored the result
-without a word, in every release since 0.1.0: a checkpoint saved after the
-step did not load after ``reset_state`` or into the graph rebuilt from
-``to_dict``.  ``run_scan`` and its siblings have always refused it (a scan
-carry of another type).  The step entry points now refuse it by name and
-store nothing; the comparison (``_param_probes._state_layout_drift``) is
-the one the REST server's ``POST /graph/nodes`` dry run uses.
+``run_scan`` and its siblings refuse such a graph (a scan carry of another
+type).  ``GraphManager.step``, ``run`` and ``run_adaptive`` store the
+result without a word, as they have since 0.1.0 (MADD-ANO-218, open): a
+checkpoint saved after the step does not load after ``reset_state``.  The
+REST server refuses such a node where it is added (``POST /graph/nodes``),
+with the comparison tested here (``_param_probes._state_layout_drift``).
 """
 import jax
 import jax.numpy as jnp
@@ -17,30 +16,12 @@ import numpy as np
 import pytest
 
 from maddening.core import _param_probes
+from maddening.core._graph_specs import _NodeSpec
 from maddening.core.graph_manager import GraphManager
-from maddening.core.node import SimulationNode
-from maddening.nodes import BallNode, SpringDamperNode, TableNode
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.nodes import BallNode, HeartPumpNode, SpringDamperNode
 
 DT = 0.01
-
-
-class _Adder(SimulationNode):
-    """A scalar state plus whatever arrives on ``drive`` (no declared
-    shape, so the edge is not held to one)."""
-
-    def initial_state(self):
-        return {"total": jnp.zeros((), jnp.float32)}
-
-    def update(self, state, boundary_inputs, dt):
-        return {"total": state["total"] + boundary_inputs.get("drive", 0.0)}
-
-
-class _Vector(SimulationNode):
-    def initial_state(self):
-        return {"value": jnp.ones((3,), jnp.float32)}
-
-    def update(self, state, boundary_inputs, dt):
-        return state
 
 
 def _broadcasting_ball() -> GraphManager:
@@ -54,23 +35,8 @@ def _shapes(gm: GraphManager) -> dict:
             if isinstance(fields, dict) for key, value in fields.items()}
 
 
-@pytest.mark.parametrize("entry", ["step", "run", "run_adaptive"])
-def test_a_step_that_changes_a_leafs_shape_is_refused_by_name_and_stores_nothing(entry):
-    gm = _broadcasting_ball()
-    shapes = _shapes(gm)
-    call = {"step": gm.step, "run": lambda: gm.run(3),
-            "run_adaptive": lambda: gm.run_adaptive(5 * DT)}[entry]
-    with pytest.raises(ValueError, match=r"'b/position' has shape \(\) before the update "
-                                         r"and \(2,\) after it"):
-        call()
-    assert _shapes(gm) == shapes and float(gm._state["b"]["position"]) == 0.0
-    # ... and again at the next call: the refusal is not spent by raising.
-    with pytest.raises(ValueError, match="b/position"):
-        call()
-
-
 @pytest.mark.parametrize("entry", ["run_scan", "run_scan_with_history", "run_adaptive_scan"])
-def test_the_scan_entry_points_refuse_the_same_graph(entry):
+def test_the_scan_entry_points_refuse_a_step_that_changes_a_leafs_shape(entry):
     gm = _broadcasting_ball()
     shapes = _shapes(gm)
     call = {"run_scan": lambda: gm.run_scan(3),
@@ -81,44 +47,61 @@ def test_the_scan_entry_points_refuse_the_same_graph(entry):
     assert _shapes(gm) == shapes
 
 
-def test_a_vector_delivered_into_a_scalar_field_is_refused_at_the_step():
-    gm = GraphManager()
-    gm.add_node(_Vector("v", DT))
-    gm.add_node(_Adder("a", DT))
-    gm.add_edge("v", "a", "value", "drive")
-    with pytest.raises(ValueError, match=r"'a/total' has shape \(\) .* \(3,\)"):
-        gm.step()
-    assert np.shape(gm._state["a"]["total"]) == ()
-
-
-def test_the_layout_is_asked_once_per_compile_and_adds_no_trace():
-    gm = GraphManager()
-    gm.add_node(SpringDamperNode("s", DT, stiffness=30.0, initial_position=1.0))
-    gm.add_node(TableNode("t", DT))
-    gm.compile()
-    assert gm._layout_check_pending
-    gm.step()
-    assert not gm._layout_check_pending and gm.trace_count == 1
-    gm.step()
-    gm.run(2)
-    assert gm.trace_count == 1
-    # A node added later is asked at the first step of the graph it joins.
-    gm.add_node(BallNode("b", DT, initial_velocity=[1.0, 2.0]))
-    with pytest.raises(ValueError, match="b/position"):
-        gm.step()
-    gm.remove_node("b")
-    gm.step()
-    assert not gm._layout_check_pending
-
-
-def test_a_refused_step_inside_a_transform_is_refused_too():
+@pytest.mark.xfail(strict=True, reason=(
+    "MADD-ANO-218 (open): step, run and run_adaptive store a stepped state whose leaf "
+    "has another shape than the state it replaces; the state no longer has the layout "
+    "of initial_state(), and its checkpoint does not load after a reset"))
+@pytest.mark.parametrize("entry", ["step", "run", "run_adaptive"])
+def test_the_step_entry_points_keep_the_shape_of_every_state_leaf(entry):
     gm = _broadcasting_ball()
+    shapes = _shapes(gm)
+    try:
+        {"step": gm.step, "run": lambda: gm.run(3),
+         "run_adaptive": lambda: gm.run_adaptive(5 * DT)}[entry]()
+    except (ValueError, TypeError):
+        pass                    # a refusal that stores nothing would do
+    assert _shapes(gm) == shapes
 
-    def loss(g):
-        return jnp.sum(gm.step(params={"nodes": {"b": {"gravity": g}}})["b"]["position"])
 
-    with pytest.raises(ValueError, match="b/position"):
-        jax.grad(loss)(jnp.float32(-9.81))
+def _drift(node: SimulationNode, boundary_inputs=None, **kw) -> list:
+    spec = _NodeSpec(node=node, update_fn=node.update, timestep=node.delta_t,
+                     accepts_params=True)
+    return _param_probes._node_update_layout_drift(
+        spec, node.initial_state(), node.params_pytree(), boundary_inputs, **kw)
+
+
+def test_one_update_traced_as_the_graph_calls_it_is_compared_with_the_initial_state():
+    assert _drift(BallNode("b", DT)) == []
+    assert _drift(SpringDamperNode("s", DT, stiffness=3.0)) == []
+    (found,) = _drift(BallNode("b", DT, initial_velocity=[1.0, 2.0]))
+    assert found == "'position' has shape () before the update and (2,) after it"
+    # With no boundary input, as the graph steps a node that has no edge:
+    # the pump then reads the constant an input would have replaced.
+    pump = HeartPumpNode("h", DT, venous_pressure=[0.0, 0.0])
+    assert _drift(pump) == []
+    assert any("'arterial_pressure' has shape ()" in f for f in _drift(pump, {}))
+    # Nothing is computed: the trace is abstract, so no value is read.
+    assert _drift(BallNode("b", DT, initial_position=float("nan"))) == []
+
+
+class _Adder(SimulationNode):
+    def initial_state(self):
+        return {"total": jnp.zeros((), jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"total": state["total"] + boundary_inputs["drive"]}
+
+    def boundary_input_spec(self):
+        return {"drive": BoundaryInputSpec(shape=(3,), description="a vector")}
+
+
+def test_the_declared_boundary_inputs_are_delivered_at_their_declared_shapes():
+    """A vector delivered into a scalar field is found from the node's own
+    declaration, and a trace failure is the caller's to judge."""
+    (found,) = _drift(_Adder("a", DT))
+    assert "'total' has shape () before the update and (3,) after it" == found
+    with pytest.raises(KeyError):
+        _drift(_Adder("a", DT), {})
 
 
 def test_the_comparison_names_every_kind_of_difference():

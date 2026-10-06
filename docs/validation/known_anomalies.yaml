@@ -13435,7 +13435,7 @@ anomalies:
       - "tests/core/test_mapping_registry.py::test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took"
       - "tests/core/test_registered_mapping_in_every_domain.py::test_a_weight_that_is_not_a_finite_floating_jax_array_is_refused_in_float64_too"
     github_issue: null
-  - anomaly_id: "MADD-ANO-197"
+  - anomaly_id: "MADD-ANO-202"
     title: "The fitters evaluated their objective at parameters other than the ones they returned: under a logit or offset log transform with bounds wide beside the value, best_loss was another point's loss, and a leaf left out of the fit was run perturbed"
     description: >
       `fit`, `fit_lm` and `fit_multiple_shooting` mapped their optimiser
@@ -13515,7 +13515,7 @@ anomalies:
       - "tests/property/test_sysid_one_evaluation.py::test_best_loss_is_the_loss_of_the_parameters_returned_under_a_wide_logit"
       - "tests/property/test_sysid_one_evaluation.py::test_a_value_its_transform_cannot_resolve_is_named_at_the_start_of_the_fit"
     github_issue: null
-  - anomaly_id: "MADD-ANO-198"
+  - anomaly_id: "MADD-ANO-203"
     title: "Assigning node.params a mapping reverted every other calibrated constant of the node to the node's own value"
     description: >
       `node.params = {**node.params, "k": v}` -- the documented way to

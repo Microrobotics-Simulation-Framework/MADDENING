@@ -36,6 +36,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import ast
 import functools
+import inspect
 import pathlib
 
 import jax.numpy as jnp
@@ -55,6 +56,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.node import (
     SimulationNode,
     _method_accepts_params,
+    _named_where_no_keyword_reaches,
     _signature_required_arguments,
     _signature_takes_keyword,
     _signature_takes_params,
@@ -103,9 +105,16 @@ def _legacy(method):
     return hook
 
 
-def _positional_only(method):
+def _positional_only_params(method):
     """Names ``params``, where no keyword reaches it."""
     def hook(self, a, b, c, params=None, /):
+        return _impl(self, method, a, b, c, params=params)
+    return hook
+
+
+def _positional_only_required(method):
+    """Positional-only and without a default."""
+    def hook(self, a, b, c, params, /):
         return _impl(self, method, a, b, c, params=params)
     return hook
 
@@ -161,7 +170,7 @@ _CLASS_SPELLINGS = {
     "var_keyword": _var_keyword,
     "no_wraps": lambda m: _no_wraps(_explicit(m)),
     "legacy": _legacy,
-    "positional_only": _positional_only,
+    "positional_only": _positional_only_params,
     "var_positional_named_params": _var_positional_named_params,
     "positional_only_beside_var_keyword": _positional_only_beside_var_keyword,
 }
@@ -298,6 +307,34 @@ def _node_probe(fn):
     return lambda kind, spelling: fn(_make(kind, spelling))
 
 
+class _Door:
+    """A probe that hands the node to a graph or to a wrapper, where the
+    others only ask.  A hook that names ``params`` where no keyword
+    reaches it is refused at every door, and answered ``False`` by every
+    probe that only asks."""
+
+    def __init__(self, probe):
+        self.probe = probe
+
+    def __call__(self, kind, spelling):
+        return self.probe(kind, spelling)
+
+
+#: The spellings of ``_CLASS_SPELLINGS`` a door refuses.
+_NO_KEYWORD_REACHES = ("positional_only", "var_positional_named_params")
+_REFUSED = "refused: names `params` where no keyword reaches it"
+
+
+def _ask(probe, kind, spelling):
+    """The probe's answer, or ``_REFUSED`` for the refusal by name."""
+    try:
+        return probe(kind, spelling)
+    except ValueError as exc:
+        if "names `params`" not in str(exc) or "where no keyword reaches it" not in str(exc):
+            raise
+        return _REFUSED
+
+
 PROBES = {
     "update": {
         "SimulationNode.accepts_params": lambda kind, s: (
@@ -305,55 +342,55 @@ PROBES = {
         "_method_accepts_params": _node_probe(lambda n: _method_accepts_params(n, "update")),
         "_signature_takes_params": _node_probe(lambda n: _signature_takes_params(n.update)),
         "graph _update_accepts_params": _node_probe(gm_mod._update_accepts_params),
-        "graph add_node spec": _graph_spec("accepts_params"),
-        "graph nodes_without_params": lambda kind, s: (
+        "graph add_node spec": _Door(_graph_spec("accepts_params")),
+        "graph nodes_without_params": _Door(lambda kind, s: (
             lambda gm: (gm.add_node(_make(kind, s)), "n" not in gm.nodes_without_params())[1]
-        )(GraphManager()),
+        )(GraphManager())),
         "sharded_node _accepts_params": _node_probe(sn_mod._accepts_params),
-        "ShardedPointwiseNode.accepts_params": lambda kind, s: ShardedPointwiseNode(
-            _make(kind, s, halo=False), _MESH).accepts_params(),
-        "HybridNode.accepts_params": _node_probe(
-            lambda n: HybridNode(n, lambda *a: {}).accepts_params()),
-        "HybridNode forwards": _hybrid_forwards("update"),
+        "ShardedPointwiseNode.accepts_params": _Door(lambda kind, s: ShardedPointwiseNode(
+            _make(kind, s, halo=False), _MESH).accepts_params()),
+        "HybridNode.accepts_params": _Door(_node_probe(
+            lambda n: HybridNode(n, lambda *a: {}).accepts_params())),
+        "HybridNode forwards": _Door(_hybrid_forwards("update")),
         # Through a wrapper that answers for what it wraps: a probe that
         # read the wrapper's own signature (explicit ``params``) instead of
         # asking it would say True for a legacy inner node.
-        "HybridNode(ShardedPointwiseNode).accepts_params": lambda kind, s: HybridNode(
+        "HybridNode(ShardedPointwiseNode).accepts_params": _Door(lambda kind, s: HybridNode(
             ShardedPointwiseNode(_make(kind, s, halo=False), _MESH), lambda *a: {},
-        ).accepts_params(),
-        "graph add_node spec of ShardedPointwiseNode": lambda kind, s: (
+        ).accepts_params()),
+        "graph add_node spec of ShardedPointwiseNode": _Door(lambda kind, s: (
             lambda gm: (gm.add_node(ShardedPointwiseNode(_make(kind, s, halo=False), _MESH)),
                         gm._nodes["n"].accepts_params)[1]
-        )(GraphManager()),
+        )(GraphManager())),
         "verification _node_accepts_params": _node_probe(ver_mod._node_accepts_params),
-        "REST pre-compile probe": _server_treats_as_params_node,
+        "REST pre-compile probe": _Door(_server_treats_as_params_node),
     },
     "update_padded": {
         "_method_accepts_params": _node_probe(lambda n: _method_accepts_params(n, "update_padded")),
         "_signature_takes_params": _node_probe(lambda n: _signature_takes_params(n.update_padded)),
-        "ShardedStencilNode.accepts_params": _node_probe(
-            lambda n: ShardedStencilNode(n, _MESH, {"devices": 0}).accepts_params()),
+        "ShardedStencilNode.accepts_params": _Door(_node_probe(
+            lambda n: ShardedStencilNode(n, _MESH, {"devices": 0}).accepts_params())),
         # Built without a Cartesian halo: ShardedUnstructuredNode refuses a
         # node that declares one (it hands update_padded the partition
         # layout, not [halo | interior | halo]).
-        "ShardedUnstructuredNode.accepts_params": lambda kind, s: ShardedUnstructuredNode(
-            _make(kind, s, halo=False), _MESH, _LAYOUT).accepts_params(),
-        "ShardedUnstructuredNode params_pytree": lambda kind, s: bool(ShardedUnstructuredNode(
-            _make(kind, s, halo=False), _MESH, _LAYOUT).params_pytree()),
+        "ShardedUnstructuredNode.accepts_params": _Door(lambda kind, s: ShardedUnstructuredNode(
+            _make(kind, s, halo=False), _MESH, _LAYOUT).accepts_params()),
+        "ShardedUnstructuredNode params_pytree": _Door(lambda kind, s: bool(
+            ShardedUnstructuredNode(_make(kind, s, halo=False), _MESH, _LAYOUT).params_pytree())),
     },
     "compute_boundary_fluxes": {
         "_method_accepts_params": _node_probe(
             lambda n: _method_accepts_params(n, "compute_boundary_fluxes")),
         "graph _flux_accepts_params": _node_probe(gm_mod._flux_accepts_params),
-        "graph add_node spec": _graph_spec("flux_accepts_params"),
+        "graph add_node spec": _Door(_graph_spec("flux_accepts_params")),
         "verification _flux_accepts_params": _node_probe(ver_mod._flux_accepts_params),
-        "HybridNode forwards": _hybrid_forwards("compute_boundary_fluxes"),
+        "HybridNode forwards": _Door(_hybrid_forwards("compute_boundary_fluxes")),
     },
     "compute_interface_correction": {
         "_method_accepts_params": _node_probe(
             lambda n: _method_accepts_params(n, "compute_interface_correction")),
         "graph _correction_accepts_params": _node_probe(gm_mod._correction_accepts_params),
-        "HybridNode forwards": _hybrid_forwards("compute_interface_correction"),
+        "HybridNode forwards": _Door(_hybrid_forwards("compute_interface_correction")),
     },
 }
 
@@ -362,9 +399,17 @@ PROBES = {
 @pytest.mark.parametrize("kind, spelling", SPELLINGS, ids=[f"{k}-{s}" for k, s in SPELLINGS])
 def test_every_params_probe_agrees_with_what_the_hook_receives(kind, spelling, method):
     truth = _delivers(_make(kind, spelling), method)
-    answers = {name: probe(kind, spelling) for name, probe in PROBES[method].items()}
+    answers = {name: _ask(probe, kind, spelling) for name, probe in PROBES[method].items()}
     answers = {name: a for name, a in answers.items() if a is not None}
-    wrong = {name: a for name, a in answers.items() if bool(a) is not truth}
+    # Every hook of these nodes has the one spelling, so for a ``params``
+    # no keyword reaches each door refuses the node -- and nothing else
+    # does, for that spelling or any other.
+    doors = {name for name, probe in PROBES[method].items() if isinstance(probe, _Door)}
+    refused = {name for name, a in answers.items() if a is _REFUSED}
+    assert refused == (doors if spelling in _NO_KEYWORD_REACHES else set()), (
+        f"{kind} {spelling} {method}(): refused by {sorted(refused)}")
+    wrong = {name: a for name, a in answers.items()
+             if a is not _REFUSED and bool(a) is not truth}
     assert not wrong, (
         f"{kind} {spelling} {method}(): calling it with params= "
         f"{'delivers' if truth else 'does not deliver'} them, but {wrong}"
@@ -424,40 +469,175 @@ def test_the_keyword_rule_answers_what_a_call_with_the_keyword_does(fn, call):
     except TypeError:
         accepted = False
     assert _signature_takes_keyword(fn, "a") is accepted
+    # ... and the refusal built on it: only for a signature that holds the
+    # name, and never where the call with the keyword is accepted.
+    holds_the_name = "a" in inspect.signature(fn).parameters
+    assert (_named_where_no_keyword_reaches(fn, "a") is not None) is (
+        holds_the_name and not accepted)
 
 
-def test_a_node_whose_update_names_params_positional_only_runs_as_a_node_without_params():
-    """What the corrected answer means for a graph.  The node below used
-    to fail its first step with ``TypeError: ... got some positional-only
-    arguments passed as keyword arguments: 'params'``.  It is a node that
-    takes no ``params`` keyword: it steps on its constructor constants,
-    it has no entry in ``gm.params``, and a pytree that names it is
-    refused by the contract's own message."""
+# ------------------------------------------------------------------
+# A hook that names ``params`` where no keyword reaches it is refused
+# where its node is handed over.  ``False`` above is the right answer to
+# "would the keyword deliver", and the wrong thing to act on: called
+# without the value, a node that plainly means to take ``params`` would
+# run on its constructor's constants with every write to ``gm.params``
+# ignored.  Every release raised ``TypeError`` from the first trace.
+# ------------------------------------------------------------------
 
-    class PositionalOnly(_Base):
-        def update(self, state, boundary_inputs, dt, params=None, /):
-            assert params is None
-            return {"x": state["x"] * self.params["k"]}
+_UNREACHABLE_FORMS = {
+    "positional_only_with_a_default": (_positional_only_params, "as a positional-only parameter"),
+    "positional_only_required": (_positional_only_required, "as a positional-only parameter"),
+    "var_positional": (_var_positional_named_params, r"as its \*args"),
+}
+_GRAPH_HOOKS = ("update", "compute_boundary_fluxes", "compute_interface_correction")
+_PADDED_HOOKS = ("update_padded", "compute_boundary_fluxes", "compute_interface_correction")
+#: door -> (hand the node over, built with a halo?, the hooks it hands ``params`` to)
+_HANDOVERS = {
+    "GraphManager.add_node": (lambda node: GraphManager().add_node(node), True, _GRAPH_HOOKS),
+    "ShardedPointwiseNode": (lambda node: ShardedPointwiseNode(node, _MESH), False, _GRAPH_HOOKS),
+    "HybridNode": (lambda node: HybridNode(node, lambda *a: {}), True, _GRAPH_HOOKS),
+    "ShardedStencilNode": (
+        lambda node: ShardedStencilNode(node, _MESH, {"devices": 0}), True, _PADDED_HOOKS),
+    "ShardedUnstructuredNode": (
+        lambda node: ShardedUnstructuredNode(node, _MESH, _LAYOUT), False, ("update_padded",)),
+}
+_HANDOVER_CASES = [(door, hook) for door, (_, _, hooks) in _HANDOVERS.items() for hook in hooks]
 
+
+def _one_hook(kind, hook, build, *, halo=True):
+    """A node whose hooks all take ``params`` by keyword, except *hook*."""
+    base = _Base if kind == "node" else _Duck
+    methods = {m: _explicit(m) for m in METHODS}
+    methods[hook] = build(hook)
+    return type(f"{kind}_one_{hook}", (base,), methods)(halo=halo)
+
+
+@pytest.mark.parametrize("kind", ["node", "duck"])
+@pytest.mark.parametrize("form", list(_UNREACHABLE_FORMS))
+@pytest.mark.parametrize("door, hook", _HANDOVER_CASES, ids=[f"{d}:{h}" for d, h in _HANDOVER_CASES])
+def test_a_hook_naming_params_where_no_keyword_reaches_is_refused_where_its_node_is_handed_over(
+        door, hook, form, kind):
+    """One hook at a time, the others taking ``params`` by keyword: the
+    graph, and each wrapper for the node it wraps, refuses by name -- the
+    node, the hook, how it names ``params`` and what to write instead."""
+    hand_over, halo, _ = _HANDOVERS[door]
+    build, how = _UNREACHABLE_FORMS[form]
+    hand_over(_one_hook(kind, hook, _explicit, halo=halo))        # the same node, spelt right
+    node = _one_hook(kind, hook, build, halo=halo)
+    with pytest.raises(ValueError, match=(
+            rf"Node 'n': {type(node).__name__}\.{hook}\(\) names `params` {how}, where no "
+            r"keyword reaches it, .*Accept `params` as a keyword argument")):
+        hand_over(node)
+
+
+def test_a_refused_node_leaves_the_graph_as_it_was_and_its_name_free():
     gm = GraphManager()
-    gm.add_node(PositionalOnly(halo=False))
+    with pytest.raises(ValueError, match="names `params` as a positional-only parameter"):
+        gm.add_node(_one_hook("node", "update", _positional_only_params, halo=False))
+    assert not gm._nodes and "n" not in gm._state
+    gm.add_node(_one_hook("node", "update", _explicit, halo=False))
     gm.compile()
     gm.step()
-    np.testing.assert_array_equal(np.asarray(gm.get_node_state("n")["x"]), 2.0 * np.ones(N))
-    assert "n" not in gm.params.get("nodes", {})
-    assert "n" in gm.nodes_without_params()
-    with pytest.raises(ValueError, match="takes no 'params' keyword"):
-        gm.step(params={"nodes": {"n": {"k": jnp.float32(3.0)}}})
+    assert "n" in gm.params["nodes"]
 
-    class Required(_Base):
-        def update(self, state, boundary_inputs, dt, params, /):
-            return dict(state)
 
-    gm = GraphManager()
-    gm.add_node(Required(halo=False))
-    with pytest.raises(TypeError, match="missing 1 required positional argument: 'params'"):
+@pytest.mark.parametrize("door", ["GraphManager.add_node", "ShardedPointwiseNode", "HybridNode",
+                                  "ShardedStencilNode"])
+@pytest.mark.parametrize("hook", ["compute_boundary_fluxes", "compute_interface_correction"])
+def test_a_node_without_params_may_name_them_anywhere_on_a_hook_that_is_never_handed_them(
+        door, hook):
+    """The refusal is for what used to raise, and no wider.  A node whose
+    ``update`` takes no ``params`` has no entry in ``gm.params``, so its
+    flux and correction hooks are never handed any: one that names
+    ``params`` positional-only there ran in every release, and runs."""
+    hand_over, halo, hooks = _HANDOVERS[door]
+    methods = {m: _legacy(m) for m in METHODS}
+    methods[hook] = _positional_only_params(hook)
+    node = type("legacy_update", (_Base,), methods)(halo=halo)
+    hand_over(node)
+    assert not _method_accepts_params(node, hooks[0])
+    if door == "GraphManager.add_node":
+        gm = GraphManager()
+        gm.add_node(node)
         gm.compile()
         gm.step()
+        assert gm.nodes_without_params() == ["n"] and "n" not in gm.params.get("nodes", {})
+
+
+def _static_padded_positional_only(self, padded, boundary_inputs, dt, static_padded=None, /,
+                                   *, params=None):
+    return dict(padded)
+
+
+def _shard_info_positional_only(self, padded, boundary_inputs, dt, shard_info=None, /,
+                                *, params=None):
+    return dict(padded)
+
+
+@pytest.mark.parametrize("keyword, update_padded", [
+    ("static_padded", _static_padded_positional_only),
+    ("shard_info", _shard_info_positional_only),
+])
+def test_the_stencil_wrapper_refuses_its_own_keywords_where_no_keyword_reaches_them(
+        keyword, update_padded):
+    """``ShardedStencilNode`` reads the same rule for ``static_padded`` and
+    ``shard_info``: named positional-only, each was answered "not taken"
+    and the inner ``update_padded`` called without it."""
+    node = type("inner", (_Base,), {"update": _explicit("update"),
+                                    "update_padded": update_padded})()
+    with pytest.raises(ValueError, match=(
+            rf"Node 'n': inner\.update_padded\(\) names `{keyword}` as a positional-only "
+            rf"parameter, .*ShardedStencilNode passes it as `{keyword}=\.\.\.`")):
+        ShardedStencilNode(node, _MESH, {"devices": 0})
+    ShardedStencilNode(                     # the same node with the keyword reachable
+        type("inner", (_Base,), {"update": _explicit("update"),
+                                 "update_padded": _explicit("update_padded")})(),
+        _MESH, {"devices": 0})
+
+
+def test_the_battery_fails_a_node_the_graph_refuses_where_it_skips_one_without_params():
+    """``SKIP`` counts as passed, so the three params checks may not
+    answer it for a node no graph would take."""
+    checks = ["params_consistent", "params_gradient_finite", "params_effective"]
+    refused = ver_mod.verify_node(
+        _one_hook("node", "update", _positional_only_params, halo=False), {"x": (-1.0, 1.0)},
+        checks=checks, max_examples=20, derandomize=True)
+    for name in checks:
+        assert refused[name].status == "FAIL", refused[name]
+        assert "names `params` as a positional-only parameter" in refused[name].detail
+    legacy = ver_mod.verify_node(
+        _make("node", "legacy", halo=False), {"x": (-1.0, 1.0)},
+        checks=checks, max_examples=20, derandomize=True)
+    assert {legacy[name].status for name in checks} == {"SKIP"}
+
+
+class _PositionalOnlyOverRest(SimulationNode):
+    """Built the way ``POST /graph/nodes`` builds a node."""
+
+    def __init__(self, name, timestep, k=2.0):
+        super().__init__(name, timestep, k=k)
+
+    def initial_state(self):
+        return dict(STATE)
+
+    def update(self, state, boundary_inputs, dt, params=None, /):
+        return dict(state)
+
+
+def test_the_rest_route_answers_the_refusal_and_adds_nothing():
+    """The route's dry run calls ``update`` without ``params``, so the node
+    passed it, was added, and every step after answered 400."""
+    gm = GraphManager()
+    client = TestClient(
+        SimulationServer(node_registry={"Odd": _PositionalOnlyOverRest},
+                         graph_manager=gm).create_app(),
+        raise_server_exceptions=False)
+    resp = client.post("/graph/nodes", json={"type": "Odd", "name": "n", "timestep": 0.1})
+    assert resp.status_code == 400, resp.text
+    assert "_PositionalOnlyOverRest.update() names `params`" in resp.json()["detail"]
+    assert "Accept `params` as a keyword argument" in resp.json()["detail"]
+    assert not gm._nodes
 
 
 def test_verify_node_runs_the_params_checks_on_a_duck_typed_params_node():
@@ -497,6 +677,12 @@ _ALLOWED = {
     # ``core/node.py`` so that one module still holds every signature read
     # behind a keyword decision.
     ("core/node.py", "_signature_required_arguments"),
+    # Not a second keyword rule either: it asks ``_signature_takes_keyword``
+    # first and answers only where that said ``False`` -- *how* the
+    # signature holds the name (positional-only, ``*args``) or that it does
+    # not, for the refusal of a hook that names ``params`` where no keyword
+    # reaches it.  The test below the matrix holds the two to each other.
+    ("core/node.py", "_named_where_no_keyword_reaches"),
 }
 
 
@@ -537,8 +723,8 @@ def test_only_the_shared_helper_reads_a_signature():
     rule got into ``ShardedUnstructuredNode`` and the duck-typed
     fallbacks.  Every reader goes through
     ``core/node.py::_signature_takes_keyword``; ``_ALLOWED`` says what the
-    two other reads are for, and neither decides whether a callable takes
-    a keyword."""
+    three other reads are for, and none of them decides whether a callable
+    takes a keyword."""
     reads = _signature_reads()
     assert set(reads) <= _ALLOWED, sorted(set(reads) - _ALLOWED)
     assert ("core/node.py", "_signature_takes_keyword") in reads

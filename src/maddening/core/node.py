@@ -424,9 +424,11 @@ def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
     name alone answered ``True`` for those, so the caller passed the
     keyword and Python raised ``TypeError`` -- from inside the first
     trace of a step, for a node.  The answer is now the one the question
-    has: such a hook takes no ``params`` keyword, and is treated as any
-    hook that does not (a node whose ``update`` needs the argument still
-    fails when it is called without it).
+    has, and it is only an answer: a hook that holds the name where no
+    keyword reaches it is not thereby a hook without the keyword.  The
+    callers that would otherwise run it without the value refuse it
+    instead (:func:`_refuse_keyword_no_keyword_reaches`, when a node is
+    added to a graph or wrapped; the mapping registry, at registration).
     """
     try:
         sig = inspect.signature(fn)
@@ -437,6 +439,87 @@ def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
             inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
         return True
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
+def _named_where_no_keyword_reaches(fn: Any, keyword: str) -> Optional[str]:
+    """How ``fn`` holds the name ``keyword`` where ``fn(..., <keyword>=x)``
+    cannot deliver ``x`` -- ``"as a positional-only parameter"`` or
+    ``"as its *args"`` -- or ``None``.
+
+    Not a second keyword rule: :func:`_signature_takes_keyword` is asked
+    first, and wherever it answers ``True`` this is ``None`` -- a keyword
+    reaches the name, or ``**kwargs`` takes it beside a positional-only
+    parameter of the same name.  Of the signatures it answers ``False``
+    for, this tells the one that holds the name from the one that never
+    mentions it (``None``, like a signature that cannot be inspected).
+    """
+    if _signature_takes_keyword(fn, keyword):
+        return None
+    try:
+        named = inspect.signature(fn).parameters.get(keyword)
+    except (TypeError, ValueError):
+        return None
+    if named is None:
+        return None
+    if named.kind is inspect.Parameter.POSITIONAL_ONLY:
+        return "as a positional-only parameter"
+    if named.kind is inspect.Parameter.VAR_POSITIONAL:
+        return "as its *args"
+    return None
+
+
+def _refuse_keyword_no_keyword_reaches(
+        node: Any, method: str, keyword: str = "params", *, caller: str = "the graph") -> None:
+    """Raise ``ValueError`` when ``node.<method>`` holds the name
+    ``keyword`` where no keyword reaches it
+    (:func:`_named_where_no_keyword_reaches`).
+
+    *caller* passes the hook that value as ``<keyword>=...``.  Until 0.4.0
+    shipped it did so for such a hook too, and Python raised ``TypeError``
+    from inside the first trace.  Answering "takes no such keyword" there
+    and calling the hook without the value would have been quieter and
+    worse: a node that plainly means to take ``params`` would run on its
+    constructor's constants, with every value written to ``gm.params``
+    ignored.  So it is refused where the node is handed over, by name.
+    """
+    fn = getattr(node, method, None)
+    if fn is None:
+        return
+    how = _named_where_no_keyword_reaches(fn, keyword)
+    if how is None:
+        return
+    raise ValueError(
+        f"Node {getattr(node, 'name', None)!r}: {type(node).__name__}.{method}() names "
+        f"`{keyword}` {how}, where no keyword reaches it, and {caller} passes it as "
+        f"`{keyword}=...`.  Accept `{keyword}` as a keyword argument (`{keyword}=None` "
+        f"with no `/` after it), or give the parameter another name if {method}() is "
+        f"not meant to receive it."
+    )
+
+
+#: The hooks, beside ``update``, that are handed the node's entry of the
+#: params pytree when the node has one.
+_PARAMS_COUPLING_HOOKS = ("compute_boundary_fluxes", "compute_interface_correction")
+
+
+def _refuse_params_no_keyword_reaches(
+        node: Any, update: str = "update", *, caller: str = "the graph") -> None:
+    """:func:`_refuse_keyword_no_keyword_reaches` for ``params``, on every
+    hook of *node* that would be handed them.
+
+    ``update`` (``update_padded`` for a node wrapped for sharding) always:
+    it is what decides whether the node has an entry in ``gm.params``.
+    The flux and interface-correction hooks when ``update`` takes
+    ``params``: only then is there an entry to hand them, and a hook
+    called without it would compute from the constructor's constants
+    beside an ``update`` on the calibrated ones.  A node whose ``update``
+    takes no ``params`` is never passed any, so what its other hooks name
+    is its own business, as it was in every release.
+    """
+    _refuse_keyword_no_keyword_reaches(node, update, caller=caller)
+    if _method_accepts_params(node, update):
+        for hook in _PARAMS_COUPLING_HOOKS:
+            _refuse_keyword_no_keyword_reaches(node, hook, caller=caller)
 
 
 def _signature_required_arguments(fn: Any) -> Optional[dict[str, bool]]:

@@ -56,7 +56,12 @@ from maddening.cloud.multigpu.halo_unstructured import (
 from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode, _detached_config, _method_accepts_params
+from maddening.core.node import (
+    SimulationNode,
+    _detached_config,
+    _method_accepts_params,
+    _refuse_keyword_no_keyword_reaches,
+)
 from maddening.core.static_data import StaticArray
 
 
@@ -295,7 +300,10 @@ class ShardedUnstructuredNode(SimulationNode):
         # inner ``update_padded(..., **kwargs)`` that ``ShardedStencilNode``
         # calibrates silently left ``gm.params`` here, and
         # ``step(params=...)`` refused it with a false "takes no 'params'
-        # keyword".
+        # keyword".  An ``update_padded`` that names ``params`` where no
+        # keyword reaches it is refused rather than run without them.
+        _refuse_keyword_no_keyword_reaches(
+            node, "update_padded", caller="ShardedUnstructuredNode")
         self._inner_accepts_params = _method_accepts_params(node, "update_padded")
         self._mesh = mesh
         self._mesh_axis = mesh_axis

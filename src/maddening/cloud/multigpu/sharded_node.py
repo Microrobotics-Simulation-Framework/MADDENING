@@ -46,6 +46,8 @@ from maddening.core.node import (
     BoundaryFluxSpec,  # noqa: F401 - named by boundary_flux_spec's annotation
     SimulationNode,
     _method_accepts_params,
+    _refuse_keyword_no_keyword_reaches,
+    _refuse_params_no_keyword_reaches,
     _signature_takes_keyword,
 )
 from maddening.core.static_data import StaticArray, coerce_static_data_value
@@ -333,7 +335,11 @@ class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
         self._n_devices = int(mesh.shape[_MESH_AXIS])
         self._validate_state_divisible(node)
         # Graph parameter contract: the wrapper is a params node exactly
-        # when the node it wraps is one.
+        # when the node it wraps is one.  A hook that names ``params``
+        # where no keyword reaches it is refused, as the graph refuses it
+        # for the node unwrapped: answered "takes none", the node would
+        # run on its constructor's constants.
+        _refuse_params_no_keyword_reaches(node, caller="ShardedPointwiseNode")
         self._inner_accepts_params = _accepts_params(node)
 
     def _validate_state_divisible(self, node: SimulationNode) -> None:
@@ -712,7 +718,14 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         # nodes do not.  If the node has sharded statics declared but
         # its signature does not accept `static_padded`, that is a
         # contract violation and we raise here rather than at first
-        # trace.
+        # trace.  So is a signature that names one of the three keywords
+        # where no keyword reaches it (``shard_info=None, /``): the hook
+        # plainly means to take it, and would be called without it.
+        for keyword in ("static_padded", "shard_info"):
+            _refuse_keyword_no_keyword_reaches(
+                node, "update_padded", keyword, caller="ShardedStencilNode")
+        _refuse_params_no_keyword_reaches(
+            node, "update_padded", caller="ShardedStencilNode")
         self._inner_accepts_static_padded = _signature_takes_keyword(
             node.update_padded, "static_padded",
         )

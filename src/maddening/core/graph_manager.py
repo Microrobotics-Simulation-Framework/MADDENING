@@ -70,7 +70,7 @@ from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import (
     SimulationNode, _detached_config, _method_accepts_params, _mutable_snapshot,
-    _mutated_keys, _replaced_keys,
+    _mutated_keys, _refuse_params_no_keyword_reaches, _replaced_keys,
 )
 from maddening.core.params import (
     ParamSpec,
@@ -7281,6 +7281,12 @@ class GraphManager:
                 f"referenced from an interface mapping.  A different spelling "
                 f"({node.name.lower()!r}, say) is fine."
             )
+        # A hook that names ``params`` where no keyword reaches it
+        # (``params=None, /`` or ``*params``) is not a node without params:
+        # it would step on its constructor's constants with every write to
+        # ``gm.params`` ignored.  It raised ``TypeError`` at its first
+        # trace in every release; it is refused here, by name.
+        _refuse_params_no_keyword_reaches(node)
 
         spec = _NodeSpec(
             node=node,

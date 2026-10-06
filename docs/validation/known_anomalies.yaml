@@ -12701,6 +12701,7 @@ anomalies:
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_members_the_load_ignores_are_never_read"
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it"
     github_issue: null
+
   - anomaly_id: "MADD-ANO-186"
     title: "A bfloat16 or float16 coupling group's norms and floor were computed in its own dtype: residual 0.0 above 65,504 active entries, inf on a finite state at the default rtol"
     description: >
@@ -13381,4 +13382,286 @@ anomalies:
       - "tests/core/test_mapping_registry.py::test_the_fmu_state_archive_carries_every_allowed_weight_and_installs_none"
       - "tests/core/test_mapping_registry.py::test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took"
       - "tests/core/test_registered_mapping_in_every_domain.py::test_a_weight_that_is_not_a_finite_floating_jax_array_is_refused_in_float64_too"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-197"
+    title: "Restoring an FMU state started the bridge's drift count again at the restored time, so a master that saved and restored between steps was never held to the time-drift bound"
+    description: >
+      The FMU bridge holds the time it reports to the time it has
+      simulated: the start time plus the master steps taken since
+      (`_t_ref`, `_n_ref`), to a millionth of a master step plus a capped
+      rounding slack (MADD-ANO-149, MADD-ANO-168).  `set_state` set that
+      reference to the restored *time* and the count to zero, and the
+      archive carried neither.  The restored time is the importer's own
+      clock with whatever it has gathered, so every restore forgave the
+      drift so far.  With a `fmi3GetFMUState` / `fmi3SetFMUState` pair
+      after every step -- what a rollback master does -- step sizes 0.45
+      millionths of a step too long were never refused (refused at the
+      third step without restores) and the reported time ran ahead of the
+      physics without bound; at 30000 s with a 1e-9 s master step, points
+      0.05 of a step late put the reported time 3.1 master steps ahead in
+      60 steps, and an honest running sum of step sizes drifted 1.78
+      master steps in 4000 (refused after 225 without restores).  Each
+      reply was `fmi3OK`.  Found by the B1 round-9 audit (finding F4, row
+      FMU-023, on e301c41).  No tagged release carried it: the bridge is
+      new in 0.4.0.
+      Resolved in 0.4.0: the archive carries the start time and the step
+      count (`_t_ref`, `_n_ref`) and `set_state` resumes them, so a restore
+      changes no later reply; an archive without them is refused by name;
+      the pair is checked as the time is, and the archive's time must lie
+      within half a master step of the simulated time the pair gives.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the FMU labelled its state with a time its physics had not
+      reached, and answered fmi3OK.  Graded `major` as MADD-ANO-149 and
+      MADD-ANO-168 are (a silent wrong result).  Not `critical`: it needed
+      a master that restores FMU states between steps *and* a clock biased
+      inside the per-step tolerance, or a running sum at a time more than
+      about 10^13 master steps from zero.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: compute each communication point as `start + k * h`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      An archive is the importer's word for its time: one rewritten to
+      carry another time with a matching reference restores, as a start
+      time given to `fmi3EnterInitializationMode` is taken.  A start time
+      given after a restore into a fresh or reset instance is a new
+      reference, by design.  And the bound itself holds to the rounding of
+      the float64 clock: the reported and the simulated time are each a
+      float64 sum, so they can differ by up to three ulps of the time
+      beyond a millionth plus a tenth of a step (under 0.02 of a step
+      wherever the clock resolves a step), which the guide now says.
+    verification:
+      - "tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_restore_changes_no_verdict_and_no_reported_time"
+      - "tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_the_archive_carries_the_start_time_and_the_steps_taken_since"
+      - "tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_an_archive_without_the_reference_is_refused"
+      - "tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_a_reference_the_bridge_never_writes_is_refused"
+      - "tests/fmi/test_a_restore_resumes_the_drift_accounting.py::test_every_archive_a_bridge_writes_is_far_inside_the_half_step_rule"
+      - "tests/property/test_differential_fmu.py::test_a_restore_between_steps_changes_no_reply_on_any_fmu_path"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-198"
+    title: "The FMU wire rounded an Int64 / UInt64 above 2**53: fmi3GetInt64 answered fmi3OK with a neighbouring integer, and a JSON set of 2**53 + 1 was stored as 2**53"
+    description: >
+      The FMU bridge carries every value as a float64, which holds every
+      value of every FMI type but two: an `Int64` or `UInt64` above 2**53
+      in magnitude is a float64 only where it is a multiple of the spacing
+      there.  Nothing guarded the others.  A `get` widened the model's
+      int64 to float64 (`np.asarray(state, dtype=np.float64)`), and the C
+      wrapper's range check passed the rounded double because it is a
+      whole number: `fmi3GetInt64` returned 9007199254740992 for a model
+      holding 9007199254740993, with `fmi3OK`.  A JSON `set` converted its
+      values to float64 before checking them, and the value check
+      (`_checked_value`) compared the cast with the value through float64,
+      which rounds both sides: `2**53 + 1` was stored as `2**53` and
+      answered `ok`.  By reading, not by reproduction: the same comparison
+      makes a float64 of exactly 2**63 equal to the largest int64 wherever
+      an out-of-range float-to-integer cast saturates, so the type's
+      maximum would be stored there for a value one past it.  This was
+      examined on x86-64 only, where that cast wraps and the old
+      comparison refused the value; no saturating platform was run.
+      Reached under `jax_enable_x64`
+      by a node with an int64 or uint64 state field or input (no built-in
+      node has one).  Found by the B1 round-9 audit (finding F5, rows
+      FMU-024, FMU-043 and FMU-045, on e301c41).  No tagged release carried
+      it: the bridge and the C wrapper are new in 0.4.0.
+      Resolved in 0.4.0: the bridge refuses a `get` of a variable holding
+      such a value, naming the variable and the integer, so the getters
+      return `fmi3Error`; it refuses a JSON `set` of one to an integer
+      variable; and every integer check (`set`, `set_state`,
+      `FmuSidecar.set_params`) decides by range and wholeness without
+      converting to a float (`maddening.core._exact_integers`), so its
+      verdict no longer depends on what a platform's out-of-range cast
+      returns.  A value a float64 is crosses exactly at any magnitude, and
+      the FMU-state archive carries every value in its own type.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result: an integer other than the one the model holds
+      was returned, or stored, with fmi3OK.  Graded `major` under the 0.4.0
+      severity definition, whatever its size.  Not `critical`: it needs
+      x64, a 64-bit integer variable and a value above 9.0e15 (a
+      nanosecond timestamp, a hash, a wide counter).  `context_dependent`
+      because the effect depends on what the importer does with the
+      integer.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.sidecar.FmuSidecar"
+      - "maddening.fmi.package.C_SOURCE"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A limit, stated and loud: an Int64 / UInt64 value that is not a
+      float64 cannot be read or set through the FMU's variables (the call
+      is fmi3Error naming it); it is carried by the FMU-state functions.
+      For a float variable an integer literal still means the nearest
+      float, as any decimal literal does.  The value check's move off the
+      float64 comparison is untested where it matters: on x86-64 the old
+      and the new check agree for every input (a mutant restoring the old
+      one survives the suite), so the saturating-cast case is closed by
+      construction and has not been observed failing or passing on such a
+      platform.  The new check itself is pinned at each type's bounds.
+    verification:
+      - "tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_get_of_an_int64_a_float64_cannot_hold_is_refused_not_rounded"
+      - "tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_json_set_of_an_integer_a_float64_cannot_hold_is_refused"
+      - "tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_an_int64_that_is_a_float64_crosses_exactly_at_any_magnitude"
+      - "tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_a_get_of_an_input_holding_such_a_value_is_refused_too"
+      - "tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_a_float_is_an_integer_of_the_type_only_if_whole_and_in_range"
+      - "tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-199"
+    title: "A set of negative zero through the FMU's C wrapper on a JSON connection was stored as positive zero"
+    description: >
+      On a connection without binary frames the C wrapper writes each value
+      with `%.17g`, which writes negative zero as `-0`.  JSON readers take
+      that literal for the integer 0 (`json.loads("-0")` is `0`), so
+      `fmi3SetFloat64(-0.0)` and `fmi3SetFloat32(-0.0f)` stored `+0.0` and
+      answered `fmi3OK`, while the same call over binary frames kept the
+      sign: the two wire forms disagreed on a value the guide says both
+      carry.  Any JSON client that writes `-0` (a C `printf("%g")`) lost
+      the sign the same way.  Found while fixing MADD-ANO-198, by the
+      battery that sends every FMI type's extreme values through the
+      bridge, the sidecar, the graph and the compiled wrapper.  No tagged
+      release carried it: the bridge and the C wrapper are new in 0.4.0.
+      Resolved in 0.4.0: the wrapper writes negative zero as `-0.0`, and
+      the bridge reads the JSON literal `-0` as negative zero where it is
+      a `set` value (it is still the integer 0 anywhere else in a
+      request).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result under the 0.4.0 severity definition -- a value
+      other than the one set was stored, with fmi3OK -- so `major`,
+      whatever its size: the two zeros differ only in sign, which matters
+      to `atan2`, to a division, to `copysign`.  Not `critical`: it needs
+      a JSON-only connection (the wrapper negotiates binary frames with
+      this bridge by default) and a model that reads the sign of a zero.
+    affected_components:
+      - "maddening.fmi.package.C_SOURCE"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A NaN still crosses the JSON wire as the token "NaN",
+      without its sign or payload, as documented.
+    verification:
+      - "tests/fmi/test_a_64_bit_integer_is_never_rounded_on_the_way.py::test_the_json_literal_minus_zero_is_stored_as_negative_zero"
+      - "tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths"
+      - "tests/fmi/test_c_unit.py::test_c_unit_tests"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-200"
+    title: "load_state loaded an integer of the other signedness wrapped: -1 for a uint32 field as 4294967295, 4000000000 for an int32 field as -294967296"
+    description: >
+      MADD-ANO-138's fix made `GraphManager.load_state` refuse a checkpoint
+      value the live leaf's dtype cannot hold.  For an integer arriving in
+      another integer type it decided by casting to the leaf's type and
+      back (`cast.astype(a.dtype) != a`).  Between a signed and an unsigned
+      type of one width that round trip is a bijection, so it always
+      returned the value it started with: an int32 `-1` for a uint32 field
+      loaded as 4294967295, a uint32 4000000000 for an int32 field as
+      -294967296, an int8 `-1` for a uint8 field as 255, with nothing
+      said, although the docstring said "an integer that would wrap" is
+      refused.  A complex value with an imaginary part loaded into a real
+      field with the imaginary part dropped.  Found in the sibling sweep of
+      MADD-ANO-198 (every check that decides whether an integer fits),
+      with the reproducer in the PR.  No tagged release wrapped: at v0.1.0,
+      v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0, under an 8 GiB address-space cap) `load_state` kept
+      the checkpoint's own dtype, so the field held `-1` as an int32 (the
+      unchecked load MADD-ANO-138 records); the cast to the live dtype,
+      and with it the wrap, came during 0.4.0 development.
+      Resolved in 0.4.0: an integer leaf takes a whole number of its own
+      range, decided without a cast there and back and without rounding
+      (`maddening.core._exact_integers.lost_as_integer`, which the FMU's
+      value check shares), and a complex value with an imaginary part is
+      refused for a real field.  `POST /checkpoint/load` answers the same
+      refusal.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result: a resumed simulation started from an integer
+      that was not the one saved, with no warning.  Graded `major` as
+      MADD-ANO-138 is.  Not `critical`: it needs a checkpoint whose
+      integer field has the other signedness than the graph's, written by
+      a graph whose field type changed or by hand.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.load_state"
+      - "maddening.core.graph_manager.GraphManager.load_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known for integers.  A float64 value still rounds to the
+      nearest float32 on load, as MADD-ANO-138's residual risk says.
+    verification:
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_of_the_other_signedness_is_refused_not_wrapped"
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_complex_value_with_an_imaginary_part_is_refused_for_a_real_field"
+      - "tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_an_integer_is_kept_exactly_when_the_target_type_holds_it"
+      - "tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_the_two_values_the_old_comparisons_took"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-201"
+    title: "build_model_description(selected_outputs=...) exported nothing, without a word, for a pair that named no state field"
+    description: >
+      `build_model_description(selected_outputs=[(node, field), ...])`
+      walked the graph's state fields and kept those it found in the
+      selection.  A pair that named nothing -- a misspelt field, a node the
+      graph does not have, a node the stability filter keeps out of the
+      FMU -- was therefore skipped with no error and no warning:
+      `selected_outputs=[("spring", "positon")]` returned a description
+      with no outputs at all, and one misspelt pair among several gave an
+      FMU missing that output.  An entry that was not a pair was unpacked
+      as one (the two-letter string `"ab"` as `("a", "b")`).  Reproduced at
+      v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0,
+      under an 8 GiB address-space cap): a spring graph exported `[]` for
+      the misspelt pair, where it exports `spring.position` and
+      `spring.velocity`.  Found by the B1 round-9 audit (finding F7, on
+      e301c41).  `selected_inputs` has refused an unknown name since
+      0.4.0's fix of MADD-ANO-084.
+      Resolved in 0.4.0: each such pair is a `ValueError` naming the node
+      and the field, and what the node or the graph does have, raised
+      before anything is built or warned about; an entry that is not a
+      `(node, field)` pair of names is refused by name.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No value the FMU computes or reports was wrong: the description
+      lacked a variable the caller had asked for under a name the graph
+      does not have, which is visible in the XML and is an error at any
+      importer that asks for that output.  Graded `minor` (declared
+      metadata short of what was asked for, the computed values right)
+      rather than a silent wrong result.  `not_safety_relevant`: nothing
+      can be read from a variable that does not exist.
+    affected_components:
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.0 and v0.3.1: check the returned description's output
+      variables against the pairs passed.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  An empty selection (`selected_outputs=[]`) still exports
+      no outputs, as asked.
+    verification:
+      - "tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_a_pair_that_names_no_state_field_is_refused_naming_it"
+      - "tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_an_entry_that_is_not_a_pair_of_names_is_refused"
+      - "tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_an_output_of_a_node_this_fmu_does_not_export_is_refused_by_name"
+      - "tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_a_selection_exports_exactly_the_outputs_it_names"
     github_issue: null

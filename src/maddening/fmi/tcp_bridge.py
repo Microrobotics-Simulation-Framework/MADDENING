@@ -42,6 +42,11 @@ few ulps of the time per step, the rounding an importer's running sum of
 step sizes gathers (``_DRIFT_ULPS_PER_STEP``): an importer whose every step
 size is a little long is refused once its errors add up past the tolerance,
 where the reported time used to move ahead of the physics without bound.
+That accounting is part of the FMU state: ``get_state`` saves the start time
+and the step count with the time, and ``set_state`` resumes them, so a
+master that saves and restores between steps is held to the same bound as
+one that does not (a restore used to start the count again from the time it
+restored, and the drift it bounded with it).
 Every tolerance is relative to the master step, at any master step, and no
 rounding slack is ever more than a tenth of one (``_ROUNDING_SLACK_MAX``):
 the reported time stays within a millionth plus a tenth of a master step of
@@ -67,7 +72,13 @@ the model description records (``ModelDescription.graph_timestep``); one
 stops at the first one after :meth:`FmuTcpBridge.stop`.
 
 ``values`` are flat numbers in value-reference order; an array variable
-contributes ``prod(shape)`` entries in row-major order.  A **non-finite**
+contributes ``prod(shape)`` entries in row-major order.  The wire carries
+every value as a float64, which holds every value of every FMI type but
+two: an ``Int64`` or ``UInt64`` above 2**53 in magnitude that is not itself
+a float64.  Such a value is never rounded: a ``get`` of a variable holding
+one is refused, and so is a ``set`` of one to an integer variable, each
+naming the variable and the integer (both used to answer ``ok`` with the
+neighbouring integer).  A **non-finite**
 value is written as the quoted token ``"NaN"``, ``"Infinity"`` or
 ``"-Infinity"`` rather than the bare token ``json.dumps`` would write,
 which is not JSON (``MADD-ANO-006``); a ``get`` reply from a diverged
@@ -142,8 +153,9 @@ again).
 The importer is **untrusted**: nothing that arrives on the socket is ever
 unpickled or evaluated.  The FMU-state blob is an ``npz`` archive of plain
 arrays (``allow_pickle=False`` on load) carrying the schema token, the
-time, the pending inputs, the node states and the params; on
-``set_state`` the archive directory is checked first (only the expected
+time, the drift reference (the start time and the master steps taken since:
+``_t_ref``, ``_n_ref``), the pending inputs, the node states and the
+params; on ``set_state`` the archive directory is checked first (only the expected
 member names, each member's declared size capped by the live array it
 replaces, and a cap on the total), so nothing is decompressed that the
 model could not hold, and then every array is checked against the live
@@ -381,6 +393,19 @@ communication point's own slack (:data:`_COMM_POINT_ULPS` ulps) would pass
 it is refused outright (``FmuTcpBridge._check_time_resolution``): the
 clock cannot place a communication point there, whatever the importer
 does."""
+_RESTORED_TIME_MAX_OFFSET = 0.5
+"""How far a restored archive's time may sit from the time its own drift
+reference says the FMU has simulated (``_t_ref + _n_ref * master_dt``), as a
+fraction of the master step: half of one, the point at which the time would
+name another master step than the physics is at.
+
+A sanity bound on an archive, not the drift tolerance: every archive this
+bridge writes is inside the drift tolerance (a millionth plus at most
+:data:`_ROUNDING_SLACK_MAX` of a step, and a few ulps of rounding), far
+inside this, so none of its own is ever refused by it; an archive whose time
+and reference disagree by half a step or more describes no instant this FMU
+was at.  One inside it restores, and the next step is judged by the drift
+tolerance against the restored reference."""
 _MASTER_DT_RTOL = 1e-9
 """How far ``master_dt`` may sit from the graph step the model description
 records, relatively: a different spelling of the same step (``0.01``
@@ -414,6 +439,28 @@ serving is refused at its commit: nothing a worker computes after
 ``stop()`` is written into the model (see ``FmuTcpBridge._committing``)."""
 
 
+class _MinusZero(int):
+    """The JSON integer literal ``-0``: the integer 0 everywhere, and the
+    float ``-0.0`` as a ``set`` value (:func:`_flat_numbers`)."""
+
+    __slots__ = ()
+
+
+_MINUS_ZERO = _MinusZero(0)
+
+
+def _json_int(text: str) -> int:
+    """A JSON integer literal as a Python ``int``, with ``-0`` kept apart.
+
+    ``json.loads("-0")`` is the integer 0: the sign is gone.  C's ``%.17g``
+    writes negative zero as ``-0`` (so does any ``printf("%g")``), so a
+    JSON client's ``set`` of ``-0.0`` -- the compiled wrapper's, on a
+    connection without binary frames -- was stored as ``+0.0`` and answered
+    ``ok``, while the binary path kept the sign.
+    """
+    return _MINUS_ZERO if text == "-0" else int(text)
+
+
 def _json_object(body: bytes, what: str) -> Any:
     """``json.loads`` of ``body``; every failure is a ``ValueError``.
 
@@ -428,7 +475,14 @@ def _json_object(body: bytes, what: str) -> Any:
         # well as the quoted ones this module writes, so a peer of either
         # vintage is understood; ``decode_non_finite`` turns the quoted
         # form into the float the bare form already produced.
-        return decode_non_finite(json.loads(body.decode("utf-8")))
+        # The hook that keeps the literal -0 apart is a Python call per
+        # integer (measured: 1.9x on the parse of a 16 MiB list of value
+        # references), so it is used only for a body that holds "-0" at all;
+        # every other request is parsed exactly as before.
+        text = body.decode("utf-8")
+        if b"-0" in body:
+            return decode_non_finite(json.loads(text, parse_int=_json_int))
+        return decode_non_finite(json.loads(text))
     except RecursionError as exc:
         raise ValueError(f"{what} is nested too deeply") from exc
     except ValueError as exc:                  # JSONDecodeError, UnicodeDecodeError
@@ -656,9 +710,60 @@ def _real_number(x: Any, what: str) -> float:
     return v
 
 
-def _flat_numbers(values: Any) -> np.ndarray:
+_FLOAT64_EXACT_INTEGERS = 2 ** 53
+"""Every integer up to this magnitude is a float64; above it only some are
+(the multiples of the float64 spacing there), and the rest round."""
+
+
+def _integers_float64_rounds(a: np.ndarray) -> dict[int, int]:
+    """``{flat index: integer}`` for the entries of the integer array ``a``
+    that a float64 cannot hold: those ``astype(float64)`` would round.
+
+    Compared as integers.  Only a 64-bit integer type reaches past
+    :data:`_FLOAT64_EXACT_INTEGERS`, so narrower arrays are never scanned.
+    """
+    if a.dtype.kind not in "iu" or a.dtype.itemsize < 8 or a.size == 0:
+        return {}
+    flat = a.ravel()
+    as_float = flat.astype(np.float64)
+    suspects = np.flatnonzero(np.abs(as_float) >= float(_FLOAT64_EXACT_INTEGERS))
+    return {int(i): int(flat[i]) for i in suspects if int(as_float[i]) != int(flat[i])}
+
+
+def _wire_float64(value: Any, var: "FMIVariable") -> np.ndarray:
+    """``value`` (a leaf of the model) flat, as the float64 the wire carries,
+    refused when that would be another number.
+
+    The wire carries every value as a float64, which holds every value of
+    every FMI type but two: an ``Int64`` or ``UInt64`` above 2**53 in
+    magnitude is a float64 only if it is a multiple of the spacing there.
+    A ``get`` used to convert regardless, so ``fmi3GetInt64`` answered
+    ``fmi3OK`` with a neighbouring integer (9007199254740992 for a model
+    holding 9007199254740993).
+
+    Raises
+    ------
+    ValueError
+        Naming the variable and the integer; nothing is read.
+    """
+    leaf = np.asarray(value)
+    rounded = _integers_float64_rounds(leaf)
+    if rounded:
+        index, integer = next(iter(rounded.items()))
+        where = f" (entry {index})" if leaf.size > 1 else ""
+        raise ValueError(
+            f"variable {var.name!r} holds {integer}{where}, which the float64 this "
+            f"protocol carries every value as cannot hold: a get would answer "
+            f"{int(float(integer))}, another integer.  An {_fmi_type_of(var)} above 2**53 "
+            "in magnitude is carried only where a float64 is exactly it; nothing was "
+            "read")
+    return np.asarray(leaf, dtype=np.float64).ravel()
+
+
+def _flat_numbers(values: Any) -> tuple[np.ndarray, dict[int, int]]:
     """A ``set`` request's ``values`` as float64, refused unless every entry
-    already is a number.
+    already is a number; and the integers among them that the float64
+    rounded, as ``{index: integer}``.
 
     ``np.asarray(values, dtype=float64)`` parses the string ``"45"`` and
     turns ``true`` into 1.0, so both used to be stored as numbers with the
@@ -667,14 +772,24 @@ def _flat_numbers(values: Any) -> np.ndarray:
     downstream to refuse by variable name -- and so is a float or integer
     array (the binary path's, or an in-process caller's).
 
+    An integer above 2**53 in magnitude that is not a float64 is rounded by
+    that conversion.  For a float variable that is what a decimal literal
+    means (the nearest float); for an integer variable it is another
+    integer, so the caller refuses it there (``FmuTcpBridge._set``): a JSON
+    ``set`` of ``2**53 + 1`` to an ``Int64`` input used to be stored as
+    ``2**53`` and answered ``ok``.
+
     Raises
     ------
     ValueError
         If ``values`` is not a flat sequence of numbers.
     """
+    rounded: dict[int, int] = {}
     if isinstance(values, np.ndarray):
         if values.dtype.kind not in "iuf":
             raise ValueError(f"values must be numbers, got an array of {values.dtype}")
+        if values.ndim == 1:
+            rounded = _integers_float64_rounds(values)
         arr = values.astype(np.float64)
     elif isinstance(values, (list, tuple)):
         for i, x in enumerate(values):
@@ -685,11 +800,20 @@ def _flat_numbers(values: Any) -> np.ndarray:
             arr = np.asarray(values, dtype=np.float64)
         except OverflowError as exc:
             raise ValueError(f"values must be finite numbers: {exc}") from exc
+        if arr.ndim == 1:
+            # the JSON literal -0 is the float -0.0 here (see _json_int)
+            minus_zero = [i for i, x in enumerate(values) if x is _MINUS_ZERO]
+            if minus_zero:
+                arr[minus_zero] = -0.0
+            for i in np.flatnonzero(np.abs(arr) >= float(_FLOAT64_EXACT_INTEGERS)):
+                x = values[int(i)]
+                if isinstance(x, (int, np.integer)) and int(x) != int(arr[i]):
+                    rounded[int(i)] = int(x)
     else:
         raise ValueError(f"values must be a flat list of numbers, got {type(values).__name__}")
     if arr.ndim != 1:
         raise ValueError("values must be a flat list of numbers")
-    return arr
+    return arr, rounded
 
 
 def _size(var: FMIVariable) -> int:
@@ -912,11 +1036,14 @@ class FmuTcpBridge:
         self._inputs: dict[str, dict[str, Any]] = self._zero_inputs()
         self._time = 0.0
         # The time the physics has reached, as a count of graph steps since a
-        # reference point (the start time, a reset, a restored snapshot):
+        # reference point (the start time, a reset):
         # ``_t_ref + _n_ref * master_dt``.  ``_time`` adopts the importer's
         # point within the tolerance; this does not, so the drift between
         # the time the FMU reports and the time it has simulated is bounded
-        # (``_drift_tolerance``).
+        # (``_drift_tolerance``).  Both are part of the FMU state: an archive
+        # carries them and a restore resumes them (it used to start a new
+        # reference at the restored time, so a master that saved and
+        # restored between steps was never held to the bound).
         self._t_ref = 0.0
         self._n_ref = 0
         # Has the instance taken a step since it was instantiated or reset?
@@ -1707,6 +1834,65 @@ class FmuTcpBridge:
         ulps = _COMM_POINT_ULPS + _DRIFT_ULPS_PER_STEP * steps
         return _COMM_POINT_TOLERANCE * self._dt + self._slack(ulps, biggest)
 
+    def _restored_reference(self, data: Any, keys: set, t: float) -> tuple[float, int]:
+        """The drift reference ``(_t_ref, _n_ref)`` of an FMU-state archive
+        whose time is ``t``, checked: the start time the FMU's clock counts
+        from and the master steps taken since.
+
+        The pair is what keeps the time the FMU reports to the time it has
+        simulated (:meth:`_check_drift`), so it is part of the state.  A
+        restore that drops it starts the accounting again at the restored
+        time -- the time an importer's clock has *reported*, with whatever
+        that clock had gathered -- and a master that restores between steps
+        is then never refused: its drift is forgotten at every restore.
+
+        Raises
+        ------
+        ValueError
+            If the archive carries no reference (one written before
+            0.4.0's fix: refused rather than restored with a new reference
+            started at its time), if either member is not what the bridge
+            writes -- a finite real scalar the clock can resolve, a
+            non-negative integer scalar -- or if the archive's time is
+            :data:`_RESTORED_TIME_MAX_OFFSET` of a master step or more from
+            the simulated time the pair gives.  Nothing is written.
+        """
+        missing = sorted({"_t_ref", "_n_ref"} - keys)
+        if missing:
+            raise ValueError(
+                f"FMU state carries no drift reference (member(s) {missing}): the "
+                "start time and the count of master steps taken since, which hold "
+                "the time the FMU reports to the time it has simulated across a "
+                "restore.  An archive written before 0.4.0's fix has none, and is "
+                "refused rather than restored with the count started again at its "
+                "time; take the state again (fmi3GetFMUState)")
+        start = data["_t_ref"]
+        if start.dtype.kind not in "iuf" or start.shape != ():
+            raise ValueError(f"FMU state start time (member '_t_ref') must be a real "
+                             f"scalar, got {start.dtype} of shape {start.shape}")
+        t_ref = float(start)
+        if not np.isfinite(t_ref):
+            raise ValueError("FMU state carries a non-finite start time (member '_t_ref')")
+        self._check_time_resolution(t_ref, "FMU state's start time")
+        count = data["_n_ref"]
+        if count.dtype.kind not in "iu" or count.shape != ():
+            raise ValueError(f"FMU state step count (member '_n_ref') must be an integer "
+                             f"scalar, got {count.dtype} of shape {count.shape}")
+        n_ref = int(count)
+        if n_ref < 0:
+            raise ValueError(f"FMU state carries a negative step count ({n_ref}, member "
+                             "'_n_ref')")
+        simulated = t_ref + n_ref * self._dt
+        if not abs(t - simulated) < _RESTORED_TIME_MAX_OFFSET * self._dt:
+            raise ValueError(
+                f"FMU state's time {t!r} is {(t - simulated) / self._dt:.3g} master steps "
+                f"from the time its own drift reference says the FMU has simulated, "
+                f"{simulated!r} (start time {t_ref!r} plus {n_ref} master steps of "
+                f"{self._dt!r}): no state of this FMU holds a time "
+                f"{_RESTORED_TIME_MAX_OFFSET:g} of a step or more from its physics, so "
+                "the archive is not one it wrote.  Nothing was written")
+        return t_ref, n_ref
+
     def _check_time_resolution(self, t: float, what: str) -> None:
         """Refuse a time at which the FMU's float64 clock cannot place a
         communication point to within :data:`_ROUNDING_SLACK_MAX` of a
@@ -2052,11 +2238,14 @@ class FmuTcpBridge:
     _META = "_meta"
 
     def _encode_state(self) -> bytes:
-        """``npz`` of plain arrays: token, time, node states, ``_meta``,
+        """``npz`` of plain arrays: token, time, the drift reference (the
+        start time and the master steps taken since), node states, ``_meta``,
         params (nodes + mappings) and the pending inputs.  No pickle."""
         arrays: dict[str, np.ndarray] = {
             "_token": np.array(self._md.instantiation_token),
             "_time": np.array(self._time, dtype=np.float64),
+            "_t_ref": np.array(self._t_ref, dtype=np.float64),
+            "_n_ref": np.array(self._n_ref, dtype=np.int64),
         }
         for node, fields in self._sidecar.state.items():
             for f, v in fields.items():
@@ -2081,7 +2270,7 @@ class FmuTcpBridge:
         """Every member an FMU-state archive may carry (name without the
         ``.npy`` suffix) and the most bytes it may decompress to: the live
         array it replaces plus the ``.npy`` header."""
-        caps = {"_token": 256, "_time": 8}
+        caps = {"_token": 256, "_time": 8, "_t_ref": 8, "_n_ref": 8}
         for n, fields in self._sidecar.state.items():
             for f, v in fields.items():
                 caps[f"s/{n}/{f}"] = int(np.asarray(v).nbytes)
@@ -2240,6 +2429,9 @@ class FmuTcpBridge:
             # would be refused.  None of this FMU's own snapshots holds one
             # (no step reaches such a time, nor does initialize).
             self._check_time_resolution(t, "FMU state's time")
+            # And the reference that time is held to (the start time and the
+            # steps since): resumed, not started again at ``t``.
+            t_ref, n_ref = self._restored_reference(data, keys, t)
         if new_params is not None:
             # A parameter the step cannot read may not change through the
             # archive either (``set`` cannot address it at all), and the
@@ -2259,7 +2451,7 @@ class FmuTcpBridge:
             if new_params is not None:
                 self._sidecar._params = new_params            # noqa: SLF001
             self._inputs, self._time = inputs, t
-            self._t_ref, self._n_ref = t, 0
+            self._t_ref, self._n_ref = t_ref, n_ref
 
     # ----------------------------------------------------------- vr mapping
     def _set(self, vrs: list[int], values, fmi_type: Any = None) -> None:
@@ -2276,7 +2468,7 @@ class FmuTcpBridge:
         if not isinstance(vrs, (list, tuple)):
             raise ValueError("vr must be a list of value references")
         fmi_type = _requested_type(fmi_type)
-        values = _flat_numbers(values)
+        values, rounded = _flat_numbers(values)
         pos = 0
         staged: list[tuple[FMIVariable, np.ndarray]] = []
         named: set[int] = set()
@@ -2301,6 +2493,17 @@ class FmuTcpBridge:
             chunk = values[pos:pos + n]
             if chunk.size != n:
                 raise ValueError(f"vr {vr} ({var.name}) expects {n} values, got {chunk.size}")
+            if rounded and np.dtype(var.dtype).kind in "iu":
+                # An integer the float64 wire form rounded, for an integer
+                # variable: it would be stored as its neighbour.
+                lost = next((rounded[i] for i in range(pos, pos + n) if i in rounded), None)
+                if lost is not None:
+                    raise ValueError(
+                        f"variable {var.name!r}: the integer {lost} cannot be carried "
+                        f"exactly as the float64 this protocol carries every value as "
+                        f"(it would be stored as {int(float(lost))}); an "
+                        f"{_fmi_type_of(var)} above 2**53 in magnitude is carried only "
+                        "where a float64 is exactly it.  Nothing was written")
             pos += n
             staged.append((var, chunk.reshape(var.shape or ())))
         if pos != len(values):
@@ -2406,21 +2609,23 @@ class FmuTcpBridge:
 
     def _value_of(self, var: FMIVariable, params: dict) -> np.ndarray:
         """``var``'s current value, flat, as float64 (``params``: the
-        sidecar's :meth:`~FmuSidecar.get_params`, read once per ``get``)."""
+        sidecar's :meth:`~FmuSidecar.get_params`, read once per ``get``);
+        ``ValueError`` for an ``Int64`` / ``UInt64`` value a float64 cannot
+        hold (:func:`_wire_float64`)."""
         if var.causality == "independent":
             return np.asarray([self._time], dtype=np.float64)
         if var.causality == "parameter":
-            return np.asarray(params[var.name], dtype=np.float64).ravel()
+            return _wire_float64(params[var.name], var)
         if var.causality == "input":
             node, field = var.node_field()
             val = self._inputs.get(node, {}).get(field)
             if val is None:
                 val = np.zeros(var.shape or (), dtype=np.float64)
-            return np.asarray(val, dtype=np.float64).ravel()
+            return _wire_float64(val, var)
         if var.is_clock:
             return np.zeros(1, dtype=np.float64)
         node, field = var.node_field()
-        return np.asarray(self._sidecar.state[node][field], dtype=np.float64).ravel()
+        return _wire_float64(self._sidecar.state[node][field], var)
 
 
 __all__ = ["FmuTcpBridge", "PROTOCOL_VERSION", "checked_value", "decode_binary",

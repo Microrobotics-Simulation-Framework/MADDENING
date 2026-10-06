@@ -111,8 +111,10 @@ binds `0.0.0.0` — publish the port to loopback
 what is exposed at startup
 (`maddening.api.server.warn_if_publicly_bound`).
 
-Request sizes are bounded so one request cannot exhaust the host, but that
-is a backstop, not authentication.  More than 10^6 values in one
+Request sizes are bounded so one request cannot exhaust the host by
+mistake, but that is a backstop, not authentication, and not a defence
+against a token-holder who sets out to exhaust it (see the next section).
+More than 10^6 values in one
 request's params, `n_steps` over 100000 or an out-of-range training
 argument is a 422 from the request model, published in `/openapi.json`.
 An integer over 10^7 for an **integer** parameter (an array dimension) is a
@@ -126,6 +128,51 @@ state elements, is a 400 naming the size: those caps are server constants
 (`MAX_NODE_STATE_ELEMENTS`, `MAX_NODE_BUILD_BYTES`,
 `MAX_GRAPH_STATE_ELEMENTS`), not part of the schema.  A non-finite
 constructor constant remains the 400 it has always been.
+
+### Who the server is for, and what it defends against
+
+In 0.4.0 the server is written for two clients: **a trusted client on
+loopback** (your own scripts and the bundled UI on the machine that runs
+the simulation), and **a token-holder on a network or a cloud pod**.
+Whoever holds the token is trusted as the person at the keyboard is: the
+routes build nodes, run steps and write files under the checkpoint root on
+their say.
+
+It defends against:
+
+* **an unauthenticated network peer**: every route of a non-loopback bind
+  but `/healthz` and `/viz/*` needs the token, an unknown bind address is
+  treated as reachable, and a peer from a routable address is challenged
+  even on a server told its bind is loopback;
+* **a web page in the user's browser reaching a loopback server**: the
+  `Host` rule above (DNS rebinding), a 403 for a state-changing request or
+  a WebSocket handshake whose `Origin` is not the server's own or one in
+  `allowed_origins`, and the token demanded of any request that carries
+  `X-Forwarded-For` or `Forwarded`, so a forwarded header cannot pass a
+  page off as a loopback peer;
+* **oversized bodies**: the 413 before a body is parsed, and the element,
+  step and size bounds above;
+* **path escapes from the checkpoint root**: `/checkpoint/save` and
+  `/checkpoint/load` touch files under it only, whether or not the token is
+  enforced.
+
+It does **not** defend against a token-holder who means harm.  The
+refusals this guide lists are the ones that exist, and each holds as
+stated; beyond them the server is not claimed to withstand:
+
+* **crafted checkpoint archives** (a load checks each member's name, shape
+  and dtype before reading it; it is not hardened against an archive built
+  to cost memory or time in another way);
+* **resource exhaustion**: many requests, long runs, a graph at the size
+  caps, slow steps, training jobs;
+* **pathological names** for nodes, fields and files, beyond the
+  characters the routes refuse;
+* and it provides **no TLS** (above): put a non-loopback bind on a private
+  network or behind a TLS-terminating proxy.
+
+So do not hand the token to a party you would not let run code on the
+host, and do not expose the port to the internet with nothing in front of
+it.
 
 ## REST Endpoints
 
@@ -187,14 +234,14 @@ already been applied.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/sim/step` | Advance one timestep. Returns new state |
-| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps. So does a run that cannot have the graph within `_GRAPH_LOCK_TIMEOUT` -- between slices, for its final state, or for the compile of `n_steps=0` -- with the detail saying how many steps remain; retry the whole run only when `steps_run` is 0 (that reply carries `Retry-After`). A step that raises (a run-time check in the step, `strict_convergence`) answers 400 `{detail, steps_run, n_steps}`: the steps before it were taken |
+| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps. So does a run that cannot have the graph within `_GRAPH_LOCK_TIMEOUT` -- between slices, for its final state, or for the compile of `n_steps=0` -- with the detail saying how many steps remain; retry the whole run only when `steps_run` is 0 (that reply carries `Retry-After`). A step that raises (a run-time check in the step, `strict_convergence`) answers 400 `{detail, steps_run, n_steps}`: the steps before it were taken. A run that fails unexpectedly answers 500 with `steps_run` too: the slice that failed is put back, the steps of the slices before it stay |
 | POST | `/sim/start` | Start real-time runner (background thread). A runner whose thread died (a step raised) is replaced |
 | POST | `/sim/pause` | Pause the runner. 409 when it is not running, saying why a started one stopped |
 | POST | `/sim/resume` | Resume the runner, paced from the resume |
 | POST | `/sim/stop` | Stop the runner. A runner whose thread had died is reported stopped, with `error` |
 | POST | `/sim/reset` | Stop the runner and reset every node; the streams are sent the reset state at step 0. `was_running` is whether a runner was running. When the graph cannot be had in time after the runner was stopped, the 503 says the runner stays stopped, with `was_running` |
 | PUT | `/sim/stride?steps_per_frame=&relay_stride=` | The runner's steps per frame and the relay's stride; a value left out keeps its current value (it used to be reset to 1). Answered at once, whatever the other runner routes wait for |
-| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON). The live state and parameters are restored after it, and the streams neither show nor count its steps |
+| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON). The graph is put back exactly as it was after it -- state, parameters, and an edited graph still waiting for its compile -- and the streams neither show nor count its steps |
 | POST | `/sim/profile/jax/start`, `/sim/profile/jax/stop` | A JAX trace of the steps between them, for at most `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600 s): past either it stops itself and writes its files. The time budget has its own timer, so an idle trace stops at it too |
 | GET | `/sim/profile/jax/status` | Whether a trace runs, its steps and budgets, its directory, and what stopped the last one |
 
@@ -233,6 +280,43 @@ and a surrogate swap at step 0 and `sim_time` 0, a state write and a node
 added or removed at the streams' clock, a checkpoint load at the
 checkpoint's.  A step of `GraphManager.run_adaptive` adds its own `dt` to
 the clock.
+
+## A request that is refused, or that fails, changes nothing
+
+**A request that is refused, or that fails unexpectedly, leaves the graph
+exactly as it was.**  Every route that can change the graph -- adding or
+removing a node or an edge, a compile, a state or params write, a
+checkpoint save or load, a step, a run's slice, a start, a reset, a
+profile, a surrogate swap -- runs in one transaction: the graph is
+recorded when the graph lock is taken, and put back if the route answers
+a 4xx of its own or fails at any point.  What is put back: the state, the
+parameters, the nodes and their own params, the edges, the coupling
+groups, the external inputs, the compile bookkeeping (a refused request
+on an edited graph leaves it waiting for its compile) and the streams'
+clock.
+
+**An unexpected failure answers 500 with a generic detail**: `The request
+failed unexpectedly (the server's log says how).`, and for a write route
+`The graph was put back exactly as it was before the request.`  The detail
+names no path, value or class of the server's; the traceback is in the
+server's log.  A 500 is a defect: please report it.
+
+What the promise does not cover:
+
+* **`POST /sim/run` is one transaction per slice**, not per run: the lock
+  is released between slices, where reads are served and
+  `PUT /graph/params` is accepted, so putting the graph back to before the
+  run would undo another request's accepted write.  A run that stops
+  part-way leaves the graph after the steps it reports (`steps_run`): an
+  unexpected failure (500) puts back the slice that failed and keeps the
+  slices before it; a step that raises (400) keeps every step before that
+  one; an interruption (503) keeps the slices it completed.
+* **What is outside the graph**: a file under the checkpoint root (a save
+  keeps its own cleanup, and says when a checkpoint was written without
+  its manifest); the runner's thread and whether it is started or stopped
+  (a reset that stopped the runner says so); a surrogate training job;
+  a JAX trace; frames a stream has already sent (the streams are sent the
+  restored frame); and anything under `/cloud`.
 
 ## Concurrency, limits and shutdown
 

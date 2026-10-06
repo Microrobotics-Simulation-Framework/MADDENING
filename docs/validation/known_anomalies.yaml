@@ -2594,7 +2594,12 @@ anomalies:
       bounds of the smooth piece the point is on, finite and with no
       warning: 1.3e-3 relative on the elasticity there, where a change
       of 1e-6 moves the weighted loss by 311.  `HeartPumpNode`'s valve
-      (`phase < systole_fraction`) is a second in-tree instance.  The
+      (`phase < systole_fraction`) is a second in-tree instance.  A fit
+      `fit_lm` does report converged is stationary on its own smooth
+      piece, which need not be the lowest: on the ball a lower piece
+      lay 1e-3 of a parameter from one converged fit, and the piece
+      of the truth 1e-6 from another (its parameters right to 1e-6,
+      its loss 2e-5 against 1e-10).  The
       condition -- a residual differentiable in the trained parameters
       along the fitted trajectory -- is stated in the docstrings of
       `fit_lm`, `fit`, `fim` and `FitResult.converged` and in
@@ -14558,10 +14563,12 @@ anomalies:
       was `converged=True`, a full `excited_rank` and no warning at a loss
       of 0.02 to 3.7, against 1e-13 at the minimum; a point within a
       hundredth of the returned parameters lowered the loss by 1% to 67%.
-      A second route to the same verdict: a step accepted at the damping
-      cap (one that crossed a jump downwards) left the damping so high
-      that every candidate of the next iteration rounded to no move, and
-      the rule then rested on the undamped step alone.
+      A second route to the same verdict: a step accepted far up the
+      damping ladder (one that crossed a jump downwards) left the damping
+      so high that the candidates of the next iteration were too short to
+      gain more than the loss's rounding, or rounded to no move at all,
+      while the undamped step crossed the next jump; the rule then rested
+      on a ladder with a gap in it.
 
       Fixed in 0.4.0, before any release shipped `fit_lm`.  Before the
       floor rule reports `converged` it compares each rejected candidate
@@ -14573,9 +14580,11 @@ anomalies:
       a `RuntimeWarning` naming a residual that is not differentiable.
       Measured: at most 21 on smooth fits stopped by the floor rule (136
       endings), 2.2e4 to 4.4e5 on the ball (55 endings).  And an iteration
-      whose damped candidates all rounded to no move while the undamped
-      step was rejected is run once more from `lam0`.  After the fix: 0 of
-      the 24 and 0 of the 90 random starts converged above the minimum.
+      whose ladder began above `lam0` while the undamped step was rejected
+      is run once more from `lam0`.  After the fix: 0 of the 24 and 0 of
+      the 90 random starts converged above the minimum, and a targeted
+      search of 800 drawn fits of the ball finds no fit converged where the
+      loss still falls along the piece it is on.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -14614,6 +14623,7 @@ anomalies:
       - "tests/core/test_sysid_non_differentiable_residual.py::test_a_smooth_fit_stopped_by_the_floor_rule_is_still_converged"
       - "tests/core/test_sysid_non_differentiable_residual.py::test_an_iteration_whose_damped_candidates_never_moved_is_asked_again"
       - "tests/property/test_sysid_targeted_search.py::test_no_wrong_fit_among_the_fixed_draws"
+      - "tests/property/test_sysid_targeted_search.py::test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-215"

@@ -2625,8 +2625,11 @@ claims:
     the linearisation's own change, the rejection is a jump and not
     rounding ... The run then ends converged=False with a RuntimeWarning
     naming a residual that is not differentiable"; an iteration "whose
-    ladder began above lam0 while the undamped step was rejected ... is
-    run once more from lam0 before the rule reads it".
+    ladder began above lam0 while the undamped step was rejected ...
+    Where the undamped step promised, on the linear model, 2**10 times
+    more than the short candidates lost to rounding -- or every candidate
+    rounded to no move at all -- the iteration is run once more from lam0
+    before the rule reads it".
   sources:
     - src/maddening/sysid.py:4878 (fit_lm)
     - src/maddening/sysid.py:4158 (FitResult, converged)
@@ -2677,6 +2680,7 @@ claims:
     - tests/core/test_sysid_non_differentiable_residual.py::test_an_iteration_whose_damped_candidates_never_moved_is_asked_again
     - tests/core/test_sysid_non_differentiable_residual.py::test_candidates_that_never_move_are_asked_again_once_only
     - tests/property/test_sysid_targeted_search.py::test_no_wrong_fit_among_the_fixed_draws
+    - tests/property/test_sysid_targeted_search.py::test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece
   status: verified
   notes: >-
     Round 7 (B1, on 04bc3e5): under x64 the floor rule's twelve damped

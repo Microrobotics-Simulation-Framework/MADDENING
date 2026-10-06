@@ -3936,6 +3936,31 @@ def _norm64(x) -> float:
     return top * float(np.sqrt(np.sum(np.square(x / top))))
 
 
+def _gain_in_the_gap(r, J, undamped, theta, rises) -> bool:
+    """Whether the undamped Gauss-Newton step from ``theta`` promises, on
+    the linear model, :data:`_JUMP_EXCESS` times more than the largest rise
+    of the loss among the short candidates an iteration rejected
+    (``rises``: what the loss's rounding did to them).
+
+    At a rounding floor the undamped step is the least-squares fit of the
+    residual's rounding and promises a reduction of that order.  One that
+    promises orders of magnitude more, from an iterate whose short
+    candidates all lost to rounding, says the step lengths between them
+    were worth asking about (:func:`fit_lm`, the floor rule).  ``False``
+    with nothing to compare (no short candidate, or a promise that is not
+    finite or not positive).
+    """
+    if not rises:
+        return False
+    r64 = np.asarray(r, dtype=np.float64)
+    step = np.asarray(undamped, dtype=np.float64) - np.asarray(theta, dtype=np.float64)
+    model = r64 + np.asarray(J, dtype=np.float64) @ step
+    promised = 0.5 * (float(r64 @ r64) - float(model @ model))
+    noise = max(float(x) for x in rises)
+    return bool(np.isfinite(promised) and promised > _JUMP_EXCESS * max(noise, 0.0)
+                and promised > 0.0)
+
+
 def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
     """``(excess, move)``: how one-sided the residual is around ``theta``,
     read from candidates a Levenberg-Marquardt iteration rejected.
@@ -5773,8 +5798,12 @@ def fit_lm(
     whose ladder began above ``lam0`` while the undamped step was rejected
     has tested no step length between its longest damped candidate and
     the undamped one (the damping it inherited was too high, as after a
-    step accepted far up the ladder; at worst every candidate rounded to no
-    move), so it is run once more from ``lam0`` before the rule reads it.
+    step accepted far up the ladder).  Where the undamped step promised,
+    on the linear model, ``2**10`` times more than the short candidates
+    lost to rounding -- or every candidate rounded to no move at all -- the
+    iteration is run once more from ``lam0`` before the rule reads it; at
+    a rounding floor that step promises no more than rounding, and nothing
+    changes.
 
     **A step of a ``log`` / ``logit`` coordinate is read along the
     transform's curve or along its tangent, whichever moves the value
@@ -5965,9 +5994,11 @@ def fit_lm(
         fitter warns (a :class:`RuntimeWarning`) when ``excited_rank`` is
         the full count while ``JᵀJ`` at the returned point resolves fewer
         directions by :func:`fim`'s rank rule, in :func:`fim`'s default
-        coordinates (each parameter relative to itself); it asks only where
-        the run ended on the iterate whose Jacobian it formed last, so it
-        costs no evaluation.  :attr:`FitResult.excited_rank`,
+        coordinates (each parameter relative to itself: here to the larger
+        of its size at the start and at the returned point, so that a
+        parameter fitted to zero is not read relative to its own rounding);
+        it asks only where the run ended on the iterate whose Jacobian it
+        formed last, so it costs no evaluation.  :attr:`FitResult.excited_rank`,
         :attr:`FitResult.undetermined_drift` and
         :attr:`FitResult.hold_declined` say what the guard found.
 
@@ -6282,6 +6313,7 @@ def fit_lm(
                                              here, rel_tol)
         attempt, there = -1, here
         rejected: list = []
+        rises: list = []
         # Whether any candidate of this iteration's ladder moved a parameter
         # at all, the damping the ladder begins at, and whether the floor
         # rule sends the iterate round again.
@@ -6327,6 +6359,7 @@ def fit_lm(
             if 0.0 < move <= _JUMP_MAX_MOVE and np.isfinite(loss_new):
                 # For the floor rule's one-sided test, should it be asked.
                 rejected.append((cand, cand_r, move))
+                rises.append(loss_new - loss)
             # Past the ladder, at least a decade a rung, so the extension
             # reaches the cap in at most 24 rungs whatever ``lam_up`` is.
             grow = lam_up if attempt + 1 < _LM_LADDER else max(lam_up, 10.0)
@@ -6380,26 +6413,32 @@ def fit_lm(
                         gn_move = _largest_relative_move(here, gn_there)
                         if gn_move <= _JUMP_MAX_MOVE and np.isfinite(loss_gn):
                             rejected.append((gn_cand, gn_r, gn_move))
-                        if ((not moved or lam_begin > lam_start) and lam > lam_start
-                                and relaxed_at is not theta):
+                        if ((not moved or (lam_begin > lam_start and _gain_in_the_gap(
+                                r, J, gn_cand, theta, rises)))
+                                and lam > lam_start and relaxed_at is not theta):
                             # The ladder began above the damping the run
                             # started with, so between its longest candidate
                             # and the undamped step, which was rejected, there
                             # are step lengths this iterate was never asked
                             # about: the rule's "every candidate was rejected"
-                            # has a gap in it.  (At its worst every damped
-                            # candidate rounded to no move at all.)  That is
-                            # the damping the run arrived with, not the
-                            # iterate -- a step accepted far up the ladder
-                            # leaves ``lam`` a decade below where it was taken,
-                            # and on a residual with jumps such a step can be
-                            # one that crossed a jump downwards, onto a piece
-                            # the run has not descended yet, where the
-                            # candidates it inherits are too short to gain
-                            # more than the loss's rounding and the undamped
-                            # step crosses the next jump.  So the iterate is
-                            # asked once more, from the damping the run
-                            # started with: a ladder with no gap.
+                            # has a gap in it.  At a rounding floor nothing is
+                            # in the gap -- the undamped step is the fit of
+                            # the residual's rounding and promises no more
+                            # than the rounding the short candidates lost to.
+                            # Where it promises far more (or every damped
+                            # candidate rounded to no move at all, and there
+                            # is nothing to compare with) the gap is the
+                            # damping the run arrived with, not the iterate:
+                            # a step accepted far up the ladder leaves ``lam``
+                            # a decade below where it was taken, and on a
+                            # residual with jumps such a step can be one that
+                            # crossed a jump downwards, onto a piece the run
+                            # has not descended yet, where the candidates it
+                            # inherits are too short to gain more than the
+                            # loss's rounding and the undamped step crosses
+                            # the next jump.  So the iterate is asked once
+                            # more, from the damping the run started with: a
+                            # ladder with no gap.
                             at_floor, again = False, True
                             lam, relaxed_at = lam_start, theta
                 if at_floor:
@@ -6497,8 +6536,13 @@ def fit_lm(
         # not determine.  This fitter holds ``J`` at the point it returns,
         # so it can say so (at no further evaluation: only where the run
         # ended on the iterate whose Jacobian it formed last).
-        resolved = _curvature_rank(rJ[1], pmap.slope(selected),
-                                   pmap.physical(selected_params))
+        # Each parameter relative to the larger of its size at the start and
+        # where the run ended, as the guard measures it: a parameter fitted
+        # to zero ends on its own rounding, and relative to that alone its
+        # column is nothing.
+        resolved = _curvature_rank(
+            rJ[1], pmap.slope(selected),
+            np.maximum(np.abs(pmap.physical(start)), np.abs(pmap.physical(selected_params))))
         if resolved is not None and resolved < n_fitted:
             warnings.warn(
                 f"fit_lm: excited_rank is {n_fitted} of {n_fitted} -- the guard "

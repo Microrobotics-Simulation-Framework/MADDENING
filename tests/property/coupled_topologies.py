@@ -1880,6 +1880,8 @@ def search_topologies() -> dict:
       timestep (a sub-cycled, multi-rate group under ``subcycling=True``);
     * ``pair-3``: two members of three entries, ``alpha = 0``: the ring a
       prescribed spectrum is put on (near-degenerate slow modes);
+    * ``pair-6``: the same with six entries, twelve scalars under Jacobi:
+      more than the eight Krylov steps resolve, so the flags must refuse;
     * ``hub``: a fan-out hub (one field read by four internal edges), a
       chord between two leaves, and a leaf that reads the hub's field
       twice, once through a transform;
@@ -1903,13 +1905,14 @@ def search_topologies() -> dict:
                 topo = topo.with_timesteps({"r1": 0.5})
             out[label] = topo
 
-    b = TopologyBuilder()
-    b.node("a", 3, alpha=0.0)
-    b.node("b", 3, alpha=0.0)
-    b.edge("b", "a")
-    b.edge("a", "b")
-    b.group("a", "b")
-    out["pair-3"] = b.build("pair-3")
+    for n in (3, 6):
+        b = TopologyBuilder()
+        b.node("a", n, alpha=0.0)
+        b.node("b", n, alpha=0.0)
+        b.edge("b", "a")
+        b.edge("a", "b")
+        b.group("a", "b")
+        out[f"pair-{n}"] = b.build(f"pair-{n}")
 
     b = TopologyBuilder()
     b.node("h", 2, alpha=0.5)

@@ -43,7 +43,9 @@ and held to a floor in the slow profile):
    the radius under a perturbation of the weighted Jacobian of the
    analysis dtype's rounding (:func:`_radius_allowance`: what a
    backward-stable computation could deliver; the claim as written has no
-   such allowance, and ``"radius_strict"`` scores it so); and, where the
+   such allowance, and ``"radius_strict"`` scores it so), and for a pass
+   whose Jacobian has rank above eight, where the claim says "an
+   estimate", the 5% of ``1 - rho`` the flag itself tests; and, where the
    weighted Jacobian is normal, how far the estimate is *above* the
    radius ("from below for a normal dF/dx"), whatever the flag.  No row
    promises ``rho_spectral`` as an upper estimate, so none is scored;
@@ -83,10 +85,20 @@ import numpy as np
 import pytest
 from hypothesis import strategies as st
 
+from maddening.core.coupling.acceleration import (
+    SPECTRAL_KRYLOV_STEPS,
+    SPECTRAL_SETTLED_FRACTION,
+)
 from tests.property import coupled_graphs as cg
 from tests.property import coupled_topologies as ct
 from tests.property.sysid_transform_grid import precision
 from tests.property.targeted_search import PER_PUSH, SLOW, targeted_search
+
+#: The per-push profile: 150 examples, not the house floor of 20.  An
+#: example costs about 20 ms once its cell is compiled (the cells are the
+#: seconds), and at 20 examples a search did not find a resolvent factor
+#: halved; at 150 it does.
+EVERY_PUSH = dataclasses.replace(PER_PUSH, max_examples=150)
 
 STRUCTURES = ct.search_topologies()
 
@@ -159,13 +171,18 @@ def _cells() -> tuple:
 #: for the shapes past defects lived on: the ring of three scalars under
 #: Jacobi in float64 (a small field), the pair with a prescribed spectrum
 #: stopped early in float64 (near-degenerate modes), the mapped ring under
-#: Gauss-Seidel in float32 (a cancelling mapping row at the floor) and the
-#: hub under the interface norm in float32 (fan-out).
+#: Gauss-Seidel in float32 (a cancelling mapping row at the floor), the
+#: hub under the interface norm in float32 (fan-out) and the pair of
+#: twelve scalars under Jacobi (a spectrum eight Krylov steps do not
+#: resolve: the one per-push cell on which a flag says False -- the
+#: gradient's, always, and the spectrum's where the gain is large --
+#: without which a flag forced True changes nothing a search sees).
 _FIRST = (
     Cell("ring-3", "float64", 1, 120),
     Cell("pair-3", "float64", 0, 5),
     Cell("mapped", "float32", 0, 120),
     Cell("hub", "float32", 6, 5),
+    Cell("pair-6", "float32", 1, 5),
 )
 #: A cell a pinned finding lives on (compiled per push for that pin only).
 _PINNED = (Cell("ring-3-multirate", "float32", 6, 5),)
@@ -388,7 +405,10 @@ def _radius_allowance(A: np.ndarray, rho: float, eps: float, seed: int) -> float
 #: test drops a direction below 1e-5 of ``||A q||`` in every dtype, so a
 #: settled ``rho_spectral`` is off by about that much of the weighted
 #: Jacobian's norm -- measured 5.6e-4 of a radius of 0.084 at a norm of 56,
-#: float64, on gains that are merely non-normal.  The ``"radius"`` score
+#: float64, on gains that are merely non-normal, and up to 4.6e-5 of the
+#: norm as this module weights it (the report's weights under the
+#: interface norm are the reading's); sixteen thresholds are allowed, so a
+#: random hunt does not go red on it.  The ``"radius"`` score
 #: allows it, so the search stays green on this tree and still sees
 #: anything larger; ``"radius_strict"`` -- the claim as written, 1e-4 of
 #: the radius and nothing for conditioning -- does not, and the pins at
@@ -397,7 +417,7 @@ def _radius_allowance(A: np.ndarray, rho: float, eps: float, seed: int) -> float
 #: say: in float32 a field 1e-4 of its driver makes the weighted
 #: eigenproblem so ill-conditioned that rounding alone moves the radius
 #: sixfold (the third pin), which ``"radius"`` allows and CPL-087 does not.
-KNOWN_BREAKDOWN_ALLOWANCE = 4.0 * 1e-5
+KNOWN_BREAKDOWN_ALLOWANCE = 16.0 * 1e-5
 
 
 def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
@@ -509,6 +529,13 @@ def observe(case: Case) -> dict:
         allowance = max(_radius_allowance(A, rho, eps_analysis, case.seed), 1e-300)
         norm_A = float(np.linalg.norm(A, 2))
         off = abs(rho_reported - rho) if out["spectral_usable"] else 0.0
+        if np.linalg.matrix_rank(J) > SPECTRAL_KRYLOV_STEPS:
+            # "An estimate otherwise, which spectral_usable reports":
+            # past eight independent scalars nothing is called exact.  A
+            # settled estimate is read as good to the margin the flag
+            # tests it by, 5% of ``1 - rho``.
+            allowance += SPECTRAL_SETTLED_FRACTION * max(1.0 - rho, 0.0)
+            out["report"]["rank"] = int(np.linalg.matrix_rank(J))
         if norm_A > 0 and np.linalg.norm(A @ A.T - A.T @ A, 2) <= 1e-9 * norm_A ** 2:
             # Normal in the norm's weights: an estimate "from below",
             # whatever the flag.
@@ -516,14 +543,17 @@ def observe(case: Case) -> dict:
         # The claim as written -- "exact ... to float32", with no word
         # about conditioning -- and the claim as a backward-stable
         # eigenvalue computation in the group's dtype can keep it.
-        out["radius_strict"] = off / max(1e-4 * rho, 1e-300)
+        out["radius_strict"] = off / max(allowance - _radius_allowance(
+            A, rho, eps_analysis, case.seed) + 1e-4 * rho, 1e-300)
         out["radius"] = off / (allowance + KNOWN_BREAKDOWN_ALLOWANCE * norm_A)
         out["report"]["jacobian_norm"] = norm_A
 
     if out["spectral_usable"]:
         dist = model.returned_weight_distance(0, step.pre, step.state)
         bound = float(d["spectral_error_bound"]) * allowed
-        out["bound"] = dist / bound if bound > 0 else (math.inf if dist > 0 else 0.0)
+        # A usable bound that is not a number bounds nothing.
+        out["bound"] = (math.inf if math.isnan(bound) else
+                        dist / bound if bound > 0 else (math.inf if dist > 0 else 0.0))
         out["report"]["distance"] = dist
 
     if out["gradient_usable"]:
@@ -533,7 +563,7 @@ def observe(case: Case) -> dict:
         # few ``eps``: an error below 64 of them (the allowance of the
         # domain check of CPL-093) is not one a gradient in this dtype has.
         bound = float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
-        out["gradient"] = true / bound
+        out["gradient"] = math.inf if math.isnan(bound) else true / bound
         out["report"]["gradient_error"] = true
     return out
 
@@ -600,13 +630,16 @@ THRESHOLD = {"bound": 1.0 + 2.0 ** 10 * float(np.finfo(np.float32).eps),
 FLAG = {"bound": "spectral_usable", "radius": "spectral_usable",
         "radius_strict": "spectral_usable",
         "gradient": "gradient_usable", "floor": "floor_reported"}
-#: The least fraction of a slow hunt's examples whose flag must have been
-#: set.  A search that only ever sees unusable numbers proves nothing; the
-#: generator draws caps of five passes, gains near one and starts at the
-#: fixed point, all of which the flags rightly refuse, and measured 0.5
-#: to 0.7 usable over the claimed domain, so a fifth leaves room for a
-#: hunt that climbs towards the refused corner and fails one that lives there.
-USABLE_FLOOR = 0.2
+#: The least fraction of a hunt's examples whose flag must have been set.
+#: A search that only ever sees unusable numbers proves nothing.  Measured
+#: on this tree: 1.00 in every block of two hunts over the claimed domain
+#: (every member declares its evaluation count and no group has more than
+#: eight scalars, so the flags have nothing to refuse there) and 0.85 to
+#: 1.00 over the widened one, where a field at its driver's rounding reads
+#: a radius above one.  A half is far enough below both that a fix which
+#: makes the flags refuse more does not trip it, and a change that makes
+#: them refuse most of what is drawn does.
+USABLE_FLOOR = 0.5
 
 
 SEARCHES = ("bound", "radius", "gradient", "floor")
@@ -632,7 +665,7 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: Domain = CLAIMED, profile
     own: the same draws on every run, and not the same draws for the four
     searches (derandomised, they would all score one set of examples)."""
     if profile is None:
-        profile = PER_PUSH.seeded(sorted(THRESHOLD).index(name))
+        profile = EVERY_PUSH.seeded(sorted(THRESHOLD).index(name))
     drawn = []
 
     def score(case: Case):
@@ -677,7 +710,8 @@ _WITNESS = {
 }
 
 
-# Slow: 800 random examples a search over every cell (seven blocks of 115),
+# Slow: 800 random examples a search over every cell (seven blocks of
+# nine or ten cells, 115 examples each),
 # each cell a compile; the blocks outermost, so the four searches share a
 # block's compiled graphs.
 # Per push: tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
@@ -699,6 +733,7 @@ def test_the_hunt_finds_no_number_on_the_wrong_side(block, name):
 #: The directions the generator was widened in, one explicit example each,
 #: inside the claimed domain: every score holds on every one.
 SEEDS = {
+    "twelve-scalars-the-flags-refuse": Case(4, 9, 0.8, False, 1.0, 0.0, 1.0, 0, 1e-2, 0),
     "a-field-a-hundredth-of-its-driver": Case(0, 3, 0.6, False, 1e-2, 0.0, 1.0, 0, 1e-3, 0),
     "gain-0.98-in-other-units": Case(0, 4, 0.98, True, 1.0, 0.0, 1.0, 3, 1e-6, 1),
     "modes-within-a-thousandth-stopped-early": Case(1, 5, 0.9, False, 1.0, 1e-3, 1.0, 0, 1e-2, 0),

@@ -3308,13 +3308,13 @@ claims:
     scales, selections; a non-affine transform makes the map non-linear in
     the reading) (MADD-ANO-187, MADD-ANO-195), and a field that several
     internal edges read counted once for each of them, as that norm counts
-    it (MADD-ANO-206); every acceleration and schedule; long
+    it (MADD-ANO-210); every acceleration and schedule; long
     Gauss-Seidel chains, sub-cycled and multi-rate groups; float16 to
     float64, a delivered value wider than its source field resolved at the
-    source's eps (MADD-ANO-204).  Where the residual is at its float floor
+    source's eps (MADD-ANO-208).  Where the residual is at its float floor
     the bound rests on the counted floor (CPL-092, CPL-102), which does not
     see a same-pass read that differences entries of one field
-    (MADD-ANO-205, open).
+    (MADD-ANO-209, open).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -3372,7 +3372,7 @@ claims:
     the analysis where no edge was mapped or transformed: the norm counts
     it once per edge and the fields' weights once, and on a star whose hub
     every leaf reads the bound read 0.26-0.73x the true distance, usable
-    (MADD-ANO-206).  Such a group is analysed on the reading too (1.001x to
+    (MADD-ANO-210).  Such a group is analysed on the reading too (1.001x to
     1.010x on the same stars), and each cell below also runs a pair in
     which one member feeds two ports of the other (0.741x before, 1.016x).
   domains:
@@ -3572,7 +3572,7 @@ claims:
     does the count see a same-pass read that differences entries of one
     source field (a mapping row [1, -1] on a field at 1000 with a
     difference of order one): a Gauss-Seidel group stalled behind it read
-    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-205, open).  In
+    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-209, open).  In
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
@@ -3856,7 +3856,7 @@ claims:
     "interface" the entries are what each internal edge delivers (its
     mapping, with the weights passed as `mappings`, then its transform),
     each at the coarser of its own dtype's eps and its source field's
-    (MADD-ANO-204).
+    (MADD-ANO-208).
   oracle: closed form.
   tests:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_floor_of_a_mapped_edge_counts_what_it_delivers
@@ -3939,7 +3939,7 @@ claims:
     difference of two entries of that field cancels: a same-pass read
     through a mapping row [1, -1] is counted as a gain of about one, and a
     Gauss-Seidel group stalled behind it read its bound at 0.054x to
-    2.6e-4x the true distance, usable (MADD-ANO-205, open).
+    2.6e-4x the true distance, usable (MADD-ANO-209, open).
     diagnostics="rounding", which measures instead of counting, is
     planned for 0.5.0.
   oracle: the count against hand-derived chains; the step and the report count the same.

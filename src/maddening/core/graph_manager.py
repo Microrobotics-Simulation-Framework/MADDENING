@@ -397,7 +397,7 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
       field every leaf reads, the residual of the edges times the
       resolvent of the fields read 0.26 to 0.73 of the true distance
       with ``spectral_usable=True`` (2 to 16 leaves, Jacobi, float64;
-      MADD-ANO-206).
+      MADD-ANO-210).
 
     Static: *interface_edges* are the group's internal edges and
     *float_fields* its floating fields by node, so a group keeps one
@@ -9742,7 +9742,7 @@ class GraphManager:
               so does the reading: with the fields counted once each
               instead, the bound read 0.26-0.73x the true distance,
               usable, on a star whose hub's field every leaf reads
-              (MADD-ANO-206).  A transform that is
+              (MADD-ANO-210).  A transform that is
               not affine makes the map non-linear in the reading, with
               the asymptotic reading above.  And its float floor is a model of the
               map's rounding (see

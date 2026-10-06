@@ -389,7 +389,7 @@ audit).  The norm also counts a field once for every internal edge that
 reads it, where the state's weights count it once: on a star whose hub's
 field every leaf reads, with no mapping or transform anywhere, the
 fields' analysis read 0.26-0.73x the true distance with
-`spectral_usable=True` (2 to 16 leaves, Jacobi; MADD-ANO-206), so a group
+`spectral_usable=True` (2 to 16 leaves, Jacobi; MADD-ANO-210), so a group
 with a field that more than one internal edge reads is analysed on the
 reading too.  Only a group whose internal edges read each field once, as
 it is, keeps the analysis in the state's weights (`_reading_is_the_fields`

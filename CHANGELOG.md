@@ -785,6 +785,7 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **REST write-sequence oracle: a run that fails part-way is held to a replay of the steps it counted** (`tests/property/injected_failures.py`): the rule "an empty graph's clock stays" was wrong for a graph emptied over the API, whose steps the streams go on counting, and failed the slow hundred-request machine; the server was consistent. A per-push example now runs an emptied and a never-filled graph with a later slice failing
 - **MADD-VER-002's acceptance band no longer admits the defect it measured**:
   `[0.7, 2.5]` -> `[1.7, 2.3]` around the theoretical 2.0 (measured 1.900); it
   cited MADD-ANO-002 for a boundary defect. MADD-VER-001: 5% -> 1e-4

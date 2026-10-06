@@ -301,6 +301,10 @@ def _same(a: Any, b: Any) -> bool:
         return a == b
 
 
+#: Counted per ``POST /sim/run`` that failed after some of its steps.
+PARTIAL_RUNS = "runs that failed after some of their steps"
+
+
 def _partial_run(resp) -> int:
     """The steps a ``POST /sim/run`` says it took before its 4xx, 500 or
     503: the one refusal that is documented to leave the graph changed.
@@ -410,11 +414,15 @@ class RestWriteSequences(RuleBasedStateMachine):
             note(f"{what} with a failure injected at {fired} -> {failed.status_code}")
             if _partial_run(failed):
                 self.unchecked = True
+                counts[PARTIAL_RUNS] += 1
 
         # Invariant 6, then the request itself.
         resp, injected, before, fingerprint = fail_at_every_point(
             served, lambda: served.client.request(method, url, **kwargs), what,
-            partial=_partial_run, on_failure=moved_on)
+            partial=_partial_run, on_failure=moved_on,
+            # Only a run counts steps before a failure: the replay of them.
+            rerun=((lambda steps: served.client.request(method, url, params={"n_steps": steps}))
+                   if url == "/sim/run" else None))
         counts["failures injected"] += len(injected)
         counts[f"failures injected ({self.bind})"] += len(injected)
         counts[(rule_name, "failed at a point")] += bool(injected)
@@ -1197,6 +1205,43 @@ def test_a_graph_whose_coupling_group_lost_a_member_still_reloads():
         assert resp.status_code == 200, resp.text
         assert not machine.gm._coupling_groups  # noqa: SLF001
         assert step(machine.do_step).status_code == 200
+
+
+@pytest.mark.parametrize("history", ("emptied", "always empty", "filled and emptied"))
+def test_a_run_that_fails_part_way_on_an_empty_graph_leaves_what_its_steps_leave(history):
+    """A run on a graph with no node, failed in a later slice: the reply
+    counts the steps before it, and the server is then what a run of that
+    many steps from the same graph leaves -- the streams' clock included,
+    which depends on the graph's history.  The relay observes a graph from
+    its first node on and goes on observing it when the last one is
+    removed, so an emptied graph's steps are counted by the streams and
+    those of a graph that never had a node are not; the oracle used to
+    expect "an empty graph's clock stays" of both, and the hundred-request
+    machine failed in the slow lane on a rod graph emptied by three
+    ``DELETE /graph/nodes`` and then run.
+
+    Per push because the ten-request machine does not get here: it takes
+    every node removed (three particular requests of the ten, from the rod
+    graph) and then a run of two steps or more.
+    """
+    RestWriteSequences.counts = collections.Counter()
+    with replay("rod" if history == "emptied" else "empty") as (machine, step):
+        if history == "filled and emptied":
+            assert step(machine.do_add_node, "ball", "BallNode", DT, {}).status_code == 201
+            assert step(machine.do_step).status_code == 200
+        for name in machine._nodes():  # noqa: SLF001
+            assert step(machine.do_remove_node, name).status_code == 200
+        assert not machine.gm._nodes  # noqa: SLF001
+        relay = machine.served.server.relay
+        observed = relay._on_event in machine.gm._observers  # noqa: SLF001
+        assert observed is (history != "always empty")
+        assert step(machine.do_compile).status_code == 200
+        assert step(machine.do_run, 3).status_code == 200
+        # Slices of one step and two: the second failed with one step
+        # counted, at each of its points, and the final read with three.
+        assert RestWriteSequences.counts[PARTIAL_RUNS] >= 3, dict(RestWriteSequences.counts)
+        assert step(machine.do_reset).status_code == 200
+        assert step(machine.do_run, 2).status_code == 200
 
 
 def test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from():

@@ -111,7 +111,7 @@ python scripts/check_numeric_constants.py
 | `XLA_FLAGS` | Disable GPU autotune (avoids equinox segfaults) | `--xla_gpu_autotune_level=0` |
 | `PYTEST_DISABLE_PLUGIN_AUTOLOAD` | Prevent plugin conflicts | `1` |
 | `MADDENING_HYPOTHESIS_PROFILE` | Hypothesis depth/settings profile (`dev` or `ci`) | `dev` |
-| `MADDENING_TEST_SHARD` | Keep only shard `i` of `N` of the test files (`tests/_sharding.py`); CI sets it per job. Unset: every file | `2/4` |
+| `MADDENING_TEST_SHARD` | Keep only shard `i` of `N` of the test files (`tests/_sharding.py`); CI sets it per job. `i/N:weighted` deals the files by measured time, as the slow lane does. Unset: every file | `2/4`, `2/6:weighted` |
 | `MADDENING_TEST_JAX_TIMING` | Record each test's JAX trace / lower / compile / cache-read time and processes started into the JUnit XML (`tests/_jax_timing.py`), for the time budget. CI sets it | `1` |
 | `MADDENING_REQUIRE_PACKAGING_TESTS` | Fail, rather than skip, the wheel test when the build backend is missing. CI's test lanes set it | `1` |
 | `JAX_COMPILATION_CACHE_DIR` | JAX's persistent compilation cache directory; the test lanes point it at the restored or empty cache (see *The compilation cache* below). Unset locally: no cache | `$RUNNER_TEMP/jax-cache` |
@@ -494,8 +494,17 @@ files, never a function of the test list. So:
 - shard *i* of a pull request holds the same files as shard *i* of the base
   branch, which is what lets a shard reuse that shard's compilation cache.
 
-`slow-tests.yml` is split the same way, four runners per lane, which takes
-the whole-suite run from about three hours to under one.
+`slow-tests.yml` is split by file too, but on six runners per lane and by
+measured time, not by hash (`MADDENING_TEST_SHARD=i/6:weighted`). It
+restores no compilation cache, so nothing there needs a file to stay on its
+shard, and its files are far from equal: the heaviest takes 48 minutes, and
+by hash one shard of four held nearly half of the lane (166 to 172 minutes
+against a 175-minute timeout, with the others at 50 to 85). The weighted
+split deals the files listed in `tests/slow_lane_weights.json` (seconds per
+file on its slower JAX lane, from a slow-lane run's JUnit artifacts),
+longest first, each onto the shard with the least time so far. A file the
+table does not list (a new one, or one under ten seconds) goes by the hash
+of its path. That predicts 57 to 67 minutes of test time on every shard.
 
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The
@@ -511,16 +520,35 @@ together:
   `of4` in the compilation cache's key and in the durations artifact's
   name, and the `-ne 4` and "of 4" in the `Test durations` job's
   "Summarise the lane" step;
-- in `slow-tests.yml`: `shard:`, `MADDENING_TEST_SHARD`, the artifact
-  name's `of4` and the "of 4" in the step titles;
 - `PINS_FOR` in `tests/_sharding.py`, and the pins themselves.
 
-The compliance tests pin most of these at four, so a change to the count
-fails them until each place is updated: `test_ci_sharding.py` (`shard:`,
-`MADDENING_TEST_SHARD` and `PINS_FOR`, in both workflows),
-`test_ci_workflows.py` and `test_report_test_durations.py` (the cache key,
-and the lane summary run on four shards' reports and on three). The
-artifact names and the step titles are not checked.
+The slow lane's count is separate (`SLOW_LANE_SHARDS` in
+`tests/_sharding.py`) and is written in `slow-tests.yml` as `shard:`,
+`MADDENING_TEST_SHARD`, the artifact name's `of6`, the "of 6" in the step
+title and the `/6` in the three issue titles. No pin depends on it: the
+table is dealt for whatever count the spec names.
+
+The compliance tests pin these counts, so a change to one fails them until
+each place is updated: `test_ci_sharding.py` (`shard:`,
+`MADDENING_TEST_SHARD` and every other mention of the count, in both
+workflows, against `PINS_FOR` and `SLOW_LANE_SHARDS`), `test_ci_workflows.py`
+and `test_report_test_durations.py` (the cache key, and the lane summary
+run on four shards' reports and on three).
+
+To rebalance the slow lane, regenerate the table from a run's artifacts.
+The script prints the heaviest files and the minutes it predicts per shard,
+before and after, on each JAX lane:
+
+```bash
+gh run download <run id> --dir /tmp/slow --pattern 'slow-durations-*'
+python scripts/slow_lane_weights.py --run <run id>=/tmp/slow --commit <run id>=<sha> --write
+```
+
+A shard that timed out wrote no report, so its files have no measurement in
+that run: give an earlier run first (`--run` repeats, and the later
+measurement of a file wins). `test_ci_sharding.py` fails if the table lists
+a file that no longer exists, or predicts more than 100 minutes on the
+heaviest shard; then raise `SLOW_LANE_SHARDS`, or split the heaviest file.
 
 Every allowlist entry is `<node id> # kept: <why it must run on every
 push>`. The tests that were already over 5 s when the budget arrived

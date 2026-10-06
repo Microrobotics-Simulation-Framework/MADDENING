@@ -24,11 +24,23 @@ every boundary after it, and they split files across shards.
 an imbalance the hash leaves.  Pinning moves that file and nothing else.
 Pins apply only when the job count equals ``PINS_FOR``; changing the job
 count is a deliberate rebalance that re-deals every file anyway.
+
+The slow lane (``slow-tests.yml``) asks for ``i/N:weighted`` instead.  It
+restores no compilation cache, so nothing there depends on a file staying
+on its shard, and its files are far from equal: one takes 48 minutes, and
+by hash a single shard held nearly half of the lane.  A weighted split
+deals the files of ``slow_lane_weights.json`` (measured seconds per file),
+longest first, each onto the shard with the least time so far; a file the
+table does not list goes by the hash above.  It is still a function of the
+path and of committed data, and a file's tests still stay together.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -60,29 +72,98 @@ PINS: dict[str, int] = {
 #: The job count the pins were balanced for.
 PINS_FOR = 4
 
+#: The suffix of a shard spec that asks for the weighted split.
+WEIGHTED = "weighted"
+#: The job count ``slow-tests.yml`` runs per JAX version.  Six, not the four
+#: of the per-push lane: the measured lane is 360 to 395 minutes of tests
+#: (the two JAX versions), so four balanced shards would sit at 96 to 100
+#: minutes each, with nothing to spare; six sit at about 65.
+SLOW_LANE_SHARDS = 6
+#: Measured seconds per test file for the weighted split, next to this
+#: module.  ``scripts/slow_lane_weights.py`` writes it from the JUnit
+#: artifacts of a slow-lane run and prints the minutes it predicts per shard.
+WEIGHTS_FILE = Path(__file__).with_name("slow_lane_weights.json")
 
-def parse(spec: str) -> tuple[int, int]:
-    """``"i/N"`` -> ``(i, N)``, 1 <= i <= N; anything else is an error."""
-    try:
-        i, n = (int(x) for x in spec.split("/"))
-    except ValueError:
-        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: expected 'i/N', e.g. '2/4'") from None
+
+def parse(spec: str) -> tuple[int, int, bool]:
+    """``"i/N"`` or ``"i/N:weighted"`` -> ``(i, N, weighted)``, 1 <= i <= N.
+
+    Anything else is an error, an unknown suffix included: a misspelt
+    ``:weighted`` must not fall back to the hash split unnoticed.
+    """
+    counts, colon, plan = spec.partition(":")
+    if colon and plan != WEIGHTED:
+        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: the only suffix is ':{WEIGHTED}'")
+    # Digits only: int() would also take " 6", "+6" and "1_0".
+    if not re.fullmatch(r"[0-9]+/[0-9]+", counts):
+        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: expected 'i/N' or 'i/N:{WEIGHTED}', e.g. '2/4'")
+    i, n = (int(x) for x in counts.split("/"))
     if not 1 <= i <= n:
         raise pytest.UsageError(f"{ENV_VAR}={spec!r}: need 1 <= i <= N")
-    return i, n
+    return i, n, bool(colon)
 
 
-def shard_of(path: str, n: int) -> int:
-    """The 1-based shard of a test file, out of ``n``."""
-    if n == PINS_FOR and path in PINS:
-        return PINS[path]
+def _by_hash(path: str, n: int) -> int:
     # sha256, not hash(): Python's string hash is salted per process.
     return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1
 
 
+def shard_of(path: str, n: int) -> int:
+    """The 1-based shard of a test file, out of ``n`` (the per-push split)."""
+    if n == PINS_FOR and path in PINS:
+        return PINS[path]
+    return _by_hash(path, n)
+
+
+def load_weights(path: Path = WEIGHTS_FILE) -> dict[str, int]:
+    """``{test file: seconds}`` from the committed table; a bad table is an error."""
+    try:
+        seconds = json.loads(path.read_text(encoding="utf-8"))["seconds"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise pytest.UsageError(f"{path}: cannot read the weighted split's table ({exc!r})") from None
+    if not isinstance(seconds, dict) or not seconds:
+        raise pytest.UsageError(f"{path}: 'seconds' must be a non-empty {{test file: seconds}} table")
+    bad = {k: v for k, v in seconds.items() if type(v) is not int or v <= 0}
+    if bad:
+        raise pytest.UsageError(f"{path}: every weight must be a positive whole number of seconds: {bad}")
+    return seconds
+
+
+def deal(weights: dict[str, int], n: int) -> dict[str, int]:
+    """``{file: shard}`` for the listed files: longest first, each onto the lightest shard.
+
+    Ties (equal seconds, equal loads) break on the path and on the lower
+    shard number, so the result does not depend on the table's order.
+    """
+    load = [0] * n
+    shards = {}
+    for path, seconds in sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):
+        lightest = min(range(n), key=lambda k: (load[k], k))
+        shards[path] = lightest + 1
+        load[lightest] += seconds
+    return shards
+
+
+def weighted_shard_of(path: str, n: int, dealt: dict[str, int]) -> int:
+    """The 1-based shard of a test file under the weighted split.
+
+    ``dealt`` is ``deal(weights, n)``.  A file it does not list -- a new
+    one, or one too light to be in the table -- goes by the hash of its
+    path, never by a pin: the pins balance the per-push lane.
+    """
+    return dealt[path] if path in dealt else _by_hash(path, n)
+
+
 class Plugin:
-    def __init__(self, shard: int, of: int):
+    def __init__(self, shard: int, of: int, weights: dict[str, int] | None = None):
         self.shard, self.of = shard, of
+        self.weighted = weights is not None
+        self._dealt = deal(weights, of) if weights is not None else {}
+
+    def shard_of(self, path: str) -> int:
+        if self.weighted:
+            return weighted_shard_of(path, self.of, self._dealt)
+        return shard_of(path, self.of)
 
     def pytest_collection_modifyitems(self, config, items):
         keep, drop = [], []
@@ -90,18 +171,20 @@ class Plugin:
             # The node id's path part is relative to the root dir with "/"
             # separators on every platform, so the hash is too.
             path = item.nodeid.split("::", 1)[0]
-            (keep if shard_of(path, self.of) == self.shard else drop).append(item)
+            (keep if self.shard_of(path) == self.shard else drop).append(item)
         if drop:
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
 
     def pytest_report_header(self, config):
-        return f"test shard: {self.shard}/{self.of} (by file; see tests/_sharding.py)"
+        how = "by file, weighted" if self.weighted else "by file"
+        return f"test shard: {self.shard}/{self.of} ({how}; see tests/_sharding.py)"
 
 
 def register(config, spec: str):
-    shard, of = parse(spec)
+    shard, of, weighted = parse(spec)
     for path, pinned in PINS.items():
         if not 1 <= pinned <= PINS_FOR:
             raise pytest.UsageError(f"tests/_sharding.py pins {path} to shard {pinned} of {PINS_FOR}")
-    config.pluginmanager.register(Plugin(shard, of), "maddening-test-shard")
+    weights = load_weights() if weighted else None
+    config.pluginmanager.register(Plugin(shard, of, weights), "maddening-test-shard")

@@ -2577,6 +2577,33 @@ anomalies:
       extracted with `git archive` gives identical numbers.  The
       collision code in `update()` has not changed since then; 0.4.0
       only added the `params` keyword.
+
+      Manifestation in system identification (0.4.0; measured
+      2026-10-06, CPU, jax/jaxlib 0.11.0, float32).  The loss of a
+      rollout through a bounce is piecewise smooth in the node's
+      parameters, with jumps: on the stock `TableNode -> BallNode`
+      graph, at the parameters that generated the record, lowering
+      `elasticity` by one part in a million raises `0.5 ||r||²` from
+      1e-11 to 0.031.  `maddening.sysid.fit_lm` is drawn along a smooth
+      piece to its edge and stops there, from 11 of 24 starts; it
+      reports that `converged=False` with a `RuntimeWarning` naming a
+      residual that is not differentiable (the same ending reported as
+      converged was MADD-ANO-216, resolved).  `fit` and
+      `fit_multiple_shooting` return their lowest-loss iterate and make
+      no statement.  `fim` at such a point returns the rank and the
+      bounds of the smooth piece the point is on, finite and with no
+      warning: 1.3e-3 relative on the elasticity there, where a change
+      of 1e-6 moves the weighted loss by 311.  `HeartPumpNode`'s valve
+      (`phase < systole_fraction`) is a second in-tree instance.  A fit
+      `fit_lm` does report converged is stationary on its own smooth
+      piece, which need not be the lowest: on the ball a lower piece
+      lay 1e-3 of a parameter from one converged fit, and the piece
+      of the truth 1e-6 from another (its parameters right to 1e-6,
+      its loss 2e-5 against 1e-10).  The
+      condition -- a residual differentiable in the trained parameters
+      along the fitted trajectory -- is stated in the docstrings of
+      `fit_lm`, `fit`, `fim` and `FitResult.converged` and in
+      `docs/user_guide/parameters.md`.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -2642,6 +2669,9 @@ anomalies:
       - "tests/nodes/test_ball_event_gradient.py::test_the_bounce_value_is_within_one_tick_of_travel_of_the_exact_solution"
       - "tests/nodes/test_ball_event_gradient.py::test_the_elasticity_gradient_is_right_because_the_contact_time_does_not_depend_on_it"
       - "tests/nodes/test_ball_event_gradient.py::test_nothing_in_maddening_warns_about_the_missing_term"
+      # The manifestation in system identification: fit_lm beside a jump.
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_beside_a_jump_is_unconverged_and_says_why"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_fit_makes_no_convergence_statement_on_the_ball"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-022"
@@ -14637,6 +14667,134 @@ anomalies:
       - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_a_structural_value_the_live_leaves_allow_is_taken_after_every_door"
       - "tests/core/test_params_guards_ask_the_node_a_save_reloads.py::test_the_points_are_read_off_the_node_built_from_the_live_leaves"
       - "tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from"
+  - anomaly_id: "MADD-ANO-216"
+    title: "fit_lm reported converged=True beside a jump of a residual that is not differentiable in the trained parameters, at a loss far above the minimum and with no warning"
+    description: >
+      `fit_lm`'s floor rule reports `converged=True` when, after the run
+      has lowered the loss, every candidate of an iteration is rejected
+      down to one damped within `step_tol`: no step the tolerance resolves
+      lowers the loss, which for a differentiable residual is its rounding
+      floor.  On a residual that jumps the same thing happens at the edge
+      of a smooth piece.  A node with an event whose timing depends on a
+      trained parameter (MADD-ANO-021) gives a rollout residual that jumps
+      when the event moves by one time step; Levenberg-Marquardt follows a
+      piece to its edge, every candidate the tolerance resolves crosses
+      the jump and is rejected, and the rule read that as the floor.
+
+      Measured 2026-10-06 on CPU, jax/jaxlib 0.11.0, float32, on the
+      parameter guide's own `TableNode -> BallNode` graph (200 steps of
+      0.01, a noiseless record at elasticity 0.7 and gravity -9.81,
+      `fit_lm` with its defaults): from 11 of 24 starts on a grid of
+      elasticities 0.55 to 0.85 and gravities 0.8 to 1.25 times the truth,
+      and from 13 or 14 of 30 random starts within exp(+-0.3), the result
+      was `converged=True`, a full `excited_rank` and no warning at a loss
+      of 0.02 to 3.7, against 1e-13 at the minimum; a point within a
+      hundredth of the returned parameters lowered the loss by 1% to 67%.
+      A second route to the same verdict: a step accepted far up the
+      damping ladder (one that crossed a jump downwards) left the damping
+      so high that the candidates of the next iteration were too short to
+      gain more than the loss's rounding, or rounded to no move at all,
+      while the undamped step crossed the next jump; the rule then rested
+      on a ladder with a gap in it.
+
+      Fixed in 0.4.0, before any release shipped `fit_lm`.  Before the
+      floor rule reports `converged` it compares each rejected candidate
+      that moved a parameter by no more than `2**-10` of itself with its
+      mirror image through the iterate: rounding is alike on both sides, a
+      jump is not.  Where the residual is `2**10` times further from its
+      linearisation on the candidate's side than on the other and than
+      the linearisation's own change, the run ends `converged=False` with
+      a `RuntimeWarning` naming a residual that is not differentiable.
+      Measured: at most 21 on smooth fits stopped by the floor rule (127
+      endings), 2.2e4 to 4.4e5 on the ball (55 endings).  And an iteration
+      whose ladder began above `lam0` while the undamped step was rejected
+      is run once more from `lam0`.  After the fix: 0 of the 24 and 0 of
+      the 90 random starts converged above the minimum, and a targeted
+      search of 800 drawn fits of the ball finds no fit converged where the
+      loss still falls along the piece it is on.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `major`: a silent wrong verdict on a documented path.  A calibration
+      of a model with a contact or a valve was reported converged, with
+      full `excited_rank`, at parameters whose loss was up to thirteen
+      orders of magnitude above the minimum, and nothing in the result
+      said so.  `context_dependent`: it needs a fit through a
+      state-triggered event whose timing depends on a fitted parameter.
+    affected_components:
+      - "maddening.sysid.fit_lm"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0.  On a development build before the fix, do
+      not read `converged` on a model with events: compare `best_loss`
+      across several starts.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The test sees jumps, not every failure of differentiability.  Not
+      detected: a kink (a continuous residual whose slope jumps), in whose
+      crease a run reports `converged=True` at a point no step lowers the
+      loss from but whose Jacobian is one-sided; a jump whose mirror image
+      the bounds do not allow; a jump beside an iterate that the proposal
+      test passes because it is stationary on its own piece; and a fit
+      converged at the interior minimum of a smooth piece that is not the
+      lowest (a local minimum, with the lower piece as near as 1e-3 of a
+      parameter on the ball).  The threshold is measured, not derived: a
+      jump smaller than `2**10` times the linear change of a step of a few
+      float spacings reads as rounding.  The root cause, the missing
+      event-time derivative, is MADD-ANO-021 and stays open.
+    verification:
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_converged_on_the_ball_only_at_the_minimum"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_beside_a_jump_is_unconverged_and_says_why"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_the_loss_beside_a_warned_ending_does_fall_across_the_jump"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_a_smooth_fit_stopped_by_the_floor_rule_is_still_converged"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_an_iteration_whose_damped_candidates_never_moved_is_asked_again"
+      - "tests/property/test_sysid_targeted_search.py::test_no_wrong_fit_among_the_fixed_draws"
+      - "tests/property/test_sysid_targeted_search.py::test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-217"
+    title: "fit_lm from a stiffness started far too high can stop short, unconverged, on the end of a wide damping range where the loss still falls"
+    description: >
+      On the parameter guide's spring with the damping given a range 100
+      times its value, `fit_lm` started from a stiffness 75 to 80 times
+      its truth (and, on a stiffer, more lightly damped spring, 17.8
+      times) can stop with iterations left, `converged=False`, the damping
+      on the upper end of its range and the stiffness two to three times
+      its truth.  That point is no optimum: the loss falls by about 1% a
+      hundredth of the way along from there, and `fit_lm` started again
+      from the returned parameters recovers the truth in 8 iterations.
+      Found by the targeted search of
+      `tests/property/test_sysid_targeted_search.py`; eight cells are
+      pinned there, in float32 and under x64, under `logit` (which also
+      gives the warning that the fit ended on the edge of its transform's
+      range) and under clipped bounds.  Which starts do it is close to
+      chance.
+
+      The ending is loud -- `converged=False`, and under `logit` the edge
+      warning by name -- and no claim is broken as written: the starts are
+      outside the span SYS-144 is held over on the guide's spring and
+      range.  Registered so that the stall is on record for 0.5.0.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      `minor`: the result is reported unconverged (and, under `logit`,
+      with a warning that names the parameter and the edge), so nothing
+      wrong is presented as a result; the start is extreme; a restart from
+      the returned point recovers the truth.
+    affected_components:
+      - "maddening.sysid.fit_lm"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Read `converged`.  Where a fit ends unconverged with iterations
+      left, start `fit_lm` again from the returned parameters, or start
+      the stiffness within a factor of 30 of a plausible value.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      # A strict xfail: a change that ends the stall is noticed.
+      - "tests/property/test_sysid_targeted_search.py::test_fit_lm_from_a_far_start_does_not_stop_short_on_the_end_of_a_range"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-218"

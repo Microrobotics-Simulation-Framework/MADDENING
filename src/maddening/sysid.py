@@ -3309,6 +3309,18 @@ def fim(
         ``crb``, which is ``+inf`` for a parameter the unresolved ones
         leave undetermined.  See :class:`FIMReport`.
 
+        **Condition: the residual is differentiable in the parameters at
+        the point asked.**  ``J`` is the derivative of the branch each step
+        took, so at a point where an event, a contact or a valve's timing
+        depends on a parameter (MADD-ANO-021) it describes the smooth piece
+        the point is on and nothing across its edge: ``rank`` and ``crb``
+        come back finite, with no warning, and bound nothing a jump can do.
+        On the stock bouncing ball at its generating parameters
+        (``noise_std=0.01``) the bound on the elasticity is 1.3e-3 relative,
+        where a change of 1e-6 moves ``0.5 ||r / sigma||²`` by 311.  This
+        function evaluates the residual at one point and cannot see that;
+        :func:`fit_lm` warns when its run ends beside such a jump.
+
     Warns
     -----
     ~maddening.warnings.PrecisionLimitWarning
@@ -3892,6 +3904,114 @@ _LM_LADDER = 12
 #: Gauss-Newton one.
 _LM_LAMBDA_MAX = 1e12
 
+#: The largest relative move of a parameter at which :func:`fit_lm`'s
+#: one-sided test (:func:`_one_sided_excess`) reads a rejected candidate.
+#: The test compares a step with its mirror image, and a smooth residual
+#: treats the two alike only to third order in the step, so it is asked of
+#: small steps alone: at ``2**-10`` of a parameter the two sides of a
+#: smooth residual differ by about that fraction of what either does.
+_JUMP_MAX_MOVE = 2.0 ** -10
+
+#: How many times further from the linear model a rejected candidate's
+#: residual has to be than its mirror image's (and than the model's own
+#: predicted change) before :func:`fit_lm` reads the rejection as a jump of
+#: the residual rather than as rounding.  Measured (CPU, jaxlib 0.11.0):
+#: on smooth residuals stopped by the floor rule the ratio is of order one
+#: -- at most 5.7 over 127 such endings (the spring and ``HeartPumpNode``
+#: from spread starts, with and without noise; the per-push and slow sysid
+#: tests) but for one float32 fit under a ``logit`` so wide that a
+#: coordinate's float spacing moves its value by 6e-4, at 21 -- and on the
+#: stock bouncing ball, whose bounce moves by one time step, 2.2e4 to
+#: 4.4e5 over 55 endings.  ``2**10`` sits between, a factor of 48 above
+#: the one and 21 below the other.
+_JUMP_EXCESS = 2.0 ** 10
+
+
+def _norm64(x) -> float:
+    """``||x||`` in float64 without squaring a value outside its range."""
+    x = np.asarray(x, dtype=np.float64)
+    top = float(np.max(np.abs(x))) if x.size else 0.0
+    if not np.isfinite(top) or top == 0.0:
+        return top
+    return top * float(np.sqrt(np.sum(np.square(x / top))))
+
+
+def _gain_in_the_gap(r, J, undamped, theta, rises) -> bool:
+    """Whether the undamped Gauss-Newton step from ``theta`` promises, on
+    the linear model, :data:`_JUMP_EXCESS` times more than the largest rise
+    of the loss among the short candidates an iteration rejected
+    (``rises``: what the loss's rounding did to them).
+
+    At a rounding floor the undamped step is the least-squares fit of the
+    residual's rounding and promises a reduction of that order.  One that
+    promises orders of magnitude more, from an iterate whose short
+    candidates all lost to rounding, says the step lengths between them
+    were worth asking about (:func:`fit_lm`, the floor rule).  ``False``
+    with nothing to compare (no short candidate, or a promise that is not
+    finite or not positive).
+    """
+    if not rises:
+        return False
+    r64 = np.asarray(r, dtype=np.float64)
+    step = np.asarray(undamped, dtype=np.float64) - np.asarray(theta, dtype=np.float64)
+    model = r64 + np.asarray(J, dtype=np.float64) @ step
+    promised = 0.5 * (float(r64 @ r64) - float(model @ model))
+    noise = max(float(x) for x in rises)
+    return bool(np.isfinite(promised) and promised > _JUMP_EXCESS * max(noise, 0.0)
+                and promised > 0.0)
+
+
+def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
+    """``(excess, move)``: how one-sided the residual is around ``theta``,
+    read from candidates a Levenberg-Marquardt iteration rejected.
+
+    For a rejected candidate ``theta + d`` the residual's departure from
+    the linear model, ``||r(theta + d) - r - J d||``, is compared with the
+    same departure at the mirror image ``theta - d`` plus the model's own
+    predicted change ``||J d||``.  ``excess`` is the largest ratio over
+    ``rejected`` and ``move`` the candidate's largest relative move of a
+    parameter.
+
+    This is what tells the rounding floor from a jump.  At the floor of a
+    differentiable residual a candidate a few ulps away is rejected because
+    the residual's own rounding outweighs what the step gains, and that
+    rounding is the same on both sides: the ratio is of order one.  Where
+    the residual jumps (a bounce or a valve switching one time step earlier)
+    the iterate has been drawn to the edge of a smooth piece; the step
+    across the edge changes the residual by the jump and the step back into
+    the piece by the model's prediction and rounding, so the ratio is the
+    jump over those.  No scale has to be assumed for the rounding: the
+    mirror image measures it on the problem itself.
+
+    ``rejected`` holds ``(candidate, residual, move)``; ``mirror(th)``
+    returns the coordinates ``th`` is evaluated at (projected onto the
+    bounds, on the leaves' grid) and the residual there.  A candidate whose
+    mirror image the bounds do not allow, or whose residual is not finite
+    on either side, says nothing and is skipped.
+    """
+    th = np.asarray(theta, dtype=np.float64)
+    r64 = np.asarray(r, dtype=np.float64)
+    J64 = np.asarray(J, dtype=np.float64)
+    excess, at_move = 0.0, 0.0
+    for cand, cand_r, move in rejected:
+        d = np.asarray(cand, dtype=np.float64) - th
+        if not d.any():
+            continue
+        back, back_r = mirror(jnp.asarray(th - d, dtype=theta.dtype))
+        d_back = np.asarray(back, dtype=np.float64) - th
+        if not d_back.any():
+            continue
+        predicted = J64 @ d
+        ahead = _norm64(np.asarray(cand_r, dtype=np.float64) - r64 - predicted)
+        behind = _norm64(np.asarray(back_r, dtype=np.float64) - r64 - J64 @ d_back)
+        scale = behind + _norm64(predicted)
+        if not (np.isfinite(ahead) and np.isfinite(scale)) or ahead == 0.0:
+            continue
+        ratio = ahead / scale if scale > 0.0 else np.inf
+        if ratio > excess:
+            excess, at_move = float(ratio), float(move)
+    return excess, at_move
+
 
 
 def _float_resolution(tree) -> np.ndarray:
@@ -4382,6 +4502,30 @@ def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm",
     return W, s * s <= rtol * curvature, curvature
 
 
+def _curvature_rank(J, scale) -> Optional[int]:
+    """How many directions ``JᵀJ`` resolves at the iterate ``J = dr/dtheta``
+    was formed at, by :func:`fim`'s rank cutoff at ``J``'s own precision,
+    with column ``j`` divided by ``scale[j]`` (the guard's coordinates,
+    :func:`_gauss_newton_flatness`, asked of every direction rather than of
+    the guard's candidates).  ``None`` -- no statement -- where ``J`` or
+    ``scale`` is not finite or a scale is not positive."""
+    Jd = np.asarray(J, dtype=np.float64)
+    scale = np.asarray(scale, dtype=np.float64)
+    if not (np.all(np.isfinite(Jd)) and np.all(np.isfinite(scale)) and np.all(scale > 0.0)):
+        return None
+    n = Jd.shape[1]
+    # A finite column over a tiny scale can overflow: no statement then, as
+    # the docstring says, rather than an error out of a diagnostic.
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not np.all(np.isfinite(Jd / scale)):
+            return None
+    flatness = _gauss_newton_flatness(Jd, np.eye(n), np.asarray(J).dtype, scale=scale)
+    if flatness is None:
+        return None
+    _, flat, _ = flatness
+    return n - int(np.count_nonzero(flat))
+
+
 def _hessian_flatness(hvp, candidates, excited, dtype, method: str,
                       scale: Optional[np.ndarray] = None):
     """The curvature test for :func:`fit` and :func:`fit_multiple_shooting`.
@@ -4752,7 +4896,10 @@ class FitResult:
         * :func:`fit_lm` only, the floor rule: after the run has lowered the
           loss at least once, an iteration rejected every candidate down to
           one damped within ``step_tol`` -- no step the tolerance resolves
-          lowers the loss any more.
+          lowers the loss any more.  That is the rounding floor of a
+          differentiable residual; where the rejected candidates show a
+          *jump* of the residual instead (below), the run ends
+          ``converged=False`` with a :class:`RuntimeWarning`.
 
         Neither :func:`fit_lm` test fires while a parameter held on its
         bound (``transform=None`` with ``bounds``) could lower the loss by
@@ -4764,6 +4911,23 @@ class FitResult:
         the parameters: a residual that reads none of the trainable
         parameters converges at its start (its proposal is exactly zero).
         :attr:`excited_rank` and :func:`fim` answer the second question.
+
+        **Condition: the residual is differentiable in the trained
+        parameters along the fitted trajectory.**  Both :func:`fit_lm` tests
+        read the residual's linearisation, and "no step lowers the loss" is
+        a minimum's rounding floor only where that linearisation describes
+        the residual on both sides of the iterate.  A node with an event, a
+        contact or a valve whose timing depends on a trained parameter
+        violates it: its residual jumps when the event moves by one time
+        step (MADD-ANO-021; ``BallNode``'s bounce, ``HeartPumpNode``'s
+        valve).  What you see then: where :func:`fit_lm`'s floor rule finds
+        the jump, ``converged=False`` and a :class:`RuntimeWarning` naming a
+        non-differentiable residual, at the lowest loss the run found; a
+        *kink* (a continuous residual whose slope jumps) is not detected,
+        and a run that ends in the crease of one reports ``converged=True``
+        at a point no step lowers the loss from but whose ``J`` is
+        one-sided.  :func:`fit` and :func:`fit_multiple_shooting` make no
+        statement either way (their only test is ``tol``).
 
     ``params`` is the **lowest-loss iterate the fitter evaluated**, not
     necessarily its last; ``best_iteration`` says which.  Earlier 0.4.0
@@ -4844,10 +5008,16 @@ class FitResult:
     question.
 
     ``excited_rank``
-        How many independent directions the data determines, as far as the
-        run and the returned point show it, out of the trainable coordinate
-        count.  A direction counts as *undetermined* -- and the rank is the
-        count minus their number -- only if it passes two tests: no
+        The trainable coordinate count minus the directions the guard
+        found undetermined.  It is the guard's finding, not a rank of the
+        data: full means the guard found none, which is not the same as
+        every direction being determined.  The first test below fails open
+        on a degeneracy that is not a fixed direction in the optimiser's
+        coordinates (:func:`fit`, ``hold_undetermined``: ``HeartPumpNode``
+        and ``SpringDamperNode`` with their default specs), and there
+        :func:`fim` at the returned point reads fewer; :func:`fit_lm`
+        warns when it does.  A
+        direction counts as *undetermined* only if it passes two tests: no
         gradient the run evaluated pointed along it, **and** the
         objective has no curvature along it at the selected iterate
         (``JᵀJ`` for :func:`fit_lm`, by :func:`fim`'s rank rule; the
@@ -5012,6 +5182,18 @@ def fit(
     step shrinks with the gradient it remembers): such a run ends short of
     the margin, on no edge, and is not named.
 
+    **The loss must be differentiable in the trained parameters along the
+    fitted trajectory.**  The gradient of a step is the gradient of the
+    branch that step took, so a node with an event, a contact or a valve
+    whose timing depends on a trained parameter gives a loss that jumps
+    when the event moves by one time step, and a gradient that omits the
+    move (MADD-ANO-021; ``BallNode``'s bounce, ``HeartPumpNode``'s valve).
+    Adam on such a loss descends each smooth piece and crosses jumps by
+    chance; ``params`` is still the lowest-loss iterate the run evaluated,
+    but nothing in the result says whether it is a minimum, and this
+    fitter makes no such statement: its ``converged`` is the ``tol`` test
+    alone.
+
     A degeneracy is rarely one parameter, though — the spring's data
     determines ``k/m`` and ``c/m`` but not the scale of ``(k, c, m)``,
     and no single leaf is the culprit.  ``hold_undetermined`` (default
@@ -5130,11 +5312,17 @@ def fit(
         And the degeneracy must be one the whole run saw: a null direction
         that rotates in the unconstrained coordinates as the fit moves
         (mixed ``log`` and identity transforms on the parameters it mixes,
-        say) leaves no null direction in the accumulated matrix, and the
-        guard correctly reports full ``excited_rank`` and does nothing.
+        say) leaves no null direction in the accumulated matrix: the guard
+        finds no direction undetermined, ``excited_rank`` reads the full
+        count and nothing is held, on a fit the data do not determine.
+        ``SpringDamperNode`` (``damping``) and ``HeartPumpNode``
+        (``stroke_volume``) do this with their default specs, and
+        :func:`fim` at the returned point reads one direction fewer.
         Declaring ``transform="log"`` on every parameter of a scale
         degeneracy is what makes it constant, and it is what
-        ``fim(scale="relative")`` already assumes.
+        ``fim(scale="relative")`` already assumes.  (:func:`fit_lm`, which
+        holds ``J`` at the point it returns, warns when it reads less than
+        the count there; this fitter holds no such matrix.)
 
     Returns
     -------
@@ -5388,6 +5576,24 @@ def _framed_gradient(J, r) -> np.ndarray:
     return np.asarray(g, dtype=np.float64) / np.asarray(c, dtype=np.float64) / float(f)
 
 
+#: :func:`fit_lm`'s warning when its floor rule finds a jump instead of the
+#: rounding floor.
+_JUMP_WARNING = (
+    "fit_lm: stopped where no step lowers the loss, but not at a minimum the "
+    "run can vouch for: the residual is not differentiable in the trained "
+    "parameters there. A rejected step that moves a parameter by {move:.1e} "
+    "of itself takes the residual {excess:.1e} times further from its "
+    "linearisation than the same step taken the other way (rounding does the "
+    "same both ways), so the residual jumps or is discontinuous beside the "
+    "returned point: converged=False. A node with an event, a contact or a "
+    "valve whose timing depends on a trained parameter does this "
+    "(MADD-ANO-021). The returned point is the lowest loss the run found; "
+    "the loss may be much lower across the jump, and excited_rank and fim "
+    "there describe one smooth piece only. See 'The residual must be "
+    "differentiable' in docs/user_guide/parameters.md."
+)
+
+
 @jax.jit
 def _marquardt_step(th, r, J, lam, lo, hi, held):
     """One Levenberg-Marquardt candidate from ``th``, projected onto
@@ -5554,6 +5760,45 @@ def fit_lm(
     more than ``step_tol`` and lowers the loss it is taken as the iterate
     and the run goes on, so the verdict there does not depend on which way
     the damped candidates' rounding fell.
+
+    **The residual must be differentiable in the trained parameters along
+    the fitted trajectory.**  Every test above reads the linearisation
+    ``J``, and "no step lowers the loss" is the rounding floor only of a
+    residual that has one on both sides of the iterate.  A node with an
+    event, a contact or a valve whose timing depends on a trained parameter
+    (``BallNode``'s bounce, ``HeartPumpNode``'s valve) has a residual that
+    *jumps* when the event moves by one time step (MADD-ANO-021).
+    Levenberg-Marquardt then follows a smooth piece to its edge, where
+    every candidate the tolerance resolves crosses the jump and is
+    rejected, at a loss that can be far above the minimum: on the stock
+    ``TableNode -> BallNode`` graph 11 of 24 starts ended so, at losses of
+    0.02 to 3.7 against a minimum near 1e-13.  So before the floor rule
+    reports ``converged`` it reads each rejected candidate that moved a
+    parameter by no more than ``2**-10`` of itself against its mirror image
+    through the iterate (one residual evaluation each, at most once a run):
+    where the residual is ``2**10`` times further from its linearisation on
+    the candidate's side than on the other side and than the
+    linearisation's own change, the rejection is a jump and not rounding,
+    which is alike on both sides.  The run then ends ``converged=False``
+    with a :class:`RuntimeWarning` naming a residual that is not
+    differentiable; ``params`` is the lowest loss it found.  Measured, in
+    float32 and under x64: at most 21 on fits of smooth residuals stopped
+    by the floor rule (the spring over its transforms, units and noise
+    levels; ``HeartPumpNode`` at noise 0.02 and 1), and 2.2e4 to 4.4e5 on
+    the ball (float32).  Not detected: a *kink* -- a continuous residual whose slope
+    jumps -- in whose crease a run ends ``converged=True``, at a point no
+    step lowers the loss from but whose ``J`` is one-sided; a jump whose
+    mirror image the bounds do not allow; and a jump beside an iterate the
+    *proposal* test passes (stationary on its own piece).  And an iteration
+    whose ladder began above ``lam0`` while the undamped step was rejected
+    has tested no step length between its longest damped candidate and
+    the undamped one (the damping it inherited was too high, as after a
+    step accepted far up the ladder).  Where the undamped step promised,
+    on the linear model, ``2**10`` times more than the short candidates
+    lost to rounding -- or every candidate rounded to no move at all -- the
+    iteration is run once more from ``lam0`` before the rule reads it; at
+    a rounding floor that step promises no more than rounding, and nothing
+    changes.
 
     **A step of a ``log`` / ``logit`` coordinate is read along the
     transform's curve or along its tangent, whichever moves the value
@@ -5740,7 +5985,15 @@ def fit_lm(
         iterate back bit for bit; the cutoff is numerical rather than
         statistical, so a merely weakly-identified direction is kept;
         and the degeneracy has to be a fixed direction in the optimiser's
-        coordinates.  :attr:`FitResult.excited_rank`,
+        coordinates -- where it is not, the guard finds nothing, and this
+        fitter warns (a :class:`RuntimeWarning`) when ``excited_rank`` is
+        the full count while ``JᵀJ`` at the returned point resolves fewer
+        directions by :func:`fim`'s rank rule, in the guard's coordinates
+        with each ``log`` / ``logit`` parameter read relative to itself, as
+        :func:`fim`'s default ``scale="relative"`` reads it (not in its
+        coordinate, whose column a flat transform shrinks); it asks only
+        where the run ended on the iterate whose Jacobian it formed last,
+        so it costs no evaluation.  :attr:`FitResult.excited_rank`,
         :attr:`FitResult.undetermined_drift` and
         :attr:`FitResult.hold_declined` say what the guard found.
 
@@ -5890,6 +6143,22 @@ def fit_lm(
         moves every trainable parameter by at most ``step_tol`` of itself."""
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
 
+    def _largest_relative_move(before, after) -> float:
+        """The largest move of a trainable parameter from the physical values
+        ``before`` to ``after``, relative to itself (``inf`` for a parameter
+        that leaves exactly 0)."""
+        before = np.asarray(before, dtype=np.float64)
+        delta = np.abs(np.asarray(after, dtype=np.float64) - before)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel = np.where(delta > 0.0, delta / np.abs(before), 0.0)
+        return float(np.max(rel)) if rel.size else 0.0
+
+    def _mirrored(th):
+        """``th`` as a candidate is evaluated -- inside the bounds, on the
+        leaves' grid -- and the residual there (:func:`_one_sided_excess`)."""
+        th = to_leaf_grid(bounds.project(th))
+        return th, residual_only(pmap.params(th))
+
     # Whether every solve a convergence verdict of this iteration rests on
     # was representable (``_marquardt_step``, ``_gauss_newton_step``).
     verdict = {"representable": True}
@@ -5957,7 +6226,10 @@ def fit_lm(
         loss_gn = _half_squared_norm(residual_only(candidate_params))
         return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
 
-    lam = float(lam0)
+    lam = lam_start = float(lam0)
+    # The iterate the floor rule last sent round again (at most once each;
+    # ``theta`` is rebound only when a step is accepted).
+    relaxed_at = None
     coarse = _coarsest_dtype(start, idx)
     tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     losses: list[float] = []
@@ -6019,6 +6291,7 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
+        jump = (0.0, 0.0)
         verdict["representable"] = True
         # A loss of exactly 0.0 from a residual that is not: the framed
         # sum's unframing underflowed float64 (a float64 residual below
@@ -6034,6 +6307,12 @@ def fit_lm(
         stuck_inward = bounds.inward_descent(theta, _resolvable(theta, here, grad, J),
                                              here, rel_tol)
         attempt, there = -1, here
+        rejected: list = []
+        rises: list = []
+        # Whether any candidate of this iteration's ladder moved a parameter
+        # at all, the damping the ladder begins at, and whether the floor
+        # rule sends the iterate round again.
+        moved, again, lam_begin = False, False, lam
         while True:
             attempt += 1
             if attempt >= _LM_LADDER and not (
@@ -6070,6 +6349,12 @@ def fit_lm(
                 # Nothing to retry: every further candidate is shorter still.
                 stationary = True
                 break
+            move = _largest_relative_move(here, there)
+            moved |= move > 0.0
+            if 0.0 < move <= _JUMP_MAX_MOVE and np.isfinite(loss_new):
+                # For the floor rule's one-sided test, should it be asked.
+                rejected.append((cand, cand_r, move))
+                rises.append(loss_new - loss)
             # Past the ladder, at least a decade a rung, so the extension
             # reaches the cap in at most 24 rungs whatever ``lam_up`` is.
             grow = lam_up if attempt + 1 < _LM_LADDER else max(lam_up, 10.0)
@@ -6108,9 +6393,9 @@ def fit_lm(
                         origin, r, J, lo, hi, held))
                 verdict["representable"] &= gn_ok
                 gn_params = pmap.params(gn_cand)
-                if _within_step_tol(here, pmap.physical(gn_params)):
-                    stationary = True
-                else:
+                gn_there = pmap.physical(gn_params)
+                at_floor = _within_step_tol(here, gn_there)
+                if not at_floor:
                     gn_r = residual_only(gn_params)
                     loss_gn = _half_squared_norm(gn_r)
                     if np.isfinite(loss_gn) and loss_gn < loss:
@@ -6119,7 +6404,55 @@ def fit_lm(
                         lam = max(lam * lam_down, 1e-12)
                         accepted = True
                     else:
-                        stationary = True
+                        at_floor = True
+                        gn_move = _largest_relative_move(here, gn_there)
+                        if gn_move <= _JUMP_MAX_MOVE and np.isfinite(loss_gn):
+                            rejected.append((gn_cand, gn_r, gn_move))
+                        if ((not moved or (lam_begin > lam_start and _gain_in_the_gap(
+                                r, J, gn_cand, theta, rises)))
+                                and lam > lam_start and relaxed_at is not theta):
+                            # The ladder began above the damping the run
+                            # started with, so between its longest candidate
+                            # and the undamped step, which was rejected, there
+                            # are step lengths this iterate was never asked
+                            # about: the rule's "every candidate was rejected"
+                            # has a gap in it.  At a rounding floor nothing is
+                            # in the gap -- the undamped step is the fit of
+                            # the residual's rounding and promises no more
+                            # than the rounding the short candidates lost to.
+                            # Where it promises far more (or every damped
+                            # candidate rounded to no move at all, and there
+                            # is nothing to compare with) the gap is the
+                            # damping the run arrived with, not the iterate:
+                            # a step accepted far up the ladder leaves ``lam``
+                            # a decade below where it was taken, and on a
+                            # residual with jumps such a step can be one that
+                            # crossed a jump downwards, onto a piece the run
+                            # has not descended yet, where the candidates it
+                            # inherits are too short to gain more than the
+                            # loss's rounding and the undamped step crosses
+                            # the next jump.  So the iterate is asked once
+                            # more, from the damping the run started with: a
+                            # ladder with no gap.
+                            at_floor, again = False, True
+                            lam, relaxed_at = lam_start, theta
+                if at_floor:
+                    # "No step the tolerance resolves lowers the loss" is the
+                    # rounding floor only where the residual is
+                    # differentiable.  Where it jumps -- a bounce or a valve
+                    # that switches one time step earlier -- the run is drawn
+                    # along a smooth piece to its edge, and there every
+                    # candidate is rejected too: for crossing the edge, at a
+                    # loss that can be far above the minimum.  The rejected
+                    # candidates tell the two apart (:func:`_one_sided_excess`).
+                    jump = _one_sided_excess(theta, r, J, rejected, _mirrored)
+                    stationary = not jump[0] > _JUMP_EXCESS
+        if again:
+            continue
+        if jump[0] > _JUMP_EXCESS:
+            warnings.warn(_JUMP_WARNING.format(move=jump[1], excess=jump[0]),
+                          RuntimeWarning, stacklevel=2)
+            break
         if stationary and (vanished or not verdict["representable"]):
             # Never a converged verdict the arithmetic could not form: with
             # the frames neither can happen to a float32 problem, but the
@@ -6187,6 +6520,51 @@ def fit_lm(
         _SelectedObjective(loss=_loss, reference=_reference, flatness=_flatness,
                            transformed=bounds.transformed, columns=_columns),
         "fit_lm")
+
+    n_fitted = int(theta0.size)
+    if (excited_rank == n_fitted and not hold_declined
+            and rJ is not None and rJ_iteration == theta_iteration):
+        # The guard found no direction undetermined, and holds one only if
+        # no gradient of the run pointed along it.  A degeneracy that turns
+        # in the optimiser's coordinates has gradients along every one of
+        # them, and ``excited_rank`` then reads full on a fit the data do
+        # not determine.  This fitter holds ``J`` at the point it returns,
+        # so it can say so (at no further evaluation: only where the run
+        # ended on the iterate whose Jacobian it formed last).
+        # In the guard's coordinates (``_relative_scale``: an identity
+        # parameter relative to its own size, with its care for one that has
+        # none), but for a ``log`` / ``logit`` coordinate read as
+        # :func:`fim` reads it, in the parameter relative to itself: near
+        # the end of its range a ``logit`` coordinate's column is small
+        # because its transform is flat there, which is a property of the
+        # coordinate and not of the data (measured: a singular-value ratio
+        # of 7e-9 in ``theta`` for a fit whose ratio in the parameters is
+        # 0.39).
+        scale = _relative_scale(theta0, selected, bounds.transformed, _columns)
+        if bounds.transformed is not None:
+            slope = np.asarray(pmap.slope(selected), dtype=np.float64)
+            size = np.abs(pmap.physical(selected_params))
+            curved = (np.asarray(bounds.transformed, dtype=bool) & np.isfinite(slope)
+                      & (slope != 0.0) & (size > 0.0))
+            scale = np.where(curved, np.abs(slope) / np.where(curved, size, 1.0), scale)
+        resolved = _curvature_rank(rJ[1], scale)
+        if resolved is not None and resolved < n_fitted:
+            warnings.warn(
+                f"fit_lm: excited_rank is {n_fitted} of {n_fitted} -- the guard "
+                f"found no direction undetermined -- but J^T J at the returned "
+                f"point resolves only {resolved} of them by fim's rank cutoff: "
+                f"the data do not determine every fitted direction there. The "
+                f"guard holds a direction only if no gradient of the run "
+                f"pointed along it, which a degeneracy that is not a fixed "
+                f"direction in the optimiser's coordinates passes -- a scale "
+                f"shared with a parameter under the identity transform "
+                f"(SpringDamperNode's damping, HeartPumpNode's stroke_volume; "
+                f"declare transform='log' on it) -- and so does a residual "
+                f"that is flat in a parameter only where the run ended. "
+                f"Nothing was held: along the unresolved direction(s) the "
+                f"returned parameters follow the start. Ask fim at the "
+                f"returned point which they are.",
+                RuntimeWarning, stacklevel=2)
 
     # The tree the selected iterate was evaluated on, unless the guard moved it.
     evaluated = selected_params if theta is selected else pmap.params(theta)

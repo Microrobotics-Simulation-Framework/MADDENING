@@ -2009,13 +2009,16 @@ claims:
   conditions: >-
     300 steps against a 2 ms compiled step; a read and a step sent while it
     runs; a params write between the slices of a run whose third slice
-    fails. Not claimed for a server shutting down.
+    fails; a graph with no node (emptied over the API, or never filled) whose
+    second slice fails, held to a replay of the counted steps. Not claimed
+    for a server shutting down.
   oracle: the final state equals 300 serial steps exactly; the read answered 200 while the run was alive.
   tests:
     - tests/api/test_concurrent_requests_are_serialised.py::test_a_run_refuses_writes_and_serves_reads_until_it_returns
     - tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_not_interrupted_returns_the_state_as_before
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_params_write_between_two_slices_of_a_run_survives_the_runs_failure
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_run_that_fails_unexpectedly_says_how_many_steps_it_took
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_run_that_fails_part_way_on_an_empty_graph_leaves_what_its_steps_leave
   status: verified
   domains:
     loopback_bind: tests/api/test_concurrent_requests_are_serialised.py::test_a_run_refuses_writes_and_serves_reads_until_it_returns

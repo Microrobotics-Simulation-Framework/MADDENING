@@ -13317,13 +13317,13 @@ anomalies:
       pass it stops on and its report.  Every other group keeps its
       states, reports and compile counts bit for bit, but for the floor of
       an interface edge that delivers a wider dtype than its source field
-      (MADD-ANO-208).  The spectral bound's conditions are unchanged: a
+      (MADD-ANO-211).  The spectral bound's conditions are unchanged: a
       mapping is linear, and a transform after it that is not affine makes
       the map non-linear in the reading.  The gradient bound keeps its
       documented norm, the source fields the edges read, before the
       mapping and the transform.  The floor remains a count, and does not
       see a same-pass read that differences entries of one field
-      (MADD-ANO-209, open).  A mapping that reads a moving geometry is not
+      (MADD-ANO-212, open).  A mapping that reads a moving geometry is not
       built yet; its reading will go through the same function.
     verification:
       - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_a_mapped_edge_is_the_scaled_change_of_what_it_delivers"
@@ -14135,7 +14135,7 @@ anomalies:
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_the_cast_check_holds_for_every_kind_of_extension_dtype"
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_leaf_dtype_with_no_rule_is_refused_not_assumed_lossless"
     github_issue: null
-  - anomaly_id: "MADD-ANO-208"
+  - anomaly_id: "MADD-ANO-211"
     title: "The float floor of an interface edge that delivers a wider dtype than its source field was taken at the wider dtype's eps: a stalled float32 group read its spectral bound at 6.7e-7x the true distance, spectral_usable=True"
     description: >
       Under `convergence_norm="interface"` the residual's float floor
@@ -14195,13 +14195,13 @@ anomalies:
       that subtracts nearly equal entries of one field delivers a value
       whose relative rounding is the source's times the cancellation.
       Where such a read is of the same Gauss-Seidel pass the bound can
-      read below the true distance with the flag set (MADD-ANO-209,
+      read below the true distance with the flag set (MADD-ANO-212,
       open).
     verification:
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution"
       - "tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_is_no_finer_than_the_field_it_was_computed_from"
     github_issue: null
-  - anomaly_id: "MADD-ANO-209"
+  - anomaly_id: "MADD-ANO-212"
     title: "The floor's gain of a same-pass read is measured along the source's own state: a Gauss-Seidel group reading a difference of two entries of one field stalls with spectral_error_bound at 0.054x (to 2.6e-4x) the true distance, spectral_usable=True"
     description: >
       With `diagnostics=True` the float floor of a coupling pass weights
@@ -14271,7 +14271,7 @@ anomalies:
       - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded"
       - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded"
     github_issue: null
-  - anomaly_id: "MADD-ANO-210"
+  - anomaly_id: "MADD-ANO-213"
     title: "Under the interface norm a field read by several internal edges was counted once per edge by the residual and once by the spectral analysis: on a star spectral_error_bound read 0.26 to 0.73 of the true distance, spectral_usable=True"
     description: >
       `convergence_norm="interface"` sums over a coupling group's internal

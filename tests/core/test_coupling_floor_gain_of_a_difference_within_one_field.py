@@ -16,7 +16,7 @@ are separate coordinates of the iterate, and the resolvent the bound
 applies carries their cross gain.  Under Gauss-Seidel the read is of the
 same pass, the pass's Jacobian has it folded in, and the count is all
 that carries the rounding: the bound reads below the true distance with
-``spectral_usable=True`` (MADD-ANO-209, open; the measured, opt-in
+``spectral_usable=True`` (MADD-ANO-212, open; the measured, opt-in
 ``diagnostics="rounding"`` level planned for 0.5.0 is what closes it).
 """
 
@@ -111,7 +111,7 @@ def test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded():
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MADD-ANO-209: the floor's gain of a same-pass read is measured along the source's "
+    "MADD-ANO-212: the floor's gain of a same-pass read is measured along the source's "
     "own state, which a difference of two entries of that field cancels, so a "
     "Gauss-Seidel group stalled behind such a read reports a usable bound below the "
     "true distance; open, deferred to 0.5.0"))

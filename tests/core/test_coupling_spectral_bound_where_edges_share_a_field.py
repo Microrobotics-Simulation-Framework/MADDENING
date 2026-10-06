@@ -12,7 +12,7 @@ the hub (counted once per leaf), and the bound read 0.73, 0.52, 0.37 and
 0.26 of the true distance at 2, 4, 8 and 16 leaves with
 ``spectral_usable=True`` (Jacobi, float64, jaxlib 0.11.0; 0.29 in float32 at
 ``rtol=1e-4``).  With an identity transform on every edge the same star took
-the analysis on the reading and read 1.005 (CPL-088, MADD-ANO-210).
+the analysis on the reading and read 1.005 (CPL-088, MADD-ANO-213).
 
 Such a group's report is now taken on the reading too
 (``graph_manager._reading_is_the_fields`` decides, statically).  The oracle

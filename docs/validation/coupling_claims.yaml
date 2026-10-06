@@ -295,7 +295,7 @@ claims:
     the same derivative "fori" would give."
   sources:
     - src/maddening/core/coupling/group.py:57 (CouplingGroup, max_iterations)
-    - src/maddening/core/graph_manager.py:3074 (_run_coupled_block_impl, single pass)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (single pass)
   conditions: >-
     max_iterations=1, both solvers, any acceleration. Not claimed for
     run_adaptive.
@@ -551,7 +551,7 @@ claims:
     spectral and gradient keys stay NaN there."
   sources:
     - src/maddening/core/coupling/group.py:110 (CouplingGroup, diagnostics)
-    - src/maddening/core/graph_manager.py:8247 (coupling_diagnostics, reported for every group)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (reported for every group)
   conditions: both solvers.
   oracle: presence and NaN-ness of the report keys.
   tests:
@@ -589,8 +589,8 @@ claims:
   sources:
     - src/maddening/core/coupling/group.py:116 (CouplingGroup, diagnostics)
     - src/maddening/core/coupling/acceleration.py:861 (arnoldi_spectral_radius)
-    - src/maddening/core/graph_manager.py:945 (_gradient_error_bound_at)
-    - src/maddening/core/graph_manager.py:379 (_reading_is_the_fields)
+    - src/maddening/core/coupling/_bounds.py::_gradient_error_bound_at
+    - src/maddening/core/coupling/_group_layout.py::_reading_is_the_fields
   conditions: solver="ift", diagnostics=True.
   oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
   tests:
@@ -732,7 +732,7 @@ claims:
     relative 1e-9); compile() refuses one that does not."
   sources:
     - src/maddening/core/coupling/group.py:161 (CouplingGroup, subcycling)
-    - src/maddening/core/graph_manager.py:985 (_subcycling_ratio_errors)
+    - src/maddening/core/coupling/_group_layout.py::_subcycling_ratio_errors
   conditions: >-
     subcycling=True with differing member timesteps. Not claimed for mixed
     dtypes, 16-bit floats, vmap, multi-rate graphs, run_adaptive, checkpoint
@@ -840,7 +840,7 @@ claims:
     not move, and the returned iterate moves within the solve's tolerance.
   sources:
     - src/maddening/core/coupling/group.py:223 (CouplingGroup, predictor)
-    - src/maddening/core/graph_manager.py:3886 (_run_coupled_block_impl, predictor)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (predictor)
   conditions: >-
     any acceleration; a multi-rate group learns only from applied solves
     (CPL-073). Not claimed for mixed dtypes, 16-bit floats, vmap,
@@ -912,8 +912,8 @@ claims:
     (sorted names joined with "+") or _meta slot names would collide are
     refused at registration.
   sources:
-    - src/maddening/core/graph_manager.py:6100 (GraphManager.add_coupling_group)
-    - src/maddening/core/graph_manager.py:925 (_refuse_colliding_group_keys)
+    - src/maddening/core/graph_manager.py::GraphManager.add_coupling_group
+    - src/maddening/core/coupling/_group_layout.py::_refuse_colliding_group_keys
   conditions: add_coupling_group, auto_couple, config load.
   oracle: exception types.
   tests:
@@ -946,7 +946,7 @@ claims:
     before any is registered, so a refused kwarg leaves the old groups, and
     the graph is marked dirty even when nothing is found.
   sources:
-    - src/maddening/core/graph_manager.py:6187 (GraphManager.auto_couple)
+    - src/maddening/core/graph_manager.py::GraphManager.auto_couple
   conditions: >-
     any graph. Not claimed for multi-rate graphs or sub-cycled groups.
   oracle: the groups registered after the call.
@@ -978,7 +978,7 @@ claims:
     "All edges between nodes in the group use current-iteration values rather
     than staggered (previous-timestep) values."
   sources:
-    - src/maddening/core/graph_manager.py:6110 (GraphManager.add_coupling_group)
+    - src/maddening/core/graph_manager.py::GraphManager.add_coupling_group
     - src/maddening/core/coupling/group.py:8 (module docstring)
   conditions: any group.
   oracle: the coupled step differs from the staggered one and reaches the float64 fixed point.
@@ -1073,7 +1073,7 @@ claims:
     is supported."
   sources:
     - src/maddening/core/coupling/group.py:230 (CouplingGroup, solver)
-    - src/maddening/core/graph_manager.py:1745 (_ift_solve_impl)
+    - src/maddening/core/coupling/_ift.py::_ift_solve_impl
   conditions: any configuration.
   oracle: forward and reverse derivatives against fori and against each other (adjoint identity).
   tests:
@@ -1155,7 +1155,7 @@ claims:
     criterion is tight enough for the two to be the same point."
   sources:
     - src/maddening/core/coupling/group.py:248 (CouplingGroup, solver)
-    - src/maddening/core/graph_manager.py:1422 (_fixed_point_while)
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while
   conditions: >-
     threshold above the norm's float32 floor (below it the two loops may
     stop on different passes: CPL-063). Not claimed for mixed dtypes, 16-bit
@@ -1199,7 +1199,7 @@ claims:
     raising.  Default False: the condition is only reported."
   sources:
     - src/maddening/core/coupling/group.py:257 (CouplingGroup, strict_convergence)
-    - src/maddening/core/graph_manager.py:2997 (_strict_error_if)
+    - src/maddening/core/coupling/_reports.py::_strict_error_if
   conditions: solver="ift".
   oracle: raises at 2x the threshold, not at the threshold; residual inside with the estimate outside raises.
   tests:
@@ -1319,7 +1319,7 @@ claims:
   sources:
     - src/maddening/core/coupling/group.py:286 (CouplingGroup, linear_solver)
     - docs/developer_guide/coupling_algorithm_guide.md#linear_solverdense-is-not-an-escape-hatch-on-a-grid
-    - src/maddening/core/graph_manager.py:1803 (_dense_peak)
+    - src/maddening/core/coupling/_ift.py::_dense_peak
   conditions: >-
     float32; a coupling Jacobian with no structure XLA can simplify (a
     diagonal one peaks at 2 N**2 in both modes). Not claimed for float64
@@ -1355,7 +1355,7 @@ claims:
     this setting and overrides for triage", and "dense" agrees with "gmres".
   sources:
     - src/maddening/core/coupling/group.py:300 (CouplingGroup, linear_solver)
-    - src/maddening/core/graph_manager.py:1947 (_ift_linear_solve)
+    - src/maddening/core/coupling/_ift.py::_ift_linear_solve
   conditions: >-
     solver="ift". Not claimed for float64 (x64), mixed dtypes or 16-bit
     floats.
@@ -1387,8 +1387,8 @@ claims:
     re-solved densely, and above it raises a MADDENING error that names the
     remedies and prices the dense path at the caller's N.
   sources:
-    - src/maddening/core/graph_manager.py:1854 (_ift_linear_solve)
-    - src/maddening/core/graph_manager.py:1800 (_DENSE_ADJOINT_FALLBACK_MAX_DOF)
+    - src/maddening/core/coupling/_ift.py::_ift_linear_solve
+    - src/maddening/core/coupling/_ift.py::_DENSE_ADJOINT_FALLBACK_MAX_DOF
     - docs/developer_guide/coupling_algorithm_guide.md#linear_solverdense-is-not-an-escape-hatch-on-a-grid
   conditions: >-
     linear_solver="gmres". Not claimed for float64 (x64), mixed dtypes,
@@ -1758,7 +1758,7 @@ claims:
     or a non-finite current residual"; prev2 defaults to prev.
   sources:
     - src/maddening/core/coupling/acceleration.py:411 (error_amplification)
-    - src/maddening/core/graph_manager.py:7767 (coupling_diagnostics, amplification)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (amplification)
   conditions: >-
     any residual triple. Not claimed for 16-bit floats.
   oracle: closed form at every rejection edge.
@@ -1792,7 +1792,7 @@ claims:
     criterion is "never looser than the raw one it replaces".
   sources:
     - src/maddening/core/coupling/acceleration.py:599 (estimated_error)
-    - src/maddening/core/graph_manager.py:1336 (_fixed_point_while)
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while
   conditions: >-
     any amplification, rejected (0.0) included; any step scale. Not claimed
     for 16-bit floats.
@@ -1905,7 +1905,7 @@ claims:
     (reported_converged), so all of them give one verdict"; the profiler's
     converged_fraction reads the same rule.
   sources:
-    - src/maddening/core/graph_manager.py:7850 (coupling_diagnostics, converged)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (converged)
     - src/maddening/core/coupling/acceleration.py:623 (convergence_criterion)
     - src/maddening/core/coupling/acceleration.py:685 (reported_converged)
   conditions: one solve per step (one waveform sweep; the multi-sweep case is CPL-052).
@@ -1943,7 +1943,7 @@ claims:
     the cap)" -- on such a step the report says converged=True and the
     strict group raises.
   sources:
-    - src/maddening/core/graph_manager.py:7856 (coupling_diagnostics, converged)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (converged)
     - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
   conditions: >-
     waveform_iterations > 1 on a sub-cycling group, solver="ift". Not
@@ -1982,7 +1982,7 @@ claims:
     state it returned is still outside the threshold, or the state it
     returned is not finite ... which can come before the cap."
   sources:
-    - src/maddening/core/graph_manager.py:7859 (coupling_diagnostics, converged)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (converged)
   conditions: any configuration.
   oracle: converged=False implies iterations == max_iterations or a non-finite returned state, over every acceleration and both modes.
   tests:
@@ -2014,7 +2014,7 @@ claims:
     state can be far from its fixed point: 38 348 ulps ... The criterion is
     deliberately not changed for this."
   sources:
-    - src/maddening/core/graph_manager.py:7887 (coupling_diagnostics, converged)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (converged)
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
     float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,
@@ -2050,7 +2050,7 @@ claims:
     contracting" -- a rate near 1 reads rho >= 1 from noise and the raw
     residual test decides.
   sources:
-    - src/maddening/core/graph_manager.py:7791 (coupling_diagnostics, ratio_usable)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (ratio_usable)
     - docs/developer_guide/coupling_algorithm_guide.md#what-ratio_usable-checks-and-what-it-does-not
     - docs/validation/known_anomalies.yaml (MADD-ANO-005)
   conditions: any configuration.
@@ -2083,8 +2083,8 @@ claims:
     ratio_usable=True and converged=True; 2.04x under aitken at its 2.0 clip,
     4.5x under iqn-*.
   sources:
-    - src/maddening/core/graph_manager.py:7778 (coupling_diagnostics, error_estimate)
-    - src/maddening/core/graph_manager.py:1340 (_fixed_point_while)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (error_estimate)
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while
     - docs/developer_guide/coupling_algorithm_guide.md#what-ratio_usable-checks-and-what-it-does-not
   conditions: the measured fixtures.
   oracle: exact float64 fixed point.
@@ -2115,8 +2115,8 @@ claims:
     on the update it went on to produce, so recomputing ||F(x) - x|| on the
     state you were handed reproduces "residual"."
   sources:
-    - src/maddening/core/graph_manager.py:8168 (coupling_diagnostics)
-    - src/maddening/core/graph_manager.py:1422 (_fixed_point_while)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while
   conditions: 'a finite state (a non-finite one records inf by design: CPL-084).'
   oracle: the residual recomputed from the returned state.
   tests:
@@ -2151,8 +2151,8 @@ claims:
     exactly when the group exhausted its budget, whichever solver ran, so
     iterations >= max_iterations is a usable cap check."
   sources:
-    - src/maddening/core/graph_manager.py:7733 (coupling_diagnostics, iterations)
-    - src/maddening/core/graph_manager.py:1717 (_fixed_point_while, n_passes)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (iterations)
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while (n_passes)
   conditions: both solvers, any float dtype (the count is int32).
   oracle: a group that cannot meet its tolerance; one that converges a pass short.
   tests:
@@ -2186,8 +2186,8 @@ claims:
     guard costs at most one extra pass" is CPL-062's claim, which fails:
     MADD-ANO-170.)
   sources:
-    - src/maddening/core/graph_manager.py:1452 (_fixed_point_while)
-    - src/maddening/core/graph_manager.py:1311 (_TWO_PASS_EXIT)
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while
+    - src/maddening/core/coupling/_fixed_point.py::_TWO_PASS_EXIT
     - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
   conditions: >-
     acceleration="aitken" (the guard); every other acceleration (no guard);
@@ -2253,7 +2253,7 @@ claims:
     different iterates and can stop sooner or later."
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
-    - src/maddening/core/graph_manager.py:1311 (_TWO_PASS_EXIT)
+    - src/maddening/core/coupling/_fixed_point.py::_TWO_PASS_EXIT
   conditions: >-
     acceleration="aitken", solver="ift" (the fori path latches by the same
     rule). Not claimed for 16-bit floats, run_adaptive or sharded graphs.
@@ -2276,7 +2276,7 @@ claims:
     residual 4.6e-5), and the guard stops at pass 11.  The state returned is converged
     and nearer the fixed point; what fails is the documented cost.
     Reproducer: tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[f32]
-    (src/maddening/core/graph_manager.py:2036, _met).  MADD-ANO-170; the
+    (src/maddening/core/coupling/_fixed_point.py::_fixed_point_while._met).  MADD-ANO-170; the
     guide's sentence is to be reworded, or the guard's rule changed, in 0.5.0.
   notes: >-
     Ambiguous until 0.4.0's claims fix ("Budget one pass over the unaccelerated
@@ -2308,8 +2308,8 @@ claims:
     rtol under the mixed norm and eps_float32 * sqrt(n) under the L2 norm";
     below that floor the verdicts can disagree.
   sources:
-    - src/maddening/core/graph_manager.py:8203 (coupling_diagnostics)
-    - src/maddening/core/graph_manager.py:8215 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
   conditions: >-
     threshold above the norm's float32 floor for the parity of passes and
     verdicts. Not claimed for mixed dtypes, 16-bit floats, vmap,
@@ -2422,7 +2422,7 @@ claims:
     size of its least-squares problem" (max_cols = max_iterations - 1).
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#what-iqn-costs
-    - src/maddening/core/graph_manager.py:3177 (_iqn_warm_start)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner._iqn_warm_start
   conditions: both IQN accelerations, max_iterations >= 2.
   oracle: the shape of the IQN-IMVJ secant slots.
   tests:
@@ -2484,7 +2484,7 @@ claims:
     to the first jacobian_reuse"; "later steps need fewer passes"; under
     "fori" the carried columns are the latching pass's, as under "ift".
   sources:
-    - src/maddening/core/graph_manager.py:3169 (_iqn_warm_start)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner._iqn_warm_start
     - docs/validation/known_anomalies.yaml (MADD-ANO-045)
   conditions: >-
     acceleration="iqn-imvj", jacobian_reuse > 0. Not claimed for mixed
@@ -2522,7 +2522,7 @@ claims:
     standing for its producer's whole (floating) state.
   sources:
     - src/maddening/core/coupling/group.py:143 (CouplingGroup, accelerated_fields)
-    - src/maddening/core/graph_manager.py:222 (_interface_state_fields)
+    - src/maddening/core/coupling/_group_layout.py::_interface_state_fields
   conditions: >-
     the IQN accelerations. Not claimed for vmap, multi-rate graphs,
     sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
@@ -2555,7 +2555,7 @@ claims:
     state", on both solvers, and an edge-carried one is evaluated at the
     iterate on every ift pass.
   sources:
-    - src/maddening/core/graph_manager.py:3028 (_run_coupling_inner)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
     - docs/validation/known_anomalies.yaml (MADD-ANO-070)
   conditions: >-
     integer, boolean and key leaves; every acceleration. Not claimed for
@@ -2592,7 +2592,7 @@ claims:
     dtype, widened to at least float32".
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
-    - src/maddening/core/graph_manager.py:3140 (_run_coupling_inner, acc_dtype)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner (acc_dtype)
   conditions: >-
     x64 on, float32 group. Not claimed for 16-bit floats, vmap, multi-rate
     graphs, sub-cycled groups, predictors or warm starts, run_adaptive,
@@ -2626,7 +2626,7 @@ claims:
     "Every acceleration ... setting is supported" under solver="ift".
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
-    - src/maddening/core/graph_manager.py:560 (_analysis_dtype)
+    - src/maddening/core/coupling/_bounds.py::_analysis_dtype
     - src/maddening/core/coupling/group.py:236 (CouplingGroup, solver)
   conditions: >-
     every acceleration, both solvers, bfloat16 and float16, the norms, the
@@ -2756,7 +2756,7 @@ claims:
     under boundary_interpolation="linear" / "quadratic"; the refusal names
     the settings that work.
   sources:
-    - src/maddening/core/graph_manager.py:1024 (_flux_edge_coupling_errors)
+    - src/maddening/core/coupling/_group_layout.py::_flux_edge_coupling_errors
     - docs/validation/known_anomalies.yaml (MADD-ANO-060)
   conditions: flux edges between two members.
   oracle: the refusal; the named settings step the same group.
@@ -2788,7 +2788,7 @@ claims:
     pass's two-sweep seed wherever a producer reads a flux, and keeps its
     single sweep, and its program, everywhere else".
   sources:
-    - src/maddening/core/graph_manager.py:2606 (_run_coupled_block_impl, jacobi_flux_sweeps)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (jacobi_flux_sweeps)
     - docs/validation/known_anomalies.yaml (MADD-ANO-071)
   conditions: >-
     flux edges inside a group.
@@ -2992,7 +2992,7 @@ claims:
     solver="ift" with diagnostics=True"; the 0.4.0 names are the only keys.
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#reading-coupling_diagnostics
-    - src/maddening/core/graph_manager.py:8247 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
   conditions: any group that has stepped.
   oracle: the key set.
   tests:
@@ -3022,7 +3022,7 @@ claims:
     records the report carry only the new names."
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#the-old-names
-    - src/maddening/core/graph_manager.py:2158 (_CouplingDiagnostics)
+    - src/maddening/core/coupling/_reports.py::_CouplingDiagnostics
   conditions: reads only.
   oracle: the warning and the value; the key set.
   tests:
@@ -3052,7 +3052,7 @@ claims:
     again after reset_state() -- has no entry, so the dict is empty until
     something has run."
   sources:
-    - src/maddening/core/graph_manager.py:8251 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
   conditions: both solvers.
   oracle: the report's keys.
   tests:
@@ -3085,10 +3085,10 @@ claims:
     "False for a non-finite residual and for a group whose norm reads no
     field".
   sources:
-    - src/maddening/core/graph_manager.py:7767 (coupling_diagnostics, amplification)
-    - src/maddening/core/graph_manager.py:7778 (coupling_diagnostics, error_estimate)
-    - src/maddening/core/graph_manager.py:7837 (coupling_diagnostics, gradient_error_estimate)
-    - src/maddening/core/graph_manager.py:8151 (coupling_diagnostics, precision_limited)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (amplification)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (error_estimate)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (gradient_error_estimate)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (precision_limited)
   conditions: both solvers, every acceleration, a dead band that removes every field.
   oracle: the report recomputed from its _meta slots with the documented rule.
   tests:
@@ -3119,8 +3119,8 @@ claims:
     not read still reads converged=False and raises under
     strict_convergence.
   sources:
-    - src/maddening/core/graph_manager.py:7758 (coupling_diagnostics, residual)
-    - src/maddening/core/graph_manager.py:1281 (_non_finite_reads_as_diverged)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (residual)
+    - src/maddening/core/coupling/_group_layout.py::_non_finite_reads_as_diverged
     - docs/validation/known_anomalies.yaml (MADD-ANO-019)
   conditions: every norm, both solvers, max_iterations=1 included.
   oracle: the report on a diverged state.
@@ -3155,7 +3155,7 @@ claims:
     rate divider fires on, and between those its entry is the most recent
     applied solve's."
   sources:
-    - src/maddening/core/graph_manager.py:7723 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
   conditions: >-
     multi-rate graph. Not claimed for float64 (x64), mixed dtypes, 16-bit
     floats, vmap, sub-cycled groups, predictors or warm starts,
@@ -3188,7 +3188,7 @@ claims:
     until the next compile "the report is the last step's, judged under the
     groups that step ran" (coupling_report note).
   sources:
-    - src/maddening/core/graph_manager.py:8265 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
     - src/maddening/core/inspection.py:1261 (coupling_report, stale note)
   conditions: >-
     an edit after the last step and before the next compile. Not claimed for
@@ -3245,7 +3245,7 @@ claims:
     max_iterations=1 (no fixed point was solved) and on a non-finite
     state."
   sources:
-    - src/maddening/core/graph_manager.py:7904 (coupling_diagnostics, rho_spectral)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (rho_spectral)
     - src/maddening/core/coupling/acceleration.py:786 (arnoldi_spectral_radius)
   conditions: as stated.
   oracle: eigenvalues of the matrix; NaN where documented.
@@ -3290,12 +3290,12 @@ claims:
     accelerator did -- so this is a bound on ||x - x*||" where
     spectral_usable is True.
   sources:
-    - src/maddening/core/graph_manager.py:9598 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_error_bound)
     - src/maddening/core/coupling/acceleration.py:1435 (spectral_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
     - src/maddening/core/inspection.py:1397 (coupling_report, the error_estimate note)
-    - src/maddening/core/graph_manager.py:681 (_interface_spectral_rate_at)
-    - src/maddening/core/graph_manager.py:379 (_reading_is_the_fields)
+    - src/maddening/core/coupling/_bounds.py::_interface_spectral_rate_at
+    - src/maddening/core/coupling/_group_layout.py::_reading_is_the_fields
   conditions: >-
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the
@@ -3467,8 +3467,8 @@ claims:
     in the spectrum (its own magnitude's)", its residual share folded into
     the factor.
   sources:
-    - src/maddening/core/graph_manager.py:7945 (coupling_diagnostics, spectral_error_bound)
-    - src/maddening/core/graph_manager.py:451 (_spectral_rate_at)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_error_bound)
+    - src/maddening/core/coupling/_bounds.py::_spectral_rate_at
   conditions: >-
     a repeated eigenvalue; a dead-banded field on the loop.
   oracle: exact fixed point; the matrix's spectrum.
@@ -3521,8 +3521,8 @@ claims:
     unchanged: states, iterations, converged, the warm starts and gradients
     through run_scan.
   sources:
-    - src/maddening/core/graph_manager.py:7991 (coupling_diagnostics, spectral_error_bound)
-    - src/maddening/core/graph_manager.py:725 (_gradient_error_bound_at)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_error_bound)
+    - src/maddening/core/coupling/_bounds.py::_gradient_error_bound_at
   conditions: both solvers, every acceleration; every jaxlib CI runs (0.10.2, 0.11.2).
   oracle: bit-identity with diagnostics=False.
   tests:
@@ -3559,7 +3559,7 @@ claims:
     (precision_limited) while a node in the group has not declared
     update_evaluations()."
   sources:
-    - src/maddening/core/graph_manager.py:7994 (coupling_diagnostics, spectral_usable)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_usable)
     - src/maddening/core/coupling/acceleration.py:1249 (spectral_rate_settled)
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
@@ -3609,7 +3609,7 @@ claims:
     caps 3-8 on concave, convex and affine maps, 1.19-1.70x on a spring pair,
     26x on a hidden slow mode.
   sources:
-    - src/maddening/core/graph_manager.py:8023 (coupling_diagnostics, gradient_relative_error_bound)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (gradient_relative_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#gradient_relative_error_bound-the-gradient-not-the-solve
   conditions: >-
     solver="ift", diagnostics=True; gradient_bound_usable, which certifies
@@ -3679,7 +3679,7 @@ claims:
     the fixed point's from any iterate, so this truthfully reads 0.0 while
     the state is far off."
   sources:
-    - src/maddening/core/graph_manager.py:8122 (coupling_diagnostics, gradient_relative_error_bound)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (gradient_relative_error_bound)
   conditions: affine in the state, additive parameters.
   oracle: the float64 fixed point's gradient.
   tests:
@@ -3726,8 +3726,8 @@ claims:
     to no constant, where a constant's tangent through the group is not
     finite ... and where the returned state is not finite".
   sources:
-    - src/maddening/core/graph_manager.py:8057 (coupling_diagnostics, gradient_relative_error_bound)
-    - src/maddening/core/graph_manager.py:8141 (coupling_diagnostics, gradient_bound_usable)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (gradient_relative_error_bound)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (gradient_bound_usable)
     - src/maddening/core/coupling/acceleration.py:1376 (ift_gradient_error_bound)
   conditions: as stated.
   oracle: the flag and value against each condition; the helper's conventions.
@@ -3777,7 +3777,7 @@ claims:
     in its leading digit (2.01e-06 against 1.84e-06 on one step, both above
     the true 9.5e-07)".
   sources:
-    - src/maddening/core/graph_manager.py:8104 (coupling_diagnostics, its own rounding)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (its own rounding)
   conditions: >-
     jax.vmap over states. Not claimed for float64 (x64), mixed dtypes,
     16-bit floats, multi-rate graphs, sub-cycled groups, predictors or warm
@@ -3812,7 +3812,7 @@ claims:
     clears spectral_usable only in a group with a node that has not declared
     its evaluation count."
   sources:
-    - src/maddening/core/graph_manager.py:8151 (coupling_diagnostics, precision_limited)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (precision_limited)
   conditions: any group.
   oracle: the stored residual against the floor recomputed from the state.
   tests:
@@ -3927,7 +3927,7 @@ claims:
     undeclared node counts as one.
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
-    - src/maddening/core/graph_manager.py:1168 (_group_evaluations)
+    - src/maddening/core/coupling/_group_layout.py::_group_evaluations
   conditions: >-
     any group.  The count is the declared evaluations, so it assumes every
     node declares update_evaluations() truthfully and none cancels inside
@@ -3973,7 +3973,7 @@ claims:
     >= 1"; anything else is refused at compile; a HybridNode forwards its
     physics node's count.
   sources:
-    - src/maddening/core/graph_manager.py:1152 (_declared_evaluations)
+    - src/maddening/core/coupling/_group_layout.py::_declared_evaluations
   conditions: any node in a group.
   oracle: the refusal; the count.
   tests:
@@ -4077,7 +4077,7 @@ claims:
     group has no report" (fori without diagnostics, no step since compile()
     / reset_state(), added since the last compile).
   sources:
-    - src/maddening/core/graph_manager.py:10339 (GraphManager.coupling_report)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_report
     - docs/user_guide/inspection.md#coupling-convergence
   conditions: >-
     compiled graph. Not claimed for float64 (x64), mixed dtypes, 16-bit
@@ -4115,8 +4115,8 @@ claims:
     instead)"; a graph with no groups, or not compiled, "gives a table that
     says so"; print_coupling_report prints it.
   sources:
-    - src/maddening/core/graph_manager.py:10361 (GraphManager.coupling_report)
-    - src/maddening/core/graph_manager.py:10378 (GraphManager.print_coupling_report)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_report
+    - src/maddening/core/graph_manager.py::GraphManager.print_coupling_report
   conditions: >-
     any graph state. Not claimed for multi-rate graphs or sub-cycled groups.
   oracle: the graph before and after; the rendered text.
@@ -4153,7 +4153,7 @@ claims:
     group's largest member timestep"; gm.timestep is the step the graph
     takes, "a sub-cycling group counts at its largest member timestep".
   sources:
-    - src/maddening/core/graph_manager.py:1100 (_scheduled_timesteps)
+    - src/maddening/core/_graph_specs.py::_scheduled_timesteps
     - docs/validation/known_anomalies.yaml (MADD-ANO-096)
   conditions: sub-cycling groups, multi-rate graphs.
   oracle: every node's own clock after n steps.
@@ -4186,7 +4186,7 @@ claims:
     solves.
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-audited-on-the-frozen-tree
-    - src/maddening/core/graph_manager.py:2499 (_run_coupled_block_impl, fires)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (fires)
     - docs/validation/known_anomalies.yaml (MADD-ANO-044)
   conditions: >-
     rate divider above one. Not claimed for float64 (x64), mixed dtypes,
@@ -4224,7 +4224,7 @@ claims:
     cap spends measuring its residual".
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
-    - src/maddening/core/graph_manager.py:7748 (coupling_diagnostics, total_iterations)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (total_iterations)
     - docs/validation/known_anomalies.yaml (MADD-ANO-026)
   conditions: >-
     subcycling with waveform_iterations > 1, both solvers. Not claimed for
@@ -4305,7 +4305,7 @@ claims:
     ratio every member covers dt"; one adaptive step at dt = macro is the
     compiled step to float32 rounding.
   sources:
-    - src/maddening/core/graph_manager.py:9212 (GraphManager.run_adaptive)
+    - src/maddening/core/graph_manager.py::GraphManager.run_adaptive
     - docs/validation/known_anomalies.yaml (MADD-ANO-043)
   conditions: >-
     a sub-cycling group; a multi-rate graph is refused. Not claimed for
@@ -4343,8 +4343,8 @@ claims:
     are discarded"; run_adaptive_scan checks "accepted & ~done" in-graph; a
     kept solve that does not converge "still raises, with the same message".
   sources:
-    - src/maddening/core/graph_manager.py:9305 (GraphManager.run_adaptive)
-    - src/maddening/core/graph_manager.py:4103 (_build_adaptive_scan)
+    - src/maddening/core/graph_manager.py::GraphManager.run_adaptive
+    - src/maddening/core/_adaptive_scan.py::_build_adaptive_scan
   conditions: >-
     both adaptive steppers. Not claimed for float64 (x64), mixed dtypes,
     16-bit floats, vmap, sub-cycled groups, predictors or warm starts,
@@ -4383,8 +4383,8 @@ claims:
     exactly when a kept solve did not converge, the verdict
     strict_convergence acts on."
   sources:
-    - src/maddening/core/graph_manager.py:8185 (coupling_diagnostics)
-    - src/maddening/core/graph_manager.py:2402 (_fold_kept_half_step_reports)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
+    - src/maddening/core/coupling/_reports.py::_fold_kept_half_step_reports
     - docs/validation/known_anomalies.yaml (MADD-ANO-095)
   conditions: >-
     both adaptive steppers. Not claimed for float64 (x64), mixed dtypes,
@@ -4452,8 +4452,8 @@ claims:
     covered"; "run_adaptive_scan was not affected"; run_adaptive_scan is
     "Like run_adaptive but fully JIT-compiled and differentiable".
   sources:
-    - src/maddening/core/graph_manager.py:9376 (GraphManager.run_adaptive)
-    - src/maddening/core/graph_manager.py:9424 (GraphManager.run_adaptive_scan)
+    - src/maddening/core/graph_manager.py::GraphManager.run_adaptive
+    - src/maddening/core/graph_manager.py::GraphManager.run_adaptive_scan
     - docs/validation/known_anomalies.yaml (MADD-ANO-061)
   conditions: >-
     the dt_min boundary included. Not claimed for float64 (x64), mixed
@@ -4500,8 +4500,8 @@ claims:
     truncated iterate, and differs from a finite difference of the forward
     by about the residual times cond(I - dF/dx).
   sources:
-    - src/maddening/core/graph_manager.py:1738 (_ift_solve_impl)
-    - src/maddening/core/graph_manager.py:1763 (_ift_solve_impl)
+    - src/maddening/core/coupling/_ift.py::_ift_solve_impl
+    - src/maddening/core/coupling/_ift.py::_ift_solve_impl
   conditions: solver="ift", a converged forward.
   oracle: the analytic gradient of linear groups; finite differences of the converged fixed point.
   tests:
@@ -4544,7 +4544,7 @@ claims:
     exactly on a map affine in its state with additive constants, and to
     about the solve's tolerance times the map's curvature otherwise."
   sources:
-    - src/maddening/core/graph_manager.py:1779 (_ift_solve_impl)
+    - src/maddening/core/coupling/_ift.py::_ift_solve_impl
   conditions: solver="ift", every acceleration.
   oracle: gradients across accelerations, bitwise on an affine group, against each other to the tolerance otherwise.
   tests:
@@ -4586,8 +4586,8 @@ claims:
     is invariant under the initial guess, the acceleration state and the
     stopping bookkeeping in the converged limit)."
   sources:
-    - src/maddening/core/graph_manager.py:1740 (_ift_solve_impl)
-    - src/maddening/core/graph_manager.py:2048 (_ift_solve_jvp)
+    - src/maddening/core/coupling/_ift.py::_ift_solve_impl
+    - src/maddening/core/coupling/_ift.py::_ift_solve_jvp
   conditions: >-
     solver="ift". Not claimed for 16-bit floats or run_adaptive (a 16-bit
     group's IFT rule raises in its LAPACK solve: MADD-ANO-161).
@@ -4618,7 +4618,7 @@ claims:
     tighter than ~100 ulp of the dtype", so exact zeros in a cotangent no
     longer read as a breakdown.
   sources:
-    - src/maddening/core/graph_manager.py:2021 (_ift_linear_solve)
+    - src/maddening/core/coupling/_ift.py::_ift_linear_solve
     - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
   conditions: >-
     any rhs scale with a normal largest entry; a zero rhs is answered with
@@ -4667,7 +4667,7 @@ claims:
     as jax.grad / jacrev and jax.hessian."
   sources:
     - docs/release_notes/v0.4.0.md#coupling-and-solvers
-    - src/maddening/core/graph_manager.py:1745 (_ift_solve_impl)
+    - src/maddening/core/coupling/_ift.py::_ift_solve_impl
   conditions: >-
     solver="ift". In the mixed, vmap, multi-rate, sub-cycled, predictor and
     restart domains the cell is the battery's CPL-030 check: jax.jvp and
@@ -4746,7 +4746,7 @@ claims:
     is differentiable on a base install with no extra.
   sources:
     - docs/user_guide/installation.md#installation
-    - src/maddening/core/graph_manager.py:1900 (_ift_linear_solve)
+    - src/maddening/core/coupling/_ift.py::_ift_linear_solve
   conditions: default settings.
   oracle: generated spectra and cotangents; an install with every extra unimportable.
   tests:
@@ -4792,7 +4792,7 @@ claims:
     exactly zero one reported successful, and it neither re-solves densely
     nor raises the adjoint error.
   sources:
-    - src/maddening/core/graph_manager.py:2313 (_ift_linear_solve)
+    - src/maddening/core/coupling/_ift.py::_ift_linear_solve
     - docs/release_notes/v0.4.0.md#krylov-solves-of-a-non-finite-right-hand-side
   conditions: >-
     solver="ift", every linear_solver (and the BiCGStab arm, reachable
@@ -5233,7 +5233,7 @@ claims:
     reports, up to the name keys.
   sources:
     - docs/developer_guide/testing_standards.md#the-claims-inventories
-    - src/maddening/core/graph_manager.py:928 (_refuse_colliding_group_keys)
+    - src/maddening/core/coupling/_group_layout.py::_refuse_colliding_group_keys
   conditions: >-
     both solvers, both schedules, every acceleration and norm, diagnostics
     on. A checkpoint restart runs on the structures without their typed PRNG
@@ -5339,7 +5339,7 @@ claims:
     order of the add_edge calls nor on the nodes' names."
   sources:
     - src/maddening/core/coupling/acceleration.py:354 (coupling_residual_interface, Notes)
-    - src/maddening/core/graph_manager.py (_interface_edge_order)
+    - src/maddening/core/coupling/_group_layout.py::_interface_edge_order
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     convergence_norm="interface", any acceleration and solver; two edges
@@ -5470,8 +5470,8 @@ claims:
     A member's flux is resolved in a dictionary local to
     _run_coupled_block_impl and an outside node's in _build_step_fn's
     flux_state; neither reads the other, so drv.q -> member and
-    member.q -> reader raise (graph_manager.py:3252 _resolve_value and
-    8125 _resolve_and_update_node).  A back edge reads the old state (8119), which
+    member.q -> reader raise (coupling/_coupled_block.py::_run_coupled_block_impl._resolve_value and
+    graph_manager.py::GraphManager._build_step_fn's _resolve_and_update_node).  A back edge reads the old state, which
     holds no flux, so an ungrouped ring a.q -> b, b -> a raises when built
     b, a and steps when built a, b.  Reproducers: the three strict xfails
     cited.  Since 0.1.0 (MADD-ANO-156, MADD-ANO-157).
@@ -5503,8 +5503,8 @@ claims:
     feedback loop, with the edge it reads from the previous step (CPL-181).
   sources:
     - src/maddening/core/coupling/group.py:56 (CouplingGroup, nodes)
-    - src/maddening/core/graph_manager.py:1478 (_loop_through_outside_nodes)
-    - src/maddening/core/graph_manager.py:1516 (_staggered_across_components)
+    - src/maddening/core/coupling/_group_layout.py::_loop_through_outside_nodes
+    - src/maddening/core/coupling/_group_layout.py::_staggered_across_components
   conditions: >-
     any group, any build order. Not claimed for multi-rate graphs,
     sub-cycled groups, run_adaptive or sharded graphs.
@@ -5551,8 +5551,8 @@ claims:
     itself and the report reads it, so a params override, or an edit of the
     weights since, does not move it either."
   sources:
-    - src/maddening/core/graph_manager.py:9598 (coupling_diagnostics, spectral_error_bound)
-    - src/maddening/core/graph_manager.py:352 (_reads_mapping_weights)
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_error_bound)
+    - src/maddening/core/coupling/_group_layout.py::_reads_mapping_weights
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
     convergence_norm="interface" and an internal edge with a mapping whose

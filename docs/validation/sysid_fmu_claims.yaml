@@ -3334,7 +3334,7 @@ claims:
     a non-finite value is refused even without bounds.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-    - src/maddening/core/graph_manager.py:6268 (check_params)
+    - src/maddening/core/graph_manager.py::GraphManager.check_params
   conditions: >-
     a leaf out of range; NaN with and without bounds; a list leaf. Not
     claimed for mixed dtypes or 16-bit floats.
@@ -3371,7 +3371,7 @@ claims:
     them, validated.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-    - src/maddening/core/graph_manager.py:6202 (set_param_spec)
+    - src/maddening/core/graph_manager.py::GraphManager.set_param_spec
   conditions: the spring; an override on an unknown node or key.
   oracle: the merged specs; the ValueError.
   tests:
@@ -3577,7 +3577,7 @@ claims:
     leaf."
   sources:
     - docs/user_guide/parameters.md (Which nodes take part)
-    - src/maddening/core/graph_manager.py:6275 (nodes_without_params)
+    - src/maddening/core/graph_manager.py::GraphManager.nodes_without_params
   conditions: a legacy node; an unknown node and key; the adaptive path.
   oracle: the snapshot; the ValueError.
   tests:
@@ -3652,7 +3652,7 @@ claims:
     params are not lost."
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-    - src/maddening/core/graph_manager.py:5359 (reset_params)
+    - src/maddening/core/graph_manager.py::GraphManager.reset_params
   conditions: >-
     an added edge; a replaced node; the profiler's recompile; a removed
     node; load before compile. Not claimed for float64 (x64), mixed dtypes,
@@ -3816,7 +3816,7 @@ claims:
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - src/maddening/core/node.py:148 (_ParamsDict, _succeed)
-    - src/maddening/core/graph_manager.py:5654 (_sync_node_param_writes)
+    - src/maddening/core/graph_manager.py::GraphManager._sync_node_param_writes
   conditions: >-
     a calibrated constant beside the key assigned; a key handed back with
     the value the node held; a keyed write pending on the mapping replaced

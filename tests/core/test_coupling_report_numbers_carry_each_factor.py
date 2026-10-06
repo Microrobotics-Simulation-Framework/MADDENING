@@ -40,6 +40,7 @@ from maddening.core.coupling.acceleration import (
     spectral_rate_settled,
 )
 from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.node import SimulationNode
 from tests.property import coupled_graphs as cg
 from tests.property import coupled_topologies as ct
@@ -133,6 +134,77 @@ def test_a_declared_evaluation_count_multiplies_the_floor_in_every_number_built_
         3.0 * one["gradient_relative_error_bound"], rel=1e-3), (dict(one), dict(three))
 
 
+def test_the_report_multiplies_a_floor_the_step_measured_by_the_declared_count():
+    """Behind a mapped edge the step measures the floor per evaluation and the report counts it.
+
+    Where the interface norm reads an edge with a mapping, the floor
+    depends on the weights the step ran with, so the step stores it per
+    evaluation (``coupling_<key>_reading_floor``) and the report
+    multiplies by the pass's count: the other branch of the report from
+    the one the unmapped groups above take.
+    """
+    half, one, two = np.array([[0.5]]), np.array([1.0]), np.array([2.0])
+
+    def stalled(evaluations):
+        gm = GraphManager()
+        gm.add_node(_Affine("a", half, one, two, jnp.float32, evaluations))
+        gm.add_node(_Affine("b", half, one, two, jnp.float32, evaluations))
+        gm.add_edge("b", "a", "x", "u", mapping=matrix_mapping(np.ones((1, 1), np.float32)))
+        gm.add_edge("a", "b", "x", "u")
+        gm.add_coupling_group(["a", "b"], diagnostics=True, iteration_mode="jacobi",
+                              max_iterations=5, convergence_norm="interface", rtol=1e-4)
+        gm.compile()
+        gm.step()
+        unit = float(gm._state["_meta"]["coupling_a+b_reading_floor"])      # noqa: SLF001
+        return gm.coupling_diagnostics()["a+b"], unit
+
+    (one_eval, unit_one), (three_evals, unit_three) = stalled(1.0), stalled(3.0)
+    # The premise: the step measured the floor, the same per evaluation in both.
+    assert np.isfinite(unit_one) and unit_one > 0.0 and unit_three == unit_one
+    for d in (one_eval, three_evals):
+        assert d["residual"] == 0.0 and d["precision_limited"], dict(d)
+    assert three_evals["spectral_error_bound"] == pytest.approx(
+        3.0 * one_eval["spectral_error_bound"], rel=1e-5), (dict(one_eval), dict(three_evals))
+
+
+def test_the_gradient_bound_carries_the_floor_along_the_step_and_in_any_direction():
+    """Just above the floor the gradient bound is ``A (r + m f) + B m f``, both parts present.
+
+    ``x = 0.5 x + 1`` twice over, started ``2**-16`` (relatively) from
+    its fixed point and stopped after two Jacobi passes: the residual
+    ``r`` is four float floors ``f``, so the iterate is resolved
+    and the floor is a part of the distance, not the whole of it.  The
+    solve does not read the declared evaluation count ``m``; the floor
+    is ``m f``.  The bound is then affine in ``m``:
+
+    * the distance along the Newton step is ``r + m f`` through the
+      resolvent (``A``), so the intercept is ``A r`` and that part of
+      the slope ``A f``;
+    * the floor has no known direction, and is taken through the
+      resolvent in the worst one (``B m f``); on this pair ``B = sqrt(2) A``.
+
+    So ``slope / (intercept f / r)`` is ``1 + sqrt(2)``.  With the floor
+    left out of the distance it is ``sqrt(2)``, with the undirected part
+    left out above the floor it is 1, and with no floor at all 0.
+    """
+    half, one = np.array([[0.5]]), np.array([1.0])
+    start = np.array([2.0 * (1.0 + 2.0 ** -16)])
+    bounds = []
+    for evaluations in (1.0, 2.0, 3.0):
+        d, gm = _pair(half, half, one, one, start, start, evaluations=evaluations,
+                      iteration_mode="jacobi", max_iterations=2, convergence_norm="l2",
+                      tolerance=1e-12)
+        floor = float(residual_precision_floor(gm._state, ["a", "b"], "l2"))  # noqa: SLF001
+        assert d["residual"] == pytest.approx(4.0 * floor, rel=1e-4), dict(d)
+        assert d["gradient_bound_usable"] and not d["precision_limited"], dict(d)
+        bounds.append(d["gradient_relative_error_bound"])
+    slope = bounds[1] - bounds[0]
+    assert bounds[2] - bounds[1] == pytest.approx(slope, rel=1e-4), bounds
+    intercept = bounds[0] - slope
+    assert intercept > 0.0, bounds
+    assert slope / (intercept / 4.0) == pytest.approx(1.0 + np.sqrt(2.0), rel=1e-3), bounds
+
+
 # ---------------------------------------------------------------------------
 # The bound's two factors
 # ---------------------------------------------------------------------------
@@ -200,6 +272,35 @@ def test_a_float32_member_beside_a_float64_one_settles_at_float32_rounding():
     assert d["converged"], dict(d)
     assert d["rho_spectral"] == pytest.approx(0.6, abs=1e-5), dict(d)
     assert d["spectral_usable"], dict(d)
+
+
+def test_the_resolvent_factor_of_a_mixed_dtype_group_is_its_float64_twins():
+    """A float32 member's rounding is not a direction of the compressed Jacobian.
+
+    Three entries a side under Gauss-Seidel: the pass has rank three, the
+    Krylov space closes at four vectors, and what is left of the next
+    product is the float32 member's rounding.  Held to the analysis
+    dtype's ``eps`` (float64's) instead of the coarsest field's, it is
+    kept as a direction and enters the compressed operator: the factor
+    the bound applies read 3.544 for 2.784.  The same pair with both
+    members in float64 has no such leftover and reads 2.787 (the two
+    stop a float32 rounding apart, hence the 0.1%).
+    """
+    rng = np.random.default_rng(3)
+    Qa, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    Qb, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    # Representable in float32, so the two pairs are the same map.
+    Ga, Gb = (0.8 * Qa).astype(np.float32), (0.75 * Qb).astype(np.float32)
+    factor = {}
+    with precision(True):
+        for first in (jnp.float32, jnp.float64):
+            d, gm = _pair(Ga, Gb, np.ones(3), np.ones(3), np.zeros(3), np.zeros(3),
+                          dtypes=(first, jnp.float64), iteration_mode="gauss-seidel",
+                          convergence_norm="l2", tolerance=1e-5, max_iterations=200)
+            assert d["converged"] and d["spectral_usable"], dict(d)
+            factor[first] = float(
+                gm._state["_meta"]["coupling_a+b_spectral_amplification"])   # noqa: SLF001
+    assert factor[jnp.float32] == pytest.approx(factor[jnp.float64], rel=0.01), factor
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +453,34 @@ def test_the_interpolated_boundary_value_keeps_its_bits_and_has_an_exact_tangent
     # An integer leaf is interpolated as it always was.
     i = _coupled_block._interpolated(jnp.asarray([1, 2]), jnp.asarray([3, 6]), half)
     assert np.array_equal(np.asarray(i), [2.0, 4.0])
+
+
+def test_the_interpolated_boundary_value_can_be_differentiated_twice():
+    """Forward over reverse, reverse over reverse and a Hessian through the tangent rule.
+
+    The rule's tangent is ordinary arithmetic in the primals and the
+    tangents, so JAX differentiates it again; a rule that closed over a
+    tracer or stopped a gradient would fail here or read zero.  The
+    second derivatives of ``a + alpha (b - a)``: zero in ``a`` and ``b``,
+    and ``d2/(d alpha d b) = 1``, ``d2/(d alpha d a) = -1``.
+    """
+    a, b = jnp.asarray([1.0, -2.0], jnp.float32), jnp.asarray([0.5, 3.0], jnp.float32)
+    alpha = jnp.asarray(0.25, jnp.float32)
+
+    def value(a_, b_, t):
+        return jnp.sum(_coupled_block._interpolated(a_, b_, t) ** 2)
+
+    def exact(a_, b_, t):
+        return jnp.sum((a_ + t * (b_ - a_)) ** 2)
+
+    for transform in (lambda f: jax.jacfwd(jax.grad(f, argnums=(0, 1, 2)), argnums=(0, 1, 2)),
+                      lambda f: jax.jacrev(jax.grad(f, argnums=(0, 1, 2)), argnums=(0, 1, 2)),
+                      lambda f: jax.hessian(f, argnums=(0, 1, 2))):
+        got, want = transform(value)(a, b, alpha), transform(exact)(a, b, alpha)
+        for g_row, w_row in zip(got, want):
+            for g, w in zip(g_row, w_row):
+                np.testing.assert_allclose(np.asarray(g), np.asarray(w), rtol=1e-6, atol=1e-6)
+    mixed = jax.grad(lambda t: jax.grad(
+        lambda b_: jnp.sum(_coupled_block._interpolated(a, b_, t)))(b)[0])(alpha)
+    assert float(mixed) == 1.0
+

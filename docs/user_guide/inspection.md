@@ -349,6 +349,18 @@ prints the report for a converged group and a capped one, and shows
 `strict_convergence=True` raising instead of reporting.  `diagnostics=True` on a `solver="ift"`
 group fills `rho_spectral` and `spectral_error_bound`.
 
+**What a node declares for `spectral_usable` at the float floor.**  A group whose residual is at
+its float floor (`precision_limited=True`: any converged float32 group at the default tolerance)
+reports `spectral_usable=False`, and so `gradient_bound_usable=False`, unless every node in it
+declares `update_evaluations()`: there the floor is the whole bound, and the floor counts each
+node's evaluations.  No node shipped in `maddening.nodes` declares it in 0.4.0, so such a group of
+stock nodes never reads usable at the floor; the numbers are still reported.  On your own node,
+return how many sequential sub-steps one `update` takes (`1` for a single explicit step or a
+relay, `N` for a loop of `N` sub-steps), and read
+[the algorithm guide](../developer_guide/coupling_algorithm_guide.md) for what the count assumes;
+a float32 group with a field under a hundredth of what drives it should be run in float64 before
+its flag is relied on (MADD-ANO-228).
+
 ## Graphs that are not ready
 
 None of these methods compiles a graph or puts it back after a

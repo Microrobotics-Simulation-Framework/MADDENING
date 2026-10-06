@@ -433,8 +433,17 @@ def _twice_solves(label) -> list:
 def test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice(label):
     """CPL-088 on a pair whose ``a`` feeds two ports of ``b``, in every
     numeric domain: the norm counts ``a`` twice and ``b`` once, and the
-    bound covers the distance to the exact fixed point counted so."""
+    bound covers the distance to the exact fixed point counted so.
+
+    The flag is set in every domain but bfloat16 (``eps = 2**-7``).  There
+    the radius reads 0.7988 for 0.7906, 0.8 of the flag's margin of
+    ``0.05 (1 - rho)`` away, and the rounding certificate (MADD-ANO-227)
+    cannot show that a rounding of the size the products disagree by
+    leaves it inside: ``spectral_usable`` is False.  Before the certificate
+    the flag was set on the strength of eight sampled perturbations.  The
+    number is still asserted against the distance."""
     d = cd.DOMAINS[label]
+    settled = jnp.dtype(d.coarsest) != jnp.dtype(jnp.bfloat16)
     assert len(_twice_graph(label)._edges) == 3                             # noqa: SLF001
     for s in _twice_solves(label):
         r = s.report
@@ -450,7 +459,7 @@ def test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice(lab
         dist = float(np.sqrt(np.mean(terms ** 2)))
         assert dist > 1.0 or d.adaptive, (
             f"{label}: fixture premise: outside the tolerance at the cap ({dist})")
-        assert r["spectral_usable"] is True, (label, r)
+        assert r["spectral_usable"] is settled, (label, r)
         assert r["spectral_error_bound"] >= dist, (
             f"{label}: bound {r['spectral_error_bound']:.4e} is "
             f"{r['spectral_error_bound'] / dist:.3f} of the distance {dist:.4e} with a "

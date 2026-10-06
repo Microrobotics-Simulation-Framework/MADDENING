@@ -416,12 +416,21 @@ claims:
     the verdict (converged); atol=0 (a declared dead band is units by
     definition); every quantity rescaled by the same factor and the map
     equivariant under it (no absolute forcing); magnitudes inside the normal
-    float range.  Power-of-two factors give bit-identical runs; decimal
-    factors change the inputs' rounding and so can move the pass count, not
-    the verdict.
-  oracle: the same group at another scale (bit-identity for powers of two).
+    float range.  Exact for power-of-two factors: bit-identical runs (state,
+    pass count, residual, error estimate, verdict).  A decimal factor rounds
+    the inputs differently: the error estimate moves by rounding, within 1%
+    of itself plus 16 float floors (residual_precision_floor) of the
+    unscaled one (measured, float32: 0.17% and 4.7 floors), so the pass
+    count can move, and so can the verdict of a group that stops at its
+    iteration cap with the estimate inside that band about the threshold
+    (measured: 0.85 to 1.51 thresholds over eleven decimal factors, two
+    verdicts differing).  Anywhere else the verdict is the unscaled one.
+  oracle: the same group at another scale (bit-identity for powers of two; the stated band for decimal factors).
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in
+    - tests/core/test_coupling_verdict_under_a_decimal_change_of_units.py::test_a_power_of_two_change_of_units_is_the_same_run
+    - tests/core/test_coupling_verdict_under_a_decimal_change_of_units.py::test_a_decimal_change_of_units_moves_the_estimate_by_no_more_than_the_stated_rounding
+    - tests/core/test_coupling_verdict_under_a_decimal_change_of_units.py::test_a_decimal_change_of_units_moves_the_verdict_only_at_the_cap_within_that_rounding
     - tests/property/test_differential_coupling_units.py::test_a_coupled_group_takes_the_same_passes_at_every_scale
     - tests/property/test_coupling_convergence_at_every_field_scale.py::test_a_small_field_is_not_dropped_merely_for_being_small
   status: verified

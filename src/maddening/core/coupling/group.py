@@ -95,7 +95,11 @@ class CouplingGroup:
     convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  All three scale each field's
         change by the field's own magnitude, so a group's verdict does
-        not depend on the units its quantities are written in.  ``"l2"``
+        not depend on the units its quantities are written in.  (To the
+        bit for a power-of-two factor.  A decimal one rounds the inputs
+        differently and moves the error estimate by rounding, so a
+        verdict taken at the iteration cap with the estimate within a
+        few float floors of the threshold can differ.)  ``"l2"``
         uses a global L2 norm with ``tolerance`` as threshold;
         ``"mixed"`` a per-field RMS of ``|dx| / (rtol * |v|)`` over
         every float field, and ``"interface"`` the same over what the

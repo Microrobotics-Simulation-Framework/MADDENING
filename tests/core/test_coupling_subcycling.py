@@ -342,6 +342,46 @@ class TestSubcyclingJAX:
         assert jnp.isfinite(g)
         assert float(g) != 0.0
 
+    # Per push: tests/core/test_coupling_report_numbers_carry_each_factor.py::test_the_interpolated_boundary_value_can_be_differentiated_twice
+    @pytest.mark.slow
+    @pytest.mark.parametrize("solver", ["ift", "fori"])
+    @pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+    def test_second_derivatives_through_a_subcycled_group(self, solver, mode):
+        """Forward over reverse and a Hessian through the interpolated boundary.
+
+        The boundary value a sub-cycled member reads is interpolated
+        under a ``custom_jvp`` rule (MADD-ANO-222); a rule can break
+        forward-over-reverse.  The second derivative of a loss through
+        three steps agrees with a central difference of its gradient.
+        """
+        gm = _make_mixed_rate_springs()
+        gm.add_coupling_group(
+            ["fast", "slow"], max_iterations=8, tolerance=1e-7, subcycling=True,
+            boundary_interpolation="linear", solver=solver, iteration_mode=mode,
+        )
+        gm.compile()
+        step_fn = jax.jit(gm._build_step_fn())
+        ext = gm._default_external_inputs()
+        init_state = dict(gm._state)
+
+        def loss_fn(init_pos):
+            state = {**init_state,
+                     "fast": {"position": init_pos, "velocity": jnp.zeros_like(init_pos)}}
+            for _ in range(3):
+                state = step_fn(state, ext)
+            return (state["fast"]["position"] ** 2
+                    + state["slow"]["position"] * state["fast"]["velocity"])
+
+        p0 = jnp.asarray(0.25, jnp.float32)
+        grad = jax.grad(loss_fn)
+        forward_over_reverse = float(jax.jvp(grad, (p0,), (jnp.ones_like(p0),))[1])
+        hessian = float(jax.hessian(loss_fn)(p0))
+        h = 3e-2
+        central = float((grad(p0 + h) - grad(p0 - h)) / (2 * h))
+        assert forward_over_reverse == pytest.approx(hessian, rel=1e-5)
+        assert abs(central) > 1.0, central
+        assert forward_over_reverse == pytest.approx(central, rel=1e-3)
+
     def test_subcycling_in_multirate_graph(self):
         """Subcycled coupling group inside a multi-rate graph."""
         gm = GraphManager()

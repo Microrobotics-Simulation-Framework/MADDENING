@@ -266,3 +266,101 @@ def test_a_structural_value_the_live_leaves_refuse_is_still_refused(tmp_path):
     assert resp.status_code == 400, resp.text
     assert "constructor refuses it" in resp.json()["detail"], resp.text
     assert gm.get_node("a").params["stencil_order"] == 2
+
+
+# ---------------------------------------------------------------------------
+# A point set derived from two parameters
+# ---------------------------------------------------------------------------
+#
+# On a HeatNode the mapping check reaches the same verdict from the node's
+# own values once it asks, where the constructor refuses, whether the key
+# moves the points at all.  A node whose points depend on two parameters
+# tells the two apart with no refusal anywhere: what follows pins that the
+# check is asked beside the live leaves, of each key and of the whole write.
+
+class _ReachRod(HeatNode):
+    """A rod whose grid stops at ``reach``: ``grid_x`` spans
+    ``min(length, reach)``."""
+
+    def __init__(self, name, timestep, reach=1.0, length=1.0, **kwargs):
+        super().__init__(name, timestep, length=min(length, reach), **kwargs)
+        self.params["length"] = length
+        self.params["reach"] = reach
+
+
+def _reach_graph() -> GraphManager:
+    a = _ReachRod("a", DT, reach=1.0, length=1.0, n_cells=6, thermal_diffusivity=LOW)
+    b = HeatNode("b", DT, n_cells=5, length=1.0, thermal_diffusivity=LOW)
+    gm = GraphManager()
+    gm.add_node(a)
+    gm.add_node(b)
+    gm.add_edge("a", "b", "temperature", "heat_source", mapping=nearest_neighbor_mapping(
+        np.asarray(a.static_data["grid_x"].value), np.asarray(b.static_data["grid_x"].value),
+        source_ref={"node": "a", "field": "grid_x"},
+        target_ref={"node": "b", "field": "grid_x"}))
+    return gm
+
+
+def test_the_points_are_read_off_the_node_built_from_the_live_leaves():
+    """Beside the reach the rod was built with, a longer rod has the same
+    grid; beside a longer live reach -- which moves no point on its own --
+    it has another, and that is the rod a save would reload."""
+    gm = _reach_graph()
+    edge = ("a.temperature->b.heat_source", "source_points", "grid_x")
+    assert gm._mapped_points_moved_by("a", {"length": 1.25}, live={"reach": 1.0}) == []  # noqa: SLF001
+    assert gm._mapped_points_moved_by("a", {"reach": 1.5}, live={}) == []  # noqa: SLF001
+    assert gm._mapped_points_moved_by("a", {"length": 1.25}, live={"reach": 1.5}) == [edge]  # noqa: SLF001
+    # ... and of two keys written together, neither of which moves a point
+    # alone:
+    assert gm._mapped_points_moved_by("a", {"length": 1.25, "reach": 1.5}) == [edge]  # noqa: SLF001
+    # With no leaves given, the graph's own are read.
+    gm._params.setdefault("nodes", {})["a"] = {"reach": jnp.asarray(1.5, jnp.float32)}  # noqa: SLF001
+    assert gm._mapped_points_moved_by("a", {"length": 1.25}) == [edge]  # noqa: SLF001
+
+
+def _answering_for(gm, monkeypatch, wanted_keys: set, wanted_live: dict):
+    """Replace the graph's mapping check with one that refuses exactly the
+    question *wanted_keys* beside live leaves holding *wanted_live*, and
+    records every question it is asked."""
+    asked = []
+
+    def reason(owner, changes, live=None):
+        asked.append((owner, set(changes), None if live is None else dict(live)))
+        if set(changes) == wanted_keys and live is not None and all(
+                float(live[k]) == pytest.approx(v) for k, v in wanted_live.items()):
+            return "THE MAPPING CHECK SAID NO"
+        return None
+
+    monkeypatch.setattr(gm, "_mapping_point_write_reason", reason)
+    return asked
+
+
+def test_the_route_asks_the_mapping_check_of_each_key_beside_the_live_leaves(
+        tmp_path, monkeypatch):
+    gm, client = _lowered("fit", tmp_path)
+    asked = _answering_for(gm, monkeypatch, {"length"}, {"thermal_diffusivity": LOW})
+    resp = _put(client, {"length": 0.9})
+    assert resp.status_code == 400 and "THE MAPPING CHECK SAID NO" in resp.text, (resp.text, asked)
+    assert gm.get_node("a").params["length"] == 1.0
+
+
+def test_the_route_asks_the_mapping_check_of_the_whole_write(tmp_path, monkeypatch):
+    gm = _rods(HIGH, "dense")
+    client = _client(gm, tmp_path)
+    asked = _answering_for(gm, monkeypatch, {"length", "thermal_diffusivity"},
+                           {"thermal_diffusivity": HIGH})
+    resp = _put(client, {"length": 0.9, "thermal_diffusivity": 0.5})
+    assert resp.status_code == 400 and "THE MAPPING CHECK SAID NO" in resp.text, (resp.text, asked)
+    assert "length, thermal_diffusivity" in resp.json()["detail"]
+    assert gm.get_node("a").params["length"] == 1.0
+    assert gm.get_node("a").params["thermal_diffusivity"] == HIGH
+
+
+def test_gm_params_asks_the_mapping_check_beside_the_trees_other_leaves(monkeypatch):
+    gm = _rods(HIGH, "dense")
+    gm.params["nodes"]["a"]["thermal_diffusivity"] = jnp.asarray(LOW, jnp.float32)
+    asked = _answering_for(gm, monkeypatch, {"length"}, {"thermal_diffusivity": LOW})
+    gm.params["nodes"]["a"]["length"] = jnp.asarray(0.9, jnp.float32)
+    with pytest.raises(ValueError, match="THE MAPPING CHECK SAID NO"):
+        gm.run(1)
+    assert asked

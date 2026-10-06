@@ -433,3 +433,22 @@ def test_a_deactivated_surrogate_is_still_a_member_of_its_group():
     assert resp.status_code == 200, resp.text
     assert gm._coupling_groups == [before]  # noqa: SLF001
     _reloads_and_steps_as_the_graph(gm)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "POST /surrogate/deactivate (experimental) puts back the edges recorded when the "
+    "surrogate was activated, not the edges the node has now: an edge added in process "
+    "while the surrogate was active is dropped by the revert, with a 200"))
+def test_a_deactivated_surrogate_keeps_the_edges_added_while_it_was_active():
+    """The revert removes the surrogate -- and with it every edge it has --
+    and adds the original with the edges of the server's record.  Nothing
+    is left dangling (the graph reloads), but an edge is lost silently."""
+    gm = _compiled(_ring(extra=("d",)))
+    server, client = _serve(gm)
+    recorded = [e for e in gm._edges if "b" in (e.source_node, e.target_node)]  # noqa: SLF001
+    server._original_nodes["b"] = (gm.get_node("b"), recorded, [])  # noqa: SLF001
+    server._active_surrogates.add("b")  # noqa: SLF001
+    gm.add_edge("b", "d", "temperature", "heat_source")
+    assert client.post("/surrogate/deactivate/b").status_code == 200
+    _reloads_and_steps_as_the_graph(gm)
+    assert ("b", "d") in [(e.source_node, e.target_node) for e in gm._edges]  # noqa: SLF001

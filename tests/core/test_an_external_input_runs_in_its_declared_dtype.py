@@ -60,6 +60,18 @@ class _Lag(SimulationNode):
         return {"x": x + dt * rate / 3, "seen": ext + jnp.zeros_like(x)}
 
 
+@stability(StabilityLevel.STABLE)
+class _Lag32(_Lag):
+    """The same node holding float32 state whatever the precision mode."""
+
+    def initial_state(self):
+        return {"x": jnp.asarray(0.25, jnp.float32), "seen": jnp.asarray(0.0, jnp.float64)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        ext = boundary_inputs.get("ext", 0.0)
+        return {"x": state["x"], "seen": ext + jnp.zeros_like(state["x"])}
+
+
 def _graph(kind: str = "uniform", **declared) -> GraphManager:
     gm = GraphManager()
     gm.add_node(_Lag("a", 0.01))
@@ -258,6 +270,28 @@ def test_an_input_of_the_declared_dtype_adds_nothing_to_the_step_program():
     assert "convert_element_type" not in text, text
 
 
+def test_a_python_scalar_is_strongly_typed_like_the_zeros_it_replaces():
+    """A Python scalar arrives weakly typed: left so, it would take the
+    dtype of whatever the node combines it with, where the zeros of an
+    omitted input and the FMU's set value are arrays of the declared
+    dtype.  A float32 node in an x64 graph with a float64 input is the
+    case the two differ in."""
+    gm = _graph("single")
+    text = str(jax.make_jaxpr(
+        lambda e: gm._compiled_step(gm._state, e, gm.params))(_ext(gm, 0.5)))   # noqa: SLF001
+    assert "convert_element_type[new_dtype=float32 weak_type=False]" in text, text
+    with _x64():
+        gm = GraphManager()
+        gm.add_node(_Lag32("a", 0.01))
+        gm.add_external_input("a", "ext", dtype=jnp.float64)
+        gm.compile()
+        from_scalar = gm._compiled_step(gm._state, _ext(gm, 0.1), gm.params)   # noqa: SLF001
+        from_array = gm._compiled_step(                                        # noqa: SLF001
+            gm._state, _ext(gm, jnp.asarray(0.1, jnp.float64)), gm.params)     # noqa: SLF001
+        assert _bits(from_scalar) == _bits(from_array)
+        assert from_scalar["a"]["seen"].dtype == jnp.float64
+
+
 def test_an_omitted_and_an_undeclared_input_are_handled_as_before():
     with _x64():
         gm = _graph("uniform")
@@ -280,3 +314,57 @@ def test_a_reloaded_graph_casts_as_the_graph_it_was_saved_from():
                 warnings.filterwarnings("ignore", message=CAST_WARNING)
                 want = _bits(gm.step(external_inputs=_ext(gm, 0.1)))
                 assert _bits(again.step(external_inputs=_ext(again, 0.1))) == want
+
+
+# ---------------------------------------------------------------------------
+# The neighbours: every other value with a type that crosses the FMU boundary
+# ---------------------------------------------------------------------------
+
+@stability(StabilityLevel.STABLE)
+class _Gain(SimulationNode):
+    """``x += gain``; ``n`` counts steps in int32 and ``on`` is a Boolean."""
+
+    def __init__(self, name, timestep, gain):
+        super().__init__(name, timestep, gain=gain)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(0.0), "n": jnp.asarray(0, jnp.int32), "on": jnp.asarray(True)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": state["x"] + p["gain"], "n": state["n"] + 1, "on": ~state["on"]}
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "x64"])
+@pytest.mark.parametrize("leaf_dtype", [np.float32, np.float64], ids=["leaf32", "leaf64"])
+def test_a_parameter_and_an_output_have_the_type_the_graph_runs_them_in(x64, leaf_dtype):
+    """Parameters and outputs never had the input's defect: a parameter's
+    FMU type is its leaf's dtype and a written value is cast to that dtype
+    by the graph (by assignment and as a ``params=`` argument alike); an
+    output's type is its state leaf's own.  Pinned here beside the input,
+    in both precision modes, so the three stay one rule."""
+    from maddening.fmi import build_model_description
+
+    with _x64(x64):
+        def build():
+            gm = GraphManager()
+            # a float64 leaf without x64 is the float32 JAX makes of it
+            gm.add_node(_Gain("n", 0.01, jnp.asarray(np.asarray(1.0, leaf_dtype))))
+            gm.compile()
+            return gm
+
+        gm = build()
+        ran = jax.dtypes.canonicalize_dtype(leaf_dtype)
+        types = {v.name: v.dtype for v in build_model_description(gm, model_name="m").variables}
+        assert types["n.params.gain"] == np.dtype(ran).name == gm.params["nodes"]["n"]["gain"].dtype.name
+        state_float = "float64" if x64 else "float32"
+        assert (types["n.x"], types["n.n"], types["n.on"], types["time"]) == (
+            state_float, "int32", "bool", "float64")
+        want = np.asarray(0.1, ran).astype(state_float)        # the leaf's 0.1, in the state
+        gm.params["nodes"]["n"]["gain"] = 0.1
+        assigned = gm.step()
+        argued = build().step(params={"nodes": {"n": {"gain": 0.1}}})
+        for out in (assigned, argued):
+            assert np.asarray(out["n"]["x"]).tobytes() == want.tobytes()
+            assert (out["n"]["x"].dtype.name, out["n"]["n"].dtype.name,
+                    out["n"]["on"].dtype.name) == (state_float, "int32", "bool")

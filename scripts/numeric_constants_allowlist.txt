@@ -32,9 +32,9 @@ src/maddening/core/coupling/mapping.py rbf_matrix 1e-300  # guard for an all-zer
 src/maddening/core/coupling/mapping.py rbf_mapping 1e-8  # dimensionless: ridge, a fraction of max|Phi_ss|
 
 # --- graph manager -----------------------------------------------------------
-src/maddening/core/graph_manager.py <module> 1e-9  # dimensionless: _SUBCYCLING_RATIO_RTOL, a fraction of macro_dt / node_dt
-src/maddening/core/graph_manager.py _ift_linear_solve 1e-6  # dimensionless: the Krylov rtol, relative to the framed right-hand side
-src/maddening/core/graph_manager.py _ift_linear_solve finfo.eps*3  # dimensionless: rtol is held no tighter than 100 ulps of the dtype; a 16-bit group's float32 solve no tighter than 100 float32 ulps and four units of the 16-bit dtype's roundoff
+src/maddening/core/coupling/_group_layout.py <module> 1e-9  # dimensionless: _SUBCYCLING_RATIO_RTOL, a fraction of macro_dt / node_dt
+src/maddening/core/coupling/_ift.py _ift_linear_solve 1e-6  # dimensionless: the Krylov rtol, relative to the framed right-hand side
+src/maddening/core/coupling/_ift.py _ift_linear_solve finfo.eps*3  # dimensionless: rtol is held no tighter than 100 ulps of the dtype; a 16-bit group's float32 solve no tighter than 100 float32 ulps and four units of the 16-bit dtype's roundoff
 src/maddening/core/graph_manager.py GraphManager.add_coupling_group 1e-6  # dimensionless: tolerance, compared with a relative norm
 src/maddening/core/graph_manager.py GraphManager._make_coupling_group 1e-6  # dimensionless: tolerance, compared with a relative norm
 src/maddening/core/graph_manager.py GraphManager.auto_couple 1e-6  # dimensionless: tolerance, compared with a relative norm

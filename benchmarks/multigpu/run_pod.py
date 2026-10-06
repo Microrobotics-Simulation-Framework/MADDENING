@@ -3103,6 +3103,21 @@ def record_problems(doc: dict) -> list[str]:
         if not all(isinstance(c, dict) for c in checks):
             return problems + ["a recorded check is not a record"]
         return problems + _check_differences(checks, [goal_raised_check(raised)])
+    # One rule for every goal: a goal that did not raise ran at least one
+    # size and recorded at least one check.  ``--cells`` needs a value, so
+    # the runner writes no file without either; one edited to hold none
+    # (cells [], results [], checks []) used to be a complete record for
+    # the goals whose cases are a plain product over the cells (forward,
+    # gradient, exchange: no sizes, no cases, no checks derived, nothing
+    # to differ) and so read "no checks", over which --summarise exited
+    # 0 -- while the same edit to stencil, hybrid or coupled read INVALID
+    # only because their case lists take min() of the cells.
+    if isinstance(cfg.get("cells"), list) and not cfg["cells"]:
+        return problems + ["its config names no cells: the runner runs at least one "
+                           "size, and a run of none measures nothing"]
+    if not checks:
+        return problems + ["records no checks, and its goal did not raise: no checks "
+                           "is not a pass"]
     measured_on = sorted({repr(r.get("n_devices")) for r in results
                           if not isinstance(r, dict) or r.get("n_devices") != n_dev})
     if measured_on:

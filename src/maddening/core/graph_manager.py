@@ -162,6 +162,23 @@ EVENT_STEP = "step"
 EVENT_FIT_PROGRESS = "fit_progress"
 
 
+class _BakedParamWrite(ValueError):
+    """The refusal of :meth:`GraphManager._refuse_baked_param_writes`, with
+    what it found as attributes -- the node, the leaf, the value the tree
+    holds, the node's own (``None`` when it has none) and why the node
+    cannot read the leaf -- for a caller that words the refusal for its own
+    interface (``POST /checkpoint/load`` names routes, not methods)."""
+
+    def __init__(self, message: str, *, owner: str, key: str, value: Any,
+                 own: Any, reason: str) -> None:
+        super().__init__(message)
+        self.owner = owner
+        self.key = key
+        self.value = value
+        self.own = own
+        self.reason = reason
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -1413,11 +1430,12 @@ class GraphManager:
                         if ctor is not None and np.size(ctor) <= 8:
                             shown = " " + np.array2string(
                                 np.asarray(ctor), precision=7, separator=", ")
-                        raise ValueError(
+                        raise _BakedParamWrite(
                             f"{where}['nodes'][{owner!r}][{key!r}] differs from "
                             f"the node's own value{shown}, but {reason}.  "
                             f"{consequence}; to drop the edit, restore the leaf or "
-                            "call gm.reset_params()."
+                            "call gm.reset_params().",
+                            owner=owner, key=key, value=value, own=ctor, reason=reason,
                         )
                 if live:
                     verified.setdefault(owner, {})[key] = value
@@ -2366,14 +2384,18 @@ class GraphManager:
         scheduled = _graph_specs._scheduled_timesteps(self._nodes, self._coupling_groups)
         if len(set(scheduled.values())) > 1:
             base_dt = _graph_specs._step_duration(scheduled)
-            dividers = {
-                name: round(scheduled[name] / base_dt)
-                for name in self._nodes
-            }
-            issues.append(
-                f"INFO: multi-rate scheduling enabled. "
-                f"Base timestep: {base_dt}, rate dividers: {dividers}"
-            )
+            try:
+                dividers = _graph_specs._rate_dividers(scheduled)
+            except ValueError as exc:
+                # What compile() raises: a schedule that would not keep a
+                # node's clock used to be reported here as enabled, with a
+                # rate divider of 0.
+                issues.append(f"ERROR: {exc}")
+            else:
+                issues.append(
+                    f"INFO: multi-rate scheduling enabled. "
+                    f"Base timestep: {base_dt}, rate dividers: {dividers}"
+                )
 
         # Coupling group validation
         coupled_nodes: set[str] = set()
@@ -2506,6 +2528,12 @@ class GraphManager:
         # state is usable; a graph still holding a transform's tracers
         # goes back to the state it had before it first.
         self._recover_from_escaped_tracers()
+        # A multi-rate schedule that would not keep a node's clock is a
+        # ValueError naming the two nodes, before anything else is asked
+        # (validate() lists it among its errors too).
+        scheduled = _graph_specs._scheduled_timesteps(self._nodes, self._coupling_groups)
+        if len(set(scheduled.values())) > 1:
+            _graph_specs._rate_dividers(scheduled)
         issues = self.validate()
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:
@@ -2650,10 +2678,9 @@ class GraphManager:
         if len(timesteps) > 1:
             is_multirate = True
             base_dt = _graph_specs._step_duration(effective_timesteps)
-            rate_dividers = {
-                name: round(effective_timesteps[name] / base_dt)
-                for name in self._nodes
-            }
+            # Refuses (ValueError) a schedule that would not keep a node's
+            # clock; the dividers of one it keeps are what they were.
+            rate_dividers = _graph_specs._rate_dividers(effective_timesteps)
         else:
             is_multirate = False
             rate_dividers = {name: 1 for name in self._nodes}

@@ -13,7 +13,6 @@ Install extras for optional features::
     pip install maddening[client]    # viz-only (no JAX needed)
 """
 
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -35,10 +34,14 @@ if TYPE_CHECKING:
     from maddening.surrogates.node import SurrogateNode
 
 
-try:
-    __version__ = _pkg_version("maddening")
-except PackageNotFoundError:  # source tree without install metadata
-    __version__ = "0.4.0.dev0"
+#: The version of this tree: the one ``pyproject.toml`` gives the
+#: distribution built from it (``tests/test_version_is_the_trees_own.py``
+#: holds the two together).  It used to be read from the *installed*
+#: distribution's metadata first, so a source tree imported beside another
+#: installed version -- ``PYTHONPATH`` over a stale editable install --
+#: called itself that version: ``GET /healthz`` on the 0.4.0 tree answered
+#: 0.3.1, as did every record that stores ``maddening.__version__``.
+__version__ = "0.4.0.dev0"
 
 
 def __getattr__(name: str) -> Any:

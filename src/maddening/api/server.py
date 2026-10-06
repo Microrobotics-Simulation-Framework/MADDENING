@@ -82,7 +82,7 @@ try:
     from fastapi import FastAPI, HTTPException, Query, WebSocket
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
-    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
     from pydantic import BaseModel, Field, field_validator
     from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as _exc:
@@ -120,12 +120,15 @@ from maddening.core.graph_manager import (
     EVENT_NODE_REMOVED,
     EVENT_STEP,
     GraphManager,
+    _UNCARRIABLE_WHY,
     _declared_boundary_zeros,
     _hook_outputs,
     _leaf_values_equal,
+    _node_name_refusal,
     _node_with_params,
     _NodeSpec,
     _params_holders,
+    _uncarriable_characters,
 )
 from maddening.core.node import SimulationNode, _method_accepts_params
 from maddening.viz.relay import StateRelay
@@ -173,6 +176,117 @@ def _json_reply(value: Any) -> Any:
         encode_non_finite,
     )
     return encode_non_finite(_jax_to_python(value))
+
+
+_SURROGATES = re.compile(r"[\ud800-\udfff]")
+#: What a reply carries where a string held a surrogate (U+FFFD).
+_REPLACEMENT_CHARACTER = "\ufffd"
+#: The body of a reply nothing else could be made of (see :class:`_Reply`).
+_UNWRITABLE_REPLY = b'{"detail":"this reply could not be written as JSON"}'
+
+
+def _reply_tree(value: Any) -> Any:
+    """*value* as any JSON reply can carry it; never raises for a tree a
+    request can cause.
+
+    * A non-finite float is its quoted token, as in every reply
+      (:func:`_json_reply`).
+    * A string is kept as it is, **also when it spells one of those
+      tokens**.  That is the difference from :func:`_json_reply`, which
+      refuses such a string because a reader of *data* would decode it as
+      a float: an error's ``detail`` echoes what the caller sent
+      (``POST /sim/run?n_steps=NaN``) and is read by a person, so there the
+      text is written back as the text it was.
+    * A surrogate in a string, which UTF-8 cannot encode (a body may spell
+      one, ``"\\ud800"``), is written as U+FFFD.
+    * A key that is not a string is its ``str``.
+    """
+    if isinstance(value, str):
+        return _SURROGATES.sub(_REPLACEMENT_CHARACTER, value)
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            INF_TOKEN,
+            NAN_TOKEN,
+            NEG_INF_TOKEN,
+        )
+        if math.isnan(value):
+            return NAN_TOKEN
+        return INF_TOKEN if value > 0 else NEG_INF_TOKEN
+    if isinstance(value, dict):
+        return {_reply_tree(key if isinstance(key, str) else str(key)): _reply_tree(item)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_reply_tree(item) for item in value]
+    return value
+
+
+class _Reply(JSONResponse):
+    """The JSON reply of every route, refusal and exception handler of the
+    app: a ``JSONResponse`` whose encoder cannot fail on what a request can
+    put in a reply.
+
+    Starlette's encoder raises for a non-finite float (``allow_nan=False``)
+    and for a string that holds a surrogate (it cannot be UTF-8), and
+    :func:`_json_reply` raises for a string that spells ``NaN``,
+    ``Infinity`` or ``-Infinity``.  Each of those raised *inside* the code
+    that was writing a refusal, so the refusal became a 500:
+    ``POST /sim/run?n_steps=NaN`` -- what a browser sends for
+    ``parseInt("")`` -- where ``n_steps=abc`` was a 422, and
+    ``{"type": "\\ud800"}`` on ``POST /graph/nodes`` where ``"abc"`` was
+    a 400.  A reply Starlette can encode is encoded by Starlette, byte for
+    byte as before; one it cannot is written by :func:`_reply_tree`; and
+    if that fails too (a tree nested past the interpreter's depth) the
+    reply keeps its status and says only that it could not be written.
+    """
+
+    def render(self, content: Any) -> bytes:
+        try:
+            return super().render(content)
+        except (ValueError, TypeError, RecursionError):  # UnicodeEncodeError is a ValueError
+            pass
+        try:
+            return json.dumps(
+                _reply_tree(content), ensure_ascii=False, allow_nan=False,
+                separators=(",", ":"), default=str,
+            ).encode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - a reply is written whatever it holds
+            return _UNWRITABLE_REPLY
+
+
+def _text_value_refusal(value: Any) -> Optional[str]:
+    """Why a parameter's *value* holds text the graph's config could not
+    carry, or ``None``.
+
+    A text parameter's value is a JSON string in ``to_dict``, in the
+    node's own 201 and in ``GET /graph/params``.  The text ``NaN``,
+    ``Infinity`` or ``-Infinity`` there is refused by the config's encoder
+    (it is how a non-finite float is written, and would be read back as
+    one), and a surrogate by every file: a node of a registered class with
+    a text parameter was added with ``"label": "NaN"``, its own reply was
+    a 500, and ``GET /graph`` was one until the node was deleted.
+    """
+    from maddening.serialization.json_codec import (  # noqa: PLC0415
+        NON_FINITE_TOKENS,
+    )
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if item in NON_FINITE_TOKENS:
+                return (f"the text {item!r} is how a config writes a non-finite "
+                        "number, so a graph holding it could not be written as "
+                        f"one (MADD-ANO-010); a different spelling ({item.lower()!r}, "
+                        "say) is fine")
+            if _SURROGATES.search(item):
+                return (f"the text {item!r} holds a surrogate, which no file "
+                        "can carry")
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return None
 
 
 def _unrepresentable(value: Any, dtype: Any) -> Optional[str]:
@@ -2813,7 +2927,7 @@ class SimulationServer:
             self._runner_lock.release()
 
     def _after_stopping_the_runner(self, exc: HTTPException, action: str,
-                                   was_running: bool) -> JSONResponse:
+                                   was_running: bool) -> _Reply:
         """The reply of a route that stopped the runner and then could not
         do *action* (*exc*: the graph lock's 503, a 409): the runner stays
         stopped, which the reply says, with ``was_running``.  It used to
@@ -2822,8 +2936,8 @@ class SimulationServer:
                    "/sim/start starts it again." if was_running else "")
         detail = str(exc.detail).replace(" Nothing was changed;", " Nothing was "
                                          f"{action};") + stopped
-        return JSONResponse(status_code=exc.status_code, headers=exc.headers,
-                            content={"detail": detail, "was_running": was_running})
+        return _Reply(status_code=exc.status_code, headers=exc.headers,
+                      content={"detail": detail, "was_running": was_running})
 
     def _publish_state(self, *, restart: bool = False) -> None:
         """Publish the graph's state to the streams, holding the graph
@@ -2910,12 +3024,12 @@ class SimulationServer:
             )
 
     @staticmethod
-    def _stop_refused(exc: HTTPException, was_running: bool) -> JSONResponse:
+    def _stop_refused(exc: HTTPException, was_running: bool) -> _Reply:
         """The reply of a route whose :meth:`_stop_runner_or_refuse` refused:
         its 503, with ``was_running`` (whether a runner was running when
         the request told it to stop)."""
-        return JSONResponse(status_code=exc.status_code, headers=exc.headers,
-                            content={"detail": exc.detail, "was_running": was_running})
+        return _Reply(status_code=exc.status_code, headers=exc.headers,
+                      content={"detail": exc.detail, "was_running": was_running})
 
     def _reset_state(self) -> None:
         """Reset all nodes to their initial state (normalised, no retrace),
@@ -3205,6 +3319,9 @@ class SimulationServer:
             # The package version, not a separately maintained API
             # version: this was pinned at "0.3.0" and went stale.
             version=_maddening_version,
+            # Every route's reply is written by the one encoder that cannot
+            # fail on it (_Reply), as every refusal and handler below is.
+            default_response_class=_Reply,
             docs_url="/docs" if interactive_docs else None,
             redoc_url="/redoc" if interactive_docs else None,
             openapi_url="/openapi.json" if interactive_docs else None,
@@ -3229,16 +3346,28 @@ class SimulationServer:
         # ExceptionGroup that FastAPI answers as "There was an error
         # parsing the body" (400).  No middleware or route reads a body
         # before it either way.
-        # A 422 echoes the value it refused, and FastAPI's own handler hands
-        # that to a JSON encoder that refuses NaN and the infinities: a
-        # request whose refused field held one (``"timestep": NaN``) was a
-        # 500.  The same body, encoded as every reply is (_json_reply).
+        # A 422 echoes the value it refused, and an HTTPException's detail
+        # often quotes one.  FastAPI's own handlers hand both to an encoder
+        # that refuses NaN, the infinities and a surrogate: a request whose
+        # refused field held one (``"timestep": NaN``) was a 500.  The
+        # handler that replaced the first encoded with _json_reply, which
+        # refuses the *text* ``NaN``: ``POST /sim/run?n_steps=NaN`` was a
+        # 500.  Both are written by _Reply, which refuses nothing.
         @app.exception_handler(RequestValidationError)
         async def _request_validation_error(_request, exc):
-            return JSONResponse(
-                status_code=422,
-                content=_json_reply({"detail": jsonable_encoder(exc.errors())}),
-            )
+            return _Reply(status_code=422,
+                          content={"detail": jsonable_encoder(exc.errors())})
+
+        @app.exception_handler(StarletteHTTPException)
+        async def _http_exception(_request, exc):
+            # FastAPI's handler, with this app's encoder: every
+            # ``HTTPException(detail=...)`` a route raises, and Starlette's
+            # own 404 and 405.
+            headers = getattr(exc, "headers", None)
+            if exc.status_code < 200 or exc.status_code in (204, 205, 304):
+                return Response(status_code=exc.status_code, headers=headers)
+            return _Reply(status_code=exc.status_code, headers=headers,
+                          content={"detail": exc.detail})
 
         app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
@@ -3265,7 +3394,7 @@ class SimulationServer:
                     "invalid" if request.headers.get("authorization")
                     else "missing",
                 )
-                return JSONResponse(
+                return _Reply(
                     status_code=401,
                     content={"detail": self._unauthorized_detail(peer, request.headers)},
                     headers={"WWW-Authenticate": "Bearer"},
@@ -3282,7 +3411,7 @@ class SimulationServer:
                     "loopback-bound server", request.method, path,
                     request.headers.get("host"),
                 )
-                return JSONResponse(status_code=403, content={"detail": rebinding})
+                return _Reply(status_code=403, content={"detail": rebinding})
             if (request.method in _STATE_CHANGING_METHODS
                     and not origin_is_same_site(
                         request.headers.get("origin"),
@@ -3294,7 +3423,7 @@ class SimulationServer:
                     request.method, path,
                     request.headers.get("origin"),
                 )
-                return JSONResponse(
+                return _Reply(
                     status_code=403,
                     content={"detail": _CROSS_ORIGIN_DETAIL},
                 )
@@ -3368,6 +3497,12 @@ class SimulationServer:
             build; nodes are built one at a time (under the graph lock), so
             concurrent requests do not each hold a node's worth of memory
             at once."""
+            # The name before anything is built or echoed: add_node's own
+            # rule, asked here so a name it refuses costs no constructor,
+            # and no reply quotes a name a reply cannot carry.
+            refusal = _node_name_refusal(req.name)
+            if refusal is not None:
+                raise HTTPException(status_code=400, detail=refusal)
             if req.type not in self.registry:
                 raise HTTPException(
                     status_code=400,
@@ -3384,6 +3519,13 @@ class SimulationServer:
                     status_code=400,
                     detail=f"params.{bad}: value must be finite",
                 )
+            # Text the config could not carry, for a parameter that takes
+            # text: the node was added, and its own reply was the 500.
+            for key, value in req.params.items():
+                refusal = _text_value_refusal(value)
+                if refusal is not None:
+                    raise HTTPException(status_code=400,
+                                        detail=f"params.{key}: {refusal}")
             # A finite number the node's float dtype cannot hold (1e39 in
             # float32) becomes an infinity once the node traces it.
             bad = _overflowing_float(req.params)
@@ -3804,6 +3946,11 @@ class SimulationServer:
                     # string and the comment below says a string is a 400.
                     raise HTTPException(status_code=400,
                                         detail=f"{key}: expected a number, got a string")
+                refusal = _text_value_refusal(value)
+                if refusal is not None:
+                    # As POST /graph/nodes refuses it: the config could not
+                    # carry this text, and neither could this route's reply.
+                    raise HTTPException(status_code=400, detail=f"{key}: {refusal}")
                 if key not in live:
                     # Kept in the parameter's type: a float written for an
                     # integer used to be stored as a float (HeatNode
@@ -3975,6 +4122,15 @@ class SimulationServer:
             )
             if not name or "\x00" in name:
                 raise outside
+            uncarriable = _uncarriable_characters(name)
+            if uncarriable:
+                # The rule of a node's name (GraphManager.add_node): the
+                # name is written to the manifest, the reply and the log.
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"checkpoint path {name!r} is invalid: it contains "
+                            f"{', '.join(uncarriable)}, and {_UNCARRIABLE_WHY}."),
+                )
             try:
                 target = (root / name).resolve()
                 if root == target or root not in target.parents:
@@ -4284,7 +4440,7 @@ class SimulationServer:
                     raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
                 return self._state_json()
 
-        def _run_failed(exc: BaseException, steps_run: int, n_steps: int) -> JSONResponse:
+        def _run_failed(exc: BaseException, steps_run: int, n_steps: int) -> _Reply:
             """The 400 of a ``POST /sim/run`` whose step raised after
             *steps_run* steps had been stored."""
             detail = _cannot_step_detail(exc)
@@ -4299,7 +4455,7 @@ class SimulationServer:
                     detail += (f" (the run stopped at step {steps_run + 1} of {n_steps}, "
                                f"and the graph is left after the {steps_run} step(s) "
                                "it took)")
-            return JSONResponse(status_code=400, content={
+            return _Reply(status_code=400, content={
                 "detail": detail, "steps_run": steps_run, "n_steps": n_steps})
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
@@ -4414,7 +4570,7 @@ class SimulationServer:
                              f"{n_steps - done} takes the rest.")
                 else:
                     rest += "  Do not repeat it: every step was taken."
-                return JSONResponse(
+                return _Reply(
                     status_code=503, headers=retry,
                     content={"status": "interrupted", "detail": f"{interrupted}: {rest}",
                              "steps_run": done, "n_steps": n_steps})

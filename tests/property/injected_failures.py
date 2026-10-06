@@ -47,7 +47,7 @@ class InjectedFailure(Exception):
 
 
 #: The methods wrapped, per class: each call is two points, before and after.
-GRAPH_STEPS = ("add_node", "remove_node", "add_edge", "remove_edge", "add_external_input",
+GRAPH_STEPS = ("add_node", "remove_node", "_remove_node", "add_edge", "remove_edge", "add_external_input",
                "set_param_spec", "compile", "step", "run", "set_node_state", "reset_state",
                "load_state", "save_state", "_store_state")
 SERVER_STEPS = ("_publish_state", "_reset_state", "_state_json", "_ensure_relay_attached")

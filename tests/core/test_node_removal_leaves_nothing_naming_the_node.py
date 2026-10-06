@@ -290,6 +290,45 @@ def test_a_mapped_edge_goes_with_either_of_its_ends_whatever_its_points_name(gon
 
 
 # ---------------------------------------------------------------------------
+# An edge whose mapping reads its geometry from one of its ends
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("gone", ["grid", "markers"])
+def test_a_geometry_edge_goes_with_either_end_and_nothing_reads_the_removed_field(gone):
+    """``geometry=(anchor, field)`` names an end of the edge itself, so the
+    edge -- and the read of the field -- goes with the node."""
+    from tests.core import geometry_surface_graphs as G
+
+    gm = G.graph()
+    gm.step()
+    gm.remove_node(gone)
+    assert gm._edges == [] and not gm.params.get("mappings")  # noqa: SLF001
+    assert _named_by(gm) <= set(gm._nodes)  # noqa: SLF001
+    assert not [issue for issue in gm.validate() if issue.startswith("ERROR")]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+        gm.step()
+        gm.to_dict()
+
+
+@pytest.mark.parametrize("replaced", ["grid", "markers"])
+def test_a_replaced_end_of_a_geometry_edge_keeps_the_edge_and_its_geometry(replaced):
+    from tests.core import geometry_surface_graphs as G
+
+    gm = G.graph()
+    gm.step()
+    before = [(e.key, e.geometry) for e in gm._edges]  # noqa: SLF001
+    cls = type(gm.get_node(replaced))
+    replace_node(gm, replaced, cls(replaced, G.DT))
+    assert [(e.key, e.geometry) for e in gm._edges] == before  # noqa: SLF001
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+        gm.step()
+
+
+# ---------------------------------------------------------------------------
 # replace_node: a node of the same name comes back, and everything stays
 # ---------------------------------------------------------------------------
 

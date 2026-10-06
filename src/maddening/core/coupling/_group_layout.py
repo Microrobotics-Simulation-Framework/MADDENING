@@ -6,14 +6,13 @@ Moved verbatim out of ``maddening.core.graph_manager``.  Private.
 
 from __future__ import annotations
 
-import dataclasses
+import copy
 import math
 from typing import Optional
 
 import jax.numpy as jnp
 import numpy as np
 
-from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.coupling.acceleration import float_fields_of
 from maddening.core.coupling.group import CouplingGroup
 
@@ -753,8 +752,7 @@ def _group_without_member(group: CouplingGroup, name: str) -> Optional[CouplingG
     ``accelerated_fields`` without the node's entry, and ``None`` (the
     interface fields) when no other entry selects a field, which
     ``CouplingGroup`` refuses to be told with an empty mapping.  The
-    options were validated, and warned about, when the group was made; the
-    smaller group is built quietly."""
+    options were validated, and warned about, when the group was made."""
     if name not in group.nodes:
         return group
     nodes = group.nodes - {name}
@@ -765,6 +763,12 @@ def _group_without_member(group: CouplingGroup, name: str) -> Optional[CouplingG
         accelerated = {k: v for k, v in accelerated.items() if k != name}
         if not any(accelerated.values()):
             accelerated = None
-    with quiet_warnings():
-        return dataclasses.replace(group, nodes=frozenset(nodes),
-                                   accelerated_fields=accelerated)
+    # A copy with the two fields set, not ``dataclasses.replace``: that
+    # runs ``__post_init__`` again, which warns again about every option
+    # the group was already warned about when it was made.  Nothing here
+    # needs validating a second time: the members are a subset, and the
+    # selection is a subset that still selects a field, or ``None``.
+    smaller = copy.copy(group)
+    object.__setattr__(smaller, "nodes", frozenset(nodes))
+    object.__setattr__(smaller, "accelerated_fields", accelerated)
+    return smaller

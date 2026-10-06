@@ -39,6 +39,10 @@ CREDENTIALS: tuple = (
     ("the token and one character more", "Bearer " + O.TOKEN + "x", False),
     ("the token in another case", "Bearer " + O.TOKEN.upper(), False),
     ("an empty bearer credential", "Bearer ", False),
+    # not RFC 9110's ``auth-scheme 1*SP token68``: a tab is not the space
+    # (the credential used to be stripped of any whitespace, and matched)
+    ("the token after a tab", "Bearer\t" + O.TOKEN, False),
+    ("the token after a space and a tab", "Bearer \t" + O.TOKEN, False),
     ("the token under the Basic scheme", "Basic " + O.TOKEN, False),
     ("the token with no scheme", O.TOKEN, False),
     ("the token in the query string, and no header", None, True),

@@ -53,9 +53,9 @@ or blank string is a configuration error and raises**: it is what
 ``MADDENING_API_TOKEN=$UNSET_VARIABLE`` produces, and reading it as
 "authentication off" would resurrect exactly the failure this module
 exists to remove.  Unset the variable if you want a generated token.
-A token with whitespace before or after it raises too: a client's
-``Authorization`` header is read with that whitespace stripped, so such
-a token could never be presented.  So does one holding a character that
+A token with whitespace before or after it raises too: the spaces after
+the scheme and the whitespace around a header's value are not part of
+the token a client presents, so such a token could never be presented.  So does one holding a character that
 is not printable ASCII: a header carries latin-1 bytes, which clients
 either refuse to send or send in another encoding than the one the
 server compares.
@@ -72,7 +72,9 @@ the log.
 
 How a client presents it
 ------------------------
-* HTTP: ``Authorization: Bearer <token>``, and nothing else.  No
+* HTTP: ``Authorization: Bearer <token>``, and nothing else: the scheme
+  in any case, one or more spaces, then the token exactly
+  (:func:`bearer_from_headers`).  No
   authenticated HTTP route accepts a token in the query string, so a
   credential never reaches an access log through this API's own routes.
 * WebSocket: ``Authorization: Bearer <token>`` for clients that can set
@@ -327,12 +329,27 @@ def bearer_from_headers(headers: Mapping[str, str]) -> str:
     str
         The token, or ``""`` when the header is absent or is not a
         ``Bearer`` credential.
+
+    Notes
+    -----
+    Read by the grammar of RFC 9110 (section 11.4), ``credentials =
+    auth-scheme 1*SP token68``, and no more generously:
+
+    * the scheme is case-insensitive (``bearer``, ``BEARER``);
+    * one or more *spaces* separate it from the token;
+    * spaces and tabs around the whole field value are not part of it (an
+      HTTP server removes them before the application sees the header);
+    * the token is everything after those spaces, compared as it is.
+
+    The token used to be ``str.strip()``-ped, which also took a tab, a
+    form feed or any other whitespace between the scheme and the token or
+    after it as padding: a credential the grammar does not allow, matched.
     """
-    raw = headers.get("authorization") or ""
-    scheme, _, credential = raw.partition(" ")
-    if scheme.strip().lower() != "bearer":
+    raw = (headers.get("authorization") or "").strip(" \t")
+    scheme, separator, credential = raw.partition(" ")
+    if not separator or scheme.lower() != "bearer":
         return ""
-    return credential.strip()
+    return credential.lstrip(" ")
 
 
 def bearer_from_subprotocols(offered: Iterable[str]) -> str:
@@ -443,8 +460,11 @@ class APIAuth:
                 f"to a value."
             )
         if source is not None and source != source.strip():
-            # bearer_from_headers strips the credential a client presents,
-            # so a token with whitespace around it could never be matched:
+            # The spaces between the scheme and the token, and the
+            # whitespace around a header's value, are not part of the token
+            # a client presents (bearer_from_headers; an HTTP server removes
+            # the latter), so a token with whitespace around it could never
+            # be matched:
             # every client was refused, with nothing said at start-up.
             raise ValueError(
                 f"{origin} has whitespace before or after it ({len(source)} "

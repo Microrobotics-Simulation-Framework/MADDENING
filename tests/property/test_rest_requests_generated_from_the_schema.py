@@ -86,6 +86,7 @@ import inspect
 import json
 import os
 import posixpath
+import re
 import socket
 from typing import Any, Callable, Iterator, Optional
 from urllib.parse import quote, unquote, urlencode
@@ -685,6 +686,9 @@ class Variant:
     what: str
     apply: Callable[[Request], None]
     refuse: Optional[str] = None
+    #: the status the reply must have, where the schema alone decides it
+    #: (:func:`_not_the_number_declared`, :func:`_not_the_count_declared`)
+    status: Optional[int] = None
 
     def must_refuse(self, op: Operation, bind: str = "loopback") -> bool:
         """Whether a rule refuses the request by its definition.  From a
@@ -774,6 +778,40 @@ def _pointer_text(pointer: tuple) -> str:
     return "body" + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in pointer)
 
 
+def _not_the_number_declared(schema: dict, value: Any) -> bool:
+    """Whether *value* is a boolean or text where *schema* declares a
+    number: a 422 from the request model, for every such field of every
+    route, whatever the text spells.  ``"timestep": true`` added a node
+    stepping at 1.0 s, and ``"0.5"`` and ``" 0.25 "`` were parsed."""
+    return schema.get("type") in ("number", "integer") and isinstance(value, (bool, str))
+
+
+_DECIMAL = re.compile(r"-?[0-9]+", re.ASCII)
+
+
+def _count_bounds(schema: dict) -> Optional[tuple]:
+    """``(minimum, maximum)`` of an integer query parameter's schema, or
+    ``None`` when it is not one."""
+    for option in schema.get("anyOf") or [schema]:
+        if option.get("type") == "integer":
+            return option.get("minimum"), option.get("maximum")
+    return None
+
+
+def _not_the_count_declared(schema: dict, text: str) -> bool:
+    """Whether query text *text* is not a decimal integer inside the range
+    *schema* declares for an integer parameter: a 422, never a value
+    clamped into the range (``/sim/profile`` took 5000 steps as 1000) or
+    text read generously (``" 5 "``, ``"5.0"``, ``"5_0"`` as 50)."""
+    bounds = _count_bounds(schema)
+    if bounds is None:
+        return False
+    if _DECIMAL.fullmatch(text) is None:
+        return True
+    lo, hi = bounds
+    return (lo is not None and int(text) < lo) or (hi is not None and int(text) > hi)
+
+
 def body_variants(op: Operation, body: Any) -> Iterator[Variant]:
     """Every malformed value of every member of *body*, the member left
     out, a member added, and the body itself replaced."""
@@ -787,7 +825,8 @@ def body_variants(op: Operation, body: Any) -> Iterator[Variant]:
     for pointer in _members(body):
         where = _pointer_text(pointer)
         value = _at(body, pointer)
-        kind = _kind(value, _schema_at(op.body, pointer))
+        declared = _schema_at(op.body, pointer)
+        kind = _kind(value, declared)
         values = {"number": NUMBER_VALUES, "string": STRING_VALUES, "object": OBJECT_VALUES,
                   "boolean": NUMBER_VALUES}.get(kind)
         if kind == "array":
@@ -796,7 +835,8 @@ def body_variants(op: Operation, body: Any) -> Iterator[Variant]:
                       ("a scalar", 1.0), ("text", "abc"), ("null", None),
                       ("ragged", [value, 1.0]), ("an object", {"0": 1.0}))
         for label, bad in values:
-            yield Variant(where, label, _put(pointer, bad))
+            yield Variant(where, label, _put(pointer, bad),
+                          status=422 if _not_the_number_declared(declared, bad) else None)
         if not isinstance(pointer[-1], int):
             yield Variant(where, "left out", _drop(pointer))
         if isinstance(value, dict):
@@ -818,7 +858,8 @@ def query_variants(op: Operation, seed: Seed) -> Iterator[Variant]:
     for name, schema in op.query:
         values = QUERY_NUMBER_VALUES if _is_count(schema) else QUERY_STRING_VALUES
         for label, value in values:
-            yield Variant(f"query {name}", label, _set_query(name, value))
+            yield Variant(f"query {name}", label, _set_query(name, value),
+                          status=422 if _not_the_count_declared(schema, value) else None)
         yield Variant(f"query {name}", "left out", _set_query(name))
         yield Variant(f"query {name}", "given twice",
                       _set_query(name, str(seed.query.get(name, "1")), "2"))
@@ -901,6 +942,114 @@ def test_every_seed_names_every_parameter_its_route_declares():
 
 
 # ---------------------------------------------------------------------------
+# Numbers: strict in every request model, bounded in every query
+# ---------------------------------------------------------------------------
+
+def _request_models() -> dict[str, type]:
+    """Every request model the server module defines."""
+    import pydantic
+
+    return {name: obj for name, obj in vars(server_module).items()
+            if inspect.isclass(obj) and issubclass(obj, pydantic.BaseModel)
+            and obj is not pydantic.BaseModel and obj.__module__ == server_module.__name__}
+
+
+def _a_valid_value(schema: dict) -> Any:
+    if "default" in schema:
+        return copy.deepcopy(schema["default"])
+    kind = schema.get("type")
+    if kind in ("number", "integer"):
+        return max(1, schema.get("minimum", 1))
+    if kind == "array":
+        return [_a_valid_value(schema.get("items", {}))]
+    return {"string": "x", "object": {}, "boolean": True}.get(kind)
+
+
+def _numbers_of(schema: dict, pointer: tuple = ()) -> Iterator[tuple]:
+    """The pointer of every member *schema* declares a number or an
+    integer, an array's elements as its first."""
+    if schema.get("type") in ("number", "integer"):
+        yield pointer
+    for name, member in (schema.get("properties") or {}).items():
+        yield from _numbers_of(member, pointer + (name,))
+    if isinstance(schema.get("items"), dict):
+        yield from _numbers_of(schema["items"], pointer + (0,))
+
+
+#: What is not a JSON number and reads as one.
+NOT_NUMBERS = (True, False, "1", "0.5", " 0.25 ", "1e-2", "")
+
+
+def test_every_number_of_every_request_model_refuses_a_boolean_and_text():
+    """Of the models themselves, so the surrogate routes' fields -- no
+    request is sent to those here -- and any model added later are held to
+    it: a field whose schema says number or integer takes a JSON number,
+    and refuses ``true`` and numeric text, naming the field."""
+    import pydantic
+
+    models = _request_models()
+    assert {"AddNodeRequest", "TrainSurrogateRequest", "SetNodeParamsRequest"} <= set(models)
+    checked = []
+    for name, model in sorted(models.items()):
+        schema = _resolved(model.model_json_schema(), model.model_json_schema().get("$defs", {}))
+        valid = {field: _a_valid_value(member)
+                 for field, member in schema.get("properties", {}).items()}
+        model.model_validate_json(json.dumps(valid))      # the control: it is a request
+        for pointer in _numbers_of(schema):
+            for bad in NOT_NUMBERS:
+                body = copy.deepcopy(valid)
+                _at(body, pointer[:-1])[pointer[-1]] = bad
+                with pytest.raises(pydantic.ValidationError) as refused:
+                    model.model_validate_json(json.dumps(body))
+                assert tuple(refused.value.errors()[0]["loc"]) == pointer, (name, pointer, bad)
+            checked.append((name, pointer))
+    assert ("AddNodeRequest", ("timestep",)) in checked
+    assert ("TrainSurrogateRequest", ("hidden_sizes", 0)) in checked
+    assert len(checked) >= 5, checked
+
+
+def test_every_integer_query_declares_its_range():
+    """Fail closed, from the schema alone and of every route (no request
+    is sent, so the out-of-scope ones are read too): an integer query
+    parameter declares a minimum and a maximum.  The battery holds a route
+    to the declared range (a value outside it is a 422); one without a
+    range was ``/sim/profile``, which clamped."""
+    found = []
+    for key, op in documented_operations(SimulationServer({}).create_app()).items():
+        for name, schema in op.query:
+            bounds = _count_bounds(schema)
+            if bounds is not None:
+                assert None not in bounds, f"{key}?{name}= declares the range {bounds}"
+                found.append(f"{key}?{name}")
+    assert {"POST /sim/run?n_steps", "POST /sim/profile?n_steps", "POST /sim/profile?n_warmup",
+            "PUT /sim/stride?steps_per_frame", "PUT /sim/stride?relay_stride"} <= set(found)
+
+
+def test_the_battery_asks_every_declared_number_for_a_422():
+    """The battery can fail: the variants of the routes that declare a
+    number carry the 422 the schema decides."""
+    served = serve("standard")
+    try:
+        def expected(key: str) -> set:
+            op = IN_SCOPE[key]
+            return {(v.where, v.what) for v in variants(op, SEEDS[key][0], served)
+                    if v.status == 422}
+        nodes = expected("POST /graph/nodes")
+        assert {("body.timestep", "a boolean"), ("body.timestep", "a numeric string"),
+                ("body.timestep", "text")} <= nodes
+        assert not [w for w in nodes if not w[0].startswith("body.timestep")], nodes
+        profile = expected("POST /sim/profile")
+        assert {("query n_steps", "zero"), ("query n_steps", "a negative"),
+                ("query n_steps", "spaces around it"), ("query n_steps", "a fraction"),
+                ("query n_warmup", "a negative"),
+                ("query n_warmup", "an integer of 2**63")} <= profile
+        assert ("query n_warmup", "zero") not in profile
+        assert ("query n_steps", "zero") not in expected("POST /sim/run")
+    finally:
+        served.close()
+
+
+# ---------------------------------------------------------------------------
 # The battery
 # ---------------------------------------------------------------------------
 
@@ -926,6 +1075,9 @@ def _run_battery(op: Operation, seeds: tuple, chosen: Callable[[Variant], bool],
                 found, resp = exchange(served, op, req,
                                        must_refuse=variant.must_refuse(op, bind))
                 sent += 1
+                if variant.status is not None and resp.status_code != variant.status:
+                    found = [*found, f"{resp.status_code} where the schema's type and range "
+                                     f"make it a {variant.status}: {resp.text[:200]}"]
                 problems += [f"[{seed.label or 'seed'}] {variant.where} = {variant.what}: {p}"
                              for p in found]
                 pristine = resp.status_code >= 400 or op.method == "GET"

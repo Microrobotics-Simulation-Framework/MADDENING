@@ -210,3 +210,40 @@ def test_a_field_of_two_axes_is_held_to_one_list_per_row(served):
     assert client.get("/graph/state/grid").json()["g"] == rows
     assert [server_module._lists_in_shape(shape) for shape in
             ((), (4,), (2, 3), (2, 3, 1), (0, 5), (5, 0))] == [0, 1, 3, 9, 1, 6]
+
+
+# ---------------------------------------------------------------------------
+# A constructor's refusal names the parameter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("params, blamed, expected, said", [
+    ({"n_cells": 8.0}, ["n_cells"], "an integer", "TypeError"),
+    ({"n_cells": 0}, ["n_cells"], "an integer", "ZeroDivisionError"),
+    ({"n_cells": 6, "stencil_order": 3}, ["stencil_order"], "an integer", "must be 2 or 4"),
+    ({"thermal_diffusivity": 1.0e9, "length": 2.0}, ["thermal_diffusivity"], "a number",
+     "Fourier"),
+    # no one parameter: each is refused whatever the other is
+    ({"n_cells": 0, "stencil_order": 3}, [], None, ""),
+])
+def test_a_constructors_refusal_names_the_parameter_and_what_its_default_is(
+        served, params, blamed, expected, said):
+    """``POST /graph/nodes`` answered a constructor's refusal with whatever
+    it raised: "'float' object cannot be interpreted as an integer" for
+    ``n_cells: 8.0``, "float division by zero" for ``n_cells: 0``.  The
+    400 now names each parameter the refusal can be told from (the node is
+    built without it), the value sent and the class's default."""
+    client, gm, _root = served
+    resp = client.post("/graph/nodes", json={"type": "HeatNode", "name": "new",
+                                             "timestep": DT, "params": params})
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("node 'new': HeatNode refuses "), detail
+    assert said in detail
+    for key in params:
+        assert (f"params.{key} = {params[key]!r}" in detail) is (key in blamed), detail
+    if blamed:
+        assert f", {expected})" in detail, detail
+    else:
+        assert "these params together" in detail, detail
+    assert "new" not in gm._nodes

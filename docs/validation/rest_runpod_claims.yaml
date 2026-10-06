@@ -483,6 +483,9 @@ claims:
     - tests/api/test_bearer_auth.py::test_a_wrong_token_is_refused
     - tests/api/test_bearer_auth.py::test_a_malformed_authorization_header_is_refused
     - tests/api/test_bearer_auth.py::test_extra_whitespace_after_the_scheme_is_tolerated
+    - tests/api/test_the_bearer_header_is_read_by_its_grammar.py::test_a_header_of_the_grammar_presents_the_token
+    - tests/api/test_the_bearer_header_is_read_by_its_grammar.py::test_any_other_header_does_not
+    - tests/api/test_the_bearer_header_is_read_by_its_grammar.py::test_the_route_serves_a_header_of_the_grammar_and_refuses_any_other
   status: verified
   domains:
     loopback_bind: n/a
@@ -1518,25 +1521,32 @@ claims:
 - id: REST-039
   area: bounds
   claim: >-
-    POST /sim/profile takes "?n_steps=N to override (default 50, capped at
-    1000 to keep request latency bounded)".
+    POST /sim/profile takes "?n_steps=N to override (default 50, at most
+    1000 to keep request latency bounded; n_warmup at most 50).  A value
+    outside its range is a 422, as on POST /sim/run".
   sources:
     - src/maddening/api/server.py:4226 (sim_profile)
-  conditions: n_steps below 1 and above 1000.
-  oracle: the number of steps the returned trace profiles (clamped, not refused).
+  conditions: n_steps below 1 and above 1000; n_warmup below 0 and above 50; counts inside their ranges.
+  oracle: 422 naming the query parameter, and the profiler not called; inside the range, the profiler called with the counts asked.
   tests:
-    - tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
-    - tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_upper_bound
+    - tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled
+    - tests/api/test_profile_endpoints.py::TestSimProfile::test_the_counts_asked_are_the_counts_profiled
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_integer_query_declares_its_range
   status: verified
+  notes: >-
+    Changed in the round-10 audit (MADD-ANO-228): both counts were clamped
+    into their ranges without a word (5000 steps asked, 1000 profiled),
+    where POST /sim/run answers 422.  They are the query's declared range
+    now.
   domains:
-    loopback_bind: tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
+    loopback_bind: tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-039]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-039]'
-    no_token: tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
+    no_token: tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled
     concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server[REST-039]'
     runner_active: n/a
     sim_run_active: n/a
-    large_payload: tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
+    large_payload: tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled
     hostile_input: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_loopback_bind_without_a_token[REST-039]'
     shutdown: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_when_sigterm_arrives_mid_request[REST-039]'
     wrapper_nodes: n/a
@@ -3800,7 +3810,7 @@ claims:
     - src/maddening/api/server.py:3505 (checkpoint_load)
     - docs/user_guide/parameters.md:208 (Writing parameters over REST)
     - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
-  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, the same verdict as PUT /graph/params; a missing path; a failure injected at every point of a load, into a compiled graph and into an edited one; a good file loaded into a graph that cannot compile (an edge between fields of different shapes) is a 400 that names the graph's reason, as POST /sim/step does, and loads once the edge is removed.
+  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, and for three pairs (PUT v, then load a checkpoint holding w) on every parameter leaf of every built-in node kind -- the initial conditions included, which a load installs in the node as PUT does -- the same verdict as PUT /graph/params; a leaf the load does not change that already differs from its node's own value where the step cannot read it (refused, naming both values and the PUT that puts the node's own back); a missing path; a failure injected at every point of a load, into a compiled graph and into an edited one; a good file loaded into a graph that cannot compile (an edge between fields of different shapes) is a 400 that names the graph's reason, as POST /sim/step does, and loads once the edge is removed.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
@@ -3830,6 +3840,9 @@ claims:
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_refusal_of_the_routes_own_is_answered_as_it_was_and_changes_nothing
     - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_load_into_a_graph_that_cannot_compile_names_the_graphs_reason
     - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_file_that_is_not_a_checkpoint_is_still_answered_as_one
+    - tests/api/test_a_checkpoint_load_answers_as_a_params_write_on_every_parameter.py::test_a_load_answers_as_a_params_write_on_every_parameter_of_a_node_kind
+    - tests/api/test_a_checkpoint_load_answers_as_a_params_write_on_every_parameter.py::test_a_load_that_would_leave_a_leaf_the_step_cannot_read_is_refused
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_save_made_before_an_initial_condition_was_written_still_loads
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-163): the load checked shapes,
@@ -3843,7 +3856,13 @@ claims:
     shared with the FMU's set_fmu_state).  GraphManager.load_state refuses
     text and booleans and asks nothing else, by decision (difference D6): a
     graph whose parameters Python moved outside their bounds must resume
-    its own checkpoint into a freshly built graph.
+    its own checkpoint into a freshly built graph.  Failing in the round-10
+    audit (never released): the load wrote gm.params and not the node's own
+    params, so after PUT of an initial_* parameter (or TableNode.position)
+    every earlier checkpoint was a 400 from the baked-leaf guard, which no
+    cited test could fail.  The load installs each leaf it changes through
+    PUT's own function (_install_param_leaves); the guard is left with a
+    leaf the load does not change, and has a failing test.
   domains:
     loopback_bind: tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-093]'
@@ -4718,7 +4737,8 @@ claims:
     check that is a string, a result that is null, n_devices [4], a config
     that is a list, a value past the float range), and one field of any
     record changed to a JSON value of any shape or deleted (generated); a
-    table value past the float range.
+    table value past the float range; for every goal, a file with its cells
+    and results emptied, its checks emptied, or both.
   oracle: summarise's return value and the file named as unreadable in its output.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3
@@ -4728,12 +4748,18 @@ claims:
     - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_a_goal_file_of_any_shape_gets_a_verdict_not_a_traceback
     - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_each_mistyped_field_the_audit_named_reads_invalid
     - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_a_table_value_past_the_float_range_leaves_the_file_out_of_the_tables
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_file_with_no_cells_or_no_checks_reads_invalid_for_every_goal
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_that_raised_still_records_its_one_check_and_no_cells_are_asked_of_it
   status: verified
   notes: >-
     Failing in the first edition: json.load and doc.get were called on every
     goal file with no guard, so a truncated file or a JSON list ended the
     summary on a traceback with exit status 1, the code for "no goal JSON".
-    run_pod.py is not in any release.
+    run_pod.py is not in any release.  Failing in the round-10 audit: a
+    forward, gradient or exchange file with cells, results and checks
+    emptied read "no checks" and the summary exited 0, where the same
+    edit to stencil, hybrid or coupled read INVALID; record_problems now
+    holds every goal that did not raise to at least one size and one check.
   domains:
     loopback_bind: n/a
     non_loopback_bind: n/a
@@ -5959,10 +5985,13 @@ claims:
   area: graph
   claim: >-
     A node whose timestep is not a finite number > 0 is refused: POST
-    /graph/nodes answers 422 from its request model -- encoded without a 500
-    even when the refused value is NaN or Infinity -- and adds nothing, and
+    /graph/nodes answers 422 from its request model -- for a boolean or text
+    as for a number out of range, and encoded without a 500 even when the
+    refused value is NaN or Infinity -- and adds nothing, and
     GraphManager.add_node raises ValueError ("timestep must be a finite
-    number > 0") for every caller.
+    number > 0") for every caller.  A timestep the graph's other nodes
+    cannot be scheduled with is a 400 naming the two nodes (compile()
+    raises ValueError for such a graph), and nothing is added.
   sources:
     - src/maddening/api/server.py:599 (AddNodeRequest)
     - src/maddening/api/server.py:3211 (_request_validation_error)
@@ -5970,8 +5999,11 @@ claims:
   conditions: >-
     NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, the
     same three as JSON text ("NaN") and a surrogate in the refused value, and
-    NaN, the infinities, zero and a negative timestep in-process; 0.005
-    taken.
+    NaN, the infinities, zero and a negative timestep in-process; true,
+    false, "0.5", " 0.25 ", "1e-2", null, a list and an object over REST;
+    0.005, 2e-3 and the JSON integer 1 taken; beside a node at 1.0, a
+    timestep of 1e-10, 1e-9, 1.5e-9, 2**63 and 1e-50 (400) and 0.25 (201); a
+    removal that would leave timesteps with no schedule (400).
   oracle: >-
     422 whose body parses, naming the timestep, and no node; ValueError and
     the graph unchanged; 201 for a valid timestep.
@@ -5981,7 +6013,16 @@ claims:
     - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
     - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500
     - tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_422_still_writes_a_refused_number_as_its_token
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_json_number_is_refused
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_every_number_of_every_request_model_refuses_a_boolean_and_text
+    - tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_a_node_whose_timestep_the_graph_cannot_schedule_is_not_added
+    - tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_a_removal_that_would_leave_timesteps_with_no_schedule_is_refused
+    - tests/core/test_multirate_schedule_keeps_every_nodes_clock.py::test_a_schedule_that_would_not_keep_a_nodes_clock_does_not_compile
   status: verified
+  notes: >-
+    Failing in the round-10 audit (MADD-ANO-227, 228): "timestep": true
+    added a node stepping at 1.0 s and numeric text was parsed; nodes at
+    1.0 and 1e-10 were added, compiled and run on different clocks.
   domains:
     loopback_bind: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
     non_loopback_bind: n/a

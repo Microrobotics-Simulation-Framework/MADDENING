@@ -105,9 +105,10 @@ def test_a_write_back_after_a_fit_is_asked_with_the_fitted_values(tmp_path):
 
 
 def test_a_single_key_written_back_after_a_load_is_asked_with_the_loaded_values(tmp_path):
-    """REST alone: a load leaves ``length`` short and alpha fitted, the
-    node's own alpha is the original; putting alpha back alone is the
-    Fourier-0.648 rod."""
+    """REST alone: a load leaves ``length`` short and alpha fitted -- in
+    the node's own params too, as the ``PUT`` of each would (it used to
+    leave the node's own alpha at the original); putting alpha back alone
+    is the Fourier-0.648 rod."""
     gm = _rod_graph()
     client = _client(gm, tmp_path)
     assert _put(client, thermal_diffusivity=A_FIT).status_code == 200
@@ -117,7 +118,8 @@ def test_a_single_key_written_back_after_a_load_is_asked_with_the_loaded_values(
     assert _put(client, thermal_diffusivity=A0).status_code == 200
     assert client.post("/checkpoint/load?path=short.npz").status_code == 200
     node = gm._nodes["rod"].node
-    assert node.params["thermal_diffusivity"] == pytest.approx(A0)   # the node's own
+    assert node.params["thermal_diffusivity"] == pytest.approx(A_FIT)   # installed, as PUT
+    assert node.params["length"] == pytest.approx(L_SHORT)
     loaded = _live(gm)
     assert loaded["length"] == pytest.approx(L_SHORT)
     r = _put(client, thermal_diffusivity=A0)

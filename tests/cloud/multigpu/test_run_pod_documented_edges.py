@@ -84,6 +84,67 @@ def test_a_goal_file_that_is_not_an_object_reads_invalid_and_the_summary_exits_3
     assert rp.summarise(directory) == 3
 
 
+def _goals_with_a_file(rp, directory) -> list:
+    return [goal for goal in rp.ALL_GOALS if (directory / f"{goal}.json").is_file()]
+
+
+def test_the_record_holds_a_file_for_every_goal_the_empty_record_rule_is_asked_of(rp, tmp_path):
+    directory = _copy_record(tmp_path)
+    assert set(_goals_with_a_file(rp, directory)) == set(rp.GOAL_CHECKS) == set(rp.ALL_GOALS)
+
+
+@pytest.mark.parametrize("emptied", ["cells and checks", "checks", "cells"])
+def test_a_goal_file_with_no_cells_or_no_checks_reads_invalid_for_every_goal(
+        rp, tmp_path, capsys, emptied):
+    """RPD-009 and RPD-014, one rule for every goal: a goal that did not
+    raise ran at least one size and recorded at least one check ("no checks
+    is not a pass").  A ``forward.json``, ``gradient.json`` or
+    ``exchange.json`` with ``cells``, ``results`` and ``checks`` emptied read
+    ``no checks`` and the summary exited 0, where the same edit to
+    ``stencil``, ``hybrid`` or ``coupled`` read INVALID (exit 3) -- by the
+    accident that their case lists take ``min()`` of the cells."""
+    reference = _copy_record(tmp_path / "reference")
+    assert rp.summarise(reference) in (0, 4)       # the record itself: nothing failed
+    capsys.readouterr()
+    goals = _goals_with_a_file(rp, reference)
+    assert len(goals) >= 8
+    for goal in goals:
+        directory = _copy_record(tmp_path / f"{goal}-{emptied.replace(' ', '-')}")
+        path = directory / f"{goal}.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert doc["checks"] and doc["config"]["cells"] and "raised" not in doc, goal
+        if "cells" in emptied:
+            doc["config"]["cells"] = []
+            doc["results"] = []
+        if "checks" in emptied:
+            doc["checks"] = []
+        doc["passed"] = False
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        problems = rp.record_problems({**doc, "_file": path.name})
+        assert problems, (goal, emptied)
+        if "cells" in emptied:
+            assert problems[-1].startswith("its config names no cells"), (goal, problems)
+        else:
+            assert problems[-1].startswith("records no checks"), (goal, problems)
+        assert rp.goal_verdict([doc]) in ("INVALID", "FAIL"), (goal, emptied)
+        assert rp.summarise(directory) == 3, (goal, emptied)
+        out = capsys.readouterr().out
+        row = next(line for line in out.splitlines() if line.split()[:1] == [goal])
+        assert "no checks" not in row and ("INVALID" in row or "FAIL" in row), (goal, row)
+
+
+def test_a_goal_that_raised_still_records_its_one_check_and_no_cells_are_asked_of_it(rp):
+    """The rule's other side: a goal that raised (``--keep-going``) holds no
+    results and exactly the check its exception gives, and is not held to
+    "at least one size"."""
+    raised = {"type": "RuntimeError", "message": "boom"}
+    doc = json.loads((_RECORD / "forward.json").read_text(encoding="utf-8"))
+    doc.update(results=[], checks=[rp.goal_raised_check(raised)], raised=raised, passed=False)
+    assert rp.record_problems(doc) == []
+    doc["checks"] = []
+    assert rp.record_problems(doc)
+
+
 @pytest.mark.parametrize("content", [b"", b"\xff\xfe not utf-8", b"null", b'"halo"'],
                          ids=["empty", "not-utf8", "null", "string"])
 def test_any_goal_file_that_is_not_a_json_object_reads_invalid_naming_the_file(

@@ -83,7 +83,7 @@ try:
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
-    from pydantic import BaseModel, Field, field_validator
+    from pydantic import BaseModel, BeforeValidator, Field, field_validator
     from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as _exc:
     raise ImportError(
@@ -120,11 +120,14 @@ from maddening.core.graph_manager import (
     EVENT_NODE_REMOVED,
     EVENT_STEP,
     GraphManager,
+    _BakedParamWrite,
 )
 from maddening.core._graph_specs import (
     _UNCARRIABLE_WHY,
     _node_name_refusal,
     _NodeSpec,
+    _rate_dividers,
+    _scheduled_timesteps,
     _uncarriable_characters,
 )
 from maddening.core._param_probes import (
@@ -438,6 +441,31 @@ MAX_STEPS_PER_FRAME = MAX_RUN_STEPS
 #: Nth step, and a stride past one run's length would never publish one.
 MAX_RELAY_STRIDE = MAX_RUN_STEPS
 
+#: Bounds of ``POST /sim/profile?n_steps=&n_warmup=``: the request holds a
+#: worker while it steps.  They used to be applied by clamping -- 5000
+#: steps asked, 1000 profiled, and nothing in the reply said so -- and are
+#: now the query's declared range, a 422 outside it as on ``/sim/run``.
+_MAX_PROFILE_STEPS = 1000
+_MAX_PROFILE_WARMUP = 50
+
+_DECIMAL_INTEGER = re.compile(r"-?[0-9]+", re.ASCII)
+
+
+def _decimal_integer_text(value: Any) -> Any:
+    """A count in a query string is its decimal digits and nothing else.
+    The default parse also took ``" 5 "``, ``"5.0"``, ``"5_0"`` (as 50) and
+    ``"+5"``: text a client did not mean as that number, or would not expect
+    to be read as one."""
+    if isinstance(value, str) and _DECIMAL_INTEGER.fullmatch(value) is None:
+        raise ValueError("expected a decimal integer (ASCII digits only)")
+    return value
+
+
+#: Asked of every integer query parameter, written after its ``Query`` in
+#: an ``Annotated`` (the bounds are then applied to the integer, and this
+#: to the text before it is parsed).
+_DECIMAL = BeforeValidator(_decimal_integer_text)
+
 #: How long ``POST /sim/stop`` (and every route that stops the runner
 #: first) waits for the runner's thread to finish the step it is in.
 #: Past it the route answers 503 and keeps the runner: the thread is
@@ -703,6 +731,71 @@ def _new_node_type_refusal(cls: Any, params: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _schedule_refusal(gm: GraphManager) -> Optional[str]:
+    """Why ``compile()`` would refuse the graph's multi-rate schedule
+    (:func:`~maddening.core._graph_specs._rate_dividers`: timesteps with no
+    common step that keeps every node's clock), or ``None``.  Asked by the
+    two routes that change which timesteps a graph holds, before and after
+    their change: a request is not accepted that leaves a graph which could
+    be scheduled unable to step."""
+    scheduled = _scheduled_timesteps(gm._nodes, gm._coupling_groups)
+    if len(set(scheduled.values())) < 2:
+        return None
+    try:
+        _rate_dividers(scheduled)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _kind_of_value(value: Any) -> str:
+    """What a constructor default is, in a refusal's words."""
+    if isinstance(value, bool):
+        return "a boolean"
+    if _is_integer(value):
+        return "an integer"
+    if isinstance(value, (float, np.floating)):
+        return "a number"
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, (list, tuple)):
+        return "a list"
+    return f"a {type(value).__name__}"
+
+
+def _constructor_refusal(cls: Any, name: str, timestep: float, params: dict[str, Any],
+                         exc: BaseException) -> str:
+    """The 400 of ``POST /graph/nodes`` for a constructor that raised *exc*
+    on *params*: the parameters the refusal can be told from -- those
+    without which (each left to the class's default in turn, as
+    :func:`_dry_run_refusal` tells them) the constructor takes the rest --
+    with the value sent and what the class's default is, then the
+    constructor's own words.
+
+    The reply used to be those words alone, and a constructor that had not
+    thought of the value answers with whatever Python raised: ``n_cells:
+    8.0`` was "'float' object cannot be interpreted as an integer" and
+    ``n_cells: 0`` "float division by zero", neither naming a parameter.
+    """
+    blamed = []
+    for key in params:
+        try:
+            cls(name=name, timestep=timestep,
+                **{k: v for k, v in params.items() if k != key})
+        except Exception:  # noqa: BLE001 - not this parameter alone
+            continue
+        blamed.append(key)
+    told = []
+    for key in blamed:
+        default = _constructor_default(cls, key)
+        expected = ("" if default is None
+                    else f" (the default is {default!r}, {_kind_of_value(default)})")
+        told.append(f"params.{key} = {params[key]!r}{expected}")
+    what = ", ".join(told) if told else "these params together"
+    said = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+    return f"node '{name}': {cls.__name__} refuses {what}: {said}"
+
+
 def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]:
     """:func:`_oversized_param`'s integer bound on ``POST /graph/nodes``'s
     *params*, asked of each value as its parameter's type reads it
@@ -729,7 +822,11 @@ class AddNodeRequest(BaseModel):
     # A finite number > 0: NaN or Infinity added the node and then answered
     # 500 (its reply could not be encoded), every step a 400 until it was
     # deleted; 0 or a negative value stepped it not at all, or backwards.
-    timestep: float = Field(gt=0, allow_inf_nan=False)
+    # Strict: a number, and not what can be read as one.  ``true`` added a
+    # node at 1.0 s, and ``"0.5"``, ``" 0.25 "`` and ``"1e-2"`` were taken,
+    # where the same kinds in ``params`` are a 400.  A JSON integer is a
+    # number.
+    timestep: float = Field(gt=0, allow_inf_nan=False, strict=True)
     params: dict[str, Any] = {}
 
     @field_validator("params")
@@ -782,12 +879,14 @@ class SetNodeParamsRequest(BaseModel):
 
 class TrainSurrogateRequest(BaseModel):
     node_name: str
-    n_data_steps: int = Field(500, ge=1, le=MAX_SURROGATE_DATA_STEPS)
-    n_epochs: int = Field(100, ge=1, le=MAX_SURROGATE_EPOCHS)
+    # Strict, as AddNodeRequest.timestep is: a JSON integer, not a boolean
+    # (``true`` was one step), numeric text or a float.
+    n_data_steps: int = Field(500, ge=1, le=MAX_SURROGATE_DATA_STEPS, strict=True)
+    n_epochs: int = Field(100, ge=1, le=MAX_SURROGATE_EPOCHS, strict=True)
     hidden_sizes: list[
-        Annotated[int, Field(ge=1, le=MAX_SURROGATE_LAYER_WIDTH)]
+        Annotated[int, Field(ge=1, le=MAX_SURROGATE_LAYER_WIDTH, strict=True)]
     ] = Field([64, 64], min_length=1, max_length=MAX_SURROGATE_LAYERS)
-    batch_size: int = Field(64, ge=1, le=MAX_SURROGATE_BATCH_SIZE)
+    batch_size: int = Field(64, ge=1, le=MAX_SURROGATE_BATCH_SIZE, strict=True)
 
     # The width and depth bounds hold one number each; the hidden weights
     # grow with width squared times depth, so that is bounded too.
@@ -2070,6 +2169,50 @@ def _installed_part(value: Any, *held: Any) -> Optional[np.ndarray]:
     return v if new.all() else v[new]
 
 
+def _install_param_leaves(gm: GraphManager, owner: str, leaves: dict[str, Any],
+                          live: dict) -> None:
+    """Write the params-pytree *leaves* of node *owner* where the graph
+    holds them: into *live* (the node's leaf dict in ``gm.params`` -- or,
+    before the first compile, the caller's copy of the node's own pytree)
+    and, for a key the node's constructor took, into ``node.params``.
+
+    The one install ``PUT /graph/params`` and ``POST /checkpoint/load``
+    share.  The load used to write ``gm.params`` only, so a checkpoint
+    saved before an initial condition was written stopped loading: the
+    leaf then differed from the node's own value, only ``initial_state()``
+    reads it, and the graph refuses such a leaf.  Written to both, the
+    loaded value is the one ``POST /sim/reset`` builds the state from, as
+    it is after a ``PUT``.
+    """
+    held = gm._nodes[owner].node.params
+    for key, value in leaves.items():
+        live[key] = value
+        if key in held:
+            # Store the constructor's Python type, never the raw JSON
+            # value: a JSON ``40`` for a float leaf would turn it into an
+            # ``int`` that ``params_pytree`` no longer exposes.
+            held[key] = np.asarray(value).tolist()
+
+
+def _leaves_a_load_changes(leaves: Any, live: Any) -> dict[str, Any]:
+    """The leaves of a node's loaded params that differ from the ones the
+    graph held (*live*): what a load is asked about, and what it installs
+    (:func:`_install_param_leaves`)."""
+    if not isinstance(leaves, dict) or not isinstance(live, dict):
+        return {}
+    return {k: v for k, v in leaves.items()
+            if k in live and not _leaf_values_equal(v, live[k])}
+
+
+def _shown_value(value: Any) -> str:
+    """A parameter value for a refusal's text: the number, or the shape of
+    an array of more than eight elements."""
+    arr = np.asarray(value)
+    if arr.size > 8:
+        return f"an array of shape {arr.shape}"
+    return np.array2string(arr, precision=7, separator=", ")
+
+
 def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
     """Why ``POST /checkpoint/load`` cannot take the parameter leaves
     *loaded* (the ``gm.params`` the load would leave) into the graph, or
@@ -2090,8 +2233,7 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
         if spec is None or not spec.accepts_params or not isinstance(live, dict) \
                 or not isinstance(leaves, dict):
             continue
-        staged = {k: v for k, v in leaves.items()
-                  if k in live and not _leaf_values_equal(v, live[k])}
+        staged = _leaves_a_load_changes(leaves, live)
         if not staged:
             continue
         own_specs = specs.get("nodes", {}).get(owner, {})
@@ -2102,7 +2244,9 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
                 continue
             reason = _leaf_value_refusal(key, part, own_specs.get(key))
             if reason is not None:
-                return f"node {owner!r}, {reason}"
+                return (f"node {owner!r}, {reason} (the checkpoint holds "
+                        f"{_shown_value(value)}; PUT /graph/params/{owner} refuses "
+                        "the same value)")
         changes = {k: np.asarray(v).tolist() for k, v in staged.items()}
         found = _params_write_refusal(
             gm, owner, changes, staged, dict(live), {**live, **staged},
@@ -2110,7 +2254,11 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
                           if k in ctor and _leaf_values_equal(v, ctor[k])])
         if found is not None:
             keys, reason, _reported = found
-            return f"node {owner!r}, {', '.join(keys)}: {reason}"
+            holds = ", ".join(f"{k} = {_shown_value(staged[k])}" for k in keys if k in staged)
+            return (f"node {owner!r}, {', '.join(keys)}: the checkpoint holds {holds}, "
+                    f"and {reason}.  PUT /graph/params/{owner} refuses the same; to "
+                    f"run the node with it, rebuild the node (DELETE /graph/nodes/{owner}, "
+                    "then POST /graph/nodes with the checkpoint's value) and load again")
     for edge, leaves in (loaded.get("mappings") or {}).items():
         live = (live_tree.get("mappings") or {}).get(edge)
         if not isinstance(live, dict) or not isinstance(leaves, dict):
@@ -3765,7 +3913,8 @@ class SimulationServer:
                 try:
                     node = node_cls(name=req.name, timestep=req.timestep, **req.params)
                 except Exception as exc:
-                    raise HTTPException(status_code=400, detail=str(exc))
+                    raise HTTPException(status_code=400, detail=_constructor_refusal(
+                        node_cls, req.name, req.timestep, req.params, exc))
                 # The ParamSpec bounds PUT /graph/params holds a write to,
                 # on the values this request gives: a damping of -5 below
                 # its bound of 0 was added, which PUT then refused to
@@ -3816,10 +3965,23 @@ class SimulationServer:
                                         detail=f"node '{req.name}' {refusal}")
                 if req.name in self.gm._nodes:
                     raise HTTPException(status_code=409, detail=f"Node '{req.name}' already exists in the graph.")
+                schedulable = _schedule_refusal(self.gm) is None
                 try:
                     self.gm.add_node(node)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
+                # A timestep the graph's other nodes cannot be scheduled
+                # with (more than about 1e9 times smaller or larger, or with
+                # no common step): the compile refuses it, so a 201 here
+                # would leave a graph whose every step is a 400.  It used
+                # to be a 201 and a graph that ran its nodes on different
+                # clocks.  The route's transaction takes the node out again.
+                refusal = _schedule_refusal(self.gm) if schedulable else None
+                if refusal is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{req.name}' cannot join this graph with a "
+                                f"timestep of {req.timestep!r}: {refusal}"))
                 self._publish_state()
                 # Through the reply encoder every other route uses: a
                 # non-finite value in the node's dict is written as its
@@ -3840,6 +4002,7 @@ class SimulationServer:
             graph without it (they used to go on serving the removed node,
             and the binary stream re-sent a schema that had it)."""
             with self._graph_transaction("remove a node", write=True):
+                schedulable = _schedule_refusal(self.gm) is None
                 try:
                     # What remove_node() warns about, for the reply.
                     notes = self.gm._remove_node(name, replacing=False)
@@ -3847,6 +4010,19 @@ class SimulationServer:
                     raise HTTPException(status_code=404, detail=str(exc))
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
+                # The common step of the timesteps that are left is found
+                # afresh, and across many decades it can be one that no
+                # longer keeps a remaining node's clock: the graph without
+                # the node would not compile.  Refused, as an added node
+                # with such a timestep is; a graph that could not be
+                # scheduled before is not held to it (the node removed may
+                # be the reason).
+                refusal = _schedule_refusal(self.gm) if schedulable else None
+                if refusal is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{name}' cannot be removed: without it, "
+                                f"{refusal}  Nothing was removed."))
                 # The server's own record of a surrogate under that name
                 # goes with the node: a later deactivate used to add the
                 # recorded original back, with its edges, into a graph the
@@ -4308,21 +4484,15 @@ class SimulationServer:
             if found is not None:
                 keys, reason, reported = found
                 raise refused(keys, reason, reported=reported)
-            for key, value in req.params.items():
-                if key in staged:
-                    # After a compile ``live`` *is* gm.params' leaf dict and
-                    # this is the write; before one it is the throwaway probe
-                    # copy, and this only keeps the echo below honest -- it
-                    # used to report the pre-write value, contradicting the
-                    # GET that follows it.
-                    live[key] = staged[key]
-                    if key in node.params:
-                        # Store the constructor's Python type, never the
-                        # raw JSON value: a JSON ``40`` for a float leaf
-                        # would turn it into an ``int`` that
-                        # ``params_pytree`` no longer exposes.
-                        node.params[key] = np.asarray(staged[key]).tolist()
-                else:
+            # After a compile ``live`` *is* gm.params' leaf dict and this is
+            # the write; before one it is the throwaway probe copy, and this
+            # only keeps the echo below honest -- it used to report the
+            # pre-write value, contradicting the GET that follows it.
+            _install_param_leaves(
+                self.gm, node_name,
+                {key: staged[key] for key in req.params if key in staged}, live)
+            for key in req.params:
+                if key not in staged:
                     node.params[key] = structural[key]
                     self.gm._dirty = True
             shown = _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
@@ -4645,20 +4815,45 @@ class SimulationServer:
                                f"was loaded: {refusal}",
                     )
                 _restore_state_and_params(self.gm, loaded)
-                # A checkpoint of a graph whose node was built with another
-                # value of a parameter it consumes at construction carries
-                # that value in gm.params.  The graph refuses such a leaf at
-                # the next step, and this API has no reset_params: every
-                # later /sim/step would be a 500 while GET /graph/params
-                # served the checkpoint's value.  Refused here instead; the
-                # route's transaction undoes the load.
+                # Each leaf the load changed is installed as PUT installs a
+                # written one -- in gm.params and in the node's own params
+                # -- by PUT's own function.  The load used to move gm.params
+                # only, so an initial condition it changed differed from
+                # the node's own value, which the graph refuses of a leaf
+                # only initial_state() reads: every checkpoint saved before
+                # a PUT of an initial_* parameter was a 400, where PUT took
+                # the checkpoint's value.
+                held = self.gm.params.get("nodes") or {}
+                for owner, leaves in (loaded[1].get("nodes") or {}).items():
+                    changed = _leaves_a_load_changes(
+                        leaves, (before[1].get("nodes") or {}).get(owner))
+                    if changed and owner in self.gm._nodes \
+                            and isinstance(held.get(owner), dict):
+                        _install_param_leaves(self.gm, owner, changed, held[owner])
+                # What is left for the graph to refuse is a leaf the load
+                # did NOT change: one that already differed from its node's
+                # own value in a way the step cannot read (written into
+                # gm.params by Python code, on a graph not stepped since).
+                # A load that answered 200 would leave a graph whose every
+                # POST /sim/step is a 400 while GET /graph/params served
+                # the leaf; the route's transaction undoes the load.
                 try:
                     self.gm._refuse_baked_param_writes(self.gm.params, live=False)
-                except ValueError as exc:
+                except _BakedParamWrite as exc:
+                    own = ("" if exc.own is None
+                           else f" and {_shown_value(exc.own)} on the node itself")
+                    back = ("" if exc.own is None or np.size(exc.own) > 8 else (
+                        f"  To load it, first write the node's own value back (PUT "
+                        f"/graph/params/{exc.owner} with {exc.key}: "
+                        f"{_shown_value(exc.own)}); the load is then asked what "
+                        "that route asks of the checkpoint's value."))
                     raise HTTPException(
                         status_code=400,
-                        detail=f"checkpoint {path!r} does not fit this graph, nothing "
-                               f"was loaded: {exc}",
+                        detail=(
+                            f"checkpoint {path!r} does not fit this graph, nothing "
+                            f"was loaded: node {exc.owner!r}, {exc.key}: the value is "
+                            f"{_shown_value(exc.value)} in the checkpoint and in the "
+                            f"graph's params{own}, and {exc.reason}.{back}"),
                     )
                 clock = _checkpoint_clock(target)
                 sim_time, steps = clock if clock is not None else (0.0, 0)
@@ -4719,14 +4914,14 @@ class SimulationServer:
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
         def sim_run(
-            n_steps: int = Query(
-                100, ge=0, le=MAX_RUN_STEPS,
+            n_steps: Annotated[int, Query(
+                ge=0, le=MAX_RUN_STEPS,
                 description="Steps to run synchronously.  Zero is a no-op "
                             "that returns the current state.  The upper "
                             "bound exists because the request holds a "
                             "worker for its whole duration; for a longer "
                             "run use POST /sim/start.",
-            ),
+            ), _DECIMAL] = 100,
         ) -> Any:
             """Run *n_steps* steps and return the state.
 
@@ -5004,19 +5199,19 @@ class SimulationServer:
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
         async def sim_set_stride(
-            steps_per_frame: Optional[int] = Query(
-                None, ge=1, le=MAX_STEPS_PER_FRAME,
+            steps_per_frame: Annotated[Optional[int], Query(
+                ge=1, le=MAX_STEPS_PER_FRAME,
                 description="Physics steps batched per wall-clock frame in the "
                             "runner, at most MAX_STEPS_PER_FRAME (one POST "
                             "/sim/run's worth).  Kept for a runner started "
                             "later.  Left out: the current value is kept.",
-            ),
-            relay_stride: Optional[int] = Query(
-                None, ge=1, le=MAX_RELAY_STRIDE,
+            ), _DECIMAL] = None,
+            relay_stride: Annotated[Optional[int], Query(
+                ge=1, le=MAX_RELAY_STRIDE,
                 description="Capture only every Nth step in the relay, at "
                             "least 1 and at most MAX_RELAY_STRIDE.  Left out: "
                             "the current value is kept.",
-            ),
+            ), _DECIMAL] = None,
         ) -> Any:
             """Adjust physics-to-render rate decoupling.
 
@@ -5473,11 +5668,22 @@ class SimulationServer:
         # -- profile endpoints (v0.2 #9) -----------------------------------
 
         @app.post("/sim/profile", tags=["sim"], response_model=None)
-        def sim_profile(n_steps: int = 50, n_warmup: int = 3) -> dict[str, Any]:
+        def sim_profile(
+            n_steps: Annotated[int, Query(
+                ge=1, le=_MAX_PROFILE_STEPS,
+                description="Steps to profile; the bound keeps the request's "
+                            "latency bounded."), _DECIMAL] = 50,
+            n_warmup: Annotated[int, Query(
+                ge=0, le=_MAX_PROFILE_WARMUP,
+                description="Steps run before the profiled ones, not timed."),
+                _DECIMAL] = 3,
+        ) -> dict[str, Any]:
             """Run a step-time profile and return a Perfetto-loadable JSON trace.
 
-            POST with ``?n_steps=N`` to override (default 50, capped at
-            1000 to keep request latency bounded).  The response is a
+            POST with ``?n_steps=N`` to override (default 50, at most 1000
+            to keep request latency bounded; ``n_warmup`` at most 50).  A
+            value outside its range is a 422, as on ``POST /sim/run``: it
+            used to be clamped into it without a word.  The response is a
             Perfetto-format JSON trace; save the body as ``profile.json``
             and drag-and-drop into https://ui.perfetto.dev for an
             interactive flame-graph view of per-node + coupling
@@ -5490,8 +5696,6 @@ class SimulationServer:
             from maddening.core.simulation.profiler import (
                 profile_graph, profile_report_to_perfetto,
             )
-            n_steps = max(1, min(1000, int(n_steps)))
-            n_warmup = max(0, min(50, int(n_warmup)))
             with self._graph_transaction("profile the graph", write=True) as transaction:
                 # The profiler resets the graph to its initial state and
                 # steps it: the route's transaction is rolled back when it

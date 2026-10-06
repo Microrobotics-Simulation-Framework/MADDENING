@@ -1082,12 +1082,15 @@ def _the_stride_is_bounded_and_a_value_left_out_keeps_its_own(ctx):
 
 
 @check("REST-039", skip=("runner", "sim_run", "wrapper"))
-def _the_profile_step_count_is_clamped_not_refused(ctx):
-    """A zero or negative step count is clamped to one, not refused."""
-    for n in (0, -5):
+def _the_profile_step_count_is_refused_outside_its_range(ctx):
+    """A step count outside 1..1000 is a 422 (it used to be clamped into
+    the range without a word); one inside it is profiled."""
+    for n in (0, -5, 1001):
         resp = ctx.client.post("/sim/profile", params={"n_steps": n})
-        assert resp.status_code == 200, resp.text
-        assert "traceEvents" in resp.json()
+        assert resp.status_code == 422, resp.text
+    resp = ctx.client.post("/sim/profile", params={"n_steps": 1, "n_warmup": 0})
+    assert resp.status_code == 200, resp.text
+    assert "traceEvents" in resp.json()
 
 
 # ===========================================================================

@@ -68,9 +68,10 @@ class TestSimProfile:
     ])
     def test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled(self, loaded_client,
                                                                        query, field):
-        """As ``POST /sim/run`` answers one.  Both counts used to be
-        clamped into their ranges without a word: 10000 steps asked, 1000
-        profiled, and a reply that did not say so."""
+        """As ``POST /sim/run`` answers one past its bound.  Both counts
+        used to be clamped into their bounds (1..1000 steps, 0..50 of
+        warm-up) without a word: 10000 steps asked, 1000 profiled, and a
+        reply that did not say so."""
         client, server = loaded_client
         calls = []
         import maddening.core.simulation.profiler as profiler

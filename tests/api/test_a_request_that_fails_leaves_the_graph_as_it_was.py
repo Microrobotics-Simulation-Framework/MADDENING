@@ -209,7 +209,11 @@ def test_a_failure_at_any_point_of_a_write_route_changes_nothing(served, route):
     if prepare is not None:
         prepare(served)
     resp, tried, _, _ = fail_at_every_point(
-        served, lambda: send(served.client), route, partial=_steps_run)
+        served, lambda: send(served.client), route, partial=_steps_run,
+        # Only a run counts steps before a failure: it is then held to a
+        # replay of them (the graph put back, that many steps run).
+        rerun=((lambda k: served.client.post("/sim/run", params={"n_steps": k}))
+               if route == "run" else None))
     assert resp.status_code == status, resp.text
     for step in steps:
         # Before the step and after it: a failure on either side of every

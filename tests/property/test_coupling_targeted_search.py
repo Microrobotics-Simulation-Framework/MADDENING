@@ -48,11 +48,11 @@ and held to a floor in the slow profile):
    weighted Jacobian is normal, how far the estimate is *above* the
    radius ("from below for a normal dF/dx"), whatever the flag.
    ``"radius_strict"``: the statement a user can check, with no reference
-   to the Jacobian -- where ``spectral_usable``, ``rho_spectral`` is
-   within ``SPECTRAL_SETTLED_FRACTION`` of ``1 - rho_spectral`` of the
-   radius (the margin the flag holds the Arnoldi residual, a discarded
-   direction, a ninth Krylov vector's movement of the radius and its
-   measured sensitivity to rounding to).  No row promises
+   to the Jacobian -- where ``spectral_usable`` and no more than eight
+   scalars cross the group's edges, ``rho_spectral`` is within
+   ``SPECTRAL_SETTLED_FRACTION`` of ``1 - rho_spectral`` of the radius
+   (the margin the flag holds the Arnoldi residual, a discarded
+   direction and the radius's measured sensitivity to rounding to).  No row promises
    ``rho_spectral`` as an upper estimate, so none is scored;
 3. *gradient bound* (CPL-093): the true relative error of the implicit
    derivative taken at the returned iterate against the same dense solve
@@ -515,7 +515,8 @@ def observe(case: Case) -> dict:
         allowance = max(_radius_allowance(A, rho, eps_analysis, case.seed), 1e-300)
         norm_A = float(np.linalg.norm(A, 2))
         off = abs(rho_reported - rho) if out["spectral_usable"] else 0.0
-        if np.linalg.matrix_rank(J) > SPECTRAL_KRYLOV_STEPS:
+        resolved = np.linalg.matrix_rank(J) <= SPECTRAL_KRYLOV_STEPS
+        if not resolved:
             # "An estimate otherwise, which spectral_usable reports":
             # past eight independent scalars nothing is called exact.  A
             # settled estimate is read as good to the margin the flag
@@ -527,8 +528,9 @@ def observe(case: Case) -> dict:
             # whatever the flag.
             off = max(off, rho_reported - rho)
         # The statement a user can check: within the flag's own margin of
-        # the radius, wherever the flag is set.
-        if out["spectral_usable"]:
+        # the radius, wherever the flag is set and the group has no more
+        # scalars than the Krylov steps resolve.
+        if out["spectral_usable"] and resolved:
             out["radius_strict"] = abs(rho_reported - rho) / max(
                 SPECTRAL_SETTLED_FRACTION * (1.0 - rho_reported), 1e-300)
         out["radius"] = off / allowance
@@ -812,6 +814,22 @@ KNOWN = {
     "a-float32-field-at-its-drivers-rounding-reads-a-zero-radius": _known(
         Case(len(_FIRST), 5, 0.05, False, 1e-6, 0.0, 1.0, 0, 0.0, 5), "radius",
         "MADD-ANO-217: a loop below a float32 field's rounding is not in the products"),
+    # Twelve float32 scalars under Jacobi, non-normal gains: 0.273 for
+    # 0.219 with the Arnoldi residual and the ninth vector's movement of
+    # the radius both inside the margin (found by the floor search, one
+    # example in 9 660 over twelve hunts; the tree before reads the same).
+    # Past eight scalars the claim is "an estimate", and for a non-normal
+    # Jacobian neither test bounds its error.
+    "MADD-ANO-220-a-non-normal-estimate-past-eight-scalars": _known(
+        Case(4, 0, 0.21902815820121518, True, 1.0, 0.0, 1.0, -6, 1e-09, 0), "radius",
+        "MADD-ANO-220: past eight scalars a non-normal radius reads settled 1.5 margins off"),
+    # A float32 Jacobi ring of mapped edges stopped at its float floor:
+    # gradient_relative_error_bound 5.1e-6 for a true 3.0e-5 (250 float32
+    # eps), gradient_bound_usable (found by the floor search, twelve
+    # examples of one hunt; the tree before reads the same).
+    "MADD-ANO-221-the-gradient-bound-at-the-float-floor": _known(
+        Case(53, 6984, 0.05, False, 1.0, 0.0, 1.0, 6, 1.0, 3), "gradient",
+        "MADD-ANO-221: the gradient bound of a precision-limited iterate reads below the error"),
     # A mapping row [1, -1] on a field 1e4 times the difference, read in
     # the same Gauss-Seidel pass, stalled in float32: the exact residual is
     # 16 floors and the bound 0.06x the distance, spectral_usable (found

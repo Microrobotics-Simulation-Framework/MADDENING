@@ -4042,7 +4042,8 @@ class GraphManager:
               *step*, this sees every mode whatever its current
               amplitude: on the two-mode case where the sequence reads
               0.2 it reads 0.999.  **Where** ``"spectral_usable"``
-              **is** ``True`` **it is within 5% of**
+              **is** ``True`` **and no more than eight scalars cross
+              the group's edges, it is within 5% of**
               ``1 - rho_spectral`` **of the radius**: that is the
               margin the flag holds the analysis to.  For a group
               whose Jacobian has rank at most eight -- rank is at most
@@ -4054,7 +4055,12 @@ class GraphManager:
               rounding into more, which is measured and withdraws the
               flag where it exceeds the margin (a float32 hub with a
               field 1e-4 of what drives it).  An estimate otherwise,
-              which ``"spectral_usable"`` reports: from below for a
+              which ``"spectral_usable"`` reports (there the flag says
+              that the Arnoldi residual and a ninth Krylov vector's
+              movement of the radius are within the margin, which
+              bounds the error for a normal Jacobian only: twelve
+              non-normal float32 scalars read 0.273 for 0.219 with the
+              flag set): from below for a
               normal ``dF/dx`` (in the norm's weights), from either side
               for a non-normal one, whose Ritz values can lie outside
               the spectrum's convex hull (1.17 on a Jacobi ring of nine

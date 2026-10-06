@@ -14853,3 +14853,89 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
       - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-220"
+    title: "Past eight interface scalars a non-normal group's rho_spectral can read settled outside the margin: twelve float32 scalars read 0.273 for 0.219, spectral_usable=True"
+    description: >
+      For a group whose pass Jacobian has rank above the eight Krylov
+      steps, `rho_spectral` is a Ritz estimate, and `spectral_usable`
+      reports it settled when the Arnoldi residual `h_{k+1,k}` and the
+      distance a ninth Krylov vector moves the radius are each at most 5%
+      of `1 - rho_spectral`.  The first bounds a Ritz value's error for a
+      normal Jacobian only, and the second is one step of a sequence that
+      need not have converged.  Measured (CPU, jaxlib 0.11.0, float32): a
+      Jacobi pair of six-entry members with non-normal gains (rank eleven,
+      the weighted Jacobian's norm 2.0) read `rho_spectral=0.2727` for a
+      radius of 0.2190 with a residual of 0.028 and a ninth-vector
+      movement of 0.023 against a margin of 0.036: 1.5 margins off, flag
+      set.  `spectral_error_bound` held on it.  The tree before the
+      ninth-vector check read the same number on this example, and 0.941
+      for 0.735 on another that the check now refuses (MADD-ANO-219).
+      One example in 9 660 drawn by twelve hunts of the targeted search.
+      No release carries the spectral bound.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported radius outside the margin its flag stands for is a
+      silent wrong result, never `minor`.  Not `critical`: the value is
+      documented as an estimate there, the bound measured on it holds,
+      and nothing is applied.  `context_dependent` because the reading of
+      `rho_spectral` is the program's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      For a group with more than eight scalars crossing its edges, read
+      `rho_spectral` as an estimate even where `spectral_usable` is True;
+      the 5% statement is made for groups of at most eight.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A condition number of the dominant Ritz value, or
+      more Krylov steps where the space is still growing, would decide
+      it; neither is in this release.
+    verification:
+      - "tests/property/test_coupling_targeted_search.py::test_a_known_defect_the_search_reached_is_fixed"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-221"
+    title: "gradient_relative_error_bound of an iterate stopped at its float floor can read below the error: 5.1e-6 for 3.0e-5 on a float32 Jacobi ring of mapped edges, gradient_bound_usable=True"
+    description: >
+      Measured (CPU, jaxlib 0.11.0, float32): a Jacobi ring of three
+      members of sizes 3, 2 and 2 whose three edges are mapped, loop gain
+      0.05, stopped by a cap of five passes with its residual at the float
+      floor (`precision_limited=True`, residual 6.2e-7).
+      `gradient_relative_error_bound` read 5.1e-6 with
+      `gradient_bound_usable=True`; the implicit derivative at the
+      returned iterate differs from the one at the fixed point by 3.0e-5
+      (about 250 float32 `eps`) in the worst scalar gain or mapping
+      weight, 1.8x what the bound and a 64-`eps` allowance for the
+      derivative's own rounding cover.  Unchanged by a decimal change of
+      units on a member; within the bound from a start 1e-3 from the
+      fixed point.  The cause is not established: the bound's distance
+      term at the float floor is the candidate.  Not introduced by the
+      spectral-estimate fixes (the tree before reads the same numbers).
+      Found by the targeted search's floor hunt, twelve examples of one
+      seed, none in three seeds of the gradient hunt.  No release carries
+      the gradient bound.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`.  Not `critical`: the error is a few hundred
+      `eps` of a float32 gradient, and nothing is applied.
+      `context_dependent` because whether the bound gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Do not read `gradient_relative_error_bound` below about 1e-4 in a
+      float32 group whose `precision_limited` is True; run the group in
+      float64 where a gradient error of that size matters.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0; cause to be established.
+    verification:
+      - "tests/property/test_coupling_targeted_search.py::test_a_known_defect_the_search_reached_is_fixed"
+    github_issue: null

@@ -586,3 +586,164 @@ def test_a_config_whose_geometry_dependent_mapping_lost_its_geometry_is_refused(
     """G3 at the door a file comes through."""
     with pytest.raises(ValueError, match="reads a moving geometry and none was given"):
         GraphManager.from_dict(_config(_geom().spec.to_dict()), REGISTRY)
+
+
+# ---------------------------------------------------------------------------
+# The reference kind's own compile-time check: positions the geometry's dtype
+# cannot resolve
+# ---------------------------------------------------------------------------
+
+_F32_EPS = float(np.finfo(np.float32).eps)
+
+
+def _grid_graph(origin, spacing, *, dtype="float32"):
+    """``a`` (a 3-point grid along axis 0) gathered to ``b``'s two points,
+    whose positions are ``b.g`` (shape ``(2, 3)``)."""
+    mapping = gg.multilinear((origin, 0.0, 0.0), (spacing, 1.0, 1.0), (N_SOURCE, 1, 1),
+                             n_points=N_TARGET, mode="consistent")
+    cls = _holder_of(dtype)
+    return _graph(source=cls, target=cls, mapping=mapping, geometry=("target", "g"))
+
+
+def test_a_grid_far_from_the_origin_of_a_float32_geometry_is_refused_at_compile():
+    """Origin 1e6, spacing 1e-3: a float32 position resolves about 119 cells.
+    Refused with the number, and the same grid under a float64 geometry
+    compiles."""
+    gm = _grid_graph(1.0e6, 1.0e-3)
+    issue = _refused_compile(gm, ["a float32 geometry locates a point on axis 0",
+                                  "of a cell", "hold the geometry in float64"])
+    assert "only to 119 of a cell" in issue, issue
+    with gg.x64(True):
+        fine = _grid_graph(1.0e6, 1.0e-3, dtype="float64")
+        assert not [i for i in fine.validate() if "geometry" in i]
+        fine.compile()
+
+
+def test_a_grid_a_float32_geometry_resolves_only_coarsely_warns_at_compile():
+    """Origin 1e4, spacing 1: 1.2e-3 of a cell, between 1/1024 and 1/16: a
+    warning naming the edge, and the graph compiles and steps."""
+    gm = _grid_graph(1.0e4, 1.0)
+    issues = [i for i in gm.validate() if "geometry" in i]
+    assert len(issues) == 1 and issues[0].startswith(f"WARNING: edge {KEY}: a float32 geometry")
+    with pytest.warns(UserWarning, match="locates a point on axis 0"):
+        gm.compile()
+    gm.step()
+    quiet = _grid_graph(100.0, 1.0)
+    assert not [i for i in quiet.validate() if "geometry" in i]
+
+
+@pytest.mark.parametrize("points, errors, warned", [
+    (2**19 + 1, 1, 0),      # exactly 1/16 of a cell at the far end: refused
+    (2**19, 0, 1),          # just under: a warning
+    (2**13 + 1, 0, 1),      # exactly 1/1024: a warning
+    (2**13, 0, 0),          # just under: nothing
+])
+def test_the_resolution_thresholds_are_a_sixteenth_and_a_1024th_of_a_cell(points, errors,
+                                                                          warned):
+    """With the origin at zero and unit spacing the far end of an axis of
+    ``n`` points is located to ``eps * (n - 1)`` cells, exactly."""
+    mapping = gg.multilinear((0.0,), (1.0,), (points,), n_points=2, mode="consistent")
+    assert _F32_EPS * (2**19) == 1 / 16 and _F32_EPS * (2**13) == 1 / 1024
+    got_errors, got_warnings = mapping.geometry_dtype_problems(np.float32)
+    assert (len(got_errors), len(got_warnings)) == (errors, warned), (got_errors, got_warnings)
+    assert mapping.geometry_dtype_problems(np.float64) == ([], [])
+
+
+@pytest.mark.parametrize("origin, spacing", [(0.0, 1e-40), (1e-40, 1.0), (0.0, 1e39),
+                                             (1e39, 1.0)])
+def test_a_grid_outside_the_normal_range_of_the_geometry_s_dtype_is_refused(origin, spacing):
+    """A spacing or an origin that is subnormal, or beyond the largest
+    number, in float32 is read as zero or infinity there: refused for a
+    float32 geometry, fine for a float64 one.  An origin of exactly zero
+    is fine."""
+    mapping = gg.multilinear((origin,), (spacing,), (4,), n_points=2, mode="consistent")
+    errors, _warnings = mapping.geometry_dtype_problems(np.float32)
+    assert len(errors) == 1 and "outside the normal range of a float32 geometry" in errors[0]
+    # (float64 holds both numbers; an origin of 1e39 with unit spacing is
+    # then refused for its resolution instead, which is right.)
+    in_float64, _ = mapping.geometry_dtype_problems(np.float64)
+    assert not any("normal range" in e for e in in_float64)
+    assert (in_float64 == []) == (origin < 1e30)
+    assert gg.multilinear((0.0,), (1.0,), (4,), n_points=2,
+                          mode="consistent").geometry_dtype_problems(np.float32) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: what a group with a geometry edge reports, and what it refuses
+# ---------------------------------------------------------------------------
+
+
+def _ring(norm: str, **edge):
+    """``a <-> b`` in a coupling group; ``a -> b`` is the edge given."""
+    gm = GraphManager()
+    gm.add_node(Holder("a", 1.0, n=N_SOURCE))
+    gm.add_node(Holder("b", 1.0, n=N_TARGET))
+    gm.add_edge("a", "b", "x", "u", **edge)
+    gm.add_edge("b", "a", "x", "u",
+                mapping=matrix_mapping(np.full((N_SOURCE, N_TARGET), 0.05, np.float32)))
+    gm.add_coupling_group(["a", "b"], convergence_norm=norm, max_iterations=50,
+                          diagnostics=True)
+    return gm
+
+
+@pytest.mark.parametrize("anchor", ["source", "target"])
+def test_the_interface_norm_on_a_group_with_a_geometry_edge_is_refused_at_compile(anchor):
+    gm = _ring("interface", mapping=_geom(), geometry=(anchor, "g"))
+    gg.assert_interface_norm_refused(gm.compile, [KEY])
+    errors = [i for i in gm.validate() if i.startswith("ERROR")]
+    assert len(errors) == 1 and f"geometry {anchor}.g" in errors[0], errors
+    # The controls: the same group with a static mapping compiles under the
+    # interface norm, and the geometry edge compiles under the other two.
+    _ring("interface", mapping=_static()).compile()
+    for norm in ("l2", "mixed"):
+        _ring(norm, mapping=_geom(), geometry=(anchor, "g")).compile()
+
+
+@pytest.mark.parametrize("norm", ["l2", "mixed"])
+@pytest.mark.parametrize("anchor", ["source", "target"])
+def test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason(anchor,
+                                                                                    norm):
+    """Diagnostics do not read a moving geometry in 0.4.0: the report keeps
+    the solve's outcome, every bound is NaN, every ``*_usable`` flag False,
+    and ``not_usable_reason`` names the edge.  The same group with a static
+    mapping reports its bounds as it always did, and has no such key."""
+    gm = _ring(norm, mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    assert gm.coupling_diagnostics() == {}
+    gm.step()
+    report = gm.coupling_diagnostics()["a+b"]
+    gg.assert_not_diagnosed(report, [KEY])
+    assert bool(report["converged"])
+    static = _ring(norm, mapping=_static())
+    static.compile()
+    static.step()
+    plain = static.coupling_diagnostics()["a+b"]
+    assert "not_usable_reason" not in plain
+    assert bool(plain["ratio_usable"]) or bool(plain["spectral_usable"]), plain
+
+
+def test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed():
+    """The pass resolves the edge, so the group's report is narrowed too; a
+    geometry edge *out of* a group leaves the group's report alone."""
+    def build(into: bool):
+        gm = GraphManager()
+        rows, cols = (N_TARGET, N_SOURCE) if into else (N_SOURCE, N_TARGET)
+        gm.add_node(Holder("a", 1.0, n=N_SOURCE, rows=rows, cols=cols))
+        gm.add_node(Holder("b", 1.0, n=N_TARGET))
+        gm.add_node(Holder("c", 1.0, n=N_TARGET))
+        weak = matrix_mapping(np.full((N_TARGET, N_TARGET), 0.05, np.float32))
+        gm.add_edge("b", "c", "x", "u", mapping=weak)
+        gm.add_edge("c", "b", "x", "u", mapping=weak)
+        if into:
+            gm.add_edge("a", "b", "x", "u", mapping=_geom(), geometry=("source", "g"),
+                        additive=True)
+        else:
+            gm.add_edge("b", "a", "x", "u", mapping=gg.geom_matrix_mapping(N_SOURCE, N_TARGET),
+                        geometry=("target", "g"))
+        gm.add_coupling_group(["b", "c"], max_iterations=50)
+        gm.compile()
+        gm.step()
+        return gm.coupling_diagnostics()["b+c"]
+
+    gg.assert_not_diagnosed(build(True), ["a.x->b.u"])
+    assert "not_usable_reason" not in build(False)

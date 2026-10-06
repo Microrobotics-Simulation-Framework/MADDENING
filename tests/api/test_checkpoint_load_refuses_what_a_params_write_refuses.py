@@ -37,7 +37,9 @@ from tests._loopback_client import LoopbackTestClient as TestClient
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import HeatNode, SpringDamperNode
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 
 REGISTRY = {"HeatNode": HeatNode, "SpringDamperNode": SpringDamperNode}
 ROD = dict(n_cells=10, length=1.0)

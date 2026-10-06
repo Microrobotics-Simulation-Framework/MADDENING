@@ -40,12 +40,20 @@ classifiers = [
 # at runtime on the default path.  lineax is small and pure JAX
 # (equinox + jaxtyping transitively), so the footprint is acceptable.
 # It is still imported lazily -- see the note on the `ift` extra.
+#
+# `scipy` is declared because the sparse interface mappings use it
+# directly (`scipy.spatial.KDTree`, the nearest-neighbour search of
+# `maddening.core.coupling.sparse_mapping`).  It adds nothing to an
+# install: jax and jaxlib already require it, and the floor is theirs
+# (jax 0.10 asks for scipy>=1.14).  It is imported by the builder that
+# needs it, not by `import maddening`.
 dependencies = [
     "jax>=0.10,<0.13",
     "jaxlib>=0.10,<0.13",
     "lineax>=0.0.7",
     "numpy>=1.24",
     "pyyaml>=6.0",
+    "scipy>=1.14",
 ]
 
 [project.optional-dependencies]

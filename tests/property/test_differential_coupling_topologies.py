@@ -30,6 +30,19 @@ late; three or more additive edges into one port, whose sum follows their
 order); and an identity relay on a group-internal edge (bit for bit under
 Gauss-Seidel with a constant iterator, and on its reference everywhere).
 
+**Sparse mapped edges** (``mapping_kind``, see
+:data:`~tests.property.coupled_topologies.MAPPING_KINDS`): the same
+structures with every mapped edge a ``StaticSparseMapping`` over a pattern
+fixed per structure, in both layouts.  The oracle is differential -- a
+sparse edge must do what a dense edge holding the same matrix does -- and
+is stated three ways.  Against the reference: the sparse graph satisfies
+the monolithic reference the dense one is held to, unchanged, with the
+drawn ``H`` zeroed outside the pattern.  Against the dense graph itself:
+under a constant iterator both graphs take the same passes, so nothing but
+rounding separates them, in every domain where a rounding is small against
+the state.  And against themselves: two sparse builds of one structure
+(renamed, reordered) are bit-identical, in every domain.
+
 What this cannot see: non-linear nodes (no closed form), sub-cycling and
 multi-rate stepping on these shapes (the covering array and the schedule
 harness hold those), and any fault the reference's restatement of the
@@ -52,14 +65,22 @@ from tests.property import coupled_topologies as ct
 from tests.property.test_coupling_invariances import report_differences
 
 NAMED = ct.named_topologies()
+#: The structure for the mapping kinds (wider interfaces), and every
+#: structure by name.
+MAPPED = ct.mapped_topologies()
+STRUCTURES = {**NAMED, **MAPPED}
 _STEPS = 3
 
+#: The sparse kinds the monolithic reference is run over: every entry, a
+#: ragged pattern with padded rows, and that pattern in the scatter layout.
+_SPARSE_REFERENCE_KINDS = ("sparse-full", "sparse-ragged", "sparse-scatter")
 
-@functools.lru_cache(maxsize=24)
+
+@functools.lru_cache(maxsize=48)
 def _built(name: str, choice: int, node_order=None, edge_order=None, rename=None,
-           relay=None, constant=False) -> tuple:
+           relay=None, constant=False, mapping_kind="matrix") -> tuple:
     """``(topology, knobs, Built)`` of a named structure, built once per variant."""
-    topo = NAMED[name]
+    topo = STRUCTURES[name]
     if relay is not None:
         topo = ct.with_identity_relay(topo, relay)
     knobs = ct.topology_knobs(topo, choice)
@@ -73,18 +94,19 @@ def _built(name: str, choice: int, node_order=None, edge_order=None, rename=None
     if rename is not None:
         mapping = dict(rename)
         topo = topo.renamed(mapping)
-        node_order = tuple(mapping[n] for n in (node_order or NAMED[name].names))
-    return topo, knobs, ct.build(topo, knobs, node_order=node_order, edge_order=edge_order)
+        node_order = tuple(mapping[n] for n in (node_order or STRUCTURES[name].names))
+    return topo, knobs, ct.build(topo, knobs, node_order=node_order, edge_order=edge_order,
+                                 mapping_kind=mapping_kind)
 
 
 @st.composite
-def _values(draw, topo, knobs):
+def _values(draw, topo, knobs, mapping_kind="matrix"):
     rho = draw(st.sampled_from([0.3, 0.6, 0.9]))
     seed = draw(st.integers(0, 2**32 - 1))
     return ct.draw_values(topo, np.random.default_rng(seed), rho,
                           nonnormal=draw(st.booleans()),
                           bias_scale=draw(st.sampled_from([1e-3, 1.0, 1e3])),
-                          group_cfgs=ct.group_cfgs_of(knobs))
+                          group_cfgs=ct.group_cfgs_of(knobs), mapping_kind=mapping_kind)
 
 
 def assert_reproduces_the_reference(topo, knobs, built, values, steps=_STEPS, traj=None,
@@ -153,6 +175,83 @@ def test_a_named_topology_reproduces_the_monolithic_reference(name, choice, orde
     topo, knobs, built = _built(name, choice, node_order=node_order)
     values = data.draw(_values(topo, knobs))
     assert_reproduces_the_reference(topo, knobs, built, values)
+
+
+def _sparse_reference_cases():
+    """Every sparse kind on every structure, and the dense kind on the
+    structure built for the mapping kinds (the others have their dense run
+    above).  Per push: the structure with wide interfaces under both
+    configurations, and every other structure under the first, each in its
+    own build order.  The rest -- the second configuration on the narrow
+    structures, the interleaved order -- is slow."""
+    cases = []
+    for name in sorted(STRUCTURES):
+        kinds = _SPARSE_REFERENCE_KINDS + (("matrix",) if name in MAPPED else ())
+        for kind in kinds:
+            for choice in (0, 1):
+                for order in ("as-built", "interleaved"):
+                    per_push = order == "as-built" and (choice == 0 or name in MAPPED)
+                    cases.append(pytest.param(
+                        name, kind, choice, order, id=f"{name}-{kind}-{choice}-{order}",
+                        marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference
+# (every structure and sparse kind under configuration 0 in its own build
+# order; the slow cases are the same check under configuration 1 and the
+# interleaved order)
+@pytest.mark.parametrize("name, mapping_kind, choice, order", _sparse_reference_cases())
+# Costly tier: one compiled graph per case; the examples draw the gains,
+# biases, mapping matrices, scale and start.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference(
+        name, mapping_kind, choice, order, data):
+    """The dense oracle, unchanged, over a graph whose mapped edges are
+    sparse: every node outside a group within its own rounding of its
+    update, every group within what its reported residual allows, with
+    ``H`` the drawn matrix zeroed outside the edge's pattern -- for every
+    entry in the gather layout, for a ragged pattern with padded slots, and
+    for that pattern in the scatter layout."""
+    node_order = None if order == "as-built" else ct.interleaved_order(STRUCTURES[name])
+    topo, knobs, built = _built(name, choice, node_order=node_order, mapping_kind=mapping_kind)
+    mapped = [type(e.mapping).__name__ for e in built.gm.edges if e.mapping is not None]
+    assert mapped and set(mapped) == {
+        "StaticLinearMapping" if mapping_kind == "matrix" else "StaticSparseMapping"}, (
+        "premise: the mapped edges are of the kind under test")
+    values = data.draw(_values(topo, knobs, mapping_kind))
+    assert_reproduces_the_reference(topo, knobs, built, values)
+
+
+def test_the_sparse_patterns_of_the_named_structures_can_express_a_wrong_index():
+    """The fixture can express the defect: across the structures the ragged
+    pattern leaves entries out, pads rows (so a mask is traced), has a row
+    with two entries (so a row sum is one) and an entry off the diagonal;
+    and the scatter layout has a source feeding two targets and one feeding
+    none."""
+    ragged = []
+    for topo in STRUCTURES.values():
+        for i, e in enumerate(topo.edges):
+            if e.mapped:
+                ragged.append(ct.mapping_pattern(topo, i, "sparse-ragged"))
+                assert ct.mapping_pattern(topo, i, "sparse-full").all()
+                assert ct.mapping_pattern(topo, i, "matrix") is None
+    assert len(ragged) >= 12
+    wide = MAPPED["mapped-ring-wide"]
+    keys = [(e.src, e.dst, e.port) for e in wide.edges if e.mapped]
+    assert len(keys) == 7 and len(set(keys)) == 6, "two mapped edges on one field pair"
+    assert any(wide.internal(e) and wide.node(e.src).n == wide.node(e.dst).n
+               for e in wide.edges if e.mapped), "a mapped edge between equal sizes"
+    assert any(e.field == "q" for e in wide.edges if e.mapped), "a mapped flux edge"
+    assert any(not mask.all() for mask in ragged)
+    gather = [ct.pattern_slots(mask, scatter=False) for mask in ragged]
+    scatter = [ct.pattern_slots(mask, scatter=True) for mask in ragged]
+    assert any(not s.valid.all() for s in gather), "a padded gather row"
+    assert any(s.valid.sum(axis=1).max() > 1 for s in gather), "a row of two entries"
+    assert any((s.source[s.valid] != 0).any() for s in gather), "an index other than 0"
+    assert any(s.valid.sum(axis=1).max() > 1 for s in scatter), "a source with two targets"
+    assert any(s.valid.sum(axis=1).min() == 0 for s in scatter), "a source with no target"
 
 
 @pytest.mark.parametrize("name", sorted(NAMED))
@@ -727,15 +826,16 @@ def _domain_steps(domain) -> int:
     return {"multi_rate": 4, "predictors_warm_starts": 4}.get(domain, 2)
 
 
-@functools.lru_cache(maxsize=48)
+@functools.lru_cache(maxsize=96)
 def _built_in(domain: str, name: str, choice: int, node_order=None, edge_order=None,
-              rename=None, relay=None, constant: str | None = None) -> tuple:
+              rename=None, relay=None, constant: str | None = None,
+              mapping_kind: str = "matrix") -> tuple:
     """``(topology, knobs, Built)`` of a named structure in *domain*.
 
     *constant* is ``"gauss-seidel"`` or ``"jacobi"``: every group under no
     acceleration and a criterion only exact stationarity meets.
     """
-    topo = _domain_topology(NAMED[name], domain)
+    topo = _domain_topology(STRUCTURES[name], domain)
     names = topo.names
     if relay is not None:
         topo = ct.with_identity_relay(topo, relay)
@@ -751,14 +851,15 @@ def _built_in(domain: str, name: str, choice: int, node_order=None, edge_order=N
         node_order = tuple(mapping[n] for n in (node_order or names))
     with _x64(domain == "f64"):
         built = ct.build(topo, knobs, dtype=_domain_dtype(domain), node_order=node_order,
-                         edge_order=edge_order)
+                         edge_order=edge_order, mapping_kind=mapping_kind)
     return topo, knobs, built
 
 
-def _domain_values(topo, knobs, domain) -> list:
+def _domain_values(topo, knobs, domain, mapping_kind="matrix") -> list:
     with _x64(domain == "f64"):
         return [ct.draw_values(topo, np.random.default_rng(seed), rho,
-                               dtype=_domain_dtype(domain), group_cfgs=ct.group_cfgs_of(knobs))
+                               dtype=_domain_dtype(domain), group_cfgs=ct.group_cfgs_of(knobs),
+                               mapping_kind=mapping_kind)
                 for seed, rho in _DRAWS]
 
 
@@ -848,6 +949,8 @@ def _assert_in_domain(domain, built, runs):
     """The premise: the graph is in *domain* (a fixture that fell back to the
     default lane would check float32 single-rate twice)."""
     gm = built.gm
+    if domain == "f32":
+        return
     assert bool(gm._is_multirate) == (domain == "multi_rate"), "multi-rate premise"
     groups = gm._committed_coupling_groups.values()
     assert all(g.subcycling == (domain == "sub_cycled") for g in groups), "sub-cycling premise"
@@ -1029,3 +1132,242 @@ def test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_doma
         with _x64(domain == "f64"):
             assert_reproduces_the_reference(t1, knobs, relayed, rv, traj=traj,
                                             dtype=_domain_dtype(domain))
+
+
+# ---------------------------------------------------------------------------
+# Sparse mapped edges in every domain
+#
+# Three statements.  The monolithic reference, in the domains it models.
+# The dense twin: the same structure with dense mapped edges holding the
+# same matrices, on the same draws, under a constant iterator (Gauss-Seidel,
+# no acceleration, up to eight passes, stopping only at exact
+# stationarity), so that no convergence criterion decides how far each
+# graph goes and nothing but rounding separates them.  And two sparse
+# builds of one structure against each other, bit for bit.
+#
+# The twin comparison is to rounding and not exact, even for one entry per
+# target and weights that round nothing.  An earlier form of this test
+# asked for equal states and failed, by one rounding, on the structure with
+# three additive mapped edges into one port: the two compiled programs are
+# different programs, and the compiler evaluates the arithmetic around a
+# mapping differently in each (a product fused with the addition next to
+# it in one and not in the other, for one).  A mapping applied on its own
+# is exact for one entry per row (``tests/core/test_sparse_mapping.py``);
+# a step is not.  It is not run in the 16-bit dtypes, where a rounding is
+# a percent of the state and the comparison could not tell a wrong weight
+# from one; there the mapping alone is held to its bound, and two sparse
+# builds to each other.
+# ---------------------------------------------------------------------------
+
+#: The domains the dense twin is compared in.
+_TWIN_DOMAINS = ("f32", "f64", "multi_rate", "sub_cycled", "vmap",
+                 "predictors_warm_starts", "checkpoint_restart")
+#: How far a sparse graph may sit from its dense twin, in epsilons of the
+#: dtype times the largest state entry.  The largest gap measured over
+#: every structure, sparse kind and twin domain was 7.5 (jaxlib 0.11.0);
+#: this leaves a factor of thirty for another compiler's choices.
+_TWIN_EPSILONS = 256
+
+
+def _twin_cases():
+    """Per push: the ragged pattern in both layouts on the structure with
+    wide interfaces, in every twin domain.  Slow: every row full there, and
+    the ragged pattern in both layouts on the other structures."""
+    cases = []
+    for domain in _TWIN_DOMAINS:
+        for name in sorted(STRUCTURES):
+            for kind in _SPARSE_REFERENCE_KINDS:
+                if name not in MAPPED and kind == "sparse-full":
+                    continue
+                per_push = name in MAPPED and kind != "sparse-full"
+                cases.append(pytest.param(
+                    domain, name, kind, id=f"{domain}-{name}-{kind}",
+                    marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+def _largest_gap(a, b) -> float:
+    """The largest difference between two runs' float states, over the
+    largest entry of the first, step by step; every other leaf must be
+    equal (they do not depend on the mapping)."""
+    worst = 0.0
+    for sa, sb in zip(a, b):
+        scale = max(float(np.max(np.abs(np.asarray(f["x"], np.float64))))
+                    for f in sa.state.values())
+        for node, fields in sa.state.items():
+            for field, value in fields.items():
+                other = sb.state[node][field]
+                assert other.dtype == value.dtype and other.shape == value.shape
+                if field == "x":
+                    gap = np.max(np.abs(np.asarray(value, np.float64)
+                                        - np.asarray(other, np.float64)), initial=0.0)
+                    worst = max(worst, float(gap) / scale)
+                else:
+                    assert np.array_equal(value, other), f"{node}.{field}"
+    return worst
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain
+# (the ragged pattern in both layouts on mapped-ring-wide, in every twin
+# domain; the slow cases are the same check on the other structures)
+@pytest.mark.parametrize("domain, name, mapping_kind", _twin_cases())
+def test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain(
+        domain, name, mapping_kind):
+    """Sparse equals dense, to rounding: the same structure built with
+    dense mapped edges and with sparse ones holding the same matrices, on
+    the same draws and under a constant iterator, returns the same states
+    to within a few hundred epsilons of the largest entry -- in float32
+    and float64, on a multi-rate graph, in a sub-cycled group, under
+    ``jax.vmap``, with a predictor's warm start, and across a checkpoint
+    restart (whose archive carries the sparse weights and their pattern's
+    digest, and which must resume bit for bit).  Mapped matrices a tenth
+    off are far outside that.  (The two may stop a pass apart: each stops
+    when its own iterate stops moving at all.)"""
+    topo, knobs, dense = _built_in(domain, name, 0, constant="gauss-seidel")
+    _t, _k, sparse = _built_in(domain, name, 0, constant="gauss-seidel",
+                               mapping_kind=mapping_kind)
+    assert sparse.slots and not dense.slots
+    assert {s.scatter for s in sparse.slots.values()} == {mapping_kind.endswith("scatter")}
+    values = _domain_values(topo, knobs, domain, mapping_kind)
+    eps = float(jnp.finfo(jnp.dtype(_domain_dtype(domain))).eps)
+    dense_runs = _runs_in(domain, dense, values)
+    for k, (a, b) in enumerate(zip(dense_runs, _runs_in(domain, sparse, values))):
+        gap = _largest_gap(a, b)
+        assert gap <= _TWIN_EPSILONS * eps, (
+            f"{domain}/{name}/{mapping_kind} draw {k}: the sparse graph is {gap / eps:.0f} "
+            f"epsilons from its dense twin")
+    # The premise: the comparison can see a wrong operator.  The mapped
+    # matrices a tenth off move the dense graph itself far outside the
+    # allowance: the states depend on them.
+    with _x64(domain == "f64"):
+        off = {**values[0], "H": {i: np.asarray(H * H.dtype.type(1.1), H.dtype)
+                                  for i, H in values[0]["H"].items()}}
+    moved = _largest_gap(dense_runs[0], _runs_in(domain, dense, [off])[0])
+    assert moved > 16 * _TWIN_EPSILONS * eps, (
+        f"premise: mapped matrices a tenth off move the states by {moved / eps:.0f} epsilons")
+
+
+def _sparse_domain_reference_cases():
+    """Per push the ragged pattern in both layouts on the structure with
+    wide interfaces; every row full, and the other structures, are slow."""
+    cases = []
+    for domain in _REFERENCE_DOMAINS:
+        for kind in _SPARSE_REFERENCE_KINDS:
+            for name in sorted(STRUCTURES):
+                per_push = name in MAPPED and kind != "sparse-full"
+                cases.append(pytest.param(
+                    domain, name, kind, id=f"{domain}-{name}-{kind}",
+                    marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain
+# (the ragged pattern in both layouts on mapped-ring-wide, in each domain
+# the reference models; the slow cases are the same check)
+@pytest.mark.parametrize("domain, name, mapping_kind", _sparse_domain_reference_cases())
+def test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain(
+        domain, name, mapping_kind):
+    """The dense oracle over sparse mapped edges with several entries in a
+    row, in the domains the monolithic reference models: a float64 graph, a
+    sub-cycled member, and a predictor's other starting guess."""
+    topo, knobs, built = _built_in(domain, name, 1, mapping_kind=mapping_kind)
+    assert built.slots, "premise: sparse mapped edges"
+    for values in _domain_values(topo, knobs, domain, mapping_kind):
+        traj, = _runs_in(domain, built, [values])
+        with _x64(domain == "f64"):
+            assert_reproduces_the_reference(topo, knobs, built, values, traj=traj,
+                                            dtype=_domain_dtype(domain))
+
+
+def _flat_gradient(tree) -> dict:
+    return {jax.tree_util.keystr(path): np.asarray(leaf, np.float64)
+            for path, leaf in jax.tree_util.tree_leaves_with_path(tree)}
+
+
+@pytest.mark.parametrize("mapping_kind", ["sparse-ragged", "sparse-scatter"])
+@pytest.mark.parametrize("domain", ["f32", "f64"])
+def test_the_gradient_through_sparse_mapped_edges_is_the_dense_graphs(domain, mapping_kind):
+    """``jax.grad`` of a loss over two steps of the structure with wide
+    interfaces, with respect to every parameter leaf: the gradient to each
+    node constant is the dense graph's, and the gradient to a sparse edge's
+    ``W`` is the dense graph's gradient to ``H`` read through the edge's
+    pattern -- zero in a padded slot.  Through the coupling group's
+    implicit rule and through the staggered edges, in float32 and under
+    x64; the two graphs converge to rounding of one another, so the
+    gradients agree to the group's tolerance, not bit for bit."""
+    name = "mapped-ring-wide"
+    topo, knobs, dense = _built_in(domain, name, 0)
+    _t, _k, sparse = _built_in(domain, name, 0, mapping_kind=mapping_kind)
+    values = _domain_values(topo, knobs, domain, mapping_kind)[1]
+
+    def gradient(built):
+        with _x64(domain == "f64"):
+            ct.set_initial(built, values)
+            gm = built.gm
+            state0, ext, step = gm._state, gm._default_external_inputs(), gm._raw_step_fn
+
+            def loss(params):
+                state = step(step(state0, ext, params), ext, params)
+                return sum(jnp.sum(state[n]["x"] ** 2) for n in topo.names)
+
+            return jax.jit(jax.grad(loss))(ct.params_for(built, values))
+
+    g_dense, g_sparse = gradient(dense), gradient(sparse)
+    rtol = 1e-7 if domain == "f64" else 2e-3
+    nodes_d, nodes_s = _flat_gradient(g_dense["nodes"]), _flat_gradient(g_sparse["nodes"])
+    assert nodes_d.keys() == nodes_s.keys() and nodes_d
+    scale = max(float(np.max(np.abs(leaf))) for leaf in nodes_d.values())
+    assert scale > 0.0
+    for key, leaf in nodes_d.items():
+        np.testing.assert_allclose(nodes_s[key], leaf, rtol=rtol, atol=rtol * scale,
+                                   err_msg=f"{domain}/{mapping_kind} d/d{key}")
+    moved = 0
+    for i, key in sparse.mapping_keys.items():
+        slots = sparse.slots[i]
+        dH = np.asarray(g_dense["mappings"][dense.mapping_keys[i]]["H"], np.float64)
+        dW = np.asarray(g_sparse["mappings"][key]["W"], np.float64)
+        np.testing.assert_allclose(dW, slots.weights(dH), rtol=rtol, atol=rtol * scale,
+                                   err_msg=f"{domain}/{mapping_kind} d/dW of {key}")
+        assert not dW[~slots.valid].any(), "a padded weight has no derivative"
+        moved += int(np.count_nonzero(dW))
+    assert moved > 0, "premise: the loss depends on the mapping weights"
+
+
+def _sparse_invariance_cases():
+    """Per push: the 16-bit dtypes on the structure with wide interfaces,
+    in both layouts -- the domains the dense twin is not compared in.  Slow:
+    the other six domains there, and all eight on ``chain-into-ring``."""
+    cases = []
+    for domain in DOMAINS:
+        for kind in ("sparse-ragged", "sparse-scatter"):
+            for name in ("chain-into-ring", *sorted(MAPPED)):
+                per_push = name in MAPPED and domain in ("bfloat16", "float16")
+                cases.append(pytest.param(
+                    domain, kind, name, id=f"{domain}-{kind}-{name}",
+                    marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain
+# (bfloat16 and float16 on mapped-ring-wide, in both layouts; the slow cases
+# are the same check in the other domains and on chain-into-ring)
+@pytest.mark.parametrize("domain, mapping_kind, name", _sparse_invariance_cases())
+def test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain(
+        domain, mapping_kind, name):
+    """CPL-180 and CPL-181 over sparse mapped edges: every node renamed, and
+    nodes and edges added in another order, bit-identical states and reports
+    (a sparse edge's pattern belongs to the structure, not to a name or to
+    the order the edge was added in)."""
+    topo, knobs, built = _built_in(domain, name, 0, mapping_kind=mapping_kind)
+    rename = _renaming(topo, 11)
+    _rt, _rk, renamed = _built_in(domain, name, 0, rename=rename, mapping_kind=mapping_kind)
+    node_order, edge_order = _orders(topo, 5)
+    _t, _k, reordered = _built_in(domain, name, 0, node_order=node_order,
+                                  edge_order=edge_order, mapping_kind=mapping_kind)
+    values = _domain_values(topo, knobs, domain, mapping_kind)
+    base = _runs_in(domain, built, values)
+    for k, (a, b) in enumerate(zip(base, _runs_in(domain, renamed, values,
+                                                  rename=dict(rename)))):
+        assert_same_runs(a, b, what=f"{domain}/{name}/{mapping_kind} draw {k} renamed")
+    for k, (a, b) in enumerate(zip(base, _runs_in(domain, reordered, values))):
+        assert_same_runs(a, b, what=f"{domain}/{name}/{mapping_kind} draw {k} reordered")

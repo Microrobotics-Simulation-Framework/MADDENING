@@ -1055,7 +1055,8 @@
         "jaxlib==0.11.2",
         "lineax==0.1.1",
         "numpy==2.5.3",
-        "optax==0.2.8"
+        "optax==0.2.8",
+        "scipy==1.18.1"
       ],
       "ref": "maddening==0.4.0.dev0"
     },
@@ -1312,7 +1313,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:93539aea-0aa5-55bb-a3eb-1e408d88c53a",
+  "serialNumber": "urn:uuid:4e2bfb3b-766b-5da7-aa0e-8c8fa7bdc146",
   "specVersion": "1.6",
   "version": 1
 }

@@ -26,7 +26,9 @@ from maddening.core.coupling.mapping import (
     rbf_mapping,
 )
 from maddening.nodes.heat import HeatNode
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 
 N_COARSE, N_FINE = 6, 12
 X_COARSE = np.linspace(0.0, 1.0, N_COARSE)
@@ -136,7 +138,7 @@ def test_changed_weights_take_effect_without_recompile(kind, weight):
 
 
 @pytest.mark.parametrize("coupled", [False, True])
-@pytest.mark.parametrize("kind", ["rbf", "inverse_distance"])
+@pytest.mark.parametrize("kind", ["rbf", "inverse_distance", "sparse_nearest_neighbor"])
 def test_gradient_wrt_mapping_weights(coupled, kind):
     """A gradient reaches every weight of the edge, staggered and through
     the IFT rule of a coupling group, whatever class holds the weights."""

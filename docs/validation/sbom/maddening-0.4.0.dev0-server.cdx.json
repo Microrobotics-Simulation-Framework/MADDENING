@@ -2960,6 +2960,7 @@
         "numpy==2.5.3",
         "pyzmq==27.2.0",
         "rich==15.0.0",
+        "scipy==1.18.1",
         "uvicorn==0.53.0",
         "websockets==17.1",
         "zstandard==0.25.0"
@@ -3310,7 +3311,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:6e467bd1-3e67-558e-93b4-d97377a9a454",
+  "serialNumber": "urn:uuid:04621b9e-a8ef-5539-832a-db3331ae4041",
   "specVersion": "1.6",
   "version": 1
 }

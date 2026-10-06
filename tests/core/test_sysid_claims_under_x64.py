@@ -793,29 +793,42 @@ def test_every_leaf_no_step_moved_is_the_value_that_went_in_under_x64(leaves):
 def test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64(leaves):
     """SYS-057: the optimiser works in the unconstrained coordinates, so a
     positive parameter cannot cross zero and a bounded one cannot leave its
-    interval, and every fitter keeps a log or logit coordinate short of where
-    ``exp`` floors or overflows in the leaves' precision (float64's are near
-    -745 and 709, float32's near -103 and 88): a linear loss pushes each
-    coordinate at its edge with Adam steps of 50 for 40 iterations, and the
-    parameter that comes back is inside, finite, and re-unconstrains."""
+    interval, and every fitter keeps a log or logit coordinate where its
+    transform can be stepped on -- short of where ``exp`` floors or overflows
+    in the leaves' precision (float64's are near -745 and 709, float32's near
+    -103 and 88), and ``sqrt(eps)`` of a ``logit`` leaf's bounds inside each
+    of them: a linear loss pushes each coordinate at its edge with Adam
+    steps of 50 for 40 iterations, and the parameter that comes back is
+    inside, finite, re-unconstrains -- and, having ended on the edge of what
+    its transform resolves, is named in a warning (it used to end there in
+    silence)."""
     with _x64():
         gm = _spring(leaves)
         lo, hi = 2.0, 10.0
         gm.set_param_spec("s", "rest_length", ParamSpec(bounds=(lo, hi), transform="logit"))
         start = _with(gm, leaves, rest_length=6.0)
         mask = _only(gm, "stiffness", "rest_length")
+        margin = float(np.sqrt(np.finfo(_dt(leaves)).eps)) * hi
         for direction in (-1.0, 1.0):
             def push(p, d=direction):
                 q = p["nodes"]["s"]
                 return d * (jnp.log(q["stiffness"]) + 50.0 * q["rest_length"])
 
-            res = fit(gm, push, params=start, mask=mask, n_iter=40, lr=50.0)
+            with pytest.warns(RuntimeWarning, match="ended on the edge of their "
+                                                    "transform's usable range") as caught:
+                res = fit(gm, push, params=start, mask=mask, n_iter=40, lr=50.0)
+            said = "\n".join(str(w.message) for w in caught)
+            assert "parameter 'rest_length'" in said and "parameter 'stiffness'" in said, said
+            assert ("upper" if direction < 0 else "lower") in said, said
             gm.check_params(res.params)
             q = res.params["nodes"]["s"]
             k, length = float(q["stiffness"]), float(q["rest_length"])
             assert q["stiffness"].dtype == _dt(leaves)
             assert 0.0 < k < np.inf and lo < length < hi, (direction, k, length)
             assert (k > 30.0 and length > 6.0) if direction < 0 else (k < 30.0 and length < 6.0)
+            # On the margin, not on the clamp a few float spacings from the bound.
+            gap = hi - length if direction < 0 else length - lo
+            assert gap == pytest.approx(margin, rel=1e-3), (direction, gap, margin)
             u = gm.unconstrain(res.params)["nodes"]["s"]
             assert np.isfinite(float(u["stiffness"])) and np.isfinite(float(u["rest_length"]))
 
@@ -872,7 +885,7 @@ def test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64(lea
     ``log`` round trip moves by one float64 ulp; float32 leaves round-trip
     through the float64 optimiser's coordinates exactly.  The run evaluated
     the round trip until the fitters' objectives took the leaves no step
-    moved as they went in (``_exact_physical_params``)."""
+    moved as they went in (``_PhysicalMap``)."""
     with _x64():
         gm = _spring(leaves)
         obs = _record(gm, leaves, 200)
@@ -967,9 +980,11 @@ def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64(sca
     """SYS-083 at float64's own range: ``r * r`` flushes below ``1e-154`` and
     overflows above ``1e154``, and ``JᵀJ`` and ``Jᵀr`` flush below about
     ``1e-154`` too -- at ``1e-157`` the bare products gave ``converged=True``
-    33% off.  Framed, the fit is the unscaled one (to ``1e-9`` where the loss
+    33% off.  Framed, the fit is the unscaled one (to ``1e-8`` where the loss
     at the optimum is a float64 subnormal, ``1e-319``, and its comparisons are
-    that coarse).  The range ends where ``0.5 ||r||²`` itself leaves float64
+    that coarse: which point of that plateau a run stops on is its path's --
+    within 1e-9, and 5.2e-9 off once a ``log`` coordinate's step was read on
+    its tangent).  The range ends where ``0.5 ||r||²`` itself leaves float64
     at some iterate: above about ``1e153`` it overflows (refused as
     non-finite), and below the smallest subnormal it reads 0.0, which
     ``fit_lm`` does not call converged
@@ -988,7 +1003,8 @@ def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64(sca
         q = res.params["nodes"]["s"]
     assert res.converged and res.n_iter <= 8, (res.converged, res.n_iter)
     np.testing.assert_allclose([float(q["stiffness"]), float(q["damping"]),
-                                float(q["rest_length"])], optimum, rtol=1e-9)
+                                float(q["rest_length"])], optimum,
+                               rtol=1e-8 if scale < 1e-150 else 1e-9)
     assert 0.0 < res.best_loss < res.losses[0] < np.inf
 
 

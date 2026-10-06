@@ -49,7 +49,9 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.params import ParamSpec
 from maddening.nodes.heat import HeatNode
 from tests.conftest import EXAMPLES_COSTLY
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 from tests.registered_mapping_kinds import assert_same_weights, weights_of
 
 C2F = "coarse.temperature->fine.heat_source"

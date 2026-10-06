@@ -18,7 +18,7 @@ to forget on a release; there is deliberately no longer one here.
 | Source Repository | https://github.com/Microrobotics-Simulation-Framework/MADDENING |
 | Python Version | >=3.12 permitted; verified on 3.12 (the CI matrix) |
 | JAX Version | jax>=0.10,<0.13 permitted; verified at 0.10.2, 0.11.2 (the versions CI installs) |
-| Base Dependencies | jax>=0.10,<0.13, jaxlib>=0.10,<0.13, lineax>=0.0.7, numpy>=1.24, pyyaml>=6.0 |
+| Base Dependencies | jax>=0.10,<0.13, jaxlib>=0.10,<0.13, lineax>=0.0.7, numpy>=1.24, pyyaml>=6.0, scipy>=1.14 |
 | Build System | hatchling |
 | Install | `pip install maddening` |
 <!-- END GENERATED: software-identification -->
@@ -264,11 +264,13 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-199 | A set of negative zero through the FMU's C wrapper on a JSON connection was stored as positive zero | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-200 | load_state loaded an integer of the other signedness wrapped: -1 for a uint32 field as 4294967295, 4000000000 for an int32 field as -294967296 | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-201 | build_model_description(selected_outputs=...) exported nothing, without a word, for a pair that named no state field | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-202 | The fitters evaluated their objective at parameters other than the ones they returned: under a logit or offset log transform with bounds wide beside the value, best_loss was another point's loss, and a leaf left out of the fit was run perturbed | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-203 | Assigning node.params a mapping reverted every other calibrated constant of the node to the node's own value | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-202 | A node named with a NUL, another control character or a surrogate was taken, and its checkpoint, its FMU's model description or the server's own replies could not be read | `major` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-203 | A refusal that echoed a surrogate from the request answered 500 | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-204 | A '#' in an edge's field name gave two mapped edges on one field pair a single slot of weights | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 
-*204 anomalies registered.  34 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 25 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*206 anomalies registered.  34 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 25 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

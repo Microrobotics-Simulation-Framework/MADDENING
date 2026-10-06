@@ -1,0 +1,1432 @@
+# Interface mappings: the claims inventory.
+#
+# Every documented statement about interface mappings that a user could rely
+# on -- the registry of mapping kinds, what a mapping may put into the
+# parameter tree, and the sparse mappings -- with the domain it was stated
+# for, how its truth is known, and a pytest node id that fails if it stops
+# being true.  An audit attacks this list; a new claim in a docstring, a
+# guide, the release notes or the CHANGELOG gets a row here in the same
+# change (docs/developer_guide/testing_standards.md, "The claims
+# inventories").  tests/compliance/test_claims_inventories.py checks every
+# row: its fields, that each cited test is collected and runs on every push
+# (or is slow-marked and names a per-push witness), that a `failing` row
+# cites a strict xfail and that a `verified` row cites none.
+#
+# Scope:
+#   MAP -- src/maddening/core/coupling/mapping_registry.py (register_mapping:
+#          kind names, declarations, the trust boundary of a file that names
+#          a kind, what a registered factory may raise and must return;
+#          MAP-001 to MAP-011, which were SYS-133 to SYS-143 of
+#          sysid_fmu_claims.yaml until this file existed);
+#          what a mapping's params_pytree() may contain and how its weights
+#          live in gm.params["mappings"] (frozen by default, fitted on
+#          opt-in, carried by a checkpoint, fixed in an FMU);
+#          src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping,
+#          its two layouts, the three sparse kinds and their builders, the
+#          limits) and the structure digest a checkpoint carries for sparse
+#          weights (src/maddening/core/simulation/checkpoint.py).
+# Covered elsewhere, not repeated here: the dense factories' own numerics
+# (rbf_mapping's patch test and conservation, tests/core/test_mapping.py);
+# sysid, ParamSpec and the FMU export as such (sysid_fmu_claims.yaml); the
+# REST routes (rest_runpod_claims.yaml); coupling groups, which leave
+# interface mappings out of their inventory (coupling_claims.yaml).
+#
+# Top level: schema_version (1), domain_set (numeric), prefixes (the id
+# prefixes this file owns; no other inventory may use them) and claims.
+# Row fields and the domain matrix: as in sysid_fmu_claims.yaml, and
+# testing_standards.md, "The domain matrix".
+
+schema_version: 1
+
+prefixes: [MAP]
+
+domain_set: numeric
+
+claims:
+
+# ---------------------------------------------------------------------------
+# The interface-mapping registry: register_mapping and a mapping's weights
+# ---------------------------------------------------------------------------
+
+- id: MAP-001
+  area: mapping registry
+  claim: >-
+    "A kind name is any non-empty string but the three a config reserves for
+    non-finite numbers (NaN, Infinity, -Infinity); registering a name that
+    is taken -- a built-in kind, or another factory's -- is a ValueError,
+    registering the same factory again with the same declaration is a no-op,
+    and nothing removes a kind."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
+    - src/maddening/core/coupling/mapping_registry.py (register_mapping, Raises)
+  conditions: >-
+    kind names of every Python type, the empty string, the three strings the
+    serialisers reserve for non-finite numbers and names that spell a dotted
+    or a file path; a second factory, the same factory, the same factory
+    under another declaration; each of the four built-in kinds and each of
+    the three sparse kinds the library registers for itself, in a process
+    that imported the registry alone too.  A registration is host-side: no
+    array, trace or graph is involved.
+  oracle: the exception and its message; the registry's entry before and after.
+  tests:
+    - tests/core/test_mapping_registry.py::test_a_kind_name_must_be_a_non_empty_string
+    - tests/core/test_mapping_registry.py::test_a_kind_name_cannot_spell_a_non_finite_json_token
+    - tests/core/test_mapping_registry.py::test_any_other_non_empty_string_is_a_kind_name_and_only_a_name
+    - tests/core/test_mapping_registry.py::test_registering_a_kind_twice_with_another_factory_is_an_error
+    - tests/core/test_mapping_registry.py::test_registering_the_same_factory_again_is_a_no_op
+    - tests/core/test_mapping_registry.py::test_registering_the_same_factory_with_another_declaration_is_an_error
+    - tests/core/test_mapping_registry.py::test_a_built_in_kind_can_never_be_replaced
+    - tests/core/test_mapping_registry.py::test_a_built_in_name_is_taken_before_any_registration_can_claim_it
+    - tests/core/test_mapping_registry.py::test_a_sparse_kind_of_the_library_is_a_registered_kind_that_cannot_be_replaced
+    - tests/core/test_mapping_registry.py::test_a_sparse_kinds_name_is_taken_before_any_registration_can_claim_it
+    - tests/core/test_mapping_registry.py::test_nothing_public_removes_a_kind
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-002
+  area: mapping registry
+  claim: >-
+    "The declaration is checked against the factory's signature when it is
+    registered, so a misspelt name fails at the decorator rather than while
+    someone loads a config"; a hyper-parameter is declared as str, bool, int
+    or float; "The names kind, points, shape and label are reserved."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
+    - src/maddening/core/coupling/mapping_registry.py (register_mapping)
+  conditions: >-
+    array, hyper-parameter and reference names that are not identifiers, are
+    repeated, are reserved or are declared in two roles; a type outside the
+    four; references that do not name exactly the arrays; a declared name
+    the factory does not take, a required argument nothing declares, and a
+    required positional-only argument (with and without **kwargs beside
+    it); an object that is not callable; a factory taking **kwargs, and a
+    kind with no array; a factory spelled as a function, a callable object,
+    a method, a classmethod, a class, a functools.partial and a decorator
+    without functools.wraps; a callable whose signature cannot be read,
+    which is taken on trust.  Host-side, at the decorator.
+  oracle: >-
+    the ValueError (TypeError for a non-callable) and its message; the kind
+    is not registered; for each spelling of a factory, whether calling it
+    with every declared name as a keyword raises TypeError.
+  tests:
+    - tests/core/test_mapping_registry.py::test_a_declaration_the_rebuild_could_not_honour_is_refused_at_registration
+    - tests/core/test_mapping_registry.py::test_registration_refuses_exactly_the_factories_the_rebuild_could_not_call
+    - tests/core/test_mapping_registry.py::test_whether_a_factory_takes_a_declared_name_is_the_packages_one_keyword_rule
+    - tests/core/test_mapping_registry.py::test_a_factory_whose_signature_cannot_be_read_is_taken_on_trust
+    - tests/core/test_mapping_registry.py::test_the_registered_object_must_be_callable
+    - tests/core/test_mapping_registry.py::test_a_factory_taking_keyword_arguments_freely_or_with_no_arrays_registers
+    - tests/core/test_mapping_registry.py::test_the_public_signature_is_the_one_documented
+    - tests/core/test_mapping_registry.py::test_the_registry_record_is_a_dataclass_that_can_gain_a_defaulted_field
+    - tests/core/test_mapping_registry.py::test_register_mapping_is_experimental_and_returns_the_factory_unchanged
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-003
+  area: mapping registry
+  claim: >-
+    "A spec's hyper-parameters are checked against these declarations before
+    your factory is called, as the built-in ones are, and an unknown one is
+    refused"; float "is a real number: a finite int or float that is not a
+    bool, handed to the factory as a float"; int "is an integer (a count, a
+    size): an int that is not a bool, of a magnitude a float64 can hold,
+    handed to the factory as an int; a float is refused for it"; "The rebuild
+    calls factory(**arrays, **hyperparameters, **references)."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
+    - src/maddening/core/coupling/mapping_spec.py (build_mapping)
+  conditions: >-
+    every hyper-parameter of three registered kinds, one of each of the
+    four types, and of the library's three sparse kinds (a string, an
+    integer), against every value its declared type refuses (text, None, a
+    bool for a number, a number for a bool, a float for an integer, a
+    container, an infinity, a NaN, an integer of 401 digits); integers up to
+    2**1023 for an integer; an integer too large for a double for a real of
+    a built-in kind too, and through the rbf factory itself; an unknown
+    hyper-parameter; a missing, an extra and an unrecorded point set;
+    through from_dict and through MappingSpec itself.  The values are Python
+    scalars read from a config, checked on the host before the factory
+    exists to be called.
+  oracle: the MappingRebuildError naming the edge and the kind; a recorder in the factory's place sees no call; the stored value's type.
+  tests:
+    - tests/core/test_mapping_registry.py::test_a_registered_hyper_parameter_of_the_wrong_type_is_refused_before_the_factory
+    - tests/core/test_mapping_registry.py::test_the_hyper_parameter_battery_covers_every_declared_type
+    - tests/core/test_mapping_registry.py::test_a_real_hyper_parameter_takes_any_finite_number_and_stores_a_float
+    - tests/core/test_mapping_registry.py::test_an_integer_hyper_parameter_takes_an_int_and_stores_an_int
+    - tests/core/test_mapping_registry.py::test_an_integer_hyper_parameter_reaches_the_factory_and_the_config_as_an_int
+    - tests/core/test_mapping_registry.py::test_an_integer_no_float64_holds_is_a_refused_real_naming_the_edge
+    - tests/core/test_mapping_registry.py::test_the_rbf_factory_itself_refuses_an_integer_no_float64_holds
+    - tests/core/test_mapping_registry.py::test_an_unknown_hyper_parameter_of_a_registered_kind_is_refused_before_the_factory
+    - tests/core/test_mapping_registry.py::test_a_registered_spec_with_the_wrong_or_missing_point_sets_is_refused_before_the_factory
+    - tests/core/test_mapping_registry.py::test_a_missing_reference_names_the_keyword_the_kind_declared
+    - tests/core/test_mapping_registry.py::test_a_malformed_registered_spec_names_its_edge_like_a_built_in_one
+    - tests/core/test_mapping_registry.py::test_a_registered_factory_is_called_with_checked_arrays_hyper_parameters_and_references
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-004
+  area: mapping registry
+  claim: >-
+    "A config, a USD stage and a checkpoint are untrusted input.  All one of
+    them can say about a mapping is the name of its kind, which is looked up
+    in the registry and nowhere else: nothing imports a module, follows a
+    dotted path or discovers an entry point because of what a file contains
+    ... A file naming a kind this process has not registered is a
+    MappingRebuildError listing the registered kinds; import the module that
+    registers it, then load."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (A file can only name a kind)
+    - src/maddening/core/coupling/mapping_registry.py (module docstring)
+  conditions: >-
+    a config loaded in a fresh interpreter that imported nothing which
+    registers a kind; kinds that are a list, a dict, a number, None, a bool,
+    the empty string and a near miss; kinds spelling a module on the path, a
+    dotted path, an entry-point path, a package path, the registering module
+    and a stdlib callable, with installed metadata advertising the module as
+    an entry point; the same on a USD stage; a checkpoint whose member names
+    spell a module; the same config after the program imports the
+    registering module.
+  oracle: >-
+    the refusal's exact text, listing the seven kinds the library ships (the
+    four built-in ones and the three sparse ones); sys.modules and
+    a marker file the sentinel module writes when imported; the weights the
+    second load rebuilds, bit for bit against the process that saved; the
+    source of the two modules, read for anything that imports or evaluates.
+  tests:
+    - tests/core/test_mapping_registry.py::test_a_process_that_registered_nothing_has_exactly_the_kinds_the_library_ships
+    - tests/core/test_mapping_registry.py::test_the_unknown_kind_refusal_lists_the_librarys_kinds_when_only_they_are_registered
+    - tests/core/test_mapping_registry.py::test_a_kind_that_is_not_a_registered_name_is_an_unknown_kind_whatever_its_type
+    - tests/core/test_mapping_registry.py::test_a_kind_registered_in_another_process_is_refused_naming_the_edge_and_the_kinds
+    - tests/core/test_mapping_registry.py::test_a_kind_that_spells_an_importable_path_is_only_an_unknown_name
+    - tests/core/test_mapping_registry.py::test_refusing_a_kind_imports_nothing_the_file_named
+    - tests/core/test_mapping_registry.py::test_the_same_config_loads_once_the_program_imports_the_registering_module
+    - tests/core/test_mapping_registry.py::test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing
+    - tests/core/test_mapping_registry.py::test_the_kind_lookup_has_no_import_machinery_to_reach
+    - tests/usd/test_usd_mapping_spec.py::test_a_stage_naming_an_unregistered_kind_is_refused_and_nothing_is_imported
+    - tests/usd/test_usd_mapping_spec.py::test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_mapping_registry.py::test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing
+    sharded: n/a
+
+- id: MAP-005
+  area: mapping registry
+  claim: >-
+    "The limits on point references -- the asset size cap, the inline limits,
+    the accepted dtypes, the containment of asset paths in the config
+    directory, the content hash -- are enforced by the reference resolver
+    before a factory runs, so they hold for a registered kind exactly as for
+    a built-in one."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (A file can only name a kind)
+    - src/maddening/core/coupling/mapping_spec.py (build_mapping)
+  conditions: >-
+    each array of three registered kinds and of the three sparse kinds (two
+    point sets, two boundary arrays, an index and a value array), and of
+    nearest_neighbor as the control, against an asset past the size cap,
+    shorter than its header, of
+    text, of complex numbers, of pickled objects, of extended precision,
+    through a symlink or a directory symlink that leaves the config
+    directory, by absolute and parent path, missing, a symlink loop, a pipe,
+    a compressed archive past the cap; an asset or an inline set that fails
+    the inline limits, the dtype rules or the recorded hash; a node
+    reference that does not resolve; on a USD stage for the asset directory
+    and the hash.  POSIX.  The resolver works on NumPy arrays on the host,
+    before the factory is called.
+  oracle: the MappingRebuildError naming the edge and the kind; a recorder in the factory's place sees no call.
+  tests:
+    - tests/core/test_mapping_registry.py::test_every_reference_limit_holds_for_a_registered_kind_before_its_factory_runs
+    - tests/core/test_mapping_registry.py::test_the_valid_references_of_the_reference_battery_build_every_kind
+    - tests/core/test_mapping_registry.py::test_a_compressed_asset_past_the_cap_is_refused_before_decompression_for_any_kind
+    - tests/usd/test_usd_mapping_spec.py::test_an_asset_referenced_registered_kind_resolves_relative_to_the_stage_file
+    - tests/core/test_mapping_spec_serialisation.py::test_from_dict_names_the_broken_edge_and_the_problem
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-006
+  area: mapping registry
+  claim: >-
+    "Whatever a registered factory raises, from_dict and load_graph_from_usd
+    report as a MappingRebuildError naming the edge and the kind, with the
+    factory's exception chained as __cause__ -- an ImportError included, for
+    a factory that needs a package the loading environment lacks"; "What the
+    factory returns is checked when a spec is rebuilt": a Mapping whose kind
+    is the registered
+    kind, carrying a MappingSpec of that kind "which records the references
+    and the hyper-parameters it was given".
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
+    - src/maddening/core/graph_manager.py (GraphManager._rebuild_mapping)
+    - src/maddening/core/coupling/mapping_spec.py (_check_registered_result)
+  conditions: >-
+    twenty-three exception types, those no built-in factory raises included;
+    an ImportError and a ModuleNotFoundError while rebuilding a built-in kind
+    too; a BaseException, which is not wrapped; any other unlisted type from
+    a built-in kind's rebuild, which still surfaces as itself; a factory
+    returning
+    None, a dict, a matrix, an object short of a member, a mapping of
+    another kind, one without a spec, with another kind's spec, with a spec
+    that dropped a reference or changed a hyper-parameter; a required
+    hyper-parameter a spec omits; built directly, the factory's own
+    exception.  Host-side, while one edge is rebuilt.
+  oracle: the wrapped error's edge, kind and __cause__ (the raised object itself); the same factory returning the right mapping rebuilds.
+  tests:
+    - tests/core/test_mapping_registry.py::test_any_exception_from_a_registered_factory_is_a_rebuild_error_naming_the_edge
+    - tests/core/test_mapping_registry.py::test_an_import_error_while_rebuilding_a_built_in_kind_names_the_edge_too
+    - tests/core/test_mapping_registry.py::test_a_base_exception_from_a_registered_factory_is_not_swallowed
+    - tests/core/test_mapping_registry.py::test_an_unlisted_exception_from_a_built_in_rebuild_still_surfaces_as_itself
+    - tests/core/test_mapping_registry.py::test_a_value_the_factory_itself_refuses_names_the_edge
+    - tests/core/test_mapping_registry.py::test_a_registered_factory_with_a_required_hyper_parameter_names_it_when_a_spec_omits_it
+    - tests/core/test_mapping_registry.py::test_what_a_registered_factory_returns_is_held_to_the_spec_it_was_built_from
+    - tests/core/test_mapping_registry.py::test_a_registered_factory_returning_the_mapping_its_spec_describes_is_accepted
+    - tests/core/test_mapping_registry.py::test_the_protocol_members_a_result_is_checked_for_are_the_protocols_own
+    - tests/core/test_mapping_spec_hardening.py::test_rebuild_reports_the_edge_for_every_failure_type
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-007
+  area: mapping registry
+  claim: >-
+    "A mapping of a registered kind is written by to_dict() and
+    save_graph_to_usd and rebuilt by from_dict() and load_graph_from_usd
+    exactly as a built-in one is: the recipe travels, the weights are
+    recomputed bit for bit by your factory."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
+    - src/maddening/core/coupling/mapping_registry.py (register_mapping)
+  conditions: >-
+    three registered kinds (a class of its own with a matrix and a scalar
+    weight, a StaticLinearMapping, a mapping without weights) over every
+    combination of their hyper-parameters; node, asset and inline
+    references; JSON and YAML; a USD stage in memory and on file; a spec and
+    its dict handed to add_edge; float32, float64 under x64 and a float32
+    member beside float64 weights (mixed dtype); the reload stepped by the
+    compiled (jit) step; a multi-rate graph, a sub-cycled group and a group
+    with a predictor; run_adaptive on the reload; a checkpoint loaded into
+    it.  On one machine: the rebuilt weights are the factory's own
+    arithmetic repeated.  Not claimed for 16-bit floats or sharded graphs.
+  oracle: >-
+    every weight of the reload against the original's, by dtype, shape and
+    bytes; the two MappingSpecs; the reload's config against the config it
+    was loaded from; the two graphs' states after the same steps, bit for bit.
+  tests:
+    - tests/core/test_mapping_registry.py::test_a_registered_kind_round_trips_bitwise_through_a_config
+    - tests/core/test_mapping_registry.py::test_a_reloaded_registered_kind_steps_exactly_as_the_graph_it_was_saved_from
+    - tests/core/test_mapping_registry.py::test_add_edge_accepts_a_registered_spec_and_its_dict_form
+    - tests/core/test_mapping_registry.py::test_a_strict_write_refuses_a_stale_node_reference_of_a_registered_kind
+    - tests/core/test_mapping_registry.py::test_a_registered_mapping_whose_description_is_not_its_spec_is_refused_at_write_time
+    - tests/core/test_mapping_registry.py::test_a_static_linear_mapping_of_a_registered_kind_must_describe_its_own_spec
+    - tests/core/test_mapping_registry.py::test_a_describe_method_that_returns_the_spec_is_written_as_it_is
+    - tests/core/test_mapping_spec_serialisation.py::test_rbf_node_field_references_round_trip
+    - tests/core/test_mapping_spec_hardening.py::test_every_factory_round_trips_bitwise_for_random_hyperparameters
+    - tests/usd/test_usd_mapping_spec.py::test_node_field_referenced_mapping_round_trips_in_memory
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint
+  status: verified
+  notes: >-
+    The same recipes are drawn by tests/property/strategies.py, so the slow
+    round-trip, replay, write-door, FMU and sysid properties built on
+    graph_recipes() run over a registered kind too.
+  domains:
+    f32: tests/core/test_mapping_registry.py::test_a_registered_kind_round_trips_bitwise_through_a_config
+    f64: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[f64]'
+    mixed_dtype: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[mixed_dtype]'
+    16bit: narrowed
+    jit: tests/core/test_mapping_registry.py::test_a_reloaded_registered_kind_steps_exactly_as_the_graph_it_was_saved_from
+    grad: n/a
+    vmap: n/a
+    multi_rate: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[multi_rate]'
+    sub_cycled: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[predictors_warm_starts]'
+    adaptive: tests/core/test_registered_mapping_in_every_domain.py::test_run_adaptive_reads_a_registered_kinds_restored_weights
+    checkpoint_restart: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[checkpoint_restart]'
+    sharded: narrowed
+
+- id: MAP-008
+  area: mapping registry
+  claim: >-
+    "For a mapping of any class other than StaticLinearMapping, add_edge
+    therefore refuses, with a ValueError naming the edge, a params_pytree()
+    that is not a plain dict -- empty for a mapping without weights; keyed
+    by Python identifiers ...; holding under each key one concrete JAX array
+    of a floating-point dtype, of any shape, all finite ...; the same on
+    every call".
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (What params_pytree() may contain)
+    - src/maddening/core/coupling/mapping.py (_params_contract_problem)
+    - src/maddening/core/graph_manager.py (GraphManager.add_edge)
+  conditions: >-
+    every structure, key and leaf the four rules exclude, a table that
+    changes between two calls in its values, a shape, a dtype or its keys; a
+    weight of float16, bfloat16 and float32 with x64 off and on (a float32
+    weight under x64 is the mixed-dtype case) and of float64 under x64, each
+    accepted; an integer, a boolean, a complex and a NumPy weight and a NaN
+    refused with x64 on as with it off; a weight traced by jit; a subclass
+    of StaticLinearMapping is asked and the class itself is not, whatever
+    its matrix holds (the class built directly: the matrix_mapping factory
+    refuses a non-finite H itself, before there is a mapping to ask).
+    Asked where the edge is added, before the graph has a step.
+  oracle: the ValueError's text, naming the edge and the entry; the graph is left without the edge; a StaticLinearMapping of an integer, boolean, complex or NaN matrix, built directly, is still added.
+  tests:
+    - tests/core/test_mapping_registry.py::test_add_edge_refuses_a_mapping_whose_params_pytree_a_reader_could_not_walk
+    - tests/core/test_mapping_registry.py::test_a_traced_weight_is_refused_as_traced
+    - tests/core/test_mapping_registry.py::test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took
+    - tests/core/test_mapping_registry.py::test_a_subclass_of_the_built_in_class_is_asked
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_floating_point_weight_of_any_width_is_accepted
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_weight_that_is_not_a_finite_floating_jax_array_is_refused_in_float64_too
+  status: verified
+  domains:
+    f32: tests/core/test_mapping_registry.py::test_add_edge_refuses_a_mapping_whose_params_pytree_a_reader_could_not_walk
+    f64: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_floating_point_weight_of_any_width_is_accepted[x64-on-float64]'
+    mixed_dtype: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_floating_point_weight_of_any_width_is_accepted[x64-on-float32]'
+    16bit: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_floating_point_weight_of_any_width_is_accepted[x64-off-float16]'
+    jit: tests/core/test_mapping_registry.py::test_a_traced_weight_is_refused_as_traced
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-009
+  area: mapping registry
+  claim: >-
+    "Every weight is frozen by default and opts in to a fit by name
+    (gm.set_param_spec(edge.key, "<weight>", ParamSpec())), is carried by a
+    checkpoint under its own name, and is fixed in an exported FMU, like H."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (What params_pytree() may contain)
+    - docs/user_guide/parameters.md (Mapping weights)
+  conditions: >-
+    each weight of the registered kinds (a matrix and a scalar, and the
+    built-in class's H) and of a hand-written class holding a scalar, a
+    vector, a matrix, a rank-3 array, an array with no element and a float16
+    array; a mapping without weights; float32, float64 under x64 and a
+    float32 member beside float64 weights (mixed dtype); the compiled (jit)
+    step reading a changed weight with no recompile; a gradient to each
+    weight and a fit of one weight at a time; a batch of weights under vmap;
+    a multi-rate graph, a sub-cycled group and a group with a predictor;
+    run_adaptive on restored weights; a checkpoint restart, and POST
+    /checkpoint/load asking each weight what a write is asked; the FMU's
+    state archive, through the sidecar and the bridge, for a mapping
+    without weights too; the writes that move a referenced point set, at
+    every door, beside a weighted and a weightless registered mapping.  Not
+    claimed for sharded graphs.
+  oracle: >-
+    the trainable mask; the fitted tree against its start, leaf by leaf and
+    bit for bit; the checkpoint's member names and the restored leaves; the
+    FMU's refusal naming the weight; the restarted run against the run that
+    never stopped, bit for bit.
+  tests:
+    - tests/core/test_mapping_edges.py::test_weights_live_in_params_mappings
+    - tests/core/test_mapping_edges.py::test_changed_weights_take_effect_without_recompile
+    - tests/core/test_mapping_edges.py::test_gradient_wrt_mapping_weights
+    - tests/core/test_mapping_edges.py::test_mapping_weights_frozen_by_default_and_opt_in_trainable
+    - tests/core/test_mapping_edges.py::test_a_fit_moves_the_one_mapping_weight_made_trainable_and_no_other
+    - tests/core/test_mapping_edges.py::test_a_fit_of_node_constants_leaves_frozen_mapping_weights_alone
+    - tests/core/test_mapping_registry.py::test_every_allowed_weight_shape_steps_and_is_restored_by_a_checkpoint
+    - tests/core/test_mapping_registry.py::test_the_fmu_state_archive_carries_every_allowed_weight_and_installs_none
+    - tests/core/test_mapping_registry.py::test_a_fit_runs_beside_a_weightless_mapped_edge_and_moves_every_trainable_shape
+    - tests/core/test_mapping_registry.py::test_a_checkpoint_beats_the_config_for_a_registered_kinds_trained_weights
+    - tests/core/test_mapping_registry.py::test_a_trainable_spec_on_a_registered_kinds_weight_round_trips
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_archive_with_new_mapping_weights_is_refused
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_fmu_of_a_weightless_mapping_snapshots_restores_and_takes_no_weight
+    - tests/core/test_mapping_point_reference_writes.py::test_the_route_refuses_a_length_under_a_reference_and_writes_nothing
+    - tests/core/test_mapping_point_reference_writes.py::test_the_checkpoint_route_refuses_and_undoes_a_moved_length
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_the_route_judges_every_weight_of_every_mapping_kind_a_load_installs
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_checkpoint_of_a_graph_whose_mapping_has_no_weights_loads
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_gradient_reaches_every_weight_of_a_registered_kind_at_its_dtype
+  status: verified
+  domains:
+    f32: tests/core/test_mapping_edges.py::test_mapping_weights_frozen_by_default_and_opt_in_trainable
+    f64: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[f64]'
+    mixed_dtype: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[mixed_dtype]'
+    16bit: 'tests/core/test_mapping_registry.py::test_every_allowed_weight_shape_steps_and_is_restored_by_a_checkpoint[shaped]'
+    jit: tests/core/test_mapping_edges.py::test_changed_weights_take_effect_without_recompile
+    grad:
+      - tests/core/test_mapping_edges.py::test_gradient_wrt_mapping_weights
+      - tests/core/test_mapping_edges.py::test_a_fit_moves_the_one_mapping_weight_made_trainable_and_no_other
+    vmap: tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kinds_weights_batch_under_vmap_as_each_member_alone
+    multi_rate: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[multi_rate]'
+    sub_cycled: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[predictors_warm_starts]'
+    adaptive: tests/core/test_registered_mapping_in_every_domain.py::test_run_adaptive_reads_a_registered_kinds_restored_weights
+    checkpoint_restart: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[checkpoint_restart]'
+    sharded: narrowed
+
+- id: MAP-010
+  area: mapping registry
+  claim: >-
+    The built-in kinds "write and rebuild exactly what they did" before they
+    became entries of the registry: the config text, the USD attribute, the
+    weights an edge is built with and the ones from_dict rebuilds, and the
+    words of every refusal -- but for the list of kinds an unknown-kind
+    refusal ends with, which has gained the three sparse kinds.
+  sources:
+    - docs/release_notes/v0.4.0.md (Registering a mapping kind)
+    - tests/core/builtin_mapping_pins.py (module docstring)
+  conditions: >-
+    the four built-in kinds, every rbf kernel and both modes, node, asset
+    and inline references, a labelled and an unlabelled matrix, in the
+    config text; the weights of nearest_neighbor, projection_1d and matrix
+    mappings and of Gaussian rbf mappings narrow against the point spacing
+    (the others' solves are not exact across machines), as float32 arrays
+    in the default lane; seventeen malformed specs; the unknown-kind refusal in a
+    process that registered nothing, whose words before the list are the
+    ones it had.  Against a capture taken on
+    release/0.4.0 at a7e69509, of geometry the factories accept (increasing
+    boundaries, finite points, a finite matrix): the coordinates they
+    refuse since MADD-ANO-192 are outside it.  Not claimed for float64
+    (x64), mixed dtypes or 16-bit floats.
+  oracle: tests/core/data/builtin_mapping_pins.json, the capture module's output on the tree before the change, compared text for text and value for value.
+  tests:
+    - tests/core/test_mapping_registry.py::test_the_capture_can_express_a_change_to_any_built_in_kind
+    - tests/core/test_mapping_registry.py::test_a_built_in_kind_writes_the_config_it_wrote_before_the_registry
+    - tests/core/test_mapping_registry.py::test_a_built_in_kind_builds_and_rebuilds_the_weights_it_did_before_the_registry
+    - tests/core/test_mapping_registry.py::test_a_malformed_built_in_spec_is_refused_in_the_words_it_was_before_the_registry
+    - tests/core/test_mapping_registry.py::test_the_write_side_refusals_and_the_spec_forms_are_what_they_were
+    - tests/core/test_mapping_registry.py::test_the_built_in_kinds_are_entries_of_the_registry_and_no_table_is_left
+    - tests/core/test_mapping_registry.py::test_the_unknown_kind_refusal_lists_the_librarys_kinds_when_only_they_are_registered
+    - tests/usd/test_usd_mapping_spec.py::test_a_built_in_kind_writes_the_stage_attribute_it_wrote_before_the_registry
+  status: verified
+  domains:
+    f32: tests/core/test_mapping_registry.py::test_a_built_in_kind_builds_and_rebuilds_the_weights_it_did_before_the_registry
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-011
+  area: mapping registry
+  claim: >-
+    gm.params["mappings"][edge.key] is the graph's own copy of the table a
+    mapping's params_pytree() returns: editing the live weights in place
+    does not change the mapping's own, so reset_params() restores them and
+    to_dict() warns that the live weights differ.
+  sources:
+    - docs/release_notes/v0.4.0.md (Registering a mapping kind)
+    - src/maddening/core/graph_manager.py (GraphManager._snapshot_params)
+  conditions: >-
+    a mapping that hands out the dict it keeps, with a matrix and a scalar
+    weight, both edited in place.  A property of the table, on the host,
+    whatever its leaves hold.
+  oracle: the kept dict's values after the edit; the UserWarning naming both weights; the table reset_params() leaves, bit for bit, and no warning after it.
+  tests:
+    - tests/core/test_mapping_registry.py::test_an_edit_of_the_live_weights_does_not_reach_the_table_a_mapping_keeps
+    - tests/core/test_mapping_registry.py::test_a_moved_weight_of_any_allowed_shape_draws_the_live_weights_warning
+    - tests/core/test_mapping_spec_hardening.py::test_to_dict_warns_when_live_mapping_weights_differ_from_the_recipe
+  status: verified
+  notes: >-
+    Until this change the snapshot kept the returned dict by reference
+    (MADD-ANO-196, never shipped): the edit rewrote the mapping's own
+    weights, reset_params() restored the edit and to_dict() never warned.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+# ---------------------------------------------------------------------------
+# Sparse mappings: StaticSparseMapping and the three sparse kinds
+# ---------------------------------------------------------------------------
+
+- id: MAP-012
+  area: sparse mapping
+  claim: >-
+    "Scattering the rows of sparse_nearest_neighbor_mapping or
+    sparse_projection_1d_mapping into a zero matrix gives the dense factory's
+    H bit for bit, in both modes."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The three kinds)
+    - src/maddening/core/coupling/sparse_mapping.py (sparse_nearest_neighbor_mapping, sparse_projection_1d_mapping)
+  conditions: >-
+    nearest neighbour, each point set both ways round, consistent and
+    conservative, the conservative operator as a padded gather and as a
+    scatter-add: integer lattices in one, two and three dimensions with
+    every target at a cell centre, at an offset of 1e9, at scales from 1e-160
+    to 1e149 and at scale 0.1 with an offset of 1e6; sources repeated three
+    times and shuffled; targets on the sources; 64 points on one circle
+    around a target; identical sources; a single source and a single target;
+    signed zeros; float32 and integer inputs; random sets in 1, 2, 3, 9 and
+    20 dimensions; points one ulp either side of an exact tie.  Projection,
+    each grid pair both ways round: random, nested, identical, sharing
+    boundaries, overlapping partly and not at all, touching, a single cell,
+    float32 and integer boundaries, an offset of 1e9, cells of 1e-200,
+    adjacent floats.  With x64 off and on: the weights are float32 either
+    way, as the dense kinds' are.  The builders run once, on the host.
+  oracle: >-
+    the dense factory's H from the same arrays: dtype, shape and every byte
+    of the rows scattered into a zero matrix; for the projection also the
+    entries per row and their ascending order.
+  tests:
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_nearest_neighbour_is_the_dense_matrix_bit_for_bit
+    - tests/core/test_sparse_mapping_builders.py::test_the_point_sets_are_built_to_tie
+    - tests/core/test_sparse_mapping_builders.py::test_the_sparse_projection_is_the_dense_double_loop_bit_for_bit
+    - tests/core/test_sparse_mapping_builders.py::test_the_grids_cover_empty_rows_shared_boundaries_and_padding
+    - tests/core/test_sparse_mapping_builders.py::test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are
+    - tests/core/test_sparse_mapping_builders.py::test_the_three_builders_at_a_hundred_thousand_points_in_a_capped_process
+  status: verified
+  domains:
+    f32: tests/core/test_sparse_mapping_builders.py::test_sparse_nearest_neighbour_is_the_dense_matrix_bit_for_bit
+    f64: tests/core/test_sparse_mapping_builders.py::test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-013
+  area: sparse mapping
+  claim: >-
+    Nearest-neighbour ties "go where the dense kind sends them, to the lowest
+    index among the points at the minimal float64 squared distance.  The k-d
+    tree only proposes candidates; wherever two candidates are closer to one
+    another than rounding can tell apart, the dense expression decides, so
+    the result does not depend on the tree or on the scipy version.  The
+    equality holds for coordinates up to 1e150 in magnitude (a larger one is
+    refused: its squared distance overflows)."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The three kinds)
+    - src/maddening/core/coupling/sparse_mapping.py (_nearest_lowest_index)
+  conditions: >-
+    3000 points with six distinct values per axis searched from 2000 queries,
+    where nine queries in ten tie and a tie holds up to dozens of points,
+    many of them exact duplicates; the point sets of MAP-012, whose lattices
+    tie two, four and eight ways and whose 1e-160 scale makes every squared
+    distance underflow; the points searched seven at a time and the tied
+    ones' candidates collected in batches of five; a coordinate of 2e150,
+    refused.  The search runs on
+    the host; the scipy installed is the one the test ran against.
+  oracle: np.argmin over the dense table of squared distances, index for index; the dense factory's matrix.
+  tests:
+    - tests/core/test_sparse_mapping_builders.py::test_the_nearest_index_is_the_dense_argmin_on_a_set_with_ties_of_every_size
+    - tests/core/test_sparse_mapping_builders.py::test_the_tie_search_runs_in_bounded_batches
+    - tests/core/test_sparse_mapping_builders.py::test_the_point_sets_are_built_to_tie
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_nearest_neighbour_is_the_dense_matrix_bit_for_bit
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_nearest_neighbour_refuses_what_it_cannot_map
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-014
+  area: sparse mapping
+  claim: >-
+    "The sparse and the dense mapping are two float evaluations of the same
+    sums.  Each output entry is within (k + 2) eps sum |w| |f| of the exact
+    sum over its row's k entries (eps of the result dtype), so the two agree
+    to rounding, entry by entry -- not bit for bit."  "With one entry per
+    row the two are the same number when the mapping is applied on its
+    own."  A row "reads only its own entries, so an infinity or a NaN in the
+    source field reaches only the targets that list it".
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, What "equal to the dense mapping" means)
+    - src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping, Notes)
+  conditions: >-
+    apply and apply_T of a ragged pattern -- a full row, an empty row, a row
+    that repeats an index, rows of every length between, padded slots -- in
+    the gather layout and in the scatter layout, on a vector field and on an
+    (n, C) field, finite; float32, float64 under x64, float64 weights on a
+    float32 field and float32 weights on a float64 field under x64 (mixed
+    dtype), float16 and bfloat16, each at the dtype H @ field has; called
+    directly and under jit; the gradient with respect to the weights and to
+    the field; a batch of fields and a batch of weights under vmap, each
+    member within eight eps of the mapping applied to it alone; one entry
+    per target in both layouts, applied on its own under jit, equal to the
+    dense product exactly; an infinity at index 0 with padded slots pointing
+    there.  The mapping alone: what a graph with sparse edges does is
+    MAP-015.
+  oracle: >-
+    the sum over each row's own slots in 80-bit extended precision, and its
+    sum of magnitudes for the bound; the dense matrix the rows scatter into,
+    for the dtype, the gradients and the exact case.
+  tests:
+    - tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding
+    - tests/core/test_sparse_mapping.py::test_the_fixture_has_a_full_row_an_empty_row_a_repeat_and_padding
+    - tests/core/test_sparse_mapping.py::test_apply_T_of_a_square_mapping_is_the_transpose_and_not_the_mapping
+    - tests/core/test_sparse_mapping.py::test_one_entry_per_target_is_the_dense_result_exactly
+    - tests/core/test_sparse_mapping.py::test_the_gradient_with_respect_to_the_weights_and_the_field_is_the_dense_one
+    - tests/core/test_sparse_mapping.py::test_a_padded_slot_contributes_an_exact_zero_whatever_the_field_holds_at_index_0
+    - tests/core/test_sparse_mapping.py::test_vmap_over_fields_and_over_weights_is_each_member_alone
+    - tests/core/test_sparse_mapping.py::test_the_weights_passed_to_apply_are_the_ones_used
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_matrix_is_matrix_mapping_of_the_same_rows
+  status: verified
+  domains:
+    f32: 'tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding[f32-gather-vector]'
+    f64: 'tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding[f64-scatter-matrix]'
+    mixed_dtype:
+      - 'tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding[mixed-f64-weights-gather-vector]'
+      - 'tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding[mixed-f64-field-scatter-vector]'
+    16bit:
+      - 'tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding[float16-gather-vector]'
+      - 'tests/core/test_sparse_mapping.py::test_apply_and_apply_T_are_the_dense_operator_to_rounding[bfloat16-scatter-vector]'
+    jit: tests/core/test_sparse_mapping.py::test_one_entry_per_target_is_the_dense_result_exactly
+    grad: tests/core/test_sparse_mapping.py::test_the_gradient_with_respect_to_the_weights_and_the_field_is_the_dense_one
+    vmap: tests/core/test_sparse_mapping.py::test_vmap_over_fields_and_over_weights_is_each_member_alone
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-015
+  area: sparse mapping
+  claim: >-
+    A graph whose mapped edges are sparse steps as the graph whose edges
+    hold the same matrices densely, to rounding: "A graph with sparse edges
+    and its dense twin therefore step to within rounding of one another, not
+    to the same bits.  Under a constant iterator the two were at most 7.5
+    eps of the largest state entry apart, over every structure, layout and
+    domain the coupling topology harness compares them in; the harness
+    allows 256."  "Inside a compiled step not even that carries over,
+    whatever the weights".  "a graph with sparse edges satisfies the same
+    monolithic reference the dense graph is held to, and its gradients are
+    the dense graph's."  "a renamed or reordered sparse graph returns the
+    original's states bit for bit."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, What "equal to the dense mapping" means)
+    - src/maddening/core/coupling/sparse_mapping.py (module docstring, Summation order)
+    - tests/property/coupled_topologies.py (module docstring, The mapping kind)
+  conditions: >-
+    five structures of linear relays -- rings, chains, stars and nested
+    cycles with outside nodes, additive ports, mapped flux edges, two mapped
+    edges on one field pair and a mapped edge between equal sizes, with
+    interfaces of one to four entries; every mapped edge a sparse mapping
+    over a pattern fixed per structure: every entry in the gather layout, a
+    ragged pattern with padded slots, and that pattern in the scatter
+    layout; the drawn matrix zeroed outside the pattern for the sparse and
+    the dense build alike.  The dense twin, under Gauss-Seidel with no
+    acceleration and up to eight passes, so that no convergence criterion
+    decides how far each graph goes: float32, float64 under x64, a
+    multi-rate graph, a sub-cycled group, three draws under one vmap of the
+    step, a group with a predictor, whose warm start the next step reads,
+    and a checkpoint restart, whose archive carries the sparse weights and
+    their pattern's digest and which resumes bit for bit; the allowance is
+    256 eps of the dtype times the largest state entry, the largest gap
+    measured was 7.5 (jaxlib 0.11.0), and mapped matrices a tenth off move
+    the states by more than sixteen times the allowance.  The monolithic
+    reference, under the first two coupling configurations of each
+    structure: float32, float64 under x64, a sub-cycled member, a
+    predictor's other starting guess.  The gradient of a loss over two
+    steps with respect to every parameter leaf, the mapping weights
+    included, in float32 and under x64.  Renaming and reordering: those
+    domains, and bfloat16 and float16, where the dense twin is not compared
+    (a rounding there is a percent of the state) and the mapping alone is
+    held to its bound (MAP-014).  The steps compiled (jit) by the graph.
+    Not claimed for mixed dtypes, run_adaptive or sharded graphs.
+  oracle: >-
+    the dense build of the same structure on the same draws, state for state
+    to the allowance, every leaf that does not depend on the mapping equal;
+    the float64 monolithic solve of the step with its rounding and residual
+    allowances (tests/property/coupled_topologies.py, LinearModel); the
+    dense graph's gradient, read through the pattern for the weights; the
+    original build's states and reports, bit for bit, for a renamed or
+    reordered one.
+  tests:
+    - tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain
+    - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference
+    - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain
+    - tests/property/test_differential_coupling_topologies.py::test_the_sparse_patterns_of_the_named_structures_can_express_a_wrong_index
+    - tests/property/test_differential_coupling_topologies.py::test_the_gradient_through_sparse_mapped_edges_is_the_dense_graphs
+    - tests/property/test_differential_coupling_topologies.py::test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain
+  status: verified
+  notes: >-
+    The property strategies (tests/property/strategies.py) draw the sparse
+    nearest neighbour and the sparse projection among their mappings, so
+    the round-trip, replay, write-door and checkpoint properties built on
+    graph_recipes() run over sparse edges too.  The twin comparison was
+    first written as an equality, for one entry per target, and failed in
+    the slow lane on the structure with three additive mapped edges into
+    one port, by one rounding -- with Gaussian weights and again with
+    weights that are powers of two.  The two graphs are different compiled
+    programs, and the compiler evaluates the arithmetic around a mapping
+    differently in each.  Hence the comparison to rounding under a constant
+    iterator, and the wording.
+  domains:
+    f32: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[f32-mapped-ring-wide-sparse-ragged]'
+    f64:
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[f64-mapped-ring-wide-sparse-scatter]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain[f64-mapped-ring-wide-sparse-ragged]'
+    mixed_dtype: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain[bfloat16-sparse-ragged-mapped-ring-wide]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain[float16-sparse-scatter-mapped-ring-wide]'
+    jit: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference
+    grad: tests/property/test_differential_coupling_topologies.py::test_the_gradient_through_sparse_mapped_edges_is_the_dense_graphs
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[vmap-mapped-ring-wide-sparse-ragged]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[multi_rate-mapped-ring-wide-sparse-scatter]'
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[sub_cycled-mapped-ring-wide-sparse-ragged]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain[sub_cycled-mapped-ring-wide-sparse-scatter]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[predictors_warm_starts-mapped-ring-wide-sparse-scatter]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain[predictors_warm_starts-mapped-ring-wide-sparse-ragged]'
+    adaptive: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[checkpoint_restart-mapped-ring-wide-sparse-ragged]'
+    sharded: narrowed
+
+- id: MAP-016
+  area: sparse mapping
+  claim: >-
+    "A config carries a sparse mapping's recipe -- kind, hyper-parameters and
+    references -- and never its index or its weights; from_dict calls the
+    same builder on the same arrays, so the reloaded index is the one that
+    was saved, bit for bit."  The USD writer and reader carry the same
+    recipe, and the choice of conservative form "is recorded in the spec, so
+    a reloaded mapping is applied the way it was built".
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The index is structure, the weights are parameters)
+    - src/maddening/core/coupling/sparse_mapping.py (module docstring)
+  conditions: >-
+    the nearest neighbour in both modes and both conservative forms and the
+    projection from node-field references, sparse_matrix from two members of
+    one .npz beside the config, a small set inlined; JSON and YAML; a USD
+    stage on file; a hand-written spec and its dict handed to add_edge;
+    with x64 off and on; float32 members, float64 members under x64 and a
+    float32 member beside a float64 one (mixed dtype); the reload stepped by
+    the compiled (jit) step; a multi-rate graph, a sub-cycled group and a
+    group with a predictor; run_adaptive on the reload; a checkpoint loaded
+    into it; an asset or a node field that changed since the save, refused;
+    a mapping without a reference, or built by hand, refused by the writers.
+    On one machine: the rebuilt index and weights are the builder's own host
+    arithmetic repeated.  Not claimed for 16-bit floats or sharded graphs.
+  oracle: >-
+    the reloaded mapping's layout, sizes, index bytes, counts, digest, spec
+    and weight bytes against the original's; the config text, searched for
+    anything but the recipe; the reload's config against the config it was
+    loaded from; the two graphs' states after the same steps, bit for bit.
+  tests:
+    - tests/core/test_sparse_mapping_serialisation.py::test_a_sparse_mapping_round_trips_through_a_config_as_its_recipe
+    - tests/core/test_sparse_mapping_serialisation.py::test_add_edge_takes_a_sparse_spec_and_its_dict_form
+    - tests/core/test_sparse_mapping_serialisation.py::test_the_two_conservative_forms_are_two_recipes_of_one_operator
+    - tests/core/test_sparse_mapping_serialisation.py::test_a_small_point_set_is_inlined_and_a_large_one_needs_a_reference
+    - tests/core/test_sparse_mapping_serialisation.py::test_sparse_matrix_needs_both_assets_and_is_never_inlined
+    - tests/core/test_sparse_mapping_serialisation.py::test_an_asset_that_changed_since_the_save_is_refused_naming_the_edge
+    - tests/core/test_sparse_mapping_serialisation.py::test_a_node_field_that_moved_is_refused_when_the_config_is_written
+    - tests/core/test_sparse_mapping_serialisation.py::test_the_rebuild_gives_the_same_index_and_weights_under_either_x64_setting
+    - tests/core/test_sparse_mapping_serialisation.py::test_a_sparse_mapping_built_by_hand_has_no_recipe_and_is_refused_by_the_writers
+    - tests/core/test_sparse_mapping_serialisation.py::test_edge_mapping_helper_references_every_array_of_every_case
+    - tests/core/test_sparse_mapping.py::test_describe_adds_no_key_a_reload_would_read_as_a_hyper_parameter
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint
+    - tests/core/test_registered_mapping_in_every_domain.py::test_the_sparse_fixtures_have_several_entries_in_a_row_padding_and_both_layouts
+    - tests/core/test_mapping_registry.py::test_a_registered_kind_round_trips_bitwise_through_a_config
+    - tests/usd/test_usd_mapping_spec.py::test_a_sparse_mapping_round_trips_through_a_stage_file
+  status: verified
+  domains:
+    f32: tests/core/test_sparse_mapping_serialisation.py::test_a_sparse_mapping_round_trips_through_a_config_as_its_recipe
+    f64:
+      - 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[matrix-f64]'
+      - 'tests/core/test_sparse_mapping_serialisation.py::test_the_rebuild_gives_the_same_index_and_weights_under_either_x64_setting[matrix-x64-on]'
+    mixed_dtype: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[matrix-mixed_dtype]'
+    16bit: narrowed
+    jit: tests/core/test_sparse_mapping_serialisation.py::test_a_sparse_mapping_round_trips_through_a_config_as_its_recipe
+    grad: n/a
+    vmap: n/a
+    multi_rate: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[projection-multi_rate]'
+    sub_cycled: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[nearest-conservative-gather-sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[nearest-conservative-scatter-predictors_warm_starts]'
+    adaptive: tests/core/test_registered_mapping_in_every_domain.py::test_run_adaptive_reads_a_sparse_kinds_restored_weights
+    checkpoint_restart: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[nearest-consistent-checkpoint_restart]'
+    sharded: narrowed
+
+- id: MAP-017
+  area: sparse mapping
+  claim: >-
+    "Only W is in gm.params["mappings"].  It is a traced input like any other
+    weight: a gradient reaches it, a replaced W takes effect on the next
+    step without recompiling, it is frozen by default and opts in to a fit
+    by name, a checkpoint carries it, and an exported FMU fixes it."  The
+    index is "kept on the mapping as a read-only host array -- structure,
+    not a parameter", and "a weight write can therefore never change the
+    sparsity pattern".
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The index is structure, the weights are parameters)
+    - src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping)
+  conditions: >-
+    the parameter tree of both layouts, one floating-point leaf and no
+    integer; the index frozen, the mapping's own copy, and a copy of the
+    mapping the mapping itself; every sparse case with float32 members,
+    float64 members under x64 (sparse_matrix weights float64, the others
+    float32) and a float32 member beside a float64 one (mixed dtype); the
+    compiled (jit) step reading a changed W with no recompile, and refusing
+    a W of another shape; the gradient with respect to W, zero in a padded
+    slot, staggered and through a coupling group; a fit of W made
+    trainable, and a fit of node constants leaving a frozen W alone; a batch
+    of W under vmap; a multi-rate graph, a sub-cycled group and a group
+    with a predictor; run_adaptive on restored weights; a checkpoint
+    restart; POST /checkpoint/load asking W what a write is asked; the FMU's
+    state archive, which carries W and installs none, for the three kinds
+    and both conservative forms; the writes that move a referenced point
+    set, at every door.  Not claimed for 16-bit floats or sharded graphs.
+  oracle: >-
+    the tree's keys, dtypes and leaves; the index's flags; the trainable
+    mask and the fitted tree against its start, leaf by leaf; the restored
+    leaves and the restarted run against the run that never stopped, bit for
+    bit; the FMU's refusal naming the weight.
+  tests:
+    - tests/core/test_sparse_mapping.py::test_the_parameter_tree_holds_one_floating_point_leaf_and_no_index
+    - tests/core/test_sparse_mapping.py::test_the_index_is_frozen_and_is_the_mappings_own_copy
+    - tests/core/test_sparse_mapping.py::test_an_edge_takes_a_sparse_mapping_and_the_step_reads_its_live_weights
+    - tests/core/test_sparse_mapping.py::test_the_sizes_the_text_and_the_inspection_line
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_gradient_reaches_the_weights_of_a_sparse_kind_at_their_dtype
+    - tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kinds_weights_batch_under_vmap_as_each_member_alone
+    - tests/core/test_registered_mapping_in_every_domain.py::test_run_adaptive_reads_a_sparse_kinds_restored_weights
+    - tests/core/test_mapping_edges.py::test_weights_live_in_params_mappings
+    - tests/core/test_mapping_edges.py::test_changed_weights_take_effect_without_recompile
+    - tests/core/test_mapping_edges.py::test_gradient_wrt_mapping_weights
+    - tests/core/test_mapping_edges.py::test_mapping_weights_frozen_by_default_and_opt_in_trainable
+    - tests/core/test_mapping_edges.py::test_a_fit_moves_the_one_mapping_weight_made_trainable_and_no_other
+    - tests/core/test_mapping_edges.py::test_a_fit_of_node_constants_leaves_frozen_mapping_weights_alone
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_archive_with_new_mapping_weights_is_refused
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_the_sidecars_own_restore_door_refuses_the_same_weights
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_the_route_judges_every_weight_of_every_mapping_kind_a_load_installs
+    - tests/core/test_mapping_point_reference_writes.py::test_the_route_refuses_a_length_under_a_reference_and_writes_nothing
+    - tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact
+  status: verified
+  domains:
+    f32: 'tests/core/test_mapping_edges.py::test_mapping_weights_frozen_by_default_and_opt_in_trainable[sparse_nearest_neighbor.W]'
+    f64: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_gradient_reaches_the_weights_of_a_sparse_kind_at_their_dtype[matrix-f64]'
+    mixed_dtype: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_gradient_reaches_the_weights_of_a_sparse_kind_at_their_dtype[matrix-mixed_dtype]'
+    16bit: narrowed
+    jit: 'tests/core/test_mapping_edges.py::test_changed_weights_take_effect_without_recompile[sparse_nearest_neighbor.W]'
+    grad:
+      - 'tests/core/test_mapping_edges.py::test_gradient_wrt_mapping_weights[sparse_nearest_neighbor-True]'
+      - 'tests/core/test_mapping_edges.py::test_a_fit_moves_the_one_mapping_weight_made_trainable_and_no_other[sparse_nearest_neighbor.W]'
+    vmap: tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kinds_weights_batch_under_vmap_as_each_member_alone
+    multi_rate: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[matrix-multi_rate]'
+    sub_cycled: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[projection-sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[nearest-conservative-gather-predictors_warm_starts]'
+    adaptive: tests/core/test_registered_mapping_in_every_domain.py::test_run_adaptive_reads_a_sparse_kinds_restored_weights
+    checkpoint_restart: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint[nearest-conservative-scatter-checkpoint_restart]'
+    sharded: narrowed
+
+- id: MAP-018
+  area: sparse mapping
+  claim: >-
+    "save_state writes the SHA-256 of the pattern (mapping.structure_digest():
+    layout, sizes, index and row counts) beside the weights, and load_state
+    -- and POST /checkpoint/load -- refuses weights whose digest is not the
+    live mapping's, before anything is loaded: weights saved for other
+    points or another index of the same shape, for the same index in the
+    other layout, or for a dense mapping (and a dense mapping refuses a
+    sparse one's).  A mapping class of your own that applies its weights
+    through a structure gets the same check by defining structure_digest()."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The index is structure, the weights are parameters)
+    - src/maddening/core/simulation/checkpoint.py (_check_mapping_structures)
+  conditions: >-
+    a checkpoint of each sparse case, reloaded by the graph that saved it
+    and by a graph rebuilt from its config; weights saved for another
+    pattern under the same edge key, leaf name, shape and values; the two
+    conservative forms; one index read by rows and by columns; a dense
+    matrix called W onto a sparse mapping of its shape, and the reverse; an
+    archive whose digest was removed, has one bit flipped, 31 bytes, another
+    integer type, text or two axes; a digest with no weights beside it,
+    which installs nothing and is not judged; a mapping whose
+    structure_digest() is not a SHA-256, refused at the save; a dense edge
+    and a node parameter beside the refused sparse edge; POST
+    /checkpoint/load, a 400 that names no server path.  A refused load
+    leaves every state field and every parameter leaf as it was.  The
+    FMU's own state archive does not carry the digest: it installs no
+    mapping weight at all (MAP-017).
+  oracle: >-
+    the archive's member names, shapes and bytes; the ValueError's text,
+    naming the edge and both digests; the graph's state and parameters
+    before and after a refused load, name for name and byte for byte.
+  tests:
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_checkpoint_carries_each_sparse_edges_weights_and_its_patterns_digest
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_dense_mappings_checkpoint_has_the_members_it_always_had
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_graph_reloads_its_own_checkpoint_and_so_does_its_config
+    - tests/core/test_checkpoint_sparse_structure.py::test_the_two_fixtures_differ_in_pattern_and_in_nothing_a_shape_check_sees
+    - tests/core/test_checkpoint_sparse_structure.py::test_weights_saved_for_another_pattern_of_the_same_shape_are_refused
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_refused_pattern_installs_nothing_of_any_other_edge_or_node
+    - tests/core/test_checkpoint_sparse_structure.py::test_the_two_conservative_forms_do_not_exchange_weights
+    - tests/core/test_checkpoint_sparse_structure.py::test_the_same_index_in_the_other_layout_is_another_pattern
+    - tests/core/test_checkpoint_sparse_structure.py::test_dense_weights_are_refused_on_a_sparse_mapping_of_their_shape
+    - tests/core/test_checkpoint_sparse_structure.py::test_sparse_weights_are_refused_on_a_dense_mapping_of_their_shape
+    - tests/core/test_checkpoint_sparse_structure.py::test_an_archive_whose_digest_is_missing_or_not_one_is_refused
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_digest_without_weights_installs_nothing_and_is_not_judged
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_mapping_that_reports_no_valid_digest_cannot_be_saved
+    - tests/core/test_checkpoint_sparse_structure.py::test_any_mapping_class_can_declare_a_structure
+    - tests/core/test_checkpoint_sparse_structure.py::test_post_checkpoint_load_refuses_weights_saved_for_another_pattern
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_checkpoint_sparse_structure.py::test_weights_saved_for_another_pattern_of_the_same_shape_are_refused
+    sharded: n/a
+
+- id: MAP-019
+  area: sparse mapping
+  claim: >-
+    structure_digest(): "Two mappings have the same digest exactly when the
+    same weights mean the same operator on both."
+  sources:
+    - src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping.structure_digest)
+  conditions: >-
+    one pattern built twice; other weights, another kind, mode and
+    description, and an index and counts given in other integer types, each
+    leaving the digest as it was; an index moved, two slots of a row
+    swapped, a larger n_source, a row shortened, the same rows in the other
+    layout and with another n_target, each changing it; counts that fill
+    every row, which are the structure without counts.  A hash of host
+    arrays.
+  oracle: the digests compared; sixty-four hexadecimal characters.
+  tests:
+    - tests/core/test_sparse_mapping.py::test_the_digest_is_of_the_pattern_and_of_nothing_else
+    - tests/core/test_sparse_mapping.py::test_the_digest_changes_with_every_part_of_the_structure
+    - tests/core/test_sparse_mapping.py::test_counts_that_fill_every_row_are_the_structure_without_counts
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-020
+  area: sparse mapping
+  claim: >-
+    The conservative nearest neighbour: "each source adds its value to the
+    target nearest to it", so the total is preserved; "The two forms hold
+    the same matrix, and agree with one another and with the dense
+    conservative kind to rounding."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The conservative nearest neighbour)
+    - src/maddening/core/coupling/sparse_mapping.py (sparse_nearest_neighbor_mapping)
+  conditions: >-
+    400 sources onto 37 targets in the plane and a positive float32 field,
+    applied under jit: every column of the operator sums to exactly one in
+    both forms; the mapped total within 400 eps of the field's; the gather
+    form, the scatter form and the dense conservative kind within 64 eps of
+    one another entry by entry; the gather form listing a target's sources
+    in ascending order; the point sets of MAP-012 for the matrix itself.
+    Not claimed for 16-bit floats, vmap or sharded graphs.
+  oracle: the dense conservative kind's matrix and its product; the field's own total in float64.
+  tests:
+    - tests/core/test_sparse_mapping_builders.py::test_conservative_nearest_neighbour_preserves_the_total_in_both_forms
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_nearest_neighbour_is_the_dense_matrix_bit_for_bit
+    - tests/core/test_sparse_mapping_builders.py::test_a_skewed_conservative_pattern_is_refused_and_the_error_names_scatter
+  status: verified
+  domains:
+    f32: tests/core/test_sparse_mapping_builders.py::test_conservative_nearest_neighbour_preserves_the_total_in_both_forms
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: narrowed
+    jit: tests/core/test_sparse_mapping_builders.py::test_conservative_nearest_neighbour_preserves_the_total_in_both_forms
+    grad: n/a
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
+
+- id: MAP-021
+  area: sparse mapping
+  claim: >-
+    The limits: the row structure is bounded by MAX_SPARSE_STRUCTURE_BYTES,
+    "Checked from the row counts before the padded arrays are allocated; the
+    refusal names the row count, the longest and the median row and the
+    number of entries"; past it the conservative gather form refuses "with
+    an error that names transpose="scatter""; a degenerate point set is
+    "refused, not resolved.  The search runs 4096 points at a time and
+    counts a chunk's candidates before it collects any, so the refusal comes
+    after the chunk that passes the bound, not after every point has been
+    measured against every other"; "Each refusal is a SparseMappingLimitError, a
+    ValueError; from from_dict or load_graph_from_usd it is a
+    MappingRebuildError naming the edge.  n_source sizes nothing, so a
+    config cannot allocate through it."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, Limits)
+    - src/maddening/core/coupling/sparse_mapping.py (module docstring, Limits)
+  conditions: >-
+    each bound set one byte, or one candidate, under what a small case needs
+    and then exactly at it, for the consistent and the scatter nearest
+    neighbour, the projection and sparse_matrix; forty sources nearest to
+    one of ten targets for the gather form, with the scatter form of the
+    same input built; integer points on one circle around thirty targets for
+    the tie bound, searched from the targets and from the sources; that set
+    searched seven points at a time by a tree that records each search,
+    with the bound one candidate under one chunk's count and under two
+    chunks', and the chunk size read back as 4096; the same
+    refusals while a config is loaded; an asset past MAX_ASSET_BYTES for an
+    array of each sparse kind; and, at the default bounds in a process whose
+    address space is capped at 6 GiB, a pattern whose padded gather would
+    need 160 GB, a tie set of 9e8 candidates, a projection row of five
+    million slots among fifty thousand, and n_source = 2**31 - 1.  Host-side
+    refusals, raised while a mapping is built.
+  oracle: >-
+    the exception's type and text, with the sizes it names; in the capped
+    process, a refusal where a missing bound would be a MemoryError; the
+    scatter form's matrix against the dense conservative kind's.
+  tests:
+    - tests/core/test_sparse_mapping_builders.py::test_a_skewed_conservative_pattern_is_refused_and_the_error_names_scatter
+    - tests/core/test_sparse_mapping_builders.py::test_every_builder_checks_the_row_structure_against_the_byte_cap
+    - tests/core/test_sparse_mapping_builders.py::test_the_default_byte_cap_is_the_asset_cap
+    - tests/core/test_sparse_mapping_builders.py::test_a_degenerate_tie_set_is_refused_before_its_candidates_are_collected
+    - tests/core/test_sparse_mapping_builders.py::test_a_degenerate_set_is_refused_after_the_chunk_that_passes_the_bound
+    - tests/core/test_sparse_mapping_builders.py::test_the_tie_bound_counts_the_points_searched_from_in_each_mode
+    - tests/core/test_sparse_mapping_builders.py::test_a_limit_met_while_loading_a_config_names_the_edge
+    - tests/core/test_sparse_mapping_builders.py::test_the_asset_cap_bounds_the_arrays_of_every_sparse_kind
+    - tests/core/test_sparse_mapping_builders.py::test_the_allocation_bounds_hold_in_a_process_with_a_capped_address_space
+    - tests/core/test_sparse_mapping_builders.py::test_n_source_is_required_and_sizes_nothing
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-022
+  area: sparse mapping
+  claim: >-
+    What is refused rather than guessed at: sparse_projection_1d_mapping
+    "requires strictly increasing boundaries on both sides and refuses
+    anything else.  It does not sort or reverse them"; in sparse_matrix "-1
+    in indices marks an unused slot ..., and the value there must be exactly
+    0: a weight that would be dropped is refused rather than dropped";
+    index values satisfy "0 <= index < n_source <= 2**31 - 1"; a
+    StaticSparseMapping is "Validated once, on the host, when it is
+    constructed"; "A field whose first axis is not the mapping's size is
+    a ValueError when the step is traced (a gather would otherwise clamp the
+    index and return a result)"; and "The sparse builders ask of their
+    coordinates what the dense factories ask ..., through the same checks
+    and in the same words, and three things more: both point sets must hold
+    a point ..., a complex, text or object array is refused by name, and so
+    is a coordinate past 1e150."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The three kinds)
+    - src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping, Notes)
+  conditions: >-
+    twenty-six malformed structures handed to the class (an index that is
+    not an integer array, not two-dimensional, empty, out of range or past
+    int32, a padded slot holding an index or a weight, weights that are not
+    finite, not floating-point or of another shape, counts of another
+    length, type or range, sizes that are not integers in range, an unknown
+    layout or mode); the scatter layout without both sizes; a traced index
+    and traced weights; fifteen point sets the nearest neighbour cannot map
+    (empty, of another rank or dimension, NaN, infinite, past 1e150,
+    complex, text, objects, unknown mode or form); ten boundary arrays that
+    do not strictly rise; the dense factories' own battery (MADD-ANO-192)
+    given to the sparse projection and to the sparse nearest neighbour in
+    both modes and both conservative forms -- eleven boundary arrays on
+    either side, a NaN and either infinity in either point set, point sets
+    of different dimensions, of three axes, without coordinates, scalar,
+    and empty on either side; twenty-three sparse_matrix inputs (a value in an
+    unused slot, an index below -1 or not below n_source, the wrong array
+    types and shapes, a NaN, an n_source that is not a size, a reference
+    that is not an asset file); extended-precision arrays, refused and not
+    narrowed; bfloat16 values named as an asset; a field one shorter, one
+    longer and of one entry, and weights of one row, of one slot,
+    transposed and scalar, called directly and under jit, in both layouts;
+    a missing scipy, an ImportError that names it and, from a config, a
+    MappingRebuildError naming the edge.
+  oracle: the exception's type and its message, naming the argument and the first offending entry.
+  tests:
+    - tests/core/test_sparse_mapping.py::test_a_malformed_structure_is_refused_when_the_mapping_is_constructed
+    - tests/core/test_sparse_mapping.py::test_the_scatter_layout_needs_both_sizes
+    - tests/core/test_sparse_mapping.py::test_a_traced_index_or_traced_weights_are_refused
+    - tests/core/test_sparse_mapping.py::test_a_field_of_another_size_is_refused_rather_than_clamped
+    - tests/core/test_sparse_mapping.py::test_weights_of_another_shape_are_refused_rather_than_broadcast
+    - tests/core/test_sparse_mapping.py::test_sparse_matrix_rows_become_the_structure_the_class_describes
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_nearest_neighbour_refuses_what_it_cannot_map
+    - tests/core/test_sparse_mapping_builders.py::test_extended_precision_and_traced_points_are_refused_not_narrowed
+    - tests/core/test_sparse_mapping_builders.py::test_a_missing_scipy_is_an_import_error_that_names_it
+    - tests/core/test_sparse_mapping_builders.py::test_the_sparse_projection_refuses_boundaries_that_do_not_rise
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_boundaries_that_are_not_strictly_increasing_are_refused_by_name
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_non_finite_point_is_refused_by_name_and_index
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_point_sets_of_different_dimension_are_refused
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_point_array_with_more_than_two_axes_is_refused
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_point_set_without_coordinates_is_refused
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_an_empty_set_to_map_from_is_refused_by_name
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_matrix_refuses_rows_it_would_have_to_guess_at
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_matrix_keeps_each_rows_entries_in_the_order_given
+    - tests/core/test_sparse_mapping_builders.py::test_a_repeated_index_in_a_row_adds
+    - tests/core/test_sparse_mapping_builders.py::test_sparse_matrix_takes_unsigned_and_narrow_index_dtypes_and_a_negative_zero
+    - tests/core/test_sparse_mapping_builders.py::test_n_source_is_required_and_sizes_nothing
+    - tests/core/test_sparse_mapping_builders.py::test_bfloat16_values_build_but_cannot_be_named_as_an_asset
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: 'tests/core/test_sparse_mapping_builders.py::test_bfloat16_values_build_but_cannot_be_named_as_an_asset'
+    jit: tests/core/test_sparse_mapping.py::test_a_field_of_another_size_is_refused_rather_than_clamped
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-023
+  area: sparse mapping
+  claim: >-
+    Reproducibility, as measured: the gather form's "output is reduced on
+    its own, so one compiled program gives one result -- measured on the CPU
+    and on a GPU"; the scatter form "Measured on the CPU ... is the in-order
+    sum, one result on every call.  Measured on a GPU the same program gave
+    a different result on every run"; "nothing more is claimed: not
+    bit-equality between the CPU and a GPU for either form".  "The row sum
+    is deterministic for one compiled program; like H @ field, it is not
+    bit-stable between a jax.vmap of a step and the step alone."
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The conservative nearest neighbour)
+    - src/maddening/core/coupling/sparse_mapping.py (module docstring, Two layouts)
+  conditions: >-
+    on the CPU, with the jaxlib a run is made on: 4000 rows of eight slots
+    onto 97 targets with repeated indices, float32 values spanning twelve
+    decades with random signs, so that another order gives other bits; ten
+    calls of one jit-compiled program, for the scatter layout's apply, for
+    the gather layout's apply and for the gather layout's apply_T; the
+    scatter-add against the sequential float32 sum in the order of the
+    index array.  The GPU statements are one attended measurement (jax and
+    jaxlib 0.11.0 with the CUDA 12 plugin, 2026-10-05) and are not run by
+    any test.  Not claimed for x64, mixed dtypes, 16-bit floats, gradients,
+    vmap or sharded graphs.
+  oracle: NumPy's in-order np.add.at in float32, byte for byte; the set of results of ten calls.
+  tests:
+    - tests/core/test_sparse_mapping.py::test_a_scatter_add_with_repeated_indices_is_the_in_order_sum_on_the_cpu
+    - tests/core/test_sparse_mapping.py::test_the_row_sum_of_one_compiled_program_is_one_result
+  status: verified
+  notes: >-
+    The CPU order was checked on jaxlib 0.10.2, 0.11.0 and 0.11.2, the three
+    this branch ran the two tests on.  The GPU measurement is recorded in
+    the guide and in the pull request that added the kinds (#232); it has
+    no CI lane (MADD-ANO-001: GPU is not a
+    verified configuration).
+  domains:
+    f32: tests/core/test_sparse_mapping.py::test_a_scatter_add_with_repeated_indices_is_the_in_order_sum_on_the_cpu
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_sparse_mapping.py::test_the_row_sum_of_one_compiled_program_is_one_result
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
+
+- id: MAP-024
+  area: sparse mapping
+  claim: >-
+    The three sparse kinds are registered kinds the library loads itself: "a
+    config that names one loads in a program that imported nothing but the
+    graph, and their names are taken first"; scipy "is imported by that
+    builder, not by import maddening".
+  sources:
+    - src/maddening/core/coupling/mapping_registry.py (_ensure_builtins)
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, Limits)
+  conditions: >-
+    a fresh interpreter that imported the registry and nothing else: the
+    kinds it lists, a second factory offered a sparse kind's name, and
+    whether scipy.spatial was imported; each sparse kind's entry, its
+    factory's stability level and its declared hyper-parameters, none of
+    them the dense matrix kind's label.  Host-side.
+  oracle: the fresh interpreter's report; the registry's entries; the ValueError naming the factory that holds the name.
+  tests:
+    - tests/core/test_mapping_registry.py::test_a_process_that_registered_nothing_has_exactly_the_kinds_the_library_ships
+    - tests/core/test_mapping_registry.py::test_a_sparse_kind_of_the_library_is_a_registered_kind_that_cannot_be_replaced
+    - tests/core/test_mapping_registry.py::test_a_sparse_kinds_name_is_taken_before_any_registration_can_claim_it
+    - tests/core/test_mapping_registry.py::test_the_kind_lookup_has_no_import_machinery_to_reach
+    - tests/core/test_mapping_registry.py::test_the_hyper_parameter_battery_covers_every_declared_type
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: MAP-025
+  area: sparse mapping
+  claim: >-
+    "The scale it has been measured at": a million points, cells or rows a
+    side, built and applied in "One process, capped at 8 GiB of address
+    space", the whole run peaking "at 1.4 GiB of resident memory"; "The same
+    script runs at a hundred thousand points on every push".
+  sources:
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The scale it has been measured at)
+  conditions: >-
+    a hundred thousand points a side on every push and a million in the slow
+    lane, in three dimensions for the nearest neighbour (consistent, and
+    conservative in both forms), 0.7 n cells for the projection, n rows of
+    eight for sparse_matrix; each built, applied by a compiled program and
+    checked on a sample of 200 against brute force, the projection against
+    the dense expression; the process capped at 8 GiB of address space,
+    its peak resident memory under 2 GiB at a hundred thousand and under 6
+    GiB at a million.  The times in the guide are one run on a shared
+    machine and are asserted by no test.
+  oracle: brute-force nearest points and the dense expressions on the sample; the process's own peak resident size.
+  tests:
+    - tests/core/test_sparse_mapping_builders.py::test_the_three_builders_at_a_hundred_thousand_points_in_a_capped_process
+    - tests/core/test_sparse_mapping_builders.py::test_the_three_builders_at_a_million_points_in_a_capped_process
+  status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a

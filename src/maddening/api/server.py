@@ -964,19 +964,19 @@ def _dry_run_node(node, state: Any = None) -> None:
     spec = _NodeSpec(node=node, update_fn=node.update, timestep=node.delta_t,
                      accepts_params=accepts)
     leaves = node.params_pytree() if accepts else None
-    with quiet_warnings():
-        # With every declared input delivered (the node once its edges are
-        # added), then with none, as the graph steps it until then: a
-        # constant read only in the absence of an input is read by every
-        # step of the node as it is added.
-        drift = _node_update_layout_drift(spec, state, leaves)
-        if not drift:
-            try:
-                drift = _node_update_layout_drift(spec, state, leaves, {})
-            except KeyError:
-                # A node that needs an input it declares cannot step until
-                # its edge is added, and says so at the step: not refused.
-                drift = []
+    # With every declared input delivered (the node once its edges are
+    # added), then with none, as the graph steps it until then: a constant
+    # read only in the absence of an input is read by every step of the
+    # node as it is added.  (Warnings are not silenced: the trace is the
+    # node's first, as the graph's would be.)
+    drift = _node_update_layout_drift(spec, state, leaves)
+    if not drift:
+        try:
+            drift = _node_update_layout_drift(spec, state, leaves, {})
+        except KeyError:
+            # A node that needs an input it declares cannot step until its
+            # edge is added, and says so at the step: not refused.
+            drift = []
     if drift:
         raise ValueError(
             "one update changes the layout of its state (" + "; ".join(drift)

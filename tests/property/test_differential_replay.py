@@ -69,6 +69,7 @@ from maddening.sysid import (
 
 from tests.conftest import EXAMPLES_COSTLY
 from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS
+from tests.sparse_mapping_support import SPARSE_NEAREST_NEIGHBOR, SPARSE_POINT_KINDS
 from tests.property.differential import (
     assert_trees_identical,
     checkpoint_path,
@@ -205,6 +206,37 @@ def _registered_mapping_rods(coupled: bool):
     return build
 
 
+def _sparse_mapping_rods(coupled: bool, transpose: str):
+    """The same two rods exchanging their whole profile through sparse
+    nearest-neighbour mappings built from node references: consistent one
+    way (one entry per row), conservative the other, as a padded gather or
+    as a scatter-add.  The weights are moved away from the ones the factory
+    builds, as a fit would leave them."""
+    def build():
+        gm = GraphManager()
+        gm.add_node(HeatNode("coarse", 0.01, n_cells=6, thermal_diffusivity=0.01,
+                             initial_temperature=np.linspace(1.0, 2.0, 6).tolist()))
+        gm.add_node(HeatNode("fine", 0.01, n_cells=12, thermal_diffusivity=0.01,
+                             initial_temperature=0.5))
+        make = SPARSE_POINT_KINDS[SPARSE_NEAREST_NEIGHBOR].build
+        grid = {n: gm.get_node(n).static_data["grid_x"].value for n in ("coarse", "fine")}
+        for source, target, hyper in (
+                ("coarse", "fine", dict(mode="consistent")),
+                ("fine", "coarse", dict(mode="conservative", transpose=transpose))):
+            gm.add_edge(source, target, "temperature", "heat_source", mapping=make(
+                grid[source], grid[target], **hyper,
+                source_ref={"node": source, "field": "grid_x"},
+                target_ref={"node": target, "field": "grid_x"}))
+        assert gm.edges[1].mapping.layout == transpose and gm.edges[1].mapping.nnz == 12
+        if coupled:
+            gm.add_coupling_group(["coarse", "fine"], max_iterations=6, tolerance=1e-12)
+        gm.compile()
+        for slot in gm.params["mappings"].values():
+            slot["W"] = (slot["W"] * 0.375).astype(slot["W"].dtype)
+        return gm
+    return build
+
+
 #: Families whose next step reads nothing carried in ``_meta`` but the
 #: multi-rate step counter, which ``start_step`` reconstructs.
 PLAIN = {
@@ -216,6 +248,8 @@ PLAIN = {
     "subcycled-rods": _rods(True),
     "registered-mapping": _registered_mapping_rods(False),
     "registered-mapping-coupled": _registered_mapping_rods(True),
+    "sparse-mapping": _sparse_mapping_rods(False, "gather"),
+    "sparse-mapping-coupled": _sparse_mapping_rods(True, "scatter"),
 }
 #: Families whose next step reads carried history: a predictor short of
 #: convergence, IMVJ warm starts, a sub-cycled group with a predictor.

@@ -41,6 +41,10 @@ from maddening.core.coupling.mapping import (
     rbf_matrix,
 )
 from maddening.core.coupling.mapping_spec import MappingRebuildError, point_array_digest
+from maddening.core.coupling.sparse_mapping import (
+    sparse_nearest_neighbor_mapping,
+    sparse_projection_1d_mapping,
+)
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 
@@ -53,9 +57,12 @@ F32 = jnp.float32
 GOOD_SOURCE = [0.0, 1.0, 2.0, 3.0]
 GOOD_TARGET = [0.0, 1.5, 3.0]
 
+#: The sparse projection asks the same checks of its boundaries (it calls
+#: the same functions), so it is held to the same battery.
 BOUNDARY_FACTORIES = {
     "projection_1d_mapping": projection_1d_mapping,
     "conservative_projection_1d": closures.conservative_projection_1d,
+    "sparse_projection_1d_mapping": sparse_projection_1d_mapping,
 }
 
 #: label -> (boundaries, what the message says, the index it names or None)
@@ -159,6 +166,14 @@ POINT_FACTORIES = {
     "rbf_interpolation": lambda s, t: closures.rbf_interpolation(s, t),
     "rbf_interpolation_2d": lambda s, t: closures.rbf_interpolation_2d(s, t),
     "nearest_neighbor_2d": lambda s, t: closures.nearest_neighbor_2d(s, t),
+    # the sparse nearest neighbour, in both modes and both conservative forms
+    "sparse_nearest_neighbor_mapping[consistent]":
+        lambda s, t: sparse_nearest_neighbor_mapping(s, t),
+    "sparse_nearest_neighbor_mapping[conservative]":
+        lambda s, t: sparse_nearest_neighbor_mapping(s, t, mode="conservative"),
+    "sparse_nearest_neighbor_mapping[conservative, scatter]":
+        lambda s, t: sparse_nearest_neighbor_mapping(s, t, mode="conservative",
+                                                     transpose="scatter"),
 }
 
 
@@ -222,10 +237,19 @@ def test_a_point_set_without_coordinates_is_refused(factory, bad, says):
     ("nearest_neighbor_mapping[conservative]", "target_points"),
     ("rbf_interpolation", "source_points"),
     ("rbf_interpolation_2d", "source_points"),
+    # a sparse mapping has at least one row and one column: either side
+    ("sparse_nearest_neighbor_mapping[consistent]", "source_points"),
+    ("sparse_nearest_neighbor_mapping[consistent]", "target_points"),
+    ("sparse_nearest_neighbor_mapping[conservative]", "source_points"),
+    ("sparse_nearest_neighbor_mapping[conservative]", "target_points"),
+    ("sparse_nearest_neighbor_mapping[conservative, scatter]", "source_points"),
+    ("sparse_nearest_neighbor_mapping[conservative, scatter]", "target_points"),
 ])
 def test_an_empty_set_to_map_from_is_refused_by_name(factory, argument):
     """The set the operator interpolates from: the source in consistent
-    mode, the target in conservative mode (the transpose of the reverse)."""
+    mode, the target in conservative mode (the transpose of the reverse).
+    The sparse nearest neighbour refuses an empty set on either side: the
+    dense kind's empty operator has no row structure to hold."""
     empty = np.zeros((0, 2))
     args = (empty, TGT2) if argument == "source_points" else (SRC2, empty)
     with pytest.raises(ValueError, match="holds no points") as caught:

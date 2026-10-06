@@ -853,6 +853,10 @@ A config (`to_dict`, USD) stores the mapping's *recipe* (`MappingSpec`:
 kind, hyper-parameters, point references) and rebuilds the weights on
 load; a checkpoint stores the weights themselves (`_params_mappings/`),
 and when both are loaded the checkpoint's — possibly trained — weights win.
+A [sparse mapping](../algorithm_guide/coupling/interface_mapping.md#sparse-mappings)
+keeps one weight `W` per slot of an index that is not a parameter; its
+checkpoint also records the pattern's digest, and a load refuses weights
+saved for another pattern.
 
 ### Calibrating a parameter that a mapped edge's grid derives from
 

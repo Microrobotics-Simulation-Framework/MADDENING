@@ -72,7 +72,9 @@ from maddening.core.coupling.mapping_spec import (
     reference_for_array,
 )
 from maddening.core.graph_manager import GraphManager
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 
 from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.invariants import assert_states_identical

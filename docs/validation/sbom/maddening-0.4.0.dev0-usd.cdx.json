@@ -941,6 +941,7 @@
         "jaxlib==0.11.2",
         "lineax==0.1.1",
         "numpy==2.5.3",
+        "scipy==1.18.1",
         "usd-core==26.8"
       ],
       "ref": "maddening==0.4.0.dev0"
@@ -1190,7 +1191,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:c1b46ac9-ebda-56c8-a877-312b536a3a6a",
+  "serialNumber": "urn:uuid:553db4db-87cc-55d6-86fe-40cbefdfee9e",
   "specVersion": "1.6",
   "version": 1
 }

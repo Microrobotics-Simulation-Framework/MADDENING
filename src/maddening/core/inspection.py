@@ -656,9 +656,17 @@ def _callable_name(fn: Any) -> str:
 
 def _mapping_text(mapping: Any) -> str:
     try:
-        return f"{type(mapping).__name__} {int(mapping.n_source)}->{int(mapping.n_target)}"
+        text = f"{type(mapping).__name__} {int(mapping.n_source)}->{int(mapping.n_target)}"
     except Exception:   # noqa: BLE001
         return type(mapping).__name__
+    try:
+        # A sparse mapping: how many slots a row has and how many are used.
+        slots, entries = getattr(mapping, "k", None), getattr(mapping, "nnz", None)
+        if slots is not None and entries is not None:
+            text += f" (k={int(slots)}, nnz={int(entries)})"
+    except Exception:   # noqa: BLE001
+        pass
+    return text
 
 
 def _group_key(group: Any) -> str:

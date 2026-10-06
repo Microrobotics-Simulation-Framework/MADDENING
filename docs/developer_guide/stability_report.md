@@ -64,6 +64,10 @@ import time.  Levels:
 | `maddening.core.coupling.mapping_spec.build_mapping` | evolving |
 | `maddening.core.coupling.mapping_spec.make_point_resolver` | evolving |
 | `maddening.core.coupling.mapping_spec.point_array_digest` | evolving |
+| `maddening.core.coupling.sparse_mapping.StaticSparseMapping` | experimental |
+| `maddening.core.coupling.sparse_mapping.sparse_matrix_mapping` | experimental |
+| `maddening.core.coupling.sparse_mapping.sparse_nearest_neighbor_mapping` | experimental |
+| `maddening.core.coupling.sparse_mapping.sparse_projection_1d_mapping` | experimental |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
 | `maddening.core.graph_manager.GraphManager.coupling_report` | experimental |
@@ -217,4 +221,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*197 API surfaces registered.*
+*201 API surfaces registered.*

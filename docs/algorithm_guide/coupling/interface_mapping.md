@@ -33,7 +33,9 @@ class Mapping(Protocol):
 target; `apply_T` is the transpose.  `weights` is the mapping's entry of
 the graph parameter pytree and `geom` is reserved for mappings that
 depend on a moving interface (planned for 0.5.0; static mappings ignore
-it).
+it).  A mapping whose weights are applied through a structure the
+parameter tree does not hold may also define `structure_digest()`; see
+[Sparse mappings](#sparse-mappings).
 
 ## Weights live in `params["mappings"]`
 
@@ -151,7 +153,8 @@ stage (`save_graph_to_usd`, attribute `maddening:mappingSpecJson`) as its
                                          "sha256": "ba24aeb27cac..."}}}
 ```
 
-`kind` names the factory -- one of the four above, or a kind you
+`kind` names the factory -- one of the four above, one of the three
+[sparse kinds](#sparse-mappings), or a kind you
 [registered yourself](#registering-your-own-mapping-kind) -- the flat keys
 are its hyper-parameters (`shape` is informational and checked on reload),
 and `points` maps each array argument of the factory (`source_points` /
@@ -532,6 +535,246 @@ raises, `from_dict` and `load_graph_from_usd` report as a
 `MappingRebuildError` naming the edge and the kind, with the factory's
 exception chained as `__cause__` -- an `ImportError` included, for a
 factory that needs a package the loading environment lacks.
+
+## Sparse mappings
+
+*Experimental in 0.4.0: everything in
+`maddening.core.coupling.sparse_mapping` may change in a minor release.*
+
+A `StaticLinearMapping` stores the whole `n_target × n_source` matrix.
+Between two interfaces of 100 000 points each that is 40 GB of float32,
+of which a nearest-neighbour selection uses one entry per row.  A
+`StaticSparseMapping` stores only the entries a row uses:
+
+* an integer **index** of shape `(n_rows, k)`, kept on the mapping as a
+  read-only host array -- structure, not a parameter;
+* one floating-point weight array **`W`** of the same shape, which is the
+  mapping's whole entry of the parameter tree:
+  `params_pytree() == {"W": W}`.
+
+Use a sparse mapping when the dense matrix does not fit in memory or is
+mostly zeros: a nearest-neighbour transfer, a cell-average projection, a
+stencil or supermesh operator computed offline.  Keep the dense kinds for
+small interfaces and for RBF interpolation, whose matrix is full.
+
+### The three kinds
+
+| factory | what it builds |
+|---------|----------------|
+| `sparse_nearest_neighbor_mapping(src_pts, tgt_pts, mode=, transpose=)` | the matrix of `nearest_neighbor_mapping`, found with a k-d tree instead of an `n_target × n_source` distance table |
+| `sparse_projection_1d_mapping(src_boundaries, tgt_boundaries)` | the matrix of `projection_1d_mapping`, found with a sorted sweep instead of a double loop |
+| `sparse_matrix_mapping(indices, values, n_source=, mode=, name=)` | bring your own rows: `target[i] = sum_j values[i, j] * source[indices[i, j]]` |
+
+A sparse mapping goes on an edge like any other, and its kind is
+registered, so `to_dict()` / `from_dict()` and the USD writer and reader
+carry it:
+
+```python
+import json
+
+import numpy as np
+
+from maddening.core.coupling.sparse_mapping import sparse_nearest_neighbor_mapping
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.heat import HeatNode
+
+gm = GraphManager()
+gm.add_node(HeatNode("coarse", 1e-4, n_cells=6, thermal_diffusivity=0.1))
+gm.add_node(HeatNode("fine", 1e-4, n_cells=12, thermal_diffusivity=0.1))
+x_coarse = gm.get_node("coarse").static_data["grid_x"].value
+x_fine = gm.get_node("fine").static_data["grid_x"].value
+mapping = sparse_nearest_neighbor_mapping(
+    x_coarse, x_fine,
+    source_ref={"node": "coarse", "field": "grid_x"},
+    target_ref={"node": "fine", "field": "grid_x"})
+gm.add_edge("coarse", "fine", "temperature", "heat_source", mapping=mapping)
+gm.compile()
+
+key = "coarse.temperature->fine.heat_source"
+assert mapping.indices.shape == (12, 1)                    # one source per target
+assert gm.params["mappings"][key]["W"].shape == (12, 1)    # one weight per slot
+
+config = json.loads(json.dumps(gm.to_dict()))
+stored = config["edges"][0]["mapping"]
+assert stored["kind"] == "sparse_nearest_neighbor"
+assert "W" not in stored and "indices" not in stored       # the recipe, nothing else
+
+reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
+rebuilt = reloaded.edges[0].mapping
+assert np.array_equal(rebuilt.indices, mapping.indices)
+assert rebuilt.structure_digest() == mapping.structure_digest()
+```
+
+**The same matrix as the dense kind.**  Scattering the rows of
+`sparse_nearest_neighbor_mapping` or `sparse_projection_1d_mapping` into a
+zero matrix gives the dense factory's `H` bit for bit, in both modes.  For
+the nearest neighbour that includes ties: they go where the dense kind
+sends them, to the **lowest index** among the points at the minimal
+float64 squared distance.  The k-d tree only proposes candidates; wherever
+two candidates are closer to one another than rounding can tell apart, the
+dense expression decides, so the result does not depend on the tree or on
+the scipy version.  The equality holds for coordinates up to `1e150` in
+magnitude (a larger one is refused: its squared distance overflows).
+
+`sparse_projection_1d_mapping` requires **strictly increasing** boundaries
+on both sides and refuses anything else.  It does not sort or reverse them
+for you, because the field keeps its cell order.  The sparse builders ask
+of their coordinates what the dense factories ask (*Shapes and validation*
+above), through the same checks and in the same words, and three things
+more: both point sets must hold a point (a sparse mapping has at least one
+row and one column), a complex, text or object array is refused by name,
+and so is a coordinate past `1e150`.
+
+`sparse_matrix_mapping` takes an integer `indices` array and a
+floating-point `values` array, both `(n_target, k)`, and `n_source`, which
+cannot be inferred.  `-1` in `indices` marks an unused slot (a row with
+fewer than `k` entries), and the value there must be exactly 0: a weight
+that would be dropped is refused rather than dropped.  The same index may
+appear twice in a row; its values add.  Like an explicit dense matrix, the
+two arrays are never inlined into a config: save them with `numpy.save`
+(or as two members of one `.npz`) next to the config and name the files
+with `indices_asset=` and `values_asset=`.  `name=` is a free label for
+display; the mapping's `kind` stays `"sparse_matrix"`.
+
+### The index is structure, the weights are parameters
+
+Only `W` is in `gm.params["mappings"]`.  It is a traced input like any
+other weight: a gradient reaches it, a replaced `W` takes effect on the
+next step without recompiling, it is frozen by default and opts in to a
+fit by name, a checkpoint carries it, and an exported FMU fixes it.
+
+The index is **baked into the compiled step as a constant**.  A weight
+write can therefore never change the sparsity pattern: a new pattern is a
+new mapping, a new edge and a recompile.  The mapping object is immutable
+(the index array is read-only, and a copy of the object is the object).
+
+A config carries a sparse mapping's recipe -- kind, hyper-parameters and
+references -- and never its index or its weights; `from_dict` calls the
+same builder on the same arrays, so the reloaded index is the one that was
+saved, bit for bit.
+
+A checkpoint carries `W` and nothing of the index, and `W` means
+something only against the index it was built for.  So `save_state` writes
+the SHA-256 of the pattern (`mapping.structure_digest()`: layout, sizes,
+index and row counts) beside the weights, and `load_state` -- and `POST
+/checkpoint/load` -- refuses weights whose digest is not the live
+mapping's, before anything is loaded: weights saved for other points or
+another index of the same shape, for the same index in the other layout,
+or for a dense mapping (and a dense mapping refuses a sparse one's).  A
+mapping class of your own that applies its weights through a structure
+gets the same check by defining `structure_digest()`.
+
+### The conservative nearest neighbour: two forms
+
+The conservative nearest neighbour is the transpose of the reverse
+selection: each source adds its value to the target nearest to it.  A
+target's row is as long as the number of sources that share it, and
+`transpose=` chooses how those rows are held:
+
+* `transpose="gather"` (the default): for each target, the sources that
+  add to it, **padded to the longest row**, summed along the row.  Each
+  output is reduced on its own, so one compiled program gives one result
+  -- measured on the CPU and on a GPU.  The cost is the padding: a
+  pattern in which many sources share one target has one long row and
+  pads every other row to it.  Past `MAX_SPARSE_STRUCTURE_BYTES` the
+  builder refuses, before allocating, with an error that names
+  `transpose="scatter"`.
+* `transpose="scatter"`: one entry **per source**, applied as a
+  scatter-add.  Compact whatever the pattern.  Measured on the CPU it is
+  the in-order sum, one result on every call.  Measured on a GPU the same
+  program gave **a different result on every run** (twenty results in
+  twenty runs, hundreds to tens of thousands of ulp apart).  Choose it
+  when the gather form is refused and run-to-run reproducibility on a GPU
+  is not needed.
+
+That is what was measured (jax / jaxlib 0.11.0, 2026-10-05) and nothing
+more is claimed: not bit-equality between the CPU and a GPU for either
+form, and not GPU behaviour on another driver or jaxlib.  The GPU
+statements are one attended measurement that no test runs (GPU is not a
+verified configuration, MADD-ANO-001); the CPU statements are tests, and
+held on the three jaxlib versions they were run on (0.10.2, 0.11.0,
+0.11.2).  The choice is
+recorded in the spec, so a reloaded mapping is applied the way it was
+built.  The two forms hold the same matrix, and agree with one another
+and with the dense conservative kind to rounding.
+
+The reverse-mode derivative of a gather with respect to the *field* is
+itself a scatter-add.  On a GPU a gradient with respect to the source
+field through either form may therefore differ in its last bits between
+runs even where the forward result does not.
+
+### What "equal to the dense mapping" means
+
+The sparse and the dense mapping are two float evaluations of the same
+sums.  Each output entry is within `(k + 2) · eps · Σ|w|·|f|` of the exact
+sum over its row's `k` entries (`eps` of the result dtype), so the two
+agree to rounding, entry by entry -- not bit for bit.  The row sum is
+deterministic for one compiled program; like `H @ field`, it is not
+bit-stable between a `jax.vmap` of a step and the step alone.
+
+With one entry per row the two are the same number when the mapping is
+applied on its own.  Inside a compiled step not even that carries over,
+whatever the weights: a graph with sparse edges and the same graph with
+dense ones are two programs, and the compiler evaluates the arithmetic
+around a mapping differently in each (it may fuse a product with an
+addition next to it -- an additive edge, a transform -- in one and not in
+the other).  A graph with sparse edges and its dense twin therefore step
+to within rounding of one another, not to the same bits.  Under a
+constant iterator the two were at most 7.5 `eps` of the largest state
+entry apart, over every structure, layout and domain the coupling
+topology harness compares them in; the harness allows 256.  The harness
+runs over sparse edges as it does over dense ones: a graph with sparse
+edges satisfies the same monolithic reference the dense graph is held to,
+and its gradients are the dense graph's.  In bfloat16 and float16, where
+a rounding is a percent of the state, the twin is not compared; a renamed
+or reordered sparse graph returns the original's states bit for bit.
+
+One difference is deliberate.  A row reads only its own entries, so an
+infinity or a NaN in the source field reaches only the targets that list
+it; `H @ field` multiplies it by the zeros of every other row and returns
+NaN everywhere.
+
+### Limits
+
+| what | bound |
+|------|-------|
+| each referenced array | `MAX_ASSET_BYTES` (256 MiB), read from the file's header before anything is allocated -- the reference resolver's, as for every kind |
+| the row structure (index plus weights) | `sparse_mapping.MAX_SPARSE_STRUCTURE_BYTES`, by default the same 256 MiB: 33.5 million float32 slots, say 4.2 million targets with eight entries each.  Checked from the row counts **before** the padded arrays are allocated; the refusal names the row count, the longest and the median row and the number of entries |
+| a nearest-neighbour search over a degenerate point set | `TIE_CANDIDATES_PER_POINT` (8) candidates per searched point plus `TIE_CANDIDATES_FLOOR` (a million) in total.  Very many points at one distance from very many others (points on a sphere around the ones they are searched from) are refused, not resolved.  The search runs 4096 points at a time and counts a chunk's candidates before it collects any, so the refusal comes after the chunk that passes the bound, not after every point has been measured against every other |
+| index values | `0 <= index < n_source <= 2**31 - 1` (the index is `int32`) |
+
+Each refusal is a `SparseMappingLimitError`, a `ValueError`; from
+`from_dict` or `load_graph_from_usd` it is a `MappingRebuildError` naming
+the edge.  `n_source` sizes nothing, so a config cannot allocate through
+it.  In a process capped at 6 GiB of address space, a pattern whose padded
+gather would need 160 GB, a tie set of 9e8 candidates and a projection row
+of five million slots among fifty thousand rows are each a
+`SparseMappingLimitError`, not a `MemoryError`.  scipy, which the nearest-neighbour builder imports for its k-d tree,
+is a declared dependency; it is imported by that builder, not by
+`import maddening`.
+
+### The scale it has been measured at
+
+One process, capped at 8 GiB of address space, jax 0.11.0 on three CPU
+cores of a shared machine (2026-10-05); the times are indicative.
+
+| a million points (or cells, or rows) a side | build | first call (compile and apply) | a later call |
+|---|---|---|---|
+| nearest neighbour in 3-D, consistent (`k = 1`) | 5.6 s | 0.06 s | 2 ms |
+| nearest neighbour, conservative, gather (`k = 11`) | 5.4 s | 1.0 s | 44 ms |
+| nearest neighbour, conservative, scatter | 5.0 s | 0.06 s | 4 ms |
+| projection onto 700 000 cells (`k = 23`) | 0.34 s | | |
+| your own rows, `k = 8` | 0.10 s | 0.6 s | 25 ms |
+
+The whole run peaked at 1.4 GiB of resident memory with all five mappings
+alive.  The index is embedded in every compiled program that applies the
+mapping (the step, each cached scan length, a sweep): four bytes per slot
+per program, 32 MB at a million rows of eight.  The same script runs at a
+hundred thousand points on every push
+(`tests/core/test_sparse_mapping_builders.py`).
+
+Not in 0.4.0: a sparse mapping on a moving interface (`geom` is ignored),
+sharded graphs, and sparse RBF kinds.
 
 ## Legacy closures
 

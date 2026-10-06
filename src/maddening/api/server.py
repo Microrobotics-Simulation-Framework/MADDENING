@@ -126,6 +126,8 @@ from maddening.core._graph_specs import (
     _UNCARRIABLE_WHY,
     _node_name_refusal,
     _NodeSpec,
+    _rate_dividers,
+    _scheduled_timesteps,
     _uncarriable_characters,
 )
 from maddening.core._param_probes import (
@@ -726,6 +728,23 @@ def _new_node_type_refusal(cls: Any, params: dict[str, Any]) -> Optional[str]:
             return f"{key}: expected a number, got a boolean"
         if _holds_text(value):
             return f"{key}: expected a number, got a string"
+    return None
+
+
+def _schedule_refusal(gm: GraphManager) -> Optional[str]:
+    """Why ``compile()`` would refuse the graph's multi-rate schedule
+    (:func:`~maddening.core._graph_specs._rate_dividers`: timesteps with no
+    common step that keeps every node's clock), or ``None``.  Asked by the
+    two routes that change which timesteps a graph holds, before and after
+    their change: a request is not accepted that leaves a graph which could
+    be scheduled unable to step."""
+    scheduled = _scheduled_timesteps(gm._nodes, gm._coupling_groups)
+    if len(set(scheduled.values())) < 2:
+        return None
+    try:
+        _rate_dividers(scheduled)
+    except ValueError as exc:
+        return str(exc)
     return None
 
 
@@ -3946,10 +3965,23 @@ class SimulationServer:
                                         detail=f"node '{req.name}' {refusal}")
                 if req.name in self.gm._nodes:
                     raise HTTPException(status_code=409, detail=f"Node '{req.name}' already exists in the graph.")
+                schedulable = _schedule_refusal(self.gm) is None
                 try:
                     self.gm.add_node(node)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
+                # A timestep the graph's other nodes cannot be scheduled
+                # with (more than about 1e9 times smaller or larger, or with
+                # no common step): the compile refuses it, so a 201 here
+                # would leave a graph whose every step is a 400.  It used
+                # to be a 201 and a graph that ran its nodes on different
+                # clocks.  The route's transaction takes the node out again.
+                refusal = _schedule_refusal(self.gm) if schedulable else None
+                if refusal is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{req.name}' cannot join this graph with a "
+                                f"timestep of {req.timestep!r}: {refusal}"))
                 self._publish_state()
                 # Through the reply encoder every other route uses: a
                 # non-finite value in the node's dict is written as its
@@ -3970,6 +4002,7 @@ class SimulationServer:
             graph without it (they used to go on serving the removed node,
             and the binary stream re-sent a schema that had it)."""
             with self._graph_transaction("remove a node", write=True):
+                schedulable = _schedule_refusal(self.gm) is None
                 try:
                     # What remove_node() warns about, for the reply.
                     notes = self.gm._remove_node(name, replacing=False)
@@ -3977,6 +4010,19 @@ class SimulationServer:
                     raise HTTPException(status_code=404, detail=str(exc))
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
+                # The common step of the timesteps that are left is found
+                # afresh, and across many decades it can be one that no
+                # longer keeps a remaining node's clock: the graph without
+                # the node would not compile.  Refused, as an added node
+                # with such a timestep is; a graph that could not be
+                # scheduled before is not held to it (the node removed may
+                # be the reason).
+                refusal = _schedule_refusal(self.gm) if schedulable else None
+                if refusal is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{name}' cannot be removed: without it, "
+                                f"{refusal}  Nothing was removed."))
                 # The server's own record of a surrogate under that name
                 # goes with the node: a later deactivate used to add the
                 # recorded original back, with its edges, into a graph the

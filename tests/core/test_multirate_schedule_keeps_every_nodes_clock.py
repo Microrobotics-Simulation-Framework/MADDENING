@@ -161,19 +161,77 @@ def test_timesteps_within_three_decades_are_never_refused(timesteps):
 # ---------------------------------------------------------------------------
 
 
-def test_the_compile_route_refuses_the_schedule_and_names_both_nodes():
-    """``POST /graph/nodes`` takes each node (a timestep is a node's own);
-    the compile, the validation and the step say why the two cannot run
-    together, where all four used to succeed."""
-    from tests.property.rest_oracle import serve
+def _post(client, name: str, timestep: float):
+    return client.post("/graph/nodes", json={"type": "BallNode", "name": name,
+                                             "timestep": timestep, "params": {}})
+
+
+def test_a_node_whose_timestep_the_graph_cannot_schedule_is_not_added():
+    """Over REST the add, the compile, the validation and the run of nodes
+    at 1.0 and 1e-10 all succeeded.  The node is refused where its
+    timestep enters, naming both nodes, and the graph is as it was."""
+    from tests.property.rest_oracle import assert_nothing_changed, serve, snapshot
 
     served = serve(registry={"BallNode": BallNode})
     try:
         client = served.client
-        for name, dt in (("slow", 1.0), ("fast", 1e-10)):
-            assert client.post("/graph/nodes", json={
-                "type": "BallNode", "name": name, "timestep": dt,
-                "params": {}}).status_code == 201
+        assert _post(client, "slow", 1.0).status_code == 201
+        assert client.post("/sim/step").status_code == 200
+        before = snapshot(served)
+        for dt in (1e-10, 1e-9, 1.5e-9, 2 ** 63, 1e-50):
+            resp = _post(client, "fast", dt)
+            assert resp.status_code == 400, (dt, resp.text)
+            detail = resp.json()["detail"]
+            assert "'fast'" in detail and "'slow'" in detail and repr(float(dt)) in detail, detail
+            assert_nothing_changed(before, snapshot(served), f"the refused timestep {dt}")
+        assert _post(client, "fast", 0.25).status_code == 201
+        assert client.post("/sim/step").status_code == 200
+        assert served.gm._rate_dividers == {"slow": 4, "fast": 1}
+    finally:
+        served.close()
+
+
+def test_a_removal_that_would_leave_timesteps_with_no_schedule_is_refused():
+    """The common step is found afresh for the timesteps that are left,
+    and four decades and more apart it can be one that no longer keeps a
+    remaining node's clock: these four nodes compile, and three of them
+    without ``d`` do not."""
+    from tests.property.rest_oracle import assert_nothing_changed, serve, snapshot
+
+    timesteps = {"a": 0.00011, "b": 6e-05, "c": 1.1e-10, "d": 2.5e-08}
+    _rate_dividers(timesteps)
+    with pytest.raises(ValueError):
+        _rate_dividers({n: dt for n, dt in timesteps.items() if n != "d"})
+    served = serve(registry={"BallNode": BallNode})
+    try:
+        client = served.client
+        for name in ("a", "b", "d", "c"):
+            assert _post(client, name, timesteps[name]).status_code == 201, name
+        assert client.post("/graph/compile").status_code == 200
+        before = snapshot(served)
+        resp = client.delete("/graph/nodes/d")
+        assert resp.status_code == 400, resp.text
+        assert "cannot be removed" in resp.json()["detail"] and "'c'" in resp.json()["detail"]
+        assert_nothing_changed(before, snapshot(served), "the refused removal")
+        assert client.delete("/graph/nodes/c").status_code == 200
+        assert client.delete("/graph/nodes/d").status_code == 200
+        assert client.post("/graph/compile").status_code == 200
+    finally:
+        served.close()
+
+
+def test_the_routes_say_why_a_graph_built_with_such_timesteps_cannot_run():
+    """A graph built in process and served: the compile, the validation
+    and the step say why the two nodes cannot run together, and the node
+    that is the reason can be removed."""
+    from tests.property.rest_oracle import serve
+
+    gm = GraphManager()
+    gm.add_node(BallNode("slow", 1.0))
+    gm.add_node(BallNode("fast", 1e-10))
+    served = serve(gm, registry={"BallNode": BallNode})
+    try:
+        client = served.client
         for route in ("/graph/compile", "/sim/step", "/sim/run?n_steps=2"):
             resp = client.post(route)
             assert resp.status_code == 400, (route, resp.text)

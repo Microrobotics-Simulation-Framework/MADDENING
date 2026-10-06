@@ -10,8 +10,9 @@ moment of writing:
 * a node named with a NUL: its checkpoint was written and did not load
   (a member's name ends at the NUL), and a USD stage reloaded the node
   under the name's first half;
-* a control character XML 1.0 cannot spell (U+0001, U+001F, ...) or U+FFFE
-  / U+FFFF: the model description was written and no parser read it;
+* a control character XML 1.0 cannot spell (U+0001, U+001F, ...: all of
+  U+0000 to U+001F but tab, line feed and carriage return) or U+FFFE /
+  U+FFFF: the model description was written and no parser read it;
 * a surrogate: the graph could not compile, and no file could hold it.
 
 And an edge's field names were not asked anything at all:
@@ -32,7 +33,6 @@ which the job that installs ``usd-core`` runs).
 from __future__ import annotations
 
 import json
-import unicodedata
 import xml.etree.ElementTree as ET
 
 import jax.numpy as jnp
@@ -54,16 +54,21 @@ REGISTRY = {"BallNode": BallNode, "SpringDamperNode": SpringDamperNode,
 
 #: What some carrier cannot hold, by what it is.
 REFUSED = {
-    "a NUL": "\x00", "U+0001": "\x01", "a tab": "\t", "a line feed": "\n",
-    "a carriage return": "\r", "an escape": "\x1b", "U+001F": "\x1f", "a delete": "\x7f",
-    "a next-line": "\x85", "U+009F": "\x9f", "a high surrogate": "\ud800",
+    "a NUL": "\x00", "U+0001": "\x01", "a backspace": "\x08", "a vertical tab": "\x0b",
+    "an escape": "\x1b", "U+001F": "\x1f", "a high surrogate": "\ud800",
     "a low surrogate": "\udfff", "U+FFFE": "\ufffe", "U+FFFF": "\uffff",
 }
 #: Names every carrier holds: lookalikes of what is refused, the
 #: characters an edge's key is made with (but ``#``), and other scripts.
 ACCEPTED = ["a b", "a.b", "a:b", 'a"b', "a\\b", "a<&>b", "a%b", "a$b{}~=", "é", "名",
             "😀", "a\u2028b", "a\u00a0b", "a\u200bb", "a\ufeffb", "a\ufffdb", "nan",
-            "x00", "meta"]
+            "x00", "meta",
+            # Unusual, and carried by every one of them: a name is not
+            # refused for that.  The two with a line break are the names
+            # the diagram and chart tests draw (test_inspection_diagram.py,
+            # test_inspection_views.py).
+            "a\tb", "two\nlines", 'we"ird <b>&amp; `tick` naïve\nsecond line', "a\rb",
+            "a\r\nb", "a\x7fb", "a\x85b", "a\x9fb"]
 
 
 def _names(char: str) -> list[str]:
@@ -75,20 +80,21 @@ def _names(char: str) -> list[str]:
 # The alphabet
 # ---------------------------------------------------------------------------
 
-def test_what_a_name_cannot_hold_is_the_controls_the_surrogates_and_two_noncharacters():
-    """Against Unicode's own categories: a control character (Cc), a
-    surrogate (Cs), U+FFFE or U+FFFF, and nothing else.  Every code point
-    of the Basic Multilingual Plane, and one in 257 of the other planes
-    with their first and last."""
+def test_what_a_name_cannot_hold_is_what_xml_1_0_has_no_character_for():
+    """Against the ``Char`` production of XML 1.0, the narrowest carrier:
+    ``#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]``
+    is taken and nothing else is refused -- not a tab or a line break, not
+    U+007F to U+009F.  Every code point of the Basic Multilingual Plane,
+    and one in 257 of the other planes with their first and last."""
     points = list(range(0x10000)) + [p for plane in range(1, 17) for p in (
         *range(plane << 16, (plane + 1) << 16, 257), (plane << 16) + 0xFFFE,
         (plane << 16) + 0xFFFF)]
     wrong = []
     for point in points:
         char = chr(point)
-        expected = (unicodedata.category(char) in ("Cc", "Cs")
-                    or point in (0xFFFE, 0xFFFF))
-        if bool(_uncarriable_characters(char)) != expected:
+        xml_char = (point in (0x9, 0xA, 0xD) or 0x20 <= point <= 0xD7FF
+                    or 0xE000 <= point <= 0xFFFD or 0x10000 <= point <= 0x10FFFF)
+        if bool(_uncarriable_characters(char)) == xml_char:
             wrong.append(hex(point))
     assert not wrong, wrong[:20]
 
@@ -109,12 +115,10 @@ def test_every_character_a_name_may_hold_is_one_xml_and_utf8_carry():
     assert "".join(el.get("v") for el in read) == "".join(taken)
 
 
-@pytest.mark.parametrize("char", [c for c in REFUSED.values()
-                                  if c not in "\t\n\r" and not "\x7f" <= c <= "\x9f"],
-                         ids=lambda c: f"U+{ord(c):04X}")
-def test_what_xml_or_utf8_cannot_carry_is_refused(char):
-    """The other direction, on the refused characters XML 1.0 or UTF-8 has
-    no way to write: a document holding one is not read back."""
+@pytest.mark.parametrize("char", list(REFUSED.values()), ids=lambda c: f"U+{ord(c):04X}")
+def test_what_is_refused_is_what_xml_or_utf8_cannot_carry(char):
+    """The other direction: each refused character is one XML 1.0 or UTF-8
+    has no way to write.  A document holding it is not read back."""
     root = ET.Element("names", attrib={"v": f"a{char}b"})
     with pytest.raises((ET.ParseError, UnicodeEncodeError)):
         ET.fromstring(ET.tostring(root, encoding="unicode").encode("utf-8"))
@@ -122,7 +126,8 @@ def test_what_xml_or_utf8_cannot_carry_is_refused(char):
 
 
 def test_the_refusal_names_each_code_point_once_in_the_order_met():
-    assert _uncarriable_characters("a\nb\x00c\n\ud800") == ["U+000A", "U+0000", "U+D800"]
+    assert _uncarriable_characters("a\x01b\x00c\x01\ud800") == ["U+0001", "U+0000", "U+D800"]
+    assert _uncarriable_characters("a\tb\nc\rd\x7fe\x85f\x9f") == []
     assert _uncarriable_characters("") == []
     assert _uncarriable_characters("a b.c->d/e#f") == []
 
@@ -139,7 +144,7 @@ def test_add_node_refuses_a_name_some_carrier_cannot_hold(what):
         with pytest.raises(ValueError, match="is invalid") as refused:
             gm.add_node(BallNode(name, 0.01))
         said = str(refused.value)
-        assert f"U+{ord(char):04X}" in said and "must not contain a control character" in said
+        assert f"U+{ord(char):04X}" in said and "must not contain U+0000 to U+001F" in said
         # The message is itself text every reader can carry.
         assert not _uncarriable_characters(said), said
         said.encode("utf-8")
@@ -233,9 +238,9 @@ def test_from_dict_refuses_a_config_naming_what_the_graph_could_not_save_again()
 # An edge's fields, and an external input's
 # ---------------------------------------------------------------------------
 
-BAD_FIELDS = sorted(NON_FINITE_TOKENS) + ["a#b", "#", "a\x00b", "a\nb", "a\ud800b", "a\ufffeb"]
+BAD_FIELDS = sorted(NON_FINITE_TOKENS) + ["a#b", "#", "a\x00b", "a\x1bb", "a\ud800b", "a\ufffeb"]
 GOOD_FIELDS = ["anchor_position", "undeclared", "", "nan", "infinity", "a.b", "a->b", "a/b",
-               "a b", "é"]
+               "a b", "é", "two\nlines", "a\tb"]
 
 
 def _pair() -> GraphManager:

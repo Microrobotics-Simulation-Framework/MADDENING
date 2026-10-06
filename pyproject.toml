@@ -268,7 +268,9 @@ filterwarnings = [
     "error",
     # GraphManager.compile() emits informational warnings about disconnected
     # nodes and cycle staggering -- expected in unit tests with minimal graphs.
-    "ignore:WARNING. node .* is disconnected:UserWarning",
+    # (?s): a node's name may hold a line break, and "." must match it, or
+    # the warning for such a node is an error here and nowhere else.
+    "ignore:(?s)WARNING. node .* is disconnected:UserWarning",
     "ignore:WARNING. cycle detected:UserWarning",
     # ... and about a coupling group whose block staggers an edge between two
     # components (MADD-ANO-159): the drawn graphs of the serialisation and

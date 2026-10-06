@@ -2937,13 +2937,13 @@ _RESERVED_STATE_KEYS = frozenset({_META_KEY, "_params", "_params_mappings"})
 
 
 def _uncarriable_characters(text: str) -> list[str]:
-    """The characters of *text* that not every place a name is written can
+    """The characters of *text* that some place a name is written cannot
     hold, as code points (``U+0000``), each once, in the order met.
 
     A name is written to a checkpoint's member names, to a config (JSON,
-    and whatever a caller writes ``to_dict()`` as), to a USD stage, to an
-    FMU's model description (XML 1.0) and to log lines.  What one of them
-    cannot carry, measured on each:
+    and whatever a caller writes ``to_dict()`` as), to a USD stage and to
+    an FMU's model description (XML 1.0).  What one of them cannot carry,
+    measured on each:
 
     * a NUL ends a checkpoint member's name, so the archive is written and
       does not load, and a USD string keeps the name only up to it;
@@ -2951,20 +2951,19 @@ def _uncarriable_characters(text: str) -> list[str]:
       carriage return) or U+FFFE and U+FFFF, escaped or not: the model
       description is written and no parser reads it;
     * a surrogate (U+D800 to U+DFFF) cannot be encoded as UTF-8, so no
-      file holds it, and the tracer refuses it as a name;
-    * a line break or an escape character in a log line forges a record or
-      drives the terminal that shows it, which is why the other control
-      characters (tab, line feed, carriage return, U+007F to U+009F) are
-      in the set too.
+      file holds it, and the tracer refuses it as a name.
 
-    So: the control characters (Unicode category Cc), the surrogates, and
-    U+FFFE and U+FFFF.  Every other character -- a space, a dot, a quote,
-    any letter of any script -- is carried by all of them.
+    So: U+0000 to U+001F but tab, line feed and carriage return; the
+    surrogates; U+FFFE and U+FFFF.  That is exactly what is not a character
+    of XML 1.0, the narrowest of the carriers.  Every other character -- a
+    space, a dot, a quote, a line break, U+007F to U+009F, any letter of
+    any script -- is written to all of them and read back as itself, and is
+    taken: a name is not refused for being unusual.
     """
     found: list[str] = []
     for ch in text:
         point = ord(ch)
-        if (point < 0x20 or 0x7F <= point <= 0x9F or 0xD800 <= point <= 0xDFFF
+        if ((point < 0x20 and ch not in "\t\n\r") or 0xD800 <= point <= 0xDFFF
                 or point in (0xFFFE, 0xFFFF)):
             label = f"U+{point:04X}"
             if label not in found:
@@ -2975,10 +2974,11 @@ def _uncarriable_characters(text: str) -> list[str]:
 #: What a refusal says of the characters :func:`_uncarriable_characters`
 #: finds, after naming them.
 _UNCARRIABLE_WHY = (
-    "a name must not contain a control character, a surrogate or U+FFFE / "
-    "U+FFFF, because not every place a name is written can hold one (a "
-    "checkpoint's member names end at a NUL, an FMU's model description "
-    "cannot carry a control character, and no file can carry a surrogate)"
+    "a name must not contain U+0000 to U+001F (but tab, line feed and "
+    "carriage return), a surrogate, or U+FFFE / U+FFFF, because not every "
+    "place a name is written can hold one (a checkpoint's member names end "
+    "at a NUL, an FMU's model description cannot carry these control "
+    "characters, and no file can carry a surrogate)"
 )
 
 
@@ -7428,7 +7428,8 @@ class GraphManager:
         ValueError
             If a field's name could not be written wherever an edge is: it
             spells ``NaN``, ``Infinity`` or ``-Infinity``, or contains
-            ``#``, a control character, a surrogate or U+FFFE / U+FFFF.  A
+            ``#``, one of U+0000 to U+001F (but tab, line feed and
+            carriage return), a surrogate or U+FFFE / U+FFFF.  A
             target field the target node does not declare is taken (a node
             may read an input it does not declare).
         """

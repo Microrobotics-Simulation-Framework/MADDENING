@@ -30,9 +30,9 @@ from tests.property import rest_oracle as O
 
 JSON = {"content-type": "application/json"}
 #: A character of each kind a name cannot hold.
-UNCARRIABLE = {"a NUL": "\x00", "U+0001": "\x01", "a line feed": "\n", "an escape": "\x1b",
-               "a delete": "\x7f", "a next-line": "\x85", "a surrogate": "\ud800",
-               "U+FFFE": "\ufffe", "U+FFFF": "\uffff"}
+UNCARRIABLE = {"a NUL": "\x00", "U+0001": "\x01", "a vertical tab": "\x0b", "an escape": "\x1b",
+               "U+001F": "\x1f", "a surrogate": "\ud800", "U+FFFE": "\ufffe",
+               "U+FFFF": "\uffff"}
 TOKENS = ["NaN", "Infinity", "-Infinity"]
 
 
@@ -125,7 +125,8 @@ def test_a_refused_name_is_refused_before_its_type_is_looked_up(served):
 
 
 @pytest.mark.parametrize("name", ["a b", "a.b", 'a"b', "é", "名", "😀", "a\u2028b", "nan",
-                                  "x00"])
+                                  "x00", "two\nlines", "a\tb", "a\x7fb"],
+                         ids=lambda n: repr(n).encode("ascii", "replace").decode())
 def test_a_node_name_every_carrier_holds_is_taken_and_its_checkpoint_loads(served, name):
     resp = post(served, "/graph/nodes", {"type": "BallNode", "name": name, "timestep": 0.01})
     assert resp.status_code == 201, resp.text
@@ -145,7 +146,7 @@ def test_a_node_name_every_carrier_holds_is_taken_and_its_checkpoint_loads(serve
 
 EDGE = {"source_node": "ball", "target_node": "spring", "source_field": "position",
         "target_field": "anchor_position"}
-BAD_FIELDS = TOKENS + ["a#b", "a\x00b", "a\nb", "a\ud800b", "a\ufffeb"]
+BAD_FIELDS = TOKENS + ["a#b", "a\x00b", "a\x1bb", "a\ud800b", "a\ufffeb"]
 
 
 @pytest.mark.parametrize("field", ["source_field", "target_field"])
@@ -162,7 +163,8 @@ def test_an_edge_field_the_config_could_not_carry_is_a_400(served, field, bad):
     assert not served.gm._edges   # noqa: SLF001
 
 
-@pytest.mark.parametrize("target_field", ["undeclared", "nan", "a.b", "a->b", "a/b", "a b"])
+@pytest.mark.parametrize("target_field", ["undeclared", "nan", "a.b", "a->b", "a/b", "a b",
+                                          "two\nlines"])
 def test_an_edge_to_a_field_the_target_does_not_declare_is_taken_and_the_graph_reloads(
         served, target_field):
     """What ``POST /graph/edges`` documents is that the nodes and the
@@ -253,7 +255,7 @@ def test_a_checkpoint_name_some_carrier_cannot_hold_is_a_400_and_no_file(served,
     assert sorted(p.name for p in served.root.rglob("*")) == files
 
 
-@pytest.mark.parametrize("name", ["a b.npz", "a.b", "é名.npz", "NaN", "a#b.npz"])
+@pytest.mark.parametrize("name", ["a b.npz", "a.b", "é名.npz", "NaN", "a#b.npz", "two\nlines.npz"])
 def test_a_checkpoint_name_every_carrier_holds_is_saved_and_loaded(served, name):
     saved = served.client.post("/checkpoint/save", params={"path": name})
     assert saved.status_code == 200, saved.text

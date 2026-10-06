@@ -503,10 +503,12 @@ STRING_VALUES: tuple = (
     ("the text NaN", "NaN"), ("the text Infinity", "Infinity"),
     ("the text -Infinity", "-Infinity"), ("a number", 5), ("a boolean", True), ("null", None),
     ("a list", ["a"]), ("an object", {"a": "b"}),
-    # What not every carrier of a name can hold, and what an edge's key is
-    # made with: refused where a name is introduced, echoed without a 500
-    # everywhere else.  The surrogate is a body's alone (a URL cannot
-    # spell one: see can_be_in_a_url).
+    # What not every carrier of a name can hold (a surrogate, an escape,
+    # U+FFFE) and what an edge's key is made with (a hash): refused where
+    # a name is introduced, echoed without a 500 everywhere else.  A line
+    # break and a dot are unusual and carried: taken, and the graph must
+    # reload.  The surrogate is a body's alone (a URL cannot spell one:
+    # see can_be_in_a_url).
     ("a lone surrogate", "a\ud800b"), ("a line break", "a\nb"),
     ("an escape character", "a\x1bb"), ("U+FFFE", "a\ufffeb"), ("a hash", "a#b"),
     ("a dot", "a.b"),

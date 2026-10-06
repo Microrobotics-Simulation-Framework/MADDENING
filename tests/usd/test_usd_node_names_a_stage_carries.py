@@ -5,7 +5,8 @@ bring in a name the graph refuses.
 name itself to ``maddening:nodeName``.  A name with a NUL in it was written
 and reloaded as its first half (the string ends at the NUL), so the stage
 reloaded a different graph without a word.  ``GraphManager.add_node`` now
-refuses a name holding a control character, a surrogate or U+FFFE / U+FFFF
+refuses a name holding what some carrier cannot (U+0000 to U+001F but tab,
+line feed and carriage return; a surrogate; U+FFFE / U+FFFF)
 (``tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py``);
 this file holds the stage to the other half: every name ``add_node`` takes
 comes back from a stage, and a stage edited to hold a refused name is
@@ -27,7 +28,7 @@ REGISTRY = {"BallNode": BallNode, "SpringDamperNode": SpringDamperNode}
 #: the characters an edge's key is made with (but ``#``), other scripts.
 ACCEPTED = ["a b", "a.b", "a:b", 'a"b', "a\\b", "a<&>b", "a%b", "a$b{}~=", "é", "名",
             "😀", "a\u2028b", "a\u00a0b", "a\u200bb", "a\ufeffb", "a\ufffdb", "nan",
-            "x00", "meta"]
+            "x00", "meta", "a\tb", "two\nlines", "a\rb", "a\x7fb", "a\x85b"]
 
 
 def _graph() -> GraphManager:
@@ -56,8 +57,8 @@ def test_the_names_add_node_takes_reload_from_a_usd_stage():
         (ACCEPTED[1], "spring")]
 
 
-@pytest.mark.parametrize("bad", ["a\nb", "a\x1bb", "a\x7fb", "a\ufffeb", "NaN", "_meta", "a/b"],
-                         ids=["a line feed", "an escape", "a delete", "U+FFFE",
+@pytest.mark.parametrize("bad", ["a\x01b", "a\x1bb", "a\ufffeb", "NaN", "_meta", "a/b"],
+                         ids=["U+0001", "an escape", "U+FFFE",
                               "a non-finite token", "a reserved key", "a separator"])
 def test_a_stage_that_names_a_node_the_graph_refuses_is_refused_when_it_is_loaded(bad):
     """The stage is a door like any other: ``load_graph_from_usd`` adds

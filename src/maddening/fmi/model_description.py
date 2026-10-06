@@ -228,10 +228,11 @@ class ModelDescription:
         compatibility on instantiation.  Deterministic: a hash of the
         model name, the default step size and, for every variable, its
         name, value reference, type, causality, variability, shape,
-        start, min, max and clocks.  So an FMU whose
-        ``modelDescription.xml`` advertises other start values or bounds
-        than the description a bridge serves does not instantiate
-        against that bridge.
+        start, min, max, unit and clocks (a clock's interval too).  So an
+        FMU whose ``modelDescription.xml`` advertises other start values,
+        bounds or units than the description a bridge serves does not
+        instantiate against that bridge.  Not covered: a variable's
+        ``description`` text.
     fmi_version : str
         FMI standard version.  Defaults to ``"3.0"``.
     generation_tool : str
@@ -865,11 +866,109 @@ def _deterministic_token(parts: Iterable[str]) -> str:
     return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
 
 
+#: The attributes of a variable the instantiation token does *not* cover,
+#: with why.  Every other field of :class:`FMIVariable` is hashed
+#: (:func:`_token_part`); ``tests/fmi`` holds the two lists to the dataclass,
+#: so a field added to it has to be put in one of them.
+_NOT_IN_THE_TOKEN = {
+    "description": "free text; nothing computes with it and the bridge does not check it",
+    "node": "the graph address of the variable, not written to the XML (the name is)",
+    "field": "the graph address of the variable, not written to the XML (the name is)",
+}
+
+
+def _token_part(v: "FMIVariable") -> str:
+    """What the instantiation token hashes of one variable: everything its
+    ``modelDescription.xml`` element advertises that an importer or the
+    bridge acts on -- name, value reference, type, causality, variability,
+    shape, start, min, max, clocks, a clock's interval and the unit."""
+    return (f"{v.name}:{v.value_reference}:{v.dtype}:{v.causality}:{v.variability}:"
+            f"{v.shape!r}:{v.start}:{v.min!r}:{v.max!r}:{v.clocks!r}:{v.interval_decimal!r}:"
+            f"{v.unit!r}")
+
+
 def _owner(var: "FMIVariable") -> str:
     """``"the <causality> of node 'n', field 'f'"`` for a clash message."""
     if var.node is None:
         return f"the {var.causality} {var.name!r}"
     return f"the {var.causality} of node {var.node!r}, field {var.field!r}"
+
+
+def _selected_output_pairs(selected_outputs: Any) -> set[tuple[str, str]]:
+    """``selected_outputs`` as a set of ``(node, field)`` name pairs.
+
+    Raises
+    ------
+    ValueError
+        If it is a string, or holds an entry that is not a pair of
+        strings.  ``set((n, f) for (n, f) in selected_outputs)`` unpacked
+        whatever it was given: ``"ab"`` as the pair ``("a", "b")``,
+        ``"spring.position"`` as an unpacking error that named neither the
+        argument nor its form.
+    """
+    if selected_outputs is None:
+        return set()
+    form = ("selected_outputs takes (node, field) pairs of names, such as "
+            "[('spring', 'position')]")
+    if isinstance(selected_outputs, (str, bytes)):
+        raise ValueError(f"{form}; got the string {selected_outputs!r}")
+    pairs: set[tuple[str, str]] = set()
+    for entry in selected_outputs:
+        if (isinstance(entry, (str, bytes)) or not isinstance(entry, (tuple, list))
+                or len(entry) != 2 or not all(isinstance(part, str) for part in entry)):
+            hint = ""
+            if isinstance(entry, str) and "." in entry:
+                node, _, field = entry.rpartition(".")
+                hint = f" (for the output {entry!r}, pass ({node!r}, {field!r}))"
+            raise ValueError(f"{form}; got the entry {entry!r}{hint}")
+        pairs.add((entry[0], entry[1]))
+    return pairs
+
+
+def _refuse_outputs_nothing_exports(selected: set[tuple[str, str]], nodes: Any,
+                                    include_evolving: bool) -> None:
+    """Refuse a ``selected_outputs`` pair no output variable would come of.
+
+    The outputs loop skips every pair it does not find, so a pair naming
+    a node the graph does not have, a field its node does not have, or a
+    node the stability filter keeps out exported nothing, without a word:
+    ``selected_outputs=[("spring", "positon")]`` gave an FMU with no
+    outputs at all.  (``selected_inputs`` has refused an unknown name since
+    0.4.0's fix of the same silence.)
+
+    Raises
+    ------
+    ValueError
+        Naming every such pair with its node and field, and what the node
+        or the graph does have.
+    """
+    problems: list[str] = []
+    for node_name, field_name in sorted(selected):
+        node_spec = (nodes or {}).get(node_name)
+        if node_spec is None:
+            problems.append(
+                f"({node_name!r}, {field_name!r}): the graph has no node {node_name!r} "
+                f"(its nodes: {sorted(nodes or {}) or ['(none)']})")
+            continue
+        node = getattr(node_spec, "node", node_spec)
+        fields = list(node.state_fields())
+        if field_name not in fields:
+            problems.append(
+                f"({node_name!r}, {field_name!r}): node {node_name!r} has no state field "
+                f"{field_name!r} (its state fields: {sorted(fields) or ['(none)']})")
+            continue
+        cls_name = f"{type(node).__module__}.{type(node).__name__}"
+        if not _ensure_stable_only_or_opt_in(cls_name, include_evolving):
+            problems.append(
+                f"({node_name!r}, {field_name!r}): node {node_name!r} is a "
+                f"{type(node).__name__}, which is not a stability level this FMU exports "
+                "(only STABLE nodes, or EVOLVING / PROVISIONAL ones with "
+                "include_evolving=True, enter an FMU)")
+    if problems:
+        raise ValueError(
+            "selected_outputs names output(s) this FMU cannot export, which would "
+            "be left out of it without a word: " + "; ".join(problems) + ".  Fix the "
+            "name, or leave the pair out.")
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -918,7 +1017,15 @@ def build_model_description(
     selected_outputs : iterable of (node, field) tuples, optional
         Which per-node state fields to expose as FMU outputs.  When
         ``None`` (default), every state field of every node is
-        included.
+        included.  A pair that names nothing this FMU can export is a
+        ``ValueError`` naming the node and the field: a node the graph does
+        not have, a field that is not one of the node's state fields, or a
+        node whose stability level this FMU does not export (see
+        *include_evolving*).  Such a pair used to export nothing in
+        silence, so a misspelt field gave an FMU without that output; and
+        an entry that is not a pair of names (``"spring.position"``, the
+        form *selected_inputs* takes) is refused by name rather than
+        unpacked letter by letter.
     include_evolving : bool, default False
         If ``True``, also include surfaces tagged
         ``@stability(EVOLVING)`` or ``PROVISIONAL``.  Default keeps
@@ -1003,7 +1110,11 @@ def build_model_description(
         the caller still has the name in its hand and can change it.
         See :data:`maddening.serialization.json_codec.NON_FINITE_TOKENS`.
         Also if *selected_inputs* names an input the graph does not
-        declare, or one whose target node this FMU does not export.
+        declare, or one whose target node this FMU does not export; and
+        if *selected_outputs* holds an entry that is not a ``(node,
+        field)`` pair of names, or a pair naming a node the graph does not
+        have, a field that is not a state field of its node, or a node
+        this FMU does not export.
 
     Warns
     -----
@@ -1097,6 +1208,11 @@ def build_model_description(
             "An unknown name would export nothing and leave the input it was "
             "meant to be held at zero; fix the name."
         )
+    # The same for the outputs, before anything is built or warned about: a
+    # pair no output would come of used to be skipped in silence.
+    selected_output_set = _selected_output_pairs(selected_outputs)
+    _refuse_outputs_nothing_exports(
+        selected_output_set, getattr(graph_manager, "_nodes", {}) or {}, include_evolving)
     # The stability filter outputs and parameters go through applies to the
     # inputs too, by their target node: an input of a node this FMU does
     # not export (an EXPERIMENTAL one always; an EVOLVING or PROVISIONAL one
@@ -1256,9 +1372,6 @@ def build_model_description(
         next_vr += 1
 
     # ----- Outputs -----
-    selected_output_set = (
-        set((n, f) for (n, f) in (selected_outputs or []))
-    )
     for node_name, node_spec in nodes.items():
         node = getattr(node_spec, "node", node_spec)
         node_class_name = (
@@ -1396,12 +1509,15 @@ def build_model_description(
     # starts every instance at its own description's starts, so an FMU
     # packaged from a graph with stiffness 30 used to instantiate, fmi3OK,
     # against a bridge serving the same structure at 45, while its
-    # modelDescription.xml said 30.
+    # modelDescription.xml said 30.  And the unit: the bridge holds its
+    # description to the graph's unit (it refuses to start once a
+    # parameter's unit has changed), so the unit is advertised like the
+    # bounds, and an FMU packaged before stiffness was re-declared from N/m
+    # to kN/m used to instantiate against the bridge serving kN/m.  The
+    # description text is not covered: nothing computes with it.
     token = _deterministic_token([
         model_name,
-        *[f"{v.name}:{v.value_reference}:{v.dtype}:{v.causality}:{v.variability}:"
-          f"{v.shape!r}:{v.start}:{v.min!r}:{v.max!r}:{v.clocks!r}:{v.interval_decimal!r}"
-          for v in variables],
+        *[_token_part(v) for v in variables],
         f"step:{default_step_size}",
     ])
 

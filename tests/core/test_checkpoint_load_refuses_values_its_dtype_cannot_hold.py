@@ -131,6 +131,68 @@ def test_an_integer_that_would_wrap_is_refused_and_one_that_fits_loads(tmp_path)
     assert int(gm.get_node_state("c")["count"]) == 7
 
 
+class _Typed(SimulationNode):
+    """A node with one state field of each of the given dtypes."""
+
+    def __init__(self, name, dtypes):
+        super().__init__(name, 0.01)
+        self._dtypes = tuple(dtypes)
+
+    def initial_state(self):
+        return {t: jnp.zeros((), t) for t in self._dtypes}
+
+    def update(self, state, boundary_inputs, dt):
+        return dict(state)
+
+
+#: ``(leaf dtype, the checkpoint's value, its dtype)``: an integer of the
+#: other signedness, of the leaf's own width or wider.
+SIGN_WRAPS = [
+    ("uint32", -1, "int32"), ("uint32", -1, "int64"), ("uint8", -1, "int8"),
+    ("uint16", -32768, "int16"), ("int32", 4_000_000_000, "uint32"),
+    ("int8", 200, "uint8"), ("int16", 65535, "uint16"),
+]
+
+
+@pytest.mark.parametrize("leaf, value, carrier", SIGN_WRAPS)
+def test_an_integer_of_the_other_signedness_is_refused_not_wrapped(tmp_path, leaf, value, carrier):
+    """``-1`` for an unsigned field loaded as the type's maximum, and
+    4000000000 for an ``int32`` one as -294967296: the check cast the value
+    to the leaf's type and back, which between a signed and an unsigned
+    type of one width always returns the value it started with."""
+    gm = GraphManager()
+    gm.add_node(_Typed("c", [leaf]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    path = tmp_path / "c.npz"
+    np.savez(path, **{f"c/{leaf}": np.asarray(value, dtype=carrier)})
+    with pytest.raises(ValueError, match=rf"field 'c/{leaf}' holds {value} .* {leaf} cannot hold"):
+        gm.load_state(str(path))
+    assert int(gm.get_node_state("c")[leaf]) == 0
+    # the type's own extremes, carried in the other signedness, load
+    info = np.iinfo(leaf)
+    for ok in {max(info.min, np.iinfo(carrier).min), min(info.max, np.iinfo(carrier).max)}:
+        np.savez(path, **{f"c/{leaf}": np.asarray(ok, dtype=carrier)})
+        gm.load_state(str(path))
+        assert int(gm.get_node_state("c")[leaf]) == ok
+
+
+def test_a_complex_value_with_an_imaginary_part_is_refused_for_a_real_field(tmp_path):
+    """The cast to a real dtype drops the imaginary part; ``3 + 2j`` loaded
+    as ``3.0``.  A complex value that is real loads."""
+    gm = _spring()
+    before = _snapshot(gm)
+    path = _checkpoint(gm, tmp_path, s__position=np.complex128(3 + 2j))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")              # numpy's own ComplexWarning on the cast
+        with pytest.raises(ValueError, match=r"field 's/position' holds .* float32 cannot hold"):
+            gm.load_state(str(path))
+        assert _same(_snapshot(gm), before)
+        gm.load_state(str(_checkpoint(gm, tmp_path, s__position=np.complex128(3 + 0j))))
+    assert float(gm.get_node_state("s")["position"]) == 3.0
+
+
 def test_the_rest_route_answers_the_refusal_naming_no_path(tmp_path):
     """POST /checkpoint/load passes load_state's own refusal on, without the server's
     paths."""

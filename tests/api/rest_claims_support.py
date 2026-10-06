@@ -1776,6 +1776,12 @@ def _a_write_that_moves_a_mapping_s_points_is_a_400(ctx):
     before = ctx.live("a", "length")
     refused(_put(ctx, "a", {"length": 2.0}), 400, "length")
     unchanged_param(ctx, "a", "length", before)
+    # A length the constructor refuses on its own (Fourier 0.58 or more at
+    # either diffusivity the rod holds here) and takes with the diffusivity
+    # written beside it: asked of the whole write (MADD-ANO-215).
+    refused(_put(ctx, "a", {"length": 0.05, "thermal_diffusivity": 0.001}), 400,
+            "length", "interface mapping on edge")
+    unchanged_param(ctx, "a", "length", before)
     resp = _put(ctx, "a", {"thermal_diffusivity": 0.004})   # a calibration of the mapped rod
     assert resp.status_code == 200, resp.text
 

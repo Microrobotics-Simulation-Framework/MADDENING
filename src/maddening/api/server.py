@@ -1853,7 +1853,8 @@ def _params_write_refusal(gm: GraphManager, owner: str, changes: dict[str, Any],
         # key, together and with a save's params, is checked below.)
         if key not in leaf_keys:
             others = {k: v for k, v in changes.items() if k != key and k in own}
-            reason = gm._constructor_write_reason(owner, key, node_value, others=others)
+            reason = gm._constructor_write_reason(owner, key, node_value, others=others,
+                                                  live=live_before)
             if reason is not None:
                 return [key, *others], reason, False
         shape_reason = gm._state_shape_write_reason(owner, key, node_value)
@@ -1868,9 +1869,17 @@ def _params_write_refusal(gm: GraphManager, owner: str, changes: dict[str, Any],
         # points' weights and a save would not load.  The graph's own
         # decision, the one that refuses the same value written into
         # gm.params alone at the next run.
-        reason = gm._mapping_point_write_reason(owner, {key: node_value})
+        reason = gm._mapping_point_write_reason(owner, {key: node_value}, live=live_before)
         if reason is not None:
             return [key], reason, False
+    # ... and of the whole write, every key at once (the keys at the node's
+    # own value included), on the node a save would reload: a length that
+    # the constructor refuses on its own and takes with the diffusivity
+    # written beside it is asked of nothing above.
+    if len(changes) > 1 or skip:
+        reason = gm._mapping_point_write_reason(owner, changes, live=live_before)
+        if reason is not None:
+            return [k for k in changes if k in own], reason, False
     # The step must still run with the values: every check above asks
     # whether a value is *used*, and counted a trace that raised as "cannot
     # tell", so RigidBodyNode ``constraints: {"w": 0}`` answered 200 and
@@ -3738,16 +3747,42 @@ class SimulationServer:
 
         @app.delete("/graph/nodes/{name}", tags=["graph"], response_model=None)
         def remove_node(name: str) -> dict[str, str]:
-            """Remove a node.  Refused (409) while the runner runs or a
+            """Remove a node, with its edges and external inputs.  A
+            coupling group loses it as a member and keeps its options; a
+            group left with fewer than two members is removed (no route
+            adds one back); the reply's ``coupling_groups`` says which, when
+            one changed.  A surrogate activated under the name is
+            forgotten with it.  400 when a mapping on an edge between two
+            other nodes was built from the node's points: remove that edge
+            first.  Refused (409) while the runner runs or a
             ``POST /sim/run`` is in progress.  The streams are sent the
             graph without it (they used to go on serving the removed node,
             and the binary stream re-sent a schema that had it)."""
             with self._graph_transaction("remove a node", write=True):
                 try:
-                    self.gm.remove_node(name)
+                    # What remove_node() warns about, for the reply.
+                    notes = self.gm._remove_node(name, replacing=False)
                 except KeyError as exc:
                     raise HTTPException(status_code=404, detail=str(exc))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                # The server's own record of a surrogate under that name
+                # goes with the node: a later deactivate used to add the
+                # recorded original back, with its edges, into a graph the
+                # node had been deleted from.  And the edges another
+                # surrogate's record holds to or from the node go with it,
+                # as the graph's own do: that deactivate used to fail on
+                # them (a 500), for good.
+                self._original_nodes.pop(name, None)
+                self._active_surrogates.discard(name)
+                for other, (orig, edges, ext) in list(self._original_nodes.items()):
+                    kept = [e for e in edges
+                            if name not in (e.source_node, e.target_node)]
+                    if len(kept) != len(edges):
+                        self._original_nodes[other] = (orig, kept, ext)
                 self._publish_state()
+            if notes:
+                return {"status": "ok", "coupling_groups": "  ".join(notes)}
             return {"status": "ok"}
 
         @app.post("/graph/edges", tags=["graph"], status_code=201, response_model=None)
@@ -5256,7 +5291,9 @@ class SimulationServer:
             if live is not None:
                 _refuse_dropped_geometry(self.gm, node_name, live.node, orig_node)
             try:
-                self.gm.remove_node(node_name)
+                # As a replacement: the coupling group the surrogate is a
+                # member of keeps the name, for the node added back below.
+                self.gm._remove_node(node_name, replacing=True)
             except KeyError:
                 pass
 

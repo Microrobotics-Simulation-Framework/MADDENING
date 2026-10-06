@@ -258,7 +258,10 @@ def test_usd_save_refuses_a_reference_to_a_removed_node(kind):
                     source_ref={"node": "spare", "field": "grid_x"},
                     target_ref={"node": "fine", "field": "grid_x"}))
     save_graph_to_usd(gm, Usd.Stage.CreateInMemory())          # fine while it exists
-    gm.remove_node("spare")
+    # remove_node() refuses this removal while the edge holds the reference
+    # (MADD-ANO-214); the write-time check is for a graph that lost the node
+    # some other way.
+    gm._remove_node("spare", replacing=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="unknown node 'spare'"):
         save_graph_to_usd(gm, Usd.Stage.CreateInMemory())
 

@@ -10,7 +10,12 @@ version.  The tests here lower them again and compare.
 Program text, not results: result bits depend on the CPU and on jaxlib,
 so a committed capture of results does not travel; identical program text
 gives identical results on any machine, and depends only on the jax
-version.
+version -- given that ``capture.graph_digests`` empties jax's caches before
+it builds a graph.  Without that the text also says how many copies of its
+own helpers jax happened to write out, which depends on what the process
+traced before; the gate failed that way for eleven graphs in a slow-lane
+process, with no program changed
+(``test_the_digests_do_not_depend_on_what_jax_s_trace_caches_hold``).
 
 * **A jax version with no captured entry fails.**  It does not skip: a
   gate that passes for lack of a capture is not a gate.  Until the capture
@@ -240,6 +245,65 @@ def test_dropping_aitken_s_second_pass_changes_the_programs_of_the_aitken_graph(
     for program in ("step", "step_baked_params", "scan3", "sweep2"):
         assert mutated[program] != base[program], program
     assert capture.graph_digests(GRAPHS[other]) == other_base
+
+
+def _step_text(name: str) -> str:
+    gm = GRAPHS[name]()
+    gm.reset_state()
+    fn, args = capture._library_program(gm, "step")           # noqa: SLF001
+    return fn.lower(*args).as_text()
+
+
+def test_the_digests_do_not_depend_on_what_jax_s_trace_caches_hold():
+    """The slow-lane failure of 2026-10-06, made in one step.  With jax's
+    cached traces of ``jnp.frexp`` and ``jnp.isinf`` dropped (as its bounded
+    caches drop entries after enough tracing) while traces that embed them
+    live on, the step of a graph with an accelerated group lowers to
+    another text -- the same operations, more private copies of the
+    helpers, every later function renumbered -- for the rest of the
+    process.  Eleven gate graphs failed that way in a process that had run
+    the sharding comparisons first.  ``graph_digests`` empties jax's caches
+    before it builds a graph, so its answer is the captured one in that
+    state too."""
+    def private_functions(text: str) -> list:
+        return sorted(re.sub(r"@[\w.$]+", "@f", line.strip()) for line in text.splitlines()
+                      if line.startswith("  func.func private "))
+
+    name = capture.AITKEN
+    before = _step_text(name)
+    jnp.frexp.clear_cache()
+    jnp.isinf.clear_cache()
+    after = _step_text(name)
+    assert after != before, (
+        "dropping jax's traces of frexp and isinf no longer changes the lowered text on jax "
+        f"{jax.__version__}: this test has lost its premise (find another way to make jax "
+        "write a helper out twice, or retire it with the reason)")
+    extra = list(private_functions(after))
+    for signature in private_functions(before):
+        extra.remove(signature)
+    assert extra and all("@f(" in signature for signature in extra), extra
+    assert {s.split("(", 1)[1] for s in extra} <= {
+        s.split("(", 1)[1] for s in private_functions(before)}, (
+            "the text gained a helper of a signature it did not have", extra)
+    assert _sha_of(after) != _sha_of(before)
+    _assert_captured({name: capture.graph_digests(GRAPHS[name])})
+
+
+def _sha_of(text: str) -> str:
+    return capture._sha(text)                                 # noqa: SLF001
+
+
+def test_graph_digests_empties_jax_s_caches_before_it_builds_the_graph(monkeypatch):
+    """The order matters: emptied first, then the graph built and lowered."""
+    events = []
+    monkeypatch.setattr(jax, "clear_caches", lambda: events.append("cleared"))
+
+    def builder():
+        events.append("built")
+        return GRAPHS["rbf-edge"]()
+
+    capture.graph_digests(builder)
+    assert events == ["cleared", "built"]
 
 
 def test_the_comparison_reports_a_missing_capture_a_missing_graph_and_a_changed_program():

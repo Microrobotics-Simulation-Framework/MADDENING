@@ -7,7 +7,9 @@ uses none is unchanged", and the strongest form of that claim is about
 the *program*, not about results: result bits depend on the CPU's
 instruction set and on jaxlib, so a committed capture of results does not
 travel to another machine, while the lowered program text depends only on
-the jax version -- and identical text gives identical results anywhere.
+the jax version and on what jax's trace caches hold (which this script
+empties first: "Emptied caches" below) -- and identical text gives
+identical results anywhere.
 
 For each of a fixed set of graphs (:func:`gate_graphs`) this lowers five
 programs and records the sha256 of their StableHLO text:
@@ -39,6 +41,25 @@ The gate is strict on purpose.  The text changes with any change to what
 is traced -- a numerically neutral ``* 1.0``, two existing operations in
 another order -- so a change that leaves it alone has, provably, changed
 nothing for these graphs.
+
+**Emptied caches.**  One part of the text is not the program's: how often
+jax wrote out a helper of its own.  A jitted function called inside a trace
+(``jnp.isinf``, ``jnp.frexp``, ``jnp.clip``, jax's ``_where``) is lowered
+as a private function, one per *trace* jax holds of it and not one per
+signature.  Whether two call sites share a trace depends on jax's trace
+caches, which are bounded: after enough other tracing in the same process
+an entry is dropped while a trace that embeds it lives on, the next call
+traces the helper again, and the text gains a second, identical
+``@isinf_7`` with every later function renumbered -- the same program
+under another sha256.  The gate held in a fresh process and in the
+per-push lane, and failed for eleven graphs (every one with an accelerated
+group) in a slow-lane process that had run the sharding comparisons first
+(2026-10-06), with no program changed.  So :func:`graph_digests` calls
+``jax.clear_caches()`` before it builds a graph: each graph is lowered
+from the same state whatever ran before it, in this process or in a
+pytest session, and in any order.  (The capture of 396eb59a was taken
+without that, in a fresh process; emptied caches give the same digests for
+all 24 graphs on the three jax versions, forwards and backwards.)
 
 **Capturing.**  The capture must be taken on the commit the change starts
 from, with a clean tree, once per jax version that is tested::
@@ -325,7 +346,13 @@ def program_texts(gm) -> dict:
 
 
 def graph_digests(builder) -> dict:
-    """``{program: sha256 of its text, or the refusal}`` of one gate graph."""
+    """``{program: sha256 of its text, or the refusal}`` of one gate graph,
+    built and lowered from emptied jax caches (the module docstring,
+    "Emptied caches"): the digests are then the same whatever this process
+    traced before."""
+    import jax  # noqa: PLC0415
+
+    jax.clear_caches()
     texts = program_texts(builder())
     assert tuple(texts) == PROGRAMS
     return {name: (text if text.startswith("refused:") else _sha(text))

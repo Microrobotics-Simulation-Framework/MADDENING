@@ -727,6 +727,46 @@ def test_a_logit_range_no_value_can_enter_is_refused_by_every_door(doors, value)
     assert "refused to start" in outcomes["bridge.set (no specs)"][2]
 
 
+#: Specs a float32 leaf cannot be mapped under at all: ``ParamSpec.check``
+#: refuses every value by the spec, not by the value (a subnormal ``logit``
+#: bound, a width or a bound float32 does not hold, a width under four
+#: smallest normals).
+_UNMAPPABLE = {
+    "logit-subnormal-lower": ParamSpec(bounds=(SUBNORMAL_MIN, 1.4210854715202004e-14),
+                                       transform="logit"),
+    "logit-subnormal-lower-wide": ParamSpec(bounds=(1e-40, 1.0), transform="logit"),
+    "logit-subnormal-upper": ParamSpec(bounds=(-1.0, -1e-40), transform="logit"),
+    "logit-narrow": ParamSpec(bounds=(2.0 * TINY, 4.0 * TINY), transform="logit"),
+    "logit-width-overflows": ParamSpec(bounds=(-3e38, 3e38), transform="logit"),
+    "logit-upper-overflows": ParamSpec(bounds=(0.0, 1e39), transform="logit"),
+    "log-lower-overflows": ParamSpec(bounds=(1e39, None), transform="log"),
+}
+
+
+@pytest.mark.parametrize("value", [1.4210853868169056e-14, TINY, 1e-20, 0.5, 2.0,
+                                   float(INITIAL_VALUE), 0.0],
+                         ids=["drawn", "tiny", "1e-20", "half", "two", "initial", "zero"])
+@pytest.mark.parametrize("label", sorted(_UNMAPPABLE))
+def test_a_spec_the_leaf_cannot_be_mapped_under_is_refused_by_every_door(doors, label, value):
+    """A refusal that is about the spec reaches the doors that hold no spec
+    through the description: a bridge over a sidecar built without specs
+    holds the ``min`` / ``max`` the description advertises, and a spec that
+    accepts no value advertises an envelope no value is in, so that bridge
+    refuses to start as every other door refuses the value.  The first
+    case and value are the draw the slow lane failed on
+    (``test_every_door_accepts_or_refuses_a_parameter_value_together_broadly``,
+    under ``logit`` on ``(1.4e-45, 1.42e-14)``): the description advertised
+    ``min = TINY`` and ``max`` one float under ``1.42e-14``, and the bridge
+    without specs took every value between them."""
+    spec = _UNMAPPABLE[label]
+    outcomes = every_door(doors, spec, value)
+    assert not any(ok for ok, _, _ in outcomes.values()), outcomes
+    for door in ("bridge.set (no specs)", "bridge.set_state (no specs)",
+                 "bridge.set (specs)", "bridge.set_state (specs)"):
+        assert "refused to start" in outcomes[door][2], (door, outcomes[door][2])
+    assert check_acceptance(doors, spec, value) == "refused"
+
+
 @pytest.mark.parametrize("value", ["1.5", "30", " 2.0 ", "1e3"])
 def test_a_numeric_string_is_refused_by_every_door(doors, value):
     """N1, fixed: ``PUT /graph/params`` stored a numeric string in a float

@@ -49,9 +49,12 @@ b. **worse than the plain fit**: where the same fit with the damping under
    ``transform=None`` and the same bounds recovers the truth in the default
    50 iterations, the transformed fit's relative error after at most four
    times as many (SYS-144);
-   -- in both, 0 for a fit that warned by name that it ended on the edge of
-   its transform's range *and* whose truth is there, nearer a bound than
-   the transform resolves: the one ending the documentation excuses;
+   -- in both, 0 for a fit that ended at an optimum that is not the truth,
+   which the spring has (another basin, from a stiffness started far too
+   high; a bound, or an edge of the transform's range the fit warned of by
+   name, that the loss pushes onto).  What tells them from a wrong ending
+   is whether the loss still falls beside the returned point
+   (:func:`_descent_nearby`);
 c. **returned is not evaluated**: the relative difference between
    ``best_loss`` and the loss of the fitter's own residual program at the
    parameters returned, and -- counted as at least 1 -- any difference at
@@ -101,9 +104,6 @@ LOSS_ULPS = 2.0 ** 10
 #: How near an edge a drawn position may sit, in float spacings of the
 #: bounds' own size (the grid's ``EDGE_ULPS``).
 EDGE_ULPS = 8.0
-#: How many of the transform's unresolved margins from a bound a truth may
-#: be for an edge warning to account for a fit that missed it.
-EDGE_MARGINS = 4.0
 #: ``fit_lm``'s default ``n_iter``, which the control runs for, and how
 #: many times that the transformed fit is given in score (b).  A fit that
 #: is still descending when its iterations run out says ``converged=False``
@@ -179,20 +179,6 @@ class Case:
             damping = lo + self._inside(self.start_at, lo, hi - lo) * (hi - lo)
         return self.stiffness * self.stiffness_off, damping
 
-    @property
-    def truth_on_an_edge(self) -> bool:
-        """Whether the truth is nearer a bound than the transform resolves
-        (``fit_lm``: ``sqrt(eps)`` of the bounds' size inside each bound;
-        four times that here).  Only then does a warning that the fit ended
-        on an edge account for a fit that is not at the truth: the data pull
-        the parameter where its transform cannot follow."""
-        lo, hi = self.bounds
-        if self.transform in ("log", "log-from-lo"):
-            return self.damping - lo <= EDGE_MARGINS * self.eps ** 0.5 * max(
-                abs(lo), self.damping)
-        margin = EDGE_MARGINS * self.eps ** 0.5 * max(abs(lo), abs(hi), hi - lo)
-        return min(self.damping - lo, hi - self.damping) <= margin
-
     def spec(self, control: bool = False) -> ParamSpec:
         lo, hi = self.bounds
         if self.transform == "logit" and not control:
@@ -215,14 +201,22 @@ _FRACTION = st.one_of(
 )
 
 
-def cases(transforms=TRANSFORMS):
+#: How far off the stiffness starts, in decades either way: everywhere,
+#: and within the span the differential claim is made over (SYS-144: 0.1 to
+#: 30 times the truth).  Beyond it ``fit_lm`` can stall on a bound from
+#: either parametrisation, and which one does is chance
+#: (:func:`test_fit_lm_from_a_far_start_does_not_stop_short_on_the_end_of_a_range`).
+FAR, CLAIMED = (-2.0, 2.0), (-1.0, float(np.log10(30.0)))
+
+
+def cases(transforms=TRANSFORMS, stiffness_decades=FAR):
     return st.builds(
         Case, transform=st.sampled_from(transforms), x64=st.booleans(), masked=st.booleans(),
         # Shrinks to the guide's spring.
         stiffness_true=_decades(-0.5, 0.5).map(lambda x: STIFFNESS * x),
         damping_true=_decades(-0.5, 0.5).map(lambda x: TRUTH * x),
         width=_decades(-1.5, 2.0), truth_at=_FRACTION, start_at=_FRACTION,
-        damping_off=_decades(-2.0, 2.0), stiffness_off=_decades(-2.0, 2.0),
+        damping_off=_decades(-2.0, 2.0), stiffness_off=_decades(*stiffness_decades),
         # ``fit_lm`` documents every residual and Jacobian entry normal: in
         # float32 a column is the residual's unit over the parameter's
         # times 1e-6 to 1, so 27 decades between them at most.
@@ -327,6 +321,59 @@ def _own_residual(key, problem):
     return _PROGRAMS[key, 0]
 
 
+#: The points around a returned one where :func:`_descent_nearby` reads the
+#: loss: each of the eight directions, at these fractions of each
+#: parameter's scale.
+_RADII = (1e-4, 1e-2)
+_DIRECTIONS = tuple((i, j) for i in (-1, 0, 1) for j in (-1, 0, 1) if (i, j) != (0, 0))
+
+
+def _descent_nearby(case: "Case", control: bool, program, params, best_loss: float,
+                    edge_warned: bool) -> float:
+    """The largest fall of the loss, as a fraction of ``best_loss``, over
+    the feasible points around ``params``: the returned point moved by
+    :data:`_RADII` of each parameter's scale in each of the eight
+    directions.  Feasible: the damping inside its bounds and, for a fit
+    that warned it ended on the edge of its transform's range, no nearer
+    the bound it ended beside (which that transform cannot reach).  0 for a
+    loss at the residual's rounding, where a fall is noise.
+
+    This is what separates a wrong ending from a right one that is not the
+    truth.  The spring's loss has more than one basin from a stiffness
+    started far too high (a fast oscillation is best fitted by damping it
+    out), and a truth nearer a bound than a ``logit`` resolves cannot be
+    reached: a fit that stops in another basin, or on a bound or an edge
+    the loss pushes it onto, has an optimum.  One that stops where the loss
+    still falls has not."""
+    lo, hi = case.spec(control).bounds
+    leaves = params["nodes"]["spring"]
+    k, c = float(leaves["stiffness"]), float(leaves["damping"])
+    scale = case.damping if hi is None else min(case.damping, hi - lo)
+    if edge_warned:
+        if hi is not None and hi - c <= c - lo:
+            hi = c
+        else:
+            lo = c
+    # The loss of a residual of 2**5 float spacings of the positions.
+    rounding = 0.5 * N_STEPS * (2.0 ** 5 * case.eps * case.residual_scale) ** 2
+    if not best_loss > rounding:
+        return 0.0
+    lowest = best_loss
+    for radius in _RADII:
+        for i, j in _DIRECTIONS:
+            c_near = max(c + j * radius * scale, lo)
+            if hi is not None:
+                c_near = min(c_near, hi)
+            near = dict(leaves, stiffness=jnp.asarray(k * (1.0 + i * radius),
+                                                      leaves["stiffness"].dtype),
+                        damping=jnp.asarray(c_near, leaves["damping"].dtype))
+            tree = dict(params, nodes=dict(params["nodes"], spring=near))
+            loss = float(sysid._half_squared_norm(program(tree)))  # noqa: SLF001
+            if np.isfinite(loss):
+                lowest = min(lowest, loss)
+    return (best_loss - lowest) / best_loss
+
+
 @dataclass
 class Outcome:
     """One fit.  ``refused``: it raised ``FloatingPointError`` (a start the
@@ -345,10 +392,24 @@ class Outcome:
     #: ``(node, key, went in, came back)`` for each kept leaf that differs.
     moved: tuple = ()
     n_iter: int = 0
+    #: For a fit that is not at the truth: how far the loss falls, as a
+    #: fraction of itself, at the best of the points around the returned one
+    #: (:func:`_descent_nearby`).  0: a constrained local optimum.
+    descent: float = 0.0
+    eps: float = 0.0
 
     @property
     def recovered(self) -> bool:
         return self.error <= TOLERANCE
+
+    @property
+    def wrong(self) -> float:
+        """The fit's relative error -- within :data:`TOLERANCE` at the
+        truth, which leaves a search something to climb -- and 0 where it
+        is at another optimum: off the truth with no fall of the loss
+        beside it."""
+        elsewhere = not self.recovered and self.descent <= LOSS_ULPS * self.eps
+        return 0.0 if elsewhere else self.error
 
 
 def run_fit(case: Case, control: bool = False, **options) -> Outcome:
@@ -396,15 +457,19 @@ def run_fit(case: Case, control: bool = False, **options) -> Outcome:
             a, b = np.asarray(went_in), np.asarray(came_back)
             if a.dtype != b.dtype or a.tobytes() != b.tobytes():
                 moved.append((node, leaf, a.tolist(), b.tolist()))
-        loss = float(sysid._half_squared_norm(  # noqa: SLF001
-            _own_residual(key, problem)(res.params)))
         texts = [str(w.message) for w in caught]
+        edge_warned = any(EDGE_WARNING in t or EDGE_START_WARNING in t for t in texts)
+        program = _own_residual(key, problem)
+        loss = float(sysid._half_squared_norm(program(res.params)))  # noqa: SLF001
+        descent = 0.0
+        if not error <= TOLERANCE:
+            descent = _descent_nearby(case, control, program, res.params, loss, edge_warned)
         return Outcome(
             converged=bool(res.converged), stiffness=k, damping=c,
             error=error if np.isfinite(error) else float("inf"),
-            edge_warned=any(EDGE_WARNING in t or EDGE_START_WARNING in t for t in texts),
+            edge_warned=edge_warned, eps=case.eps,
             best_loss=float(res.best_loss), loss_returned=loss, moved=tuple(moved),
-            n_iter=int(res.n_iter))
+            n_iter=int(res.n_iter), descent=descent)
 
 
 # ---------------------------------------------------------------------------
@@ -412,24 +477,22 @@ def run_fit(case: Case, control: bool = False, **options) -> Outcome:
 # ---------------------------------------------------------------------------
 
 def converged_at_a_wrong_point(case: Case):
-    """(a) ``converged=True`` is the truth, or an edge the truth is on and
-    the fit warned of."""
+    """(a) ``converged=True`` is an optimum: the truth, another basin's, or
+    a bound or a warned-of edge the loss pushes onto."""
     fit = run_fit(case)
-    excused = fit.edge_warned and case.truth_on_an_edge
-    return (fit.error if fit.converged and not excused else 0.0), fit
+    return (fit.wrong if fit.converged else 0.0), fit
 
 
 def worse_than_the_plain_fit(case: Case):
-    """(b) Where the control recovers the truth, the transformed fit does,
-    or -- the truth being on an edge of its transform's range -- warns by
-    name that it ended there."""
+    """(b) Where the control recovers the truth, the transformed fit ends at
+    an optimum too, converged or not: no trap on the way."""
     control = run_fit(case, control=True, n_iter=N_ITER)
     if not control.recovered:
         return 0.0, ("the control did not recover", control)
     fit = run_fit(case, n_iter=PATIENCE * N_ITER)
     if fit.refused:
         return float("inf"), ("refused where the control recovered", fit)
-    return (0.0 if fit.edge_warned and case.truth_on_an_edge else fit.error), fit
+    return fit.wrong, fit
 
 
 def returned_is_not_evaluated(case: Case):
@@ -449,7 +512,8 @@ def returned_is_not_evaluated(case: Case):
 #: ``(score, strategy, threshold)``.
 SEARCHES = {
     "converged-at-a-wrong-point": (converged_at_a_wrong_point, cases(), TOLERANCE),
-    "worse-than-the-plain-fit": (worse_than_the_plain_fit, cases(TRANSFORMS[1:]), TOLERANCE),
+    "worse-than-the-plain-fit": (worse_than_the_plain_fit, cases(TRANSFORMS[1:], CLAIMED),
+                                 TOLERANCE),
     "returned-is-not-evaluated": (returned_is_not_evaluated, cases(), 1.0),
 }
 
@@ -467,3 +531,42 @@ def test_no_wrong_fit_among_the_fixed_draws(name):
 def test_no_wrong_fit_found_by_the_search(name):
     score, strategy, threshold = SEARCHES[name]
     targeted_search(strategy, score, threshold, profile=SLOW, label=name)
+
+
+# ---------------------------------------------------------------------------
+# Found by the search
+# ---------------------------------------------------------------------------
+
+#: A stiffness started 75 or 80 times too high with the damping free over
+#: a range a hundred times its value, as ``(transform, x64, the stiffness's
+#: start over its truth, where in the range the damping starts)``.  Each
+#: fit stopped with iterations left, ``converged=False``, the damping on
+#: the upper end of its range (a ``logit`` one with the edge warning) and
+#: the stiffness two to three times its truth -- at no optimum: the loss
+#: falls by about 1% a hundredth of the way along from there.  Which starts
+#: do it is close to chance, and the clipped parametrisation does it too,
+#: so the pin is the set.
+_STOPPED_SHORT = [
+    ("logit", False, 75.0, 0.75), ("logit", False, 75.0, 0.9), ("logit", False, 75.0, 0.94),
+    ("logit", True, 75.0, 0.75), ("logit", True, 80.0, 0.75),
+    ("identity", False, 80.0, 0.9), ("identity", True, 80.0, 0.94),
+]
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "fit_lm from a stiffness start 75 times off stops unconverged on the end of a wide "
+    "damping range where the loss still falls: found by the search of score (b) before "
+    "it was kept to SYS-144's span of starts (0.1 to 30 times the truth).  Loud "
+    "(converged=False, and a logit fit names the edge), an extreme start, outside every "
+    "claim's conditions; kept so that a change which ends it is noticed."))
+def test_fit_lm_from_a_far_start_does_not_stop_short_on_the_end_of_a_range():
+    stopped = {}
+    for transform, x64, stiffness_off, start_at in _STOPPED_SHORT:
+        case = Case(transform=transform, x64=x64, masked=False, stiffness_true=STIFFNESS,
+                    damping_true=TRUTH, width=100.0, truth_at=0.9375, start_at=start_at,
+                    damping_off=1.0, stiffness_off=stiffness_off, unit=1.0,
+                    residual_scale=1.0, masked_range=10.0)
+        fit = run_fit(case, n_iter=PATIENCE * N_ITER)
+        if fit.wrong > TOLERANCE and fit.n_iter < PATIENCE * N_ITER:
+            stopped[transform, x64, stiffness_off, start_at] = fit
+    assert not stopped, "\n".join(f"{cell}: {fit}" for cell, fit in stopped.items())

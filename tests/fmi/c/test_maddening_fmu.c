@@ -5,6 +5,13 @@
  * sidecar on a socketpair and, for instantiation, a real loopback
  * listener on a thread.  Built and run by tests/fmi/test_c_unit.py,
  * plain and under -fsanitize=address,undefined.
+ *
+ * WHICH SOURCE IS TESTED.  The wrapper is included through the macro
+ * MADDENING_FMU_C, which tests/fmi/test_c_unit.py sets to the path of the
+ * imported package's source (maddening.fmi.package.C_SOURCE), so the
+ * binary tests the wrapper Python would package -- a copy of src/ put on
+ * PYTHONPATH (a mutation harness's) included.  Built by hand without the
+ * macro, the tree's own source is used.  main() prints the path.
  */
 
 /* send() is routed through a fault injector for the send-failure tests
@@ -16,8 +23,55 @@
 #  define _DEFAULT_SOURCE 1
 #endif
 #include <errno.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+
+/* Every allocation the wrapper and this file make is counted (the libc
+ * headers come first, so the macros below rename only the calls).  The
+ * count of live ones is what the FMU-state tests assert on -- a state
+ * object allocated over one the importer handed back shows up as two more
+ * -- and main() fails unless it ends at zero, so the plain build sees a
+ * leak as the sanitized one does.  g_fail_allocs_in makes the n-th
+ * allocation from now on this thread fail, once. */
+static atomic_long g_live_allocs = 0;
+static _Thread_local long g_fail_allocs_in = -1;
+static int alloc_fails_now(void) {
+    if (g_fail_allocs_in < 0) return 0;
+    return g_fail_allocs_in-- == 0;
+}
+static void *counted_malloc(size_t n) {
+    void *p = alloc_fails_now() ? NULL : malloc(n);
+    if (p) atomic_fetch_add(&g_live_allocs, 1);
+    return p;
+}
+static void *counted_calloc(size_t k, size_t n) {
+    void *p = alloc_fails_now() ? NULL : calloc(k, n);
+    if (p) atomic_fetch_add(&g_live_allocs, 1);
+    return p;
+}
+static void *counted_realloc(void *old, size_t n) {
+    void *p = alloc_fails_now() ? NULL : realloc(old, n);
+    if (p && !old) atomic_fetch_add(&g_live_allocs, 1);
+    return p;
+}
+static void counted_free(void *p) {
+    if (p) atomic_fetch_sub(&g_live_allocs, 1);
+    free(p);
+}
+static char *counted_strdup(const char *s) {
+    char *p = strdup(s);
+    if (p) atomic_fetch_add(&g_live_allocs, 1);
+    return p;
+}
+static long live_allocs(void) { return atomic_load(&g_live_allocs); }
+#define malloc counted_malloc
+#define calloc counted_calloc
+#define realloc counted_realloc
+#define free counted_free
+#define strdup counted_strdup
 
 /* Faults apply to one socket only (the client end under test), never to
  * the fake server's sends on the other end of the pair. */
@@ -30,7 +84,10 @@ static int g_recv_fault_fd = -1, g_recv_eintr = 0;
 static ssize_t fault_recv(int s, void *buf, size_t n, int flags);
 #define send fault_send
 #define recv fault_recv
-#include "../../../src/maddening/fmi/c/maddening_fmu.c"
+#ifndef MADDENING_FMU_C
+#  define MADDENING_FMU_C "../../../src/maddening/fmi/c/maddening_fmu.c"
+#endif
+#include MADDENING_FMU_C
 #undef send
 #undef recv
 
@@ -61,6 +118,7 @@ static ssize_t fault_send(int s, const void *buf, size_t n, int flags) {
 
 #include <assert.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
 
 static int g_failures = 0;
@@ -87,8 +145,17 @@ static Instance *fake_instance(sock_t s) {
     return in;
 }
 
+/* A state object of the test's own (on the stack, in no instance's list):
+ * `n` bytes at `blob`, which fmi3SetFMUState only reads. */
+static FmuState bare_state(char *blob, size_t n) {
+    FmuState st;
+    memset(&st, 0, sizeof st);
+    st.blob = blob; st.n = n;
+    return st;
+}
+
 /* The tests close the sockets themselves; this frees the rest (the
- * instance's C numeric locale included). */
+ * instance's C numeric locale and its live FMU states included). */
 static void free_instance(Instance *in) {
     in->sock = SOCK_INVALID;
     instance_release(in);
@@ -139,26 +206,67 @@ static void *server_thread(void *p) {
     return NULL;
 }
 
-/* Run `body` on the client end while the fake server answers once; the
- * request the server saw is left in g_seen (g_seen_len bytes, flag bit
- * in g_seen_flag) for the caller to inspect. */
+/* One exchange of the existing instance `in_` with a fake server that
+ * answers once: `body` runs on the client end, and the request the server
+ * saw is left in g_seen (g_seen_len bytes, flag bit in g_seen_flag) for the
+ * caller to inspect.  The instance outlives the exchange, so a test can
+ * make several on one instance (FMU states belong to their instance). */
 static char *g_seen = NULL;
 static size_t g_seen_len = 0;
 static int g_seen_flag = 0;
-#define WITH_SERVER_X(reply_, reply_len_, advertised_, flag_, body) do {         \
+#define EXCHANGE_X(in_, reply_, reply_len_, advertised_, flag_, body) do {       \
     int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);              \
     ServerArgs args = { sv[1], (reply_), (reply_len_), (advertised_), (flag_),    \
                         NULL, 0, 0, 0 };                                         \
     pthread_t th; pthread_create(&th, NULL, server_thread, &args);               \
-    Instance *in = fake_instance(sv[0]);                                         \
+    (in_)->sock = sv[0];                                                         \
     body;                                                                        \
     pthread_join(th, NULL);                                                      \
-    if (in->sock != SOCK_INVALID) sock_close(sv[0]);   /* unless the wrapper dropped it */ \
+    if ((in_)->sock != SOCK_INVALID) sock_close(sv[0]);  /* unless the wrapper dropped it */ \
+    (in_)->sock = SOCK_INVALID;                                                  \
     if (!args.closed) sock_close(sv[1]);                                         \
     free(g_seen); g_seen = args.seen ? args.seen : strdup("");                   \
     g_seen_len = args.seen_len; g_seen_flag = args.seen_flag;                    \
+} while (0)
+/* A JSON reply of strlen(reply) bytes. */
+#define EXCHANGE(in_, reply, body) EXCHANGE_X((in_), (reply), slen(reply), slen(reply), 0, body)
+/* A binary-flagged reply of `len` bytes. */
+#define BINARY_EXCHANGE(in_, reply, len, body) EXCHANGE_X((in_), (reply), (len), (len), 1, body)
+
+/* The same with an instance of its own, `in`, made for the exchange and
+ * freed after it. */
+#define WITH_SERVER_X(reply_, reply_len_, advertised_, flag_, body) do {         \
+    Instance *in = fake_instance(SOCK_INVALID);                                  \
+    EXCHANGE_X(in, (reply_), (reply_len_), (advertised_), (flag_), body);        \
     free_instance(in);                                                           \
 } while (0)
+
+/* A call the wrapper must refuse BEFORE it sends anything, made against a
+ * server that would answer "ok" (with a value, a state and a time) to
+ * whatever it was sent.  On a closed connection every call is fmi3Error,
+ * so `call == fmi3Error` there could not fail and only a log-text check
+ * could tell a refusal from a send; here an unrefused call is answered
+ * fmi3OK, and the server must have seen nothing.  The instance `in` is in
+ * Step Mode; `body` may set its phase or `in->binary`. */
+#define WILLING_REPLY "{\"ok\":true,\"values\":[2],\"state\":\"QUJD\",\"t\":0}"
+static int g_sent_nothing = 0;
+#define WITH_WILLING_SERVER(body) do {                                           \
+    int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);              \
+    ServerArgs args = { sv[1], WILLING_REPLY, slen(WILLING_REPLY),               \
+                        slen(WILLING_REPLY), 0, NULL, 0, 0, 0 };                 \
+    pthread_t th; pthread_create(&th, NULL, server_thread, &args);               \
+    Instance *in = fake_instance(sv[0]);                                         \
+    body;                                                                        \
+    /* hang up, so a server still waiting for a request sees EOF and ends */     \
+    if (in->sock != SOCK_INVALID) sock_close(sv[0]);                             \
+    pthread_join(th, NULL);                                                      \
+    if (!args.closed) sock_close(sv[1]);                                         \
+    g_sent_nothing = (args.seen == NULL);                                        \
+    CHECK(g_sent_nothing);                       /* nothing reached the wire */  \
+    free(args.seen);                                                             \
+    free_instance(in);                                                           \
+} while (0)
+
 /* JSON reply of strlen(reply) bytes, optionally announcing len_override. */
 #define WITH_SERVER(reply, len_override, body)                                   \
     WITH_SERVER_X((reply), slen(reply), (len_override) ? (len_override) : slen(reply), 0, body)
@@ -443,6 +551,24 @@ static void test_get_set_step(void) {
         CHECK(fmi3SetInt32((fmi3Instance)in, vr, 2, vi, 2) == fmi3OK);
     });
     CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Int32\",\"vr\":[7,9],\"values\":[-5,7]}") == 0);
+    /* negative zero keeps its sign in the text: %.17g alone writes "-0",
+     * which a JSON reader takes for the integer 0 */
+    fmi3Float64 zeros[3] = { -0.0, 0.0, -0.0 };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 3, zeros, 3) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Float64\",\"vr\":[7,9,11],\"values\":[-0.0,0,-0.0]}") == 0);
+    fmi3Float32 zero32[1] = { -0.0f };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetFloat32((fmi3Instance)in, vr, 1, zero32, 1) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Float32\",\"vr\":[7],\"values\":[-0.0]}") == 0);
+    /* and a reply's "-0.0" (or a bare "-0") is read back negative */
+    fmi3Float64 back[2] = { 1.0, 1.0 };
+    WITH_SERVER("{\"ok\":true,\"values\":[-0.0,-0]}", 0, {
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, back, 2) == fmi3OK);
+    });
+    CHECK(back[0] == 0.0 && signbit(back[0]) && back[1] == 0.0 && signbit(back[1]));
     fmi3Boolean vb[1] = { fmi3True };
     WITH_SERVER("{\"ok\":true}", 0, {
         CHECK(fmi3SetBoolean((fmi3Instance)in, vr, 1, vb, 1) == fmi3OK);
@@ -451,13 +577,16 @@ static void test_get_set_step(void) {
      * can refuse fmi3SetBoolean on a Float32 variable (it used to arrive
      * as a bare 1.0 and be stored) */
     CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Boolean\",\"vr\":[7],\"values\":[1]}") == 0);
-    /* NaN / inf never leave the process */
+    /* NaN / inf never leave the process: refused with a peer that would
+     * have taken them */
     fmi3Float32 bad[1] = { NAN };
-    Instance *dead = fake_instance(SOCK_INVALID);
     g_log_calls = 0;
-    CHECK(fmi3SetFloat32((fmi3Instance)dead, vr, 1, bad, 1) == fmi3Error);
+    WITH_WILLING_SERVER({
+        CHECK(fmi3SetFloat32((fmi3Instance)in, vr, 1, bad, 1) == fmi3Error);
+    });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "non-finite") != NULL);
     /* nValues == 0 needs no socket */
+    Instance *dead = fake_instance(SOCK_INVALID);
     CHECK(fmi3SetFloat64((fmi3Instance)dead, vr, 0, v64, 0) == fmi3OK);
     CHECK(fmi3GetFloat64((fmi3Instance)dead, vr, 0, v64, 0) == fmi3OK);
     CHECK(fmi3SetFloat64(NULL, vr, 1, v64, 1) == fmi3Error);
@@ -503,15 +632,18 @@ static void test_get_set_step(void) {
     });
     /* a non-finite point or step never reaches the wire (%.17g would
      * write "nan", which is not JSON) */
-    {
-        Instance *dead = fake_instance(SOCK_INVALID);
-        dead->time = 0.3;
-        g_log_calls = 0;
-        CHECK(fmi3DoStep((fmi3Instance)dead, NAN, 0.05, fmi3False, &ev, &term, &early, &last) == fmi3Error);
-        CHECK(last == 0.3 && g_log_calls == 1 && strstr(g_last_log, "must be finite") != NULL);
-        CHECK(fmi3DoStep((fmi3Instance)dead, 0.3, INFINITY, fmi3False, &ev, &term, &early, &last) == fmi3Error);
-        free_instance(dead);
-    }
+    g_log_calls = 0;
+    WITH_WILLING_SERVER({
+        in->time = 0.3;
+        CHECK(fmi3DoStep((fmi3Instance)in, NAN, 0.05, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+        CHECK(last == 0.3 && in->time == 0.3);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "must be finite") != NULL);
+    WITH_WILLING_SERVER({
+        in->time = 0.3;
+        CHECK(fmi3DoStep((fmi3Instance)in, 0.3, INFINITY, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+        CHECK(last == 0.3 && in->time == 0.3);
+    });
     /* EnterInitializationMode tells the bridge the start time, which is the
      * instance's time from then on (it used to stay in the wrapper, and the
      * "time" variable read 0.0 until the first step) */
@@ -528,15 +660,14 @@ static void test_get_set_step(void) {
         CHECK(in->time == 0.7 && strstr(g_last_log, "has stepped") != NULL);
         CHECK(in->phase == PHASE_INSTANTIATED);          /* a refused initialize moves nothing */
     });
-    {
-        Instance *dead = fake_instance(SOCK_INVALID);
-        dead->phase = PHASE_INSTANTIATED;
-        g_log_calls = 0;
-        CHECK(fmi3EnterInitializationMode((fmi3Instance)dead, fmi3False, 0, NAN, fmi3False, 0) == fmi3Error);
-        CHECK(g_log_calls == 1 && strstr(g_last_log, "start time must be finite") != NULL);
-        CHECK(fmi3EnterInitializationMode(NULL, fmi3False, 0, 0.0, fmi3False, 0) == fmi3Error);
-        free_instance(dead);
-    }
+    g_log_calls = 0;
+    WITH_WILLING_SERVER({
+        in->phase = PHASE_INSTANTIATED;
+        CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, NAN, fmi3False, 0) == fmi3Error);
+        CHECK(in->phase == PHASE_INSTANTIATED);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "start time must be finite") != NULL);
+    CHECK(fmi3EnterInitializationMode(NULL, fmi3False, 0, 0.0, fmi3False, 0) == fmi3Error);
 }
 
 /* ------------------------------------------------------- binary frames */
@@ -733,16 +864,20 @@ static void test_binary_get_set(void) {
     CHECK(g_seen_flag == 1 && g_seen_len == 4 + strlen("{\"op\":\"set\",\"type\":\"Int32\",\"vr\":[7,9],\"n\":2,\"dtype\":\"f64\"}") + 16);
     /* non-finite values never leave the process on the binary path either */
     fmi3Float64 bad[2] = { 1.0, INFINITY };
-    Instance *dead = fake_instance(SOCK_INVALID);
-    dead->binary = 1;
     g_log_calls = 0;
-    CHECK(fmi3SetFloat64((fmi3Instance)dead, vr, 2, bad, 2) == fmi3Error);
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 2, bad, 2) == fmi3Error);
+    });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "non-finite") != NULL);
     /* a set larger than the frame limit is refused before any buffer grows
      * (and before any value is read: the count alone decides) */
-    CHECK(do_set(dead, "Float64", vr, 1, v64, (size_t)FRAME_MAX / 8 + 1) == fmi3Error);
-    CHECK(dead->req_cap == 0 && strstr(g_last_log, "frame limit") != NULL);
-    free_instance(dead);
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(do_set(in, "Float64", vr, 1, v64, (size_t)FRAME_MAX / 8 + 1) == fmi3Error);
+        CHECK(in->req_cap == 0);
+    });
+    CHECK(strstr(g_last_log, "frame limit") != NULL);
     /* endianness helpers round-trip on this host */
     {
         double x[2] = { 0.1, -1.7976931348623157e308 }, y[2];
@@ -758,22 +893,22 @@ static void test_binary_fmu_state(void) {
     unsigned char blob[12] = { 'P', 'K', 0, 0, 1, 255, 0, 3, '"', '\\', 0, 9 };
     unsigned char frame[128];
     size_t n = bin_payload(frame, "{\"ok\":true,\"n\":12}", blob, 12);
+    Instance *in = fake_instance(SOCK_INVALID);     /* the states below are its */
+    in->binary = 1;
     fmi3FMUState st = NULL;
-    WITH_BINARY_SERVER((const char *)frame, n, {
-        in->binary = 1;
+    BINARY_EXCHANGE(in, (const char *)frame, n, {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK);
     });
     CHECK(st != NULL && ((FmuState *)st)->n == 12 && memcmp(((FmuState *)st)->blob, blob, 12) == 0);
     /* serialize / deserialize keep the raw bytes */
     size_t sz = 0;
-    CHECK(fmi3SerializedFMUStateSize(NULL, st, &sz) == fmi3OK && sz == 12);
+    CHECK(fmi3SerializedFMUStateSize((fmi3Instance)in, st, &sz) == fmi3OK && sz == 12);
     fmi3Byte buf[12];
-    CHECK(fmi3SerializeFMUState(NULL, st, buf, 12) == fmi3OK && memcmp(buf, blob, 12) == 0);
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, st, buf, 12) == fmi3OK && memcmp(buf, blob, 12) == 0);
     fmi3FMUState st2 = NULL;
-    CHECK(fmi3DeserializeFMUState(NULL, buf, 12, &st2) == fmi3OK);
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, buf, 12, &st2) == fmi3OK);
     /* set_state on the binary path is length-delimited: no base64 check */
-    WITH_SERVER("{\"ok\":true}", 0, {
-        in->binary = 1;
+    EXCHANGE(in, "{\"ok\":true}", {
         CHECK(fmi3SetFMUState((fmi3Instance)in, st2) == fmi3OK);
     });
     CHECK(g_seen_flag == 1);
@@ -783,36 +918,39 @@ static void test_binary_fmu_state(void) {
         CHECK(g_seen_len == 4 + hl + 12 && get_be32((const unsigned char *)g_seen) == hl);
         CHECK(memcmp(g_seen + 4, hdr, hl) == 0 && memcmp(g_seen + 4 + hl, blob, 12) == 0);
     }
-    /* the same blob on a JSON-mode instance is refused (not base64) */
-    Instance *dead = fake_instance(SOCK_INVALID);
+    /* the same blob on a JSON-mode instance is refused (not base64), by the
+     * wrapper: the peer would have taken it */
     g_log_calls = 0;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, st2) == fmi3Error);
+    WITH_WILLING_SERVER({ CHECK(fmi3SetFMUState((fmi3Instance)in, st2) == fmi3Error); });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "not valid") != NULL);
     /* an oversize blob is refused before the request buffer grows */
-    FmuState huge = { (char *)"x", (size_t)FRAME_MAX + 1 };
-    dead->binary = 1;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, &huge) == fmi3Error && dead->req_cap == 0);
-    free_instance(dead);
-    fmi3FreeFMUState(NULL, &st); fmi3FreeFMUState(NULL, &st2);
+    FmuState huge = bare_state((char *)"x", (size_t)FRAME_MAX + 1);
+    g_log_calls = 0;
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, &huge) == fmi3Error && in->req_cap == 0);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &st) == fmi3OK && st == NULL);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &st2) == fmi3OK && st2 == NULL);
     /* count / raw length mismatch on get_state */
     n = bin_payload(frame, "{\"ok\":true,\"n\":11}", blob, 12);
-    WITH_BINARY_SERVER((const char *)frame, n, {
-        in->binary = 1;
+    BINARY_EXCHANGE(in, (const char *)frame, n, {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3Error);
     });
     CHECK(st == NULL && strstr(g_last_log, "length mismatch") != NULL);
     n = bin_payload(frame, "{\"ok\":true}", blob, 12);
-    WITH_BINARY_SERVER((const char *)frame, n, {
-        in->binary = 1;
+    BINARY_EXCHANGE(in, (const char *)frame, n, {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3Error);
     });
+    CHECK(st == NULL);
     /* a JSON get_state reply still works on a binary-mode instance */
-    WITH_SERVER("{\"ok\":true,\"state\":\"QUJDRA==\"}", 0, {
-        in->binary = 1;
+    EXCHANGE(in, "{\"ok\":true,\"state\":\"QUJDRA==\"}", {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK);
     });
     CHECK(st != NULL && ((FmuState *)st)->n == 8);
-    fmi3FreeFMUState(NULL, &st);
+    fmi3FreeFMUState((fmi3Instance)in, &st);
+    free_instance(in);
 }
 
 /* ------------------------------------------- over-limit / broken framing */
@@ -887,23 +1025,31 @@ static void test_max_set_frame_fits_the_bridge_limit(void) {
     });
     CHECK(g_seen_flag == 1 && g_seen_len == 4 + hl + 8 * n && g_seen_len <= FRAME_MAX);
     CHECK(get_be32((const unsigned char *)g_seen) == hl && memcmp(g_seen + 4, hdr, hl) == 0);
-    Instance *dead = fake_instance(SOCK_INVALID);
-    dead->binary = 1;
+    /* one value more is refused by the wrapper, with a peer that would
+     * have answered it */
     g_log_calls = 0;
-    CHECK(do_set(dead, "Float64", vr, 1, vals, n + 1) == fmi3Error);
-    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);   /* refused, not "closed" */
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(do_set(in, "Float64", vr, 1, vals, n + 1) == fmi3Error);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     /* the header counts: twenty 10-digit value references push the same
      * payload over the limit even with a few values fewer */
     g_log_calls = 0;
-    CHECK(do_set(dead, "Float64", vr, 20, vals, n - 10) == fmi3Error);
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(do_set(in, "Float64", vr, 20, vals, n - 10) == fmi3Error);
+    });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     /* and an absurd count or vr list is refused before any buffer grows */
-    Instance *fresh = fake_instance(SOCK_INVALID);
-    fresh->binary = 1;
-    CHECK(do_set(fresh, "Float64", vr, 1, vals, (size_t)FRAME_MAX / 8 + 1) == fmi3Error && fresh->req_cap == 0);
-    CHECK(do_set(fresh, "Float64", vr, (size_t)FRAME_MAX, vals, 1) == fmi3Error && fresh->req_cap == 0);
-    free_instance(fresh);
-    free_instance(dead);
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(do_set(in, "Float64", vr, 1, vals, (size_t)FRAME_MAX / 8 + 1) == fmi3Error && in->req_cap == 0);
+    });
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(do_set(in, "Float64", vr, (size_t)FRAME_MAX, vals, 1) == fmi3Error && in->req_cap == 0);
+    });
     free(vals);
 }
 
@@ -918,12 +1064,12 @@ static void test_get_request_respects_the_frame_limit(void) {
      * needs a 150 MB buffer, so it is left to the reproducer. */
     fmi3ValueReference vr[1] = { 4294967295u };
     double out[1];
-    Instance *fresh = fake_instance(SOCK_INVALID);
     g_log_calls = 0;
-    CHECK(do_get(fresh, "Float64", vr, (size_t)FRAME_MAX / 2 + 1, out, 1) == fmi3Error);
-    CHECK(fresh->req_cap == 0);                    /* refused before any buffer grew */
+    WITH_WILLING_SERVER({
+        CHECK(do_get(in, "Float64", vr, (size_t)FRAME_MAX / 2 + 1, out, 1) == fmi3Error);
+        CHECK(in->req_cap == 0);                   /* refused before any buffer grew */
+    });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
-    free_instance(fresh);
 }
 
 
@@ -1018,23 +1164,30 @@ static void test_getters_refuse_values_their_type_cannot_hold(void) {
 }
 
 static void test_int64_setters_refuse_values_a_double_cannot_carry(void) {
+    /* Each refusal is the wrapper's own, made with a peer that would have
+     * answered "ok" to the rounded value. */
     fmi3ValueReference vr[1] = { 7 };
-    Instance *dead = fake_instance(SOCK_INVALID);
     fmi3Int64 big[1] = { 9007199254740993LL };                  /* 2^53 + 1 */
     g_log_calls = 0;
-    CHECK(fmi3SetInt64((fmi3Instance)dead, vr, 1, big, 1) == fmi3Error);
+    WITH_WILLING_SERVER({ CHECK(fmi3SetInt64((fmi3Instance)in, vr, 1, big, 1) == fmi3Error); });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "cannot be carried exactly") != NULL);
+    fmi3Int64 low[1] = { -9007199254740993LL };                 /* -(2^53 + 1) */
+    WITH_WILLING_SERVER({ CHECK(fmi3SetInt64((fmi3Instance)in, vr, 1, low, 1) == fmi3Error); });
     fmi3Int64 top[1] = { INT64_MAX };                           /* rounds to 2^63 */
-    CHECK(fmi3SetInt64((fmi3Instance)dead, vr, 1, top, 1) == fmi3Error);
+    WITH_WILLING_SERVER({ CHECK(fmi3SetInt64((fmi3Instance)in, vr, 1, top, 1) == fmi3Error); });
+    fmi3UInt64 ubig[1] = { 9007199254740993ULL };
+    WITH_WILLING_SERVER({ CHECK(fmi3SetUInt64((fmi3Instance)in, vr, 1, ubig, 1) == fmi3Error); });
     fmi3UInt64 utop[1] = { UINT64_MAX };                        /* rounds to 2^64 */
-    CHECK(fmi3SetUInt64((fmi3Instance)dead, vr, 1, utop, 1) == fmi3Error);
-    CHECK(strstr(g_last_log, "cannot be carried exactly") != NULL);
-    /* exact ones reach the wire (here: a closed connection) */
-    fmi3Int64 ok[2] = { 9007199254740992LL, INT64_MIN };
     g_log_calls = 0;
-    CHECK(fmi3SetInt64((fmi3Instance)dead, vr, 1, ok, 2) == fmi3Error);
-    CHECK(strstr(g_last_log, "connection to the sidecar is closed") != NULL);
-    free_instance(dead);
+    WITH_WILLING_SERVER({ CHECK(fmi3SetUInt64((fmi3Instance)in, vr, 1, utop, 1) == fmi3Error); });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "cannot be carried exactly") != NULL);
+    /* a refused value anywhere in the array refuses the whole call */
+    fmi3Int64 mixed[3] = { 1, 9007199254740993LL, 2 };
+    g_log_calls = 0;
+    WITH_WILLING_SERVER({ CHECK(fmi3SetInt64((fmi3Instance)in, vr, 1, mixed, 3) == fmi3Error); });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "values[1]") != NULL);
+    /* exact ones reach the wire, as they are */
+    fmi3Int64 ok[2] = { 9007199254740992LL, INT64_MIN };
     WITH_SERVER("{\"ok\":true}", 0, {
         CHECK(fmi3SetInt64((fmi3Instance)in, vr, 1, ok, 2) == fmi3OK);
     });
@@ -1048,7 +1201,9 @@ static void test_set_fmu_state_counts_the_frame_header(void) {
     /* The bridge drops a connection whose frame exceeds FRAME_MAX.  The
      * binary set_state frame is [u32 hl][header][blob]; the check used to
      * be on the blob alone, so a blob of exactly FRAME_MAX bytes passed it
-     * and the instance died ("send failed", then every call closed). */
+     * and the instance died ("send failed", then every call closed).
+     * Every case runs against a peer that takes what it is sent: a refusal
+     * is the wrapper's, and the largest frame that fits arrives whole. */
     char hdr[64];
     size_t n = FRAME_MAX, hl;
     for (;;) {             /* the largest blob whose whole frame fits */
@@ -1057,34 +1212,43 @@ static void test_set_fmu_state_counts_the_frame_header(void) {
         --n;
     }
     char *blob = (char *)calloc(FRAME_MAX + 2, 1);   /* never read past what each case names */
-    FmuState fits = { blob, n }, over = { blob, n + 1 }, whole = { blob, FRAME_MAX };
-    Instance *dead = fake_instance(SOCK_INVALID);
-    dead->binary = 1;
+    FmuState fits = bare_state(blob, n), over = bare_state(blob, n + 1),
+             whole = bare_state(blob, FRAME_MAX);
     g_log_calls = 0;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, &whole) == fmi3Error);
-    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL && dead->req_cap == 0);
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, &whole) == fmi3Error && in->req_cap == 0);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     g_log_calls = 0;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, &over) == fmi3Error);
-    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL && dead->req_cap == 0);
+    WITH_WILLING_SERVER({
+        in->binary = 1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, &over) == fmi3Error && in->req_cap == 0);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     g_log_calls = 0;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, &fits) == fmi3Error);   /* reaches the wire */
-    CHECK(g_log_calls == 1 && strstr(g_last_log, "connection to the sidecar is closed") != NULL);
-    free_instance(dead);
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->binary = 1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, &fits) == fmi3OK);     /* reaches the wire */
+    });
+    CHECK(g_log_calls == 0 && g_seen_flag == 1 && g_seen_len == FRAME_MAX);   /* exactly the limit */
+    CHECK(get_be32((const unsigned char *)g_seen) == hl && memcmp(g_seen + 4, hdr, hl) == 0);
     /* the JSON path: {"op":"set_state","state":"<blob>"} */
     const size_t overhead = strlen("{\"op\":\"set_state\",\"state\":\"\"}");
     size_t jn = FRAME_MAX - overhead;
     memset(blob, 'A', jn + 1);
-    FmuState jfits = { blob, jn }, jover = { blob, jn + 1 };
-    dead = fake_instance(SOCK_INVALID);
+    FmuState jfits = bare_state(blob, jn), jover = bare_state(blob, jn + 1);
     g_log_calls = 0;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, &jover) == fmi3Error);
-    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL && dead->req_cap == 0);
+    WITH_WILLING_SERVER({
+        CHECK(fmi3SetFMUState((fmi3Instance)in, &jover) == fmi3Error && in->req_cap == 0);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     g_log_calls = 0;
     blob[jn] = '\0';
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, &jfits) == fmi3Error);
-    CHECK(g_log_calls == 1 && strstr(g_last_log, "connection to the sidecar is closed") != NULL);
-    CHECK(strlen(dead->req) == FRAME_MAX);                 /* exactly the limit, built */
-    free_instance(dead);
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetFMUState((fmi3Instance)in, &jfits) == fmi3OK);
+    });
+    CHECK(g_log_calls == 0 && g_seen_flag == 0 && g_seen_len == FRAME_MAX);   /* exactly the limit, sent */
     free(blob);
 }
 
@@ -1231,44 +1395,309 @@ static void test_a_silent_sidecar_times_out(void) {
 /* ----------------------------------------------------------- FMU state */
 
 static void test_fmu_state(void) {
+    Instance *in = fake_instance(SOCK_INVALID);     /* the states below are its */
     fmi3FMUState st = NULL;
-    WITH_SERVER("{\"ok\":true,\"state\":\"QUJDRA==\"}", 0, {
+    EXCHANGE(in, "{\"ok\":true,\"state\":\"QUJDRA==\"}", {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK);
     });
     CHECK(st != NULL && ((FmuState *)st)->n == 8 && memcmp(((FmuState *)st)->blob, "QUJDRA==", 8) == 0);
     size_t n = 0;
-    CHECK(fmi3SerializedFMUStateSize(NULL, st, &n) == fmi3OK && n == 8);
+    CHECK(fmi3SerializedFMUStateSize((fmi3Instance)in, st, &n) == fmi3OK && n == 8);
     fmi3Byte buf[8];
-    CHECK(fmi3SerializeFMUState(NULL, st, buf, 4) == fmi3Error);      /* too small */
-    CHECK(fmi3SerializeFMUState(NULL, st, buf, 8) == fmi3OK);
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, st, buf, 4) == fmi3Error);      /* too small */
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, st, buf, 8) == fmi3OK);
     fmi3FMUState st2 = NULL;
-    CHECK(fmi3DeserializeFMUState(NULL, buf, 8, &st2) == fmi3OK);
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, buf, 8, &st2) == fmi3OK);
     CHECK(memcmp(((FmuState *)st2)->blob, "QUJDRA==", 8) == 0);
-    WITH_SERVER("{\"ok\":true}", 0, {
+    EXCHANGE(in, "{\"ok\":true}", {
         CHECK(fmi3SetFMUState((fmi3Instance)in, st2) == fmi3OK);
     });
     CHECK(strcmp(g_seen, "{\"op\":\"set_state\",\"state\":\"QUJDRA==\"}") == 0);
-    CHECK(fmi3FreeFMUState(NULL, &st) == fmi3OK && st == NULL);
-    CHECK(fmi3FreeFMUState(NULL, &st2) == fmi3OK);
-    CHECK(fmi3FreeFMUState(NULL, &st) == fmi3OK);                    /* double free is a no-op */
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &st) == fmi3OK && st == NULL);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &st2) == fmi3OK);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &st) == fmi3OK);        /* a freed (NULL) one is ignored */
     /* missing / unterminated state field */
-    WITH_SERVER("{\"ok\":true}", 0, {
+    EXCHANGE(in, "{\"ok\":true}", {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3Error);
     });
-    WITH_SERVER("{\"ok\":true,\"state\":\"unterminated", 0, {
+    EXCHANGE(in, "{\"ok\":true,\"state\":\"unterminated", {
         CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3Error);
     });
-    Instance *dead = fake_instance(SOCK_INVALID);
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, NULL) == fmi3Error);
-    CHECK(fmi3SerializedFMUStateSize(NULL, NULL, &n) == fmi3Error);
+    CHECK(st == NULL);
+    WITH_WILLING_SERVER({ CHECK(fmi3SetFMUState((fmi3Instance)in, NULL) == fmi3Error); });
+    CHECK(fmi3SerializedFMUStateSize((fmi3Instance)in, NULL, &n) == fmi3Error);
     /* importer-supplied bytes that are not base64 never reach the wire */
     fmi3FMUState junk = NULL;
-    CHECK(fmi3DeserializeFMUState(NULL, (const fmi3Byte *)"abc\"def\\x", 9, &junk) == fmi3OK);
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"abc\"def\\x", 9, &junk) == fmi3OK);
     g_log_calls = 0;
-    CHECK(fmi3SetFMUState((fmi3Instance)dead, junk) == fmi3Error);
+    WITH_WILLING_SERVER({ CHECK(fmi3SetFMUState((fmi3Instance)in, junk) == fmi3Error); });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "not valid") != NULL);
-    fmi3FreeFMUState(NULL, &junk);
-    free_instance(dead);
+    fmi3FreeFMUState((fmi3Instance)in, &junk);
+    free_instance(in);
+}
+
+/* ------------------------------------- FMU states: who owns the memory
+ *
+ * FMI 3.0.1, "Getting and Setting the Complete FMU State", function by
+ * function (the rules are quoted at the top of the wrapper).  The oracle
+ * is the count of live allocations: a state is two (the object and its
+ * blob), and nothing else here allocates once the instance's reply buffer
+ * exists.
+ */
+
+#define STATE_ALLOCS 2L
+
+/* The instance's live states, head first, as a count; -1 if the list's
+ * links or owners are inconsistent. */
+static long states_of(const Instance *in) {
+    long k = 0;
+    const FmuState *prev = NULL;
+    for (const FmuState *st = in->states; st; prev = st, st = st->next, ++k)
+        if (st->owner != in || st->prev != prev) return -1;
+    return k;
+}
+
+static void test_get_fmu_state_reuses_the_state_object_it_is_handed(void) {
+    /* The rollback pattern: one fmi3FMUState variable, fmi3GetFMUState(&state)
+     * before every step.  FMI 3.0: a non-NULL *FMUState "points to a
+     * previously returned FMUState that is no longer needed and can be
+     * overwritten".  The wrapper allocated a new object and blob over it on
+     * every call -- one whole state leaked per call (2.8 kB a call for one
+     * spring, 82 kB for a 20000-cell rod) -- and returned another pointer. */
+    Instance *in = fake_instance(SOCK_INVALID);
+    fmi3FMUState state = NULL;
+    EXCHANGE(in, "{\"ok\":true,\"state\":\"QUJDRA==\"}", {
+        CHECK(fmi3GetFMUState((fmi3Instance)in, &state) == fmi3OK);
+    });
+    CHECK(state != NULL && states_of(in) == 1);
+    const void *first = state;
+    const long held = live_allocs();                 /* the state and the reply buffer */
+    const char *replies[] = { "{\"ok\":true,\"state\":\"QUJDREVGR0hJSktMTU5PUA==\"}",   /* longer */
+                              "{\"ok\":true,\"state\":\"QQ==\"}",                       /* shorter */
+                              "{\"ok\":true,\"state\":\"\"}",                           /* empty */
+                              "{\"ok\":true,\"state\":\"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\"}" };
+    for (int k = 0; k < 40; ++k) {
+        const char *reply = replies[k % 4];
+        EXCHANGE(in, reply, { CHECK(fmi3GetFMUState((fmi3Instance)in, &state) == fmi3OK); });
+        CHECK(state == first);                       /* the same object, as FMI describes */
+        CHECK(live_allocs() == held);                /* and nothing new left behind */
+        const char *want = strstr(reply, "\"state\":\"") + 9;
+        size_t n = (size_t)(strchr(want, '"') - want);
+        FmuState *st = (FmuState *)state;
+        CHECK(st->n == n && memcmp(st->blob, want, n) == 0 && st->blob[n] == '\0');
+        CHECK(states_of(in) == 1);
+    }
+    /* the binary path reuses it too */
+    {
+        unsigned char blob[6] = { 'P', 'K', 0, 7, 0, 9 }, frame[64];
+        size_t n = bin_payload(frame, "{\"ok\":true,\"n\":6}", blob, 6);
+        in->binary = 1;
+        BINARY_EXCHANGE(in, (const char *)frame, n, {
+            CHECK(fmi3GetFMUState((fmi3Instance)in, &state) == fmi3OK);
+        });
+        in->binary = 0;
+        CHECK(state == first && live_allocs() == held);
+        CHECK(((FmuState *)state)->n == 6 && memcmp(((FmuState *)state)->blob, blob, 6) == 0);
+    }
+    /* A call that fails leaves the variable, and the state it holds, as
+     * they were: a refusal, a reply without a state, a length mismatch. */
+    {
+        unsigned char frame[64];
+        size_t n = bin_payload(frame, "{\"ok\":true,\"n\":5}", "PK\0\7\0\11", 6);
+        const char *bad[] = { "{\"ok\":false,\"error\":\"RuntimeError: stopped\"}", "{\"ok\":true}",
+                              "{\"ok\":true,\"state\":\"unterminated" };
+        for (size_t k = 0; k < sizeof bad / sizeof *bad; ++k) {
+            EXCHANGE(in, bad[k], { CHECK(fmi3GetFMUState((fmi3Instance)in, &state) == fmi3Error); });
+            CHECK(state == first && live_allocs() == held);
+            CHECK(((FmuState *)state)->n == 6 && memcmp(((FmuState *)state)->blob, "PK\0\7\0\11", 6) == 0);
+        }
+        BINARY_EXCHANGE(in, (const char *)frame, n, {
+            CHECK(fmi3GetFMUState((fmi3Instance)in, &state) == fmi3Error);
+        });
+        CHECK(state == first && live_allocs() == held && ((FmuState *)state)->n == 6);
+    }
+    /* Out of memory while a held state must grow: fmi3Fatal, and the state
+     * is still the one the importer had.  (The reply buffer is already
+     * large enough, so the allocation that fails is the state's.) */
+    {
+        char big[600];
+        memset(big, 'Q', sizeof big);
+        memcpy(big, "{\"ok\":true,\"pad\":\"", 18);
+        memcpy(big + sizeof big - 3, "\"}", 3);
+        EXCHANGE(in, big, { CHECK(bridge_call(in, "{\"op\":\"x\"}") == fmi3OK); });
+        const long with_buffer = live_allocs();
+        memcpy(big, "{\"ok\":true,\"state\":\"", 20);
+        EXCHANGE(in, big, {
+            g_fail_allocs_in = 0;
+            CHECK(fmi3GetFMUState((fmi3Instance)in, &state) == fmi3Fatal);
+            CHECK(g_fail_allocs_in < 0);             /* the failure was taken */
+        });
+        g_fail_allocs_in = -1;
+        CHECK(state == first && live_allocs() == with_buffer);
+        CHECK(((FmuState *)state)->n == 6 && memcmp(((FmuState *)state)->blob, "PK\0\7\0\11", 6) == 0);
+        /* and with no state yet: neither allocation that can fail leaves
+         * anything behind, and the variable stays NULL */
+        for (long nth = 0; nth < 2; ++nth) {
+            fmi3FMUState fresh = NULL;
+            EXCHANGE(in, big, {
+                g_fail_allocs_in = nth;
+                CHECK(fmi3GetFMUState((fmi3Instance)in, &fresh) == fmi3Fatal);
+                CHECK(g_fail_allocs_in < 0);
+            });
+            g_fail_allocs_in = -1;
+            CHECK(fresh == NULL && live_allocs() == with_buffer && states_of(in) == 1);
+        }
+    }
+    /* A pointer that is not a live state of this instance is not taken for
+     * one: it is overwritten unread (as every pointer used to be), so an
+     * uninitialised variable does not become a wild free. */
+    {
+        const long before = live_allocs();
+        fmi3FMUState wild = (fmi3FMUState)(uintptr_t)0x10;      /* not a pointer to anything */
+        EXCHANGE(in, "{\"ok\":true,\"state\":\"QQ==\"}", {
+            CHECK(fmi3GetFMUState((fmi3Instance)in, &wild) == fmi3OK);
+        });
+        CHECK(wild != (fmi3FMUState)(uintptr_t)0x10 && wild != state && states_of(in) == 2);
+        CHECK(live_allocs() == before + STATE_ALLOCS);
+        CHECK(fmi3FreeFMUState((fmi3Instance)in, &wild) == fmi3OK && live_allocs() == before);
+    }
+    /* fmi3GetFMUState(instance, NULL) has nowhere to return a state */
+    g_log_calls = 0;
+    WITH_WILLING_SERVER({ CHECK(fmi3GetFMUState((fmi3Instance)in, NULL) == fmi3Error); });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "FMUState is NULL") != NULL);
+    const long before_free = live_allocs();
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &state) == fmi3OK && state == NULL);
+    CHECK(live_allocs() == before_free - STATE_ALLOCS && states_of(in) == 0);
+    free_instance(in);
+}
+
+static void test_the_fmu_state_functions_keep_to_fmi_ownership(void) {
+    Instance *in = fake_instance(SOCK_INVALID);
+    Instance *other = fake_instance(SOCK_INVALID);
+    const long base = live_allocs();
+    fmi3FMUState a = NULL;
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"QUJD", 4, &a) == fmi3OK);
+    CHECK(live_allocs() == base + STATE_ALLOCS && states_of(in) == 1);
+
+    /* fmi3SetFMUState: "The FMU must not change the content of the provided
+     * FMUState to allow multiple calls" -- the object is the same, bit for
+     * bit, after two restores and after a refused one. */
+    FmuState seen = *(FmuState *)a;
+    for (int k = 0; k < 2; ++k) {
+        EXCHANGE(in, "{\"ok\":true,\"t\":0.5}", { CHECK(fmi3SetFMUState((fmi3Instance)in, a) == fmi3OK); });
+        CHECK(strcmp(g_seen, "{\"op\":\"set_state\",\"state\":\"QUJD\"}") == 0);
+        CHECK(memcmp(a, &seen, sizeof seen) == 0 && memcmp(((FmuState *)a)->blob, "QUJD", 5) == 0);
+    }
+    EXCHANGE(in, "{\"ok\":false,\"error\":\"ValueError: token\"}", {
+        CHECK(fmi3SetFMUState((fmi3Instance)in, a) == fmi3Error);
+    });
+    CHECK(memcmp(a, &seen, sizeof seen) == 0 && live_allocs() == base + STATE_ALLOCS + 2);  /* + req, resp */
+    const long held = live_allocs();
+
+    /* fmi3SerializedFMUStateSize / fmi3SerializeFMUState: the object is read,
+     * and only `n` bytes of the importer's vector are written. */
+    size_t n = 99;
+    CHECK(fmi3SerializedFMUStateSize((fmi3Instance)in, a, &n) == fmi3OK && n == 4);
+    CHECK(fmi3SerializedFMUStateSize((fmi3Instance)in, a, NULL) == fmi3Error);
+    fmi3Byte vec[8];
+    memset(vec, 0xAA, sizeof vec);
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, a, vec, 3) == fmi3Error && vec[0] == 0xAA);
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, a, NULL, 4) == fmi3Error);
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, NULL, vec, 8) == fmi3Error && vec[0] == 0xAA);
+    CHECK(fmi3SerializeFMUState((fmi3Instance)in, a, vec, 8) == fmi3OK);
+    CHECK(memcmp(vec, "QUJD", 4) == 0 && vec[4] == 0xAA && vec[7] == 0xAA);
+    CHECK(memcmp(a, &seen, sizeof seen) == 0 && live_allocs() == held);
+
+    /* fmi3DeserializeFMUState "constructs a copy": always a new object.
+     * The standard says nothing about *FMUState on entry, so it is not
+     * read -- a variable still holding a live state gets a second state
+     * (the first stays valid, and the importer's to free), and so does one
+     * holding no pointer at all. */
+    fmi3FMUState b = a;
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"WFla", 4, &b) == fmi3OK);
+    CHECK(b != a && memcmp(a, &seen, offsetof(FmuState, prev)) == 0 && states_of(in) == 2);
+    CHECK(memcmp(((FmuState *)a)->blob, "QUJD", 4) == 0 && memcmp(((FmuState *)b)->blob, "WFla", 4) == 0);
+    fmi3FMUState c = (fmi3FMUState)(uintptr_t)0x10;
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"", 0, &c) == fmi3OK);
+    CHECK(c != (fmi3FMUState)(uintptr_t)0x10 && ((FmuState *)c)->n == 0 && states_of(in) == 3);
+    CHECK(live_allocs() == held + 2 * STATE_ALLOCS);
+    /* an empty vector may be NULL; a NULL one that claims bytes, or nowhere
+     * to return the state, is refused with nothing allocated */
+    fmi3FMUState d = NULL;
+    g_log_calls = 0;
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, NULL, 4, &d) == fmi3Error && d == NULL);
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"QUJD", 4, NULL) == fmi3Error);
+    CHECK(g_log_calls == 2 && live_allocs() == held + 2 * STATE_ALLOCS);
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, NULL, 0, &d) == fmi3OK && ((FmuState *)d)->n == 0);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &d) == fmi3OK && d == NULL);
+    /* a vector no frame could carry is refused before it is copied (size + 1
+     * bytes used to be allocated, whatever the size, and filled from it) */
+    g_log_calls = 0;
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"x", (size_t)FRAME_MAX + 1, &d) == fmi3Error);
+    CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"x", SIZE_MAX, &d) == fmi3Error);
+    CHECK(d == NULL && g_log_calls == 2 && strstr(g_last_log, "frame limit") != NULL);
+    CHECK(live_allocs() == held + 2 * STATE_ALLOCS && states_of(in) == 3);
+
+    /* fmi3GetFMUState on another instance does not take this instance's
+     * state for one of its own: `a` stays what it was, and whose it was. */
+    fmi3FMUState borrowed = a;
+    EXCHANGE(other, "{\"ok\":true,\"state\":\"Wlpa\"}", {
+        CHECK(fmi3GetFMUState((fmi3Instance)other, &borrowed) == fmi3OK);
+    });
+    CHECK(borrowed != a && memcmp(((FmuState *)a)->blob, "QUJD", 4) == 0);
+    CHECK(states_of(in) == 3 && states_of(other) == 1 && ((FmuState *)a)->owner == in);
+
+    /* fmi3Reset and fmi3Terminate leave every state object valid: the
+     * state saved before restores after. */
+    EXCHANGE(in, "{\"ok\":true}", { CHECK(fmi3Terminate((fmi3Instance)in) == fmi3OK); });
+    EXCHANGE(in, "{\"ok\":true}", { CHECK(fmi3Reset((fmi3Instance)in) == fmi3OK); });
+    CHECK(states_of(in) == 3 && memcmp(((FmuState *)a)->blob, "QUJD", 5) == 0);
+    EXCHANGE(in, "{\"ok\":true,\"t\":0.5}", { CHECK(fmi3SetFMUState((fmi3Instance)in, a) == fmi3OK); });
+    CHECK(strcmp(g_seen, "{\"op\":\"set_state\",\"state\":\"QUJD\"}") == 0);
+
+    /* fmi3FreeFMUState: the middle, the head and the tail of the list, a
+     * second free of the (now NULL) variable, and a NULL argument. */
+    const long before_free = live_allocs();
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &b) == fmi3OK && b == NULL && states_of(in) == 2);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &b) == fmi3OK && b == NULL && states_of(in) == 2);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, NULL) == fmi3OK && states_of(in) == 2);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &c) == fmi3OK && c == NULL && states_of(in) == 1);
+    CHECK(in->states == (FmuState *)a);
+    CHECK(fmi3FreeFMUState(NULL, &a) == fmi3OK && a == NULL && states_of(in) == 0);   /* any instance */
+    CHECK(live_allocs() == before_free - 3 * STATE_ALLOCS);
+    CHECK(fmi3FreeFMUState((fmi3Instance)other, &borrowed) == fmi3OK && states_of(other) == 0);
+    free_instance(in);
+    free_instance(other);
+}
+
+static void test_free_instance_frees_the_states_that_are_still_live(void) {
+    /* FMI 3.0: fmi3FreeInstance "frees all the allocated memory and other
+     * resources that have been allocated by the functions of the FMU
+     * interface".  A state the importer never freed used to outlive its
+     * instance -- and the library, once the importer unloaded it. */
+    const long base = live_allocs();
+    int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    ServerArgs args = { sv[1], "{\"ok\":true}", 11, 11, 0, NULL, 0, 0, 0 };
+    pthread_t th; pthread_create(&th, NULL, server_thread, &args);
+    Instance *in = fake_instance(sv[0]);
+    fmi3FMUState kept[5] = { NULL, NULL, NULL, NULL, NULL };
+    for (int k = 0; k < 5; ++k)
+        CHECK(fmi3DeserializeFMUState((fmi3Instance)in, (const fmi3Byte *)"QUJDRA==", 8, &kept[k]) == fmi3OK);
+    CHECK(states_of(in) == 5 && live_allocs() == base + 1 + 5 * STATE_ALLOCS);
+    CHECK(fmi3FreeFMUState((fmi3Instance)in, &kept[2]) == fmi3OK);    /* one, by the importer */
+    CHECK(states_of(in) == 4);
+    fmi3FreeInstance((fmi3Instance)in);              /* tells the bridge, frees the rest */
+    pthread_join(th, NULL);
+    CHECK(args.seen != NULL && strcmp(args.seen, "{\"op\":\"terminate\"}") == 0);
+    free(args.seen);
+    sock_close(sv[1]);
+    CHECK(live_allocs() == base);
+    /* a state in no instance's list (made with a NULL instance) is the
+     * importer's alone to free */
+    fmi3FMUState loose = NULL;
+    CHECK(fmi3DeserializeFMUState(NULL, (const fmi3Byte *)"QUJD", 4, &loose) == fmi3OK);
+    CHECK(((FmuState *)loose)->owner == NULL && live_allocs() == base + STATE_ALLOCS);
+    CHECK(fmi3FreeFMUState(NULL, &loose) == fmi3OK && live_allocs() == base);
 }
 
 /* ------------------------------------------------ instantiate via TCP */
@@ -1452,17 +1881,18 @@ static void test_instantiate(const char *good_token) {
 
 /* ------------------------------------------------- the FMI 3.0 state machine */
 
-/* `call` on an instance in `phase` with a dead socket is refused by the
- * state machine itself: exactly one log message naming the state.  (A dead
- * socket fails the call too, so the status alone would not tell.) */
+/* `call` on an instance in `phase` is refused by the state machine itself:
+ * fmi3Error with exactly one log message naming the state, nothing sent
+ * and the state unchanged -- against a peer that would have answered "ok"
+ * (on a dead socket every call fails, so the status could not tell). */
 #define REFUSED_IN(phase_, call) do {                                            \
-    Instance *in = fake_instance(SOCK_INVALID);                                  \
-    in->phase = (phase_);                                                        \
     g_log_calls = 0; g_last_log[0] = '\0';                                       \
-    CHECK((call) == fmi3Error);                                                  \
+    WITH_WILLING_SERVER({                                                        \
+        in->phase = (phase_);                                                    \
+        CHECK((call) == fmi3Error);                                              \
+        CHECK(in->phase == (phase_));                                            \
+    });                                                                          \
     CHECK(g_log_calls == 1 && strstr(g_last_log, "is not allowed in the") != NULL); \
-    CHECK(in->phase == (phase_));                                                \
-    free_instance(in);                                                           \
 } while (0)
 
 static void test_the_fmi_state_machine(void) {
@@ -1611,6 +2041,8 @@ int main(int argc, char **argv) {
      * runs this binary once more under a ',' decimal-point locale, where
      * every check below also checks that the wire's numbers ignore it. */
     setlocale(LC_ALL, "");
+    printf("wrapper source: %s\n", MADDENING_FMU_C);
+    printf("wrapper version: %s\n", MADDENING_FMU_VERSION);
     printf("decimal point in effect: %s\n", localeconv()->decimal_point);
     test_parse_values();
     test_parse_values_non_finite();
@@ -1632,9 +2064,17 @@ int main(int argc, char **argv) {
     test_the_wrappers_clock_follows_set_fmu_state_and_reset();
     test_a_silent_sidecar_times_out();
     test_fmu_state();
+    test_get_fmu_state_reuses_the_state_object_it_is_handed();
+    test_the_fmu_state_functions_keep_to_fmi_ownership();
+    test_free_instance_frees_the_states_that_are_still_live();
     test_the_fmi_state_machine();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");
     test_misc_entry_points();
+    /* Every allocation of the wrapper and of the tests above was freed:
+     * the plain build's leak check (the sanitized one has LeakSanitizer). */
+    free(g_seen); g_seen = NULL;
+    printf("live allocations at exit: %ld\n", live_allocs());
+    CHECK(live_allocs() == 0);
     printf("maddening_fmu unit tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

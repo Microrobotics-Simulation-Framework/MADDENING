@@ -3261,7 +3261,7 @@ claims:
     flag says that the Arnoldi residual and a ninth Krylov vector's
     movement of the radius are within that margin, which bounds the error
     for a normal Jacobian only: twelve non-normal float32 scalars read
-    0.273 for 0.219, flag set (MADD-ANO-222, open).  (2) For rank at most eight, rho_spectral is the
+    0.273 for 0.219, flag set (MADD-ANO-225, open).  (2) For rank at most eight, rho_spectral is the
     radius of a matrix within the analysis dtype's rounding of the weighted
     Jacobian: within 1e-4 of the radius plus its movement under
     perturbations of norm 8 eps ||A|| (score "radius"; 1e-9 of the radius
@@ -3273,10 +3273,10 @@ claims:
     what drives them: a loop that passes through a change of a field below
     that field's rounding is not in the products at all (a float32
     sub-cycled ring with a field 1e-6 of its driver reads 1e-12 for
-    1.25e-4, flag set: MADD-ANO-219, open).  On a backend where JAX lowers
+    1.25e-4, flag set: MADD-ANO-222, open).  On a backend where JAX lowers
     no non-symmetric eigenvalue problem (neither CPU nor GPU) the
     compressed radius comes from repeated squaring, which in float32 is
-    not backward stable (MADD-ANO-220).
+    not backward stable (MADD-ANO-223).
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
     - tests/core/test_coupling_error_bound.py::test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum
@@ -3672,7 +3672,7 @@ claims:
     transform, the raw source fields, before the transform.  Not held at
     the float floor in float32: a Jacobi ring of mapped edges stopped with
     precision_limited=True read 5.1e-6 for a true 3.0e-5, flag set
-    (MADD-ANO-223, open).
+    (MADD-ANO-226, open).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep

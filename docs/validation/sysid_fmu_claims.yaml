@@ -4075,8 +4075,13 @@ claims:
     into an int32 field; an integer of the other signedness, of the field's
     own width and wider, into unsigned and signed fields of 8, 16 and 32
     bits, with the type's own extremes loading; a complex value with and
-    without an imaginary part; through POST /checkpoint/load. Not claimed for
-    16-bit floats, multi-rate graphs, sub-cycled groups or sharded graphs.
+    without an imaginary part; through POST /checkpoint/load; a float32,
+    float64 or float16 checkpoint into a bfloat16 state field (and a
+    bfloat16 params leaf) at +-1e-44, 3.4028235e38, 1e39, -1e-50, -1e-39,
+    inf and NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50 (a
+    file that itself holds a bfloat16 member is refused whole,
+    MADD-ANO-206). Not claimed for multi-rate graphs, sub-cycled groups or
+    sharded graphs.
   oracle: the ValueError naming the leaf; the graph's state and params bit for bit; the loaded subnormal's sign.
   tests:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
@@ -4088,6 +4093,10 @@ claims:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_of_the_other_signedness_is_refused_not_wrapped
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_complex_value_with_an_imaginary_part_is_refused_for_a_real_field
     - tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_the_two_values_the_old_comparisons_took
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_cannot_hold_is_refused
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_can_hold_loads_as_the_cast_rounds_it
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_parameter_leaf_of_bfloat16_is_held_to_the_same_rule
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_float16_field_cannot_hold_is_refused
   status: verified
   notes: >-
     From v0.1.0 to v0.3.1 load_state narrowed a float64 checkpoint with
@@ -4098,12 +4107,15 @@ claims:
     to the leaf's type and back, which cannot see a same-width sign change,
     so -1 for a uint32 field loaded as 4294967295 (MADD-ANO-200; found in
     the sibling sweep of B1 round 9's F5).  The tags kept the checkpoint's
-    own dtype and did not wrap.
+    own dtype and did not wrap.  A bfloat16 leaf was cast with no check on
+    the 0.4.0 tree, because the rule was chosen by the NumPy kind of the
+    leaf's dtype and an extension dtype's is void (MADD-ANO-207, never
+    released).
   domains:
     f32: tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
     f64: tests/core/test_params_claims_in_float64.py::test_load_state_into_a_float64_field_loads_what_float32_could_not
     mixed_dtype: tests/core/test_params_claims_in_float64.py::test_load_state_into_a_float32_field_of_an_x64_graph_refuses_what_float32_cannot_hold
-    16bit: narrowed
+    16bit: tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_cannot_hold_is_refused
     jit: n/a
     grad: n/a
     vmap: n/a

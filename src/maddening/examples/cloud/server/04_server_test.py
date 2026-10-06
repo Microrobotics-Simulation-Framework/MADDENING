@@ -108,10 +108,7 @@ gm.add_node(SpringDamperNode(
 gm.add_edge("table", "ball", "position", "table_position")
 gm.add_edge("ball", "spring", "position", "anchor_position")
 
-import warnings
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    gm.compile()
+gm.compile()
 print(f"Graph compiled: {gm.node_names}")
 
 server = SimulationServer(

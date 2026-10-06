@@ -39,8 +39,8 @@ scales the error by ``r**2``: the coupling strength is set by ``r``.
   sees.  At ``r = 1.5`` a Gauss-Seidel pass *amplifies* the error by
   ``r**2 = 2.25``.  The library says so too: ``compile()`` warns that the
   undamped ``r = 0.5`` pair grows by a factor ``g`` every step
-  (MADD-ANO-098).  The demo records that warning, prints it and asserts
-  it was raised.
+  (MADD-ANO-098).  The demo reads that advisory from ``validate()``,
+  prints it and asserts it was given.
 
 Every iteration count printed is measured, and the conclusions the demo
 prints are asserted.
@@ -54,7 +54,6 @@ Usage
 import argparse
 import os
 import re
-import warnings
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from maddening.core.graph_manager import GraphManager
@@ -79,10 +78,12 @@ def build_graph(stiffness, damping, acceleration="none", relaxation=1.0,
                 max_iterations=50, flagged=None):
     """Two masses on one spring, iterated as a coupling group.
 
-    With a ``flagged`` list, a warning from ``compile()`` that names
-    MADD-ANO-098 is appended to it instead of being shown, so the demo
-    can print and assert it.  Every other warning, and that one when no
-    list is given, goes on to the caller as usual.
+    With a ``flagged`` list, what the graph has to say about MADD-ANO-098
+    is appended to it, so the demo can print and assert it.  It is read
+    from ``validate()``, which returns the advisories ``compile()`` then
+    issues as warnings: asking for them is simpler than catching them,
+    and changes no warning filter (a filter is process-wide, so a block
+    that swaps it is not safe beside other threads).
     """
     gm = GraphManager()
     gm.add_node(SpringDamperNode(
@@ -103,14 +104,9 @@ def build_graph(stiffness, damping, acceleration="none", relaxation=1.0,
     if acceleration == "fixed":
         kwargs["relaxation"] = relaxation
     gm.add_coupling_group(["spring_a", "spring_b"], **kwargs)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        gm.compile()
-    for w in caught:
-        if flagged is not None and PAIR_ANOMALY in str(w.message):
-            flagged.append(str(w.message))
-        else:
-            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+    if flagged is not None:
+        flagged.extend(issue for issue in gm.validate() if PAIR_ANOMALY in issue)
+    gm.compile()
     return gm
 
 

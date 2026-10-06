@@ -846,6 +846,18 @@ def _positional_arrays_beside_kwargs(source_points, target_points, /, **hyper_an
     return "called"
 
 
+def _optional_positional_only_scale(scale=1.0, /, source_points=None, target_points=None, *,
+                                    flip=False, name="x", source_points_ref=None,
+                                    target_points_ref=None):
+    return "called"
+
+
+def _name_is_the_rest_of_the_positionals(source_points, target_points, *name, scale=1.0,
+                                         flip=False, source_points_ref=None,
+                                         target_points_ref=None):
+    return "called"
+
+
 def _forgetting_wraps(fn):
     def inner(*args, **kwargs):
         return fn(*args, **kwargs)
@@ -887,6 +899,14 @@ _FACTORY_SPELLINGS = {
         (_without_a_name, r"takes no keyword argument\(s\) \['name'\]"),
     "required_positional_only": (_positional_arrays, _POSITIONAL),
     "required_positional_only_beside_kwargs": (_positional_arrays_beside_kwargs, _POSITIONAL),
+    # A declared name the signature holds where no keyword reaches it: an
+    # optional positional-only parameter, and the name of ``*args``.  The
+    # keyword rule answered for the name alone, so both registered and
+    # failed with a TypeError when a config was loaded.
+    "optional_positional_only_declared":
+        (_optional_positional_only_scale, r"takes no keyword argument\(s\) \['scale'\]"),
+    "declared_name_is_var_positional":
+        (_name_is_the_rest_of_the_positionals, r"takes no keyword argument\(s\) \['name'\]"),
 }
 
 

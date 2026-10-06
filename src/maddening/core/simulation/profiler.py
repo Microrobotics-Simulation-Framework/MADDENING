@@ -42,7 +42,6 @@ import os
 import tarfile
 import tempfile
 import time
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -51,6 +50,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.coupling.acceleration import (
@@ -680,8 +680,7 @@ def _one_iteration_variant(gm):
             # the variant changes ``max_iterations`` and
             # ``strict_convergence``, the restore puts the caller's groups
             # back.  Errors still raise: only warnings are silenced.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with quiet_warnings():
                 gm._coupling_groups = [
                     dataclasses.replace(g, max_iterations=1, strict_convergence=False)
                     for g in saved_groups
@@ -691,8 +690,7 @@ def _one_iteration_variant(gm):
             yield
         finally:
             gm._coupling_groups = saved_groups
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with quiet_warnings():
                 gm.compile()
             gm._state = saved_state
             gm.params = saved_params

@@ -13038,10 +13038,13 @@ anomalies:
       The lock serialises `create_app()` against `create_app()` and nothing
       else.  `warnings.catch_warnings` is not thread-safe (before Python
       3.14's context-aware warnings), so an app built while another thread
-      is inside any other such block -- the caller's, a dependency's, or
-      one of the library's own parameter-write and compile probes, which
-      are new in 0.4.0 -- can still trade filters with it.  The probes one
-      server's routes reach run under its graph lock, one at a time.
+      is inside any other such block -- the caller's or a dependency's --
+      can still trade filters with it, and FastAPI itself opens 44 more,
+      under no lock of the library's, the first time an app is asked for
+      `/openapi.json`.  The library's own parameter-write and compile
+      probes were such blocks during 0.4.0's development and no longer are
+      (MADD-ANO-204): they change no filter another thread can see, so an
+      app built beside one neither loses a filter to it nor leaves it one.
     verification:
       - "tests/api/test_create_app_from_several_threads.py::test_apps_built_in_several_threads_at_once_leave_the_warnings_filters_as_they_were"
       - "tests/api/test_create_app_from_several_threads.py::test_a_maddening_warning_still_reaches_the_caller_after_apps_built_at_once"
@@ -13803,4 +13806,295 @@ anomalies:
       - "tests/core/test_node_params_writes_are_observed.py::test_a_replacement_and_an_in_place_write_do_not_hide_each_other"
       - "tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes"
       - "tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-204"
+    title: "The library's warning probes silenced every thread of the process, and two that overlapped in two threads could leave every warning ignored for good"
+    description: >
+      In sixteen places the library runs a node's own code a second time
+      only to learn something about it: when a live parameter is written
+      (one trace of the step, to see which leaves it reads), when `PUT
+      /graph/params` checks a value (the constructor, `initial_state()`,
+      the hooks' traces), when a sharded wrapper checks its inner node's
+      state, when a loop entry point looks for a step XLA miscompiles
+      (MADD-ANO-068), and when the profiler compiles its one-iteration
+      variant.  What that code warns is said by the real run, so each
+      probe ran inside `warnings.catch_warnings()` with
+      `simplefilter("ignore")`.  Python's filters are one list for the
+      whole process, and that block saves the list on the way in and puts
+      it back on the way out.  Two things followed.  While one thread was
+      inside a probe, every warning of every thread was dropped: another
+      graph's compile-time advisory, a precision note.  And two probes
+      that overlapped in two threads and left in the order they entered
+      each put back the other's saved list, the second one's being the
+      first one's `ignore`: `('ignore', None, Warning, None, 0)` stayed at
+      the front of the filters for good, and no warning of any kind was
+      shown by that process again, with no sign.  Measured on
+      release/0.4.0 at 60c89656 (Python 3.12.3, CPU, jaxlib 0.11.0, three
+      cores, empty HOME): four independent graphs, each written and
+      stepped once in its own thread, 40 rounds, nothing widened, left
+      that filter in 1 round here and in 2 to 9 rounds where it was first
+      seen; with the overlap arranged (the node's `update`, traced inside
+      the probe, holds two probes open and lets the first one in leave
+      first) it is left in 20 runs of 20.  One server is enough: a
+      parameter write probes under the server's graph lock, but FastAPI
+      builds the fields of `/openapi.json` -- 44 such blocks, the first
+      time an app is asked -- under no lock of the library's, and a block
+      of FastAPI's that opened during a probe and closed after it put the
+      probe's `ignore` back (15 runs of 15, arranged).  Inside each of the
+      sixteen blocks a warning raised in another thread was dropped (16 of
+      16).  The probes are new in 0.4.0, so no release carried any of
+      this.  Found while fixing MADD-ANO-191, whose residual risk recorded
+      it.  Resolved in 0.4.0: every probe goes through one helper
+      (`maddening.core._quiet_warnings.quiet_warnings`), which saves and
+      restores nothing.  It puts one filter in the list whose message
+      matcher is per thread, so it ignores the thread inside the block and
+      no other, and removes it when the last open block closes; a copy
+      that outlives a block ignores nothing.  Its lock is held for a list
+      insert or remove only, never while a probe's body runs.  Twelve
+      examples used the same block and no longer do: ten compiled inside
+      it for an advisory `compile()` no longer issues, one recorded
+      `compile()`'s warnings with it, and one wrapped every step of its
+      server's runner thread in it.  No module of the package touches the
+      filters outside the helper, which a source scan holds.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No value is computed wrongly, but the warnings are how the library
+      says a result is provisional or a setting is ignored (a staggered
+      edge, a rank decided at the precision floor, a field in the
+      subnormal range, a weight a config would drop), and the lasting form
+      removes every one of them for the rest of the process, silently.
+      Graded `major` for that; a silent loss of the library's own
+      safeguards is not `minor`.  `context_dependent`: it takes graphs run
+      from more than one thread of a process, or a REST server whose
+      OpenAPI schema is first asked for while a parameter is written.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager"
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.core.simulation.profiler.profile_graph"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: write parameters and step graphs from one thread, and look
+      for `('ignore', None, Warning, None, 0)` at the front of
+      `warnings.filters`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The library cannot make `warnings.catch_warnings()` safe for other
+      code that uses it from several threads of the same process: the
+      caller's, or a dependency's.  Two such blocks can still put back
+      each other's filters and leave an `ignore` for good, whatever the
+      library does.  On the library's own paths (recorded by wrapping the
+      block's entry; JAX 0.11.0, NumPy 2.4.6, lineax 0.0.7, FastAPI
+      0.136.1, pydantic 2.13.4): JAX and NumPy open none on compile, step,
+      run, scan, a parameter write or a checkpoint; lineax opens two, each
+      ignoring every warning, whenever a gradient through a coupling group
+      is traced; FastAPI opens 48 in `create_app()` (one app at a time
+      since MADD-ANO-191) and 44 at an app's first `/openapi.json`, where
+      it ignores one pydantic category.  Four threads each tracing such a
+      gradient at once changed the filters in 0 rounds of 30, and left an
+      `ignore` for every warning in 1 round of 10 once every block was
+      held open a millisecond longer.  Where a foreign block overlaps one
+      of the library's probes the consequence is bounded and holds
+      nothing back: one that opened before the probe and closes during it
+      ends that probe's silence, so what the node's code warns there is
+      shown, or raised where warnings are errors, which the probe reads as
+      "cannot tell"; one that opened during the probe and closes after it
+      puts back a copy of the probe's filter, which ignores nothing and is
+      removed by the next probe to close.  Covered on the default build of
+      CPython 3.12; the helper alone was also run on 3.13.13 and 3.14.5.
+      A free-threaded build and `-X context_aware_warnings` are not
+      covered.
+    verification:
+      - "tests/core/test_warning_probes_across_threads.py::test_independent_graphs_written_and_stepped_in_two_threads_leave_the_filters_alone"
+      - "tests/core/test_warning_probes_across_threads.py::test_every_silencing_block_of_src_is_reached_by_a_path_here"
+      - "tests/core/test_warning_probes_across_threads.py::test_another_thread_is_told_what_it_warns_while_the_block_is_open"
+      - "tests/core/test_warning_probes_across_threads.py::test_the_nodes_own_warning_is_silenced_inside_the_block"
+      - "tests/api/test_params_write_while_the_openapi_schema_is_built.py::test_a_write_that_overlaps_the_first_openapi_request_leaves_no_warning_silenced"
+      - "tests/core/test_quiet_warnings.py::test_another_thread_keeps_its_warnings_while_a_block_is_open"
+      - "tests/core/test_quiet_warnings.py::test_blocks_that_overlap_in_two_threads_leave_the_filters_alone"
+      - "tests/core/test_quiet_warnings.py::test_the_lock_guards_two_list_operations_and_nothing_else"
+      - "tests/core/test_quiet_warnings.py::test_a_foreign_block_that_closes_after_a_probe_leaves_a_copy_that_ignores_nothing"
+      - "tests/core/test_quiet_warnings.py::test_a_foreign_block_that_closes_inside_a_probe_ends_its_silence_and_leaves_nothing"
+      - "tests/core/test_quiet_warnings.py::test_only_the_helper_touches_the_warnings_filters"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-205"
+    title: "A config from to_dict() shared its containers with the graph: editing one to build a variant changed the graph it came from"
+    description: >
+      `GraphManager.to_dict()` and `SimulationNode.to_dict()` handed out
+      the graph's own containers, not copies.  The natural way to build a
+      variant of a graph -- `cfg = gm.to_dict()`,
+      `cfg["nodes"][0]["params"]["stiffness"] = 5000.0`,
+      `GraphManager.from_dict(cfg, registry)` -- therefore also wrote into
+      `gm`.  In every release from 0.1.0 to 0.3.1 the config's `params`
+      was `node.params` itself: the original graph kept stepping on its
+      compiled constants, ran the variant's value from its next recompile
+      on, and wrote it into its own next config, with nothing said.
+      Reproduced identically on the extracted 0.1.0, 0.2.0, 0.2.1, 0.3.0
+      and 0.3.1 trees (CPU, jaxlib 0.11.0, empty HOME, under an 8 GiB
+      address-space cap): a `SpringDamperNode` at stiffness 50, its config
+      edited to 5000, recompiled and stepped once, stood at position
+      0.962560 where an untouched graph stood at 2.884150, and its
+      `to_dict()` then said 5000.  On the 0.4.0 tree a node on the `params`
+      contract got a copied top-level dict, and the rest remained: a node
+      on the three-argument `update` contract still got its own mapping,
+      and now took the edit at its next step (a multiplier edited from 2
+      to 5 stepped to 10 where an untouched graph stepped to 4); the lists
+      and dicts inside any node's params, a mapped edge's inline point
+      sets and a sharded stencil wrapper's `axis_map` were the graph's own
+      (10 of the 38 containers of one config were the same objects in two
+      calls); and `effective_node_params()` returned the node's lists.  It is also why `yaml.safe_dump(gm.to_dict())` raised
+      for a node on the three-argument contract: its `params` was the
+      node's counting `dict` subclass, which a safe dumper does not
+      represent.  Found by following that YAML failure to its cause.
+      Resolved in 0.4.0: `GraphManager.to_dict()`,
+      `SimulationNode.to_dict()`, the sharded wrappers' descriptors and
+      `effective_node_params()` return copies in plain containers, so a
+      config shares nothing mutable with the graph and YAML writes what
+      JSON does.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, never `minor`: a graph whose config was edited
+      to describe another graph runs that other graph's parameter, from
+      its next recompile (the releases) or step (a three-argument node on
+      the 0.4.0 tree), and saves it as its own.  Not `critical`: it takes
+      a config edited in place and the original graph kept in use
+      afterwards.  `context_dependent` because what the parameter governs
+      is the model's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.core.graph_manager.GraphManager.effective_node_params"
+      - "maddening.core.node.SimulationNode.to_dict"
+      - "maddening.serialization.config.to_dict"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, edit a copy: `copy.deepcopy(gm.to_dict())`, or
+      `json.loads(json.dumps(gm.to_dict()))`, which is what a config read
+      from a file already is.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `node.params` is still the node's own mapping, by design: writing
+      through it is the documented way to change a constant.  The copy
+      follows dicts, lists, tuples and NumPy arrays; a mutable object of
+      another class held in a node's params is handed out as it is.
+      `CouplingGroup.to_dict()`, `ParamSpec.to_dict()` and an edge's or a
+      mapping spec's `to_dict()` called directly were not each examined:
+      they are detached where `GraphManager.to_dict()` assembles them.
+    verification:
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_two_configs_of_one_graph_share_no_container"
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_no_container_of_a_config_is_one_the_graph_holds"
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_emptying_any_container_of_a_config_leaves_the_graphs_next_config_alone"
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_a_variant_built_from_an_edited_config_does_not_change_the_original"
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_the_effective_params_of_a_node_are_a_copy_all_the_way_down"
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_a_nodes_own_descriptor_shares_no_container_with_the_node"
+      - "tests/core/test_a_config_shares_nothing_with_its_graph.py::test_a_config_is_plain_data_that_yaml_and_json_write_alike"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-206"
+    title: "A bfloat16 state or parameter leaf cannot be restored from a checkpoint"
+    description: >
+      `save_state` converts every leaf with `np.asarray` and writes it with
+      `np.savez`.  NumPy carries bfloat16 as an extension dtype, and the
+      `.npy` format has no name for one: the member is written as `|V2`,
+      two raw bytes per element.  `load_state` then refuses it --
+      `ValueError: Checkpoint field 'n/x' holds |V2 data, not a number.
+      Nothing was loaded.` on the tree, a `TypeError` from the cast on the
+      extracted 0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1 trees (CPU, jaxlib
+      0.11.0, empty HOME).  So a graph holding a bfloat16 leaf, which is a
+      supported dtype for a state field and for a coupling group, can be
+      saved and cannot be resumed, where `save_state` documents that it
+      persists all node states.  One node holding
+      `{"x": jnp.ones(4, jnp.bfloat16)}`, stepped, saved and loaded into a
+      fresh graph, reproduces it; float16, float32, the integers, booleans
+      and complex64 round-trip.  Loud: nothing is loaded and nothing wrong
+      is restored, and the bytes on disk are the leaf's own bits.  The
+      other dtypes JAX has that NumPy carries as extension types (the
+      small floats, the 2- and 4-bit integers) were not tried through a
+      checkpoint; those examined have a void descriptor too, one byte
+      wide.  Found while checking that a 16-bit coupling group's slots
+      widen on load.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception at load time: no state is restored, so none is restored
+      wrongly.  The cost is a bfloat16 run that cannot be resumed from its
+      checkpoint.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.save_state"
+      - "maddening.core.simulation.checkpoint.load_state"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Hold a state that must be checkpointed in float16 or float32.  To
+      recover a bfloat16 leaf from an existing file, read the member with
+      `numpy.load` and reinterpret it: `member.view(ml_dtypes.bfloat16)`.
+      Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0.  The fix is a decision about
+      the checkpoint format: a member has to carry the name of a dtype
+      NumPy cannot name (a one-field record whose field is named after the
+      dtype round-trips, measured), an older release must refuse such a
+      file loudly, and the two-byte members already on disk can be read as
+      bfloat16 while one-byte members cannot be told apart.  Until then a
+      graph with a bfloat16 leaf has no checkpoint it can load.
+    verification:
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_bfloat16_state_survives_a_checkpoint_restart"
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_what_a_bfloat16_checkpoint_holds_today_is_the_leafs_bits_without_its_name"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-207"
+    title: "A checkpoint value loaded into a bfloat16 leaf was cast with no check: a float32 1e-44 loaded as 0.0 and 3.4028235e38 as inf"
+    description: >
+      `load_state` casts each member of a checkpoint to the live leaf's
+      dtype and refuses a value the cast would lose (MADD-ANO-138).  Which
+      rule applied was chosen by the leaf's `dtype.kind`, and NumPy reports
+      bfloat16, like every dtype it carries as an extension type, as kind
+      `V` (void).  A bfloat16 leaf therefore got no rule at all.  A
+      checkpoint written by a float32 graph and loaded into the same graph
+      held in bfloat16 -- its own checkpoint cannot be loaded,
+      MADD-ANO-206, so this is the load such a graph can do -- stored
+      `1e-44` as `0.0`, `-1e-44` as `-0.0` and `3.4028235e38` as `inf`, and
+      a float64 `1e39` as `inf`, in a state field and in a parameter leaf
+      alike, with nothing said.  Measured on release/0.4.0 at 60c89656
+      (CPU, jaxlib 0.11.0).  No release carried it: on the extracted 0.1.0
+      to 0.3.1 trees the same load replaced the bfloat16 field with a
+      float32 one, values intact, and the cast to the live leaf's dtype is
+      new in 0.4.0.  Found while reproducing MADD-ANO-206.  Resolved in
+      0.4.0: the kind is read from JAX's own dtype lattice, so bfloat16,
+      the small floats and the 2- and 4-bit integers are each held to the
+      rule for their kind, and a leaf dtype that has no rule is a
+      `ValueError`, where "nothing lost" used to be assumed.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, never `minor`: a resumed run started from a
+      state that was not the one saved, an `inf` that propagates or a zero
+      that hides.  Not `critical`: it needs a checkpoint of another
+      precision loaded into a bfloat16 graph, and a value outside
+      bfloat16's range.  `context_dependent` as MADD-ANO-138 is.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.load_state"
+      - "maddening.core.graph_manager.GraphManager.load_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: compare a state loaded into a bfloat16 graph with the file
+      (`numpy.load`) for values that became `inf` or `0`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Exercised for a bfloat16 state field and parameter leaf through
+      `load_state`, and for the other extension dtypes on the cast alone.
+      A float format without `inf` that saturates is not flagged: a 4-bit
+      float stores `1e39` as its largest value, 6.0.  A mapping weight held
+      in bfloat16 is not exercised.
+    verification:
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_cannot_hold_is_refused"
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_parameter_leaf_of_bfloat16_is_held_to_the_same_rule"
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_can_hold_loads_as_the_cast_rounds_it"
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_the_cast_check_holds_for_every_kind_of_extension_dtype"
+      - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_leaf_dtype_with_no_rule_is_refused_not_assumed_lossless"
     github_issue: null

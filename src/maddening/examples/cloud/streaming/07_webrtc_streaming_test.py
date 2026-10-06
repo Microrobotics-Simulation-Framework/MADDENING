@@ -92,7 +92,7 @@ PIP_INSTALL = (
 API_TOKEN = secrets.token_urlsafe(32)
 
 SERVER_SCRIPT = r'''
-import sys, time, warnings, json
+import sys, time, json
 import jax
 import jax.numpy as jnp
 print(f"JAX: {jax.devices()}")
@@ -124,9 +124,7 @@ gm.add_edge("table", "ball", "position", "table_position")
 gm.add_edge("ball", "spring", "position", "anchor_position")
 gm.add_edge("ball", "heat_rod", "velocity", "left_temperature",
     transform=lambda v: jnp.clip(jnp.abs(v) * 10.0, 0.0, 100.0))
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    gm.compile()
+gm.compile()
 print(f"Graph: {gm.node_names}")
 
 # --- Build matplotlib frame renderer ---

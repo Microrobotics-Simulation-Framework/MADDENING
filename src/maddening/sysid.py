@@ -4502,32 +4502,19 @@ def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm",
     return W, s * s <= rtol * curvature, curvature
 
 
-def _curvature_rank(J, slope, physical) -> Optional[int]:
-    """The rank :func:`fim` would report at the iterate ``J = dr/dtheta``
-    was formed at, with its default ``scale="relative"``: of ``dr/dp``
-    with each column times its parameter's magnitude, by :func:`fim`'s
-    cutoff at ``J``'s own precision.
-
-    ``slope`` is ``dp/dtheta`` and ``physical`` the parameters' values, per
-    column.  In :func:`fim`'s coordinates rather than the optimiser's or
-    the guard's: a ``logit`` coordinate near the end of its range has a
-    column in ``theta`` that its flat transform shrinks, which is a
-    property of the coordinate and not of the data (measured: a singular
-    value ratio of 7e-9 in ``theta`` for a fit whose ratio in the
-    parameters is 0.39).  ``None`` -- no statement -- where ``J`` is not
-    finite or a parameter or its slope is zero or not finite, which
-    :func:`fim` reports in its own words (``zero_scaled``).
-    """
+def _curvature_rank(J, scale) -> Optional[int]:
+    """How many directions ``JᵀJ`` resolves at the iterate ``J = dr/dtheta``
+    was formed at, by :func:`fim`'s rank cutoff at ``J``'s own precision,
+    with column ``j`` divided by ``scale[j]`` (the guard's coordinates,
+    :func:`_gauss_newton_flatness`, asked of every direction rather than of
+    the guard's candidates).  ``None`` -- no statement -- where ``J`` or
+    ``scale`` is not finite or a scale is not positive."""
     Jd = np.asarray(J, dtype=np.float64)
-    slope = np.asarray(slope, dtype=np.float64)
-    size = np.abs(np.asarray(physical, dtype=np.float64))
-    usable = np.isfinite(slope) & (slope != 0.0) & np.isfinite(size) & (size > 0.0)
-    if not (np.all(np.isfinite(Jd)) and np.all(usable)):
+    scale = np.asarray(scale, dtype=np.float64)
+    if not (np.all(np.isfinite(Jd)) and np.all(np.isfinite(scale)) and np.all(scale > 0.0)):
         return None
     n = Jd.shape[1]
-    # ``1 / (size / slope)``: ``_gauss_newton_flatness`` divides by its scale.
-    _, flat, _ = _gauss_newton_flatness(Jd, np.eye(n), np.asarray(J).dtype,
-                                        scale=slope / size)
+    _, flat, _ = _gauss_newton_flatness(Jd, np.eye(n), np.asarray(J).dtype, scale=scale)
     return n - int(np.count_nonzero(flat))
 
 
@@ -5993,12 +5980,12 @@ def fit_lm(
         coordinates -- where it is not, the guard finds nothing, and this
         fitter warns (a :class:`RuntimeWarning`) when ``excited_rank`` is
         the full count while ``JᵀJ`` at the returned point resolves fewer
-        directions by :func:`fim`'s rank rule, in :func:`fim`'s default
-        coordinates (each parameter relative to itself: here to the larger
-        of its size at the start and at the returned point, so that a
-        parameter fitted to zero is not read relative to its own rounding);
-        it asks only where the run ended on the iterate whose Jacobian it
-        formed last, so it costs no evaluation.  :attr:`FitResult.excited_rank`,
+        directions by :func:`fim`'s rank rule, in the guard's coordinates
+        with each ``log`` / ``logit`` parameter read relative to itself, as
+        :func:`fim`'s default ``scale="relative"`` reads it (not in its
+        coordinate, whose column a flat transform shrinks); it asks only
+        where the run ended on the iterate whose Jacobian it formed last,
+        so it costs no evaluation.  :attr:`FitResult.excited_rank`,
         :attr:`FitResult.undetermined_drift` and
         :attr:`FitResult.hold_declined` say what the guard found.
 
@@ -6536,13 +6523,23 @@ def fit_lm(
         # not determine.  This fitter holds ``J`` at the point it returns,
         # so it can say so (at no further evaluation: only where the run
         # ended on the iterate whose Jacobian it formed last).
-        # Each parameter relative to the larger of its size at the start and
-        # where the run ended, as the guard measures it: a parameter fitted
-        # to zero ends on its own rounding, and relative to that alone its
-        # column is nothing.
-        resolved = _curvature_rank(
-            rJ[1], pmap.slope(selected),
-            np.maximum(np.abs(pmap.physical(start)), np.abs(pmap.physical(selected_params))))
+        # In the guard's coordinates (``_relative_scale``: an identity
+        # parameter relative to its own size, with its care for one that has
+        # none), but for a ``log`` / ``logit`` coordinate read as
+        # :func:`fim` reads it, in the parameter relative to itself: near
+        # the end of its range a ``logit`` coordinate's column is small
+        # because its transform is flat there, which is a property of the
+        # coordinate and not of the data (measured: a singular-value ratio
+        # of 7e-9 in ``theta`` for a fit whose ratio in the parameters is
+        # 0.39).
+        scale = _relative_scale(theta0, selected, bounds.transformed, _columns)
+        if bounds.transformed is not None:
+            slope = np.asarray(pmap.slope(selected), dtype=np.float64)
+            size = np.abs(pmap.physical(selected_params))
+            curved = (np.asarray(bounds.transformed, dtype=bool) & np.isfinite(slope)
+                      & (slope != 0.0) & (size > 0.0))
+            scale = np.where(curved, np.abs(slope) / np.where(curved, size, 1.0), scale)
+        resolved = _curvature_rank(rJ[1], scale)
         if resolved is not None and resolved < n_fitted:
             warnings.warn(
                 f"fit_lm: excited_rank is {n_fitted} of {n_fitted} -- the guard "

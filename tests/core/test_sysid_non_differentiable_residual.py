@@ -443,23 +443,45 @@ def test_the_curvature_rank_is_fims_rank_in_fims_coordinates():
     J = rng.normal(size=(40, 3)).astype(np.float32)
     ones = np.ones(3)
     rank = sysid._curvature_rank  # noqa: SLF001
-    assert rank(J, ones, ones) == 3
+    assert rank(J, ones) == 3
     # The third column a combination of the others: one direction fewer.
     flat = np.column_stack([J[:, 0], J[:, 1], 2.0 * J[:, 0] - J[:, 1]])
-    assert rank(flat, ones, ones) == 2
-    # A column in small units is not unresolved: it is read relative to its
-    # parameter ...
+    assert rank(flat, ones) == 2
+    # A column that is small because of its coordinate (a parameter in
+    # small units, a transform that is flat there) is read by its scale.
     small = J * np.asarray([1.0, 1.0, 1e-9], np.float32)
-    assert rank(small, ones, np.asarray([1.0, 1.0, 1e9])) == 3
-    # ... and a coordinate whose transform is flat there (``dp/dtheta`` of
-    # 1e-9) is read in the parameter, as fim reads it.
-    assert rank(small, np.asarray([1.0, 1.0, 1e-9]), ones) == 3
-    assert rank(small, ones, ones) == 2
-    # No statement where fim's relative column has no scale, or J no value.
-    assert rank(J, ones, np.asarray([1.0, 0.0, 1.0])) is None
-    assert rank(J, np.asarray([1.0, 0.0, 1.0]), ones) is None
+    assert rank(small, np.asarray([1.0, 1.0, 1e-9])) == 3
+    assert rank(small, ones) == 2
+    # No statement without a scale, or without a finite J.
+    assert rank(J, np.asarray([1.0, 0.0, 1.0])) is None
+    assert rank(J, np.asarray([1.0, np.inf, 1.0])) is None
     J[3, 1] = np.nan
-    assert rank(J, ones, ones) is None
+    assert rank(J, ones) is None
+
+
+def test_the_warning_does_not_fire_on_a_parameter_whose_value_is_zero():
+    """``HeartPumpNode`` with the stroke volume frozen has no degeneracy,
+    and its ``venous_pressure`` is 0: relative to itself that parameter has
+    no size, and the guard's scale gives it one from its column.  A fit
+    from a start that leaves it at 0 resolves every direction and is
+    silent."""
+    gm = GraphManager()
+    for name in ("heart", "record"):
+        gm.add_node(HeartPumpNode(name, DT))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    gm.set_param_spec("heart", "stroke_volume", ParamSpec(trainable=False))
+    residual = _twin(gm, "heart", 240, "arterial_pressure")
+    truth = gm.params["nodes"]["heart"]
+    assert float(truth["venous_pressure"]) == 0.0, "premise"
+    start = _started(gm, "heart", resistance=float(truth["resistance"]) * 1.2,
+                     compliance=float(truth["compliance"]) * 0.85)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_lm(gm, residual, params=start)
+    assert res.excited_rank == 4, res.excited_rank      # every trainable coordinate
+    assert not _messages(caught, RANK), _messages(caught, RANK)
 
 
 def test_the_warning_does_not_fire_on_a_coordinate_its_transform_flattens():

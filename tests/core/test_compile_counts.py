@@ -79,27 +79,31 @@ def _coupled() -> GraphManager:
 class AvalChangesOnce(SimulationNode):
     """A node that forces exactly one extra compile of the step.
 
-    The first step is traced against a ``(1,)`` leaf and returns a
-    ``(2,)`` one, so the second step's argument has a different aval and
-    JAX must trace and compile the whole step again.  From the third
-    step on the aval is stable, so the retrace count settles at 2 rather
-    than growing without bound -- the mutation has to be as
+    Its ``x`` starts as a Python float, which the first step is traced
+    against as a weakly typed ``float32`` scalar; the step returns a
+    strongly typed one, so the second step's argument has a different
+    aval and JAX must trace and compile the whole step again.  From the
+    third step on the aval is stable, so the retrace count settles at 2
+    rather than growing without bound -- the mutation has to be as
     deterministic as the thing it is testing.
 
     This is the shape of the real bug the counts exist to catch: nothing
     here is wrong enough to raise, the results are all correct, and the
-    only symptom is a second XLA compile on every run.
+    only symptom is a second XLA compile on every run.  The state keeps
+    its layout throughout -- the same fields, shapes and kinds of dtype --
+    so the step is one ``GraphManager.step`` stores (a step that reshapes
+    a leaf is refused), and the state saves, reloads and scans.
     """
 
     def initial_state(self):
-        return {"x": jnp.zeros(1), "n": jnp.array(0, jnp.int32)}
+        return {"x": 0.0, "n": jnp.array(0, jnp.int32)}
 
     def state_fields(self):
         return ["x", "n"]
 
     def update(self, state, boundary_inputs, dt, *, params=None):
-        x = state["x"] if state["x"].shape[0] == 2 else jnp.zeros(2)
-        return {"x": x + dt, "n": state["n"] + 1}
+        x = jnp.asarray(state["x"], jnp.float32)    # strongly typed from here on
+        return {"x": x + jnp.float32(dt), "n": state["n"] + 1}
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +258,11 @@ def test_a_changing_state_aval_is_reported_as_an_extra_compile():
         gm.step()
     assert gm.trace_count == 2, "the mutation did not actually retrace"
     assert compile_counts(gm).retrace_count == 2
+    # ... and it is a retrace of a step that keeps the state's layout: the
+    # weak type is the only thing that changed.
+    assert jnp.shape(gm._state["g"]["x"]) == () and gm._state["g"]["x"].dtype == jnp.float32
+    assert not gm._state["g"]["x"].weak_type
+    assert int(gm._state["g"]["n"]) == 8        # four steps here, four of the measurement's
 
 
 # ---------------------------------------------------------------------------

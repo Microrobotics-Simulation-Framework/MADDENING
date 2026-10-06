@@ -70,6 +70,7 @@ import numpy as np
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core._exact_integers import lost_as_integer
+from maddening.core._param_probes import _state_layout_drift
 from maddening.core.params import check_bounds
 from maddening.fmi.directional_derivatives import (
     DirectionalDerivativeKind,
@@ -559,6 +560,9 @@ class FmuSidecar:
         #: spec, so the accepted values are the intersection of the two.
         self._advertised: dict[tuple[str, str], Any] = {}
         self._input_resolver = config.input_resolver
+        #: Which trace of the graph's compiled step the last layout
+        #: comparison was made on (:meth:`_refuse_layout_drift`).
+        self._layout_checked_trace: Optional[int] = None
 
     def _refuse_new_values_for(self, fixed: Mapping[str, str]) -> None:
         """Add ``{"<node>.params.<key>": reason}`` to the parameters whose
@@ -681,8 +685,53 @@ class FmuSidecar:
         if self._input_resolver is not None:
             external_inputs = self._input_resolver(external_inputs)
         if self._params is None:
-            return self._config.step_fn(state, external_inputs)
-        return self._config.step_fn(state, external_inputs, self._params)
+            advanced = self._config.step_fn(state, external_inputs)
+        else:
+            advanced = self._config.step_fn(state, external_inputs, self._params)
+        self._refuse_layout_drift(state, advanced)
+        return advanced
+
+    def _refuse_layout_drift(self, state: Any, advanced: Any) -> None:
+        """Raise if one step gave *advanced* other keys, shapes or kinds of
+        dtype than *state* has, as ``GraphManager.step`` does.
+
+        The sidecar runs the graph's compiled step on a state of its own,
+        so the graph's check never sees it: a node that broadcasts a state
+        leaf at its first step (a list given for a scalar constant) left
+        the sidecar holding a state that is not the one its model
+        description declares.  Nothing is committed: :meth:`step` and the
+        bridge commit only what this returns.
+
+        A graph's compiled step is compared once per trace (the layout a
+        traced program returns is fixed by the layout it is given); any
+        other callable, and the step of a graph compiled again since, is
+        compared at every step.  Host-side: shapes and dtypes are read,
+        nothing is traced or computed.
+
+        Raises
+        ------
+        ValueError
+            Naming each leaf (``node/field``) and how it differs.
+        """
+        trace = None
+        owner = _step_compile(self._config.step_fn)
+        if owner is not None and owner[0] is not None:
+            graph, generation = owner
+            if getattr(graph, "_compile_generation", None) == generation:
+                trace = getattr(graph, "_n_traces", None)
+        if trace is not None and trace == self._layout_checked_trace:
+            return
+        drift = _state_layout_drift(state, advanced)
+        if drift:
+            raise ValueError(
+                "one step changes the layout of the state, which is then not the "
+                "state the model description declares: " + "; ".join(drift)
+                + " (leaves are named node/field).  A node's update() must return "
+                "its state with the shapes and kinds of dtype initial_state() gave "
+                "it: check the node's constructor values and the shapes its edges "
+                "and inputs deliver.  Nothing was advanced."
+            )
+        self._layout_checked_trace = trace
 
     def get_params(self) -> dict[str, Any]:
         """``{"<node>.params.<key>": value}`` for every FMI ``parameter``

@@ -222,11 +222,19 @@ def test_a_fit_of_the_length_through_the_mapped_edge_lands_far_from_the_truth():
         gm = _build(L_CONSTRUCTED)
         mask = jax.tree.map(lambda _: False, gm.params)
         mask["nodes"]["src"]["length"] = True
-        res = sysid.fit_lm(
-            gm,
-            lambda p: sysid.windowed_loss(
-                gm, p, obs, obs_fn=lambda s: s[observed]["temperature"], window=STEPS),
-            mask=mask, n_iter=20)
+        # The residual handed over is the scalar loss, one row.  Where such a
+        # fit ends on a point at which that row's derivative is exactly zero,
+        # ``JᵀJ`` there resolves nothing and ``fit_lm`` says so; no other
+        # warning is expected.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = sysid.fit_lm(
+                gm,
+                lambda p: sysid.windowed_loss(
+                    gm, p, obs, obs_fn=lambda s: s[observed]["temperature"], window=STEPS),
+                mask=mask, n_iter=20)
+        assert all("resolves only 0 of them" in str(w.message) for w in caught), [
+            str(w.message) for w in caught]
         return float(res.params["nodes"]["src"]["length"]), float(res.losses[-1])
 
     through_edge, loss_edge = fitted("dst")

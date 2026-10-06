@@ -640,7 +640,9 @@ loss, since at the float floor a fit's proposal rounds to nothing and
 cannot.  The default `step_tol` is `2**4` ulps of each parameter's dtype,
 so a float32 fit that reaches its optimum reports it; and once the fit
 has lowered the loss, an iteration that rejects every candidate down to
-one within `step_tol` has reached the rounding floor and converges too.
+one within `step_tol` converges too: no step the tolerance resolves lowers
+the loss, which for a differentiable residual is its rounding floor (see
+"The residual must be differentiable" below for one that is not).
 Neither fires while a parameter on its bound could lower the loss by
 moving into its range.  (`fit` and `fit_multiple_shooting` have only the
 `tol` test, so with the default `tol=0.0` their `converged` is always
@@ -673,6 +675,38 @@ is the residual's rounding and counts as zero, so a truth exactly on a
 bound converges on either bound.  A float32 constant in an x64 graph is
 optimised on float32's grid, as the model sees it, so it converges in as
 few iterations as a float64 one.
+
+**The residual must be differentiable in the trained parameters along the
+fitted trajectory.**  Every fitter here, and `fim`, reads derivatives, and
+a derivative of a step is the derivative of the branch that step took.  A
+node with an event, a contact or a valve whose timing depends on a trained
+parameter breaks the condition: `BallNode`'s bounce and `HeartPumpNode`'s
+valve switch one time step earlier or later as a parameter moves, and the
+residual *jumps* there (MADD-ANO-021).  On the bouncing ball of the first
+snippet, at the very parameters that generated a record, lowering the
+elasticity by one part in a million raises the loss from `1e-11` to `0.03`.
+What you see on such a residual:
+
+- `fit_lm` follows a smooth piece of the loss to its edge, where every
+  step the tolerance resolves crosses the jump and is rejected.  Its floor
+  rule would read that as the rounding floor, so it first compares each
+  small rejected step with the same step taken the other way: rounding is
+  alike on both sides, a jump is not.  Where it finds one the run ends
+  `converged=False` with a `RuntimeWarning` that names a residual that is
+  not differentiable; `res.params` is the lowest loss the run found, which
+  may be far above the minimum (on that ball, 11 of 24 starts: losses of
+  0.02 to 3.7 against 1e-13).  Start again from elsewhere, or smooth the
+  event.  A *kink* -- a continuous residual whose slope jumps -- is not
+  detected: a run that ends in the crease of one reports `converged=True`
+  at a point no step lowers the loss from.
+- `fit` and `fit_multiple_shooting` descend each smooth piece and cross
+  jumps by chance; they return the lowest-loss iterate they evaluated and
+  say nothing about whether it is a minimum (their `converged` is the `tol`
+  test alone).
+- `fim` at such a point reports the rank and the bounds of the smooth piece
+  the point is on, finite and with no warning.  They bound nothing a jump
+  can do: on that ball the bound on the elasticity is `1.3e-3` relative
+  where a change of `1e-6` moves the weighted loss by 311.
 
 Every fitter keeps each optimiser coordinate where its transform can be
 stepped on: a `transform=None` leaf inside its bounds (clipped, with the
@@ -781,10 +815,20 @@ The degeneracy has to be a fixed direction in the unconstrained
 coordinates, though.  `SpringDamperNode` gives `damping` the identity
 transform so that zero damping stays representable, which makes the scale
 direction `(c, 1, 1)` and rotates it as `c` moves; then no direction is
-null for the whole run, and the guard holds nothing.  Declare
+null for the whole run, and the guard holds nothing.  `HeartPumpNode`
+does the same with its default specs: its data fix `R·C` and `SV/C` but
+not the scale of `(R, C, SV)`, and `stroke_volume` has the identity
+transform beside a `log` resistance and compliance.  `excited_rank` then
+reads the full count -- it is the count minus the directions *the guard
+found* undetermined, and the guard found none -- on a fit the data do not
+determine, where `fim` at the returned point reads one direction fewer.
+`fit_lm`, which holds the Jacobian at the point it returns, says so in a
+`RuntimeWarning`; `fit` and `fit_multiple_shooting` hold no such matrix
+and do not.  Declare
 `transform="log"` on every parameter a scale degeneracy mixes — the
 coordinates `fim(scale="relative")` already assumes — and it becomes
-constant.  Then fit all three of `(k, c, m)`, and nothing else:
+constant (`damping` on the spring, `stroke_volume` on the heart pump).
+Then fit all three of `(k, c, m)`, and nothing else:
 
 <!-- snippet: continues -->
 ```python

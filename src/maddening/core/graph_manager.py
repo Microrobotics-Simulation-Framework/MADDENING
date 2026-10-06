@@ -249,6 +249,10 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
+        # Per group key, the keys of the geometry-dependent mapped edges
+        # the compiled step's pass resolves (experimental; empty for a
+        # group without one).  Such a group reports no bound.
+        self._committed_geometry_edges: dict[str, tuple] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
         # ``(name, entries)``; written when the step is traced.
@@ -1652,6 +1656,8 @@ class GraphManager:
         source_units: Optional[str] = None,
         target_units: Optional[str] = None,
         mapping: Optional[Any] = None,
+        *,
+        geometry: Optional[Any] = None,
     ) -> None:
         """Add a data-dependency edge between two nodes.
 
@@ -1669,6 +1675,19 @@ class GraphManager:
         :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
         A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
         its dict form) is rebuilt first with :meth:`point_resolver`.
+
+        ``geometry`` (experimental) names the moving geometry a
+        geometry-dependent mapping reads: ``("source", field)`` or
+        ``("target", field)``, a state field of this edge's own source or
+        target node (the dict ``{"anchor": ..., "field": ...}`` is taken
+        too).  There is no default anchor.  A source-anchored geometry is
+        read at the time level the edge's value is read at; a
+        target-anchored one is the field of the state the target's hook
+        is called with.  It is required by a mapping whose
+        ``needs_geometry`` is true and refused with any other; the
+        field's presence, dtype (float32 or float64) and shape (the
+        mapping's ``geometry_shape``) are checked by :meth:`validate`.
+        An edge without one behaves exactly as it did.
 
         The *transform* parameter accepts either a callable or a
         string name registered via ``@register_transform``.  String
@@ -1693,6 +1712,8 @@ class GraphManager:
             carriage return), a surrogate or U+FFFE / U+FFFF.  A
             target field the target node does not declare is taken (a node
             may read an input it does not declare).
+            Also if ``geometry`` is malformed, is given without a
+            geometry-dependent mapping, or is missing for one.
         """
         for what, name in (("source", source_field), ("target", target_field)):
             refusal = _graph_specs._field_name_refusal(name)
@@ -1714,6 +1735,8 @@ class GraphManager:
                     mapping = MappingSpec.from_dict(mapping)
                 mapping = mapping.build(self.point_resolver())
             self._check_mapping_shapes(source, source_field, target, target_field, mapping)
+        geometry = _graph_specs._checked_geometry(
+            f"{source}.{source_field}->{target}.{target_field}", geometry, mapping)
         ordinal = 0
         if mapping is not None:
             # Mapping weights live in params["mappings"][edge.key]; a
@@ -1728,7 +1751,7 @@ class GraphManager:
             )
         edge = EdgeSpec(source, target, source_field, target_field,
                         transform, additive, source_units, target_units,
-                        mapping=mapping, ordinal=ordinal)
+                        mapping=mapping, ordinal=ordinal, geometry=geometry)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
@@ -1761,10 +1784,19 @@ class GraphManager:
                 f"mapping {mapping!r} on {source}.{source_field} -> "
                 f"{target}.{target_field}: {problem}"
             )
+        leads = _graph_specs._mapping_field_leads(mapping)
         src_spec = self._nodes.get(source)
         if src_spec is not None:
             src_state = src_spec.node.initial_state()
-            if source_field in src_state:
+            if source_field in src_state and leads is not None:
+                have = tuple(np.shape(src_state[source_field])[:len(leads[0])])
+                if have != leads[0]:
+                    raise ValueError(
+                        f"mapping {mapping!r} reads a field whose leading axes are "
+                        f"{leads[0]}, which does not match {source}.{source_field} "
+                        f"(shape {tuple(np.shape(src_state[source_field]))})"
+                    )
+            elif source_field in src_state:
                 n = int(np.prod(np.shape(src_state[source_field])[:1] or (1,)))
                 if mapping.n_source != n:
                     raise ValueError(
@@ -1774,8 +1806,16 @@ class GraphManager:
         tgt_spec = self._nodes.get(target)
         if tgt_spec is not None:
             bspec = tgt_spec.node.boundary_input_spec().get(target_field)
-            shape = tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ()
-            if shape and mapping.n_target != int(shape[0]):
+            shape: tuple[Any, ...] = (
+                tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ())
+            if shape and leads is not None:
+                if tuple(int(n) for n in shape[:len(leads[1])]) != leads[1]:
+                    raise ValueError(
+                        f"mapping {mapping!r} delivers a field whose leading axes are "
+                        f"{leads[1]}, which does not match {target}.{target_field} "
+                        f"declared shape {shape}"
+                    )
+            elif shape and mapping.n_target != int(shape[0]):
                 raise ValueError(
                     f"mapping n_target={mapping.n_target} does not match "
                     f"{target}.{target_field} declared shape {shape}"
@@ -1830,7 +1870,9 @@ class GraphManager:
                 value = fluxes[edge.source_node][edge.source_field]
             else:
                 value = src_fields[edge.source_field]
-            value = _graph_specs._apply_edge(edge, value, resolved)
+            value = _graph_specs._apply_edge(
+                edge, value, resolved,
+                _graph_specs._edge_geom(edge, state, lambda: state[node_name]))
             if edge.additive and edge.target_field in out:
                 out[edge.target_field] = out[edge.target_field] + value
             else:
@@ -2199,6 +2241,10 @@ class GraphManager:
                             f"Available: {list(self._state[e.source_node].keys())}"
                         )
 
+        # Geometry-dependent mappings (experimental): what each edge's
+        # geometry must be.  Nothing for a graph without one.
+        issues.extend(_graph_specs._geometry_edge_issues(self._edges, self._nodes, self._state))
+
         # Edge validation: shape, dtype, units against BoundaryInputSpec
         for e in self._edges:
             if e.target_node not in self._nodes:
@@ -2216,7 +2262,13 @@ class GraphManager:
             if src_val is not None:
                 src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
                 spec_shape = tuple(spec.shape)
-                if e.mapping is not None and src_shape:
+                leads = (None if e.mapping is None
+                         else _graph_specs._mapping_field_leads(e.mapping))
+                if leads is not None and src_shape:
+                    # A mapping that declares its field shapes replaces
+                    # the leading axes it reads by the ones it delivers.
+                    src_shape = leads[1] + src_shape[len(leads[0]):]
+                elif e.mapping is not None and src_shape:
                     # The mapping changes axis 0 to its n_target; the
                     # rest of the shape (vector components) passes through.
                     src_shape = (int(e.mapping.n_target),) + src_shape[1:]
@@ -2348,6 +2400,7 @@ class GraphManager:
             issues.extend(_group_layout._flux_edge_coupling_errors(
                 group, self._nodes, self._edges, self._state,
             ))
+            issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._edges))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
 
@@ -3010,6 +3063,11 @@ class GraphManager:
                       if e.source_node in g.nodes and e.target_node in g.nodes))
             for g in self._coupling_groups
         }
+        self._committed_geometry_edges = {
+            "+".join(sorted(g.nodes)): tuple(
+                e.key for e in _group_layout._group_geometry_edges(g, self._edges))
+            for g in self._coupling_groups
+        }
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -3314,6 +3372,12 @@ class GraphManager:
                 self._validate_params(params)
             return _graph_specs._ResolvedParams(params.get("nodes", {}), params.get("mappings", {}))
 
+        # Nodes with an incoming edge whose mapping reads a geometry from
+        # the node's own state (experimental; empty for every other graph).
+        target_geometry_nodes = frozenset(
+            e.target_node for e in self._edges
+            if e.geometry is not None and e.geometry[0] == "target")
+
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None,
@@ -3327,6 +3391,11 @@ class GraphManager:
                 (use new_state) even if they are in back_edge_set.
             """
             boundary_inputs: dict[str, Any] = {}
+            # Static: whether an incoming edge reads a geometry from this
+            # node's own state.  Only then is what each edge read kept,
+            # for the flux hook below.
+            reads_own_geometry = node_name in target_geometry_nodes
+            delivered: list = []
 
             for edge in edges_by_target[node_name]:
                 # Determine source state: back-edges read from full_state
@@ -3347,7 +3416,15 @@ class GraphManager:
                     value = flux_state[src_nn][edge.source_field]
                 else:
                     value = src_state[src_nn][edge.source_field]
-                value = _graph_specs._apply_edge(edge, value, node_params)
+                raw = value
+                # A geometry (experimental) is read where the value was:
+                # from ``src_state`` for a source anchor, and for a target
+                # anchor from the state ``update`` is about to receive.
+                value = _graph_specs._apply_edge(
+                    edge, value, node_params,
+                    _graph_specs._edge_geom(edge, src_state, new_state[node_name]))
+                if reads_own_geometry:
+                    delivered.append((edge, raw, src_state, value))
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -3370,6 +3447,28 @@ class GraphManager:
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
             if type(spec.node).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
+                if reads_own_geometry:
+                    # The flux hook is called with the post-update state,
+                    # so a geometry this node holds is read from that
+                    # state: the edges are resolved again, in the same
+                    # order, each from the value it read above.
+                    boundary_inputs = {}
+                    for edge, raw, src_state, value in delivered:
+                        if edge.geometry is not None and edge.geometry[0] == "target":
+                            value = _graph_specs._apply_edge(
+                                edge, raw, node_params,
+                                _graph_specs._edge_geom(edge, src_state, new_node_state))
+                        if edge.additive and edge.target_field in boundary_inputs:
+                            boundary_inputs[edge.target_field] = (
+                                boundary_inputs[edge.target_field] + value
+                            )
+                        else:
+                            boundary_inputs[edge.target_field] = value
+                    if node_name in has_external:
+                        node_ext = external_inputs.get(node_name, {})
+                        for ei in ext_by_target[node_name]:
+                            if ei.target_field in node_ext:
+                                boundary_inputs[ei.target_field] = node_ext[ei.target_field]
                 fluxes = _graph_specs._node_fluxes(
                     spec, new_node_state, boundary_inputs, spec.timestep,
                     node_params.nodes.get(node_name),
@@ -4340,6 +4439,28 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
+            **A group that resolves a geometry-dependent mapping**
+            (experimental: an edge into a member, from inside the group
+            or outside it, added with ``add_edge(..., geometry=...)``)
+            reports the solve's own ``"iterations"``,
+            ``"total_iterations"``, ``"residual"`` and ``"converged"``
+            and nothing else of the above: the diagnostics do not read a
+            moving geometry in 0.4.0, so ``"amplification"``,
+            ``"error_estimate"``, ``"rho_spectral"``,
+            ``"spectral_error_bound"`` and
+            ``"gradient_relative_error_bound"`` are NaN,
+            ``"gradient_error_estimate"`` is ``inf``, and
+            ``"ratio_usable"``, ``"spectral_usable"``,
+            ``"gradient_bound_usable"`` and ``"precision_limited"`` are
+            ``False``.  Such an entry has one more key,
+            ``"not_usable_reason"`` : str, which names the edges and
+            says why; no other group's entry has it.  The values are
+            withheld **here**: the internal ``_meta`` entry of the state
+            (which ``GET /graph/state`` of the REST server and an FMU
+            state archive carry verbatim) still holds what the step
+            itself computed for such a group, and those raw slots are
+            not a report and promise nothing.
+
             **After** :meth:`run_adaptive` **or** :meth:`run_adaptive_scan`
             the report describes the last accepted attempt's two kept
             half steps, the two solves ``strict_convergence`` checks:
@@ -4580,6 +4701,31 @@ class GraphManager:
                     ),
                     "precision_limited": precision_limited,
                 })
+                geometry_keys = self._committed_geometry_edges.get(key, ())
+                if geometry_keys:
+                    # Experimental, 0.4.0: the diagnostics do not read a
+                    # moving geometry, so a group whose pass resolves a
+                    # geometry-dependent mapping reports the solve's own
+                    # outcome and nothing built on the float floor or on
+                    # the contraction estimates: every bound is NaN (the
+                    # gradient estimate ``inf``, as where the ratio is
+                    # rejected), every ``*_usable`` flag False, and the
+                    # report says why.
+                    result[key].update({
+                        "amplification": float("nan"),
+                        "error_estimate": float("nan"),
+                        "ratio_usable": False,
+                        "gradient_error_estimate": float("inf"),
+                        "rho_spectral": float("nan"),
+                        "spectral_error_bound": float("nan"),
+                        "spectral_usable": False,
+                        "gradient_relative_error_bound": float("nan"),
+                        "gradient_bound_usable": False,
+                        "precision_limited": False,
+                        "not_usable_reason": (
+                            _group_layout._GEOMETRY_DIAGNOSTICS_REASON.format(
+                                keys=list(geometry_keys))),
+                    })
         return result
 
     # ------------------------------------------------------------------
@@ -5229,6 +5375,7 @@ class GraphManager:
         check only the ones they keep, as a multi-rate step checks only
         the solves it applies (MADD-ANO-044).
         """
+        self._refuse_adaptive_geometry("_build_dt_step_fn")
         schedule = list(self._schedule)
         nodes_dict = dict(self._nodes)
         back_edge_set = set(self._back_edges)
@@ -5412,6 +5559,19 @@ class GraphManager:
             _reports._fold_kept_half_step_reports, tuple(coupling_groups))
         return dt_step_fn
 
+    def _refuse_adaptive_geometry(self, entry: str) -> None:
+        """Raise for a graph with a geometry-dependent mapping: the
+        adaptive steppers take half steps and discard attempts, and the
+        time level a geometry is read at across those is not defined."""
+        keys = _graph_specs._geometry_edge_keys(self._edges)
+        if keys:
+            raise RuntimeError(
+                f"{entry}: this graph has geometry-dependent mapping(s) on edge(s) "
+                f"{keys}, which the adaptive steppers do not support in 0.4.0: the time "
+                f"level a geometry is read at across half steps and rejected attempts "
+                f"is not defined yet. Use step / run_scan."
+            )
+
     def _adaptive_multirate_message(self, entry: str) -> str:
         """Why ``run_adaptive*`` refuses this (multi-rate) graph.
 
@@ -5524,6 +5684,7 @@ class GraphManager:
         # had just stopped being multi-rate.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive"))
+        self._refuse_adaptive_geometry("run_adaptive")
         self._refuse_xla_loop_hazards("run_adaptive", scan=False)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
@@ -5704,6 +5865,7 @@ class GraphManager:
         # After the recompile, for the reason given in ``run_adaptive``.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive_scan"))
+        self._refuse_adaptive_geometry("run_adaptive_scan")
         self._refuse_xla_loop_hazards("run_adaptive_scan", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
@@ -6173,6 +6335,7 @@ class GraphManager:
                 source_units=ed.get("source_units"),
                 target_units=ed.get("target_units"),
                 mapping=mapping,
+                geometry=ed.get("geometry"),
             )
         for owner, overrides in config.get("param_specs", {}).items():
             for key, spec_dict in overrides.items():
@@ -6693,6 +6856,9 @@ class GraphManager:
         * ``precision_limited=True`` -- the residual is rounding, and
           ``converged`` can be ``True`` on a stalled iterate;
         * ``spectral_usable=False`` where a spectral bound was computed;
+        * in place of the three above, ``not_usable_reason`` for a group
+          that resolves a geometry-dependent mapping (experimental): its
+          bounds, estimates and ``*_usable`` flags are withheld;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

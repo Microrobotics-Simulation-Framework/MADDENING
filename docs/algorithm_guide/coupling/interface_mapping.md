@@ -31,9 +31,9 @@ class Mapping(Protocol):
 
 `apply` maps a source field (`(n_source,)` or `(n_source, C)`) to the
 target; `apply_T` is the transpose.  `weights` is the mapping's entry of
-the graph parameter pytree and `geom` is reserved for mappings that
-depend on a moving interface (planned for 0.5.0; static mappings ignore
-it).  A mapping whose weights are applied through a structure the
+the graph parameter pytree and `geom` is the geometry of a mapping that
+depends on a moving interface (experimental, see *Geometry-dependent
+mappings* below; static mappings ignore it).  A mapping whose weights are applied through a structure the
 parameter tree does not hold may also define `structure_digest()`; see
 [Sparse mappings](#sparse-mappings).
 
@@ -363,8 +363,9 @@ JSON and USD.  The FMI exporter never exposes mapping weights, so the
 exported `modelDescription.xml` is identical with and without a mapping
 on an edge.
 
-Still planned for 0.5.0: matrix-free mappings for moving interfaces
-(`geom`), Wendland / partition-of-unity sparsity, and
+Still planned for 0.5.0: further kinds for moving interfaces (0.4.0 has
+one, experimental: *Geometry-dependent mappings* below), Wendland /
+partition-of-unity sparsity, and
 scaled-consistent / nearest-projection variants.
 
 ## Registering your own mapping kind
@@ -775,6 +776,190 @@ hundred thousand points on every push
 
 Not in 0.4.0: a sparse mapping on a moving interface (`geom` is ignored),
 sharded graphs, and sparse RBF kinds.
+
+## Geometry-dependent mappings
+
+*Experimental in 0.4.0: `add_edge(..., geometry=...)`, the registry flag
+`needs_geometry` and everything in `maddening.core.coupling.grid_mapping`
+may change in a minor release.  The user guide page
+[Geometry-dependent mappings](../../user_guide/geometry_dependent_mappings.md)
+has a runnable example, the refusals and the limits of this release.*
+
+Every mapping above is **static**: its operator is fixed when the graph is
+built.  A **geometry-dependent** mapping also reads a *geometry*, a state
+field of the edge's own source or target node that moves during the run
+(marker positions, a deforming interface), and builds its operator from it
+at every call:
+
+```
+value_at_target = mapping.apply(value_at_source, weights, geom)
+```
+
+The edge names the field, `add_edge(..., mapping=m, geometry=(anchor,
+field))` with `anchor` `"source"` or `"target"`, and the graph resolves it
+as it resolves the value.  The geometry is ordinary node state: it is
+integrated by its node, batched by `run_sweep`, differentiated by
+`jax.grad`, and saved by a checkpoint.  The mapping declares
+`needs_geometry = True` and a static `geometry_shape` (see the `Mapping`
+protocol's optional attributes), and must be a pure function of its three
+arguments.
+
+### The time level a geometry is read at
+
+Two rules cover every call site.
+
+* **Source-anchored** (`geometry=("source", g)`): the geometry is read
+  exactly as an ordinary edge `source.g -> target` would be read there,
+  from the same state the edge's value is read from.  Where the value is
+  interpolated between two snapshots (a sub-cycled member of a coupling
+  group), the geometry is interpolated between the same two snapshots
+  with the same weight, componentwise, and the mapping is applied to the
+  interpolated value at the interpolated geometry.
+* **Target-anchored** (`geometry=("target", g)`): the geometry is field
+  `g` of the `state` argument of the hook the boundary inputs are being
+  resolved for, `update` or `compute_boundary_fluxes`.
+
+| Call site | Value | Source-anchored geometry | Target-anchored geometry |
+|---|---|---|---|
+| Plain step, forward edge | the source's value from this step | the source's `g` from this step | the target's pre-step `g` (the state `update` receives) |
+| Plain step, back edge | the previous step | the source's `g` of the previous step | the target's pre-step `g` |
+| Plain step, the target's flux hook | as for its `update` | as for its `update` | the target's **post-update** `g`: the edges are resolved again for the hook |
+| Multi-rate, slow source | the state the source holds between its steps | the same held state | the target's current state |
+| Group member's `update`, Gauss-Seidel | the in-pass state | the in-pass `g` | the member's pre-step `g`, at every pass |
+| Group member's `update`, Jacobi | the incoming iterate | the incoming iterate's `g` | the member's pre-step `g` |
+| Group member's flux, seeded before a pass | the incoming iterate | the incoming iterate's `g` | the incoming iterate's `g` of the member |
+| Group member's flux after its update | the in-pass state | the in-pass `g` | the member's in-pass, post-update `g` |
+| Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d` | `g_prev + a (g_cur - g_prev)`, then the mapping | the member's state before this sub-step |
+| Sub-cycled member, `"constant"` | the end-of-step value | the end-of-step `g` | the member's state before this sub-step |
+| An edge from outside the group | not interpolated | read with the value | by the hook, as above |
+| `resolve_boundary_inputs` (inspection) | the current state | the current state's `g` | the node's current `g` |
+
+A target-anchored geometry is therefore the same at every pass of a
+coupling solve, because members integrate from the pre-step state; a
+source-anchored one is part of the iterate.
+
+The interpolation of a geometry is **componentwise**.  A geometry whose
+components are not affine coordinates (a unit quaternion, an angle across
+its wrap) should use `boundary_interpolation="constant"`.
+
+### `multilinear_grid`: gather and scatter on a uniform grid
+
+The reference kind, `multilinear_grid_mapping(origin, spacing, shape, *,
+n_points, mode, layout="flat")`, transfers between a uniform grid of one
+to three axes and `n_points` moving points whose positions, shape
+`(n_points, d)`, are the geometry.
+
+**Grid.**  The grid is the lattice of sample points: value
+$(i_0, \dots, i_{d-1})$ sits at $x_a = o_a + i_a h_a$,
+$0 \le i_a \le n_a - 1$.  The flat index is C order,
+$I = \sum_a s_a i_a$ with strides $s_a = \prod_{b > a} n_b$.
+
+**Index arithmetic.**  For point $p$ and axis $a$, in the geometry's
+dtype:
+
+$$
+u = \frac{x_{p,a} - o_a}{h_a}, \qquad
+\bar u = \min(\max(u, 0),\, n_a - 1), \qquad
+i^0 = \min(\lfloor \bar u \rfloor,\, n_a - 2), \qquad
+t = \bar u - i^0, \qquad
+i^1 = \min(i^0 + 1,\, n_a - 1).
+$$
+
+$u$ is computed in a static power-of-two frame of $h_a$ (the position, the
+origin and the spacing are multiplied by the same power of two, which
+changes no bit of the quotient and keeps every intermediate a normal
+number), so a spacing far below one is resolved.  On an axis with a single
+point $i^0 = i^1 = 0$ and $t = 0$.
+
+**Stencil and weights.**  Each point reads the $2^d$ corners
+$c \in \{0, 1\}^d$ of its cell:
+
+$$
+I_{p,c} = \sum_a s_a\, i^{c_a}_{p,a}, \qquad
+W_{p,c} = \prod_a \bigl(c_a\, t_{p,a} + (1 - c_a)(1 - t_{p,a})\bigr),
+\qquad \sum_c W_{p,c} = 1 .
+$$
+
+**Gather and scatter are one operator and its transpose.**
+
+$$
+\text{consistent (gather):}\quad y_p = \sum_c W_{p,c}\, f_{I_{p,c}},
+\qquad
+\text{conservative (scatter):}\quad g_j = \sum_{p,c\,:\,I_{p,c} = j} W_{p,c}\, y_p .
+$$
+
+Gather reproduces any field that is multilinear in the coordinates, at
+every point inside the hull of the lattice.  Scatter preserves the plain
+sum, $\sum_j g_j = \sum_p y_p$: it deposits *amounts*.  It divides by no
+cell volume and applies no quadrature weight; turning the result into a
+density belongs to a node or to the edge's `transform`.  `apply_T` of one
+mode is `apply` of the other at the same positions.
+
+**Outside the grid.**  A point outside the hull is clamped to it,
+coordinate by coordinate ($\bar u$ above): gather extrapolates constantly,
+scatter deposits on the boundary, and the weights still sum to one.  A
+non-finite coordinate is not clamped: every weight of that point is NaN at
+flat index 0, so gather returns NaN for that point only and scatter puts
+NaN in the cells of index 0.
+
+**Derivative with respect to a position.**  Inside a cell,
+$\partial y_p / \partial x_{p,a}$ is the slope of the multilinear
+interpolant along axis $a$, $\tfrac{1}{h_a}\sum_c \pm W^{(a)}_{p,c} f_{I_{p,c}}$
+with $W^{(a)}$ the product over the other axes.  The interpolant has a
+kink at every lattice plane; there the derivative is that of the cell
+above the plane (of the last cell at the top of the hull), so on the two
+faces of the hull it is the interior one-sided derivative, and strictly
+outside the hull it is zero.
+
+**Precision.**  Indices and weights are computed in the geometry's dtype
+and the weights are cast to the field's dtype, so the result has the
+field's dtype: a float32 field with a float64 geometry gives a float32
+input computed from float64 positions.  A position $x$ resolves
+$\varepsilon |x|$, so on axis $a$ a point is located to
+
+$$
+\varepsilon\, \frac{\max(|o_a|,\, |o_a + (n_a - 1) h_a|)}{h_a}
+$$
+
+cells.  When that is 1/16 of a cell or more for the dtype the geometry
+field has, `compile()` refuses the graph; at 1/1024 or more, `validate()`
+reports a warning.  Hold the geometry in float64 or move the origin of the
+coordinates closer to the grid.
+
+**Determinism.**  Gather is a fixed left fold over the $2^d$ corners.
+Scatter is a scatter-add with repeated indices: on CPU it accumulates in
+update order (points, then corners), so the result is a deterministic
+function of the inputs including the order of the points, and a
+permutation of the points changes it by rounding only.  On an accelerator
+a cell that receives several contributions may differ by rounding from
+run to run.
+
+### What reads a geometry in 0.4.0, and what does not
+
+The step reads it: the plain step, a coupling group's passes under every
+solver and acceleration, sub-cycled members, multi-rate graphs, and the
+gradients through all of them.  IQN's automatic interface set includes a
+source-anchored geometry that is internal to the group, since it is part
+of the iterate.
+
+The **diagnostics do not**.  A coupling group whose pass resolves a
+geometry-dependent mapping (on an edge into a member, from inside the
+group or from outside) reports its solve, `iterations`,
+`total_iterations`, `residual` and `converged`, and withholds everything
+built on the float floor or on the contraction estimates: the bounds and
+estimates are NaN (`gradient_error_estimate` is `inf`), `ratio_usable`,
+`spectral_usable`, `gradient_bound_usable` and `precision_limited` are
+`False`, and the entry has a `not_usable_reason` string that says so.
+`convergence_norm="interface"` is refused at `compile()` for a group with
+a geometry-dependent mapping on an internal edge (the norm would leave
+the geometry out, and declare a group converged while its geometry still
+moves); use `"l2"` or `"mixed"`.  The adaptive steppers and edges with a
+sharded end are refused too.
+
+A graph without a geometry edge is not affected by any of this: it
+compiles to the same programs as before the feature existed
+(`tests/core/test_step_program_digests.py` compares the lowered program
+text of 24 graphs with a capture taken before it).
 
 ## Legacy closures
 

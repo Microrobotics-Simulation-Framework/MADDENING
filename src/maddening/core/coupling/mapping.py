@@ -84,6 +84,47 @@ class Mapping(Protocol):
     ``dict`` (empty for a mapping without weights) from Python identifiers
     to concrete, finite, floating-point JAX arrays, the same on every call
     (see :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
+
+    **Optional attributes of a geometry-dependent mapping (experimental).**
+    None is part of this protocol: the graph reads each with ``getattr``
+    and a static mapping has none of them.
+
+    ``needs_geometry`` : bool
+        ``True`` for a mapping that reads a moving geometry.  Its edge
+        must then name one, ``add_edge(..., mapping=m, geometry=(anchor,
+        field))`` with ``anchor`` ``"source"`` or ``"target"``, and
+        ``apply`` is called with that state field as ``geom``, at the time
+        level the edge's value has.  Absent or ``False``: ``geom`` is
+        never passed and a ``geometry=`` on the edge is refused.  A
+        registered kind declares the same value with
+        ``register_mapping(..., needs_geometry=True)``; a factory whose
+        product disagrees with its registration is refused at rebuild.
+    ``geometry_shape`` : tuple of int
+        The static shape of the geometry ``apply`` reads.  ``compile()``
+        refuses an edge whose geometry field has another shape.
+    ``accepts_geometry_shape(shape) -> bool``
+        Replaces the equality test against ``geometry_shape`` for a
+        mapping that takes more than one shape (a one-dimensional grid
+        that reads ``(n_points,)`` as well as ``(n_points, 1)``).
+    ``geometry_dtype_problems(dtype) -> (errors, warnings)``
+        Two lists of sentences about a geometry of that floating dtype,
+        asked once when the graph is validated: each error is an
+        ``ERROR:`` issue (``compile()`` raises), each warning a
+        ``WARNING:`` one.  For what only the mapping knows, such as a
+        float32 coordinate that cannot resolve a cell of its grid.
+    ``field_shapes() -> (source_lead, target_lead)``
+        The leading axes of the field the mapping reads and of the field
+        it delivers, as two tuples, for a mapping whose fields are not
+        ``(n_source, ...)`` and ``(n_target, ...)`` (a grid field kept in
+        the grid's own shape).  ``add_edge`` and ``validate()`` then
+        compare these with the two ends instead of ``n_source`` and
+        ``n_target``.
+
+    A geometry-dependent mapping must be a pure function of ``(field,
+    weights, geom)``: nothing cached on values and nothing carried
+    between calls, so that a restart from a checkpoint is the
+    uninterrupted run.  It is called under ``jit``, ``grad`` and ``vmap``
+    with a traced ``geom``.
     """
 
     kind: str

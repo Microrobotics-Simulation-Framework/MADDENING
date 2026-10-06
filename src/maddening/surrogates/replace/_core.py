@@ -169,6 +169,12 @@ def replace_node(
         for ei in saved_external
     ]
 
+    # A geometry-dependent mapping reads a state field of this node: the
+    # replacement must hold it, or nothing is changed.
+    from maddening.core._graph_specs import _refuse_unpreserved_geometry  # noqa: PLC0415
+    _refuse_unpreserved_geometry(gm._edges, original_name,
+                                 gm._nodes[original_name].node, surrogate_node)
+
     # Remove original (this also removes edges and external inputs).  As a
     # replacement: a coupling group the node belongs to keeps it as a
     # member -- ``remove_node`` itself takes the node out of its group --

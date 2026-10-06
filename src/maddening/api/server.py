@@ -1124,6 +1124,26 @@ class _GraphLock:
         self.release()
 
 
+def _refuse_dropped_geometry(gm: GraphManager, name: str, held: Any, incoming: Any) -> None:
+    """A 409 if putting *incoming* in place of node *name* (*held*) would
+    leave an edge's geometry-dependent mapping reading a field *incoming*
+    does not hold with that shape and a float32 or float64 dtype
+    (experimental).  Asked by the surrogate routes before they change
+    anything, with the library's own rule (``replace_node``'s), so the
+    refusal is the route's and says what is wrong: left to
+    ``replace_node`` inside the transaction it was put back as well, but
+    answered the generic 500."""
+    from maddening.core._graph_specs import (  # noqa: PLC0415
+        _refuse_unpreserved_geometry,
+    )
+    try:
+        _refuse_unpreserved_geometry(gm._edges, name, held, incoming)
+    except ValueError as exc:
+        detail = str(exc).replace(" Nothing was changed.",
+                                  " Nothing was changed; the graph is as it was.")
+        raise HTTPException(status_code=409, detail=detail) from None
+
+
 def _surrogate_training_bytes(gm: GraphManager, node_name: str,
                               req: "TrainSurrogateRequest") -> int:
     """The memory a ``POST /surrogate/train`` job for *req* would take,
@@ -5205,6 +5225,8 @@ class SimulationServer:
                     initial_values=initial_values,
                 )
 
+                _refuse_dropped_geometry(
+                    self.gm, node_name, self.gm._nodes[node_name].node, surrogate)
                 from maddening.surrogates.replace import replace_node
                 replace_node(self.gm, node_name, surrogate)
                 self.gm.compile()
@@ -5265,6 +5287,9 @@ class SimulationServer:
                 if edge.key in self.gm._param_spec_overrides
             }
             problems: list[str] = []
+            live = self.gm._nodes.get(node_name)
+            if live is not None:
+                _refuse_dropped_geometry(self.gm, node_name, live.node, orig_node)
             try:
                 # As a replacement: the coupling group the surrogate is a
                 # member of keeps the name, for the node added back below.

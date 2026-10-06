@@ -326,6 +326,62 @@ def test_a_refused_step_of_an_edited_graph_leaves_it_waiting_for_its_compile(ser
 
 
 # ---------------------------------------------------------------------------
+# The streams
+# ---------------------------------------------------------------------------
+
+def test_the_streams_are_sent_the_restored_frame_only_when_a_failed_write_published_one(served):
+    """A state write publishes the written state to the streams before it
+    answers.  When it then fails, the relay holds the frame from before the
+    request again, under a new sequence number -- a stream that sent the
+    abandoned frame sends the restored one.  A failure before anything was
+    published leaves the sequence alone: no frame is re-sent for nothing."""
+    relay = served.server.relay
+    assert served.client.post("/sim/step").status_code == 200
+    sequence, sim_time, frame = relay.latest_frame()
+    body = {"state": {"position": 2.0, "velocity": 0.5}}
+    injector = Injector(served)
+    for at, published in ((1, False), (6, True)):
+        injector.arm(at)
+        try:
+            resp = served.client.put("/graph/state/ball", json=body)
+        finally:
+            fired = injector.disarm()
+        assert resp.status_code == 500, (fired, resp.text)
+        assert ("after StateRelay.restore" in fired) is published, fired
+        now, time_now, frame_now = relay.latest_frame()
+        assert frame_now is frame and time_now == sim_time
+        assert now == (sequence + 2 if published else sequence), (fired, sequence, now)
+        sequence = now
+
+
+def test_a_relay_attached_by_a_request_that_failed_is_attached_again_by_the_next():
+    """A server started on an empty graph attaches its relay (an observer
+    of the graph) in the first request that publishes a state: the first
+    node added.  When that request fails, the graph's observers are put
+    back without the relay -- and the server must not go on believing it is
+    attached, or the streams' clock never counts a step."""
+    s = O.serve()
+    body = {"type": "BallNode", "name": "ball", "timestep": DT, "params": {}}
+    try:
+        with quiet():
+            assert not s.server._relay_attached  # noqa: SLF001
+            injector = Injector(s)
+            injector.arm(8)
+            try:
+                resp = s.client.post("/graph/nodes", json=body)
+            finally:
+                fired = injector.disarm()
+            assert resp.status_code == 500 and "before _json_reply" in fired, fired
+            assert not s.server._relay_attached  # noqa: SLF001
+            assert s.server.relay._on_event not in s.gm._observers  # noqa: SLF001
+            assert s.client.post("/graph/nodes", json=body).status_code == 201
+            assert s.client.post("/sim/step").status_code == 200
+            assert s.server.relay.step_count == 1
+    finally:
+        s.close()
+
+
+# ---------------------------------------------------------------------------
 # POST /sim/run: the steps before the failure stay, and the reply says so
 # ---------------------------------------------------------------------------
 

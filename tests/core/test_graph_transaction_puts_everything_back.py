@@ -286,6 +286,21 @@ def test_further_roots_are_recorded_with_the_graph():
     assert list(originals) == ["rod"] and originals["rod"][1] == [] and active == {"rod"}
 
 
+def test_a_container_is_recorded_however_deep_and_through_whatever_holds_it():
+    """A dict in a list in a tuple in a set-holding dict: each level is
+    walked, whatever kind of container holds the next."""
+    inner, members = {"a": 1}, {1, 2}
+    held = [(inner, [members])]
+    snapshot = _Snapshot([{"held": held}])
+    inner["b"] = 2
+    del inner["a"]
+    members.add(3)
+    held.append("more")
+    snapshot.restore()
+    assert inner == {"a": 1} and members == {1, 2} and held == [(inner, [members])]
+    assert held[0][0] is inner
+
+
 # ---------------------------------------------------------------------------
 # What it shares
 # ---------------------------------------------------------------------------

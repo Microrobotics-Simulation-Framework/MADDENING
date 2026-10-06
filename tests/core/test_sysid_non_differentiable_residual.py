@@ -398,6 +398,28 @@ def test_fit_lm_warns_when_the_guard_reads_full_and_the_jacobian_does_not():
         assert sysid.fim(residual, res.params, mask=mask).rank == 2
 
 
+def test_fit_lm_warns_on_the_springs_scale_under_its_default_specs():
+    """The other stock instance: ``SpringDamperNode``'s identity ``damping``
+    beside a ``log`` stiffness and mass, the scale of ``(k, c, m)`` free."""
+    gm = GraphManager()
+    for name in ("spring", "record"):
+        gm.add_node(SpringDamperNode(name, DT, stiffness=30.0, damping=2.0,
+                                     initial_position=0.5))
+    gm.compile()
+    residual = _twin(gm, "spring", 200, "position")
+    mask = jax.tree.map(lambda _: False, gm.params)
+    for key in ("stiffness", "damping", "mass"):
+        mask["nodes"]["spring"][key] = True
+    start = _started(gm, "spring", stiffness=30.0 * 1.3 * 1.15, damping=2.0 * 1.3 * 0.85,
+                     mass=1.3)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_lm(gm, residual, params=start, mask=mask)
+    texts = _messages(caught, RANK)
+    assert res.excited_rank == 3, res.excited_rank
+    assert len(texts) == 1 and "resolves only 2" in texts[0], texts
+
+
 def test_fit_lm_is_silent_where_the_guard_held_the_direction():
     """The documented remedy: under ``log`` the direction is fixed, the
     guard holds it, ``excited_rank`` is 2 and there is nothing to warn of."""
@@ -416,17 +438,50 @@ def test_fit_lm_is_silent_on_a_fit_every_direction_of_which_is_resolved(noisy_sp
     assert not _messages(caught, RANK)
 
 
-def test_the_curvature_rank_is_the_count_of_directions_the_cutoff_resolves():
+def test_the_curvature_rank_is_fims_rank_in_fims_coordinates():
     rng = np.random.default_rng(0)
-    J = rng.normal(size=(40, 3))
+    J = rng.normal(size=(40, 3)).astype(np.float32)
     ones = np.ones(3)
-    assert sysid._curvature_rank(J, ones, np.float32) == 3  # noqa: SLF001
+    rank = sysid._curvature_rank  # noqa: SLF001
+    assert rank(J, ones, ones) == 3
     # The third column a combination of the others: one direction fewer.
     flat = np.column_stack([J[:, 0], J[:, 1], 2.0 * J[:, 0] - J[:, 1]])
-    assert sysid._curvature_rank(flat, ones, np.float32) == 2  # noqa: SLF001
-    # In the guard's coordinates: a column in small units is not unresolved.
-    small = J * np.asarray([1.0, 1.0, 1e-9])
-    assert sysid._curvature_rank(small, np.asarray([1.0, 1.0, 1e-9]), np.float32) == 3  # noqa: SLF001
-    assert sysid._curvature_rank(small, ones, np.float32) == 2  # noqa: SLF001
+    assert rank(flat, ones, ones) == 2
+    # A column in small units is not unresolved: it is read relative to its
+    # parameter ...
+    small = J * np.asarray([1.0, 1.0, 1e-9], np.float32)
+    assert rank(small, ones, np.asarray([1.0, 1.0, 1e9])) == 3
+    # ... and a coordinate whose transform is flat there (``dp/dtheta`` of
+    # 1e-9) is read in the parameter, as fim reads it.
+    assert rank(small, np.asarray([1.0, 1.0, 1e-9]), ones) == 3
+    assert rank(small, ones, ones) == 2
+    # No statement where fim's relative column has no scale, or J no value.
+    assert rank(J, ones, np.asarray([1.0, 0.0, 1.0])) is None
+    assert rank(J, np.asarray([1.0, 0.0, 1.0]), ones) is None
     J[3, 1] = np.nan
-    assert sysid._curvature_rank(J, ones, np.float32) is None  # noqa: SLF001
+    assert rank(J, ones, ones) is None
+
+
+def test_the_warning_does_not_fire_on_a_coordinate_its_transform_flattens():
+    """A ``logit`` damping whose truth sits near the end of a wide range:
+    in the optimiser's coordinates its column is small because the
+    transform is flat there, which says nothing about the data.  The fit
+    recovers both parameters, and the warning, read in fim's coordinates,
+    is silent."""
+    gm = GraphManager()
+    for name in ("spring", "record"):
+        gm.add_node(SpringDamperNode(name, DT, stiffness=30.0, damping=1.9,
+                                     initial_position=0.5))
+    gm.compile()
+    gm.set_param_spec("spring", "damping", ParamSpec(bounds=(0.0, 2000.0), transform="logit"))
+    residual = _twin(gm, "spring", 100, "position")
+    mask = jax.tree.map(lambda _: False, gm.params)
+    for key in ("stiffness", "damping"):
+        mask["nodes"]["spring"][key] = True
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_lm(gm, residual, mask=mask,
+                     params=_started(gm, "spring", stiffness=24.0, damping=3.0))
+    assert res.converged and res.excited_rank == 2
+    assert float(res.params["nodes"]["spring"]["damping"]) == pytest.approx(1.9, rel=1e-2)
+    assert not _messages(caught, RANK)

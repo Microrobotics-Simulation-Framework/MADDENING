@@ -37,8 +37,8 @@ known exactly, to the bit.  All of these are leaves of the ``params`` tree
 the fitter hands its model, so the model-side programs
 (``sysid._compile_model``: the residual and its Jacobian) are compiled once
 for each precision and each way of leaving leaves out and shared by every
-example -- **four pairs of model-side compiles in a run of all three
-searches**, whatever the number of examples (about 2.7 s a pair on three
+example -- **four pairs of model-side compiles in a run of the three
+searches of the spring** (and one for the ball's), whatever the number of examples (about 2.7 s a pair on three
 cores; a fit is then 0.04 s).  What is not shared is the library's own: its
 map from the optimiser's coordinates to the parameters is compiled once per
 distinct ``ParamSpec`` (the bounds are constants of a spec) -- three scalar
@@ -65,7 +65,24 @@ c. **returned is not evaluated**: the relative difference between
    ``best_loss`` and the loss of the fitter's own residual program at the
    parameters returned, and -- counted as at least 1 -- any difference at
    all between a leaf the fit was not to move and the array that went in
-   (SYS-054).
+   (SYS-054);
+d. **converged beside a lower loss**, on a second problem, whose residual
+   is not differentiable: the guide's ``TableNode -> BallNode`` graph (200
+   float32 steps; a second ball on the same table, trained by nothing,
+   carries the truth and is the record), with the truth's elasticity and
+   gravity and both starts drawn.  A bounce moves by one time step as a
+   parameter moves, so the loss is piecewise smooth with jumps
+   (MADD-ANO-021), and Levenberg-Marquardt is drawn along a piece to its
+   edge.  For a fit that reports ``converged=True``: the largest fall of
+   the loss over the points within 1e-4 of the returned one in the
+   optimiser's coordinates (both parameters are fitted as they are), in
+   units of what the residual's rounding can move the loss by (SYS-080:
+   ``converged`` is not reported beside a jump).  1e-4 is inside one
+   smooth piece of this loss, whose pieces are about 1e-3 wide; a fit
+   converged at the interior minimum of a piece that is not the truth's
+   is at an optimum and scores 0 (the per-push draws hold one: truth 0.6,
+   started at 0.5 with the true gravity, loss 5.1e-3, flat to rounding
+   out to 1e-4 and with the truth's piece 1e-3 away).
 
 Per push: each search, derandomised, at the house floor of examples.  Slow:
 the random hunt.  What the hunt found is pinned at the foot of the module.
@@ -73,7 +90,11 @@ the random hunt.  What the hunt found is pinned at the foot of the module.
 That the scores can fire was shown on the tree before the fixes they are
 for (``fa12c585``): (b) found the ``logit`` edge trap and (c) the leaf left
 out by ``mask=`` that the model was run with moved, each within tens of
-examples (the pull request that added this module gives the counts).
+examples (the pull request that added this module gives the counts).  And
+(d) on ``77a04aaf``, before ``fit_lm``'s floor rule told a jump from the
+rounding floor: the per-push draws find a fit converged beside a lower loss
+at their first example, and random draws on three seeds at examples 2, 2
+and 1 (SEEDS).
 """
 
 from __future__ import annotations
@@ -95,6 +116,7 @@ from jax.flatten_util import ravel_pytree
 from maddening import sysid
 from maddening.core.graph_manager import GraphManager
 from maddening.core.params import ParamSpec
+from maddening.nodes import BallNode, TableNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.sysid import fit_lm
 
@@ -521,8 +543,113 @@ def returned_is_not_evaluated(case: Case):
     return (max(score, 2.0) if fit.moved else score), fit
 
 
+# ---------------------------------------------------------------------------
+# The bouncing ball: a residual with jumps
+# ---------------------------------------------------------------------------
+
+BALL_STEPS = 200
+#: The residual's rounding, as a norm: ``2**2`` float32 spacings of a
+#: position of order one at every sample.  Measured on a smooth piece: a
+#: step of one float spacing of a parameter moved the loss as a rounding
+#: of 0.45 spacings a sample would (1.7e-7 at a loss of 0.025).
+BALL_ROUNDING = float(np.sqrt(BALL_STEPS) * 2.0 ** 2 * np.finfo(np.float32).eps)
+#: Score (d) is in units of the fall rounding explains, so its threshold is 1.
+BESIDE = 1.0
+#: How far from a returned point score (d) reads the loss, as fractions of
+#: each parameter: inside one smooth piece (about 1e-3 wide).
+_BALL_RADII = (1e-5, 1e-4)
+_BALL: dict = {}
+
+
+@dataclass(frozen=True)
+class BallCase:
+    """One fit of the ball: the truth and where each parameter starts."""
+
+    elasticity_true: float
+    #: The truth's gravity, and the start's, as multiples of -9.81.
+    gravity_true: float
+    elasticity_start: float
+    gravity_start: float
+
+
+def ball_cases():
+    return st.builds(
+        BallCase,
+        # Shrinks to the guide's ball, started below its truth.
+        elasticity_true=st.floats(0.5, 0.9).map(lambda x: 1.2 - x),
+        gravity_true=_decades(-0.15, 0.15),
+        elasticity_start=st.floats(0.3, 0.95), gravity_start=_decades(-0.15, 0.15))
+
+
+def _ball_problem() -> _Problem:
+    if _BALL:
+        return _BALL["problem"]
+    gm = GraphManager()
+    gm.add_node(TableNode("table", DT))
+    for name in ("ball", "record"):
+        gm.add_node(BallNode(name, DT, initial_position=1.0, elasticity=0.7))
+        gm.add_edge("table", name, "position", "table_position")
+    gm.compile()
+    kept = [("record", k) for k in gm.params["nodes"]["record"]]
+    kept += [("ball", "initial_position"), ("ball", "initial_velocity")]
+    for node, leaf in kept:
+        gm.set_param_spec(node, leaf, ParamSpec(trainable=False))
+    init = {name: {k: v[None] for k, v in gm.get_node_state(name).items()}
+            for name in gm.node_names}
+
+    def residual(p):
+        history = gm.run_sweep(BALL_STEPS, init, return_history=True, params=p)[1]
+        return history["ball"]["position"][0] - history["record"]["position"][0]
+
+    _BALL["problem"] = _Problem(gm, jax.tree.map(lambda x: x, gm.params), residual, None,
+                                tuple(kept))
+    return _BALL["problem"]
+
+
+def converged_beside_a_lower_loss(case: BallCase):
+    """(d) ``converged=True`` on a residual with jumps is still a point no
+    nearby one lowers the loss from by more than rounding explains."""
+    key = "ball"
+    with precision(False):
+        problem = _ball_problem()
+        start = jax.tree.map(lambda x: x, problem.params)
+
+        def put(node, leaf, value):
+            start["nodes"][node][leaf] = jnp.asarray(value, start["nodes"][node][leaf].dtype)
+
+        put("record", "elasticity", case.elasticity_true)
+        put("record", "gravity", -9.81 * case.gravity_true)
+        put("ball", "elasticity", case.elasticity_start)
+        put("ball", "gravity", -9.81 * case.gravity_start)
+        with _shared_programs(key), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = fit_lm(problem.gm, problem.residual, params=start)
+        details = (bool(res.converged), float(res.best_loss), int(res.n_iter))
+        if not res.converged:
+            return 0.0, details
+        program = _own_residual(key, problem)
+        leaves = res.params["nodes"]["ball"]
+        best = float(sysid._half_squared_norm(program(res.params)))  # noqa: SLF001
+        # What a residual moved by its rounding moves ``0.5 ||r||^2`` by.
+        rounding = BALL_ROUNDING * float(np.sqrt(2.0 * best)) + 0.5 * BALL_ROUNDING ** 2
+        e, g = float(leaves["elasticity"]), float(leaves["gravity"])
+        lowest = best
+        for radius in _BALL_RADII:
+            for i, j in _DIRECTIONS:
+                near = dict(leaves,
+                            elasticity=jnp.asarray(min(max(e * (1.0 + i * radius), 0.0), 1.0),
+                                                   leaves["elasticity"].dtype),
+                            gravity=jnp.asarray(g * (1.0 + j * radius), leaves["gravity"].dtype))
+                tree = dict(res.params, nodes=dict(res.params["nodes"], ball=near))
+                loss = float(sysid._half_squared_norm(program(tree)))  # noqa: SLF001
+                if np.isfinite(loss):
+                    lowest = min(lowest, loss)
+        return (best - lowest) / rounding, details + (lowest,)
+
+
 #: ``(score, strategy, threshold)``.
 SEARCHES = {
+    "converged-beside-a-lower-loss": (converged_beside_a_lower_loss, ball_cases(), BESIDE),
     "converged-at-a-wrong-point": (converged_at_a_wrong_point, cases(), TOLERANCE),
     "worse-than-the-plain-fit": (worse_than_the_plain_fit, cases(TRANSFORMS[1:], CLAIMED),
                                  TOLERANCE),

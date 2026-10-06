@@ -3917,12 +3917,12 @@ _JUMP_MAX_MOVE = 2.0 ** -10
 #: predicted change) before :func:`fit_lm` reads the rejection as a jump of
 #: the residual rather than as rounding.  Measured (CPU, jaxlib 0.11.0):
 #: on smooth residuals stopped by the floor rule the ratio is of order one
-#: -- at most 5.5 over 185 such endings (the spring and ``HeartPumpNode``
+#: -- at most 5.7 over 136 such endings (the spring and ``HeartPumpNode``
 #: from spread starts, with and without noise; the per-push and slow sysid
 #: tests) but for one float32 fit under a ``logit`` so wide that a
 #: coordinate's float spacing moves its value by 6e-4, at 21 -- and on the
 #: stock bouncing ball, whose bounce moves by one time step, 2.2e4 to
-#: 4.4e5 over 47 endings.  ``2**10`` sits between, a factor of 48 above
+#: 4.4e5 over 55 endings.  ``2**10`` sits between, a factor of 48 above
 #: the one and 21 below the other.
 _JUMP_EXCESS = 2.0 ** 10
 
@@ -4477,16 +4477,32 @@ def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm",
     return W, s * s <= rtol * curvature, curvature
 
 
-def _curvature_rank(J, scale, dtype) -> Optional[int]:
-    """How many directions ``JᵀJ`` resolves at the iterate ``J`` was formed
-    at, by :func:`_gauss_newton_flatness`'s test asked of every direction
-    rather than of the guard's candidates: :func:`fim`'s rank cutoff, in the
-    guard's coordinates.  ``None`` where ``J`` is not finite."""
+def _curvature_rank(J, slope, physical) -> Optional[int]:
+    """The rank :func:`fim` would report at the iterate ``J = dr/dtheta``
+    was formed at, with its default ``scale="relative"``: of ``dr/dp``
+    with each column times its parameter's magnitude, by :func:`fim`'s
+    cutoff at ``J``'s own precision.
+
+    ``slope`` is ``dp/dtheta`` and ``physical`` the parameters' values, per
+    column.  In :func:`fim`'s coordinates rather than the optimiser's or
+    the guard's: a ``logit`` coordinate near the end of its range has a
+    column in ``theta`` that its flat transform shrinks, which is a
+    property of the coordinate and not of the data (measured: a singular
+    value ratio of 7e-9 in ``theta`` for a fit whose ratio in the
+    parameters is 0.39).  ``None`` -- no statement -- where ``J`` is not
+    finite or a parameter or its slope is zero or not finite, which
+    :func:`fim` reports in its own words (``zero_scaled``).
+    """
     Jd = np.asarray(J, dtype=np.float64)
-    if not np.all(np.isfinite(Jd)):
+    slope = np.asarray(slope, dtype=np.float64)
+    size = np.abs(np.asarray(physical, dtype=np.float64))
+    usable = np.isfinite(slope) & (slope != 0.0) & np.isfinite(size) & (size > 0.0)
+    if not (np.all(np.isfinite(Jd)) and np.all(usable)):
         return None
     n = Jd.shape[1]
-    _, flat, _ = _gauss_newton_flatness(Jd, np.eye(n), dtype, scale=scale)
+    # ``1 / (size / slope)``: ``_gauss_newton_flatness`` divides by its scale.
+    _, flat, _ = _gauss_newton_flatness(Jd, np.eye(n), np.asarray(J).dtype,
+                                        scale=slope / size)
     return n - int(np.count_nonzero(flat))
 
 
@@ -5946,10 +5962,11 @@ def fit_lm(
         and the degeneracy has to be a fixed direction in the optimiser's
         coordinates -- where it is not, the guard finds nothing, and this
         fitter warns (a :class:`RuntimeWarning`) when ``excited_rank`` is
-        the full count while ``JᵀJ`` at the returned point, by the same
-        cutoff, resolves fewer directions; it asks only where the run ended
-        on the iterate whose Jacobian it formed last, so it costs no
-        evaluation.  :attr:`FitResult.excited_rank`,
+        the full count while ``JᵀJ`` at the returned point resolves fewer
+        directions by :func:`fim`'s rank rule, in :func:`fim`'s default
+        coordinates (each parameter relative to itself); it asks only where
+        the run ended on the iterate whose Jacobian it formed last, so it
+        costs no evaluation.  :attr:`FitResult.excited_rank`,
         :attr:`FitResult.undetermined_drift` and
         :attr:`FitResult.hold_declined` say what the guard found.
 
@@ -6471,22 +6488,24 @@ def fit_lm(
         # not determine.  This fitter holds ``J`` at the point it returns,
         # so it can say so (at no further evaluation: only where the run
         # ended on the iterate whose Jacobian it formed last).
-        resolved = _curvature_rank(
-            rJ[1], _relative_scale(theta0, selected, bounds.transformed, _columns), coarse)
+        resolved = _curvature_rank(rJ[1], pmap.slope(selected),
+                                   pmap.physical(selected_params))
         if resolved is not None and resolved < n_fitted:
             warnings.warn(
                 f"fit_lm: excited_rank is {n_fitted} of {n_fitted} -- the guard "
                 f"found no direction undetermined -- but J^T J at the returned "
-                f"point resolves only {resolved} of them by fim's rank cutoff. "
-                f"The guard holds a direction only if no gradient of the run "
-                f"pointed along it, so a degeneracy that is not a fixed "
-                f"direction in the optimiser's coordinates passes it: a scale "
-                f"shared with a parameter under the identity transform does "
-                f"that (SpringDamperNode's damping, HeartPumpNode's "
-                f"stroke_volume; declare transform='log' on it). Nothing was "
-                f"held: the returned parameters along the unresolved "
-                f"direction(s) follow the start. Ask fim at the returned "
-                f"point which they are.",
+                f"point resolves only {resolved} of them by fim's rank cutoff: "
+                f"the data do not determine every fitted direction there. The "
+                f"guard holds a direction only if no gradient of the run "
+                f"pointed along it, which a degeneracy that is not a fixed "
+                f"direction in the optimiser's coordinates passes -- a scale "
+                f"shared with a parameter under the identity transform "
+                f"(SpringDamperNode's damping, HeartPumpNode's stroke_volume; "
+                f"declare transform='log' on it) -- and so does a residual "
+                f"that is flat in a parameter only where the run ended. "
+                f"Nothing was held: along the unresolved direction(s) the "
+                f"returned parameters follow the start. Ask fim at the "
+                f"returned point which they are.",
                 RuntimeWarning, stacklevel=2)
 
     # The tree the selected iterate was evaluated on, unless the guard moved it.

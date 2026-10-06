@@ -568,8 +568,12 @@ claims:
   sources:
     - src/maddening/sysid.py:2345 (fim)
   conditions: >-
-    a smooth residual in float64; a spring rollout in float32. Not claimed
-    for 16-bit floats.
+    a smooth residual in float64; a spring rollout in float32.  The
+    residual differentiable in the parameters at the point asked: beside a
+    jump (a node with an event, a contact or a valve whose timing depends
+    on a parameter, MADD-ANO-021) J is the derivative of the smooth piece
+    the point is on, and the matrix describes that piece alone, with no
+    warning.  Not claimed for 16-bit floats.
   oracle: J^T J from central differences; the inverse of the matrix.
   tests:
     - tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
@@ -749,7 +753,12 @@ claims:
     - src/maddening/sysid.py:640 (FIMReport, crb)
   conditions: >-
     the spring's (k, c, m) scale degeneracy; a non-finite and a partly NaN
-    decomposition. Not claimed for 16-bit floats.
+    decomposition.  The residual differentiable in the parameters at the
+    point asked: beside a jump (MADD-ANO-021) a finite crb is the bound of
+    the smooth piece the point is on and bounds nothing the jump can do
+    (the bouncing ball at its generating parameters: 1.3e-3 relative on
+    the elasticity, where a change of 1e-6 moves the weighted loss by
+    311), with no warning.  Not claimed for 16-bit floats.
   oracle: the +inf pattern; never 0.0 or NaN.
   tests:
     - tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
@@ -2291,20 +2300,33 @@ claims:
     "Two limits, both fail-open.  The cutoff is numerical, so a merely
     weakly-identified direction is kept, not held ... a null direction
     that rotates in the unconstrained coordinates ... leaves no null
-    direction in the accumulated matrix, and the guard correctly reports
-    full excited_rank and does nothing."
+    direction in the accumulated matrix: the guard finds no direction
+    undetermined, excited_rank reads the full count and nothing is held,
+    on a fit the data do not determine."  excited_rank is "the trainable
+    coordinate count minus the directions the guard found undetermined";
+    fit_lm "warns ... when excited_rank is the full count while JᵀJ at
+    the returned point, by the same cutoff, resolves fewer directions".
   sources:
     - src/maddening/sysid.py:3625 (fit, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     SpringDamperNode's identity-transform damping; directions just above and
-    below the cutoff. Not claimed for 16-bit floats.
+    below the cutoff.  The warning: HeartPumpNode with its default specs
+    (the identity stroke_volume), float32, where the run ended on the
+    iterate whose Jacobian it formed last; silent where the guard held the
+    direction (stroke_volume under log) and on a fit every direction of
+    which is resolved.  fit and fit_multiple_shooting hold no Jacobian and
+    give no such warning.  Not claimed for 16-bit floats.
   oracle: excited_rank and the held displacement.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
     - tests/core/test_sysid_undetermined_directions.py::test_a_direction_just_above_the_cutoff_is_kept
     - tests/core/test_sysid_undetermined_directions.py::test_a_direction_just_below_the_cutoff_is_held
     - tests/core/test_sysid_undetermined_directions.py::test_the_cutoff_is_numerical_and_keeps_a_weakly_excited_direction
+    - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_warns_when_the_guard_reads_full_and_the_jacobian_does_not
+    - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_silent_where_the_guard_held_the_direction
+    - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_silent_on_a_fit_every_direction_of_which_is_resolved
+    - tests/core/test_sysid_non_differentiable_residual.py::test_the_curvature_rank_is_the_count_of_directions_the_cutoff_resolves
   status: verified
   domains:
     f32: tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
@@ -2595,6 +2617,14 @@ claims:
     loss it is taken as the iterate and the run goes on"; converged "is
     never reported on a solve whose live columns were not representable
     even framed, or on a loss of 0.0 from a residual that is not zero".
+    And the floor rule tells a jump of the residual from the rounding
+    floor: "where the residual is 2**10 times further from its
+    linearisation on the candidate's side than on the other side and than
+    the linearisation's own change, the rejection is a jump and not
+    rounding ... The run then ends converged=False with a RuntimeWarning
+    naming a residual that is not differentiable"; an iteration "whose
+    damped candidates all rounded to no move, while the undamped step was
+    rejected ... is run once more from lam0 before the rule reads it".
   sources:
     - src/maddening/sysid.py:4878 (fit_lm)
     - src/maddening/sysid.py:4158 (FitResult, converged)
@@ -2609,7 +2639,17 @@ claims:
     solve and a float64 loss that underflows (never converged).  Not a
     parameter whose truth is exactly 0: it has no relative resolution, and
     such a run stops at its floor unconverged unless given a tol (SYS-130).
-    Not claimed for 16-bit floats.
+    The verdicts presume a residual differentiable in the trained
+    parameters along the fitted trajectory.  One that jumps (a node with
+    an event, a contact or a valve whose timing depends on a trained
+    parameter, MADD-ANO-021): converged=False and the warning where a
+    rejected candidate within 2**-10 of a parameter shows the jump against
+    its mirror image (the stock TableNode -> BallNode graph, float32; that
+    graph does not run under x64); not detected, and not claimed: a kink
+    (a continuous residual whose slope jumps), a jump whose mirror image
+    the bounds do not allow, a jump beside an iterate the proposal test
+    passes, and a converged fit at the interior minimum of a smooth piece
+    other than the lowest.  Not claimed for 16-bit floats.
   oracle: the flag and the iteration it stopped on.
   tests:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
@@ -2626,6 +2666,15 @@ claims:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_verdict_does_not_depend_on_a_parameters_units
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_never_converges_on_a_solve_it_could_not_form
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_loss_that_underflows_float64_is_never_converged
+    - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_converged_on_the_ball_only_at_the_minimum
+    - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_beside_a_jump_is_unconverged_and_says_why
+    - tests/core/test_sysid_non_differentiable_residual.py::test_the_loss_beside_a_warned_ending_does_fall_across_the_jump
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_smooth_fit_stopped_by_the_floor_rule_is_still_converged
+    - tests/core/test_sysid_non_differentiable_residual.py::test_the_one_sided_excess_of_a_jump_is_the_jump_over_the_linear_change
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_candidate_with_no_mirror_image_or_no_finite_residual_says_nothing
+    - tests/core/test_sysid_non_differentiable_residual.py::test_an_iteration_whose_damped_candidates_never_moved_is_asked_again
+    - tests/core/test_sysid_non_differentiable_residual.py::test_candidates_that_never_move_are_asked_again_once_only
+    - tests/property/test_sysid_targeted_search.py::test_no_wrong_fit_among_the_fixed_draws
   status: verified
   notes: >-
     Round 7 (B1, on 04bc3e5): under x64 the floor rule's twelve damped
@@ -2887,8 +2936,11 @@ claims:
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     the spring with mass frozen; a per-leaf noise model; float32 constants
-    in an x64 graph, in as few iterations as float64 ones. Not claimed for
-    16-bit floats.
+    in an x64 graph, in as few iterations as float64 ones.  A residual
+    differentiable in the trained parameters along the fitted trajectory
+    (SYS-080): on the stock bouncing ball, whose residual jumps
+    (MADD-ANO-021), fit_lm ended beside a jump from 11 of 24 starts,
+    converged=False and saying so.  Not claimed for 16-bit floats.
   oracle: the truth; the iteration count against Adam's at equal budget.
   tests:
     - tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations

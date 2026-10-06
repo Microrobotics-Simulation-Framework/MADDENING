@@ -3892,6 +3892,83 @@ _LM_LADDER = 12
 #: Gauss-Newton one.
 _LM_LAMBDA_MAX = 1e12
 
+#: The largest relative move of a parameter at which :func:`fit_lm`'s
+#: one-sided test (:func:`_one_sided_excess`) reads a rejected candidate.
+#: The test compares a step with its mirror image, and a smooth residual
+#: treats the two alike only to third order in the step, so it is asked of
+#: small steps alone: at ``2**-10`` of a parameter the two sides of a
+#: smooth residual differ by about that fraction of what either does.
+_JUMP_MAX_MOVE = 2.0 ** -10
+
+#: How many times further from the linear model a rejected candidate's
+#: residual has to be than its mirror image's (and than the model's own
+#: predicted change) before :func:`fit_lm` reads the rejection as a jump of
+#: the residual rather than as rounding.  Measured: at most TODO on smooth
+#: fits stopped by the floor rule, and from TODO upwards on the stock
+#: bouncing ball (a bounce that moves by one time step).
+_JUMP_EXCESS = 2.0 ** 10
+
+
+def _norm64(x) -> float:
+    """``||x||`` in float64 without squaring a value outside its range."""
+    x = np.asarray(x, dtype=np.float64)
+    top = float(np.max(np.abs(x))) if x.size else 0.0
+    if not np.isfinite(top) or top == 0.0:
+        return top
+    return top * float(np.sqrt(np.sum(np.square(x / top))))
+
+
+def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
+    """``(excess, move)``: how one-sided the residual is around ``theta``,
+    read from candidates a Levenberg-Marquardt iteration rejected.
+
+    For a rejected candidate ``theta + d`` the residual's departure from
+    the linear model, ``||r(theta + d) - r - J d||``, is compared with the
+    same departure at the mirror image ``theta - d`` plus the model's own
+    predicted change ``||J d||``.  ``excess`` is the largest ratio over
+    ``rejected`` and ``move`` the candidate's largest relative move of a
+    parameter.
+
+    This is what tells the rounding floor from a jump.  At the floor of a
+    differentiable residual a candidate a few ulps away is rejected because
+    the residual's own rounding outweighs what the step gains, and that
+    rounding is the same on both sides: the ratio is of order one.  Where
+    the residual jumps (a bounce or a valve switching one time step earlier)
+    the iterate has been drawn to the edge of a smooth piece; the step
+    across the edge changes the residual by the jump and the step back into
+    the piece by the model's prediction and rounding, so the ratio is the
+    jump over those.  No scale has to be assumed for the rounding: the
+    mirror image measures it on the problem itself.
+
+    ``rejected`` holds ``(candidate, residual, move)``; ``mirror(th)``
+    returns the coordinates ``th`` is evaluated at (projected onto the
+    bounds, on the leaves' grid) and the residual there.  A candidate whose
+    mirror image the bounds do not allow, or whose residual is not finite
+    on either side, says nothing and is skipped.
+    """
+    th = np.asarray(theta, dtype=np.float64)
+    r64 = np.asarray(r, dtype=np.float64)
+    J64 = np.asarray(J, dtype=np.float64)
+    excess, at_move = 0.0, 0.0
+    for cand, cand_r, move in rejected:
+        d = np.asarray(cand, dtype=np.float64) - th
+        if not d.any():
+            continue
+        back, back_r = mirror(jnp.asarray(th - d, dtype=theta.dtype))
+        d_back = np.asarray(back, dtype=np.float64) - th
+        if not d_back.any():
+            continue
+        predicted = J64 @ d
+        ahead = _norm64(np.asarray(cand_r, dtype=np.float64) - r64 - predicted)
+        behind = _norm64(np.asarray(back_r, dtype=np.float64) - r64 - J64 @ d_back)
+        scale = behind + _norm64(predicted)
+        if not (np.isfinite(ahead) and np.isfinite(scale)) or ahead == 0.0:
+            continue
+        ratio = ahead / scale if scale > 0.0 else np.inf
+        if ratio > excess:
+            excess, at_move = float(ratio), float(move)
+    return excess, at_move
+
 
 
 def _float_resolution(tree) -> np.ndarray:
@@ -5388,6 +5465,24 @@ def _framed_gradient(J, r) -> np.ndarray:
     return np.asarray(g, dtype=np.float64) / np.asarray(c, dtype=np.float64) / float(f)
 
 
+#: :func:`fit_lm`'s warning when its floor rule finds a jump instead of the
+#: rounding floor.
+_JUMP_WARNING = (
+    "fit_lm: stopped where no step lowers the loss, but not at a minimum the "
+    "run can vouch for: the residual is not differentiable in the trained "
+    "parameters there. A rejected step that moves a parameter by {move:.1e} "
+    "of itself takes the residual {excess:.1e} times further from its "
+    "linearisation than the same step taken the other way (rounding does the "
+    "same both ways), so the residual jumps or is discontinuous beside the "
+    "returned point: converged=False. A node with an event, a contact or a "
+    "valve whose timing depends on a trained parameter does this "
+    "(MADD-ANO-021). The returned point is the lowest loss the run found; "
+    "the loss may be much lower across the jump, and excited_rank and fim "
+    "there describe one smooth piece only. See 'The residual must be "
+    "differentiable' in docs/user_guide/parameters.md."
+)
+
+
 @jax.jit
 def _marquardt_step(th, r, J, lam, lo, hi, held):
     """One Levenberg-Marquardt candidate from ``th``, projected onto
@@ -5890,6 +5985,22 @@ def fit_lm(
         moves every trainable parameter by at most ``step_tol`` of itself."""
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
 
+    def _largest_relative_move(before, after) -> float:
+        """The largest move of a trainable parameter from the physical values
+        ``before`` to ``after``, relative to itself (``inf`` for a parameter
+        that leaves exactly 0)."""
+        before = np.asarray(before, dtype=np.float64)
+        delta = np.abs(np.asarray(after, dtype=np.float64) - before)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel = np.where(delta > 0.0, delta / np.abs(before), 0.0)
+        return float(np.max(rel)) if rel.size else 0.0
+
+    def _mirrored(th):
+        """``th`` as a candidate is evaluated -- inside the bounds, on the
+        leaves' grid -- and the residual there (:func:`_one_sided_excess`)."""
+        th = to_leaf_grid(bounds.project(th))
+        return th, residual_only(pmap.params(th))
+
     # Whether every solve a convergence verdict of this iteration rests on
     # was representable (``_marquardt_step``, ``_gauss_newton_step``).
     verdict = {"representable": True}
@@ -5957,7 +6068,10 @@ def fit_lm(
         loss_gn = _half_squared_norm(residual_only(candidate_params))
         return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
 
-    lam = float(lam0)
+    lam = lam_start = float(lam0)
+    # The iterate the floor rule last sent round again (at most once each;
+    # ``theta`` is rebound only when a step is accepted).
+    relaxed_at = None
     coarse = _coarsest_dtype(start, idx)
     tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     losses: list[float] = []
@@ -6019,6 +6133,7 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
+        jump = (0.0, 0.0)
         verdict["representable"] = True
         # A loss of exactly 0.0 from a residual that is not: the framed
         # sum's unframing underflowed float64 (a float64 residual below
@@ -6034,6 +6149,10 @@ def fit_lm(
         stuck_inward = bounds.inward_descent(theta, _resolvable(theta, here, grad, J),
                                              here, rel_tol)
         attempt, there = -1, here
+        rejected: list = []
+        # Whether any candidate of this iteration's ladder moved a parameter
+        # at all, and whether the floor rule sends the iterate round again.
+        moved, again = False, False
         while True:
             attempt += 1
             if attempt >= _LM_LADDER and not (
@@ -6070,6 +6189,11 @@ def fit_lm(
                 # Nothing to retry: every further candidate is shorter still.
                 stationary = True
                 break
+            move = _largest_relative_move(here, there)
+            moved |= move > 0.0
+            if 0.0 < move <= _JUMP_MAX_MOVE and np.isfinite(loss_new):
+                # For the floor rule's one-sided test, should it be asked.
+                rejected.append((cand, cand_r, move))
             # Past the ladder, at least a decade a rung, so the extension
             # reaches the cap in at most 24 rungs whatever ``lam_up`` is.
             grow = lam_up if attempt + 1 < _LM_LADDER else max(lam_up, 10.0)
@@ -6108,9 +6232,9 @@ def fit_lm(
                         origin, r, J, lo, hi, held))
                 verdict["representable"] &= gn_ok
                 gn_params = pmap.params(gn_cand)
-                if _within_step_tol(here, pmap.physical(gn_params)):
-                    stationary = True
-                else:
+                gn_there = pmap.physical(gn_params)
+                at_floor = _within_step_tol(here, gn_there)
+                if not at_floor:
                     gn_r = residual_only(gn_params)
                     loss_gn = _half_squared_norm(gn_r)
                     if np.isfinite(loss_gn) and loss_gn < loss:
@@ -6119,7 +6243,42 @@ def fit_lm(
                         lam = max(lam * lam_down, 1e-12)
                         accepted = True
                     else:
-                        stationary = True
+                        at_floor = True
+                        gn_move = _largest_relative_move(here, gn_there)
+                        if gn_move <= _JUMP_MAX_MOVE and np.isfinite(loss_gn):
+                            rejected.append((gn_cand, gn_r, gn_move))
+                        if not moved and lam > lam_start and relaxed_at is not theta:
+                            # Every damped candidate rounded to no move at
+                            # all, so the only step this iterate was asked
+                            # about is the undamped one: the rule's "every
+                            # candidate was rejected" has nothing between the
+                            # two to stand on.  That is the damping the run
+                            # arrived with, not the iterate -- a step accepted
+                            # at the cap leaves ``lam`` a decade below it, and
+                            # on a residual with jumps such a step can be one
+                            # that crossed a jump downwards, onto a piece the
+                            # run has not descended yet.  So the iterate is
+                            # asked once more, from the damping the run
+                            # started with.
+                            at_floor, again = False, True
+                            lam, relaxed_at = lam_start, theta
+                if at_floor:
+                    # "No step the tolerance resolves lowers the loss" is the
+                    # rounding floor only where the residual is
+                    # differentiable.  Where it jumps -- a bounce or a valve
+                    # that switches one time step earlier -- the run is drawn
+                    # along a smooth piece to its edge, and there every
+                    # candidate is rejected too: for crossing the edge, at a
+                    # loss that can be far above the minimum.  The rejected
+                    # candidates tell the two apart (:func:`_one_sided_excess`).
+                    jump = _one_sided_excess(theta, r, J, rejected, _mirrored)
+                    stationary = not jump[0] > _JUMP_EXCESS
+        if again:
+            continue
+        if jump[0] > _JUMP_EXCESS:
+            warnings.warn(_JUMP_WARNING.format(move=jump[1], excess=jump[0]),
+                          RuntimeWarning, stacklevel=2)
+            break
         if stationary and (vanished or not verdict["representable"]):
             # Never a converged verdict the arithmetic could not form: with
             # the frames neither can happen to a float32 problem, but the

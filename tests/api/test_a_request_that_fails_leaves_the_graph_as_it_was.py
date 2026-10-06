@@ -198,7 +198,7 @@ ROUTES = {
         lambda s: _position(s) == 0.5 and s.server.relay.step_count == 0),
     "profile": (
         _moved, lambda c: c.post("/sim/profile", params={"n_steps": 2, "n_warmup": 0}),
-        200, ("GraphManager.step", "_restore_state_and_params"),
+        200, ("GraphManager.reset_state", "GraphManager.step"),
         lambda s: s.server.relay.step_count == 2),
 }
 
@@ -217,6 +217,22 @@ def test_a_failure_at_any_point_of_a_write_route_changes_nothing(served, route):
         assert any(f"before {step}" in point for point in tried), (step, tried)
         assert any(f"after {step}" in point for point in tried), (step, tried)
     assert done(served), f"{route} answered {status} and did not do it"
+
+
+@pytest.mark.parametrize("prepare", [_moved, _dirty], ids=["stepped", "edited"])
+def test_a_profile_that_succeeds_leaves_the_graph_exactly_as_it_was(served, prepare):
+    """The one route that rolls its transaction back when it succeeds: the
+    profiler resets and steps the graph, and compiles an edited one.  The
+    route used to put back the state and the params by itself; the compile
+    bookkeeping of the profiler's run stayed."""
+    prepare(served)
+    before = O.snapshot(served)
+    fingerprint = served_fingerprint(served)
+    resp = served.client.post("/sim/profile", params={"n_steps": 2, "n_warmup": 1})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["traceEvents"], "the profile measured nothing"
+    O.assert_nothing_changed(before, O.snapshot(served), "a profile")
+    assert_exactly_as_it_was(fingerprint, served_fingerprint(served), "a profile")
 
 
 def test_every_route_that_takes_the_graph_to_write_is_in_the_list_or_named_here():

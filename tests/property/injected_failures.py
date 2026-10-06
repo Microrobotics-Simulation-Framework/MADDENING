@@ -181,13 +181,9 @@ def fail_at_every_point(served: O.Served, send: Callable[[], Any], what: str, *,
         if resp.status_code >= 500:
             assert resp.status_code == 500, f"{where} -> {resp.status_code}"
             detail = resp.json()["detail"]
-            if "Could not restore" not in detail:
-                # (That one is POST /surrogate/deactivate's own 500, after
-                # its own undo: an experimental route, which still quotes
-                # the error.)
-                assert "failed unexpectedly" in detail, (where, detail)
-                assert "InjectedFailure" not in resp.text and "injected" not in resp.text, (
-                    f"{where} named the failure in its reply: {resp.text[:300]}")
+            assert "failed unexpectedly" in detail, (where, detail)
+            assert "InjectedFailure" not in resp.text and "injected" not in resp.text, (
+                f"{where} named the failure in its reply: {resp.text[:300]}")
         if on_failure is not None:
             on_failure(fired, resp)
         steps = partial(resp)

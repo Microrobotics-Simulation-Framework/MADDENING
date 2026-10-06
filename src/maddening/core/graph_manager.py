@@ -3005,6 +3005,155 @@ _META_KEY = "_meta"
 #: (``maddening.core.simulation.checkpoint``).
 _RESERVED_STATE_KEYS = frozenset({_META_KEY, "_params", "_params_mappings"})
 
+
+def _uncarriable_characters(text: str) -> list[str]:
+    """The characters of *text* that some place a name is written cannot
+    hold, as code points (``U+0000``), each once, in the order met.
+
+    A name is written to a checkpoint's member names, to a config (JSON,
+    and whatever a caller writes ``to_dict()`` as), to a USD stage and to
+    an FMU's model description (XML 1.0).  What one of them cannot carry,
+    measured on each:
+
+    * a NUL ends a checkpoint member's name, so the archive is written and
+      does not load, and a USD string keeps the name only up to it;
+    * XML 1.0 has no way to write U+0000 to U+001F (but tab, line feed and
+      carriage return) or U+FFFE and U+FFFF, escaped or not: the model
+      description is written and no parser reads it;
+    * a surrogate (U+D800 to U+DFFF) cannot be encoded as UTF-8, so no
+      file holds it, and the tracer refuses it as a name.
+
+    So: U+0000 to U+001F but tab, line feed and carriage return; the
+    surrogates; U+FFFE and U+FFFF.  That is exactly what is not a character
+    of XML 1.0, the narrowest of the carriers.  Every other character -- a
+    space, a dot, a quote, a line break, U+007F to U+009F, any letter of
+    any script -- is written to all of them and read back as itself, and is
+    taken: a name is not refused for being unusual.
+    """
+    found: list[str] = []
+    for ch in text:
+        point = ord(ch)
+        if ((point < 0x20 and ch not in "\t\n\r") or 0xD800 <= point <= 0xDFFF
+                or point in (0xFFFE, 0xFFFF)):
+            label = f"U+{point:04X}"
+            if label not in found:
+                found.append(label)
+    return found
+
+
+#: What a refusal says of the characters :func:`_uncarriable_characters`
+#: finds, after naming them.
+_UNCARRIABLE_WHY = (
+    "a name must not contain U+0000 to U+001F (but tab, line feed and "
+    "carriage return), a surrogate, or U+FFFE / U+FFFF, because not every "
+    "place a name is written can hold one (a checkpoint's member names end "
+    "at a NUL, an FMU's model description cannot carry these control "
+    "characters, and no file can carry a surrogate)"
+)
+
+
+def _node_name_refusal(name: Any) -> Optional[str]:
+    """Why ``add_node`` refuses *name*, or ``None``.
+
+    One rule for every door a node's name comes in by -- ``add_node``, and
+    so ``from_dict``, a USD stage and ``POST /graph/nodes`` (which asks
+    before it builds anything).  A name is refused where it is introduced
+    when some place it is later written could not hold it: the checkpoint
+    of a node named with a NUL was saved and did not load.
+    """
+    if not isinstance(name, str):
+        return (f"Node name {name!r} is invalid: a name is a string, not "
+                f"{type(name).__name__}")
+    bad = [t for t in ("/", "#", "->") if t in name]
+    if not name or bad:
+        # These tokens delimit checkpoint keys, mapping slots and edge
+        # keys; a node name containing them corrupts those namespaces.
+        return (f"Node name {name!r} is invalid: must be non-empty and must "
+                f"not contain {bad or ['/', '#', '->']}")
+    uncarriable = _uncarriable_characters(name)
+    if uncarriable:
+        return (f"Node name {name!r} is invalid: it contains "
+                f"{', '.join(uncarriable)}, and {_UNCARRIABLE_WHY}.")
+    if name in _RESERVED_STATE_KEYS:
+        # The graph's own state lives under ``_meta`` (coupling and
+        # multirate carries) and a checkpoint keeps the params under
+        # ``_params`` and ``_params_mappings``.  A node named for one of
+        # them was taken (POST /graph/nodes answered 201), the next
+        # compile dropped its state, every step was a KeyError and a
+        # checkpoint save was refused until the node was deleted.
+        return (f"Node name {name!r} is invalid: it is a key the graph "
+                f"reserves for its own state and checkpoints "
+                f"({', '.join(sorted(_RESERVED_STATE_KEYS))}).  A different "
+                f"spelling ({name.lstrip('_')!r}, say) is fine.")
+    from maddening.serialization.json_codec import (  # noqa: PLC0415
+        NON_FINITE_TOKENS,
+    )
+    if name in NON_FINITE_TOKENS:
+        # MADD-ANO-010: the JSON surfaces refuse a string that spells a
+        # non-finite token, and a node name is a JSON *value* in
+        # ``to_dict`` (``nodes[i]["name"]``) and in any mapping point
+        # reference.  It reached the stage untouched, though, because
+        # ``save_graph_to_usd`` writes it to a typed USD String
+        # attribute that never sees the codec -- so a ``.usda`` could
+        # round-trip to a graph that could not be written as a config,
+        # and the same graph was refused or accepted depending on which
+        # surface it met.  Refused here instead, at the point of entry,
+        # which is what the anomaly's own workaround recommends
+        # ("validate names ... where they are accepted, not where they
+        # are saved") and what makes the three surfaces agree.
+        return (f"Node name {name!r} is invalid: it spells a non-finite "
+                f"JSON token, which the serialisers reserve (MADD-ANO-010), so "
+                f"a graph holding it could not be written as a config or "
+                f"referenced from an interface mapping.  A different spelling "
+                f"({name.lower()!r}, say) is fine.")
+    return None
+
+
+def _field_name_refusal(name: Any) -> Optional[str]:
+    """Why an edge or an external input cannot name the field *name*, or
+    ``None``: the rule of :func:`_node_name_refusal` for the names a graph
+    is given beside its nodes'.
+
+    A field's name is written where a node's is -- it is a JSON *value* in
+    ``to_dict`` (``edges[i]["target_field"]``), half of an edge's key and so
+    of a mapping's slot in ``params["mappings"]`` and of a checkpoint
+    member -- and the target field of an edge is the caller's to choose:
+    ``validate`` passes one the target node does not declare, because a
+    node may read an input it does not declare.  So it is asked here.
+
+    * The text ``NaN``, ``Infinity`` or ``-Infinity`` is how the config
+      writes a non-finite float, and the reader of a config turns each back
+      into one wherever it stands: an edge to a field of that name was
+      taken, and ``to_dict`` (``GET /graph``) then raised for as long as
+      the edge was there.
+    * ``#`` ends the edge's key and starts a mapped edge's ordinal
+      (``a.x->b.y#1``), so with one in a field's name two mapped edges on
+      the same pair shared one slot of weights, and ``remove_edge`` left
+      the slot behind.
+    * The characters of :func:`_uncarriable_characters`.
+
+    ``.``, ``->`` and ``/`` are carried: nothing splits an edge's key at
+    them (a checkpoint splits its member names at the *last* ``/``, and an
+    FMU records the node and the field of a variable beside its name).
+    """
+    if not isinstance(name, str):
+        return f"a field's name is a string, not {type(name).__name__}"
+    from maddening.serialization.json_codec import (  # noqa: PLC0415
+        NON_FINITE_TOKENS,
+    )
+    if name in NON_FINITE_TOKENS:
+        return ("it spells a non-finite JSON token, which the serialisers "
+                "reserve (MADD-ANO-010), so a graph holding it could not be "
+                f"written as a config.  A different spelling ({name.lower()!r}, "
+                "say) is fine")
+    if "#" in name:
+        return ("it contains '#', which ends an edge's key and starts a "
+                "mapped edge's ordinal")
+    uncarriable = _uncarriable_characters(name)
+    if uncarriable:
+        return f"it contains {', '.join(uncarriable)}, and {_UNCARRIABLE_WHY}"
+    return None
+
 #: The ``_meta`` slots ``coupling_diagnostics()`` reads a group's report
 #: from, as ``coupling_{group key}_{suffix}``.  A step writes them; they
 #: describe that step and the group it ran under, unlike the warm starts
@@ -7332,30 +7481,9 @@ class GraphManager:
         self._recover_from_escaped_tracers()
         if node.name in self._nodes:
             raise ValueError(f"Node '{node.name}' already exists in the graph.")
-        bad = [t for t in ("/", "#", "->") if t in node.name]
-        if not node.name or bad:
-            # These tokens delimit checkpoint keys, mapping slots and edge
-            # keys; a node name containing them corrupts those namespaces.
-            raise ValueError(
-                f"Node name {node.name!r} is invalid: must be non-empty and must "
-                f"not contain {bad or ['/', '#', '->']}"
-            )
-        from maddening.serialization.json_codec import (  # noqa: PLC0415
-            NON_FINITE_TOKENS,
-        )
-        if node.name in _RESERVED_STATE_KEYS:
-            # The graph's own state lives under ``_meta`` (coupling and
-            # multirate carries) and a checkpoint keeps the params under
-            # ``_params`` and ``_params_mappings``.  A node named for one of
-            # them was taken (POST /graph/nodes answered 201), the next
-            # compile dropped its state, every step was a KeyError and a
-            # checkpoint save was refused until the node was deleted.
-            raise ValueError(
-                f"Node name {node.name!r} is invalid: it is a key the graph "
-                f"reserves for its own state and checkpoints "
-                f"({', '.join(sorted(_RESERVED_STATE_KEYS))}).  A different "
-                f"spelling ({node.name.lstrip('_')!r}, say) is fine."
-            )
+        refusal = _node_name_refusal(node.name)
+        if refusal is not None:
+            raise ValueError(refusal)
         try:
             timestep = float(node.delta_t)
         except (TypeError, ValueError):
@@ -7369,26 +7497,6 @@ class GraphManager:
             raise ValueError(
                 f"Node {node.name!r} has timestep {node.delta_t!r}: a node's "
                 "timestep must be a finite number > 0."
-            )
-        if node.name in NON_FINITE_TOKENS:
-            # MADD-ANO-010: the JSON surfaces refuse a string that spells a
-            # non-finite token, and a node name is a JSON *value* in
-            # ``to_dict`` (``nodes[i]["name"]``) and in any mapping point
-            # reference.  It reached the stage untouched, though, because
-            # ``save_graph_to_usd`` writes it to a typed USD String
-            # attribute that never sees the codec -- so a ``.usda`` could
-            # round-trip to a graph that could not be written as a config,
-            # and the same graph was refused or accepted depending on which
-            # surface it met.  Refused here instead, at the point of entry,
-            # which is what the anomaly's own workaround recommends
-            # ("validate names ... where they are accepted, not where they
-            # are saved") and what makes the three surfaces agree.
-            raise ValueError(
-                f"Node name {node.name!r} is invalid: it spells a non-finite "
-                f"JSON token, which the serialisers reserve (MADD-ANO-010), so "
-                f"a graph holding it could not be written as a config or "
-                f"referenced from an interface mapping.  A different spelling "
-                f"({node.name.lower()!r}, say) is fine."
             )
         # A hook that names ``params`` where no keyword reaches it
         # (``params=None, /`` or ``*params``) is not a node without params:
@@ -7464,7 +7572,24 @@ class GraphManager:
         target_units : str or None
             Physical units after transform (e.g. ``"N"``).
             Checked against the target node's ``expected_units``.
+
+        Raises
+        ------
+        ValueError
+            If a field's name could not be written wherever an edge is: it
+            spells ``NaN``, ``Infinity`` or ``-Infinity``, or contains
+            ``#``, one of U+0000 to U+001F (but tab, line feed and
+            carriage return), a surrogate or U+FFFE / U+FFFF.  A
+            target field the target node does not declare is taken (a node
+            may read an input it does not declare).
         """
+        for what, name in (("source", source_field), ("target", target_field)):
+            refusal = _field_name_refusal(name)
+            if refusal is not None:
+                raise ValueError(
+                    f"An edge from {source!r} to {target!r}: its {what} field "
+                    f"{name!r} is invalid: {refusal}."
+                )
         if isinstance(transform, str):
             from maddening.core.transforms import resolve_transform
             transform = resolve_transform(transform)
@@ -7631,6 +7756,14 @@ class GraphManager:
         dtype
             JAX dtype (default ``jnp.float32``).
         """
+        refusal = _field_name_refusal(target_field)
+        if refusal is not None:
+            # The rule of an edge's fields (see add_edge): an external
+            # input's is written to the config beside them.
+            raise ValueError(
+                f"An external input of {target_node!r}: its field "
+                f"{target_field!r} is invalid: {refusal}."
+            )
         spec = ExternalInputSpec(target_node, target_field, shape, dtype)
         self._external_inputs.append(spec)
         self._dirty = True

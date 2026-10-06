@@ -12639,8 +12639,12 @@ anomalies:
       was a 500 instead.  Reproduced at v0.1.0, v0.2.0, v0.3.0 and v0.3.1
       (`git archive`, CPU, FastAPI `TestClient`).  Found while fixing the
       B2 round-8 audit's finding 4.
-      Resolved in 0.4.0: the app encodes a 422 as it encodes every reply
-      (`_json_reply`: a non-finite number as its quoted token).
+      Resolved in 0.4.0: the app encodes a 422 with its reply encoder
+      (`_Reply`): a non-finite number as its quoted token, and a refused
+      text as the text it was.  (The first form of the fix, never in a
+      release, encoded the 422 as data and so answered 500 for the *text*
+      `NaN`, `Infinity` or `-Infinity` -- `POST /sim/run?n_steps=NaN`; see
+      MADD-ANO-209.)
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -12658,6 +12662,8 @@ anomalies:
       None known.
     verification:
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
+      - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_422_still_writes_a_refused_number_as_its_token"
+      - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_count_that_is_the_text_of_a_non_finite_number_is_a_422_that_echoes_it"
     github_issue: null
   - anomaly_id: "MADD-ANO-185"
     title: "A checkpoint load decompressed every archive member before it checked any name or shape: a small archive cost as much memory as its members declared"
@@ -14134,6 +14140,166 @@ anomalies:
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_can_hold_loads_as_the_cast_rounds_it"
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_the_cast_check_holds_for_every_kind_of_extension_dtype"
       - "tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_leaf_dtype_with_no_rule_is_refused_not_assumed_lossless"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-208"
+    title: "A node named with a NUL, another control character or a surrogate was taken, and its checkpoint, its FMU's model description or the server's own replies could not be read"
+    description: >
+      `GraphManager.add_node` refused a name holding `/`, `#` or `->`, and
+      nothing else about its characters, though a name is written to a
+      checkpoint's member names, to the config, to a USD stage, to an FMU's
+      model description and to log lines.  With a NUL in a node's name,
+      `save_state` wrote the checkpoint and `load_state` refused it (an
+      archive member's name ends at the NUL); over REST, `POST /graph/nodes`
+      answered 201, `POST /checkpoint/save` 200 and `POST /checkpoint/load`
+      of that file 400.  With U+0001 (any control character XML 1.0 cannot
+      spell, or U+FFFE / U+FFFF), `build_model_description(...).to_xml()`
+      wrote a document no XML parser reads (v0.3.0 and v0.3.1, where the FMU
+      export exists).  With a surrogate, `POST /graph/nodes` answered 500
+      *after the node was added*: `GET /graph` and `POST /graph/compile`
+      were then 500, and no URL can spell the name to delete the node.
+      Reproduced at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git
+      archive`, CPU, FastAPI `TestClient`).  Found by the REST request
+      oracle (a node named with a NUL) and by the sweep of its class.
+      Resolved in 0.4.0: `add_node` -- and so `from_dict`, a USD stage and
+      `POST /graph/nodes`, which asks before it builds anything -- refuses a
+      name holding what one of them cannot carry -- U+0000 to U+001F but tab,
+      line feed and carriage return, a surrogate, or U+FFFE / U+FFFF: what
+      XML 1.0 has no character for -- in the words it refuses the others ("Node name ... is
+      invalid"); `add_edge` and `add_external_input` hold a field's name to
+      the same characters, and `POST /checkpoint/save` and `/load` a
+      checkpoint's.  Every other character is taken, a line break and U+007F to U+009F
+      among them (a name is not refused for being unusual), and a graph of
+      such names is shown to reload from a checkpoint, a config file, an FMU
+      model description and a USD stage.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No value was computed wrongly.  What was lost is a save: the
+      checkpoint or the model description was written without a word and
+      refused when it was read.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_node"
+      - "maddening.core.graph_manager.GraphManager.add_edge"
+      - "maddening.core.graph_manager.GraphManager.add_external_input"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: name nodes with printable characters only; load a
+      checkpoint once after saving it to know it can be read.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A graph built before 0.4.0 with such a name is refused by `from_dict`
+      and by a USD load, which is the intent; rename the node in the file.
+      The time-series panels of the frame renderer still split their
+      `node.field` keys at the first dot, so a node whose name holds a dot
+      is not drawn there (a display, and loud: the panel stays empty).
+    verification:
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_add_node_refuses_a_name_some_carrier_cannot_hold"
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_the_names_add_node_takes_reload_from_a_checkpoint"
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_the_names_add_node_takes_are_read_back_from_an_fmu_model_description"
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_every_character_a_name_may_hold_is_one_xml_and_utf8_carry"
+      - "tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_node_name_some_carrier_cannot_hold_is_a_400_before_anything_is_built"
+      - "tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_checkpoint_name_some_carrier_cannot_hold_is_a_400_and_no_file"
+      - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-209"
+    title: "A refusal that echoed a surrogate from the request answered 500"
+    description: >
+      A 4xx echoes what it refused, and Starlette's JSON encoder cannot
+      write a string that holds a surrogate (U+D800 to U+DFFF has no UTF-8
+      bytes; a JSON body may spell one, `"\ud800"`).  A request whose
+      refused value held one -- `{"type": "\ud800"}` on `POST /graph/nodes`,
+      an unknown node of that name on `POST /graph/edges`, a 422 for a
+      field of that text -- answered 500 where the same request with
+      `"abc"` answered 400, 404 or 422.  Nothing was changed, except by the
+      node name of MADD-ANO-208.  Reproduced at v0.1.0, v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1 (`git archive`, CPU, FastAPI `TestClient`).  Found
+      by the sweep of the class of a defect the REST request oracle found
+      on the 0.4.0 tree and no release carried: the handler written for
+      MADD-ANO-184 encoded the 422 with the encoder of data, which refuses
+      the *text* `NaN`, `Infinity` and `-Infinity`, so `POST
+      /sim/run?n_steps=NaN` was a 500.
+      Resolved in 0.4.0: every route, every refusal the app builds, and its
+      handlers of a request-validation error and of an `HTTPException`
+      reply through one encoder (`_Reply`) that cannot fail on what a
+      request can put in a reply: a non-finite number is its quoted token, a
+      text is the text it was, and a surrogate is written as U+FFFD.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: a refused request answered 500 instead of its 4xx, and nothing
+      was written.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: read a 500 for a request that carried a surrogate as
+      the refusal it should have been.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The echo of a surrogate is U+FFFD, not the surrogate: a client that
+      compares the echo with what it sent sees a difference there.  A graph
+      built in-process whose node holds a text parameter spelling `NaN`,
+      `Infinity` or `-Infinity` is still refused by `to_dict`
+      (MADD-ANO-010), so `GET /graph` of a server started on one answers
+      500; no request can bring a graph to that state.
+    verification:
+      - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_a_reply_is_written_for_what_the_default_encoder_refuses"
+      - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_every_route_and_both_handlers_reply_through_the_one_encoder"
+      - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_no_reply_of_the_server_module_is_built_with_the_default_encoder"
+      - "tests/api/test_a_reply_is_written_whatever_it_echoes.py::test_an_http_exception_is_answered_whatever_its_detail_echoes"
+      - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-210"
+    title: "A '#' in an edge's field name gave two mapped edges on one field pair a single slot of weights"
+    description: >
+      An edge's key is `source.field->target.field`, and a second mapped
+      edge on the same pair takes the ordinal `#1`, so each has its own
+      slot in `params["mappings"]`.  `add_edge` read the ordinal after the
+      first `#` of a key, and asked nothing of a field's name: with a `#`
+      in one (`"s#x"`), two mapped edges on the same pair got the same key
+      and one slot between them, so one edge delivered through the other's
+      weights, and `remove_edge` left the slot in `params["mappings"]`.
+      Never in a release: mapped edges are new in 0.4.0.  Found by the
+      sweep of the names a graph is given (MADD-ANO-208).
+      Resolved in 0.4.0: `add_edge` and `add_external_input` refuse a field
+      name holding `#`, as `add_node` refuses a node's.  (They also refuse
+      one that spells `NaN`, `Infinity` or `-Infinity`, which the config
+      reserves: an edge to a target field of that name was taken, and
+      `to_dict` and `GET /graph` then failed for as long as it stood --
+      loud, and never in a release.  `POST /graph/nodes` and `PUT
+      /graph/params` refuse such a text for a text parameter for the same
+      reason.)
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: both edges stepped, and one carried the other's interface
+      weights.  `context_dependent` because what the mapped interface
+      carries is the model's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_edge"
+      - "maddening.core.graph_manager.GraphManager.remove_edge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: keep `#` out of the field names an edge is given.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Two mapped edges whose keys coincide for another reason -- from one
+      source field to the field `v` of a node `t.u` and to the field `u.v`
+      of a node `t` -- take distinct ordinals and a slot each, but
+      `remove_edge` of either clears both slots: the remaining edge's is
+      rebuilt from its mapping at the next compile, so a weight written to
+      `gm.params` for it since is replaced by the mapping's own.  Keep a
+      dot out of one of the two names.
+    verification:
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_two_mapped_edges_on_one_field_pair_keep_a_slot_each_and_a_hash_cannot_merge_them"
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_add_edge_refuses_a_field_name_the_config_or_an_edge_key_cannot_hold"
+      - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_add_external_input_refuses_the_field_names_an_edge_refuses"
+      - "tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_an_edge_field_the_config_could_not_carry_is_a_400"
     github_issue: null
   - anomaly_id: "MADD-ANO-211"
     title: "The float floor of an interface edge that delivers a wider dtype than its source field was taken at the wider dtype's eps: a stalled float32 group read its spectral bound at 6.7e-7x the true distance, spectral_usable=True"

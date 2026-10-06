@@ -1001,7 +1001,7 @@ def test_the_allocation_bounds_hold_in_a_process_with_a_capped_address_space():
 
 
 _SCALE = '''
-    import json, resource, sys, time
+    import json, sys, time
     import numpy as np
     n = int(sys.argv[1])
     import jax, jax.numpy as jnp
@@ -1093,7 +1093,12 @@ _SCALE = '''
     out["gradient is finite"] = bool(np.isfinite(grad).all() and np.abs(grad).max() > 0)
     out["digest"] = len(timed("digest", matrix.structure_digest))
 
-    out["peak_rss_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+    # This process image's own high-water mark.  ru_maxrss is not that:
+    # after a fork and an exec it still holds the parent's peak, so it
+    # reports the test session's memory, not this script's.
+    with open("/proc/self/status") as status:
+        high_water = [line for line in status if line.startswith("VmHWM:")]
+    out["peak_rss_mib"] = int(high_water[0].split()[1]) // 1024
     print("RESULT" + json.dumps(out))
 '''
 

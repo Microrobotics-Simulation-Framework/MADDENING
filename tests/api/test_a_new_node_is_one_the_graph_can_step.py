@@ -207,3 +207,23 @@ def test_a_node_that_reads_its_constants_from_the_params_pytree_only_is_added(se
     # ... and the same class with a gain the update cannot multiply by.
     resp = _add(client, "ReadsThePytreeOnly", {"gain": [1.0, 2.0]}, name="other")
     assert resp.status_code == 400 and "params.gain" in resp.json()["detail"]
+
+
+def test_a_node_the_door_never_saw_is_refused_where_the_graph_steps(tmp_path):
+    """The dry run guards ``POST /graph/nodes``.  A graph the server was
+    handed, or one edited in process, does not pass that door: its step is
+    held to the state's layout by the graph itself (``GraphManager.step``
+    and ``run``), which both step routes answer as a 400 with nothing
+    stored."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", DT, stiffness=30.0, damping=2.0, initial_position=1.0))
+    gm.add_node(BallNode("b", DT, initial_velocity=[1.0, 2.0]))
+    gm.compile()
+    server = SimulationServer(node_registry=REGISTRY, graph_manager=gm,
+                              checkpoint_root=str(tmp_path))
+    with TestClient(server.create_app(), raise_server_exceptions=False) as client:
+        held = gm._state
+        for resp in (client.post("/sim/step"), client.post("/sim/run", params={"n_steps": 3})):
+            assert resp.status_code == 400, resp.text
+            assert "'b/position' has shape () before the update and (2,) after it" in resp.text
+            assert gm._state is held

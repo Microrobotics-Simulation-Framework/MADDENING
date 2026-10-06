@@ -234,10 +234,11 @@ def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list
     ``float32`` its ``initial_state()`` builds, and the state reloads.
 
     The comparison behind the REST server's dry run of a new node
-    (``POST /graph/nodes``): a node whose ``update`` returns a leaf of
-    another shape than its ``initial_state()`` built broadcasts it at the
-    first step, and :meth:`GraphManager.step` stores the result
-    (MADD-ANO-220).  Host-side: it reads shapes and dtypes, never values,
+    (``POST /graph/nodes``) and behind the check of a stepped state
+    (:meth:`GraphManager.step`, ``FmuSidecar.step``): a node whose
+    ``update`` returns a leaf of another shape than its
+    ``initial_state()`` built broadcasts it at the first step, which was
+    stored (MADD-ANO-220).  Host-side: it reads shapes and dtypes, never values,
     so tracers and the abstract values of :func:`jax.eval_shape` compare
     like arrays.
     """

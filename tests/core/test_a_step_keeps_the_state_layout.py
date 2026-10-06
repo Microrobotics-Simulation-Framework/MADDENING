@@ -231,9 +231,15 @@ class _CountsItsTraces(SimulationNode):
         return {"x": state["x"] + dt}
 
 
-def test_the_comparison_calls_no_update_and_traces_nothing():
+def test_the_comparison_is_made_once_per_trace_and_calls_no_update(monkeypatch):
     """It reads the shapes of the state the step returned, host-side: the
-    node's ``update`` runs as often as the step's one trace runs it."""
+    node's ``update`` runs as often as the step's one trace runs it, and
+    nine steps of one program are compared once.  (The patch is of the
+    name the graph reads: the count below shows it is in effect.)"""
+    compared = []
+    real = _param_probes._state_layout_drift
+    monkeypatch.setattr(_param_probes, "_state_layout_drift",
+                        lambda *a, **kw: compared.append(1) or real(*a, **kw))
     gm = GraphManager()
     gm.add_node(_CountsItsTraces("c", DT))
     gm.compile()
@@ -242,7 +248,11 @@ def test_the_comparison_calls_no_update_and_traces_nothing():
         gm.step()
     gm.run(4)
     assert gm.trace_count == 1 and _CountsItsTraces.traces == 1
-    assert gm._layout_checked_trace == (gm._compile_generation, 1)
+    assert len(compared) == 1
+    gm.compile()
+    gm.step()
+    gm.step()
+    assert len(compared) == 2
 
 
 def test_a_graph_with_a_coupling_group_is_held_to_its_layout_too():

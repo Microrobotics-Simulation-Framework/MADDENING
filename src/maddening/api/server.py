@@ -1051,9 +1051,9 @@ def _dry_run_node(node, state: Any = None) -> None:
     pytree (``HeartPumpNode`` ``venous_pressure: null``) was accepted and
     every later step was a 400; and a list where the node's state is a
     scalar (``BallNode`` ``initial_velocity: [0, 0]``) was accepted, the
-    state changed shape at the first step (``GraphManager.step`` stores
-    such a state: MADD-ANO-220), and the graph's own checkpoint no longer
-    loaded after a reset.
+    state changed shape at the first step (which ``GraphManager.step``
+    then stored, and now refuses: MADD-ANO-220), and the graph's own
+    checkpoint no longer loaded after a reset.
 
     *state* is the node's initial state when the caller has already built
     it (the size check does), so it is not allocated twice.

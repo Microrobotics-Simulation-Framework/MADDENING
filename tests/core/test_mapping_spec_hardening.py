@@ -187,7 +187,12 @@ def test_strict_to_dict_refuses_a_reference_to_a_removed_node(kind):
     pts = np.array([0.0, 0.5, 1.0])
     gm.add_edge("a", "b", "v", "inp",
                 mapping=make(pts, pts, source_ref={"node": "c", "field": "pts"}))
-    gm.remove_node("c")
+    with pytest.raises(ValueError, match="Cannot remove node 'c'"):
+        gm.remove_node("c")
+    # remove_node() refuses this removal while the edge holds the reference
+    # (MADD-ANO-214); the write-time check is for a graph that lost the node
+    # some other way.
+    gm._remove_node("c", replacing=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="unknown node 'c'") as exc:
         gm.to_dict()
     assert "a.v->b.inp" in str(exc.value)

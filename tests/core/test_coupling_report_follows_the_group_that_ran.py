@@ -159,10 +159,16 @@ def test_rebuilding_a_member_before_the_next_step_leaves_the_report_alone(diagno
     gm = _stalled_ring(diagnostics)
     before = dict(gm.coupling_diagnostics()[_KEY])
     assert before["precision_limited"], "fixture premise: the residual is the floor"
-    gm.remove_node("n1")
+    # The node takes its membership of the group with it (it used to stay
+    # listed), so the recipe ends by adding the group again.
+    with pytest.warns(UserWarning, match="took it out of the coupling group"):
+        gm.remove_node("n1")
     gm.add_node(_Relay("n1", _G, _C, 0.999, evaluations=50))
     gm.add_edge("n0", "n1", "x", "u")
     gm.add_edge("n1", "n2", "x", "u")
+    gm.remove_coupling_group(["n0", "n2"])
+    gm.add_coupling_group(_NAMES, max_iterations=2000, tolerance=1e-12,
+                          diagnostics=diagnostics)
     after = dict(gm.coupling_diagnostics()[_KEY])
     for key in before:
         a, b = before[key], after[key]
@@ -170,9 +176,14 @@ def test_rebuilding_a_member_before_the_next_step_leaves_the_report_alone(diagno
 
 
 def test_a_member_removed_since_the_step_takes_the_report_with_it():
-    """No ``KeyError``: the group has no entry, and the coupling report says why."""
+    """No ``KeyError``: the group that ran has no entry, and the coupling
+    report says why of the group the removal left (the member took its
+    membership with it; the group used to go on listing it, and the row
+    said "a member was removed")."""
     gm = _stalled_ring()
-    gm.remove_node("n1")
+    with pytest.warns(UserWarning, match="took it out of the coupling group"):
+        gm.remove_node("n1")
     assert _KEY not in gm.coupling_diagnostics()
-    row = next(r for r in gm.coupling_report() if r["group"] == _KEY)
-    assert any("removed" in flag for flag in row["flags"]), row
+    rows = list(gm.coupling_report())
+    assert [r["group"] for r in rows] == ["n0+n2"], rows
+    assert any("added after the last compile" in flag for flag in rows[0]["flags"]), rows

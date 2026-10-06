@@ -1688,7 +1688,9 @@ claims:
     sharded graph on virtual devices; for each, the sha256 of the lowered
     text of five programs: the step with traced and with baked parameters
     (jit), run_scan(3), run_sweep at batch 2 (vmap) and the adaptive step
-    (run_adaptive), per jax version (0.10.2, 0.11.0, 0.11.2). Not claimed
+    (run_adaptive), per jax version (0.10.2, 0.11.0, 0.11.2), each graph
+    built and lowered from emptied jax caches (jax.clear_caches(): the text
+    otherwise also depends on what the process traced before). Not claimed
     for float64 (x64), mixed dtypes, 16-bit dtypes, gradients or
     checkpoints.
   oracle: >-
@@ -1705,6 +1707,7 @@ claims:
     - 'tests/core/test_step_program_digests.py::test_a_numerically_neutral_edit_of_the_edge_path_changes_every_program'
     - 'tests/core/test_step_program_digests.py::test_resolving_a_node_s_incoming_edges_in_another_order_changes_every_program'
     - 'tests/core/test_step_program_digests.py::test_dropping_aitken_s_second_pass_changes_the_programs_of_the_aitken_graph'
+    - 'tests/core/test_step_program_digests.py::test_the_digests_do_not_depend_on_what_jax_s_trace_caches_hold'
   status: verified
   domains:
     f32: 'tests/core/test_step_program_digests.py::test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged'

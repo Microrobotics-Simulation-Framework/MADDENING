@@ -746,13 +746,52 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     (hi - lo)`` rounds to 1, so a sidecar with ``param_specs`` -- and FMPy
     through the compiled wrapper -- refused the FMU's own advertised max;
     and a bound in float32's subnormal-spacing band (``TINY <= |b| <
-    2**-102``) advertised a neighbour one flushed distance away.  When no
-    value on the bound's side of the interval passes (a ``logit`` range
-    with no float inside it), the neighbour is advertised as before, and
-    the bridge refuses a description whose ``min`` exceeds its ``max``.
+    2**-102``) advertised a neighbour one flushed distance away.
+
+    When ``check`` accepts no value of the dtype at all -- a ``logit`` range
+    with no float inside it, or a spec the dtype cannot map
+    (``ParamSpec._require_representable``: a subnormal ``logit`` bound, a
+    bound or a width the dtype does not hold) -- the variable advertises
+    the empty envelope ``min = tiny > max = -tiny`` on both sides, whatever
+    the spec's own bounds, and the bridge refuses a description whose
+    ``min`` exceeds its ``max``.  The neighbours used to be advertised
+    there, on the assumption that an interval with no value has neighbours
+    that cross; ``logit`` on ``(1e-45, 1e-14)`` has not (``min = tiny``,
+    ``max`` just under ``1e-14``), so the description declared settable a
+    whole range of values every spec-holding surface refuses.
     """
     if spec is None:
         return None
+    return _advertised_pair(spec, dtype)[side]
+
+
+def _advertised_pair(spec, dtype: str) -> tuple[Optional[float], Optional[float]]:
+    """Both sides of :func:`_advertised_bound`, decided together: whether
+    any value is accepted at all is a property of the spec, not of a side."""
+    sides = [_advertised_side(spec, side, dtype) for side in (0, 1)]
+    searched = [found for _, found in sides if found is not None]
+    if searched and not any(searched):
+        # Every bound that was searched from has no accepted value between
+        # it and the interval's middle (or the dtype's largest number).
+        tiny = float(np.finfo(_search_dtype(dtype)).tiny)
+        return tiny, -tiny
+    return sides[0][0], sides[1][0]
+
+
+def _search_dtype(dtype: str) -> np.dtype:
+    """The floating dtype an open bound of a ``dtype`` variable is searched in."""
+    try:
+        dt = np.dtype(dtype)
+    except TypeError:
+        return np.dtype(np.float32)
+    return dt if np.issubdtype(dt, np.floating) else np.dtype(np.float32)
+
+
+def _advertised_side(spec, side: int, dtype: str) -> tuple[Optional[float], Optional[bool]]:
+    """``(bound, found)`` of one side: the value :func:`_advertised_bound`
+    documents, and whether ``ParamSpec.check`` accepts a value on this
+    side of the interval (``None`` where no search was made: no bound, a
+    closed bound, or a dtype this process holds no leaf of)."""
     b = spec.bounds[side]
     if b is None and side == 0 and spec.transform == "log":
         # ``transform="log"`` without a lower bound is measured from 0
@@ -762,18 +801,14 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
         # and ran mass = -1.
         b = 0.0
     if b is None:
-        return None
+        return None, None
     if spec.transform not in ("log", "logit"):
-        return b
-    try:
-        dt = np.dtype(dtype)
-        if not np.issubdtype(dt, np.floating):
-            dt = np.dtype(np.float32)
-    except TypeError:
-        dt = np.dtype(np.float32)
+        return b, None
+    dt = _search_dtype(dtype)
     fi = np.finfo(dt)
     towards = dt.type(np.inf) if side == 0 else dt.type(-np.inf)
-    m = np.nextafter(dt.type(b), towards)
+    with np.errstate(over="ignore"):                  # a bound past the dtype's range
+        m = np.nextafter(dt.type(b), towards)
     if abs(m) < fi.tiny:
         m = dt.type(fi.tiny if side == 0 else -fi.tiny)
     import jax  # noqa: PLC0415 - the dtype JAX would hold a leaf of this dtype in
@@ -781,9 +816,9 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     if jax.dtypes.canonicalize_dtype(dt) != dt:
         # A float64 variable without x64: no leaf of this dtype exists in
         # this process for ``check`` to judge (JAX would hold it as float32).
-        return float(m)
+        return float(m), None
     accepted = _accepted_inside(spec, float(b), side, dt, m)
-    return float(m if accepted is None else accepted)
+    return float(m if accepted is None else accepted), accepted is not None
 
 
 def _envelope(lo: Optional[float], hi: Optional[float]) -> tuple[Optional[float], Optional[float]]:

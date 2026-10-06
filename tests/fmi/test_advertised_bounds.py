@@ -129,6 +129,85 @@ def test_an_open_bound_at_zero_advertises_the_outermost_value_its_spec_accepts(s
     assert not _accepted(spec, outward), (spec, outward)
 
 
+#: Specs ``ParamSpec.check`` accepts no float32 under: a ``logit`` bound that
+#: is a float32 subnormal (drawn by the slow lane's door comparison:
+#: ``tests/property/test_differential_param_acceptance.py``), a ``logit``
+#: width under four smallest normals, a width and a bound float32 does not
+#: hold, and a ``logit`` range with no float inside it.
+_NO_VALUE_ACCEPTED = {
+    "logit-subnormal-lower": ParamSpec(bounds=(1.401298464324817e-45, 1.4210854715202004e-14),
+                                       transform="logit"),
+    "logit-subnormal-lower-wide": ParamSpec(bounds=(1e-40, 1.0), transform="logit"),
+    "logit-subnormal-upper": ParamSpec(bounds=(-1.0, -1e-40), transform="logit"),
+    "logit-narrow": ParamSpec(bounds=(2.0 * float(F32.tiny), 4.0 * float(F32.tiny)),
+                              transform="logit"),
+    "logit-width-overflows": ParamSpec(bounds=(-3e38, 3e38), transform="logit"),
+    "logit-upper-overflows": ParamSpec(bounds=(0.0, 1e39), transform="logit"),
+    "log-lower-overflows": ParamSpec(bounds=(1e39, None), transform="log"),
+    "logit-nothing-inside": ParamSpec(bounds=(0.0, 1e-40), transform="logit"),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_NO_VALUE_ACCEPTED))
+def test_a_spec_that_accepts_no_value_advertises_an_envelope_no_value_is_in(label):
+    """``min > max`` on both sides, whatever the spec's own bounds (a ``log``
+    spec with no upper bound included), so a bridge refuses to serve the
+    description.  The neighbours of the bounds used to be advertised:
+    ``min = tiny`` and ``max`` just under ``1.42e-14`` for the first case,
+    a range of values the description declared settable and the graph
+    refuses, every one."""
+    from maddening.fmi.model_description import _advertised_bound, _parameter_envelope
+
+    spec = _NO_VALUE_ACCEPTED[label]
+    lo, hi = spec.bounds
+    probes = [float(F32.tiny), -float(F32.tiny), 0.5, 1.0, 30.0, 1e-20, 1.4210853868169056e-14,
+              float(F32.max)]
+    probes += [float(np.nextafter(np.float32(b), np.float32(t)))
+               for b in (lo, hi) if b is not None and abs(b) < float(F32.max)
+               for t in (-np.inf, np.inf)]
+    assert not any(_accepted(spec, np.float32(x)) for x in probes), "the premise: no value passes"
+    low, high = (_advertised_bound(spec, side, "float32") for side in (0, 1))
+    assert (low, high) == (float(F32.tiny), -float(F32.tiny))
+    assert _parameter_envelope(spec, "float32")[:2] == (low, high)
+
+
+def test_a_spec_one_side_of_which_accepts_values_keeps_its_bounds():
+    """The empty envelope is for a spec with no accepted value on *any* side
+    it was searched from: ``logit`` on ``(0, 1)`` and ``log`` above ``1``
+    advertise what they did."""
+    from maddening.fmi.model_description import _advertised_bound
+
+    unit = ParamSpec(bounds=(0.0, 1.0), transform="logit")
+    low, high = (_advertised_bound(unit, side, "float32") for side in (0, 1))
+    assert 0.0 < low < high < 1.0
+    above_one = ParamSpec(bounds=(1.0, None), transform="log")
+    assert _advertised_bound(above_one, 0, "float32") == float(np.nextafter(np.float32(1), 2))
+    assert _advertised_bound(above_one, 1, "float32") is None
+    # a float64 variable in a process without x64: nothing is searched
+    assert _advertised_bound(ParamSpec(bounds=(1e-320, 1.0), transform="logit"), 1,
+                             "float64") == float(np.nextafter(1.0, 0.0))
+
+
+def test_no_bridge_serves_a_parameter_whose_spec_accepts_no_value(gm):
+    """With the graph's specs or without: the bridge refuses to start over a
+    description whose parameter admits no value (it used to start, and
+    without specs took ``1e-20`` for the first case's leaf)."""
+    from maddening.fmi.tcp_bridge import FmuTcpBridge
+
+    gm.set_param_spec("s", "stiffness", _NO_VALUE_ACCEPTED["logit-subnormal-lower"])
+    md = build_model_description(gm, model_name="m")
+    var = next(v for v in md.variables if v.name == "s.params.stiffness")
+    assert var.min > var.max
+    for specs in (None, gm.param_specs()):
+        side = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state={n: dict(f) for n, f in gm._state.items()},
+            params=gm.params, param_specs=specs, fixed_params=md.fixed_parameters,
+            input_resolver=gm._resolve_external_inputs))
+        with pytest.raises(ValueError, match="no value can satisfy"):
+            FmuTcpBridge(side, md, master_dt=gm.timestep)
+
+
 def test_inclusive_identity_bounds_are_unchanged(gm):
     md = build_model_description(gm, model_name="m")
     var = next(v for v in md.variables if v.name == "ball.params.elasticity")

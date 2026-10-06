@@ -1407,8 +1407,8 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
                      "ratio_usable=True; spectral_error_bound (solver='ift', "
                      "diagnostics=True) is the bound where spectral_usable is True, for a "
                      "linear map (asymptotic for a non-linear one), in the group's own norm "
-                     "at the returned state (under 'interface', each edge's transformed "
-                     "value). See coupling_diagnostics()")
+                     "at the returned state (under 'interface', what each edge delivers: "
+                     "its mapping, then its transform). See coupling_diagnostics()")
         if gm._is_multirate:
             notes.append("multi-rate graph: a group's entry is its most recent applied solve")
     if status.stale and groups:

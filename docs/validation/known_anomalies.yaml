@@ -12820,15 +12820,19 @@ anomalies:
     residual_risk: >
       A transform that is not affine makes the map non-linear in the
       reading, and the bound is then asymptotic, as for any non-linear map.
-      An internal edge with an interface mapping is read by the interface
+      An internal edge with an interface mapping was read by the interface
       norm, its float floor and this analysis at its source field (through
-      the transform alone where it has one), not at the value the mapping
-      delivers: the bound is in the reading the residual is in, but that
-      reading is not what the consumer sees.  With the audit's selection
-      written as a mapping the bound reads 1.02-5.2x the distance in the
+      the transform alone where it had one), not at the value the mapping
+      delivers: the bound was in the reading the residual was in, but that
+      reading was not what the consumer sees.  With the audit's selection
+      written as a mapping the bound read 1.02-5.2x the distance in the
       source fields and 0.064-0.32x the distance in the delivered values.
-      That is the mapped-edge anomaly registered with the interface-mapping
-      fixes (open), not this one.
+      That was MADD-ANO-195, not this one, and it is resolved in 0.4.0 as
+      well: every
+      reading of an interface edge goes through the step's own edge rule
+      (mapping, then transform, with the weights the step ran with), and
+      the same pair reads 1.001x, 66.5x and 1.003x the distance in the
+      delivered values at caps 2 to 4.
     verification:
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures"
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair"
@@ -13198,8 +13202,8 @@ anomalies:
       on the function).  The dataset is rebuilt from a state history and
       still pairs a forward edge's input with the wrong step
       (MADD-ANO-194); a node fed by a flux-reading edge has no dataset
-      (`KeyError`, as before).  The interface convergence norm reads a
-      mapped edge before its mapping (MADD-ANO-195).
+      (`KeyError`, as before).  The interface convergence norm read a
+      mapped edge before its mapping (MADD-ANO-195, resolved in 0.4.0).
     verification:
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_check_conservation_feeds_the_flux_hook_what_the_step_feeds"
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_dataset_pairs_each_state_with_the_boundary_input_the_step_fed"
@@ -13275,7 +13279,24 @@ anomalies:
       traced, or another entry of the field with no error.  No release
       carried it: mapped edges are new in 0.4.0.  Found by the sweep of
       every reader of an edge's source field that followed MADD-ANO-193
-      (CPU, jax 0.11.0).
+      (CPU, jax 0.11.0).  The spectral analysis behind
+      `spectral_error_bound` and the report's own floor read the edge the
+      same way, so residual and bound agreed with each other and described
+      the source field: on the round-6 audit's `extract_last` pair with
+      the selection written as a `matrix_mapping` the bound read 0.064x,
+      0.318x and 0.074x the true distance in the delivered values at
+      `max_iterations` 2 to 4, `spectral_usable=True` (1.02x to 5.2x in
+      the source fields).  Resolved in 0.4.0: the step's edge rule is one
+      function (`maddening.core.edge._delivered`: the mapping, with the
+      weights the step ran with, then the transform), and the residual,
+      the floor, the reading the spectrum is taken on and the report all
+      iterate one generator built on it
+      (`acceleration._interface_readings`).  A group whose norm reads a
+      mapped edge records its floor in the step (`_meta`'s
+      `coupling_<key>_reading_floor`), because the weights can be passed
+      for one step and the graph does not hold them afterwards.  The same
+      pair reads 1.001x, 66.5x and 1.003x the distance in the delivered
+      values, the transform spelling's figures.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -13286,22 +13307,38 @@ anomalies:
     affected_components:
       - "maddening.core.coupling.acceleration.coupling_residual_interface"
       - "maddening.core.coupling.acceleration.residual_precision_floor"
-    affected_versions: ">=0.4.0.dev0"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
     workaround: >
-      For a coupling group with a mapped internal edge use
+      Not applicable to a tagged release.  On the affected development
+      builds: for a coupling group with a mapped internal edge use
       `convergence_norm="mixed"` (or `"l2"`), which hold every member
       field to the criterion, or tighten `rtol` by the ratio of the source
       field's scale to the delivered value's.
-    resolution_status: "open"
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
     residual_risk: >
-      Open.  The fix is to read each interface edge through the step's
-      own edge rule (mapping, then transform) in the norm and in the
-      precision floor; it changes the criterion of mapped groups only.
-      Until then the interface norm of a mapped edge is the norm of its
-      source field.
+      The change moves the criterion of a group with a mapped internal
+      edge under `convergence_norm="interface"` only: its residual, the
+      pass it stops on and its report.  Every other group keeps its
+      states, reports and compile counts bit for bit, but for the floor of
+      an interface edge that delivers a wider dtype than its source field
+      (MADD-ANO-211).  The spectral bound's conditions are unchanged: a
+      mapping is linear, and a transform after it that is not affine makes
+      the map non-linear in the reading.  The gradient bound keeps its
+      documented norm, the source fields the edges read, before the
+      mapping and the transform.  The floor remains a count, and does not
+      see a same-pass read that differences entries of one field
+      (MADD-ANO-212, open).  A mapping that reads a moving geometry is not
+      built yet; its reading will go through the same function.
     verification:
       - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_a_mapped_edge_is_the_scaled_change_of_what_it_delivers"
       - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_an_unmapped_edge_is_the_scaled_change_of_what_it_delivers"
+      - "tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_one_pass_reports_the_change_of_what_its_edges_delivered"
+      - "tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with"
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_selection_written_as_a_mapping_is_bounded_as_the_same_selection_as_a_transform"
+      - "tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver"
+      - "tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_the_monolithic_reference"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-196"
@@ -14263,4 +14300,212 @@ anomalies:
       - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_add_edge_refuses_a_field_name_the_config_or_an_edge_key_cannot_hold"
       - "tests/core/test_a_name_is_refused_where_no_carrier_could_hold_it.py::test_add_external_input_refuses_the_field_names_an_edge_refuses"
       - "tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_an_edge_field_the_config_could_not_carry_is_a_400"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-211"
+    title: "The float floor of an interface edge that delivers a wider dtype than its source field was taken at the wider dtype's eps: a stalled float32 group read its spectral bound at 6.7e-7x the true distance, spectral_usable=True"
+    description: >
+      Under `convergence_norm="interface"` the residual's float floor
+      (`residual_precision_floor`, and the per-entry resolution the
+      spectral analysis takes on the same reading) counted each value an
+      internal edge delivers at the eps of the *delivered* value's dtype.
+      A delivered value is no finer than the field it was computed from.
+      Under `jax_enable_x64` an edge whose transform returns float64 from
+      a float32 field (`v.astype(float64)`, or a unit conversion that
+      multiplies by a NumPy float64 constant) delivers float64 numbers
+      that carry float32 rounding, and the floor read `2**-29` of what the
+      source resolves.  Measured on release/0.4.0 at f9a3bef5 (CPU, jaxlib
+      0.11.0): the audit's two-member `extract_last` pair held in float32
+      under x64, its two internal edges casting what they deliver to
+      float64, Gauss-Seidel with Aitken, `max_iterations=3`, `rtol=1e-6`,
+      `diagnostics=True`.  The pair stalls at `residual=0.0` a float32
+      rounding from its fixed point, 0.659 in the norm's units, and the
+      report read `precision_limited=True`,
+      `spectral_error_bound=4.44e-7` and `spectral_usable=True`: 6.7e-7 of
+      the true distance.  The same pair with float32 edges read 238 (362x
+      the distance).  An edge that delivers its source's dtype, or a
+      narrower one, was not affected, and neither were the L2 and mixed
+      norms, which read the fields themselves.  No release carried it: the
+      floor and the spectral bound are new in 0.4.0's development.  Found
+      while routing the interface norm's readings through the step's edge
+      rule: a float64 mapping matrix -- which is what a NumPy matrix
+      becomes under x64 -- applied to a float32 field widens what the edge
+      delivers in the same way.  Resolved in 0.4.0: each delivered value
+      is resolved at the coarser of its own dtype's eps and its source
+      field's, in the floor and in the analysis alike.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs `jax_enable_x64`, the
+      interface norm, a narrower member behind an edge that widens, and a
+      residual at its float floor; the iteration and `converged` were
+      unaffected.  `context_dependent` because whether the bound gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: keep what an internal edge delivers in its source field's
+      dtype (cast inside the consuming node instead of on the edge), or
+      read the bound under convergence_norm="mixed".
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The floor is a model of the map's rounding (`PRECISION_FLOOR_ULPS`
+      units of eps per entry, per evaluation), not a proof of it.  It
+      counts a delivered value at one resolution per entry and does not
+      see a cancellation *inside* an edge: a mapping row or a transform
+      that subtracts nearly equal entries of one field delivers a value
+      whose relative rounding is the source's times the cancellation.
+      Where such a read is of the same Gauss-Seidel pass the bound can
+      read below the true distance with the flag set (MADD-ANO-212,
+      open).
+    verification:
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution"
+      - "tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_is_no_finer_than_the_field_it_was_computed_from"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-212"
+    title: "The floor's gain of a same-pass read is measured along the source's own state: a Gauss-Seidel group reading a difference of two entries of one field stalls with spectral_error_bound at 0.054x (to 2.6e-4x) the true distance, spectral_usable=True"
+    description: >
+      With `diagnostics=True` the float floor of a coupling pass weights
+      every group-internal read by its relative gain, measured by one
+      Jacobian-vector product of the reading member's update along the
+      source's own state (`_read_gain`, `PRECISION_FLOOR_ULPS`).  That
+      direction moves every entry of the source field by the same relative
+      amount.  A read that takes a difference of two nearly equal entries
+      of one field returns a small response along it and is counted as a
+      gain of about one, while the entries round independently: the
+      difference of two float32 numbers near `L` carries a rounding of
+      `eps * L`, `L / |difference|` times the floor's unit in what the
+      reader receives.  Under Gauss-Seidel a member reads the members
+      swept before it from the same pass, the pass's Jacobian has that
+      read folded in, and the counted floor is all that carries its
+      rounding.  Measured on release/0.4.0 at f9a3bef5 and on the tree
+      with the interface-reading fix alike (CPU, jaxlib 0.11.0, float32):
+      `A.u = [L + t, L]`, an edge `A -> B` with the mapping matrix
+      `[[1, -1]]`, `B.u = 0.99 d + 0.01`, the L2 norm, `tolerance=1e-9`,
+      `max_iterations=6000`.  At `L = 1000` the Gauss-Seidel group stalls
+      at `residual=0.0` after 565 passes with `t = 0.99698` where the
+      fixed point is 1.0, and reports `spectral_error_bound=1.65e-4`,
+      `spectral_usable=True`, against a true distance of 3.03e-3 in its
+      norm: 0.054x.  At `L = 1e5` it reads 2.6e-4x.  The mixed norm reads
+      the same fractions, and the interface norm (with the
+      interface-reading fix) 0.044x and 2.1e-4x in what the edges
+      deliver.  Under `iteration_mode="jacobi"` the same pair stalls at
+      the same state and its bound holds (37x): the two entries are
+      separate coordinates of the iterate there, and the resolvent the
+      bound applies carries their cross gain.  Under Gauss-Seidel the same
+      difference taken by a transform (`v[:1] - v[1:]`) or inside the
+      reading node did not stall there in these runs -- XLA folded the
+      difference into the producer's sum, and the pair converged to
+      float32 resolution of `t` -- which nothing guarantees.  No release carried it: the floor, the gain measurement and
+      interface mappings are new in 0.4.0's development.  Found while
+      probing what the floor counts for a value a mapped edge delivers.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`.  Not `critical`: it needs a Gauss-Seidel
+      group, a same-pass read that differences entries of one field far
+      larger than their difference, and a residual at its float floor;
+      the iteration itself is the float map's and is unaffected.
+      `context_dependent` because whether the bound gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Where a member reads a difference of entries of one field of another
+      member (a gradient or jump operator as an interface mapping, a
+      transform or a node that subtracts entries), run the group under
+      `iteration_mode="jacobi"`, or have the producer hold the difference
+      as a field of its own so that it is stored at its own magnitude; and
+      do not rely on `spectral_error_bound` where `precision_limited` is
+      True for such a group.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, whose measured, opt-in
+      `diagnostics="rounding"` level estimates the pass's rounding instead
+      of counting it.  Until then the counted floor assumes that a
+      same-pass read passes on a relative rounding of its source no larger
+      than the gain measured along the source's own state.
+    verification:
+      - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded"
+      - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-213"
+    title: "Under the interface norm a field read by several internal edges was counted once per edge by the residual and once by the spectral analysis: on a star spectral_error_bound read 0.26 to 0.73 of the true distance, spectral_usable=True"
+    description: >
+      `convergence_norm="interface"` sums over a coupling group's internal
+      *edges* (`coupling_residual_interface`): a field that `k` of them
+      read is counted `k` times.  With `diagnostics=True` the report's
+      spectral analysis took its weights from the *fields*, each once,
+      wherever no internal edge carried a mapping or a transform, and
+      `spectral_error_bound` multiplied a residual measured in one norm by
+      a resolvent norm measured in the other.  Measured on release/0.4.0 at
+      60c89656 (CPU, jaxlib 0.11.0, float64 under x64, `rtol=1e-6`,
+      `iteration_mode="jacobi"`, no acceleration, no transform or mapping
+      on any edge): a star of a hub and `N` leaves, every node one scalar
+      field, the hub's field read by every leaf, the hub responding to one
+      leaf with a gain of 5 and that leaf to the hub with 0.1 (a loop gain
+      of 0.5).  The group converged (`converged=True`, 22 to 24 passes)
+      and reported `spectral_usable=True`, `precision_limited=False` and a
+      bound of 0.728, 0.517, 0.367 and 0.260 of the distance to the exact
+      fixed point in the norm the residual is in, at `N` = 2, 4, 8 and 16;
+      the same fractions at `max_iterations=4`, not converged (0.517 at 4
+      leaves, 0.260 at 16); in float32 at `rtol=1e-4`, where the float
+      floor is not most of the bound, 0.399 at 8 leaves and 0.292 at 16.
+      A pair in which one member feeds two ports of the other read 0.741
+      after three Jacobi passes.  The residual sat on the fields counted
+      once and the error it implies on the field counted `N` times.  With
+      a registered identity transform on every internal edge the same star
+      took the analysis on the reading and read 1.005 and 1.001 (4 and 16
+      leaves).  Under Gauss-Seidel the same stars read 1.4 to 2.2 of the
+      distance, and under the mixed and L2 norms, which count a field
+      once whatever reads it, 1.019.  No release carried it: the spectral
+      bound is new in 0.4.0's development (`spectral_error_bound` is not
+      in the source of v0.1.0 to v0.3.1).  Found by the round-12 coupling
+      audit.  Resolved in 0.4.0: a group whose reading is not its fields
+      each read once -- a mapping or a transform on an internal edge, or a
+      field that more than one internal edge reads -- has its report's
+      spectral analysis taken on the reading (`_reading_is_the_fields`,
+      static); the stars above read 1.001 to 1.010 of the distance and the
+      pair 1.016.  A group whose internal edges read each field once, as
+      it is, keeps the analysis and the report it had, bit for bit.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs `diagnostics=True`,
+      the interface norm and a field that more than one internal edge
+      reads; the iteration, the state and `converged` were unaffected.
+      `context_dependent` because whether the bound gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: read the bound under convergence_norm="mixed", or put a
+      registered "identity" transform on every internal edge of the group,
+      which takes the report through the analysis on the reading.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Such a group's diagnostics cost eight more Jacobian-vector products
+      per step (16 for the spectrum), as a mapped or transformed edge's
+      do.  Its gradient-error bound keeps the state's own weights, each
+      field once, and is reported only where the state's spectrum settled
+      as well.  The bound is exact for an affine map and asymptotic for a
+      non-linear one, as before.
+    verification:
+      - "tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_on_a_star"
+      - "tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_an_identity_transform_on_every_edge_of_a_star_changes_no_bound"
+      - "tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice"
+      - "tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum"
     github_issue: null

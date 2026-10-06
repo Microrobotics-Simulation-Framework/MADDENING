@@ -56,6 +56,8 @@ from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    _interface_readings,
+    _reading_eps,
     convergence_criterion,
     float_fields_of,
     reported_converged,
@@ -66,7 +68,7 @@ from maddening.core.coupling.acceleration import (
     state_float_image,
     state_from_float_image,
 )
-from maddening.core.edge import EdgeSpec
+from maddening.core.edge import EdgeSpec, _delivered
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import (
     SimulationNode, _detached_config, _method_accepts_params, _mutable_snapshot,
@@ -340,16 +342,78 @@ def _strong_typed(tree):
 
 
 def _apply_edge(edge: EdgeSpec, value, params):
-    """Mapping (interface transfer) first, then the scalar transform."""
-    if edge.mapping is not None:
-        weights = None
-        if params is not None:
-            weights = params.mappings.get(edge.key)
-        with jax.named_scope("edge:mapping"):
-            value = edge.mapping.apply(value, weights)
-    if edge.transform is not None:
-        value = edge.transform(value)
-    return value
+    """Mapping (interface transfer) first, then the scalar transform.
+
+    The step's edge rule (:func:`maddening.core.edge._delivered`) with the
+    step's resolved parameters: the mapping weights are ``params``'s
+    ``mappings`` entry for the edge, baked or traced as the step has them.
+    """
+    return _delivered(edge, value, None if params is None else params.mappings)
+
+
+def _reads_mapping_weights(group, edges, state) -> bool:
+    """Does *group*'s norm read a value that depends on interface-mapping weights?
+
+    True under ``convergence_norm="interface"`` when an internal edge
+    whose source field is floating carries a mapping: that norm reads
+    what each internal edge delivers
+    (:func:`~maddening.core.coupling.acceleration._interface_readings`),
+    and a mapped edge delivers its source field through weights that
+    live in ``params["mappings"]`` and may be overridden per step.  The
+    float floor of such a group's residual therefore cannot be taken
+    from the returned state alone, and the step records it
+    (``coupling_<key>_reading_floor``).  Static, and shared by
+    ``compile()``'s seeding, the step's write and ``reset_state()``, so
+    the three agree on which groups own the slot; every other group's
+    ``_meta`` and compiled step are what they were.
+    """
+    if group.convergence_norm != "interface":
+        return False
+    for e in edges:
+        if (e.mapping is not None
+                and e.source_node in group.nodes and e.target_node in group.nodes):
+            value = state.get(e.source_node, {}).get(e.source_field)
+            if value is not None and jnp.issubdtype(jnp.asarray(value).dtype, jnp.floating):
+                return True
+    return False
+
+
+def _reading_is_the_fields(interface_edges, float_fields) -> bool:
+    """Is the interface norm's reading the fields it reads, each of them once?
+
+    ``coupling_residual_interface`` sums over a group's internal *edges*:
+    what each one delivers, over its own magnitude.  The state's weights
+    (``_norm_weights`` in the step) give each read *field* its own
+    magnitude's weight once.  The two are one norm exactly when every
+    internal edge with a floating source field delivers that field as it
+    is -- no mapping, no transform -- and no field is read by more than
+    one of them.  Then the report's spectral analysis is taken in the
+    state's weights (``_spectral_rate_at``); otherwise on the reading
+    (``_interface_spectral_rate_at``):
+
+    * a mapping or a transform changes what an entry is and which
+      magnitude it is divided by;
+    * a field that ``k`` internal edges read is counted ``k`` times by
+      the norm and once by the state's weights.  On a star whose hub's
+      field every leaf reads, the residual of the edges times the
+      resolvent of the fields read 0.26 to 0.73 of the true distance
+      with ``spectral_usable=True`` (2 to 16 leaves, Jacobi, float64;
+      MADD-ANO-213).
+
+    Static: *interface_edges* are the group's internal edges and
+    *float_fields* its floating fields by node, so a group keeps one
+    analysis for the life of its compiled step.
+    """
+    read = set()
+    for e in interface_edges:
+        if e.source_field not in float_fields.get(e.source_node, ()):
+            continue
+        if e.transform is not None or e.mapping is not None:
+            return False
+        if (e.source_node, e.source_field) in read:
+            return False
+        read.add((e.source_node, e.source_field))
+    return True
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -621,19 +685,22 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     """``(rho, arnoldi_residual, amplification, ratio)`` in the interface norm's own coordinates.
 
     :func:`_spectral_rate_at` with ``field_reference``, for a group under
-    ``convergence_norm="interface"`` with a transform on an internal edge.
-    That norm measures each internal edge's source value *after* the
-    edge's transform (``coupling_residual_interface``), each over its own
+    ``convergence_norm="interface"`` with a mapping or a transform on an
+    internal edge, or a field that more than one internal edge reads
+    (:func:`_reading_is_the_fields`).  That norm measures what each
+    internal edge *delivers*
+    -- its source value through the edge's interface mapping and then its
+    transform (``coupling_residual_interface``) -- each over its own
     magnitude; the spectral analysis took its weights from the raw source
     fields, and the bound multiplied a residual in one set of coordinates
     by a resolvent norm in the other.  An offset (a unit conversion's
     273.15) shrinks the reading's relative change, a selection
-    (``"extract_last"``) changes which magnitude an entry is divided by,
-    and the bound read 0.0014-0.098x the true distance with
-    ``spectral_usable=True``.
+    (``"extract_last"``, or a mapping that delivers one entry) changes
+    which magnitude an entry is divided by, and the bound read
+    0.0014-0.098x the true distance with ``spectral_usable=True``.
 
     So here every quantity is taken on the reading ``y = Phi(x)`` itself
-    (``reading``: the flat vector of the transformed edge values, in the
+    (``reading``: the flat vector of the delivered edge values, in the
     order the norm sums them).  The pass reads the iterate only through
     those edges, ``F = G o Phi``, so the reading iterates by its own map
     ``Phi o G``, whose Jacobian ``A = Phi' G'`` has ``dF/dx``'s non-zero
@@ -642,8 +709,8 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     ``A`` in the reading's weights carries the residual the loop measured
     to the distance in the norm the loop measured it in.  ``A`` is applied
     through preimages (:func:`~maddening.core.coupling.acceleration._arnoldi_through`):
-    the Krylov vectors are readings of state tangents, so no transform is
-    ever inverted.
+    the Krylov vectors are readings of state tangents, so no mapping or
+    transform is ever inverted.
 
     ``x_weights`` are the state's spectral weights, which only condition
     the preimages; ``weights``, ``spectral_weights`` and ``resolution``
@@ -1426,8 +1493,8 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
 _GROUP_META_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification", "rho_spectral",
     "spectral_residual", "spectral_amplification",
-    "gradient_relative_error_bound", "pass_evaluations", "V", "W", "pred_count",
-    "pred_0", "pred_1", "pred_2",
+    "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
+    "V", "W", "pred_count", "pred_0", "pred_1", "pred_2",
 )
 
 
@@ -1539,8 +1606,9 @@ def _flux_edge_coupling_errors(group, nodes, edges, state) -> list[str]:
     serve one, and both used to fail inside the trace with a bare
     ``KeyError`` naming the flux:
 
-    * ``convergence_norm="interface"`` measures the change of each
-      internal edge's source field between iterates;
+    * ``convergence_norm="interface"`` measures the change, between
+      iterates, of what each internal edge delivers from its source
+      field;
     * a sub-cycled member under ``boundary_interpolation="linear"`` (or
       ``"quadratic"``, which is linear) interpolates each internal input
       between the pass's incoming iterate and the in-pass state.
@@ -3093,7 +3161,7 @@ def _field_name_refusal(name: Any) -> Optional[str]:
 _REPORT_SLOT_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification",
     "rho_spectral", "spectral_residual", "spectral_amplification",
-    "gradient_relative_error_bound", "pass_evaluations",
+    "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
 )
 
 
@@ -3710,6 +3778,25 @@ def _run_coupled_block_impl(
     # order the group fixes, not the order of the ``add_edge`` calls.
     interface_edges_in_order = _interface_edge_order(
         group_internal_list, group_node_names)
+    # The mapping weights this step runs with (``params["mappings"]``,
+    # baked or traced as the step has them): what ``_resolve_boundary``
+    # hands ``_apply_edge``, and so what every reading of an interface
+    # edge below is taken with.
+    step_mappings = node_params.mappings if node_params is not None else None
+    # Whether the interface norm's reading depends on those weights
+    # (static).  Such a group's float floor is recorded by the step.
+    reads_mapping_weights = _reads_mapping_weights(group, all_edges, new_state)
+    # The same weights for what *reports on* the returned state rather
+    # than taking part in the map -- the spectral analysis's reading and
+    # the recorded floor: read as the step has them, and differentiated
+    # with respect to nothing (the analysis stops the gradient of the
+    # state and of the pass's constants in the same way).  Only the
+    # interface norm reads an edge, so only it builds them.
+    report_mappings = (
+        None if step_mappings is None or not use_interface_norm else {
+            e.key: jax.tree.map(jax.lax.stop_gradient, step_mappings[e.key])
+            for e in interface_edges_in_order
+            if e.mapping is not None and e.key in step_mappings})
 
     # Precompute which boundary inputs come from coupling (intra-group) edges
     # per target node -- only these get interface correction
@@ -4157,9 +4244,11 @@ def _run_coupled_block_impl(
         res_dtype = _group_residual_dtype(s_new, group_node_names)
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
+                # Each internal edge as the step delivers it: through its
+                # mapping, with this step's weights, then its transform.
                 return coupling_residual_interface(
                     s_new, s_old, interface_edges_in_order,
-                    group.atol, group.rtol,
+                    group.atol, group.rtol, mappings=step_mappings,
                 ).astype(res_dtype)
             if use_mixed_norm:
                 return coupling_residual_mixed(
@@ -4680,34 +4769,30 @@ def _run_coupled_block_impl(
                     w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
-            # Under ``convergence_norm="interface"`` with a transform on an
-            # internal edge the norm reads each edge's *transformed* source
-            # value, so the report's spectral analysis is taken on that
+            # Under ``convergence_norm="interface"`` the norm reads what
+            # each internal edge *delivers* -- its source value through the
+            # mapping, then the transform -- once per edge.  With a mapping
+            # or a transform on an internal edge, or a field that more than
+            # one internal edge reads, that is not the read fields weighted
+            # once each, and the report's spectral analysis is taken on the
             # reading (``_interface_spectral_rate_at``); the raw source
-            # fields' weights above measured a different norm.  Static: a
-            # group without such an edge keeps the analysis it had.
-            transformed_reading = use_interface_norm and any(
-                e.transform is not None
-                and e.source_field in float_fields.get(e.source_node, ())
-                for e in interface_edges_in_order
-            )
+            # fields' weights above measured a different norm.  Static
+            # (``_reading_is_the_fields``): every other group keeps the
+            # analysis it had.
+            transformed_reading = use_interface_norm and not _reading_is_the_fields(
+                interface_edges_in_order, float_fields)
+            def _reading_parts(s_star):
+                """The interface norm's reading at ``s_star``, as ``(source dtype,
+                value)`` per edge: what each internal edge delivers, in the order
+                and by the rules ``coupling_residual_interface`` sums them
+                (``_interface_readings``, which both iterate)."""
+                return [(source_dtype, jnp.asarray(v))
+                        for _e, source_dtype, v in _interface_readings(
+                            interface_edges_in_order, s_star, mappings=report_mappings)]
 
             def _reading_values(s_star):
-                """The interface norm's reading at ``s_star``: each internal
-                edge's source value after its transform, in the order and by
-                the rules ``coupling_residual_interface`` sums them."""
-                out = []
-                for e in interface_edges_in_order:
-                    v = s_star[e.source_node][e.source_field]
-                    if not jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating):
-                        continue
-                    if e.transform is not None:
-                        v = e.transform(v)
-                    v = jnp.asarray(v)
-                    if v.size == 0:
-                        continue
-                    out.append(v)
-                return out
+                """The delivered values alone."""
+                return [v for _source_dtype, v in _reading_parts(s_star)]
 
             def _reading(x_full):
                 """``Phi(x)``: the reading as one flat vector."""
@@ -4754,12 +4839,15 @@ def _run_coupled_block_impl(
 
             def _reading_resolution(x_full, scale, evaluations):
                 """The reading's float resolution per entry, each edge's value at
-                its own dtype's eps (``_residual_resolution``), in the reading's
-                weights' units, for a pass that rounds like ``evaluations``."""
-                vals = _reading_values(_embed(x_full))
-                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                its own eps -- its dtype's, or its source field's where that is
+                coarser (``_reading_eps``, as ``residual_precision_floor`` takes
+                it) -- in the reading's weights' units (``_residual_resolution``),
+                for a pass that rounds like ``evaluations``."""
+                parts = _reading_parts(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for _src, v in parts]))
                 eps = jnp.concatenate([
-                    jnp.full((v.size,), jnp.finfo(v.dtype).eps, work) for v in vals])
+                    jnp.full((v.size,), _reading_eps(source_dtype, v), work)
+                    for source_dtype, v in parts])
                 return (scale * evaluations.astype(work)) * _residual_resolution(eps)
 
             if accel_fields is not None:
@@ -4878,7 +4966,7 @@ def _run_coupled_block_impl(
                         spectral_rate_settled(rho_spec, spec_resid), grad_bound,
                         jnp.full_like(grad_bound, jnp.nan))
                     # The report's triple, on the interface norm's own
-                    # reading: each internal edge's transformed value over its
+                    # reading: each internal edge's delivered value over its
                     # own magnitude -- the coordinates ``residual`` and the
                     # floor are measured in (``_interface_spectral_rate_at``).
                     x_sg = jax.lax.stop_gradient(x_star_full)
@@ -5469,6 +5557,26 @@ def _run_coupled_block_impl(
                 iterations = jnp.maximum(iterations, count)
                 total = total + count
             sweep_meta[f"coupling_{group_key}_total_iterations"] = total
+        floor_meta = {}
+        if reads_mapping_weights:
+            # The residual's float floor per evaluation, at the state this
+            # step returns and with the mapping weights it ran with.  The
+            # report takes every other group's floor from the returned
+            # state alone (``coupling_diagnostics``); a mapped edge's
+            # delivered value also depends on ``params["mappings"]``, which
+            # a caller may override for one step and which the graph no
+            # longer holds afterwards -- so the step measures it, once,
+            # after the solve, by the function the report calls.  Only its
+            # dead-band and finiteness tests read the values, so it carries
+            # no derivative.  It is the floor of the state the step leaves,
+            # as every other group's is: ``run_adaptive*`` keeps the last
+            # half step's (``_fold_kept_half_step_reports`` does not fold it).
+            floor_meta[f"coupling_{group_key}_reading_floor"] = jnp.asarray(
+                residual_precision_floor(
+                    {nn: result[nn] for nn in group_node_names}, group_node_names,
+                    "interface", group.atol, group.rtol, interface_edges_in_order,
+                    evaluations=1.0, mappings=report_mappings,
+                ), dtype=res_dtype)
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
             **result.get(_META_KEY, {}),
@@ -5478,6 +5586,7 @@ def _run_coupled_block_impl(
             f"coupling_{group_key}_amplification": jnp.asarray(
                 final_amp, dtype=res_dtype
             ),
+            **floor_meta,
         }
         # The spectral triple exists only where it can be computed
         # (``solver="ift"``) and was asked for (``diagnostics=True``);
@@ -8338,6 +8447,16 @@ class GraphManager:
                     meta[f"coupling_{key}_amplification"] = jnp.array(
                         0.0, dtype=res_dtype
                     )
+                    if _reads_mapping_weights(g, self._edges, self._state):
+                        # The residual's float floor per evaluation, which
+                        # the step measures where the interface norm reads
+                        # a mapped edge (its delivered value depends on the
+                        # weights the step ran with); NaN reads as "not
+                        # measured".  Same condition as the write in
+                        # ``_run_coupled_block_impl``.
+                        meta[f"coupling_{key}_reading_floor"] = jnp.array(
+                            jnp.nan, dtype=res_dtype
+                        )
                     if g.diagnostics and g.solver == "ift":
                         # The Arnoldi triple (Ritz radius, residual,
                         # resolvent norm) behind the spectral bound; NaN
@@ -9670,7 +9789,14 @@ class GraphManager:
               not re-derived from the graph at report time: an edit made
               since -- a node rebuilt with another declared count -- does
               not move the report of a step that already ran, and a group
-              a member of which was removed since has no entry -- measured
+              a member of which was removed since has no entry.  Under
+              ``convergence_norm="interface"`` with an interface mapping
+              on an internal edge the entries are what the edges deliver,
+              which depends on the mapping weights the step ran with
+              (``params["mappings"]``, which a caller may override for one
+              step): the step measures that group's floor itself and the
+              report reads it, so a ``params`` override, or an edit of the
+              weights since, does not move it either -- measured
               in that norm), times the larger of
               ``||(I - H)^{-1}||_2`` (the resolvent norm of the
               Krylov-compressed Jacobian, in the group's own norm) and
@@ -9730,19 +9856,30 @@ class GraphManager:
               fields are outside what it bounds and the norm's scale
               drifts with the iterate exactly as it does for
               ``"residual"``.  Under ``convergence_norm="interface"``
-              the "fields" are what that norm reads: each internal
-              edge's source value *after* the edge's transform, over
-              its own magnitude, and the spectrum is taken on that
-              reading (the Jacobian of the reading's own iteration,
-              ``Phi' G'`` for ``F = G o Phi``, applied through state
-              tangents, so no transform is inverted) -- taken on the
-              raw source fields instead, the bound multiplied a residual
-              in one set of coordinates by a resolvent in another and
-              read 0.0014-0.098x the true distance, usable, with an
-              offset (a unit conversion) or ``"extract_last"`` on an
-              edge.  A transform that is not affine makes the map
-              non-linear in the reading, with the asymptotic reading
-              above.  And its float floor is a model of the
+              the "fields" are what that norm reads: the value each
+              internal edge *delivers* -- its source value through the
+              edge's interface mapping, with the weights the step ran
+              with, and then its transform -- over its own magnitude,
+              and the spectrum is taken on that reading (the Jacobian
+              of the reading's own iteration, ``Phi' G'`` for ``F = G o
+              Phi``, applied through state tangents, so no mapping or
+              transform is inverted) -- taken on the raw source fields
+              instead, the bound multiplied a residual in one set of
+              coordinates by a resolvent in another and read
+              0.0014-0.098x the true distance, usable, with an offset
+              (a unit conversion) or ``"extract_last"`` on an edge; and
+              while the norm and the analysis left an edge's mapping
+              out, residual and bound alike described the source field
+              and not what the target is handed (0.064-0.318x the true
+              distance in the delivered values, usable, with the
+              selection written as a mapping).  The norm counts a
+              field once for every internal edge that reads it, and
+              so does the reading: with the fields counted once each
+              instead, the bound read 0.26-0.73x the true distance,
+              usable, on a star whose hub's field every leaf reads
+              (MADD-ANO-213).  A transform that is
+              not affine makes the map non-linear in the reading, with
+              the asymptotic reading above.  And its float floor is a model of the
               map's rounding (see
               :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
               which a node that cancels catastrophically inside its own
@@ -9818,10 +9955,10 @@ class GraphManager:
               ``|g_k - g*| <= bound * |g_k|`` for the gradient with
               respect to one scalar constant, its norms the group's over
               the state's own fields -- under
-              ``convergence_norm="interface"`` with a transform on an
-              internal edge, the source fields the edges read, before the
-              transform, not the reading ``"spectral_error_bound"`` is
-              taken in.  Measured (jaxlib 0.11.0,
+              ``convergence_norm="interface"`` with a mapping or a
+              transform on an internal edge, the source fields the edges
+              read, before the mapping and the transform, not the reading
+              ``"spectral_error_bound"`` is taken in.  Measured (jaxlib 0.11.0,
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,
@@ -10186,11 +10323,26 @@ class GraphManager:
                     # A member removed since the step: its state, which the
                     # floor is measured on, is gone, and so is this report.
                     continue
-                floor = float(residual_precision_floor(
-                    self._state, sorted(group.nodes), group.convergence_norm,
-                    group.atol, group.rtol, list(internal_edges),
-                    evaluations=evaluations,
-                ))
+                # Where the group's norm reads a mapped edge, what that edge
+                # delivers depends on the mapping weights the step ran with
+                # (``params["mappings"]``, which a caller may override for
+                # one step), so the step measured the floor per evaluation
+                # itself (``reading_floor``) and the count multiplies it in
+                # the slot's own dtype, as the function does.  A slot that
+                # is absent or was never written (a state this build's
+                # step did not produce) falls back to the graph's own
+                # weights, which is what a ``params=None`` step runs with.
+                measured_floor = meta.get(f"coupling_{key}_reading_floor")
+                if measured_floor is not None and np.isfinite(np.asarray(measured_floor)):
+                    unit = np.asarray(measured_floor)
+                    floor = float(unit * np.asarray(evaluations, unit.dtype))
+                else:
+                    floor = float(residual_precision_floor(
+                        self._state, sorted(group.nodes), group.convergence_norm,
+                        group.atol, group.rtol, list(internal_edges),
+                        evaluations=evaluations,
+                        mappings=(self._params or {}).get("mappings"),
+                    ))
                 spectral_bound = float(spectral_error_bound(
                     residual, rho_spec, spec_resid, spec_amp, floor=floor,
                 ))
@@ -11474,7 +11626,7 @@ class GraphManager:
             key = "+".join(sorted(group.nodes))
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
-                           "pass_evaluations"):
+                           "pass_evaluations", "reading_floor"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):

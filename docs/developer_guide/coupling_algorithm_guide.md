@@ -171,7 +171,12 @@ The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
 every entry the norm reads, **per evaluation**, in the norm's units —
 `4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
 `"mixed"` and `"interface"` (`residual_precision_floor`), each field at
-its own dtype's `eps`.  Four is 2.6x the sum of the two measured
+its own dtype's `eps`.  Under `"interface"` the entries are what the
+internal edges deliver (mapping, then transform), each at the coarser of
+its own dtype's `eps` and its source field's; where an edge is mapped,
+the delivered value depends on the weights the step ran with, so the
+step records the per-evaluation floor itself (`_meta`'s
+`coupling_<key>_reading_floor`) and the report reads that.  Four is 2.6x the sum of the two measured
 sources of one evaluation's rounding: the evaluation error of a dense
 update `A @ u + c` near its fixed point (at most 0.72 of a unit over
 3 000 random contractions) and the disagreement between two
@@ -358,10 +363,16 @@ distance in the returned state's weights with `spectral_usable=True`
 (round-5 audit).
 
 Under `convergence_norm="interface"` the "fields" are what that norm
-reads: each internal edge's source value *after* the edge's transform,
-over its own magnitude.  A transform changes the weights -- an offset (a
+reads: the value each internal edge *delivers* -- its source value
+through the edge's interface mapping (with the weights the step ran
+with) and then its transform, exactly what the step hands the target --
+over its own magnitude.  One function gives every reader that value
+(`_interface_readings` in `core/coupling/acceleration.py`, built on the
+step's own edge rule): the residual, its float floor, this analysis and
+the report.  A mapping or a transform changes the weights -- an offset (a
 unit conversion's 273.15) divides a change by a far larger magnitude, a
-selection (`"extract_last"`) by the selected entry's rather than the
+selection (`"extract_last"`, or a mapping that delivers one entry of a
+field) by the selected entry's rather than the
 field's -- so the spectrum is taken on that reading `y = Φ(x)`.  The pass
 reads the iterate only through those edges, `F = G ∘ Φ`, so `y` iterates
 by its own map `Φ ∘ G`, whose Jacobian `A = Φ′ G′` has `dF/dx`'s non-zero
@@ -374,7 +385,21 @@ the reading of `dF/dx` applied to it), so no transform is ever inverted.
 Taken on the raw source fields instead, the bound multiplied a residual
 in one set of coordinates by a resolvent measured in another and read
 0.0014-0.098x the true distance with `spectral_usable=True` (round-6
-audit).  A transform that is not affine makes the map non-linear in the
+audit).  The norm also counts a field once for every internal edge that
+reads it, where the state's weights count it once: on a star whose hub's
+field every leaf reads, with no mapping or transform anywhere, the
+fields' analysis read 0.26-0.73x the true distance with
+`spectral_usable=True` (2 to 16 leaves, Jacobi; MADD-ANO-213), so a group
+with a field that more than one internal edge reads is analysed on the
+reading too.  Only a group whose internal edges read each field once, as
+it is, keeps the analysis in the state's weights (`_reading_is_the_fields`
+in `core/graph_manager.py`, static): there the two are one norm, and the
+second spectrum's eight Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
+left an edge's mapping out, a mapped edge was measured on its source
+field throughout: the bound was consistent with the residual and both
+described a value the consuming node never sees -- 0.064-0.318x the true
+distance in what the edge delivers, usable, on the same pair with the
+selection written as a `matrix_mapping`.  A transform that is not affine makes the map non-linear in the
 reading, and the bound is then asymptotic, as for a non-linear map.  The
 gradient bound below keeps the state's own analysis, in the raw fields'
 weights.
@@ -1232,7 +1257,9 @@ at most one pass (2.0–2.9 against 2.95).
 
 Third, and this one is an accuracy caveat rather than a cost one:
 **do not pair the auto-detected `accelerated_fields` with
-`convergence_norm="interface"`.**  Both are the edge source fields, so
+`convergence_norm="interface"`.**  Both are the edge source fields (the
+criterion reads them as the edges deliver them, through any mapping and
+transform), so
 the quasi-Newton step lands on exactly the fields the criterion then
 measures, and every other field of the group is carried out of the last
 raw pass with nothing looking at it.  Measured over the sweep, on an

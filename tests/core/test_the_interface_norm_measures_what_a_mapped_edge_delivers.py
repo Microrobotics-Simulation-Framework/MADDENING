@@ -3,10 +3,16 @@
 The step applies an edge's interface mapping and then its transform
 (``_apply_edge``).  ``coupling_residual_interface`` and
 ``residual_precision_floor`` read the edge's *source field* through the
-transform alone, so on a mapped edge inside a coupling group the norm is
+transform alone, so on a mapped edge inside a coupling group the norm was
 taken on the source field's scale, not on the delivered value's
-(MADD-ANO-195, open; mapped edges are new in 0.4.0, so no release carried
-it).  The unmapped case is the control and passes.
+(MADD-ANO-195, resolved; mapped edges are new in 0.4.0, so no release
+carried it).  Both now read every interface edge through the step's own
+edge rule (``acceleration._interface_readings``).  The unmapped case is the
+control.  The battery for the fix -- a transform after the mapping, the
+step's weights, the dead band, the compiled step, the report and every
+numeric domain -- is in
+``test_coupling_interface_reading_is_what_the_edge_delivers.py`` and
+``test_coupling_mapped_edges_in_every_domain.py``.
 """
 
 from __future__ import annotations
@@ -45,14 +51,11 @@ def test_the_norm_of_an_unmapped_edge_is_the_scaled_change_of_what_it_delivers()
     assert _delivered_norm() == pytest.approx(0.1 / (RTOL * 1.1), rel=1e-5)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MADD-ANO-195: the interface norm and the precision floor read a mapped edge's "
-    "source field through the transform, without its interface mapping, so they "
-    "measure on the source field's scale and not what the edge delivers; open"))
 def test_the_norm_of_a_mapped_edge_is_the_scaled_change_of_what_it_delivers():
     """The mapped edge delivers exactly what edge ``d -> b`` delivers, so the
-    two norms, and the two floors, must be equal.  Today the mapped one is
-    measured against the source field's 1000: 0.0071 where it is 9.09."""
+    two norms, and the two floors, must be equal.  Before MADD-ANO-195 was
+    fixed the mapped one was measured against the source field's 1000:
+    0.0071 where it is 9.09."""
     mapped = [EdgeSpec("a", "b", "x", "u", mapping=matrix_mapping(SELECT))]
     direct = [EdgeSpec("d", "b", "x", "u")]
     got = float(coupling_residual_interface(NEW, OLD, mapped, atol=0.0, rtol=RTOL))

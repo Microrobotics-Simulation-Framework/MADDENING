@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core._pow2_frame import pow2_frame, pow2_rescue
+from maddening.core.edge import _delivered
 
 
 # ------------------------------------------------------------------
@@ -398,18 +399,85 @@ def coupling_residual_mixed(
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
 
 
+def _interface_readings(interface_edges, *states, mappings=None):
+    """What ``convergence_norm="interface"`` reads on each internal edge, at each of *states*.
+
+    **The one definition of how an interface edge is read: as the step
+    delivers it.**  The edge's source field, through the edge's interface
+    mapping and then its transform (:func:`maddening.core.edge._delivered`,
+    the function the step's boundary resolution calls), with the mapping
+    weights the step ran with.  The residual
+    (:func:`coupling_residual_interface`), its float floor
+    (:func:`residual_precision_floor`) and the spectral analysis the
+    report's bound is taken on (``_reading_values`` in
+    ``core/graph_manager.py``) all iterate this generator, so they
+    cannot disagree about what the norm measures, and none of them can
+    measure a value the consuming node never sees.
+
+    Yields ``(edge, source_dtype, value, ...)`` in the order of
+    *interface_edges*: one delivered value per state, and the dtype of
+    the source field at the first.  The first state decides which edges
+    are read: an edge whose source field is not floating there (a
+    counter, a flag, a key) carries no norm, and neither does one that
+    delivers no entries.  Later states are read at the same edges and
+    need not hold the fields the first one skips.
+
+    ``mappings`` is the ``"mappings"`` section of the graph parameter
+    pytree the step ran with (``{edge.key: weights}``); ``None`` reads
+    each mapping with its own weights.
+    """
+    for edge in interface_edges:
+        source = states[0][edge.source_node][edge.source_field]
+        if not _is_float_leaf(source):
+            continue            # an integer interface field cannot carry a norm
+        sources = (source,) + tuple(
+            s[edge.source_node][edge.source_field] for s in states[1:])
+        values = tuple(_delivered(edge, v, mappings) for v in sources)
+        if jnp.asarray(values[0]).size == 0:
+            continue
+        yield (edge, jnp.asarray(source).dtype) + values
+
+
+def _reading_eps(source_dtype, value) -> float:
+    """The float resolution of one delivered value: the coarser of its own dtype's and its source's.
+
+    A delivered value is no finer than the field it was computed from.
+    Under ``jax_enable_x64`` a float64 mapping matrix applied to a
+    float32 field, or a transform that returns float64, delivers float64
+    numbers that carry float32 rounding; taken at the delivered dtype's
+    eps the floor was ``2**-29`` of what the source resolves, and a
+    float32 pair stalled at ``residual=0.0`` behind edges that widen
+    read its bound at 6.7e-7 of the true distance with
+    ``spectral_usable=True`` (jaxlib 0.11.0, CPU).  An edge that delivers
+    its source's dtype, or a narrower one, keeps the eps it had.
+    """
+    delivered = jnp.asarray(value).dtype
+    eps = float(jnp.finfo(delivered).eps)
+    if jnp.issubdtype(source_dtype, jnp.floating):
+        # units: dimensionless -- each eps is relative to its own value's
+        # magnitude (the floor counts it per entry in the norm's units,
+        # where every field is divided by its own max|field|); the larger
+        # of the two is the resolution the delivered value really has.
+        eps = max(eps, float(jnp.finfo(source_dtype).eps))
+    return eps
+
+
 def coupling_residual_interface(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
     interface_edges: list,
     atol: float = 0.0,
     rtol: float = 1e-6,
+    mappings: Optional[dict] = None,
 ) -> jnp.ndarray:
     """Interface consistency, on the scale of each interface quantity.
 
-    Computes the difference in interface values (edge source fields)
-    between two successive iterations.  Only the fields that appear
-    on intra-group edges are compared.  The scaling is the one
+    Computes the difference in interface values between two successive
+    iterations: for each intra-group edge, **the value the edge
+    delivers** -- its source field through the edge's interface mapping
+    and then its transform, exactly as the step hands it to the target
+    (:func:`_interface_readings`).  Only the fields that appear on
+    intra-group edges are compared.  The scaling is the one
     :func:`coupling_residual_mixed` documents: relative to the
     quantity's own magnitude, with ``atol`` as a dead band rather than
     as a floor under the scale.
@@ -430,11 +498,16 @@ def coupling_residual_interface(
     rtol : float
         Relative change demanded of every interface quantity above the
         dead band.
+    mappings : dict, optional
+        The ``"mappings"`` section of the graph parameter pytree the
+        step runs with (``{edge.key: weights}``), for the edges that
+        carry an interface mapping; ``None`` applies each mapping with
+        its own weights.  EXPERIMENTAL (new in 0.4.0).
 
     Returns
     -------
     jnp.ndarray
-        Scalar RMS error norm.  Converged when <= 1.0.  Each transformed
+        Scalar RMS error norm.  Converged when <= 1.0.  Each delivered
         value is measured in at least float32 (see :func:`_widened`).
 
     Notes
@@ -458,16 +531,8 @@ def coupling_residual_interface(
     # the quotient by the entry count are at least float32.
     sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
-    for edge in interface_edges:
-        new_val = s_new[edge.source_node][edge.source_field]
-        if not _is_float_leaf(new_val):
-            continue            # an integer interface field cannot carry a norm
-        old_val = s_old[edge.source_node][edge.source_field]
-        if edge.transform is not None:
-            new_val = edge.transform(new_val)
-            old_val = edge.transform(old_val)
-        if jnp.asarray(new_val).size == 0:
-            continue
+    for _edge, _source_dtype, new_val, old_val in _interface_readings(
+            interface_edges, s_new, s_old, mappings=mappings):
         scaled, active = _scaled_change(_widened(new_val), _widened(old_val), atol, rtol)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
         count = count + jnp.where(active, scaled.size, 0)
@@ -1037,8 +1102,9 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 
     ``measure`` is a linear map from the iterate's coordinates to the
     coordinates a norm is taken in -- under ``convergence_norm="interface"``
-    the JVP of the interface reading, each internal edge's *transformed*
-    source value -- and the operator analysed is ``A`` with
+    the JVP of the interface reading, what each internal edge *delivers*
+    (its source value through the edge's mapping, then its transform)
+    -- and the operator analysed is ``A`` with
     ``A measure(u) = measure(matvec(u))``.  It is well defined wherever
     ``matvec`` sends the kernel of ``measure`` to zero, which a coupling
     pass does when every member reads the iterate only through the edges
@@ -1256,7 +1322,8 @@ PRECISION_FLOOR_ULPS = 4.0
 
 def residual_precision_floor(state, node_names, convergence_norm="l2",
                              atol: float = 0.0, rtol: float = 1.0,
-                             interface_edges=(), evaluations: float = 1.0):
+                             interface_edges=(), evaluations: float = 1.0,
+                             mappings: Optional[dict] = None):
     """The float resolution of a residual the group's norm reports at *state*.
 
     ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` in every
@@ -1290,7 +1357,13 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         The group's dead band and relative tolerance (``rtol`` is not
         read by the L2 norm, whose threshold is ``tolerance``).
     interface_edges : iterable of EdgeSpec
-        The group's internal edges (read under ``"interface"``).
+        The group's internal edges (read under ``"interface"``, each as
+        the value it delivers: :func:`_interface_readings`).
+    mappings : dict, optional
+        The ``"mappings"`` section of the graph parameter pytree the
+        step ran with, for the internal edges that carry an interface
+        mapping (read under ``"interface"`` only); ``None`` applies each
+        mapping with its own weights.  EXPERIMENTAL (new in 0.4.0).
     evaluations : float
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
@@ -1325,22 +1398,21 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     """
     norm = str(convergence_norm)
     use_rtol = 1.0 if norm == "l2" else float(rtol)
+    # ``(value, eps)``: each entry the norm reads, and its float resolution.
     values = []
     if norm == "interface":
-        for edge in interface_edges:
-            v = state[edge.source_node][edge.source_field]
-            if not _is_float_leaf(v):
-                continue
-            if edge.transform is not None:
-                v = edge.transform(v)
-            values.append(jnp.asarray(v))
+        for _edge, source_dtype, v in _interface_readings(
+                interface_edges, state, mappings=mappings):
+            v = jnp.asarray(v)
+            values.append((v, _reading_eps(source_dtype, v)))
     else:
         for nn in node_names:
             for field_name in state[nn]:
                 v = state[nn][field_name]
                 if _is_float_leaf(v):
-                    values.append(jnp.asarray(v))
-    values = [v for v in values if v.size > 0]
+                    v = jnp.asarray(v)
+                    values.append((v, float(jnp.finfo(v.dtype).eps)))
+    values = [(v, eps) for v, eps in values if v.size > 0]
     if not values:
         return jnp.zeros((), jnp.float32)
     # At least float32, as the norms accumulate (``_widened``): in a 16-bit
@@ -1350,12 +1422,12 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     # documented as ``4 eps / rtol``.  Each field keeps its *own* dtype's
     # eps; only the arithmetic is widened, so a float32 or float64 group's
     # floor is the one it was.
-    dtype = jnp.promote_types(jnp.result_type(*[v.dtype for v in values]), jnp.float32)
+    dtype = jnp.promote_types(jnp.result_type(*[v.dtype for v, _eps in values]), jnp.float32)
     sum_sq = jnp.zeros((), dtype)
     count = jnp.zeros((), dtype)
-    for v in values:
+    for v, own_eps in values:
         _scaled, active = _scaled_change(_widened(v), _widened(v), atol, use_rtol)
-        eps = float(jnp.finfo(v.dtype).eps) / use_rtol
+        eps = own_eps / use_rtol
         n = jnp.where(active, float(v.size), 0.0).astype(dtype)
         sum_sq = sum_sq + n * jnp.asarray(eps * eps, dtype)
         count = count + n

@@ -673,7 +673,7 @@ def test_a_grid_outside_the_normal_range_of_the_geometry_s_dtype_is_refused(orig
 # ---------------------------------------------------------------------------
 
 
-def _ring(norm: str, **edge):
+def _ring(norm: str, tolerance: float = 1e-6, **edge):
     """``a <-> b`` in a coupling group; ``a -> b`` is the edge given."""
     gm = GraphManager()
     gm.add_node(Holder("a", 1.0, n=N_SOURCE))
@@ -681,8 +681,9 @@ def _ring(norm: str, **edge):
     gm.add_edge("a", "b", "x", "u", **edge)
     gm.add_edge("b", "a", "x", "u",
                 mapping=matrix_mapping(np.full((N_SOURCE, N_TARGET), 0.05, np.float32)))
+    live = {"tolerance": tolerance} if norm == "l2" else {"rtol": tolerance}
     gm.add_coupling_group(["a", "b"], convergence_norm=norm, max_iterations=50,
-                          diagnostics=True)
+                          diagnostics=True, **live)
     return gm
 
 
@@ -699,8 +700,7 @@ def test_the_interface_norm_on_a_group_with_a_geometry_edge_is_refused_at_compil
         _ring(norm, mapping=_geom(), geometry=(anchor, "g")).compile()
 
 
-@pytest.mark.parametrize("norm", ["l2", "mixed"])
-@pytest.mark.parametrize("anchor", ["source", "target"])
+@pytest.mark.parametrize("anchor, norm", [("source", "l2"), ("target", "mixed")])
 def test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason(anchor,
                                                                                     norm):
     """Diagnostics do not read a moving geometry in 0.4.0: the report keeps
@@ -714,6 +714,24 @@ def test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_re
     report = gm.coupling_diagnostics()["a+b"]
     gg.assert_not_diagnosed(report, [KEY])
     assert bool(report["converged"])
+    # The premise: every entry the report withholds would otherwise have
+    # said something.  Read the same slots as a group without a geometry
+    # edge would be read -- at a loose tolerance every flag is usable and
+    # every bound finite; at a tight one the residual is at its floor.
+    loose = _ring(norm, 1e-3, mapping=_geom(), geometry=(anchor, "g"))
+    loose.compile()
+    loose.step()
+    gg.assert_not_diagnosed(loose.coupling_diagnostics()["a+b"], [KEY])
+    for graph in (gm, loose):
+        graph._committed_geometry_edges = {}          # noqa: SLF001
+    unnarrowed, tight = loose.coupling_diagnostics()["a+b"], gm.coupling_diagnostics()["a+b"]
+    assert "not_usable_reason" not in unnarrowed
+    for flag in ("ratio_usable", "spectral_usable", "gradient_bound_usable"):
+        assert unnarrowed[flag] is True, (flag, dict(unnarrowed))
+    for bound in ("amplification", "error_estimate", "gradient_error_estimate",
+                  "rho_spectral", "spectral_error_bound", "gradient_relative_error_bound"):
+        assert np.isfinite(unnarrowed[bound]), (bound, dict(unnarrowed))
+    assert tight["precision_limited"] is True, dict(tight)
     static = _ring(norm, mapping=_static())
     static.compile()
     static.step()

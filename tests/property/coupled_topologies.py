@@ -2280,3 +2280,129 @@ def interleaved_order(topo: Topology) -> tuple:
         at = order.index(members[0]) + 1
         order[at:at] = outside
     return tuple([n for n in topo.names if n in downstream] + order)
+
+
+# ---------------------------------------------------------------------------
+# Shapes and value moves for the coupling targeted search
+# ---------------------------------------------------------------------------
+
+
+def search_topologies() -> dict:
+    """One-group structures for ``test_coupling_targeted_search.py``, each a
+    shape a past defect of ``coupling_diagnostics()`` lived on.
+
+    The group is the whole graph, every member declares its evaluation
+    count (:class:`TRelay`) and none carries a non-float leaf, so every
+    acceleration traces and every bound can be usable.
+
+    * ``ring-K`` (``K`` = 2, 3, 5, 8): a ring of scalars, the chain lengths;
+    * ``ring-3-multirate``: ``ring-3`` with one member at half the
+      timestep (a sub-cycled, multi-rate group under ``subcycling=True``);
+    * ``pair-3``: two members of three entries, ``alpha = 0``: the ring a
+      prescribed spectrum is put on (near-degenerate slow modes);
+    * ``pair-6``: the same with six entries, twelve scalars under Jacobi:
+      more than the eight Krylov steps resolve, so the flags must refuse;
+    * ``hub``: a fan-out hub (one field read by four internal edges), a
+      chord between two leaves, and a leaf that reads the hub's field
+      twice, once through a transform;
+    * ``mapped``: a ring of sizes 3, 2, 2 whose three edges are all mapped
+      (a mapping with more columns than rows, whose rows can cancel; one
+      between equal sizes under a transform).
+    """
+    out = {}
+    for k in (2, 3, 5, 8):
+        for multirate in ((False, True) if k == 3 else (False,)):
+            b = TopologyBuilder()
+            names = [f"r{i}" for i in range(k)]
+            for i, name in enumerate(names):
+                b.node(name, 1, alpha=(0.5, 0.0, -0.25)[i % 3])
+            for i in range(k):
+                b.edge(names[i], names[(i + 1) % k])
+            b.group(*names)
+            label = f"ring-{k}" + ("-multirate" if multirate else "")
+            topo = b.build(label)
+            if multirate:
+                topo = topo.with_timesteps({"r1": 0.5})
+            out[label] = topo
+
+    for n in (3, 6):
+        b = TopologyBuilder()
+        b.node("a", n, alpha=0.0)
+        b.node("b", n, alpha=0.0)
+        b.edge("b", "a")
+        b.edge("a", "b")
+        b.group("a", "b")
+        out[f"pair-{n}"] = b.build(f"pair-{n}")
+
+    b = TopologyBuilder()
+    b.node("h", 2, alpha=0.5)
+    for leaf in ("l0", "l1", "l2"):
+        b.node(leaf, 2, alpha=0.0 if leaf == "l1" else 0.25)
+    _star_shape(b, "h", ("l0", "l1", "l2"))
+    b.edge("l0", "l1")
+    b.edge("h", "l2", transform="scale_2.0")
+    b.group("h", "l0", "l1", "l2")
+    out["hub"] = b.build("hub")
+
+    b = TopologyBuilder()
+    b.node("m0", 3, alpha=0.5)
+    b.node("m1", 2, alpha=0.0)
+    b.node("m2", 2, alpha=-0.25)
+    b.edge("m0", "m1")
+    b.edge("m1", "m2", mapped=True, transform="negate")
+    b.edge("m2", "m0")
+    b.group("m0", "m1", "m2")
+    out["mapped"] = b.build("mapped")
+    return out
+
+
+def place_group_fixed_point(topo: Topology, values: dict, gi: int, target: dict, *,
+                            group_cfgs=None) -> None:
+    """Move the biases of group *gi*'s members so that its fixed point, for
+    the step from ``values[...]["x0"]``, is *target* (``{member: array}``).
+
+    Exact in the reference's precision for the values as given; rounding
+    them to a graph's dtype afterwards moves the fixed point by that
+    rounding, so a caller measures against :class:`LinearModel` of the
+    rounded values, never against *target*.  This is how a field is made
+    small beside what drives it: its bias cancels its inputs.
+    """
+    model = LinearModel(topo, values, dtype="float64", group_cfgs=group_cfgs, exact=True)
+    pre = {nd.name: {"x": np.asarray(values["nodes"][nd.name]["x0"], np.float64)}
+           for nd in topo.nodes}
+    state = model.monolithic(pre)
+    members, off, k = model._group_layout(gi)
+    t = np.concatenate([np.asarray(target[m], LD) for m in members])
+    want = (np.eye(k, dtype=LD) - model.group_operator(gi)) @ t
+    shift = want - model.group_constant(gi, pre, state)
+    for m in members:
+        nd = topo.node(m)
+        alpha = LD(nd.alpha)
+        s_d = sum((alpha ** j for j in range(model.divider.get(m, 1))), LD(0))
+        values["nodes"][m]["b"] = np.asarray(
+            np.asarray(values["nodes"][m]["b"], LD) + shift[off[m]:off[m] + nd.n] / s_d,
+            np.float64)
+
+
+def rescale_node_units(topo: Topology, values: dict, name: str, unit: float) -> None:
+    """Restate node *name*'s field in a unit *unit* times smaller (its
+    values *unit* times larger): its bias, start and gains are multiplied,
+    and what reads it is divided -- a mapped edge's ``H``, or the gain of a
+    port that only *name* feeds.  The coupled system is the same one."""
+    v = values["nodes"][name]
+    v["b"] = np.asarray(v["b"], np.float64) * unit
+    v["x0"] = np.asarray(v["x0"], np.float64) * unit
+    v["G"] = [np.asarray(G, np.float64) * unit for G in v["G"]]
+    ports = set()
+    for i, e in enumerate(topo.edges):
+        if e.src != name:
+            continue
+        if e.mapped:
+            values["H"][i] = np.asarray(values["H"][i], np.float64) / unit
+        else:
+            ports.add((e.dst, e.port))
+    for dst, port in ports:
+        assert all(e.src == name and not e.mapped for e in topo.edges
+                   if e.dst == dst and e.port == port), (name, dst, port)
+        values["nodes"][dst]["G"][port] = np.asarray(
+            values["nodes"][dst]["G"][port], np.float64) / unit

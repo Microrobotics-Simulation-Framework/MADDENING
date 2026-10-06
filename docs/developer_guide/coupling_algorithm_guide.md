@@ -140,9 +140,9 @@ never run.
 | `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
 | `gradient_error_estimate` | how far the IFT adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
 | `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
-| `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
+| `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true and no more than eight scalars cross the group's edges.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
 | `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
-| `spectral_usable` | the bound is finite and the Arnoldi space had settled (`h_{k+1,k} ≤ 0.05 (1 − rho_spectral)`).  False where nothing was computed, for a group with more than eight independent interface scalars, and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
+| `spectral_usable` | the bound is finite and the Arnoldi space had settled: `h_{k+1,k}`, any direction the breakdown test discarded as rounding, and the distance one more Jacobian-vector product moves `rho_spectral` are each `≤ 0.05 (1 − rho_spectral)`.  False where nothing was computed, where rounding or a ninth Krylov vector moves the radius by more than that (a non-normal Jacobian), for a group with more than eight independent interface scalars, and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
 | `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
 | `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
 | `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group; clears `spectral_usable` only where a node's evaluation count is undeclared |
@@ -344,7 +344,16 @@ Arnoldi residual `h_{k+1,k}`, and the resolvent norm `‖(I − H)⁻¹‖₂` o
 the compressed Jacobian.  A coupling Jacobian's rank is at most the
 number of boundary scalars crossing the group's edges, so for a group
 with up to eight of them the Krylov space is the whole range, the
-non-zero spectrum is exact and `h_{k+1,k}` is zero; for a larger group
+non-zero spectrum is that of a matrix within rounding of the Jacobian and
+`h_{k+1,k}` is zero.  A new Krylov direction is taken for rounding only
+below eight units of the products' own rounding (`eps` of the group's
+dtype times the Jacobian's norm), never a fixed fraction of the product,
+and the estimate then spends a ninth product on a check of itself: along
+a combination of the basis, against what the eight before it say that
+product is.  How far the disagreement moves the radius is reported with
+the Arnoldi residual, so a radius that float rounding leaves undetermined
+-- a non-normal Jacobian turns one `eps` of its norm into far more -- reads
+`spectral_usable=False` instead of a number.  For a larger group
 the radius is an estimate -- from below for a normal Jacobian, from
 either side for a non-normal one (1.17 on a Jacobi ring of nine relays
 whose every eigenvalue has modulus 0.95) -- `spectral_usable` is false,
@@ -394,7 +403,7 @@ with a field that more than one internal edge reads is analysed on the
 reading too.  Only a group whose internal edges read each field once, as
 it is, keeps the analysis in the state's weights (`_reading_is_the_fields`
 in `core/coupling/_group_layout.py`, static): there the two are one norm, and the
-second spectrum's eight Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
+second spectrum's nine Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
 left an edge's mapping out, a mapped edge was measured on its source
 field throughout: the bound was consistent with the residual and both
 described a value the consuming node never sees -- 0.064-0.318x the true

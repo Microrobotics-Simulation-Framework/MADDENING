@@ -132,8 +132,8 @@ class CouplingGroup:
         ``True`` adds the spectral keys (``rho_spectral``,
         ``spectral_error_bound``, ``spectral_usable``) and the IFT
         gradient-error bound (``gradient_relative_error_bound``,
-        ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
-        products for the spectrum (``16`` under the interface norm with
+        ``gradient_bound_usable``), which cost ``9`` Jacobian-vector
+        products for the spectrum (``18`` under the interface norm with
         a mapping or a transform on an internal edge, or a field that
         more than one internal edge reads, whose report takes
         a second spectrum on the reading the edges deliver) and ``11 + 4 k + 5 n_p``

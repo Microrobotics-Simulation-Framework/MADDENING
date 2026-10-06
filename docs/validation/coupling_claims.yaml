@@ -577,26 +577,25 @@ claims:
 - id: CPL-013
   area: configuration
   claim: >-
-    The diagnostics cost "8 Jacobian-vector products for the spectrum (16
+    The diagnostics cost "9 Jacobian-vector products for the spectrum (18
     under convergence_norm="interface" with a mapping or a transform on an
     internal edge, or a field that more than one internal edge reads
     ...) and 11 + 4 k + 5 n_p more for the bound per group per step (plus one
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
-    at most 64 entries, one per larger constant)"; arnoldi_spectral_radius's n_steps "is the
-    number of Jacobian-vector products the call costs, with or without
-    v_extra".
+    at most 64 entries, one per larger constant)"; arnoldi_spectral_radius "costs n_steps + 1
+    Jacobian-vector products, with or without v_extra".
   sources:
     - src/maddening/core/coupling/group.py:116 (CouplingGroup, diagnostics)
-    - src/maddening/core/coupling/acceleration.py:861 (arnoldi_spectral_radius)
+    - src/maddening/core/coupling/acceleration.py::arnoldi_spectral_radius
     - src/maddening/core/coupling/_bounds.py::_gradient_error_bound_at
     - src/maddening/core/coupling/_group_layout.py::_reading_is_the_fields
   conditions: solver="ift", diagnostics=True.
   oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
   tests:
-    - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
+    - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_plus_one_jacobian_vector_products
     - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_products
-    - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_eight_more_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_nine_more_products
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is
   status: verified
@@ -605,7 +604,7 @@ claims:
     f64: n/a
     mixed_dtype: n/a
     16bit: n/a
-    jit: tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
+    jit: tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_plus_one_jacobian_vector_products
     grad: n/a
     vmap: n/a
     multi_rate: n/a
@@ -3232,8 +3231,13 @@ claims:
   area: report
   claim: >-
     rho_spectral is "the spectral radius of dF/dx at the returned state, from
-    eight Arnoldi steps ...  Exact (non-zero eigenvalues, to float32) for a
-    group whose Jacobian has rank at most eight ... and an estimate
+    eight Arnoldi steps ...  Where spectral_usable is True it is within 5%
+    of 1 - rho_spectral of the radius ...  For a group whose Jacobian has
+    rank at most eight ... it is the radius of a matrix within the analysis
+    dtype's rounding of the Jacobian (in the norm's weights): exact to that
+    rounding for a normal Jacobian ... while a non-normal one can turn a
+    rounding into more, which is measured and withdraws the flag where it
+    exceeds the margin ...  An estimate
     otherwise, which spectral_usable reports: from below for a normal dF/dx
     (in the norm's weights), from either side for a non-normal one, whose
     Ritz values can lie outside the spectrum's convex hull.  For a bfloat16
@@ -3246,8 +3250,33 @@ claims:
     state."
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (rho_spectral)
-    - src/maddening/core/coupling/acceleration.py:786 (arnoldi_spectral_radius)
-  conditions: as stated.
+    - src/maddening/core/coupling/acceleration.py::arnoldi_spectral_radius
+    - src/maddening/core/coupling/acceleration.py::_compressed_spectrum
+  conditions: >-
+    as stated, in two statements the targeted search scores separately.
+    (1) What a user can check: wherever spectral_usable is True and no
+    more than eight scalars cross the group's edges,
+    |rho_spectral - rho| <= 5% of (1 - rho_spectral) (score
+    "radius_strict").  Past eight scalars the value is an estimate and the
+    flag says that the Arnoldi residual and a ninth Krylov vector's
+    movement of the radius are within that margin, which bounds the error
+    for a normal Jacobian only: twelve non-normal float32 scalars read
+    0.273 for 0.219, flag set (MADD-ANO-225, open).  (2) For rank at most eight, rho_spectral is the
+    radius of a matrix within the analysis dtype's rounding of the weighted
+    Jacobian: within 1e-4 of the radius plus its movement under
+    perturbations of norm 8 eps ||A|| (score "radius"; 1e-9 of the radius
+    and better on the float64 pins).  The flag's margin is held by
+    measurement, not by a bound: one more Jacobian-vector product (the
+    ninth Krylov vector where the space is still growing, otherwise a
+    combination of the basis against the Arnoldi relation) moves the radius
+    by at most the margin.  Made for fields no smaller than a hundredth of
+    what drives them: a loop that passes through a change of a field below
+    that field's rounding is not in the products at all (a float32
+    sub-cycled ring with a field 1e-6 of its driver reads 1e-12 for
+    1.25e-4, flag set: MADD-ANO-222, open).  On a backend where JAX lowers
+    no non-symmetric eigenvalue problem (neither CPU nor GPU) the
+    compressed radius comes from repeated squaring, which in float32 is
+    not backward stable (MADD-ANO-223).
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
     - tests/core/test_coupling_error_bound.py::test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum
@@ -3257,6 +3286,11 @@ claims:
     - tests/core/test_coupling_error_bound.py::test_on_a_nonlinear_map_the_spectrum_is_taken_at_the_returned_iterate
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
     - tests/core/test_coupling_sixteen_bit_groups.py::test_the_spectral_slots_are_kept_in_the_analysis_dtype
+    - tests/property/test_coupling_targeted_search.py::test_a_settled_spectral_radius_is_the_radius_per_push
+    - tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed
+    - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle
+    - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_direction_far_above_rounding_is_kept_in_float64
+    - tests/core/test_coupling_spectral_estimate_rounding.py::test_the_compressed_radius_is_the_eigenvalues_not_the_squaring
   status: verified
   notes: >-
     16bit domain failing on d2429a6: the spectral slots were stored in the
@@ -3351,6 +3385,7 @@ claims:
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_norms_that_count_a_field_once_keep_their_bound_on_a_star
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_interface_norm_counts_a_field_once_for_every_edge_that_reads_it
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice
+    - tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
   status: verified
   notes: >-
     The round-6 audit found the interface norm's transformed reading
@@ -3551,7 +3586,11 @@ claims:
   area: report
   claim: >-
     spectral_usable: "the bound above is finite and the Arnoldi space had
-    settled: the Arnoldi residual h_{k+1,k} is at most 5% of
+    settled: the Arnoldi residual h_{k+1,k}, any direction the breakdown
+    test discarded as rounding, and the distance one more Jacobian-vector
+    product moves rho_spectral (the ninth Krylov vector where the space was
+    still growing; where it was not, the product's disagreement with the
+    eight before it, which is rounding's) are each at most 5% of
     1 - rho_spectral.  False where nothing was computed, where the bound is
     inf, for a group with more independent interface scalars than the eight
     Krylov steps resolve ... where the residual never entered the Krylov
@@ -3560,7 +3599,8 @@ claims:
     update_evaluations()."
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_usable)
-    - src/maddening/core/coupling/acceleration.py:1249 (spectral_rate_settled)
+    - src/maddening/core/coupling/acceleration.py::spectral_rate_settled
+    - src/maddening/core/coupling/acceleration.py::_compressed_spectrum
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
     as stated, and only where the counted floor is honest: every node
@@ -3581,6 +3621,9 @@ claims:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_resolved_spectrum_is_usable
     - tests/core/test_coupling_spectral_bound_certificate.py::test_a_residual_the_space_never_absorbs_reads_as_unresolved
+    - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle
+    - tests/core/test_coupling_spectral_estimate_rounding.py::test_what_a_breakdown_discards_is_reported_as_residual
+    - tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed
     - tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor
     - tests/property/test_differential_coupling_interactions.py::test_a_usable_spectral_bound_bounds_the_distance_in_every_row
   status: verified
@@ -3626,7 +3669,10 @@ claims:
     derivative only.  The resolvent is applied exactly to each probe's
     secant (MADD-ANO-142; per-entry probes MADD-ANO-143).  Its norms are
     the state's fields: under convergence_norm="interface" with an edge
-    transform, the raw source fields, before the transform.
+    transform, the raw source fields, before the transform.  Not held at
+    the float floor in float32: a Jacobi ring of mapped edges stopped with
+    precision_limited=True read 5.1e-6 for a true 3.0e-5, flag set
+    (MADD-ANO-226, open).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
@@ -3643,6 +3689,7 @@ claims:
     - tests/property/test_differential_coupling_interactions.py::test_a_usable_gradient_bound_bounds_the_error_in_every_row
     - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap
     - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn
+    - tests/property/test_coupling_targeted_search.py::test_a_usable_gradient_bound_is_never_below_the_error_per_push
   status: verified
   notes: >-
     16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
@@ -3866,6 +3913,7 @@ claims:
     - tests/core/test_coupling_claims_helpers.py::test_the_floor_traces_under_jit_and_reads_nothing_inside_the_dead_band
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_counts_more_than_65504_entries
+    - tests/property/test_coupling_targeted_search.py::test_the_floor_covers_what_the_reported_residual_misses_per_push
   status: verified
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve

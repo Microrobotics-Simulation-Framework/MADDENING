@@ -1389,7 +1389,7 @@ def _run_coupled_block_impl(
             # The spectral bound's ingredients, at the state being
             # returned (``x_star_full`` before the strict guard, whose
             # value it is).  Only with ``diagnostics=True``: it costs
-            # ``SPECTRAL_KRYLOV_STEPS`` Jacobian-vector products
+            # ``SPECTRAL_KRYLOV_STEPS + 1`` Jacobian-vector products
             # per group per step, which the always-on ift report is
             # not charged for.  NaN is what ``coupling_diagnostics``
             # reads as "not computed" (``spectral_usable=False``).
@@ -1429,17 +1429,24 @@ def _run_coupled_block_impl(
                         for fld in float_fields[nn]}
                     for nn in group_node_names
                 }))
+                # The rounding of the map's Jacobian-vector products: ``eps``
+                # of the coarsest field the pass evaluates in (static).
+                map_eps = max(
+                    float(jnp.finfo(template_state[nn][fld].dtype).eps)
+                    for nn in group_node_names for fld in float_fields[nn]
+                ) if any(float_fields[nn] for nn in group_node_names) else None
                 if transformed_reading:
                     # The gradient bound's triple, in the state's weights,
                     # which its own norms are taken in.
                     rho_spec, spec_resid, spec_amp = _spectral_rate_at(
                         step_pure, x_star_full, consts, weights, spec_weights,
-                        resolution=resolution,
+                        resolution=resolution, map_eps=map_eps,
                     )
                 else:
                     rho_spec, spec_resid, spec_amp, pair_ratio = _spectral_rate_at(
                         step_pure, x_star_full, consts, weights, spec_weights,
                         resolution=resolution, field_reference=_field_magnitudes,
+                        map_eps=map_eps,
                     )
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
@@ -1470,7 +1477,7 @@ def _run_coupled_block_impl(
                         step_pure, x_star_full, consts, spec_weights, _reading,
                         read_w, read_spec_w,
                         _reading_resolution(x_sg, read_scale, pass_evals),
-                        _reading_reference,
+                        _reading_reference, map_eps=map_eps,
                     )
                 # The factor the report's bound applies, in the returned
                 # state's weights: the gradient bound above takes its own

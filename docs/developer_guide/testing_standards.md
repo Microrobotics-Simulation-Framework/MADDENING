@@ -1161,15 +1161,53 @@ names no directory of the deployment; a 2xx is strict JSON.
   changes the state also gets a rule in the sequence oracle. The
   out-of-scope prefixes (`/surrogate/`, `/ws/`, `/cloud/`) are listed in
   `OUT_OF_SCOPE`, and nothing is ever sent to them.
+- **Both serve the graph in two configurations**, drawn with each example:
+  the default loopback bind, and the one a network bind requires
+  (`rest_oracle.serve(token_enforced=True)`: the server is *told* its bind
+  is `0.0.0.0`, no socket is opened, and the client presents the token). A
+  token-holder's requests are held to every invariant above, failure
+  injection included. The one invariant only that configuration has is in
+  `tests/property/without_the_token.py`: the same request without the
+  token, in each of nine ways of not presenting it, is a 401 with
+  `WWW-Authenticate: Bearer`, changes nothing, and its body is byte for
+  byte the one a server with an empty graph gives another request. The
+  request oracle asks it of every route the app has, read from
+  `app.routes` (so the surrogate routes too, which are refused before they
+  are reached); `/cloud/*` and the stream handshakes are never sent to
+  (`NEVER_SENT`). **A new way of presenting a credential** goes in
+  `CREDENTIALS`.
+- **Coupled, mapped and multi-rate graphs**
+  (`rest_oracle.COUPLED_AND_MAPPED_GRAPHS`: a coupling group under each
+  solver, a dense and a sparse static mapped edge, nodes at three rates)
+  are graphs the routes cannot build and users serve. The sequence oracle
+  starts examples from them and tours one of each kind per push; the
+  request oracle has a seed on one of each kind for every write route
+  (sent as it is per push, its battery in the slow lane). Keep them tiny: a
+  coupled graph's compile is most of an example.
+- **Writes beside the runner** (the last section of the sequence oracle's
+  file): requests sent while `POST /sim/start`'s thread steps the graph. A
+  route documented to answer 409 beside the runner must, and a parameter
+  write is applied after a whole number of steps, read from the streams'
+  clock inside the write's transaction; what the runner leaves when it is
+  stopped must be, bit for bit, what a fresh server leaves that takes the
+  same steps one at a time and the accepted writes at those steps. Nothing
+  reads the graph beside the runner except through a route.
 
 A defect either oracle finds is kept as a strict xfail with its minimal
 request, and, where the generators would otherwise report nothing else, a
 tolerance exactly as narrow as the defect, pinned by a test of how narrow,
-that goes when the xfail passes (none is left: the three the request oracle
+that goes when the xfail passes (of the request oracle's none is left: the three it
 found on the tree it was written on are fixed, and their cases are under
 "What the battery found" in its file). To show an oracle can
 still fail, run it against an older tree: `git archive <commit> src` into
 a scratch directory, and that `src` on `PYTHONPATH` with this tree's tests.
+
+Two strict xfails are left in the sequence oracle's file, found when its
+examples began to start from coupled and mapped graphs:
+`test_a_graph_whose_coupling_group_lost_a_member_still_reloads` and
+`test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from`.
+The machine withholds exactly those two requests (`_grouped`, `_withheld`);
+each filter goes with its xfail.
 
 ### Coupling and numerics
 

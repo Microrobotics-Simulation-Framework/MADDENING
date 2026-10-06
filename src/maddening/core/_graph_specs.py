@@ -523,12 +523,18 @@ def _input_cast_changes(value, dtype) -> Optional[str]:
         return None
     if have == dtype or _holds_every_value(have, dtype):
         return None
-    import warnings
-
-    with warnings.catch_warnings(), np.errstate(all="ignore"):
-        warnings.simplefilter("ignore")
+    # No warnings filter is touched here (they are per-process, and graphs
+    # run in threads): NumPy's floating-point complaints about a cast are
+    # ``errstate``'s, which is per-thread, and the one cast that warns
+    # through ``warnings`` -- complex to real -- is not made.
+    with np.errstate(all="ignore"):
         try:
             before = arr.astype(have)
+            if have.kind == "c" and np.dtype(dtype).kind != "c":
+                if bool(np.any(before.imag != 0)):
+                    return f"a {have}"
+                before = before.real
+                have = before.dtype
             after = before.astype(dtype)
             # Back in the dtype it came from, so the comparison is exact:
             # NumPy would compare an int64 with a float64 as float64s.

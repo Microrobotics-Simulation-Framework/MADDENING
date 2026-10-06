@@ -91,7 +91,7 @@ import functools
 import operator
 import threading
 import warnings
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 __all__: list[str] = []
 
@@ -126,7 +126,7 @@ class _ThisThread(threading.local):
     #: bare ``functools.partial`` there warns on 3.13 (from inside the
     #: warnings machinery, which then recurses until the stack ends) and is
     #: bound like a method from 3.14.
-    match = staticmethod(_MATCH_NOTHING)
+    match: Callable[[object], bool] = staticmethod(_MATCH_NOTHING)
 
 
 _THREAD = _ThisThread()
@@ -149,7 +149,9 @@ def _block_opened() -> None:
     global _open_blocks
     with _FILTER_LOCK:
         _open_blocks += 1
-        filters = warnings.filters
+        # A list: the stubs call it a Sequence, and ``catch_warnings``
+        # replaces it with a copy that is a list too.
+        filters: list[Any] = warnings.filters  # pyright: ignore[reportAssignmentType]
         if not filters or filters[0] is not _FILTER:
             # A copy further back (a filter somebody put ahead of it since)
             # stays where it is until the last block closes: taking it out
@@ -165,7 +167,7 @@ def _block_closed() -> None:
         _open_blocks -= 1
         if _open_blocks > 0:
             return
-        filters = warnings.filters
+        filters: list[Any] = warnings.filters  # pyright: ignore[reportAssignmentType]
         while True:
             try:
                 filters.remove(_FILTER)

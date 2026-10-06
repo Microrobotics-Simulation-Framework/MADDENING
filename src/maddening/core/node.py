@@ -340,7 +340,8 @@ def _detached_config(value: Any) -> Any:
         return [_detached_config(item) for item in value]
     if isinstance(value, tuple):
         items = [_detached_config(item) for item in value]
-        return type(value)._make(items) if hasattr(value, "_make") else tuple(items)
+        make = getattr(type(value), "_make", None)      # a named tuple's constructor
+        return make(items) if make is not None else tuple(items)
     if isinstance(value, np.ndarray):
         return value.copy()
     return value

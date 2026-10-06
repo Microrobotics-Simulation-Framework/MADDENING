@@ -49,7 +49,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.graph_manager import GraphManager, _fixed_point_while
+from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling._fixed_point import _fixed_point_while
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.nodes.spring import SpringDamperNode
 

@@ -9,7 +9,7 @@ offset on an edge (a unit conversion's 273.15) or a registered selection
 (``"extract_last"``) it read 0.0014-0.098x the true distance with
 ``spectral_usable=True`` (CPL-088, round-6 coupling audit).  The report's
 spectral triple is now taken on the reading itself
-(``graph_manager._interface_spectral_rate_at``).
+(``coupling._bounds._interface_spectral_rate_at``).
 
 The oracle is the float64 fixed point of the affine map, and the distance is
 the interface norm's: every internal edge's transformed value, its change
@@ -754,7 +754,8 @@ def test_on_the_reading_path_the_gradient_bound_stands_only_on_the_states_settle
     the settled fraction, which leaves its bound finite and contracting, to
     reach the gate.
     """
-    from maddening.core import graph_manager as gm_mod
+    # The coupled block reads its own binding of the name, so that is the one patched.
+    from maddening.core.coupling import _coupled_block as block_mod
     from maddening.core.coupling.acceleration import SPECTRAL_SETTLED_FRACTION
 
     ab, ba = "unit-of-first", "last"
@@ -763,7 +764,7 @@ def test_on_the_reading_path_the_gradient_bound_stands_only_on_the_states_settle
     # The control: the same pair, unpatched, carries a usable gradient bound.
     assert plain["spectral_usable"] and plain["gradient_bound_usable"], dict(plain)
 
-    real = gm_mod._spectral_rate_at
+    real = block_mod._spectral_rate_at
 
     def state_triple_unsettled(*args, **kwargs):
         out = real(*args, **kwargs)
@@ -772,7 +773,7 @@ def test_on_the_reading_path_the_gradient_bound_stands_only_on_the_states_settle
         rho, resid, amp = out
         return rho, jnp.maximum(resid, 4.0 * SPECTRAL_SETTLED_FRACTION * (1.0 - rho)), amp
 
-    monkeypatch.setattr(gm_mod, "_spectral_rate_at", state_triple_unsettled)
+    monkeypatch.setattr(block_mod, "_spectral_rate_at", state_triple_unsettled)
     d = _run(_mat_graph(ab, ba), values)
     assert d["spectral_usable"], dict(d)                    # the reading's triple settled
     assert d["spectral_error_bound"] == plain["spectral_error_bound"], dict(d)

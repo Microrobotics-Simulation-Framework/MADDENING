@@ -595,7 +595,7 @@ def test_a_flux_edge_from_an_outside_node_into_a_group_member_steps():
     outside nodes works.  ``_run_coupled_block_impl`` resolves a member's
     inputs from the group's own flux dictionary only, never from the
     fluxes the outside nodes produced earlier in the step
-    (``graph_manager.py``, ``_resolve_value``), so the step raises
+    (``coupling/_coupled_block.py``, ``_resolve_value``), so the step raises
     ``KeyError: 'q'`` at trace.  Measured at 0.4.0.dev0 under both solvers.
     """
     _steps_like_its_reference(_ring_with([("drv", dict(alpha=1.0, beta=1.0, flux=True))],

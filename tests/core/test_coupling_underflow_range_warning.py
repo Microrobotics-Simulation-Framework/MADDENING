@@ -20,7 +20,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.graph_manager import GraphManager, _underflow_range_fields
+from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling._reports import _underflow_range_fields
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.warnings import PrecisionLimitWarning, UnderflowRangeWarning
 

@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core import graph_manager as gm_mod
+from maddening.core import _param_probes as probes_mod
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
 from maddening.nodes import HeatNode
@@ -182,13 +182,13 @@ def test_a_steady_run_does_not_retrace_for_the_check():
     gm = _spring()
     gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(52.0, jnp.float32)
     calls = []
-    real = gm_mod._param_leaves_read
-    gm_mod._param_leaves_read = lambda *a: (calls.append(1), real(*a))[1]
+    real = probes_mod._param_leaves_read
+    probes_mod._param_leaves_read = lambda *a: (calls.append(1), real(*a))[1]
     try:
         for _ in range(3):
             gm.step()
     finally:
-        gm_mod._param_leaves_read = real
+        probes_mod._param_leaves_read = real
     assert len(calls) == 1
     assert gm.trace_count == 1
 
@@ -248,7 +248,7 @@ def test_the_structural_walk_follows_loops_and_branches():
     gm = GraphManager()
     gm.add_node(_Branchy())
     gm.compile()
-    reads = gm_mod._param_leaves_read(gm._raw_step_fn, gm._state,
+    reads = probes_mod._param_leaves_read(gm._raw_step_fn, gm._state,
                                       gm._default_external_inputs(), gm.params)
     assert reads == {("n", k) for k in ("a", "b", "c", "e_scan", "e_while", "k_cond")}
 

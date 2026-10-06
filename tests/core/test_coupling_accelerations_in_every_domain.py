@@ -43,8 +43,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core import graph_manager as gm_mod
-from maddening.core.graph_manager import _analysis_dtype, _fixed_point_while
+from maddening.core.coupling import _fixed_point as fp_mod
+from maddening.core.coupling._bounds import _analysis_dtype
+from maddening.core.coupling._fixed_point import _fixed_point_while
 from tests.core import coupling_domains as cd
 
 SEQ = 5        # steps of a sequence run (predictor, restart)
@@ -301,7 +302,7 @@ def _exits(domain, label, acceleration, guard, monkeypatch, *, tol):
     vmap of it) traced, under the patch, which is then undone.
     """
     if guard is not None:
-        monkeypatch.setattr(gm_mod, "_TWO_PASS_EXIT", guard)
+        monkeypatch.setattr(fp_mod, "_TWO_PASS_EXIT", guard)
     try:
         gm = cd.pair(domain, n=3, g=(np.ones(3), np.ones(3)), c=(np.ones(3), np.zeros(3)),
                      acceleration=acceleration, max_iterations=60, tolerance=tol)

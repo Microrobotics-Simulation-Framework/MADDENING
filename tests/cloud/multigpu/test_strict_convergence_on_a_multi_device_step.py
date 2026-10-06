@@ -31,11 +31,9 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
-from maddening.core.graph_manager import (
-    GraphManager,
-    _multi_device_mesh,
-    _strict_error_if,
-)
+from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import _multi_device_mesh
+from maddening.core.coupling._reports import _strict_error_if
 from tests.cloud.multigpu import test_coupling_claims_on_a_sharded_graph as sharded
 from tests.core import test_coupling_claims_in_every_domain as battery
 

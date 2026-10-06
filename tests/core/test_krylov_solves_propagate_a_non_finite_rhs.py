@@ -1,7 +1,7 @@
 """A right-hand side with a NaN or infinite entry gives NaN from every Krylov solve, never zeros.
 
 Every matrix-free solve in the library -- the IFT tangent and adjoint of a
-coupling group (``graph_manager._ift_linear_solve``), ``ift_linear_solve``
+coupling group (``coupling._ift._ift_linear_solve``), ``ift_linear_solve``
 and ``sharded_cg`` / ``sharded_gmres`` -- poses its Krylov iteration on the
 right-hand side framed by ``max|b|``, with a tolerance relative to it.  A
 NaN or infinite entry made that tolerance NaN or ``inf``, the zero initial
@@ -39,7 +39,8 @@ import numpy as np
 import pytest
 
 from maddening.cloud.multigpu.iterative_solver import sharded_cg, sharded_gmres
-from maddening.core.graph_manager import GraphManager, _ift_linear_solve
+from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling._ift import _ift_linear_solve
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.solver_utils import ift_linear_solve
 

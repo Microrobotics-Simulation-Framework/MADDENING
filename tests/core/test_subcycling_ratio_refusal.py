@@ -104,7 +104,7 @@ def test_a_member_that_divides_is_accepted_and_keeps_the_graphs_clock(fast_dt):
 
 def test_the_tolerance_admits_float_noise_and_nothing_coarser():
     """``1e-9`` relative: a ratio 1e-12 off whole passes, 1e-6 off is refused."""
-    from maddening.core.graph_manager import _SUBCYCLING_RATIO_RTOL
+    from maddening.core.coupling._group_layout import _SUBCYCLING_RATIO_RTOL
 
     assert _SUBCYCLING_RATIO_RTOL == 1e-9
     near = MACRO / (4 * (1 + 1e-12))

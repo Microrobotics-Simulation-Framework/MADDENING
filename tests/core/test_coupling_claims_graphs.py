@@ -32,7 +32,8 @@ from maddening.core.coupling.acceleration import (
     reported_error_estimate,
     residual_precision_floor,
 )
-from maddening.core.graph_manager import GraphManager, _group_evaluations
+from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling._group_layout import _group_evaluations
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.simulation.profiler import profile_graph
 from maddening.nodes.spring import SpringDamperNode
@@ -930,13 +931,17 @@ def test_the_two_pass_guard_adds_at_most_one_pass_to_aitkens_exit(mode, monkeypa
     control is the same group compiled with it emptied.  One step per
     draw, so both start from the same state.
     """
-    from maddening.core import graph_manager as gm_mod
+    from maddening.core.coupling import _fixed_point as fp_mod
 
     gdef = cg.TRIANGLE
     group = dict(acceleration="aitken", iteration_mode=mode, max_iterations=60,
                  tolerance=1e-5)
     guarded = _build(gdef, group)
-    monkeypatch.setattr(gm_mod, "_TWO_PASS_EXIT", ())
+    # ``compile()`` does not trace: the guarded step is traced by its first
+    # call, so that call is taken before the list is emptied.  (Each draw
+    # below starts from its own initial state, so this step leaves nothing.)
+    cg.trajectory(guarded, gdef, cg.draw_values(np.random.default_rng(0), gdef, 0.3), 1)
+    monkeypatch.setattr(fp_mod, "_TWO_PASS_EXIT", ())
     unguarded = _build(gdef, group)
     extra = []
     for seed in range(6):
@@ -947,6 +952,7 @@ def test_the_two_pass_guard_adds_at_most_one_pass_to_aitkens_exit(mode, monkeypa
             extra.append(with_guard["iterations"] - without["iterations"])
     assert extra, "the draws must give the unguarded loop a criterion exit"
     assert all(0 <= k <= 1 for k in extra), extra
+    assert any(extra), "the control must differ: emptying the list changed no exit"
 
 
 # ---------------------------------------------------------------------------

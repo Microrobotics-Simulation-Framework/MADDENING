@@ -39,9 +39,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import maddening.core.graph_manager as gm_mod
 from maddening.core.coupling.group import CouplingGroup
-from maddening.core.graph_manager import GraphManager, _group_evaluations
+from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling import _coupled_block, _group_layout
+from maddening.core.coupling._group_layout import _group_evaluations
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 
 
@@ -193,19 +194,25 @@ def test_the_report_and_the_step_count_the_same_chain(monkeypatch, mode, want, n
     Gauss-Seidel.
     """
     seen = []
-    real = gm_mod._group_evaluations
+    real = _group_layout._group_evaluations
 
-    def spy(group, nodes, schedule, edges):
-        out = real(group, nodes, schedule, edges)
-        seen.append(out[0])
-        return out
+    def spy(reader):
+        def spied(group, nodes, schedule, edges):
+            out = real(group, nodes, schedule, edges)
+            seen.append((reader, out[0]))
+            return out
+        return spied
 
-    monkeypatch.setattr(gm_mod, "_group_evaluations", spy)
+    # Each reader holds its own binding of the name: the coupled block imports
+    # it, ``GraphManager`` reads it through the module that defines it.
+    monkeypatch.setattr(_coupled_block, "_group_evaluations", spy("step"))
+    monkeypatch.setattr(_group_layout, "_group_evaluations", spy("report"))
     gm, key = _ring_graph(5, mode, names=names)
     if names is not None:
         assert [nm for nm in gm.schedule] == _PERMUTED, "fixture premise: swept as added"
     gm.step()
-    assert seen and set(seen) == {want}, seen
+    assert {reader for reader, _ in seen} == {"step", "report"}, seen
+    assert {count for _, count in seen} == {want}, seen
     assert gm._committed_floor_inputs[key][0] == want
     gm.coupling_diagnostics()
 

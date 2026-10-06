@@ -508,7 +508,7 @@ if __name__ == "__main__":
 # the test, and the redundant restart cycle reports breakdown.  The
 # remedy lineax prints -- raise ``restart`` -- cannot help, because
 # ``restart`` is already ``min(N, 50)``.  See the long-form comment in
-# ``graph_manager._ift_linear_solve``.
+# ``coupling._ift._ift_linear_solve``.
 #
 # It is also non-monotone in stiffness (0.998 and 0.999 raised, 0.9995
 # did not), because whether the float32 iterate lands inside an
@@ -627,9 +627,9 @@ def test_unaffordable_dense_fallback_names_the_remedies_that_work(
     cap is lowered to 0 instead and the 4-DOF case that reliably fails
     is reused.  That exercises the same branch on the same failure.
     """
-    from maddening.core import graph_manager as gm_mod
+    from maddening.core.coupling import _ift as ift_mod
 
-    monkeypatch.setattr(gm_mod, "_DENSE_ADJOINT_FALLBACK_MAX_DOF", 0)
+    monkeypatch.setattr(ift_mod, "_DENSE_ADJOINT_FALLBACK_MAX_DOF", 0)
     with pytest.raises(Exception) as excinfo:  # noqa: PT011 — eqx runtime error
         _gain_gradient(0.999)
     message = str(excinfo.value)

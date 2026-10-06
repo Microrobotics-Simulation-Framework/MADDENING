@@ -161,7 +161,7 @@ def test_the_newton_miss_is_float32_accurate_however_small_h(h):
     where the truth is ``h eta / 2``.  The miss is what the second-order
     term carries and what stretches the distance to ``t*``.
     """
-    from maddening.core.graph_manager import _kantorovich_root_and_miss
+    from maddening.core.coupling._bounds import _kantorovich_root_and_miss
 
     step = np.float32(0.37)
     h32 = np.float32(h)

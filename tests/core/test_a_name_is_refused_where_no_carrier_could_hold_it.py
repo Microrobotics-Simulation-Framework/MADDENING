@@ -40,8 +40,8 @@ import numpy as np
 import pytest
 
 from maddening.core.coupling.mapping import StaticLinearMapping
-from maddening.core.graph_manager import (
-    GraphManager,
+from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import (
     _field_name_refusal,
     _node_name_refusal,
     _uncarriable_characters,

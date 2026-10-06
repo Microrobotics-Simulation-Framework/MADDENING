@@ -1564,7 +1564,7 @@ def test_the_deprecated_names_do_not_survive_a_group_without_the_new_one():
     a future report that drops it) raises rather than warning about a
     key it cannot answer.
     """
-    from maddening.core.graph_manager import _CouplingDiagnostics
+    from maddening.core.coupling._reports import _CouplingDiagnostics
 
     partial = _CouplingDiagnostics({"iterations": 3, "residual": 1e-6})
     with warnings.catch_warnings():

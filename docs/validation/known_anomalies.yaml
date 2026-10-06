@@ -13692,12 +13692,14 @@ anomalies:
       oracle (a node named with a NUL) and by the sweep of its class.
       Resolved in 0.4.0: `add_node` -- and so `from_dict`, a USD stage and
       `POST /graph/nodes`, which asks before it builds anything -- refuses a
-      name holding a control character (Unicode category Cc), a surrogate or
-      U+FFFE / U+FFFF, in the words it refuses the others ("Node name ... is
+      name holding what one of them cannot carry -- U+0000 to U+001F but tab,
+      line feed and carriage return, a surrogate, or U+FFFE / U+FFFF: what
+      XML 1.0 has no character for -- in the words it refuses the others ("Node name ... is
       invalid"); `add_edge` and `add_external_input` hold a field's name to
       the same characters, and `POST /checkpoint/save` and `/load` a
-      checkpoint's.  Every other character is taken, and a graph of such
-      names is shown to reload from a checkpoint, a config file, an FMU
+      checkpoint's.  Every other character is taken, a line break and U+007F to U+009F
+      among them (a name is not refused for being unusual), and a graph of
+      such names is shown to reload from a checkpoint, a config file, an FMU
       model description and a USD stage.
     severity: "major"
     safety_relevance: "not_safety_relevant"

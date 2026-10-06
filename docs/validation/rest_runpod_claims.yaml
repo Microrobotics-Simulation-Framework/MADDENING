@@ -2515,9 +2515,10 @@ claims:
   conditions: >-
     an empty graph; a registered and an unregistered type; bad constructor
     constants. Also a 400 that adds nothing, asked before the type is looked
-    up or anything is built: a name holding a control character, a surrogate,
-    U+FFFE or U+FFFF (a checkpoint, an FMU's model description or a file
-    could not carry it); and, for a class with a text parameter, a text
+    up or anything is built: a name holding one of U+0000 to U+001F (tab,
+    line feed and carriage return excepted), a surrogate, U+FFFE or U+FFFF
+    (a checkpoint, an FMU's model description or a file could not carry
+    it; any other name, a line break in it included, is taken); and, for a class with a text parameter, a text
     value that spells NaN, Infinity or -Infinity or holds a surrogate.
   oracle: status codes and the graph's nodes.
   tests:
@@ -2633,8 +2634,9 @@ claims:
     may read an input it does not declare, and GraphManager.validate passes
     one): an undeclared target field is a 201 and the graph is reported,
     saved and reloaded. A field name the config or an edge's key cannot hold
-    -- the text NaN, Infinity or -Infinity, a '#', a control character, a
-    surrogate, U+FFFE or U+FFFF -- is a 400 and adds nothing.
+    -- the text NaN, Infinity or -Infinity, a '#', one of U+0000 to U+001F
+    (tab, line feed and carriage return excepted), a surrogate, U+FFFE or
+    U+FFFF -- is a 400 and adds nothing; a line break in one is taken.
   oracle: status codes and the graph's edges.
   tests:
     - tests/api/test_graph_endpoint_validation.py::test_add_edge_checks_nodes_and_fields

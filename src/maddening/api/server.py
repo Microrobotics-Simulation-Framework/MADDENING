@@ -2859,8 +2859,11 @@ class SimulationServer:
             self._ensure_relay_attached()
 
     def _ensure_runner(self) -> RealtimeRunner:
+        # Asked on every call, not only when the runner is created: a
+        # start that failed in its transaction leaves the runner it created
+        # and puts the graph's observers back without the relay.
+        self._ensure_relay_attached()
         if self.runner is None:
-            self._ensure_relay_attached()
             with self._stride_lock:
                 self.runner = RealtimeRunner(self.gm, self.relay,
                                              steps_per_frame=self._steps_per_frame,

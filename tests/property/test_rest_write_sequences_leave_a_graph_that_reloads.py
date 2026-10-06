@@ -834,6 +834,11 @@ def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
     assert accepted >= 40 and refused >= 10, dict(counts)
     assert counts["stepped beside its reload"] >= 40, dict(counts)
     assert len({key[0] for key in counts if isinstance(key, tuple)}) >= 8, dict(counts)
+    # Invariant 6 was asked: failures were injected, in most kinds of request.
+    assert counts["failures injected"] >= 400, dict(counts)
+    assert len({key[0] for key, n in counts.items()
+                if isinstance(key, tuple) and key[1] == "failed at a point" and n}) >= 8, \
+        dict(counts)
 
 
 # Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
@@ -958,6 +963,10 @@ def test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused():
                  "add edge", "remove edge", "step", "run", "compile", "save", "load"):
         for outcome in ("accepted", "refused"):
             assert counts[(kind, outcome)] > 0, (kind, outcome, dict(counts))
+        # ... and with a failure injected into its body (invariant 6).
+        assert counts[(kind, "failed at a point")] > 0, (kind, dict(counts))
+    assert counts[("reset", "failed at a point")] and counts["failures injected"] >= 150, \
+        dict(counts)
     assert counts[("reset", "accepted")] and counts[("fit", "kept")] \
         and counts[("fit", "put back")], dict(counts)
     assert counts["stepped beside its reload"] >= 15 and counts[

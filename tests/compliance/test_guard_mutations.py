@@ -122,6 +122,8 @@ JT = "tests/_jax_timing.py"
 PR = "scripts/prune_jax_cache.py"
 CI = ".github/workflows/ci.yml"
 SL = ".github/workflows/slow-tests.yml"
+SWT = "tests/slow_lane_weights.json"
+SLW = "scripts/slow_lane_weights.py"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
 TC = "tests/core/test_compile_cache.py"
@@ -244,7 +246,7 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("S2", SH, "    if n == PINS_FOR and path in PINS:", "    if False:", SHARD, "pins ignored"),
     _M("S3", SH, "    if n == PINS_FOR and path in PINS:", "    if path in PINS:", SHARD,
        "pins leak into other job counts"),
-    _M("S4", SH, "(keep if shard_of(path, self.of) == self.shard else drop).append(item)", "keep.append(item)",
+    _M("S4", SH, "(keep if self.shard_of(path) == self.shard else drop).append(item)", "keep.append(item)",
        SHARD, "every shard runs the whole suite"),
     _M("S5", SH, 'path = item.nodeid.split("::", 1)[0]', "path = item.nodeid", SHARD,
        "a file's tests split across shards (hashed by node id)"),
@@ -264,6 +266,49 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "deselected tests not reported as deselected"),
     _M("S12", SH, "            items[:] = keep", "            pass", SHARD,
        "deselection reported, but every shard still runs everything"),
+    # --- S, continued: the slow lane's weighted split --------------------------
+    _M("S13", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)", "    return _by_hash(path, n)",
+       SHARD, "the weighted split ignores its table: the slow lane is back on the hash split, one shard at "
+              "its timeout"),
+    _M("S14", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)",
+       "    return dealt[path] if path in dealt else shard_of(path, n)", SHARD,
+       "the per-push pins leak into the weighted split"),
+    _M("S15", SH, "        lightest = min(range(n), key=lambda k: (load[k], k))", "        lightest = 0", SHARD,
+       "every measured file dealt to shard 1"),
+    _M("S16", SH, "sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):",
+       "sorted(weights.items(), key=lambda kv: (kv[1], kv[0])):", SHARD,
+       "shortest first: the 48-minute file lands last, on top of a full shard"),
+    _M("S17", SH, "    return i, n, bool(colon)", "    return i, n, False", SHARD,
+       "the ':weighted' suffix is parsed and ignored"),
+    _M("S18", SH, "    if colon and plan != WEIGHTED:", "    if False:", SHARD,
+       "any suffix is taken for ':weighted', a misspelt one included"),
+    _M("S19", SH, "    weights = load_weights() if weighted else None", "    weights = None", SHARD,
+       "a weighted spec registers the hash split"),
+    _M("S20", SH, "        if self.weighted:\n            return weighted_shard_of(path, self.of, self._dealt)\n",
+       "", SHARD, "the plugin holds the dealt table and never reads it"),
+    _M("S21", SH, "if type(v) is not int or v <= 0}", "if type(v) is not int or v < 0}", SHARD,
+       "a zero weight accepted: the file is dealt as if it cost nothing"),
+    _M("S22", SH, "    if not isinstance(seconds, dict) or not seconds:", "    if not isinstance(seconds, dict):",
+       SHARD, "an empty table accepted: a weighted run that is a hash split"),
+    _M("S23", SH, '    if not re.fullmatch(r"[0-9]+/[0-9]+", counts):', '    if not re.fullmatch(r".+/.+", counts):',
+       SHARD, "a malformed spec dies in int() with a traceback instead of a usage error, or (' 1/4') is accepted"),
+    # --- SW: the slow lane's table, tests/slow_lane_weights.json ----------------
+    _M("SW1", SWT, '  "tests/property/test_sysid_truth_recovery.py": ',
+       '  "tests/property/test_sysid_truth_recovered.py": ', SHARD,
+       "the table's heaviest entry names a file that does not exist: its shard is 48 minutes lighter than dealt"),
+    _M("SW2", SWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
+       "the table claims a floor its entries are under"),
+    _M("SW3", SWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
+    # --- G: the table's generator, scripts/slow_lane_weights.py ----------------
+    _M("G1", SLW, "            slowest[path] = max(slowest[path], seconds)",
+       "            slowest[path] = seconds", SHARD, "a file's weight is whichever lane was read last"),
+    _M("G2", SLW, "            merged[lane].update(files)", "            merged[lane] = {**files, **merged[lane]}",
+       SHARD, "the first run's measurement wins over a later one"),
+    _M("G3", SLW, "             if round(s) >= min_seconds and p not in gone}",
+       "             if round(s) >= min_seconds}", SHARD, "a measured file that no longer exists stays in the table"),
+    _M("G4", SLW, "            lanes[lane][path] += float(case.get(\"time\") or 0.0)",
+       "            lanes[lane][path] = float(case.get(\"time\") or 0.0)", SHARD,
+       "a file weighs what its last test took"),
     # --- C: the root conftest -------------------------------------------------
     _M("C1", CF, "    if spec:\n        from tests import _sharding", "    if False:\n        from tests import _sharding",
        CI_ALL, "MADDENING_TEST_SHARD ignored: every shard runs everything"),
@@ -395,12 +440,21 @@ MUTANTS: tuple[Mutant, ...] = (
        "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
        "        env:\n          PYTEST_ADDOPTS: \"--deselect tests/core\"\n", CI_ALL,
        "every slow-lane shard silently drops tests/core (selection moved into the step's env)"),
-    _M("Z4", SL, "        shard: [1, 2, 3, 4]\n",
-       "        shard: [1, 2, 3, 4]\n        exclude:\n          - shard: 4\n", CI_ALL,
-       "the slow lane's matrix excludes shard 4"),
+    _M("Z4", SL, "        shard: [1, 2, 3, 4, 5, 6]\n",
+       "        shard: [1, 2, 3, 4, 5, 6]\n        exclude:\n          - shard: 6\n", CI_ALL,
+       "the slow lane's matrix excludes shard 6"),
     _M("Z5", SL, "          timeout --kill-after=60s 175m python -m pytest tests/ \\\n",
-       "          MADDENING_TEST_SHARD=1/4 timeout --kill-after=60s 175m python -m pytest tests/ \\\n", CI_ALL,
-       "all four slow-lane shards run shard 1's files"),
+       "          MADDENING_TEST_SHARD=1/6 timeout --kill-after=60s 175m python -m pytest tests/ \\\n", CI_ALL,
+       "all six slow-lane shards run shard 1's files"),
+    _M("Z6", SL, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted"',
+       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"', SHARD,
+       "the slow lane runs six shards split by hash: every test once, the balance gone"),
+    _M("Z7", SL, "        shard: [1, 2, 3, 4, 5, 6]\n", "        shard: [1, 2, 3, 4, 5]\n", SHARD,
+       "the slow lane runs five of six shards"),
+    _M("Z8", SL, "-shard${{ matrix.shard }}of6", "-shard${{ matrix.shard }}of4", SHARD,
+       "the slow lane's artifacts are named for four shards: a download by name misses two"),
+    _M("Z9", SL, "shard ${{ matrix.shard }} of 6)", "shard ${{ matrix.shard }} of 4)", SHARD,
+       "a shard's summary is titled 'shard 5 of 4'"),
     # --- PY: the pytest configuration, pyproject.toml -------------------------
     _M("PY1", PP, "addopts = \"-m 'not slow'\"", "addopts = \"-m 'not slow' --ignore=tests/fmi\"", CI_ALL,
        "every lane silently stops collecting tests/fmi (selection moved into addopts)"),

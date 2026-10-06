@@ -162,6 +162,23 @@ EVENT_STEP = "step"
 EVENT_FIT_PROGRESS = "fit_progress"
 
 
+class _BakedParamWrite(ValueError):
+    """The refusal of :meth:`GraphManager._refuse_baked_param_writes`, with
+    what it found as attributes -- the node, the leaf, the value the tree
+    holds, the node's own (``None`` when it has none) and why the node
+    cannot read the leaf -- for a caller that words the refusal for its own
+    interface (``POST /checkpoint/load`` names routes, not methods)."""
+
+    def __init__(self, message: str, *, owner: str, key: str, value: Any,
+                 own: Any, reason: str) -> None:
+        super().__init__(message)
+        self.owner = owner
+        self.key = key
+        self.value = value
+        self.own = own
+        self.reason = reason
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -1413,11 +1430,12 @@ class GraphManager:
                         if ctor is not None and np.size(ctor) <= 8:
                             shown = " " + np.array2string(
                                 np.asarray(ctor), precision=7, separator=", ")
-                        raise ValueError(
+                        raise _BakedParamWrite(
                             f"{where}['nodes'][{owner!r}][{key!r}] differs from "
                             f"the node's own value{shown}, but {reason}.  "
                             f"{consequence}; to drop the edit, restore the leaf or "
-                            "call gm.reset_params()."
+                            "call gm.reset_params().",
+                            owner=owner, key=key, value=value, own=ctor, reason=reason,
                         )
                 if live:
                     verified.setdefault(owner, {})[key] = value

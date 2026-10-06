@@ -120,6 +120,7 @@ from maddening.core.graph_manager import (
     EVENT_NODE_REMOVED,
     EVENT_STEP,
     GraphManager,
+    _BakedParamWrite,
 )
 from maddening.core._graph_specs import (
     _UNCARRIABLE_WHY,
@@ -2070,6 +2071,50 @@ def _installed_part(value: Any, *held: Any) -> Optional[np.ndarray]:
     return v if new.all() else v[new]
 
 
+def _install_param_leaves(gm: GraphManager, owner: str, leaves: dict[str, Any],
+                          live: dict) -> None:
+    """Write the params-pytree *leaves* of node *owner* where the graph
+    holds them: into *live* (the node's leaf dict in ``gm.params`` -- or,
+    before the first compile, the caller's copy of the node's own pytree)
+    and, for a key the node's constructor took, into ``node.params``.
+
+    The one install ``PUT /graph/params`` and ``POST /checkpoint/load``
+    share.  The load used to write ``gm.params`` only, so a checkpoint
+    saved before an initial condition was written stopped loading: the
+    leaf then differed from the node's own value, only ``initial_state()``
+    reads it, and the graph refuses such a leaf.  Written to both, the
+    loaded value is the one ``POST /sim/reset`` builds the state from, as
+    it is after a ``PUT``.
+    """
+    held = gm._nodes[owner].node.params
+    for key, value in leaves.items():
+        live[key] = value
+        if key in held:
+            # Store the constructor's Python type, never the raw JSON
+            # value: a JSON ``40`` for a float leaf would turn it into an
+            # ``int`` that ``params_pytree`` no longer exposes.
+            held[key] = np.asarray(value).tolist()
+
+
+def _leaves_a_load_changes(leaves: Any, live: Any) -> dict[str, Any]:
+    """The leaves of a node's loaded params that differ from the ones the
+    graph held (*live*): what a load is asked about, and what it installs
+    (:func:`_install_param_leaves`)."""
+    if not isinstance(leaves, dict) or not isinstance(live, dict):
+        return {}
+    return {k: v for k, v in leaves.items()
+            if k in live and not _leaf_values_equal(v, live[k])}
+
+
+def _shown_value(value: Any) -> str:
+    """A parameter value for a refusal's text: the number, or the shape of
+    an array of more than eight elements."""
+    arr = np.asarray(value)
+    if arr.size > 8:
+        return f"an array of shape {arr.shape}"
+    return np.array2string(arr, precision=7, separator=", ")
+
+
 def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
     """Why ``POST /checkpoint/load`` cannot take the parameter leaves
     *loaded* (the ``gm.params`` the load would leave) into the graph, or
@@ -2090,8 +2135,7 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
         if spec is None or not spec.accepts_params or not isinstance(live, dict) \
                 or not isinstance(leaves, dict):
             continue
-        staged = {k: v for k, v in leaves.items()
-                  if k in live and not _leaf_values_equal(v, live[k])}
+        staged = _leaves_a_load_changes(leaves, live)
         if not staged:
             continue
         own_specs = specs.get("nodes", {}).get(owner, {})
@@ -4308,21 +4352,15 @@ class SimulationServer:
             if found is not None:
                 keys, reason, reported = found
                 raise refused(keys, reason, reported=reported)
-            for key, value in req.params.items():
-                if key in staged:
-                    # After a compile ``live`` *is* gm.params' leaf dict and
-                    # this is the write; before one it is the throwaway probe
-                    # copy, and this only keeps the echo below honest -- it
-                    # used to report the pre-write value, contradicting the
-                    # GET that follows it.
-                    live[key] = staged[key]
-                    if key in node.params:
-                        # Store the constructor's Python type, never the
-                        # raw JSON value: a JSON ``40`` for a float leaf
-                        # would turn it into an ``int`` that
-                        # ``params_pytree`` no longer exposes.
-                        node.params[key] = np.asarray(staged[key]).tolist()
-                else:
+            # After a compile ``live`` *is* gm.params' leaf dict and this is
+            # the write; before one it is the throwaway probe copy, and this
+            # only keeps the echo below honest -- it used to report the
+            # pre-write value, contradicting the GET that follows it.
+            _install_param_leaves(
+                self.gm, node_name,
+                {key: staged[key] for key in req.params if key in staged}, live)
+            for key in req.params:
+                if key not in staged:
                     node.params[key] = structural[key]
                     self.gm._dirty = True
             shown = _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
@@ -4645,20 +4683,45 @@ class SimulationServer:
                                f"was loaded: {refusal}",
                     )
                 _restore_state_and_params(self.gm, loaded)
-                # A checkpoint of a graph whose node was built with another
-                # value of a parameter it consumes at construction carries
-                # that value in gm.params.  The graph refuses such a leaf at
-                # the next step, and this API has no reset_params: every
-                # later /sim/step would be a 500 while GET /graph/params
-                # served the checkpoint's value.  Refused here instead; the
-                # route's transaction undoes the load.
+                # Each leaf the load changed is installed as PUT installs a
+                # written one -- in gm.params and in the node's own params
+                # -- by PUT's own function.  The load used to move gm.params
+                # only, so an initial condition it changed differed from
+                # the node's own value, which the graph refuses of a leaf
+                # only initial_state() reads: every checkpoint saved before
+                # a PUT of an initial_* parameter was a 400, where PUT took
+                # the checkpoint's value.
+                held = self.gm.params.get("nodes") or {}
+                for owner, leaves in (loaded[1].get("nodes") or {}).items():
+                    changed = _leaves_a_load_changes(
+                        leaves, (before[1].get("nodes") or {}).get(owner))
+                    if changed and owner in self.gm._nodes \
+                            and isinstance(held.get(owner), dict):
+                        _install_param_leaves(self.gm, owner, changed, held[owner])
+                # What is left for the graph to refuse is a leaf the load
+                # did NOT change: one that already differed from its node's
+                # own value in a way the step cannot read (written into
+                # gm.params by Python code, on a graph not stepped since).
+                # A load that answered 200 would leave a graph whose every
+                # POST /sim/step is a 400 while GET /graph/params served
+                # the leaf; the route's transaction undoes the load.
                 try:
                     self.gm._refuse_baked_param_writes(self.gm.params, live=False)
-                except ValueError as exc:
+                except _BakedParamWrite as exc:
+                    own = ("" if exc.own is None
+                           else f" and {_shown_value(exc.own)} on the node itself")
+                    back = ("" if exc.own is None or np.size(exc.own) > 8 else (
+                        f"  To load it, first write the node's own value back (PUT "
+                        f"/graph/params/{exc.owner} with {exc.key}: "
+                        f"{_shown_value(exc.own)}); the load is then asked what "
+                        "that route asks of the checkpoint's value."))
                     raise HTTPException(
                         status_code=400,
-                        detail=f"checkpoint {path!r} does not fit this graph, nothing "
-                               f"was loaded: {exc}",
+                        detail=(
+                            f"checkpoint {path!r} does not fit this graph, nothing "
+                            f"was loaded: node {exc.owner!r}, {exc.key}: the value is "
+                            f"{_shown_value(exc.value)} in the checkpoint and in the "
+                            f"graph's params{own}, and {exc.reason}.{back}"),
                     )
                 clock = _checkpoint_clock(target)
                 sim_time, steps = clock if clock is not None else (0.0, 0)

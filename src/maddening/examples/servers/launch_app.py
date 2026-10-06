@@ -22,7 +22,6 @@ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
 # Use CPU by default for the demo app (reliable, fast enough for interactive use)
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import warnings
 import webbrowser
 import threading
 
@@ -74,9 +73,7 @@ def build_demo_graph() -> GraphManager:
         transform=lambda v: jnp.clip(jnp.abs(v) * 10.0, 0.0, 100.0),
     )
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
 
     return gm
 

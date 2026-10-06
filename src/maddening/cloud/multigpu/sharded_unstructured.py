@@ -37,7 +37,6 @@ the path is tested on CPU virtual devices only
 from __future__ import annotations
 
 import functools
-import warnings
 from typing import Any, Optional
 
 import jax
@@ -54,9 +53,15 @@ from maddening.cloud.multigpu.halo_unstructured import (
     partition_value,
     gather_value,
 )
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode, _method_accepts_params
+from maddening.core.node import (
+    SimulationNode,
+    _detached_config,
+    _method_accepts_params,
+    _refuse_keyword_no_keyword_reaches,
+)
 from maddening.core.static_data import StaticArray
 
 
@@ -295,7 +300,10 @@ class ShardedUnstructuredNode(SimulationNode):
         # inner ``update_padded(..., **kwargs)`` that ``ShardedStencilNode``
         # calibrates silently left ``gm.params`` here, and
         # ``step(params=...)`` refused it with a false "takes no 'params'
-        # keyword".
+        # keyword".  An ``update_padded`` that names ``params`` where no
+        # keyword reaches it is refused rather than run without them.
+        _refuse_keyword_no_keyword_reaches(
+            node, "update_padded", caller="ShardedUnstructuredNode")
         self._inner_accepts_params = _method_accepts_params(node, "update_padded")
         self._mesh = mesh
         self._mesh_axis = mesh_axis
@@ -697,8 +705,7 @@ class ShardedUnstructuredNode(SimulationNode):
         a ``static_data_provider``, say) is left to that backstop.
         """
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with quiet_warnings():
                 built = dict(jax.eval_shape(self._inner.initial_state))
         except Exception:  # noqa: BLE001 - cannot tell: the backstop checks
             return
@@ -959,7 +966,7 @@ class ShardedUnstructuredNode(SimulationNode):
         d["sharding"] = "unstructured"
         d["n_devices"] = self._layout.n_devices
         d["exchange"] = self._exchange
-        return d
+        return _detached_config(d)
 
 
 __all__ = [

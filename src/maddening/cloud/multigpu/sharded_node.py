@@ -18,7 +18,6 @@ sharding or :class:`ShardedStencilNode` for stencil sharding.
 from __future__ import annotations
 
 import functools
-import warnings
 from typing import Any, Optional
 
 import jax
@@ -39,12 +38,16 @@ from maddening.cloud.multigpu.halo import (
     _global_edge_halos,
     halo_exchange,
 )
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import (
+    _detached_config,
     BoundaryFluxSpec,  # noqa: F401 - named by boundary_flux_spec's annotation
     SimulationNode,
     _method_accepts_params,
+    _refuse_keyword_no_keyword_reaches,
+    _refuse_params_no_keyword_reaches,
     _signature_takes_keyword,
 )
 from maddening.core.static_data import StaticArray, coerce_static_data_value
@@ -332,7 +335,11 @@ class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
         self._n_devices = int(mesh.shape[_MESH_AXIS])
         self._validate_state_divisible(node)
         # Graph parameter contract: the wrapper is a params node exactly
-        # when the node it wraps is one.
+        # when the node it wraps is one.  A hook that names ``params``
+        # where no keyword reaches it is refused, as the graph refuses it
+        # for the node unwrapped: answered "takes none", the node would
+        # run on its constructor's constants.
+        _refuse_params_no_keyword_reaches(node, caller="ShardedPointwiseNode")
         self._inner_accepts_params = _accepts_params(node)
 
     def _validate_state_divisible(self, node: SimulationNode) -> None:
@@ -434,7 +441,7 @@ class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
         d = self._inner.to_dict() if hasattr(self._inner, "to_dict") else {}
         d["sharded"] = True
         d["shard_axes"] = self._shard_axes
-        return d
+        return _detached_config(d)
 
 
 def _params_signature(params) -> tuple:
@@ -711,7 +718,14 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         # nodes do not.  If the node has sharded statics declared but
         # its signature does not accept `static_padded`, that is a
         # contract violation and we raise here rather than at first
-        # trace.
+        # trace.  So is a signature that names one of the three keywords
+        # where no keyword reaches it (``shard_info=None, /``): the hook
+        # plainly means to take it, and would be called without it.
+        for keyword in ("static_padded", "shard_info"):
+            _refuse_keyword_no_keyword_reaches(
+                node, "update_padded", keyword, caller="ShardedStencilNode")
+        _refuse_params_no_keyword_reaches(
+            node, "update_padded", caller="ShardedStencilNode")
         self._inner_accepts_static_padded = _signature_takes_keyword(
             node.update_padded, "static_padded",
         )
@@ -1608,8 +1622,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         shapes = self._inner_state_shapes
         if shapes is None:
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
+                with quiet_warnings():
                     built = jax.eval_shape(self._inner.initial_state)
                 shapes = {
                     k: tuple(v.shape) for k, v in dict(built).items()
@@ -1826,4 +1839,6 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         d["sharded_stencil"] = True
         d["axis_map"] = self._axis_map
         d["boundary"] = self._boundary
-        return d
+        # Copies: the wrapper's own axis map used to be handed out, and a
+        # config edited to describe another decomposition changed this one.
+        return _detached_config(d)

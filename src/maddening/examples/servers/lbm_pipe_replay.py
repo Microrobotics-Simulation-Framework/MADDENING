@@ -30,8 +30,6 @@ import os
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import warnings
-
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.lbm_pipe import LBMPipeNode
 
@@ -159,9 +157,7 @@ def main():
         rho_0=rho_0,
     ))
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
 
     # --- Run simulation ---
     print(f"Running {n_steps} simulation steps...")

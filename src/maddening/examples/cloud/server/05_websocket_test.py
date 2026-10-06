@@ -70,7 +70,7 @@ if _parent:
         os.kill(os.getpid(), signal.SIGINT)
     threading.Thread(target=_watch_parent, daemon=True).start()
 
-import jax, warnings
+import jax
 print(f"JAX: {jax.devices()}")
 from maddening import GraphManager
 from maddening.nodes.ball import BallNode
@@ -85,9 +85,7 @@ gm.add_node(TableNode(name="table", timestep=0.01))
 gm.add_node(SpringDamperNode(name="spring", timestep=0.01, stiffness=50.0, damping=2.0, mass=0.5, rest_length=1.5, initial_position=3.0))
 gm.add_edge("table", "ball", "position", "table_position")
 gm.add_edge("ball", "spring", "position", "anchor_position")
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    gm.compile()
+gm.compile()
 
 server = SimulationServer(
     node_registry={"BallNode": BallNode, "TableNode": TableNode, "SpringDamperNode": SpringDamperNode},

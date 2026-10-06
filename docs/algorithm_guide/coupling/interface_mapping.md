@@ -689,7 +689,11 @@ target's row is as long as the number of sources that share it, and
 
 That is what was measured (jax / jaxlib 0.11.0, 2026-10-05) and nothing
 more is claimed: not bit-equality between the CPU and a GPU for either
-form, and not GPU behaviour on another driver or jaxlib.  The choice is
+form, and not GPU behaviour on another driver or jaxlib.  The GPU
+statements are one attended measurement that no test runs (GPU is not a
+verified configuration, MADD-ANO-001); the CPU statements are tests, and
+held on the three jaxlib versions they were run on (0.10.2, 0.11.0,
+0.11.2).  The choice is
 recorded in the spec, so a reloaded mapping is applied the way it was
 built.  The two forms hold the same matrix, and agree with one another
 and with the dense conservative kind to rounding.
@@ -718,7 +722,12 @@ the other).  A graph with sparse edges and its dense twin therefore step
 to within rounding of one another, not to the same bits.  Under a
 constant iterator the two were at most 7.5 `eps` of the largest state
 entry apart, over every structure, layout and domain the coupling
-topology harness compares them in; the harness allows 256.
+topology harness compares them in; the harness allows 256.  The harness
+runs over sparse edges as it does over dense ones: a graph with sparse
+edges satisfies the same monolithic reference the dense graph is held to,
+and its gradients are the dense graph's.  In bfloat16 and float16, where
+a rounding is a percent of the state, the twin is not compared; a renamed
+or reordered sparse graph returns the original's states bit for bit.
 
 One difference is deliberate.  A row reads only its own entries, so an
 infinity or a NaN in the source field reaches only the targets that list
@@ -737,7 +746,10 @@ NaN everywhere.
 Each refusal is a `SparseMappingLimitError`, a `ValueError`; from
 `from_dict` or `load_graph_from_usd` it is a `MappingRebuildError` naming
 the edge.  `n_source` sizes nothing, so a config cannot allocate through
-it.  scipy, which the nearest-neighbour builder imports for its k-d tree,
+it.  In a process capped at 6 GiB of address space, a pattern whose padded
+gather would need 160 GB, a tie set of 9e8 candidates and a projection row
+of five million slots among fifty thousand rows are each a
+`SparseMappingLimitError`, not a `MemoryError`.  scipy, which the nearest-neighbour builder imports for its k-d tree,
 is a declared dependency; it is imported by that builder, not by
 `import maddening`.
 

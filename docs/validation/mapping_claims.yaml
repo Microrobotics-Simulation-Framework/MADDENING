@@ -785,16 +785,17 @@ claims:
   area: sparse mapping
   claim: >-
     A graph whose mapped edges are sparse steps as the graph whose edges
-    hold the same matrices densely, to rounding: "a graph with sparse edges
-    satisfies the same monolithic reference the dense graph is held to, its
-    gradients are the dense graph's, and under a constant iterator its
-    states are within rounding of its dense twin's (at most 7.5 eps of the
-    largest entry measured, 256 allowed)".  "Not bit for bit, whatever the
-    weights": "'the same number' holds for a mapping applied on its own and
-    not for a step."  A renamed or reordered sparse graph returns the
-    original's states and reports "bit for bit".
+    hold the same matrices densely, to rounding: "A graph with sparse edges
+    and its dense twin therefore step to within rounding of one another, not
+    to the same bits.  Under a constant iterator the two were at most 7.5
+    eps of the largest state entry apart, over every structure, layout and
+    domain the coupling topology harness compares them in; the harness
+    allows 256."  "Inside a compiled step not even that carries over,
+    whatever the weights".  "a graph with sparse edges satisfies the same
+    monolithic reference the dense graph is held to, and its gradients are
+    the dense graph's."  "a renamed or reordered sparse graph returns the
+    original's states bit for bit."
   sources:
-    - docs/release_notes/v0.4.0.md (Sparse interface mappings)
     - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, What "equal to the dense mapping" means)
     - src/maddening/core/coupling/sparse_mapping.py (module docstring, Summation order)
     - tests/property/coupled_topologies.py (module docstring, The mapping kind)
@@ -1334,7 +1335,8 @@ claims:
   notes: >-
     The CPU order was checked on jaxlib 0.10.2, 0.11.0 and 0.11.2, the three
     this branch ran the two tests on.  The GPU measurement is recorded in
-    the release notes; it has no CI lane (MADD-ANO-001: GPU is not a
+    the guide and in the pull request that added the kinds (#232); it has
+    no CI lane (MADD-ANO-001: GPU is not a
     verified configuration).
   domains:
     f32: tests/core/test_sparse_mapping.py::test_a_scatter_add_with_repeated_indices_is_the_in_order_sum_on_the_cpu

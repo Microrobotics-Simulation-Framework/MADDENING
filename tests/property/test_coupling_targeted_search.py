@@ -401,25 +401,6 @@ def _radius_allowance(A: np.ndarray, rho: float, eps: float, seed: int) -> float
     return 1e-4 * rho + 16.0 * moved
 
 
-#: KNOWN DEFECT (coupling audit round 7, finding F2): the Arnoldi breakdown
-#: test drops a direction below 1e-5 of ``||A q||`` in every dtype, so a
-#: settled ``rho_spectral`` is off by about that much of the weighted
-#: Jacobian's norm -- measured 5.6e-4 of a radius of 0.084 at a norm of 56,
-#: float64, on gains that are merely non-normal, and up to 4.6e-5 of the
-#: norm as this module weights it (the report's weights under the
-#: interface norm are the reading's); sixteen thresholds are allowed, so a
-#: random hunt does not go red on it.  The ``"radius"`` score
-#: allows it, so the search stays green on this tree and still sees
-#: anything larger; ``"radius_strict"`` -- the claim as written, 1e-4 of
-#: the radius and nothing for conditioning -- does not, and the pins at
-#: the foot of the module hold the defect.  The fix deletes this constant.
-#: Whether ``"radius"`` then becomes the strict score is the fix's to
-#: say: in float32 a field 1e-4 of its driver makes the weighted
-#: eigenproblem so ill-conditioned that rounding alone moves the radius
-#: sixfold (the third pin), which ``"radius"`` allows and CPL-087 does not.
-KNOWN_BREAKDOWN_ALLOWANCE = 16.0 * 1e-5
-
-
 def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
     """The worst relative error of ``d x* / d c`` taken at the returned
     iterate, over every scalar gain and mapping weight ``c`` of the group.
@@ -545,7 +526,7 @@ def observe(case: Case) -> dict:
         # eigenvalue computation in the group's dtype can keep it.
         out["radius_strict"] = off / max(allowance - _radius_allowance(
             A, rho, eps_analysis, case.seed) + 1e-4 * rho, 1e-300)
-        out["radius"] = off / (allowance + KNOWN_BREAKDOWN_ALLOWANCE * norm_A)
+        out["radius"] = off / allowance
         out["report"]["jacobian_norm"] = norm_A
 
     if out["spectral_usable"]:

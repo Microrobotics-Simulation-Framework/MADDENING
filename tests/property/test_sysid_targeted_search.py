@@ -6,10 +6,12 @@ problem with ``tests/property/targeted_search.py``: every number is drawn
 from a continuous range, three scores say how wrong a fit is, and
 Hypothesis climbs each of them.
 
-The problem.  The guide's spring (stiffness 30, damping 1.9, mass 1, 100
-noiseless position samples) with the stiffness under its own ``log`` spec
-and the damping under the transform an example names, and drawn:
+The problem.  The guide's spring (100 noiseless position samples, mass
+frozen) with the stiffness under its own ``log`` spec and the damping under
+the transform an example names, and drawn:
 
+* the truth: a stiffness of 10 to 100 and a damping of 0.5 to 6 per unit
+  mass (the guide's are 30 and 1.9), every one of them underdamped;
 * the transform of the damping: none (clipped bounds), ``log``, ``log``
   from a non-zero lower bound, ``logit``;
 * the precision (float32, x64) and whether the leaves the fit leaves alone
@@ -23,12 +25,14 @@ and the damping under the transform an example names, and drawn:
 
 Numbers are arguments of the compiled programs, not constants of them.
 The unit of the parameters is the *mass*: a spring of mass ``u`` with
-stiffness ``30 u`` and damping ``1.9 u`` moves as the guide's does, so one
-record serves every unit and the truth is known to the rounding of ``k / m``
-(a part in 1e7 in float32, far inside the scores' thresholds).  The unit of
-the residual is a leaf of a second, uncoupled node that the residual
-multiplies by.  Both are leaves of the ``params`` tree the fitter hands its
-model, so the model-side programs (``sysid._compile_model``: the residual
+stiffness ``k u`` and damping ``c u`` moves as one of mass 1 with ``k`` and
+``c`` does.  A second, uncoupled node, which no fit moves, carries the
+rest: the true stiffness and damping in its own, and the residual's unit in
+its rest length.  The residual is that unit times the difference of two
+rollouts of the spring, one at the parameters it is handed and one with the
+truth put in their place -- so the record is noiseless and the truth is
+known exactly, to the bit.  All of these are leaves of the ``params`` tree
+the fitter hands its model, so the model-side programs (``sysid._compile_model``: the residual
 and its Jacobian) are compiled once for each precision and each way of
 leaving leaves out and shared by every example -- **four pairs of
 model-side compiles in a run of all three searches**, whatever the number
@@ -40,12 +44,14 @@ for each range drawn.
 The scores, each 0 where there is nothing to say:
 
 a. **converged at a wrong point**: for a fit that reports
-   ``converged=True`` and gave no warning about an edge of its transform's
-   range, its relative parameter error (SYS-080, SYS-082);
+   ``converged=True``, its relative parameter error (SYS-080, SYS-082);
 b. **worse than the plain fit**: where the same fit with the damping under
-   ``transform=None`` and the same bounds recovers the truth, the
-   transformed fit's relative error, unless it warned by name that it
-   ended on (or started on) the edge of its transform's range (SYS-144);
+   ``transform=None`` and the same bounds recovers the truth in the default
+   50 iterations, the transformed fit's relative error after at most four
+   times as many (SYS-144);
+   -- in both, 0 for a fit that warned by name that it ended on the edge of
+   its transform's range *and* whose truth is there, nearer a bound than
+   the transform resolves: the one ending the documentation excuses;
 c. **returned is not evaluated**: the relative difference between
    ``best_loss`` and the loss of the fitter's own residual program at the
    parameters returned, and -- counted as at least 1 -- any difference at
@@ -95,6 +101,16 @@ LOSS_ULPS = 2.0 ** 10
 #: How near an edge a drawn position may sit, in float spacings of the
 #: bounds' own size (the grid's ``EDGE_ULPS``).
 EDGE_ULPS = 8.0
+#: How many of the transform's unresolved margins from a bound a truth may
+#: be for an edge warning to account for a fit that missed it.
+EDGE_MARGINS = 4.0
+#: ``fit_lm``'s default ``n_iter``, which the control runs for, and how
+#: many times that the transformed fit is given in score (b).  A fit that
+#: is still descending when its iterations run out says ``converged=False``
+#: and is right; found by this search at the default: a ``logit`` fit that
+#: took 55 iterations beside a control that took 43.  That is a cap, not a
+#: trap, and four times the control's allowance tells them apart.
+N_ITER, PATIENCE = 50, 4
 
 
 @dataclass(frozen=True)
@@ -104,6 +120,9 @@ class Case:
     transform: str
     x64: bool
     masked: bool
+    #: The truth, per unit mass.
+    stiffness_true: float
+    damping_true: float
     #: The damping's range, in units of the true damping.
     width: float
     #: Where in the range the truth and the start sit: a fraction of it.
@@ -125,11 +144,11 @@ class Case:
 
     @property
     def damping(self) -> float:
-        return TRUTH * self.unit
+        return self.damping_true * self.unit
 
     @property
     def stiffness(self) -> float:
-        return STIFFNESS * self.unit
+        return self.stiffness_true * self.unit
 
     @property
     def bounds(self) -> tuple:
@@ -152,10 +171,27 @@ class Case:
         """``(stiffness, damping)`` the fit starts from."""
         lo, hi = self.bounds
         if self.transform in ("log", "log-from-lo"):
-            damping = lo + (self.damping - lo) * self.damping_off
+            # Measured from the lower bound, and kept the same few float
+            # spacings above it (a start that rounds onto it is refused).
+            damping = lo + max((self.damping - lo) * self.damping_off,
+                               EDGE_ULPS * self.eps * max(abs(lo), self.damping))
         else:
             damping = lo + self._inside(self.start_at, lo, hi - lo) * (hi - lo)
         return self.stiffness * self.stiffness_off, damping
+
+    @property
+    def truth_on_an_edge(self) -> bool:
+        """Whether the truth is nearer a bound than the transform resolves
+        (``fit_lm``: ``sqrt(eps)`` of the bounds' size inside each bound;
+        four times that here).  Only then does a warning that the fit ended
+        on an edge account for a fit that is not at the truth: the data pull
+        the parameter where its transform cannot follow."""
+        lo, hi = self.bounds
+        if self.transform in ("log", "log-from-lo"):
+            return self.damping - lo <= EDGE_MARGINS * self.eps ** 0.5 * max(
+                abs(lo), self.damping)
+        margin = EDGE_MARGINS * self.eps ** 0.5 * max(abs(lo), abs(hi), hi - lo)
+        return min(self.damping - lo, hi - self.damping) <= margin
 
     def spec(self, control: bool = False) -> ParamSpec:
         lo, hi = self.bounds
@@ -182,6 +218,9 @@ _FRACTION = st.one_of(
 def cases(transforms=TRANSFORMS):
     return st.builds(
         Case, transform=st.sampled_from(transforms), x64=st.booleans(), masked=st.booleans(),
+        # Shrinks to the guide's spring.
+        stiffness_true=_decades(-0.5, 0.5).map(lambda x: STIFFNESS * x),
+        damping_true=_decades(-0.5, 0.5).map(lambda x: TRUTH * x),
         width=_decades(-1.5, 2.0), truth_at=_FRACTION, start_at=_FRACTION,
         damping_off=_decades(-2.0, 2.0), stiffness_off=_decades(-2.0, 2.0),
         # ``fit_lm`` documents every residual and Jacobian entry normal: in
@@ -218,7 +257,8 @@ def _problem(x64: bool, masked: bool) -> _Problem:
     gm = GraphManager()
     gm.add_node(SpringDamperNode("spring", DT, initial_position=0.5, stiffness=STIFFNESS,
                                  damping=TRUTH, mass=MASS, rest_length=REST_LENGTH))
-    # Carries the residual's unit in its rest length; coupled to nothing.
+    # Carries the truth in its stiffness and damping and the residual's
+    # unit in its rest length; coupled to nothing.
     gm.add_node(SpringDamperNode("units", DT, stiffness=1.0, damping=1.0, mass=1.0,
                                  rest_length=1.0, initial_position=1.0))
     gm.compile()
@@ -235,10 +275,13 @@ def _problem(x64: bool, masked: bool) -> _Problem:
             "position"][0]
 
     params = jax.tree.map(lambda x: x, gm.params)
-    measured = positions(params)
 
     def residual(p):
-        return p["nodes"]["units"]["rest_length"] * (positions(p) - measured)
+        carried = p["nodes"]["units"]
+        spring = dict(p["nodes"]["spring"], stiffness=carried["stiffness"],
+                      damping=carried["damping"])
+        truth = dict(p, nodes=dict(p["nodes"], spring=spring))
+        return carried["rest_length"] * (positions(p) - positions(truth))
 
     mask = None
     if masked:
@@ -308,9 +351,9 @@ class Outcome:
         return self.error <= TOLERANCE
 
 
-def run_fit(case: Case, control: bool = False) -> Outcome:
+def run_fit(case: Case, control: bool = False, **options) -> Outcome:
     """``fit_lm`` on ``case``; ``control``: with the damping under
-    ``transform=None`` and the same bounds."""
+    ``transform=None`` and the same bounds.  ``options`` go to ``fit_lm``."""
     key = (case.x64, case.masked)
     with precision(case.x64):
         problem = _problem(*key)
@@ -329,11 +372,15 @@ def run_fit(case: Case, control: bool = False) -> Outcome:
         put("spring", "stiffness", k0)
         put("spring", "damping", c0)
         put("spring", "mass", MASS * case.unit)
+        put("units", "stiffness", case.stiffness)
+        put("units", "damping", case.damping)
+        put("units", "mass", MASS * case.unit)
         put("units", "rest_length", case.residual_scale)
         try:
             with _shared_programs(key), warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                res = fit_lm(gm, problem.residual, params=start, mask=problem.mask)
+                res = fit_lm(gm, problem.residual, params=start, mask=problem.mask,
+                             **options)
         except FloatingPointError:
             return Outcome(refused=True)
         leaves = res.params["nodes"]["spring"]
@@ -365,22 +412,24 @@ def run_fit(case: Case, control: bool = False) -> Outcome:
 # ---------------------------------------------------------------------------
 
 def converged_at_a_wrong_point(case: Case):
-    """(a) ``converged=True`` is the truth, or an edge the fit warned of."""
+    """(a) ``converged=True`` is the truth, or an edge the truth is on and
+    the fit warned of."""
     fit = run_fit(case)
-    wrong = fit.converged and not fit.edge_warned
-    return (fit.error if wrong else 0.0), fit
+    excused = fit.edge_warned and case.truth_on_an_edge
+    return (fit.error if fit.converged and not excused else 0.0), fit
 
 
 def worse_than_the_plain_fit(case: Case):
     """(b) Where the control recovers the truth, the transformed fit does,
-    or warns by name about an edge of its transform's range."""
-    control = run_fit(case, control=True)
+    or -- the truth being on an edge of its transform's range -- warns by
+    name that it ended there."""
+    control = run_fit(case, control=True, n_iter=N_ITER)
     if not control.recovered:
         return 0.0, ("the control did not recover", control)
-    fit = run_fit(case)
+    fit = run_fit(case, n_iter=PATIENCE * N_ITER)
     if fit.refused:
         return float("inf"), ("refused where the control recovered", fit)
-    return (0.0 if fit.edge_warned else fit.error), fit
+    return (0.0 if fit.edge_warned and case.truth_on_an_edge else fit.error), fit
 
 
 def returned_is_not_evaluated(case: Case):

@@ -811,11 +811,11 @@ FIXED = {
     # field 0.015 of its driver: 0.250 for 0.206 and 0.107 for 0.056 with
     # eight sampled perturbations moving the radius by a third to a half
     # of the margin.  The certificate over every perturbation of the
-    # measured size refuses both (MADD-ANO-227).
-    "MADD-ANO-227-a-radius-rounding-can-move-is-not-settled-i": (
+    # measured size refuses both (MADD-ANO-229).
+    "MADD-ANO-229-a-radius-rounding-can-move-is-not-settled-i": (
         Case(41, 29814, 0.453609867338665, True, 0.01539605614570328, 0.0, 1.0, 1, 0.0, 0),
         "radius_strict", False),
-    "MADD-ANO-227-a-radius-rounding-can-move-is-not-settled-ii": (
+    "MADD-ANO-229-a-radius-rounding-can-move-is-not-settled-ii": (
         Case(41, 51310, 0.23676567122390113, True, 0.016305935878241445, 0.0, 1.0, -1,
              3.188721180654517e-07, 6), "radius_strict", False),
     "MADD-ANO-226-the-gradient-bound-at-the-float-floor": (

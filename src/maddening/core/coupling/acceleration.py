@@ -1373,7 +1373,7 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
     # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
     # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
-    # open below the claimed domain, MADD-ANO-228.)
+    # open below the claimed domain, MADD-ANO-230.)
     residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         # The certificate, tested rather than assumed: the fraction of
@@ -1505,7 +1505,7 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
     # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
     # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
-    # open below the claimed domain, MADD-ANO-228.)
+    # open below the claimed domain, MADD-ANO-230.)
     residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         ex_norm = jnp.linalg.norm(extra_q)

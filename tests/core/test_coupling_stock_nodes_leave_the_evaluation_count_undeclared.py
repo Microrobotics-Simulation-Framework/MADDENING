@@ -12,7 +12,7 @@ wrong radius with its flag set.  Two ``SpringDamperNode`` s anchored on
 each other (``k = 6000``, ``c = 90``, ``dt = 0.01``, float32,
 Gauss-Seidel, the default tolerance) settle to rest, and their
 velocities fall under a hundredth of the positions that drive them: the
-regime of MADD-ANO-228, where a direction the Arnoldi breakdown test
+regime of MADD-ANO-230, where a direction the Arnoldi breakdown test
 takes for rounding can carry the dominant mode.  With the two nodes
 declaring one evaluation, 2 of 1 376 steps over six configurations read
 settled outside the margin (``rho_spectral`` 0.462 for 0.36 on the sixth
@@ -45,7 +45,7 @@ def test_the_stock_nodes_are_found():
 
 @pytest.mark.parametrize("cls", STOCK, ids=lambda cls: cls.__name__)
 def test_a_stock_node_does_not_declare_its_evaluation_count(cls):
-    """Declaring it is a decision about MADD-ANO-228 (see the module docstring), not a tidy-up."""
+    """Declaring it is a decision about MADD-ANO-230 (see the module docstring), not a tidy-up."""
     assert cls.update_evaluations is SimulationNode.update_evaluations, cls
 
 

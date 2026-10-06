@@ -3279,7 +3279,7 @@ claims:
     gives each row's rounding, no perturbation of that size entry by entry
     puts an eigenvalue of the compression on the circle |z| = rho + margin
     or on the circle of that radius about the dominant one
-    (MADD-ANO-227).  The measured size is one product's, and a direction
+    (MADD-ANO-229).  The measured size is one product's, and a direction
     the breakdown test discarded counts for its bare norm.
     Made for fields no smaller than a hundredth of what drives them; below
     that a float32 group's radius is more often undetermined and the flag

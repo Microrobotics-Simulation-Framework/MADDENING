@@ -15073,7 +15073,7 @@ anomalies:
       exact tangent); solve values do not move.  A field below about 1e-4
       of what it drives in float32 can still leave the radius
       undetermined, which `spectral_usable` then reports
-      (MADD-ANO-227).
+      (MADD-ANO-229).
     verification:
       - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
       - "tests/core/test_coupling_report_numbers_carry_each_factor.py::test_the_interpolated_boundary_value_keeps_its_bits_and_has_an_exact_tangent"
@@ -15288,7 +15288,7 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-227"
+  - anomaly_id: "MADD-ANO-229"
     title: "A spectrum reported settled from sampled rounding could be outside its margin: float32 groups of rank six read rho_spectral 0.250 for 0.206 and 0.107 for 0.056, spectral_usable=True"
     description: >
       `spectral_usable` tested how far a fresh Jacobian-vector product's
@@ -15330,7 +15330,7 @@ anomalies:
       about 0.975, and on the float32 rank-six cell from 0.91 to 0.74.
       The measured size is one product's disagreement, taken as the size
       of every product's rounding.  A direction the breakdown test
-      discards is outside it (MADD-ANO-228).  In 16-bit dtypes the
+      discards is outside it (MADD-ANO-230).  In 16-bit dtypes the
       products' rounding leaves little a certificate can pass: a float16
       or bfloat16 group far from normal reads `spectral_usable=False`.
     verification:
@@ -15339,7 +15339,7 @@ anomalies:
       - "tests/core/test_coupling_report_numbers_carry_each_factor.py::test_the_certificate_refuses_a_radius_rounding_can_move_inward"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-228"
+  - anomaly_id: "MADD-ANO-230"
     title: "A direction the Arnoldi breakdown test takes for rounding can carry the dominant mode of a Jacobian far from normal: float32 fan-out hubs with a field 1e-4 to 1e-2 of the rest read rho_spectral 0.157 for 0.349 and 0.503 for 0.397, settled"
     description: >
       The breakdown test discards a new Krylov direction below eight units

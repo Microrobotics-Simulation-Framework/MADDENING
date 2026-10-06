@@ -437,7 +437,7 @@ def test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice(lab
 
     The flag is set in every domain but bfloat16 (``eps = 2**-7``).  There
     the radius reads 0.7988 for 0.7906, 0.8 of the flag's margin of
-    ``0.05 (1 - rho)`` away, and the rounding certificate (MADD-ANO-227)
+    ``0.05 (1 - rho)`` away, and the rounding certificate (MADD-ANO-229)
     cannot show that a rounding of the size the products disagree by
     leaves it inside: ``spectral_usable`` is False.  Before the certificate
     the flag was set on the strength of eight sampled perturbations.  The

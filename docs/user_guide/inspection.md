@@ -359,7 +359,7 @@ return how many sequential sub-steps one `update` takes (`1` for a single explic
 relay, `N` for a loop of `N` sub-steps), and read
 [the algorithm guide](../developer_guide/coupling_algorithm_guide.md) for what the count assumes;
 a float32 group with a field under a hundredth of what drives it should be run in float64 before
-its flag is relied on (MADD-ANO-228).
+its flag is relied on (MADD-ANO-230).
 
 ## Graphs that are not ready
 

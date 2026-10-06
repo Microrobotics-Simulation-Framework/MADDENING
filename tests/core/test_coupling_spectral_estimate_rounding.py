@@ -280,7 +280,7 @@ def test_the_products_rounding_is_the_coarsest_fields_not_the_analysis(monkeypat
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MADD-ANO-228: a direction the breakdown test takes for rounding can carry the "
+    "MADD-ANO-230: a direction the breakdown test takes for rounding can carry the "
     "dominant mode of a Jacobian far from normal; open, below the claimed domain"))
 def test_a_discarded_direction_does_not_hide_the_dominant_mode():
     """Hub seed 373: weighted norm 700 beside a radius of 0.349, read 0.157, settled.

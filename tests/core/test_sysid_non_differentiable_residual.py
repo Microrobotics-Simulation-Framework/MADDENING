@@ -459,43 +459,22 @@ def test_the_curvature_rank_is_fims_rank_in_fims_coordinates():
     assert rank(J, ones) is None
 
 
-def test_the_warning_does_not_fire_on_a_parameter_whose_value_is_zero():
-    """``HeartPumpNode`` with the stroke volume frozen has no degeneracy,
-    and its ``venous_pressure`` is 0: relative to itself that parameter has
-    no size, and the guard's scale gives it one from its column.  A fit
-    from a start that leaves it at 0 resolves every direction and is
-    silent."""
-    gm = GraphManager()
-    for name in ("heart", "record"):
-        gm.add_node(HeartPumpNode(name, DT))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
-    gm.set_param_spec("heart", "stroke_volume", ParamSpec(trainable=False))
-    residual = _twin(gm, "heart", 240, "arterial_pressure")
-    truth = gm.params["nodes"]["heart"]
-    assert float(truth["venous_pressure"]) == 0.0, "premise"
-    start = _started(gm, "heart", resistance=float(truth["resistance"]) * 1.2,
-                     compliance=float(truth["compliance"]) * 0.85)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        res = fit_lm(gm, residual, params=start)
-    assert res.excited_rank == 4, res.excited_rank      # every trainable coordinate
-    assert not _messages(caught, RANK), _messages(caught, RANK)
-
-
 def test_the_warning_does_not_fire_on_a_coordinate_its_transform_flattens():
-    """A ``logit`` damping whose truth sits near the end of a wide range:
-    in the optimiser's coordinates its column is small because the
-    transform is flat there, which says nothing about the data.  The fit
-    recovers both parameters, and the warning, read in fim's coordinates,
-    is silent."""
+    """A ``logit`` damping whose truth sits 0.2% below the upper end of its
+    range: in the optimiser's coordinates its column is small because the
+    transform is flat there (a singular-value ratio of 5e-4, under float32's
+    cutoff of 1e-3), which says nothing about the data (0.26 in the
+    parameter relative to itself).  The fit recovers both parameters, and
+    the warning, read as fim reads such a parameter, is silent.  (A
+    parameter whose value is zero is the other case of a column with no
+    scale of its own:
+    ``test_sysid_fit_lm_step_tol.py::test_a_truth_of_exactly_zero_has_no_relative_resolution``.)"""
     gm = GraphManager()
     for name in ("spring", "record"):
         gm.add_node(SpringDamperNode(name, DT, stiffness=30.0, damping=1.9,
                                      initial_position=0.5))
     gm.compile()
-    gm.set_param_spec("spring", "damping", ParamSpec(bounds=(0.0, 2000.0), transform="logit"))
+    gm.set_param_spec("spring", "damping", ParamSpec(bounds=(0.0, 1.9038), transform="logit"))
     residual = _twin(gm, "spring", 100, "position")
     mask = jax.tree.map(lambda _: False, gm.params)
     for key in ("stiffness", "damping"):
@@ -503,7 +482,7 @@ def test_the_warning_does_not_fire_on_a_coordinate_its_transform_flattens():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         res = fit_lm(gm, residual, mask=mask,
-                     params=_started(gm, "spring", stiffness=24.0, damping=3.0))
+                     params=_started(gm, "spring", stiffness=24.0, damping=1.2))
     assert res.converged and res.excited_rank == 2
-    assert float(res.params["nodes"]["spring"]["damping"]) == pytest.approx(1.9, rel=1e-2)
+    assert float(res.params["nodes"]["spring"]["damping"]) == pytest.approx(1.9, rel=1e-4)
     assert not _messages(caught, RANK)

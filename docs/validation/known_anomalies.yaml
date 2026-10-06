@@ -14578,7 +14578,7 @@ anomalies:
       linearisation on the candidate's side than on the other and than
       the linearisation's own change, the run ends `converged=False` with
       a `RuntimeWarning` naming a residual that is not differentiable.
-      Measured: at most 21 on smooth fits stopped by the floor rule (136
+      Measured: at most 21 on smooth fits stopped by the floor rule (127
       endings), 2.2e4 to 4.4e5 on the ball (55 endings).  And an iteration
       whose ladder began above `lam0` while the undamped step was rejected
       is run once more from `lam0`.  After the fix: 0 of the 24 and 0 of

@@ -3917,7 +3917,7 @@ _JUMP_MAX_MOVE = 2.0 ** -10
 #: predicted change) before :func:`fit_lm` reads the rejection as a jump of
 #: the residual rather than as rounding.  Measured (CPU, jaxlib 0.11.0):
 #: on smooth residuals stopped by the floor rule the ratio is of order one
-#: -- at most 5.7 over 136 such endings (the spring and ``HeartPumpNode``
+#: -- at most 5.7 over 127 such endings (the spring and ``HeartPumpNode``
 #: from spread starts, with and without noise; the per-push and slow sysid
 #: tests) but for one float32 fit under a ``logit`` so wide that a
 #: coordinate's float spacing moves its value by 6e-4, at 21 -- and on the

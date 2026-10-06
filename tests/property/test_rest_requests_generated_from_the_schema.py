@@ -82,6 +82,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import inspect
 import json
 import os
 import posixpath
@@ -107,6 +108,8 @@ from maddening.nodes.lbm import LBMNode
 from tests.conftest import EXAMPLES_FLOOR
 from tests.property import rest_oracle as O
 from tests.property.differential import no_cloud_launch, note, quiet
+from tests.property.node_catalogue import KINDS
+from tests.property.node_catalogue import REGISTRY as CATALOGUE_REGISTRY
 from tests.property.without_the_token import (
     CREDENTIALS,
     assert_refused_without_the_token,
@@ -1334,6 +1337,195 @@ def test_a_generated_request_to_any_route_is_refused_whole_or_served(key, data):
     bind = data.draw(st.sampled_from(O.BINDS), label="bind")
     credential = data.draw(st.integers(0, len(CREDENTIALS) - 1), label="without the token")
     check_generated_request(op, seed, changes, bind, credential)
+
+
+# ---------------------------------------------------------------------------
+# POST /graph/nodes, for every node kind of the catalogue
+# ---------------------------------------------------------------------------
+# The seeds above add a spring and a rod and name two or three of their
+# parameters.  Here every class of ``node_catalogue`` is added with each of
+# its numeric constructor parameters replaced in turn, and a 201 is held to
+# more than "the save reloads": the node must be one the graph steps, its
+# state after the step must have the layout of its ``initial_state()``, and
+# a checkpoint saved after the step must load after a reset.  (A list for a
+# scalar constant used to be a 201: the state changed shape at the first
+# step and the graph's own checkpoint was refused after a reset.  ``null``
+# for a constant the step reads from the params pytree used to be a 201
+# and every later step a 400.)
+
+def _numeric_defaults(cls: type) -> dict:
+    """``{parameter: default}`` for every constructor parameter of *cls*
+    whose default is a number or a list of numbers."""
+    found = {}
+    for name, parameter in inspect.signature(cls.__init__).parameters.items():
+        default = parameter.default
+        if isinstance(default, bool) or name in ("self", "name", "timestep"):
+            continue
+        if isinstance(default, (int, float)) or (
+                isinstance(default, (list, tuple)) and default
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        for v in default)):
+            found[name] = list(default) if isinstance(default, tuple) else default
+    return found
+
+
+#: One class per catalogue entry (the rod has two families), with the
+#: timestep of its family; the cheap ones run per push.
+_KIND_CLASSES = {kind.cls.__name__: (kind.cls, kind.timestep, kind.cheap)
+                 for kind in reversed(list(KINDS.values()))}
+assert set(_KIND_CLASSES) == set(CATALOGUE_REGISTRY)
+_NEW = "new"
+
+
+def _other_ranks(default: Any) -> tuple:
+    """*default* at other ranks: twice in a list, and nested once more."""
+    return ([default, default], [[default]], [])
+
+
+def _layout(tree: dict) -> dict:
+    return {key: (np.shape(value), np.asarray(value).dtype.kind) for key, value in tree.items()}
+
+
+def check_the_added_node(served: O.Served, what: str) -> list[str]:
+    """What is wrong with the node *what* added, by the invariant of a 201
+    of ``POST /graph/nodes``: the graph steps, the node's state then has
+    the layout of its ``initial_state()``, and a checkpoint saved after the
+    step loads after a reset."""
+    client, problems = served.client, []
+    built = _layout(served.gm._nodes[_NEW].node.initial_state())  # noqa: SLF001
+    held = _layout(served.gm._state[_NEW])  # noqa: SLF001
+    if held != built:
+        problems.append(f"the state it was added with {held} is not its initial_state()'s {built}")
+    resp = client.post("/sim/step")
+    if resp.status_code != 200:
+        return problems + [f"201, and the graph cannot step: {resp.status_code} {resp.text[:300]}"]
+    stepped = _layout(served.gm._state[_NEW])  # noqa: SLF001
+    if stepped != built:
+        problems.append("201, and one step changed its state's layout: "
+                        + "; ".join(f"{k}: {built.get(k)} -> {stepped.get(k)}"
+                                    for k in sorted(set(built) | set(stepped))
+                                    if built.get(k) != stepped.get(k)))
+    for method, url in (("POST", "/checkpoint/save?path=stepped.npz"), ("POST", "/sim/reset"),
+                        ("POST", "/checkpoint/load?path=stepped.npz")):
+        resp = client.request(method, url)
+        if resp.status_code != 200:
+            problems.append(f"201, a step, and then {method} {url}: "
+                            f"{resp.status_code} {resp.text[:300]}")
+            break
+    return [f"{what}: {problem}" for problem in problems]
+
+
+def add_a_node_and_check_it(served: O.Served, body: dict) -> tuple[list, int]:
+    """``POST /graph/nodes`` with *body* on *served*, held to the
+    invariants of every request and, when it is a 201, to
+    :func:`check_the_added_node`; the node is removed again.
+    ``(problems, status)``."""
+    op = IN_SCOPE["POST /graph/nodes"]
+    req = request_of(op, Seed(body=body), served)
+    problems, resp = exchange(served, op, req)
+    if resp.status_code == 201:
+        problems += check_the_added_node(served, req.describe())
+        gone = served.client.delete(f"/graph/nodes/{_NEW}")
+        assert gone.status_code == 200, gone.text
+    return problems, resp.status_code
+
+
+def _battery_over_the_parameters_of(class_name: str) -> None:
+    cls, timestep, _ = _KIND_CLASSES[class_name]
+    served = O.serve(GraphManager(), registry=dict(CATALOGUE_REGISTRY))
+    problems, statuses = [], []
+    try:
+        plain = {"type": class_name, "name": _NEW, "timestep": timestep, "params": {}}
+        found, status = add_a_node_and_check_it(served, plain)
+        assert status == 201 and not found, f"the class's own defaults: {status} {found}"
+        for name, default in _numeric_defaults(cls).items():
+            for value in (*_other_ranks(default), None, {}):
+                found, status = add_a_node_and_check_it(
+                    served, {**plain, "params": {name: value}})
+                problems += found
+                statuses.append(status)
+    finally:
+        settle(served)
+        served.close()
+    # (HealthCheckNode has no numeric parameter: its defaults alone.)
+    assert statuses or not _numeric_defaults(cls)
+    assert not problems, (f"{len(problems)} problem(s) in {len(statuses)} requests:\n"
+                          + "\n".join(problems[:20]))
+
+
+@pytest.mark.parametrize("class_name", sorted(k for k, v in _KIND_CLASSES.items() if v[2]))
+def test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads(class_name):
+    """Each numeric constructor parameter of the class at another rank,
+    ``null`` and ``{}``: a 4xx that changes nothing, or a node the graph
+    steps with the layout of its ``initial_state()`` and whose checkpoint
+    loads after a reset."""
+    with quiet(), jax_recorder_not_run():
+        _battery_over_the_parameters_of(class_name)
+
+
+# Per push: tests/property/test_rest_requests_generated_from_the_schema.py::test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads
+@pytest.mark.slow  # a lattice or a wavelet basis built for every accepted request
+@pytest.mark.parametrize("class_name", sorted(k for k, v in _KIND_CLASSES.items() if not v[2]))
+def test_a_new_costly_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads(class_name):
+    """The battery above for the classes that take seconds to build."""
+    with quiet():
+        _battery_over_the_parameters_of(class_name)
+
+
+_CHEAP_CLASSES = sorted(k for k, v in _KIND_CLASSES.items() if v[2])
+
+
+@st.composite
+def generated_nodes(draw):
+    """A node of a cheap catalogue class with up to three of its numeric
+    constructor parameters given a drawn value: the default at another
+    rank, any JSON, or a number."""
+    class_name = draw(st.sampled_from(_CHEAP_CLASSES), label="class")
+    cls, timestep, _ = _KIND_CLASSES[class_name]
+    defaults = _numeric_defaults(cls)
+    params = {}
+    for name in draw(st.lists(st.sampled_from(sorted(defaults)), max_size=3, unique=True),
+                     label="parameters"):
+        params[name] = draw(st.one_of(
+            st.sampled_from([*_other_ranks(defaults[name]), None, {}]), _JSON,
+            st.floats(-4.0, 4.0, width=32)), label=name)
+    return {"type": class_name, "name": _NEW, "timestep": timestep, "params": params}
+
+
+_CATALOGUE_SERVED: list = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_catalogue_served():
+    yield
+    while _CATALOGUE_SERVED:
+        served = _CATALOGUE_SERVED.pop()
+        settle(served)
+        served.close()
+
+
+# Per push: tests/property/test_rest_requests_generated_from_the_schema.py::test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads
+@pytest.mark.slow  # a compile and a step for every node the server accepts
+@given(body=generated_nodes())
+def test_a_generated_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads(body):
+    """The battery's invariant over drawn values, at the profile's depth."""
+    if not _CATALOGUE_SERVED:
+        _CATALOGUE_SERVED.append(O.serve(GraphManager(), registry=dict(CATALOGUE_REGISTRY)))
+    served = _CATALOGUE_SERVED[0]
+    note(json.dumps(body, allow_nan=True)[:300])
+    try:
+        with quiet():
+            problems, status = add_a_node_and_check_it(served, body)
+    except BaseException:
+        _CATALOGUE_SERVED.pop()
+        served.close()
+        raise
+    note(f"-> {status}")
+    if problems:
+        _CATALOGUE_SERVED.pop()
+        settle(served)
+        served.close()
+    assert not problems, "\n".join(problems)
 
 
 # ---------------------------------------------------------------------------

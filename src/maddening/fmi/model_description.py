@@ -361,10 +361,14 @@ class ModelDescription:
 
         # <DefaultExperiment>
         ET.SubElement(root, "DefaultExperiment", attrib={
-            "startTime": repr(self.default_start_time),
-            "stopTime": repr(self.default_stop_time),
-            "tolerance": repr(self.default_tolerance),
-            "stepSize": repr(self.default_step_size),
+            # Each through the xs:double writer, never ``repr``: NumPy 2
+            # prints a scalar as ``np.float64(0.05)``, which no schema
+            # reads (a description built with ``default_step_size=
+            # np.float64(0.05)`` was written so, and FMPy refused the FMU).
+            "startTime": _xs_float(float(self.default_start_time)),
+            "stopTime": _xs_float(float(self.default_stop_time)),
+            "tolerance": _xs_float(float(self.default_tolerance)),
+            "stepSize": _xs_float(float(self.default_step_size)),
         })
 
         # <ModelVariables>
@@ -385,7 +389,7 @@ class ModelDescription:
                 interval = var.interval_decimal
                 # `__post_init__` refuses a clock without one.
                 assert interval is not None
-                attrib["intervalDecimal"] = repr(float(interval))
+                attrib["intervalDecimal"] = _xs_float(float(interval))
                 ET.SubElement(mv, "Clock", attrib=attrib)
                 continue
             if var.clocks:
@@ -467,6 +471,80 @@ def _ensure_stable_only_or_opt_in(
     ):
         return True
     return False
+
+
+#: How far an advertised communication step may sit from a whole number of
+#: graph steps, in ulps of the step: the rounding of ``n * graph_timestep``
+#: and of another spelling of the same number (``0.07`` against ``7 * 0.01``,
+#: one ulp apart), and nothing more.  The bridge's drift tolerance grows by
+#: this many ulps of the time per graph step
+#: (``tcp_bridge._DRIFT_ULPS_PER_STEP``), so an importer stepping at a size
+#: accepted here, each point computed as ``start + k * h``, is never refused.
+_ADVERTISED_STEP_ULPS = 4
+
+
+def _advertised_step(value: Any, what: str = "default_step_size") -> float:
+    """``value`` as the float a description advertises, refused unless it is
+    a finite, positive real number.
+
+    A NumPy scalar is a number and becomes the Python float of its value
+    (it used to be stored as given and written to the XML with ``repr``:
+    ``stepSize="np.float64(0.05)"``).  A Boolean, a string, an array (a JAX
+    scalar among them) or a complex number is not one.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a real number, or is not finite and positive.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, float, np.integer, np.floating)):
+        raise ValueError(
+            f"{what} must be a number (a Python or NumPy int or float), got "
+            f"{value!r} of type {type(value).__name__}; pass float(...) of it")
+    try:
+        step = float(value)
+    except OverflowError:
+        step = math.inf
+    if not math.isfinite(step) or step <= 0:
+        raise ValueError(f"{what} must be finite and positive, got {value!r}")
+    return step
+
+
+def _whole_steps(advertised: float, step: float, *, what: str = "default_step_size",
+                of: str = "graph_timestep", ulps: int = _ADVERTISED_STEP_ULPS) -> int:
+    """The whole number of steps of ``step`` that ``advertised`` is, to
+    ``ulps`` ulps; refused, naming the nearest whole multiple, otherwise.
+
+    An importer steps at the advertised size (the FMU cannot handle a
+    variable communication step), and the bridge holds the importer's clock
+    to the time it has simulated: a step a little off a whole number of
+    graph steps is accepted step by step and refused once its errors add
+    up.  ``float(np.float32(0.05))`` on a 0.01 s graph, 1.5e-8 off, used to
+    be accepted here and by the bridge, and answered ``fmi3Error`` at the
+    fourteenth ``fmi3DoStep``.
+
+    Raises
+    ------
+    ValueError
+        If ``advertised`` is not within ``ulps`` ulps of ``n * step`` for a
+        whole ``n >= 1``.
+    """
+    ratio = advertised / step
+    n = max(1, int(round(ratio))) if math.isfinite(ratio) else 1
+    nearest = n * step
+    off = abs(advertised - nearest)
+    if not off <= ulps * math.ulp(max(advertised, nearest)):
+        raise ValueError(
+            f"{what}={advertised!r} is not a whole number of steps of {of}="
+            f"{step!r}: it is {ratio:.17g} of them, and the nearest whole number, "
+            f"{n}, is {nearest!r} ({off / step:.3g} of a step away; at most {ulps} "
+            f"ulps, {ulps * math.ulp(max(advertised, nearest)) / step:.3g} of a step, "
+            f"are rounding).  An importer stepping at the advertised size would be "
+            f"refused once the difference adds up past the bridge's tolerance on "
+            f"time; pass {what}={n} * {of} (a float32-rounded or otherwise "
+            f"approximated step is not that number)")
+    return n
 
 
 def _xs_float(x: float) -> str:
@@ -1042,9 +1120,14 @@ def build_model_description(
         the GCD of the timesteps as scheduled (a sub-cycling coupling
         group at its largest member timestep), which is what one sidecar
         step advances.  Another value is advertised as the FMU's
-        communication step; a bridge serves it only if it is a whole
-        number of graph steps.  The graph step itself is recorded as
-        :attr:`ModelDescription.graph_timestep` either way.
+        communication step.  It must be a finite, positive number (a
+        Python or NumPy int or float; it is stored as a Python float) and
+        a whole number of graph steps to within rounding
+        (four ulps): ``5 * graph_manager.timestep``,
+        not a float32-rounded ``0.05``.  Anything else is refused here,
+        naming the nearest whole multiple, as an importer stepping at it
+        would be refused part-way through its run.  The graph step itself
+        is recorded as :attr:`ModelDescription.graph_timestep` either way.
     include_parameters : bool, default True
         Expose every leaf of ``graph_manager.params["nodes"]`` that the
         compiled step reads as a ``causality="parameter"``,
@@ -1501,6 +1584,13 @@ def build_model_description(
     graph_timestep = _master_timestep(graph_manager)
     if default_step_size is None:
         default_step_size = graph_timestep
+    else:
+        # A number, held to what the bridge will serve for a whole run:
+        # the Python float of it (a NumPy scalar was stored as given and
+        # written ``np.float64(0.05)``), a whole number of graph steps to
+        # rounding (see ``_whole_steps``).
+        default_step_size = _advertised_step(default_step_size)
+        _whole_steps(default_step_size, graph_timestep)
 
     # Deterministic instantiationToken — depends on the schema, so
     # the FMU loader refuses mismatched schemas at instantiation.  It

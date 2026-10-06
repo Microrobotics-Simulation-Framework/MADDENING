@@ -141,8 +141,18 @@ def injection_points() -> Iterator[None]:
             setattr(owner, name, original)
 
 
+def _record(served: O.Served) -> Any:
+    """The served graph, its server's record of it and the streams' clock
+    as they are now, for ``rollback()`` to put back (the server's own
+    transaction record, which the injected failures hold to the oracle's
+    snapshot and fingerprint at every point)."""
+    with served.server._graph_lock:  # noqa: SLF001
+        return server_module._GraphTransaction(served.server)  # noqa: SLF001
+
+
 def fail_at_every_point(served: O.Served, send: Callable[[], Any], what: str, *,
                         partial: Callable[[Any], int] = lambda resp: 0,
+                        rerun: Optional[Callable[[int], Any]] = None,
                         on_failure: Optional[Callable[[str, Any], None]] = None,
                         max_points: int = 400):
     """Send one request with a failure injected at each point it reaches in
@@ -157,14 +167,25 @@ def fail_at_every_point(served: O.Served, send: Callable[[], Any], what: str, *,
 
     *partial*: how many steps a reply says the request took before it
     failed (``POST /sim/run``, the one refusal documented to leave the
-    graph changed): the streams' clock must then have advanced by exactly
-    that many steps, the slice that failed put back.
+    graph changed), and *rerun*: the same request for that many steps.
+    The server is then what a run of exactly that many steps leaves, the
+    slice that failed put back -- found by a replay, not by a rule: the
+    graph is put back as it was before the request (and held to that), the
+    counted steps are run with no failure, and the two results are
+    compared whole (:func:`rest_oracle.snapshot`: state, params, config,
+    files and the streams' clock).  What a step does to the clock is the
+    server's to say and differs by history -- the relay observes a graph
+    from its first node on and goes on observing it when its last node is
+    removed, so an emptied graph's steps are counted and a graph that was
+    always empty's are not -- and a replay from the same server has the
+    same history.
     """
     injector = Injector(served)
     tried: list[str] = []
     for at in range(max_points):
         before = O.snapshot(served)
         fingerprint = served_fingerprint(served)
+        start = _record(served) if rerun is not None else None
         injector.arm(at)
         try:
             resp = send()
@@ -189,13 +210,22 @@ def fail_at_every_point(served: O.Served, send: Callable[[], Any], what: str, *,
         steps = partial(resp)
         after = O.snapshot(served)
         if steps:
-            # An empty graph has nothing to publish: its steps are taken
-            # and counted by the reply, and the streams' clock stays where
-            # it is, as it does when such a run succeeds.
-            counted = steps if served.gm._nodes else 0  # noqa: SLF001
-            assert after["clock"][0] == before["clock"][0] + counted, (
-                f"{where} said it took {steps} step(s); the streams' clock went "
-                f"{before['clock']} -> {after['clock']}")
+            assert rerun is not None and start is not None, (
+                f"{where} said it took {steps} step(s), and no replay was given "
+                "to hold it to")
+            start.rollback()
+            back = f"{where} and then put back by the oracle to replay its steps,"
+            O.assert_nothing_changed(before, O.snapshot(served), back)
+            assert_exactly_as_it_was(fingerprint, served_fingerprint(served), back)
+            replayed = rerun(steps)
+            assert replayed.status_code == 200, (
+                f"{where} said it took {steps} step(s); a run of {steps} step(s) "
+                f"from the same graph -> {replayed.status_code} {replayed.text[:300]}")
+            found = O.differences(O.snapshot(served), after)
+            assert not found, (
+                f"{where} said it took {steps} step(s) and did not leave what a run "
+                f"of {steps} step(s) from the same graph leaves (the replay -> the "
+                "failed run): " + "; ".join(found))
             continue
         O.assert_nothing_changed(before, after, where)
         assert_exactly_as_it_was(fingerprint, served_fingerprint(served), where)

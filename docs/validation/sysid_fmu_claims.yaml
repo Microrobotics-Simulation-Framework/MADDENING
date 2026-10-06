@@ -2326,7 +2326,9 @@ claims:
     - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_warns_when_the_guard_reads_full_and_the_jacobian_does_not
     - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_silent_where_the_guard_held_the_direction
     - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_silent_on_a_fit_every_direction_of_which_is_resolved
-    - tests/core/test_sysid_non_differentiable_residual.py::test_the_curvature_rank_is_the_count_of_directions_the_cutoff_resolves
+    - tests/core/test_sysid_non_differentiable_residual.py::test_the_curvature_rank_is_fims_rank_in_fims_coordinates
+    - tests/core/test_sysid_non_differentiable_residual.py::test_the_warning_does_not_fire_on_a_coordinate_its_transform_flattens
+    - tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_warns_on_the_springs_scale_under_its_default_specs
   status: verified
   domains:
     f32: tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
@@ -2623,8 +2625,8 @@ claims:
     the linearisation's own change, the rejection is a jump and not
     rounding ... The run then ends converged=False with a RuntimeWarning
     naming a residual that is not differentiable"; an iteration "whose
-    damped candidates all rounded to no move, while the undamped step was
-    rejected ... is run once more from lam0 before the rule reads it".
+    ladder began above lam0 while the undamped step was rejected ... is
+    run once more from lam0 before the rule reads it".
   sources:
     - src/maddening/sysid.py:4878 (fit_lm)
     - src/maddening/sysid.py:4158 (FitResult, converged)

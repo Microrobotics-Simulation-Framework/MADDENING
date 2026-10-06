@@ -5770,10 +5770,11 @@ def fit_lm(
     step lowers the loss from but whose ``J`` is one-sided; a jump whose
     mirror image the bounds do not allow; and a jump beside an iterate the
     *proposal* test passes (stationary on its own piece).  And an iteration
-    whose damped candidates all rounded to no move, while the undamped step
-    was rejected, has tested nothing between the two (the damping it
-    inherited was too high, as after a step accepted at the cap), so it is
-    run once more from ``lam0`` before the rule reads it.
+    whose ladder began above ``lam0`` while the undamped step was rejected
+    has tested no step length between its longest damped candidate and
+    the undamped one (the damping it inherited was too high, as after a
+    step accepted far up the ladder; at worst every candidate rounded to no
+    move), so it is run once more from ``lam0`` before the rule reads it.
 
     **A step of a ``log`` / ``logit`` coordinate is read along the
     transform's curve or along its tangent, whichever moves the value
@@ -6282,8 +6283,9 @@ def fit_lm(
         attempt, there = -1, here
         rejected: list = []
         # Whether any candidate of this iteration's ladder moved a parameter
-        # at all, and whether the floor rule sends the iterate round again.
-        moved, again = False, False
+        # at all, the damping the ladder begins at, and whether the floor
+        # rule sends the iterate round again.
+        moved, again, lam_begin = False, False, lam
         while True:
             attempt += 1
             if attempt >= _LM_LADDER and not (
@@ -6378,19 +6380,26 @@ def fit_lm(
                         gn_move = _largest_relative_move(here, gn_there)
                         if gn_move <= _JUMP_MAX_MOVE and np.isfinite(loss_gn):
                             rejected.append((gn_cand, gn_r, gn_move))
-                        if not moved and lam > lam_start and relaxed_at is not theta:
-                            # Every damped candidate rounded to no move at
-                            # all, so the only step this iterate was asked
-                            # about is the undamped one: the rule's "every
-                            # candidate was rejected" has nothing between the
-                            # two to stand on.  That is the damping the run
-                            # arrived with, not the iterate -- a step accepted
-                            # at the cap leaves ``lam`` a decade below it, and
-                            # on a residual with jumps such a step can be one
-                            # that crossed a jump downwards, onto a piece the
-                            # run has not descended yet.  So the iterate is
+                        if ((not moved or lam_begin > lam_start) and lam > lam_start
+                                and relaxed_at is not theta):
+                            # The ladder began above the damping the run
+                            # started with, so between its longest candidate
+                            # and the undamped step, which was rejected, there
+                            # are step lengths this iterate was never asked
+                            # about: the rule's "every candidate was rejected"
+                            # has a gap in it.  (At its worst every damped
+                            # candidate rounded to no move at all.)  That is
+                            # the damping the run arrived with, not the
+                            # iterate -- a step accepted far up the ladder
+                            # leaves ``lam`` a decade below where it was taken,
+                            # and on a residual with jumps such a step can be
+                            # one that crossed a jump downwards, onto a piece
+                            # the run has not descended yet, where the
+                            # candidates it inherits are too short to gain
+                            # more than the loss's rounding and the undamped
+                            # step crosses the next jump.  So the iterate is
                             # asked once more, from the damping the run
-                            # started with.
+                            # started with: a ladder with no gap.
                             at_floor, again = False, True
                             lam, relaxed_at = lam_start, theta
                 if at_floor:

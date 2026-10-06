@@ -74,15 +74,20 @@ d. **converged beside a lower loss**, on a second problem, whose residual
    parameter moves, so the loss is piecewise smooth with jumps
    (MADD-ANO-021), and Levenberg-Marquardt is drawn along a piece to its
    edge.  For a fit that reports ``converged=True``: the largest fall of
-   the loss over the points within 1e-4 of the returned one in the
-   optimiser's coordinates (both parameters are fitted as they are), in
-   units of what the residual's rounding can move the loss by (SYS-080:
-   ``converged`` is not reported beside a jump).  1e-4 is inside one
-   smooth piece of this loss, whose pieces are about 1e-3 wide; a fit
-   converged at the interior minimum of a piece that is not the truth's
-   is at an optimum and scores 0 (the per-push draws hold one: truth 0.6,
-   started at 0.5 with the true gravity, loss 5.1e-3, flat to rounding
-   out to 1e-4 and with the truth's piece 1e-3 away).
+   the loss at a point 1e-4 of each parameter away from the returned one
+   in the optimiser's coordinates (both parameters are fitted as they
+   are), in units of what the residual's rounding can move the loss by --
+   counted where the loss falls *along the piece the point is on*, a tenth
+   as far at a tenth of the distance (SYS-080: ``converged`` is not
+   reported where a step still lowers the loss).  A fall that does not
+   shrink with the distance is a jump to another piece, and a converged
+   fit beside one is at an optimum of its own piece and scores 0.  The
+   hunt found two kinds: the interior minimum of a piece that is not the
+   truth's (truth 0.6, started at 0.5 with the true gravity: loss 5.1e-3,
+   flat to rounding out to 1e-4, the truth's piece 1e-3 away), and a fit
+   within ``step_tol`` of the truth on the far side of the jump that sits
+   at the truth itself (truth 0.3, started at 0.75: the parameters right
+   to 1e-6, the loss 2.0e-5 where 1e-10 is 1e-6 of the elasticity away).
 
 Per push: each search, derandomised, at the house floor of examples.  Slow:
 the random hunt.  What the hunt found is pinned at the foot of the module.
@@ -555,9 +560,13 @@ BALL_STEPS = 200
 BALL_ROUNDING = float(np.sqrt(BALL_STEPS) * 2.0 ** 2 * np.finfo(np.float32).eps)
 #: Score (d) is in units of the fall rounding explains, so its threshold is 1.
 BESIDE = 1.0
-#: How far from a returned point score (d) reads the loss, as fractions of
-#: each parameter: inside one smooth piece (about 1e-3 wide).
-_BALL_RADII = (1e-5, 1e-4)
+#: How far from a returned point score (d) reads the loss, as a fraction of
+#: each parameter -- inside one smooth piece (about 1e-3 wide) -- and the
+#: nearer distance, a tenth of it, at which a fall along a smooth piece is
+#: a tenth as large (counted between a fiftieth and a half: measured 0.09
+#: to 0.10 at the endings beside a jump, and 1.0 across one).
+BALL_RADIUS, BALL_NEARER = 1e-4, 0.1
+_ALONG_A_PIECE = (0.02, 0.5)
 _BALL: dict = {}
 
 
@@ -633,18 +642,23 @@ def converged_beside_a_lower_loss(case: BallCase):
         # What a residual moved by its rounding moves ``0.5 ||r||^2`` by.
         rounding = BALL_ROUNDING * float(np.sqrt(2.0 * best)) + 0.5 * BALL_ROUNDING ** 2
         e, g = float(leaves["elasticity"]), float(leaves["gravity"])
-        lowest = best
-        for radius in _BALL_RADII:
-            for i, j in _DIRECTIONS:
-                near = dict(leaves,
-                            elasticity=jnp.asarray(min(max(e * (1.0 + i * radius), 0.0), 1.0),
-                                                   leaves["elasticity"].dtype),
-                            gravity=jnp.asarray(g * (1.0 + j * radius), leaves["gravity"].dtype))
-                tree = dict(res.params, nodes=dict(res.params["nodes"], ball=near))
-                loss = float(sysid._half_squared_norm(program(tree)))  # noqa: SLF001
-                if np.isfinite(loss):
-                    lowest = min(lowest, loss)
-        return (best - lowest) / rounding, details + (lowest,)
+
+        def loss_at(i, j, radius):
+            near = dict(leaves,
+                        elasticity=jnp.asarray(min(max(e * (1.0 + i * radius), 0.0), 1.0),
+                                               leaves["elasticity"].dtype),
+                        gravity=jnp.asarray(g * (1.0 + j * radius), leaves["gravity"].dtype))
+            tree = dict(res.params, nodes=dict(res.params["nodes"], ball=near))
+            return float(sysid._half_squared_norm(program(tree)))  # noqa: SLF001
+
+        fall = 0.0
+        for i, j in _DIRECTIONS:
+            far = best - loss_at(i, j, BALL_RADIUS)
+            near = best - loss_at(i, j, BALL_RADIUS * BALL_NEARER)
+            if (np.isfinite(far) and far > fall
+                    and _ALONG_A_PIECE[0] * far <= near <= _ALONG_A_PIECE[1] * far):
+                fall = far
+        return fall / rounding, details + (fall,)
 
 
 #: ``(score, strategy, threshold)``.
@@ -675,6 +689,29 @@ def test_no_wrong_fit_found_by_the_search(name):
 # ---------------------------------------------------------------------------
 # Found by the search
 # ---------------------------------------------------------------------------
+
+#: Fits of the ball that ``fit_lm`` reported converged where the loss still
+#: fell along the piece they were on, as ``(true elasticity, true gravity,
+#: the elasticity's start, the gravity's start)``, gravities over -9.81.
+#: The first is what the per-push draws of score (d) found before the
+#: floor rule told a jump from the rounding floor.  The second the random
+#: hunt found after that, at its 164th example: a step that crossed a jump
+#: downwards far up the damping ladder left the next iteration candidates
+#: too short to gain more than the loss's rounding, with the undamped step
+#: across the next jump; the floor rule now asks such an iterate again from
+#: the starting damping (a score of 30 before; ``converged=True`` at a loss
+#: of 0.021).
+_CONVERGED_WHERE_THE_LOSS_FELL = [
+    (0.7, 1.0, 0.625, 1.333521432163324),
+    (0.7, 1.2429505644303036, 0.625, 1.0),
+]
+
+
+@pytest.mark.parametrize("cell", _CONVERGED_WHERE_THE_LOSS_FELL)
+def test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece(cell):
+    score, details = converged_beside_a_lower_loss(BallCase(*cell))
+    assert score <= BESIDE, (score, details)
+
 
 #: Fits that stopped with iterations left, ``converged=False``, the damping
 #: on the upper end of a wide range (a ``logit`` one with the edge warning)

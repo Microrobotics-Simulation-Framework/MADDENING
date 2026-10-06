@@ -315,6 +315,37 @@ def _params_empty(params: Any) -> bool:
         return False
 
 
+def _detached_config(value: Any) -> Any:
+    """*value* copied into plain containers that share nothing mutable
+    with it: what a config hands out.
+
+    A ``dict`` of any class (a node's ``params`` is a counting subclass)
+    comes back as a ``dict``, a ``list`` as a new ``list``, a ``tuple`` as
+    a tuple of copies (a named tuple keeps its class), a NumPy array as a
+    copy; anything else -- a number, a string, a JAX array, none of which
+    can be changed in place -- as it is.
+
+    ``to_dict()`` used to hand out the graph's own containers: a node's
+    ``params`` mapping, the lists inside it, a mapped edge's point sets, a
+    sharded wrapper's ``axis_map``.  Editing a config to build a variant
+    of a graph -- ``cfg = gm.to_dict(); cfg["nodes"][0]["params"]["k"] =
+    5.0`` -- therefore edited the graph it came from, which ran the
+    variant's value from its next step or recompile on, with nothing
+    said (MADD-ANO-198).  It also made the config's ``params`` a ``dict``
+    subclass, which ``yaml.safe_dump`` refuses.
+    """
+    if isinstance(value, dict):
+        return {key: _detached_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_detached_config(item) for item in value]
+    if isinstance(value, tuple):
+        items = [_detached_config(item) for item in value]
+        return type(value)._make(items) if hasattr(value, "_make") else tuple(items)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
+
 def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
     """Would calling ``fn(..., <keyword>=x)`` deliver ``x``?
 
@@ -1612,10 +1643,16 @@ class SimulationNode(ABC):
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise the node descriptor (not runtime state)."""
+        """Serialise the node descriptor (not runtime state).
+
+        ``params`` is a copy in plain containers
+        (:func:`_detached_config`), not the node's own ``params``.  It
+        used to be that mapping itself, so writing into a config wrote
+        into the node (MADD-ANO-198).
+        """
         return {
             "type": type(self).__name__,
             "name": self.name,
             "timestep": self.delta_t,
-            "params": self.params,
+            "params": _detached_config(self.params),
         }

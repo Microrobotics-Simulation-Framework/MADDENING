@@ -42,6 +42,7 @@ from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import (
+    _detached_config,
     BoundaryFluxSpec,  # noqa: F401 - named by boundary_flux_spec's annotation
     SimulationNode,
     _method_accepts_params,
@@ -434,7 +435,7 @@ class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
         d = self._inner.to_dict() if hasattr(self._inner, "to_dict") else {}
         d["sharded"] = True
         d["shard_axes"] = self._shard_axes
-        return d
+        return _detached_config(d)
 
 
 def _params_signature(params) -> tuple:
@@ -1825,4 +1826,6 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         d["sharded_stencil"] = True
         d["axis_map"] = self._axis_map
         d["boundary"] = self._boundary
-        return d
+        # Copies: the wrapper's own axis map used to be handed out, and a
+        # config edited to describe another decomposition changed this one.
+        return _detached_config(d)

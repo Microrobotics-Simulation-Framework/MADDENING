@@ -69,7 +69,8 @@ from maddening.core.coupling.acceleration import (
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import (
-    SimulationNode, _method_accepts_params, _mutable_snapshot, _mutated_keys,
+    SimulationNode, _detached_config, _method_accepts_params, _mutable_snapshot,
+    _mutated_keys,
 )
 from maddening.core.params import (
     ParamSpec,
@@ -7133,7 +7134,9 @@ class GraphManager:
         scalars/lists.  This is what serialisation stores, so a calibrated
         graph reloads with the calibrated constants."""
         spec = self._nodes[name]
-        out = dict(spec.node.params)
+        # A copy all the way down: a list this handed out used to be the
+        # node's own (MADD-ANO-198).
+        out = _detached_config(spec.node.params)
         live = self._params_or_default(params).get("nodes", {}).get(name, {})
         snapshot = spec.node.params_pytree()
         for key, value in live.items():
@@ -11503,7 +11506,12 @@ class GraphManager:
             n: {k: s.to_dict() for k, s in o.items()}
             for n, o in self.param_spec_overrides().items()
         }
-        return encode_non_finite({
+        # Detached last, over the whole tree: whatever a part's own
+        # ``to_dict`` handed out -- a node's params, a mapped edge's point
+        # sets, a sharded wrapper's axis map -- the config shares no
+        # container with the graph, so editing it edits nothing else
+        # (MADD-ANO-198).
+        return encode_non_finite(_detached_config({
             "nodes": nodes,
             **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
@@ -11517,7 +11525,7 @@ class GraphManager:
             # exactly the config it wrote before this key existed.
             **({"coupling_groups": [g.to_dict() for g in self._coupling_groups]}
                if self._coupling_groups else {}),
-        })
+        }))
 
     @classmethod
     def from_dict(

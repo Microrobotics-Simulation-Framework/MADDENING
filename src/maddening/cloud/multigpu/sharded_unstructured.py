@@ -56,7 +56,7 @@ from maddening.cloud.multigpu.halo_unstructured import (
 from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode, _method_accepts_params
+from maddening.core.node import SimulationNode, _detached_config, _method_accepts_params
 from maddening.core.static_data import StaticArray
 
 
@@ -958,7 +958,7 @@ class ShardedUnstructuredNode(SimulationNode):
         d["sharding"] = "unstructured"
         d["n_devices"] = self._layout.n_devices
         d["exchange"] = self._exchange
-        return d
+        return _detached_config(d)
 
 
 __all__ = [

@@ -69,6 +69,7 @@ from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import (
     SimulationNode, _method_accepts_params, _mutable_snapshot, _mutated_keys,
+    _replaced_keys,
 )
 from maddening.core.params import (
     ParamSpec,
@@ -5886,6 +5887,17 @@ def _short_value(value) -> str:
     return np.array2string(arr, precision=7, separator=", ")
 
 
+def _write_counts(params) -> Optional[dict]:
+    """``{key: writes}`` of a node's params mapping since its lineage began
+    (``_ParamsDict._write_counts``: its own counted writes and those of the
+    mappings it replaced), or ``None`` for a mapping that does not count."""
+    counter = getattr(params, "_write_counts", None)
+    if not callable(counter):
+        return None
+    counts = counter()
+    return counts if isinstance(counts, dict) else None
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -5937,9 +5949,10 @@ class GraphManager:
         # ``params`` property, which first takes in any ``node.params``
         # write (``_sync_node_param_writes``).
         self._params: dict = {"nodes": {}, "mappings": {}}
-        # What the last sync saw of each node: its params mapping and write
-        # counts.  A ``node.params`` write is what moved them since.
-        self._node_writes_seen: dict[str, tuple[Any, Any, dict, dict]] = {}
+        # What the last sync saw of each node: its params mapping, its write
+        # counts and a copy of its in-place-mutable values.  A ``node.params``
+        # write is what moved them since.
+        self._node_writes_seen: dict[str, tuple[Any, dict, dict]] = {}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -6048,13 +6061,16 @@ class GraphManager:
         takes the node write in, so that write wins in turn.  (Only a leaf
         written through a reference held across the node write, with no
         read in between, loses to it.)  A write is a counted write to the
-        node's ``_ParamsDict``, the mapping replaced (which the node stores
-        as a new ``_ParamsDict``), or a value changed in place -- an element
-        of a list or a NumPy array, which no method of the mapping sees --
-        found by comparing each such value with its copy from the last sync
-        (:func:`~maddening.core.node._mutated_keys`); so a write of the
-        value the node already held counts, and one into a list is not lost
-        (MADD-ANO-175).  Never compiles, so it is safe from a getter and
+        node's ``_ParamsDict``; a key the mapping's replacement changed
+        (``node.params = {**node.params, "k": v}`` is stored as a new
+        ``_ParamsDict`` that takes over the old one's counts and counts
+        ``k``, not the keys it hands back with the value they had:
+        ``_ParamsDict._succeed``, MADD-ANO-203); or a value changed in place
+        -- an element of a list or a NumPy array, which no method of the
+        mapping sees -- found by comparing each such value with its copy
+        from the last sync (:func:`~maddening.core.node._mutated_keys`).  So
+        a keyed write of the value the node already held counts, and one
+        into a list is not lost (MADD-ANO-175).  Never compiles, so it is safe from a getter and
         from :meth:`compile`; node values are taken under
         ``jax.ensure_compile_time_eval``, so a sync inside a trace stores
         concrete arrays.
@@ -6066,17 +6082,43 @@ class GraphManager:
             seen = self._node_writes_seen.get(name)
             if seen is None:
                 continue                    # added since the last compile
-            mutated = _mutated_keys(params, seen[3]) if params is seen[0] else set()
-            if params is seen[0] and getattr(params, "_writes", None) == seen[1] \
-                    and not mutated:
-                continue
-            key_writes = getattr(params, "_key_writes", None)
-            if params is not seen[0] or key_writes is None:
-                written = set(params) | set(seen[0] if isinstance(seen[0], dict) else ())
+            was, counts_seen, snapshot = seen
+            counts = _write_counts(params)
+            # The mapping the last sync saw, or one that has taken over from
+            # it since (``node.params = {...}``: ``_ParamsDict._succeed``),
+            # whose counts continue its counts.
+            continued = params is was or (
+                counts is not None
+                and getattr(params, "_lineage", None) is getattr(was, "_lineage", object()))
+            if counts is None and params is not was:
+                # A mapping that does not count (``node.__dict__["params"]``
+                # assigned directly) put in the old one's place: nothing says
+                # which keys were written, so all were.
+                written = set(params) | set(was if isinstance(was, dict) else ())
+            elif counts is None:
+                written = _mutated_keys(params, snapshot)
+            elif continued:
+                # Counted writes -- a replacement counts the keys it changed,
+                # not the ones it handed back (MADD-ANO-203) -- and values
+                # changed in place.
+                written = {k for k in set(counts) | set(counts_seen)
+                           if counts.get(k, 0) != counts_seen.get(k, 0)}
+                written |= _mutated_keys(params, snapshot)
             else:
-                counts = seen[2]
-                written = {k for k in set(key_writes) | set(counts)
-                           if key_writes.get(k, 0) != counts.get(k, 0)} | mutated
+                # A counting mapping from elsewhere stored as it is (a
+                # sharded wrapper shares its node's): its counts say nothing
+                # about this graph's last sync, so its values do, beside
+                # whatever the old mapping had pending when it went.
+                before = _write_counts(was) or {}
+                written = {k for k in set(before) | set(counts_seen)
+                           if before.get(k, 0) != counts_seen.get(k, 0)}
+                written |= _mutated_keys(was, snapshot)
+                if isinstance(was, dict):
+                    written |= _replaced_keys(was, params)
+                else:
+                    written |= set(params)
+            if not written and params is was:
+                continue
             live = nodes_live.get(name)
             values: dict = {}
             if written and live is not None:
@@ -6089,9 +6131,7 @@ class GraphManager:
                     continue
                 with jax.ensure_compile_time_eval():
                     live[key] = jnp.asarray(values[key], dtype=jnp.asarray(live[key]).dtype)
-            self._node_writes_seen[name] = (params, getattr(params, "_writes", None),
-                                            dict(key_writes or {}),
-                                            _mutable_snapshot(params))
+            self._node_writes_seen[name] = (params, counts or {}, _mutable_snapshot(params))
         if marked:
             self._dirty = True
         return marked
@@ -6102,8 +6142,7 @@ class GraphManager:
         :func:`~maddening.core.node._mutable_snapshot`), as of now, are what
         the next sync compares against."""
         self._node_writes_seen = {
-            name: (spec.node.params, getattr(spec.node.params, "_writes", None),
-                   dict(getattr(spec.node.params, "_key_writes", None) or {}),
+            name: (spec.node.params, _write_counts(spec.node.params) or {},
                    _mutable_snapshot(spec.node.params))
             for name, spec in self._nodes.items()
         }

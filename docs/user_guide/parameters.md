@@ -264,6 +264,18 @@ place into a list, a NumPy array or a nested dict
 with a copy taken at the last sync, which costs a copy and a comparison
 of those values per sync.  Until 0.4.0's fix both were lost to
 `gm.params`, every run, `compile()` and `to_dict()`.
+**The assignment is a write of the keys whose values it changes** -- a key
+added, dropped, or given another value, bit for bit -- **and of no
+other**: the keys it hands back unchanged are the node's own values, not
+writes, so a constant of that node you calibrated in `gm.params` stays
+calibrated.  It is the rule the in-place write follows, and the one way
+the two spellings of a write differ: `node.params = {**node.params, "k":
+v}` with the `v` the node already held writes nothing, while
+`node.params["k"] = v` is a write whatever the value.  Write the key to
+put a node's own value back over a calibration.  (For a time during 0.4.0
+development the assignment was read as a write of every key, and the
+one-key idiom put the node's own value over every other calibrated
+constant of the node, without a word.)
 A `gm.params` write reads `gm.params` first, which takes in any pending
 node write, so the two are always ordered and the later wins; the one
 exception is a `gm.params` leaf written through a reference held across
@@ -323,6 +335,22 @@ u = gm.unconstrain()       # optimiser coordinates (log k, log m, ...)
 gm.constrain(u)            # back to physical values, always inside bounds
 gm.check_params(p)         # ValueError naming the first leaf out of range
 ```
+
+`gm.constrain(gm.unconstrain(p))` returns `p` to the transform's own
+resolution, which its bounds set and not the value: within 16 of its
+spacings -- `eps * max(|lo|, |hi|, hi - lo)` for `logit`, `eps * |lo|` for
+`log` -- plus 16 `eps` of the value, because the maps rebuild the value as
+`lo + ...` in the leaf's dtype.  Under bounds far
+wider than the value that is coarse -- a float32 `2.0` under `logit`
+bounds `(-1e6, 1e6)` comes back up to 0.12 away, and not at the same
+float from eager and jitted code -- so give a transformed parameter
+bounds near its own size, or `transform=None`.  The fitters make that map
+once per iterate, run the model on the arrays it returns and hand those
+arrays back, so what they report is always the loss of what they return;
+and they warn (`PrecisionLimitWarning`, naming the leaf) about a
+parameter they are asked to fit whose value its transform resolves to
+worse than `sqrt(eps)` of itself.  A leaf a fit does not move is never
+passed through its transform at all.
 
 ## System identification: `maddening.sysid`
 
@@ -580,13 +608,46 @@ bound converges on either bound.  A float32 constant in an x64 graph is
 optimised on float32's grid, as the model sees it, so it converges in as
 few iterations as a float64 one.
 
-Every fitter keeps each optimiser coordinate where `constrain` is its
-transform and not a clamp: a `transform=None` leaf inside its bounds,
-and a `log` / `logit` leaf short of where `exp` floors or overflows and
-the sigmoid meets the edge of its representable range.  Past those the
-derivative is 0, and a coordinate one step carried there used to stay
-there: a spring's damping started at 4 against a truth of 0.05 landed on
-0 and `fit_lm` called it converged.
+Every fitter keeps each optimiser coordinate where its transform can be
+stepped on: a `transform=None` leaf inside its bounds (clipped, with the
+one-sided derivative on a bound), and a `log` / `logit` leaf at least
+`sqrt(eps)` of its bounds' own size inside each bound (3.5e-4 of the
+range in float32, 1.5e-8 in float64), and short of where `exp` floors or
+overflows.  Nearer a bound than that the transform is flat to the working
+precision: the distance to the bound has lost half its digits, and a unit
+step of the coordinate moves the value by a few float spacings.  So **a
+`log` / `logit` parameter cannot be fitted onto its bound**: a fit that
+ends on that margin -- its data pull the parameter to the bound, or it
+started out there and could not come back within its budget -- says so in
+a `RuntimeWarning` naming the parameter.  Declare a parameter that belongs
+on its bound with `transform=None`, which clips and can sit there.
+
+`fit_lm` reads each step of a `log` / `logit` coordinate along the
+transform's curve or along its tangent, whichever moves the value less.
+The two agree to first order.  Where the transform is flat, the tangent's
+reading is the step the same parameter would take under `transform=None`,
+so a coordinate at the edge of its range comes back in one step; where a
+step heads for a bound, the curve's closes the distance by a factor of
+*e* at most and never lands on it.  The test suite holds `fit_lm` to the
+consequence over a grid of this spring (each transform, the truth and the
+start anywhere in the range and a few float spacings inside each edge,
+both precisions): wherever the same fit with the parameter clipped instead
+of transformed recovers its optimum, the transformed one does too.  `fit` and
+`fit_multiple_shooting` step a coordinate by about `lr` whatever the
+gradient, so they leave such an edge only over about `8 / lr` updates in
+float32 and `18 / lr` in float64 (more while the coordinate's gradient is
+below Adam's `eps` of the largest); they name a parameter started there
+before they run.
+
+Until 0.4.0's fix a coordinate one step carried to such an edge stayed
+there.  A `transform=None` damping started at 4 against a truth of 0.05
+landed on 0 and `fit_lm` called it converged.  A `logit` coordinate's
+range ended where its derivative was a few `eps` of the bounds, from
+where every Levenberg-Marquardt candidate, `1/eps` long, landed on the
+opposite edge: under x64 on the spring above, a damping bounded to
+`(0.5, 2)` came back 2.0 for a truth of 1.9 from 20 of 60 starts, not
+converged and without a word, where the same fit with the bounds clipped
+recovered the truth from every one.
 
 For noisy data, `fit_multiple_shooting` replaces teacher forcing with
 free per-window initial states and a continuity penalty
@@ -703,7 +764,7 @@ is isotropic there — take `A = [[1, 2], [2, 4]]` and `g = (1, 2)`, whose step
 is `∝ (2, 1)` for every `λ` against a null space spanned by `(2, −1)`.
 
 They differ in how badly.  `fit_lm`'s step vanishes with the gradient, so its
-drift *converges*: on the spring above it settles 0.85% (noiseless) or 0.43%
+drift *converges*: on the spring above it settles 1.78% (noiseless) or 0.66%
 (σ = 0.02) from the scale you supplied and stays there, bit for bit, from
 iteration 10 to 200.  `fit_multiple_shooting` is Adam, so it does not settle:
 2.0% to 4.8% across `lr` 0.01–0.2, a 3.0% spread that the schedule picks and

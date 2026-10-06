@@ -13665,3 +13665,142 @@ anomalies:
       - "tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_an_output_of_a_node_this_fmu_does_not_export_is_refused_by_name"
       - "tests/fmi/test_selected_outputs_name_what_the_fmu_exports.py::test_a_selection_exports_exactly_the_outputs_it_names"
     github_issue: null
+  - anomaly_id: "MADD-ANO-202"
+    title: "The fitters evaluated their objective at parameters other than the ones they returned: under a logit or offset log transform with bounds wide beside the value, best_loss was another point's loss, and a leaf left out of the fit was run perturbed"
+    description: >
+      `fit`, `fit_lm` and `fit_multiple_shooting` mapped their optimiser
+      coordinates to physical parameters twice: inside the jitted objective,
+      and again eagerly (`gm.constrain`) for `FitResult.params`, the
+      `callback` and the observers.  A `logit` leaf is rebuilt as `lo + (hi -
+      lo) * sigmoid(u)` and a `log` leaf as `lo + exp(u)` in the leaf's
+      dtype, so the values the map can return are spaced like the floats
+      near the *bounds* -- `eps * max(|lo|, |hi|, hi - lo)` and `eps * |lo|`
+      -- and XLA contracts the multiply-add where eager JAX does not, so
+      the two evaluations landed on different points of that grid.  At
+      ordinary bounds they differed by an ulp for about one value in 400;
+      in float32 under `logit` bounds `(-1e4, 1e4)`, `fit_lm` on the
+      parameter guide's spring reported `best_loss` 1.27e-8 for parameters
+      whose loss, by its own residual, is 4.5e-10, and under `(-1e6, 1e6)`
+      returned a damping of 2.0 for an objective it had run at 2.0266.  And
+      a leaf the fit does not move was returned as given while the
+      objective ran its `constrain(unconstrain(p))` round trip whenever the
+      *eager* round trip happened to be exact (the 0.4.0 development fix
+      for the one-ulp case decided from the eager map alone): a damping
+      left out by `mask=` at its true 2.0 under `logit` bounds `(-1e6,
+      1e6)` was run at 2.0266 and the stiffness fitted beside it came back
+      30.06 for a truth of 30, `converged=True`, with no warning.  Found by
+      the B1 round-9 claims audit (SYS-104, SYS-071, SYS-054, SYS-080, on
+      e301c41, 2026-10-05); the third audit round to find two evaluations
+      of this mapping disagreeing in their last bits.  No tagged release
+      carried it: `maddening.sysid` and the parameter specs are new in
+      0.4.0.  Resolved in 0.4.0 (2026-10-05) by removing one evaluation:
+      each fitter maps `theta` to physical parameters once, by one compiled
+      function, runs its model on the arrays that returns -- the
+      model-side programs take the physical tree as their argument and
+      contain nothing of a transform -- and hands those arrays back.  A
+      leaf the fit does not move is never passed through its transform, in
+      the result or in any evaluation.  A fitted leaf whose value its
+      transform cannot resolve to `sqrt(eps)` of itself is named in a
+      `PrecisionLimitWarning` at the start of the fit.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a parameter fitted against a model run with a constant other
+      than the one given (0.2% off in the reproducer), `converged=True`,
+      and a `best_loss` that was not the loss of the parameters returned.
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result is never `minor`) and registered although no release carried
+      it, because it is major.  Not `critical`: the error is the transform's
+      resolution, so it needs a `logit` or offset `log` leaf whose bounds
+      are thousands of times wider than its value, in float32.
+      `context_dependent` because what a misidentified constant does
+      depends on the model.
+    affected_components:
+      - "maddening.sysid.fit_lm"
+      - "maddening.sysid.fit"
+      - "maddening.sysid.fit_multiple_shooting"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The transform's resolution is its bounds', not the value's: a fitted
+      `logit` or offset `log` leaf is still placed only to `eps * max(|lo|,
+      |hi|, hi - lo)` (`eps * |lo|`), which the fitters now say in a
+      `PrecisionLimitWarning` when it is more than `sqrt(eps)` of the
+      value, and which `gm.constrain(gm.unconstrain(p))` has outside the
+      fitters too -- there, eager and jitted code can still return
+      neighbouring points of that grid.  `best_loss` is the fitter's own
+      compiled program's value at exactly the arrays returned; a loss the
+      caller computes from `params` agrees with it to rounding, not to the
+      bit.  With the identifiability guard holding a direction, `params`
+      is the held point and `best_loss` the selected iterate's, as before.
+    verification:
+      - "tests/property/test_sysid_one_evaluation.py::test_the_arrays_a_fit_returns_are_the_arrays_it_evaluated"
+      - "tests/property/test_sysid_one_evaluation.py::test_without_the_guard_best_loss_is_the_loss_of_exactly_the_result"
+      - "tests/property/test_sysid_one_evaluation.py::test_a_fit_that_takes_no_step_evaluates_and_returns_its_start"
+      - "tests/property/test_sysid_one_evaluation.py::test_a_multiple_shooting_fit_returns_the_arrays_it_evaluated"
+      - "tests/property/test_sysid_one_evaluation.py::test_a_leaf_left_out_by_the_mask_is_run_at_the_value_given"
+      - "tests/property/test_sysid_one_evaluation.py::test_best_loss_is_the_loss_of_the_parameters_returned_under_a_wide_logit"
+      - "tests/property/test_sysid_one_evaluation.py::test_a_value_its_transform_cannot_resolve_is_named_at_the_start_of_the_fit"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-203"
+    title: "Assigning node.params a mapping reverted every other calibrated constant of the node to the node's own value"
+    description: >
+      `node.params = {**node.params, "k": v}` -- the documented way to
+      replace a node's mapping -- was read by the graph as a write of
+      *every* key of the node, so at the next sync each constant of that
+      node calibrated in `gm.params` was overwritten with the value the
+      node itself held: a spring whose stiffness a fit had calibrated to 45
+      went back to 30 when its damping was assigned this way, with no
+      warning, and ran, saved and exported 30.  The keyed write
+      `node.params["k"] = v` never did.  The rule came in with the single
+      sync point for node writes (1fa529b, 2026-10-02) and reached the
+      one-key idiom's every use when a replaced mapping was made to keep
+      counting (MADD-ANO-175, 2026-10-03).  Found by the B1 round-9 claims
+      audit (SYS-115, SYS-116, on e301c41, 2026-10-05).  No tagged release
+      carried it: the parameter pytree is new in 0.4.0.  Resolved in 0.4.0
+      (2026-10-05): a mapping assigned to `node.params` takes over the
+      write counts of the one it replaces and counts a write of each key
+      whose value it changes -- a key added, dropped, or holding another
+      value, bit for bit -- and of no other, the rule an in-place element
+      write already followed.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the graph ran, saved and exported constants other than the
+      calibrated ones, with no error, after a write that named another key.
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result) and registered although no release carried it, because it is
+      major.  Not `critical`: it needs the mapping assigned whole, and the
+      keyed write was unaffected.  `context_dependent` because what a
+      reverted constant does depends on the model.
+    affected_components:
+      - "maddening.core.node.SimulationNode"
+      - "maddening.core.graph_manager.GraphManager.params"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The two spellings of a write now differ in one case, by design: a
+      replacement that hands a key the value the node already held is not
+      a write of it, where `node.params[key] = value` is a write whatever
+      the value (and is the way to put a node's own value back over a
+      calibration).  The comparison is made when the mapping is assigned,
+      bit for bit, so `30` for `30.0` is a change.  A counting mapping
+      assigned as it is (another node's) has counts that say nothing about
+      this graph; its values are compared at the next sync instead, so a
+      keyed write into it of a value it already held, made before that
+      sync, is not seen.  `node.__dict__["params"]` assigned directly
+      bypasses the setter and is read as a write of every key.
+    verification:
+      - "tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_replacement_that_hands_a_key_back_unchanged_is_not_a_write_of_it"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_replacement_carries_the_writes_the_old_mapping_had_pending"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_replacement_and_an_in_place_write_do_not_hide_each_other"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes"
+      - "tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes"
+    github_issue: null

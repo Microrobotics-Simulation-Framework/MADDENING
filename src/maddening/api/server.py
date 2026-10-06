@@ -2941,7 +2941,7 @@ class SimulationServer:
         detail = str(exc.detail).replace(" Nothing was changed;", " Nothing was "
                                          f"{action};") + stopped
         return _Reply(status_code=exc.status_code, headers=exc.headers,
-                            content={"detail": detail, "was_running": was_running})
+                      content={"detail": detail, "was_running": was_running})
 
     def _publish_state(self, *, restart: bool = False) -> None:
         """Publish the graph's state to the streams, holding the graph
@@ -3033,7 +3033,7 @@ class SimulationServer:
         its 503, with ``was_running`` (whether a runner was running when
         the request told it to stop)."""
         return _Reply(status_code=exc.status_code, headers=exc.headers,
-                            content={"detail": exc.detail, "was_running": was_running})
+                      content={"detail": exc.detail, "was_running": was_running})
 
     def _reset_state(self) -> None:
         """Reset all nodes to their initial state (normalised, no retrace),

@@ -2185,3 +2185,98 @@ def test_a_float_parameter_carries_its_extreme_values_on_all_four_paths(dtype):
         for value in outside:
             reply = paths.tcp_set(par, value)
             assert reply["ok"] is False and "does not fit its type" in reply["error"], (value, reply)
+
+
+# ---------------------------------------------------------------------------
+# The same number in, the same model out: an input in its declared dtype
+# ---------------------------------------------------------------------------
+#
+# Every battery above hands the sidecar and the graph an input already cast
+# to the FMU variable's dtype, so none of them could see a graph that ran a
+# supplied value in another dtype than its FMU: under x64 an input declared
+# the ordinary way (float32) was exported as Float32 and narrowed by the
+# FMU, while gm.step ran the importer's 0.1 as a float64 (B1 round 11:
+# 0.5908093400306381 against 0.5908093402561657 after ten steps).  Here the
+# three paths are handed the *same Python number*, as a user hands it, and
+# the states are compared bit for bit: in float32 and under x64, with the
+# default declaration and with dtype=float64.
+
+def _plant_with(**declared):
+    def factory():
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, damping=2.0,
+                                     rest_length=0.4, initial_position=0.5))
+        gm.add_node(HeatNode("rod", 0.01, n_cells=3, thermal_diffusivity=0.01))
+        gm.add_external_input("spring", "anchor_position", **declared)
+        gm.add_external_input("rod", "heat_source", shape=(3,), **declared)
+        gm.compile()
+        return gm
+    return factory
+
+
+#: name -> (x64?, add_external_input keywords, the FMI type of the inputs)
+SAME_NUMBER: dict[str, tuple[bool, dict, str]] = {
+    "float32-default": (False, {}, "Float32"),
+    "x64-default": (True, {}, "Float32"),
+    "x64-float64": (True, {"dtype": jnp.float64}, "Float64"),
+    "x64-float32": (True, {"dtype": jnp.float32}, "Float32"),
+}
+_SAME_NUMBER_MODELS: dict[str, Model] = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stop_same_number_models():
+    yield
+    for model in _SAME_NUMBER_MODELS.values():
+        model.stop()
+
+
+_handed_in = (st.sampled_from([0.1, -0.1, 1 / 3, 0.0, 0.5, 16777217.0, 1e-3 + 1e-12])
+              | st.floats(1e-3, 1e3) | st.floats(-1e3, -1e-3))
+
+
+@pytest.mark.parametrize("case", sorted(SAME_NUMBER))
+@settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
+@given(data=st.data())
+def test_an_fmu_and_its_graph_run_the_same_number_handed_to_both(case, data):
+    """A Python float set on the FMU's input and handed to the sidecar and
+    to ``gm.step``: the three states are identical to the bit after every
+    step, whatever the precision mode and the declaration."""
+    x64, declared, fmi_type = SAME_NUMBER[case]
+    with _x64() if x64 else contextlib.nullcontext(), warnings.catch_warnings():
+        # the graph says, once, that it runs a value cast to the declared
+        # dtype; that it does is what this test is about
+        warnings.filterwarnings("ignore", message=".*does not hold as given")
+        if case not in _SAME_NUMBER_MODELS:
+            _SAME_NUMBER_MODELS[case] = Model.build(_plant_with(**declared), case)
+        model = _SAME_NUMBER_MODELS[case]
+        by_name = {v.name: v for v in model.md.variables}
+        anchor, source = by_name["spring.anchor_position"], by_name["rod.heat_source"]
+        assert _FMI_TYPE[anchor.dtype] == _FMI_TYPE[source.dtype] == fmi_type
+        state_dtype = np.asarray(model.direct._state["spring"]["position"]).dtype  # noqa: SLF001
+        assert state_dtype == (np.float64 if x64 else np.float32)
+        paths = Paths(model, persistent=True)
+        try:
+            for _ in range(data.draw(st.integers(1, 3), label="rounds")):
+                a = data.draw(_handed_in, label="anchor")
+                q = data.draw(st.lists(_handed_in, min_size=3, max_size=3), label="source")
+                reply = paths._wire({"op": "set", "type": fmi_type,          # noqa: SLF001
+                                     "vr": [anchor.value_reference, source.value_reference],
+                                     "values": [a, *q]})
+                assert reply == {"ok": True}, reply
+                handed = {"spring": {"anchor_position": a}, "rod": {"heat_source": q}}
+                paths.side_inputs = {n: dict(f) for n, f in handed.items()}
+                paths.gm_inputs = {n: dict(f) for n, f in handed.items()}
+                op_step(paths, data.draw(st.integers(1, 3), label="steps"))
+                states = {
+                    "bridge": paths.bridge._sidecar.state,                  # noqa: SLF001
+                    "sidecar": paths.side.state,
+                    "graph": model.direct._state,                           # noqa: SLF001
+                }
+                trees = {k: {n: dict(f) for n, f in v.items()} for k, v in states.items()}
+                for other in ("sidecar", "graph"):
+                    assert_trees_identical(
+                        trees["bridge"], trees[other],
+                        what=f"{case}: anchor {a!r}, source {q!r}: bridge vs {other}")
+        finally:
+            paths.close()

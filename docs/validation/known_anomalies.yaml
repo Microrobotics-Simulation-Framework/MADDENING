@@ -14797,6 +14797,105 @@ anomalies:
       - "tests/property/test_sysid_targeted_search.py::test_fit_lm_from_a_far_start_does_not_stop_short_on_the_end_of_a_range"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-218"
+    title: "A value handed to step or a scan ran in the dtype it arrived in, not the external input's declared dtype: an x64 graph with a default-declared (float32) input ran 0.1 as a float64 where its own FMU ran float32(0.1)"
+    description: >
+      `GraphManager.add_external_input(node, field)` declares `float32`
+      unless told otherwise, also under `jax_enable_x64`.  The declared
+      dtype was applied to the zeros of an omitted input, written to the
+      saved configuration and exported by `build_model_description` as the
+      FMU variable's type (`Float32`, set with `fmi3SetFloat32`; the
+      bridge casts a set value to it) -- and not applied by the step to a
+      value handed to `step`, `run`, `run_scan`, `run_scan_with_history`,
+      `run_sweep`, `run_adaptive`, `run_adaptive_scan` or the raw compiled
+      step.  On a float64 graph a supplied `0.1` therefore ran as a
+      float64 in the graph and as `float32(0.1)` in the FMU exported from
+      it: a float64 spring after ten steps read 0.5908093400306381 from
+      `gm.run_scan` and 0.5908093402561657 from the FMU, with no warning
+      at export or at the set (FMU-040 and FMU-002's float64 domain).  The
+      FMU differential family handed its graph oracle the input already
+      cast to the variable's dtype, so it could not see this.  Found by
+      the audit of the FMU and system-identification claims (round 11,
+      2026-10-06).  No tagged release carried the disagreement: 0.3.x
+      exported no input of a real graph (MADD-ANO-078).
+      Resolved in 0.4.0: every step program casts each declared external
+      input to its declared dtype on entry (uniform, coupled, multi-rate
+      and runtime-timestep programs; a value already of that dtype adds
+      nothing to the program, so the committed step programs are
+      unchanged), and a supplied value the cast changes -- a float64 `0.1`
+      into a float32 input under x64, a fraction into an integer input --
+      is reported once per input with a `UserWarning` naming
+      `add_external_input(..., dtype=)`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: two entry points documented to run the same model ran
+      different numbers from the same input value.  Graded `major` under
+      the 0.4.0 severity definition (a silent wrong result is never
+      `minor`).  Not `critical`: the difference is one float32 rounding of
+      the input (3.8e-10 relative in the reproducer).
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_external_input"
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      An x64 graph that relied on a default-declared input running in
+      float64 now runs that input in float32 and warns once per input;
+      declaring `dtype=jnp.float64` restores float64.  A node whose
+      arithmetic is narrower than its declared input (a float16 node with
+      a float32 input) is now promoted by a supplied Python scalar as it
+      already was by the zeros of an omitted input.
+    verification:
+      - "tests/core/test_an_external_input_runs_in_its_declared_dtype.py::test_an_x64_graph_runs_a_supplied_value_in_the_declared_dtype"
+      - "tests/core/test_an_external_input_runs_in_its_declared_dtype.py::test_a_value_the_cast_changes_is_reported_once_per_input"
+      - "tests/core/test_an_external_input_runs_in_its_declared_dtype.py::test_an_input_of_the_declared_dtype_adds_nothing_to_the_step_program"
+      - "tests/property/test_differential_fmu.py::test_an_fmu_and_its_graph_run_the_same_number_handed_to_both"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-219"
+    title: "build_model_description(default_step_size=<NumPy scalar>) wrote stepSize=\"np.float64(0.05)\": a modelDescription.xml no FMI importer reads, with nothing said at export"
+    description: >
+      `build_model_description` stored `default_step_size` as given and
+      `ModelDescription.to_xml` wrote the four `DefaultExperiment`
+      attributes with `repr`.  Under NumPy 2 the `repr` of a scalar is
+      `np.float64(0.05)`, so `default_step_size=np.float64(0.05)`,
+      `np.int64(5) * dt`, `np.float32(0.05)` or `np.round(...)` produced
+      `stepSize="np.float64(0.05)"`, which is not an `xs:double`: FMPy's
+      `validate_fmu` reports it and `simulate_fmu`, which validates by
+      default, refuses the FMU.  The export, `write_fmu` and the bridge
+      said nothing.  A hand-built `ModelDescription` wrote
+      `default_start_time`, `default_stop_time` and `default_tolerance`
+      the same way.  Found by the audit of the FMU claims (round 11,
+      2026-10-06).  Checked on v0.3.0 and v0.3.1 with NumPy 2.4.6: both
+      write `stepSize="np.float64(0.05)"`.
+      Resolved in 0.4.0: `default_step_size` must be a finite, positive
+      Python or NumPy int or float and is stored as a Python float (a
+      Boolean, a string, an array or a complex number is refused by
+      name), and every `DefaultExperiment` attribute and clock interval is
+      written through the `xs:double` writer.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No wrong number: the file is invalid and an importer that validates
+      refuses it.  Silent only at export.
+    affected_components:
+      - "maddening.fmi.model_description.build_model_description"
+      - "maddening.fmi.model_description.ModelDescription.to_xml"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.0 and v0.3.1 pass `default_step_size=float(value)`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: null
+    verification:
+      - "tests/fmi/test_default_step_is_one_graph_step.py::test_a_numpy_scalar_step_size_is_stored_and_written_as_the_float_it_is"
+      - "tests/fmi/test_default_step_is_one_graph_step.py::test_a_step_size_that_is_not_a_finite_positive_number_is_refused_at_build"
+      - "tests/fmi/test_default_step_is_one_graph_step.py::test_every_number_a_hand_built_description_writes_is_an_xs_double"
   - anomaly_id: "MADD-ANO-220"
     title: "GraphManager.step, run and run_adaptive store a step that changed the shape of a state leaf"
     description: >

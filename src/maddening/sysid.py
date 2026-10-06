@@ -4495,8 +4495,19 @@ def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm",
     if not np.all(np.isfinite(Jd)):
         return _no_curvature(method, k, "the Jacobian at the selected iterate is not finite")
     if scale is not None:
-        Jd = Jd / np.asarray(scale, dtype=np.float64)[None, :]
-    W, s = _rotation_by_singular_values(Jd @ candidates, k)
+        # A finite column over a tiny scale overflows, and so does the
+        # product with the candidates: the check above was made before
+        # either, and the SVD below then raised ``LinAlgError`` out of a
+        # diagnostic (``_curvature_rank`` guarded its own call only).
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            Jd = Jd / np.asarray(scale, dtype=np.float64)[None, :]
+    with np.errstate(over="ignore", invalid="ignore"):
+        JC = Jd @ candidates
+    if not (np.all(np.isfinite(Jd)) and np.all(np.isfinite(JC))):
+        return _no_curvature(
+            method, k, "the Jacobian at the selected iterate is not finite in the "
+                       "guard's coordinates (a column over its scale overflows)")
+    W, s = _rotation_by_singular_values(JC, k)
     curvature = float(np.linalg.norm(Jd, 2)) ** 2
     rtol = _resolve_rank_rtol(dtype, n, None, n_residual=m)
     return W, s * s <= rtol * curvature, curvature
@@ -4568,17 +4579,27 @@ def _hessian_flatness(hvp, candidates, excited, dtype, method: str,
     k = candidates.shape[1]
     top = excited[:, ::-1][:, :_HOLD_SCALE_DIRECTIONS]
     V = np.concatenate([candidates, top], axis=1)
-    inv = (None if scale is None
-           else 1.0 / np.asarray(scale, dtype=np.float64)[:, None])
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        inv = (None if scale is None
+               else 1.0 / np.asarray(scale, dtype=np.float64)[:, None])
     try:
-        HV = np.asarray(hvp(V if inv is None else V * inv), dtype=np.float64)
+        with np.errstate(over="ignore", invalid="ignore"):
+            V_in = V if inv is None else V * inv
+        HV = np.asarray(hvp(V_in), dtype=np.float64)
     except Exception as exc:   # noqa: BLE001 - any failure means "no curvature"
         return _no_curvature(
             method, k, f"its Hessian-vector product raised {type(exc).__name__}: {exc}")
     if not np.all(np.isfinite(HV)):
         return _no_curvature(method, k, "its Hessian-vector product is not finite")
     if inv is not None:
-        HV = HV * inv
+        # The same ordering as ``_gauss_newton_flatness`` had: a finite
+        # product over a tiny scale overflows after the check above.
+        with np.errstate(over="ignore", invalid="ignore"):
+            HV = HV * inv
+        if not np.all(np.isfinite(HV)):
+            return _no_curvature(
+                method, k, "its Hessian-vector product is not finite in the guard's "
+                           "coordinates (a row over its scale overflows)")
     curvature = float(np.linalg.norm(HV, 2))
     W, s = _rotation_by_singular_values(HV[:, :k], k)
     cutoff = math.sqrt(float(np.finfo(dtype).eps)) * curvature

@@ -189,7 +189,11 @@ def fail_at_every_point(served: O.Served, send: Callable[[], Any], what: str, *,
         steps = partial(resp)
         after = O.snapshot(served)
         if steps:
-            assert after["clock"][0] == before["clock"][0] + steps, (
+            # An empty graph has nothing to publish: its steps are taken
+            # and counted by the reply, and the streams' clock stays where
+            # it is, as it does when such a run succeeds.
+            counted = steps if served.gm._nodes else 0  # noqa: SLF001
+            assert after["clock"][0] == before["clock"][0] + counted, (
                 f"{where} said it took {steps} step(s); the streams' clock went "
                 f"{before['clock']} -> {after['clock']}")
             continue

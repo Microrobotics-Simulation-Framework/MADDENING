@@ -6120,9 +6120,10 @@ claims:
     /graph/nodes, after the node joined the graph) and inside a read (GET
     /graph/params); and a failure injected at every point of every write
     route's body, whose 500 must carry the generic detail and no word of
-    the failure. Not claimed for a non-loopback bind, a request the token
-    is demanded of, simultaneous requests, the runner running, an in-flight
-    /sim/run, a server shutting down or wrapper nodes.
+    the failure -- on a loopback bind, and from a token-holder on a server
+    that demands the token (the reply and the graph; the log record is read
+    on loopback). Not claimed for simultaneous requests, the runner
+    running, an in-flight /sim/run, a server shutting down or wrapper nodes.
   oracle: >-
     the reply's body, exactly; the log record's exception; the graph object
     for object.
@@ -6130,6 +6131,8 @@ claims:
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_outside_a_write_route_is_the_same_generic_500
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
+    - tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_failure_at_any_point_of_any_write_route_changes_nothing_for_a_token_holder
   status: verified
   notes: >-
     The experimental POST /surrogate/deactivate answers this 500 too; it
@@ -6138,8 +6141,8 @@ claims:
     this inventory's scope.
   domains:
     loopback_bind: tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged
-    non_loopback_bind: narrowed
-    token_enforced: narrowed
+    non_loopback_bind: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
+    token_enforced: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
     no_token: tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_an_unexpected_failure_is_a_500_that_names_nothing_and_is_logged
     concurrent: narrowed
     runner_active: narrowed

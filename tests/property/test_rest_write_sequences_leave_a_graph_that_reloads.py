@@ -41,7 +41,15 @@ through the state-changing routes in whatever order Hypothesis picks --
    (``tests/property/injected_failures.py``) -- and after each the graph
    must be exactly as it was: by invariant 2's snapshot, and object for
    object (``tests/property/graph_fingerprint.py``).  A refusal of the
-   request's own is held to the same object-for-object comparison.
+   request's own is held to the same object-for-object comparison;
+7. on a server that demands the token, the same request *without* it is
+   refused and reveals nothing.  Half the examples serve their graph as a
+   network bind requires -- the server told its bind is ``0.0.0.0``, the
+   client presenting the token on every request -- and are held to
+   invariants 1 to 6 as the others are; and before each request the same
+   request is sent in one of the ways of not presenting the token
+   (``tests/property/without_the_token.py``): 401, nothing changed, and a
+   body that is the one a server with an empty graph gives.
 
 What makes the historical sequences reachable is the vocabulary.  A rod is
 drawn *at* its limit, not safely inside it: its diffusivity, length,
@@ -51,10 +59,22 @@ returns to a value the graph has already held as often as it proposes a new
 one.  Node names and checkpoint names come from pools of four and three, so
 a node is rebuilt under its old name and an old save is loaded.
 
+An example starts from the rod graph, an empty one, or one of the graphs
+the routes cannot build and users serve
+(``rest_oracle.COUPLED_AND_MAPPED_GRAPHS``): two rods in a coupling group
+under each solver, a rod heating another through a dense and through a
+sparse static mapping, and a spring, a rod and a ball at three rates.
+
+The last section sends requests *while the runner runs* and holds what the
+runner leaves to a replay of the accepted ones on a fresh server.
+
 What it cannot see: a defect in which the served graph and its reload agree
-on a wrong value, a sequence the rules cannot spell (the runner, the
-streams, the surrogate routes and ``/cloud/*`` are out of scope and never
-requested), and concurrency -- one request at a time, on a loopback bind.
+on a wrong value, a sequence the rules cannot spell (the streams, the
+surrogate routes and ``/cloud/*`` are out of scope and never requested),
+and requests that arrive at the same time -- one request at a time, beside
+the runner or not.  No socket is
+opened: the server that demands the token is *told* its bind, and its
+client is in process.
 
 Nothing here can reach a cloud provider: no rule sends a request to
 ``/cloud/*``, and the module runs under
@@ -76,7 +96,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import event as hypothesis_event
-from hypothesis import settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.errors import InvalidArgument
 from hypothesis.stateful import (
@@ -89,15 +109,24 @@ from hypothesis.stateful import (
 )
 
 import maddening.nodes
+from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import BallNode, HeatNode, SpringDamperNode
 
 from tests.conftest import EXAMPLES_FLOOR
 from tests.property import rest_oracle as O
-from tests.property.differential import no_cloud_launch, note, quiet
+from tests.property.differential import (
+    assert_trees_identical,
+    full_state,
+    no_cloud_launch,
+    note,
+    params_tree,
+    quiet,
+)
 from tests.property.graph_fingerprint import assert_exactly_as_it_was, served_fingerprint
 from tests.property.injected_failures import fail_at_every_point, injection_points
 from tests.property.node_catalogue import f32
+from tests.property.without_the_token import CREDENTIALS, assert_refused_without_the_token
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -223,6 +252,28 @@ def rod_graph() -> GraphManager:
     return gm
 
 
+#: The graphs an example starts from.  The rod graph is the one the
+#: vocabulary is built around; the others are the kinds of graph the
+#: routes have no request to build and users serve: a coupling group under
+#: each solver, a mapped edge of each static kind, and nodes at three rates.
+START_GRAPHS: dict[str, Any] = {
+    "rod": rod_graph,
+    "empty": GraphManager,
+    **O.COUPLED_AND_MAPPED_GRAPHS,
+}
+assert O.ROD_CELLS == N_CELLS and O.ROD_DT == DT and set(O.ROD_ALPHAS) <= set(ALPHAS)
+#: The starts beside the rod graph and the empty one.
+COUPLED_AND_MAPPED = tuple(sorted(set(START_GRAPHS) - {"rod", "empty"}))
+
+
+def start_graph(start: str) -> GraphManager:
+    with quiet():
+        gm = START_GRAPHS[start]()
+        if gm._nodes and gm._dirty:  # noqa: SLF001
+            gm.compile()
+    return gm
+
+
 def event(text: str) -> None:
     """``hypothesis.event`` inside a generated example, nothing outside one
     (a pinned sequence drives the same requests as an ordinary test)."""
@@ -287,6 +338,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         #: (node, key) -> the value the node was built with
         self.built_with: dict = {}
         self.last = "the start"
+        #: the configuration the graph is served in (``rest_oracle.BINDS``)
+        self.bind = "loopback"
         #: the kind of the last request sent ("add edge", "put params", ...)
         self.last_kind = "start"
         #: whether the last rule and its invariants ran to their end
@@ -300,12 +353,15 @@ class RestWriteSequences(RuleBasedStateMachine):
     # plumbing
     # ------------------------------------------------------------------
 
-    def begin(self, start: str) -> None:
-        gm = rod_graph() if start == "rod" else GraphManager()
-        self.served = O.serve(gm)
+    def begin(self, start: str, bind: str = "loopback") -> None:
+        assert bind in O.BINDS, bind
+        gm = start_graph(start)
+        self.bind = bind
+        type(self).counts[f"started from {start}"] += 1
+        self.served = O.serve(gm, token_enforced=bind == "token")
         for name, spec in gm._nodes.items():  # noqa: SLF001
             self._remember_construction(name, spec.node)
-        self.last = f"the start ({start})"
+        self.last = f"the start ({start}, {bind})"
         if gm._nodes:  # noqa: SLF001
             assert self.do_save(START_SLOT).status_code == 200
 
@@ -339,6 +395,14 @@ class RestWriteSequences(RuleBasedStateMachine):
             kwargs["params"] = params
         what = O.describe(method, url, body if body is not None else params)
         served = self.served
+        counts = type(self).counts
+        if served.token_enforced:
+            # Invariant 7, before the request itself: the same request
+            # without the token (each way of not presenting it in turn).
+            turn = counts["sent without the token"]
+            counts["sent without the token"] += assert_refused_without_the_token(
+                served, method, url, what,
+                credentials=(CREDENTIALS[turn % len(CREDENTIALS)],), **kwargs)
 
         def moved_on(fired, failed):
             # A run that failed after some of its steps left the graph
@@ -351,15 +415,17 @@ class RestWriteSequences(RuleBasedStateMachine):
         resp, injected, before, fingerprint = fail_at_every_point(
             served, lambda: served.client.request(method, url, **kwargs), what,
             partial=_partial_run, on_failure=moved_on)
-        type(self).counts["failures injected"] += len(injected)
-        type(self).counts[(rule_name, "failed at a point")] += bool(injected)
+        counts["failures injected"] += len(injected)
+        counts[f"failures injected ({self.bind})"] += len(injected)
+        counts[(rule_name, "failed at a point")] += bool(injected)
         note(f"{what} -> {resp.status_code} {resp.text[:300]}")
         O.assert_no_server_error(resp, what)
         if resp.status_code < 300:
             O.assert_strict_json(resp, what)
         outcome = "accepted" if resp.status_code < 400 else "refused"
         event(f"{rule_name}: {outcome}")
-        type(self).counts[(rule_name, outcome)] += 1
+        counts[(rule_name, outcome)] += 1
+        counts[f"{outcome} ({self.bind})"] += 1
         if resp.status_code >= 400 and not _partial_run(resp):
             O.assert_nothing_changed(before, O.snapshot(self.served), what)
             assert_exactly_as_it_was(fingerprint, served_fingerprint(self.served),
@@ -386,6 +452,24 @@ class RestWriteSequences(RuleBasedStateMachine):
 
     def _nodes(self) -> list[str]:
         return list(self.gm._nodes)  # noqa: SLF001
+
+    def _withheld(self, name: str, params: dict) -> bool:
+        """Whether a parameter write is one the machine does not send: a
+        rod's ``length`` when a mapped edge was built from its grid.  The
+        route refuses such a write, except after a fit or a load left
+        another leaf away from the node's own value (pinned below as a
+        strict xfail; drop this with it).  The refusal itself is in the
+        tour of the mapped graphs."""
+        mapped = {end for edge in self.gm._edges if edge.mapping is not None  # noqa: SLF001
+                  for end in (edge.source_node, edge.target_node)}
+        if name in mapped and "length" in params:
+            type(self).counts["withheld"] += 1
+            return True
+        return False
+
+    def _grouped(self) -> set[str]:
+        """The nodes a coupling group names."""
+        return {name for group in self.gm._coupling_groups for name in group.nodes}  # noqa: SLF001
 
     def _draw_node(self, data, *, ghost: bool = True) -> str:
         """A node of the graph, one with a stability limit three times as
@@ -430,9 +514,10 @@ class RestWriteSequences(RuleBasedStateMachine):
     # start
     # ------------------------------------------------------------------
 
-    @initialize(start=st.sampled_from(("rod",) * 7 + ("empty",)))
-    def start(self, start):
-        self.begin(start)
+    @initialize(start=st.sampled_from(("rod",) * 10 + ("empty",) + COUPLED_AND_MAPPED),
+                bind=st.sampled_from(O.BINDS))
+    def start(self, start, bind):
+        self.begin(start, bind)
 
     # ------------------------------------------------------------------
     # structure
@@ -451,8 +536,13 @@ class RestWriteSequences(RuleBasedStateMachine):
     @rule(data=st.data())
     def add_or_remove_a_node(self, data):
         present = self._nodes()
+        # A member of a coupling group is not removed: the route takes the
+        # request and leaves the group naming it, a graph whose save does
+        # not reload (pinned below as a strict xfail; drop this filter with
+        # it).
+        removable = [n for n in present if n not in self._grouped()]
         if present and data.draw(st.integers(0, 2), label="remove") == 0:
-            self.do_remove_node(data.draw(st.sampled_from(present * 3 + ["ghost"]),
+            self.do_remove_node(data.draw(st.sampled_from(removable * 3 + ["ghost"]),
                                           label="name"))
             return
         free = [n for n in NAMES if n not in present]
@@ -540,7 +630,8 @@ class RestWriteSequences(RuleBasedStateMachine):
             return
         key = data.draw(st.sampled_from(self._keys(name) * 2 + ["no_such_param"]), label="key")
         value = 1.0 if key == "no_such_param" else self._draw_value(data, name, key)
-        self.do_put(name, {key: value})
+        if not self._withheld(name, {key: value}):
+            self.do_put(name, {key: value})
 
     @precondition(lambda self: self.served is not None and self._nodes())
     @rule(data=st.data())
@@ -552,8 +643,9 @@ class RestWriteSequences(RuleBasedStateMachine):
         # A node with one parameter (a table) gets a one-key body.
         keys = data.draw(st.lists(st.sampled_from(pool), min_size=min(2, len(set(pool))),
                                   max_size=3, unique=True), label="keys")
-        self.do_put(name, {key: self._draw_value(data, name, key) for key in keys},
-                    rule_name="put several params")
+        body = {key: self._draw_value(data, name, key) for key in keys}
+        if not self._withheld(name, body):
+            self.do_put(name, body, rule_name="put several params")
 
     @precondition(lambda self: self.served is not None and self._nodes())
     @rule(data=st.data())
@@ -575,7 +667,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         if others and data.draw(st.integers(0, 2), label="and a new value") == 0:
             key = data.draw(st.sampled_from(others), label="new key")
             body[key] = self._draw_value(data, name, key)
-        self.do_put(name, body, rule_name="put params back")
+        if not self._withheld(name, body):
+            self.do_put(name, body, rule_name="put params back")
 
     def _limited(self) -> list[str]:
         return [name for name in self._nodes() if O.limit_fraction(self.gm, name) is not None]
@@ -604,7 +697,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         if not nearer:
             return
         key, value = data.draw(st.sampled_from(nearer), label="write")
-        self.do_put(name, {key: value}, rule_name="put towards the limit")
+        if not self._withheld(name, {key: value}):
+            self.do_put(name, {key: value}, rule_name="put towards the limit")
 
     def do_fit(self, name: str, key: str, value: Any) -> bool:
         """A direct ``gm.params`` write, as a fit (or any Python code)
@@ -839,6 +933,15 @@ def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
     assert len({key[0] for key, n in counts.items()
                 if isinstance(key, tuple) and key[1] == "failed at a point" and n}) >= 8, \
         dict(counts)
+    # Both configurations were served, and in each requests were accepted,
+    # refused and failed at a point; a token-holder's every request was
+    # first sent without the token (invariant 7).
+    for bind in O.BINDS:
+        assert counts[f"accepted ({bind})"] >= 10 and counts[f"refused ({bind})"] >= 1, \
+            dict(counts)
+        assert counts[f"failures injected ({bind})"] >= 100, dict(counts)
+    assert counts["sent without the token"] == \
+        counts["accepted (token)"] + counts["refused (token)"], dict(counts)
 
 
 # Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
@@ -880,13 +983,13 @@ def test_every_stock_node_is_classified_by_its_stability_limit():
 # before its fix the request is accepted and an invariant fails instead.
 
 @contextlib.contextmanager
-def replay(start: str = "rod"):
+def replay(start: str = "rod", bind: str = "loopback"):
     """A fixed sequence through the machine: ``step(machine.do_x, ...)``
     sends the request under invariants 1 and 2 and then asks 3 to 5, as the
     machine does after every rule, and the sequence ends with the last step
     every generated example ends with."""
     machine = RestWriteSequences()
-    machine.begin(start)
+    machine.begin(start, bind)
     machine.check_graph(machine.last)
 
     def step(do, *args):
@@ -973,6 +1076,185 @@ def test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused():
         "a graph that cannot compile"] >= 2, dict(counts)
 
 
+# Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
+@pytest.mark.slow  # a second tour of every write route, each request sent at every injection point: 3 s
+def test_a_failure_at_any_point_of_any_write_route_changes_nothing_for_a_token_holder():
+    """Invariant 6 on a server that demands the token.  One accepted and
+    one refused request of every kind the machine sends, from a
+    token-holder, each first sent with a failure injected at every point
+    its route body reaches: the 500 carries the generic detail and no word
+    of the failure, and the graph is exactly as it was, object for object
+    -- and each was first sent without the token (invariant 7).  The
+    generated sequences reach this configuration in half their examples on
+    every push (their test counts the failures injected there); which kinds
+    of request they send there moves with the draw, and this tour does
+    not."""
+    RestWriteSequences.counts = collections.Counter()
+    with replay(bind="token") as (machine, step):
+        assert machine.served.token_enforced
+        for status, do, *args in (
+                (200, machine.do_put, "spring", {"stiffness": 20.0}),
+                (400, machine.do_put, "rod", {"thermal_diffusivity": ALPHAS[-1], "length": 0.5}),
+                (200, machine.do_put_state, "ball", {"position": 2.0, "velocity": 0.5}),
+                (400, machine.do_put_state, "ball", {"position": 2.0}),
+                (201, machine.do_add_node, "extra", "HeatNode", 0.02,
+                 {"n_cells": N_CELLS, "thermal_diffusivity": ALPHAS[0],
+                  "initial_temperature": 1.0}),
+                (409, machine.do_add_node, "extra", "BallNode", DT, {}),
+                (201, machine.do_add_edge, "ball", "position", "spring", "anchor_position"),
+                (200, machine.do_step,),
+                (200, machine.do_run, 2),
+                (200, machine.do_save, "a.npz"),
+                (200, machine.do_remove_edge, "ball", "position", "spring", "anchor_position"),
+                (404, machine.do_remove_edge, "ball", "position", "spring", "anchor_position"),
+                (200, machine.do_compile,),
+                (200, machine.do_reset,),
+                (200, machine.do_load, "a.npz"),
+                (404, machine.do_load, "never-saved.npz"),
+                (200, machine.do_remove_node, "extra"),
+                (404, machine.do_remove_node, "extra")):
+            resp = step(do, *args)
+            assert resp.status_code == status, (do.__name__, args, resp.status_code, resp.text)
+    counts = RestWriteSequences.counts
+    for kind in ("put params", "put state", "add node", "remove node", "add edge",
+                 "remove edge", "step", "run", "compile", "reset", "save", "load"):
+        assert counts[(kind, "failed at a point")] > 0, (kind, dict(counts))
+    assert counts["failures injected (token)"] == counts["failures injected"] >= 80, dict(counts)
+    # The 18 requests above, the save every example starts with and the
+    # step it ends with.
+    assert counts["sent without the token"] == 20, dict(counts)
+
+
+# ---------------------------------------------------------------------------
+# Coupled, mapped and multi-rate graphs
+# ---------------------------------------------------------------------------
+
+#: A tour of the write routes over a graph of two rods (``rod`` and
+#: ``extra``) or of a spring, a ball and a rod: requests each start takes
+#: or refuses in its own way, and none is predicted.
+_TOUR = (
+    ("do_put", "rod", {"thermal_diffusivity": ALPHAS[0]}),
+    ("do_put", "rod", {"thermal_diffusivity": -1.0}),
+    ("do_put_state", "rod", {"temperature": [2.0] * N_CELLS}),
+    ("do_step",),
+    ("do_run", 3),
+    ("do_save", "a.npz"),
+    ("do_put", "rod", {"length": 0.75}),
+    ("do_load", "a.npz"),
+    # ... and, in the slow lane, the requests after which a graph is
+    # compiled again (most of the cost of a coupled one):
+    ("do_reset",),
+    ("do_add_node", "spare", "SpringDamperNode", 2 * DT, {"stiffness": 20.0}),
+    ("do_step",),
+    ("do_remove_edge", "rod", "temperature", "extra", "heat_source"),
+    ("do_step",),
+    ("do_add_edge", "rod", "temperature", "extra", "heat_source"),
+    ("do_remove_node", "spare"),
+    ("do_compile",),
+    ("do_load", START_SLOT),
+)
+
+
+#: The tour's requests per push: the writes that leave the compiled step,
+#: over one start of each kind (the other solver and the other mapping
+#: kind are toured whole in the slow lane, and started from by the machine).
+_TOUR_PER_PUSH = 8
+_TOURED_PER_PUSH = ("coupled (ift)", "mapped (sparse)", "multi-rate")
+
+
+def _tour(start: str, requests: tuple) -> collections.Counter:
+    RestWriteSequences.counts = collections.Counter()
+    bind = O.BINDS[COUPLED_AND_MAPPED.index(start) % 2]
+    with replay(start, bind) as (machine, step):
+        gm = machine.gm
+        assert bool(gm._coupling_groups) == start.startswith("coupled")  # noqa: SLF001
+        assert any(e.mapping is not None for e in gm._edges) == start.startswith("mapped")  # noqa: SLF001
+        assert (len({spec.node.delta_t for spec in gm._nodes.values()}) == 3) \
+            == (start == "multi-rate")  # noqa: SLF001
+        for name, *args in requests:
+            step(getattr(machine, name), *args)
+    counts = RestWriteSequences.counts
+    counts["accepted"] = sum(n for key, n in counts.items() if key[1:] == ("accepted",))
+    counts["refused"] = sum(n for key, n in counts.items() if key[1:] == ("refused",))
+    return counts
+
+
+@pytest.mark.parametrize("start", _TOURED_PER_PUSH)
+def test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_a_write(start):
+    """Invariants 1 to 7 over the graphs the routes cannot build and users
+    serve: a coupling group under each solver, a mapped edge of each static
+    kind, nodes at three rates.  A fixed tour over each -- parameters
+    written and refused, a state written, a step, a run, a save and its
+    load -- every request with a failure injected at each point, and after
+    each accepted one the graph stepped beside the graph its save reloads,
+    bit for bit.  The generated sequences start from these graphs too;
+    which a short run reaches moves with the draw.  The starts alternate
+    between the two configurations."""
+    counts = _tour(start, _TOUR[:_TOUR_PER_PUSH])
+    assert counts["accepted"] >= 6 and counts["refused"] >= 1, dict(counts)
+    assert counts["stepped beside its reload"] >= 6, dict(counts)
+    assert counts["failures injected"] >= 30, dict(counts)
+
+
+# Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_a_write
+@pytest.mark.slow  # a coupled graph is compiled again after every structural write: 3 to 12 s a start
+@pytest.mark.parametrize("start", COUPLED_AND_MAPPED)
+def test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_every_kind_of_write(start):
+    """The whole tour: the requests above and then a reset, a node added
+    and removed, an edge removed and added back (without its mapping, where
+    it had one), a compile and a load of the save every example starts
+    with."""
+    counts = _tour(start, _TOUR)
+    assert counts["accepted"] >= 12 and counts["refused"] >= 1, dict(counts)
+    assert counts["stepped beside its reload"] >= 10, dict(counts)
+    assert counts["failures injected"] >= 60, dict(counts)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "DELETE /graph/nodes/{name} takes the removal of a coupling group's member and leaves "
+    "the group naming it: the graph's save does not reload and every step is a 400 until a "
+    "node of that name is added again"))
+def test_a_graph_whose_coupling_group_lost_a_member_still_reloads():
+    """Found by the tour above, under either solver.  ``DELETE /graph/nodes/extra`` on two rods
+    in a coupling group answers 200; the group still names ``extra``, so
+    ``GraphManager.from_dict`` refuses the graph's own save ("cannot be
+    rebuilt: No node named 'extra'") and ``POST /sim/step`` and
+    ``/graph/compile`` answer 400 ("coupling group references non-existent
+    node") -- and no route removes a group.  Either answer would hold the
+    invariant: refuse the removal, or drop the group with the node."""
+    with replay("coupled (ift)") as (machine, step):
+        resp = step(machine.do_remove_node, "extra")
+        assert resp.status_code in (200, 400, 409), resp.text
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "PUT /graph/params takes a rod's new length, which moves the points a mapped edge was "
+    "built from, when a load (or a fit) has left the rod's diffusivity away from the node's "
+    "own value and the new length is unstable at the node's own: the graph's save does not "
+    "reload"))
+def test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from():
+    """Found by the machine on the mapped graphs (of either kind: the dense
+    one answers the same), over REST alone.  The
+    rod's diffusivity is lowered, saved, raised again and the save loaded:
+    the live leaf is the low value and the node's own the high one, as
+    after a fit.  A length of 0.5 is then stable for the rod that runs
+    (Fourier 0.2) and unstable at the node's own diffusivity (0.6).  The
+    route refuses a length of 0.75 here, as it does without the load ("the
+    interface mapping on edge ... was built from" the rod's grid); the
+    length of 0.5 it answers 200, and the mapped edge keeps the operator
+    built for the old grid while ``GraphManager.from_dict`` refuses the
+    graph's own save (``PointReferenceError``)."""
+    with replay("mapped (sparse)") as (machine, step):
+        low, high = O.ROD_ALPHAS
+        assert step(machine.do_put, "rod", {"thermal_diffusivity": low}).status_code == 200
+        assert step(machine.do_save, "a.npz").status_code == 200
+        assert step(machine.do_put, "rod", {"thermal_diffusivity": high}).status_code == 200
+        assert step(machine.do_load, "a.npz").status_code == 200
+        assert step(machine.do_put, "rod", {"length": 0.75}).status_code == 400
+        resp = step(machine.do_put, "rod", {"length": 0.5})
+        assert resp.status_code == 400, resp.text
+
+
 def test_a_value_written_back_after_a_fit_is_held_to_the_stability_limit():
     """MADD-ANO-178 at its shortest.  A fit moves the rod's diffusivity down
     (the node's own value stays at Fourier 0.45); a length of 0.75 is then
@@ -1017,3 +1299,254 @@ def test_a_checkpoint_loaded_into_a_rebuilt_node_is_held_to_the_stability_limit(
             "initial_temperature": 1.0}).status_code == 201
         resp = step(machine.do_load, "a.npz")
         assert resp.status_code == 400, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Writes while the runner runs
+# ---------------------------------------------------------------------------
+# ``POST /sim/start`` starts a thread that steps the graph, one step at a
+# time under the graph lock.  While it runs the routes that write the state
+# or the structure answer 409, and ``PUT /graph/params`` is taken between
+# two steps (``src/maddening/api/README.md``, "Concurrency").  So a sequence
+# of requests sent to a running graph has one meaning: the accepted
+# parameter writes, each applied after a whole number of steps.  The oracle
+# reads that number -- the streams' clock when the write's transaction
+# held the graph lock -- and replays the run on a fresh server: the same
+# steps one at a time, the same accepted requests at the same steps.  What
+# the runner left must be what the replay leaves, bit for bit.
+
+#: The routes documented to answer 409 while the runner runs.
+REFUSED_WHILE_RUNNING = ("step", "run", "put state", "load", "add node", "remove node",
+                         "add edge", "remove edge", "profile")
+#: What a parameter write is answered, running or not.
+PARAMS_STATUSES = (200, 400, 404, 422)
+#: How long the runner is waited for, in seconds (it paces itself to the
+#: wall clock: a step every :data:`DT`).
+RUNNER_WAIT = 20.0
+
+
+@contextlib.contextmanager
+def transactions_of(served: O.Served):
+    """Record every transaction the served graph's routes open: ``(action,
+    the streams' step count when the graph lock was taken)``.  The runner's
+    own steps take the lock without a transaction and are not recorded."""
+    log: list[tuple[str, int]] = []
+    original = SimulationServer._graph_transaction  # noqa: SLF001
+
+    @contextlib.contextmanager
+    def recorded(self, action, **kwargs):
+        with original(self, action, **kwargs) as transaction:
+            if self is served.server:
+                log.append((action, int(self.relay.step_count)))
+            yield transaction
+
+    SimulationServer._graph_transaction = recorded  # noqa: SLF001
+    try:
+        yield log
+    finally:
+        SimulationServer._graph_transaction = original  # noqa: SLF001
+
+
+def _wait_for_steps(served: O.Served, n: int) -> None:
+    """Until the runner has taken *n* more steps."""
+    import time
+
+    relay = served.server.relay
+    target, deadline = relay.step_count + n, time.monotonic() + RUNNER_WAIT
+    while relay.step_count < target:
+        assert time.monotonic() < deadline, (
+            f"the runner took no {n} step(s) in {RUNNER_WAIT:g} s (at {relay.step_count})")
+        assert served.server.runner.is_alive, "the runner's thread died"
+        time.sleep(DT / 4)
+
+
+def _json(body: Any) -> dict:
+    """A JSON body with NaN and Infinity spelled as Python's encoder
+    spells them (the machine's own requests carry them so)."""
+    return {"content": json.dumps(body, allow_nan=True),
+            "headers": {"content-type": "application/json"}}
+
+
+def live_request(served: O.Served, kind: str, node: str = "", params: Optional[dict] = None):
+    """``(method, url, kwargs)`` of a request of *kind* that the idle
+    server takes: so a 409 while the runner runs is the runner's."""
+    gm = served.gm
+    quoted = quote(node, safe="")
+    if kind == "put params":
+        return "PUT", f"/graph/params/{quoted}", _json({"params": params})
+    if kind == "put state":
+        state = {f: np.zeros(np.shape(v)).tolist() for f, v in gm.get_node_state(node).items()}
+        return "PUT", f"/graph/state/{quoted}", _json({"state": state})
+    if kind in ("add edge", "remove edge"):
+        edge = gm._edges[0]  # noqa: SLF001
+        body = {"source_node": edge.source_node, "target_node": edge.target_node,
+                "source_field": edge.source_field, "target_field": edge.target_field}
+        if kind == "add edge":
+            body.update(source_node=edge.target_node, target_node=edge.source_node,
+                        target_field="heat_source" if "heat_source" in (
+                            gm._nodes[edge.source_node].node.boundary_input_spec() or {})  # noqa: SLF001
+                        else "anchor_position")
+        return ("POST" if kind == "add edge" else "DELETE"), "/graph/edges", _json(body)
+    return {
+        "step": ("POST", "/sim/step", {}),
+        "run": ("POST", "/sim/run", {"params": {"n_steps": 2}}),
+        "load": ("POST", "/checkpoint/load", {"params": {"path": START_SLOT}}),
+        "save": ("POST", "/checkpoint/save", {"params": {"path": SLOTS[0]}}),
+        "compile": ("POST", "/graph/compile", {}),
+        "profile": ("POST", "/sim/profile", {"params": {"n_steps": 1, "n_warmup": 0}}),
+        "add node": ("POST", "/graph/nodes", _json({
+            "type": "SpringDamperNode", "name": "spare", "timestep": DT, "params": {}})),
+        "remove node": ("DELETE", f"/graph/nodes/{quoted}", {}),
+    }[kind]
+
+
+def _served_view(served: O.Served) -> str:
+    """The graph's structure and parameters as the server reports them (a
+    read takes the graph lock, as this thread must not read the graph
+    beside the runner)."""
+    resp = served.client.get("/graph")
+    assert resp.status_code == 200, resp.text
+    return resp.text
+
+
+def run_live(start: str, bind: str, requests: list, *, waits: Optional[list] = None
+             ) -> collections.Counter:
+    """Start the runner on *start*, send *requests* (``(kind, node,
+    params)``) while it runs -- after ``waits[i]`` more steps each -- stop
+    it, and hold what it left to a replay on a fresh server.  Returns what
+    was reached."""
+    counts: collections.Counter = collections.Counter()
+    waits = list(waits or [1] * len(requests))
+    live = O.serve(start_graph(start), token_enforced=bind == "token")
+    replayed = O.serve(start_graph(start), token_enforced=bind == "token")
+    accepted: list[tuple[int, tuple]] = []
+    try:
+        for served in (live, replayed):
+            assert served.client.post("/checkpoint/save",
+                                      params={"path": START_SLOT}).status_code == 200
+        with transactions_of(live) as log:
+            resp = live.client.post("/sim/start")
+            assert resp.status_code == 200, resp.text
+            for (kind, node, params), wait in zip(requests, waits):
+                _wait_for_steps(live, wait)
+                method, url, kwargs = live_request(live, kind, node, params)
+                what = O.describe(method, url, kwargs) + " while the runner runs"
+                view, seen = _served_view(live), len(log)
+                resp = live.client.request(method, url, **kwargs)
+                note(f"{what} -> {resp.status_code} {resp.text[:200]}")
+                O.assert_no_server_error(resp, what)
+                assert live.server.runner.is_alive, f"{what} stopped the runner"
+                if kind in REFUSED_WHILE_RUNNING:
+                    assert resp.status_code == 409 and "runner is started" in resp.text, (
+                        f"{what} -> {resp.status_code}, where a write of the state or the "
+                        f"structure beside the runner is a 409: {resp.text[:300]}")
+                    counts["refused beside the runner"] += 1
+                elif kind == "put params":
+                    assert resp.status_code in PARAMS_STATUSES, (what, resp.status_code, resp.text)
+                if resp.status_code < 300 and kind == "put params":
+                    applied = [at for action, at in log[seen:] if action == "write a node's params"]
+                    assert len(applied) == 1, (what, log[seen:])
+                    accepted.append((applied[0], (kind, node, params)))
+                    counts["applied between two steps"] += 1
+                else:
+                    assert _served_view(live) == view, (
+                        f"{what} -> {resp.status_code} and the graph the server reports changed")
+            _wait_for_steps(live, 1)
+            resp = live.client.post("/sim/stop")
+            assert resp.status_code == 200, resp.text
+        assert live.server.runner is None or not live.server.runner.is_alive
+        taken = int(live.server.relay.step_count)
+        counts["steps"] = taken
+
+        # The replay: the same steps, one at a time, and the accepted
+        # requests at the steps they were applied after.
+        done = 0
+
+        def step_to(n: int) -> None:
+            nonlocal done
+            assert n >= done, (n, done, accepted)
+            for _ in range(n - done):
+                assert replayed.client.post("/sim/step").status_code == 200
+            done = n
+
+        for at, (kind, node, params) in accepted:
+            step_to(at)
+            method, url, kwargs = live_request(replayed, kind, node, params)
+            resp = replayed.client.request(method, url, **kwargs)
+            assert resp.status_code == 200, (
+                f"{method} {url} {kwargs} was accepted beside the runner after step {at}, "
+                f"and the replay answers {resp.status_code}: {resp.text[:300]}")
+        step_to(taken)
+        what = (f"{start} ({bind}): {taken} steps of the runner with {accepted} applied, "
+                "against a fresh server replaying them")
+        assert_trees_identical(full_state(replayed.gm), full_state(live.gm),
+                               what=f"{what}: state")
+        assert_trees_identical(params_tree(replayed.gm), params_tree(live.gm),
+                               what=f"{what}: params")
+        assert O.saved_config(replayed.gm) == O.saved_config(live.gm), f"{what}: config"
+        reported = [served.client.get("/graph/state").text for served in (replayed, live)]
+        assert reported[0] == reported[1], f"{what}: the state the server reports"
+        assert int(replayed.server.relay.step_count) == taken
+    finally:
+        for served in (live, replayed):
+            with served.server._runner_lock:  # noqa: SLF001
+                served.server._stop_runner()  # noqa: SLF001
+            served.close()
+    return counts
+
+
+def test_writes_beside_the_runner_are_refused_or_applied_between_two_steps():
+    """A fixed sequence sent to a running graph, on a server that demands
+    the token: every route documented to answer 409 beside the runner does,
+    and changes nothing the server reports; a parameter write is taken or
+    refused as it is of an idle graph; and what the runner leaves when it is
+    stopped is, bit for bit, what a fresh server leaves that takes the same
+    steps one at a time and the accepted writes after the steps they were
+    applied after."""
+    requests = [("put params", "spring", {"stiffness": 20.0}),
+                ("put params", "rod", {"thermal_diffusivity": -1.0}),
+                *[(kind, "ball", None) for kind in REFUSED_WHILE_RUNNING],
+                ("put params", "rod", {"thermal_diffusivity": ALPHAS[0], "length": 0.75}),
+                ("save", "", None), ("compile", "", None),
+                ("put params", "ghost", {"stiffness": 1.0}),
+                ("put params", "ball", {"gravity": -1.0})]
+    counts = run_live("rod", "token", requests,
+                      waits=[2, 1, *[0] * len(REFUSED_WHILE_RUNNING), 1, 0, 0, 0, 2])
+    assert counts["refused beside the runner"] == len(REFUSED_WHILE_RUNNING), dict(counts)
+    assert counts["applied between two steps"] == 3 and counts["steps"] >= 7, dict(counts)
+
+
+@st.composite
+def live_sequences(draw):
+    """``(start, bind, requests, waits)``: up to six requests to a running
+    graph of any start but the empty one."""
+    start = draw(st.sampled_from(sorted(set(START_GRAPHS) - {"empty"})), label="start")
+    bind = draw(st.sampled_from(O.BINDS), label="bind")
+    nodes = {"rod": "HeatNode", "extra": "HeatNode", "spring": "SpringDamperNode",
+             "ball": "BallNode"}
+    present = sorted(start_graph(start)._nodes)  # noqa: SLF001
+    requests, waits = [], []
+    for _ in range(draw(st.integers(1, 6), label="requests")):
+        kind = draw(st.sampled_from(("put params",) * 6 + REFUSED_WHILE_RUNNING
+                                    + ("save", "compile")), label="kind")
+        node = draw(st.sampled_from(present), label="node")
+        params = None
+        if kind == "put params":
+            vocabulary = VOCABULARY[nodes[node]]
+            keys = draw(st.lists(st.sampled_from(sorted(vocabulary)), min_size=1, max_size=2,
+                                 unique=True), label="keys")
+            params = {key: draw(st.sampled_from(vocabulary[key] * 3 + AWKWARD[:6]), label=key)
+                      for key in keys}
+        requests.append((kind, node, params))
+        waits.append(draw(st.integers(0, 2), label="steps before it"))
+    return start, bind, requests, waits
+
+
+# Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_writes_beside_the_runner_are_refused_or_applied_between_two_steps
+@pytest.mark.slow  # the runner paces itself to the wall clock: a third of a second an example
+@given(sequence=live_sequences())
+def test_any_writes_beside_the_runner_leave_what_a_replay_of_the_accepted_ones_leaves(sequence):
+    """The property above for drawn requests, over every start graph --
+    coupled, mapped and multi-rate among them -- on either bind."""
+    start, bind, requests, waits = sequence
+    run_live(start, bind, requests, waits=waits)

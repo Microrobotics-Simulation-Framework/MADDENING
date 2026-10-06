@@ -1290,3 +1290,253 @@ def test_a_checkpoint_loaded_into_a_rebuilt_node_is_held_to_the_stability_limit(
         resp = step(machine.do_load, "a.npz")
         assert resp.status_code == 400, resp.text
 
+
+# ---------------------------------------------------------------------------
+# Writes while the runner runs
+# ---------------------------------------------------------------------------
+# ``POST /sim/start`` starts a thread that steps the graph, one step at a
+# time under the graph lock.  While it runs the routes that write the state
+# or the structure answer 409, and ``PUT /graph/params`` is taken between
+# two steps (``src/maddening/api/README.md``, "Concurrency").  So a sequence
+# of requests sent to a running graph has one meaning: the accepted
+# parameter writes, each applied after a whole number of steps.  The oracle
+# reads that number -- the streams' clock when the write's transaction
+# held the graph lock -- and replays the run on a fresh server: the same
+# steps one at a time, the same accepted requests at the same steps.  What
+# the runner left must be what the replay leaves, bit for bit.
+
+#: The routes documented to answer 409 while the runner runs.
+REFUSED_WHILE_RUNNING = ("step", "run", "put state", "load", "add node", "remove node",
+                         "add edge", "remove edge", "profile")
+#: What a parameter write is answered, running or not.
+PARAMS_STATUSES = (200, 400, 404, 422)
+#: How long the runner is waited for, in seconds (it paces itself to the
+#: wall clock: a step every :data:`DT`).
+RUNNER_WAIT = 20.0
+
+
+@contextlib.contextmanager
+def transactions_of(served: O.Served):
+    """Record every transaction the served graph's routes open: ``(action,
+    the streams' step count when the graph lock was taken)``.  The runner's
+    own steps take the lock without a transaction and are not recorded."""
+    log: list[tuple[str, int]] = []
+    original = SimulationServer._graph_transaction  # noqa: SLF001
+
+    @contextlib.contextmanager
+    def recorded(self, action, **kwargs):
+        with original(self, action, **kwargs) as transaction:
+            if self is served.server:
+                log.append((action, int(self.relay.step_count)))
+            yield transaction
+
+    SimulationServer._graph_transaction = recorded  # noqa: SLF001
+    try:
+        yield log
+    finally:
+        SimulationServer._graph_transaction = original  # noqa: SLF001
+
+
+def _wait_for_steps(served: O.Served, n: int) -> None:
+    """Until the runner has taken *n* more steps."""
+    import time
+
+    relay = served.server.relay
+    target, deadline = relay.step_count + n, time.monotonic() + RUNNER_WAIT
+    while relay.step_count < target:
+        assert time.monotonic() < deadline, (
+            f"the runner took no {n} step(s) in {RUNNER_WAIT:g} s (at {relay.step_count})")
+        assert served.server.runner.is_alive, "the runner's thread died"
+        time.sleep(DT / 4)
+
+
+def _json(body: Any) -> dict:
+    """A JSON body with NaN and Infinity spelled as Python's encoder
+    spells them (the machine's own requests carry them so)."""
+    return {"content": json.dumps(body, allow_nan=True),
+            "headers": {"content-type": "application/json"}}
+
+
+def live_request(served: O.Served, kind: str, node: str = "", params: Optional[dict] = None):
+    """``(method, url, kwargs)`` of a request of *kind* that the idle
+    server takes: so a 409 while the runner runs is the runner's."""
+    gm = served.gm
+    quoted = quote(node, safe="")
+    if kind == "put params":
+        return "PUT", f"/graph/params/{quoted}", _json({"params": params})
+    if kind == "put state":
+        state = {f: np.zeros(np.shape(v)).tolist() for f, v in gm.get_node_state(node).items()}
+        return "PUT", f"/graph/state/{quoted}", _json({"state": state})
+    if kind in ("add edge", "remove edge"):
+        edge = gm._edges[0]  # noqa: SLF001
+        body = {"source_node": edge.source_node, "target_node": edge.target_node,
+                "source_field": edge.source_field, "target_field": edge.target_field}
+        if kind == "add edge":
+            body.update(source_node=edge.target_node, target_node=edge.source_node,
+                        target_field="heat_source" if "heat_source" in (
+                            gm._nodes[edge.source_node].node.boundary_input_spec() or {})  # noqa: SLF001
+                        else "anchor_position")
+        return ("POST" if kind == "add edge" else "DELETE"), "/graph/edges", _json(body)
+    return {
+        "step": ("POST", "/sim/step", {}),
+        "run": ("POST", "/sim/run", {"params": {"n_steps": 2}}),
+        "load": ("POST", "/checkpoint/load", {"params": {"path": START_SLOT}}),
+        "save": ("POST", "/checkpoint/save", {"params": {"path": SLOTS[0]}}),
+        "compile": ("POST", "/graph/compile", {}),
+        "profile": ("POST", "/sim/profile", {"params": {"n_steps": 1, "n_warmup": 0}}),
+        "add node": ("POST", "/graph/nodes", _json({
+            "type": "SpringDamperNode", "name": "spare", "timestep": DT, "params": {}})),
+        "remove node": ("DELETE", f"/graph/nodes/{quoted}", {}),
+    }[kind]
+
+
+def _served_view(served: O.Served) -> str:
+    """The graph's structure and parameters as the server reports them (a
+    read takes the graph lock, as this thread must not read the graph
+    beside the runner)."""
+    resp = served.client.get("/graph")
+    assert resp.status_code == 200, resp.text
+    return resp.text
+
+
+def run_live(start: str, bind: str, requests: list, *, waits: Optional[list] = None
+             ) -> collections.Counter:
+    """Start the runner on *start*, send *requests* (``(kind, node,
+    params)``) while it runs -- after ``waits[i]`` more steps each -- stop
+    it, and hold what it left to a replay on a fresh server.  Returns what
+    was reached."""
+    counts: collections.Counter = collections.Counter()
+    waits = list(waits or [1] * len(requests))
+    live = O.serve(start_graph(start), token_enforced=bind == "token")
+    replayed = O.serve(start_graph(start), token_enforced=bind == "token")
+    accepted: list[tuple[int, tuple]] = []
+    try:
+        for served in (live, replayed):
+            assert served.client.post("/checkpoint/save",
+                                      params={"path": START_SLOT}).status_code == 200
+        with transactions_of(live) as log:
+            resp = live.client.post("/sim/start")
+            assert resp.status_code == 200, resp.text
+            for (kind, node, params), wait in zip(requests, waits):
+                _wait_for_steps(live, wait)
+                method, url, kwargs = live_request(live, kind, node, params)
+                what = O.describe(method, url, kwargs) + " while the runner runs"
+                view, seen = _served_view(live), len(log)
+                resp = live.client.request(method, url, **kwargs)
+                note(f"{what} -> {resp.status_code} {resp.text[:200]}")
+                O.assert_no_server_error(resp, what)
+                assert live.server.runner.is_alive, f"{what} stopped the runner"
+                if kind in REFUSED_WHILE_RUNNING:
+                    assert resp.status_code == 409 and "runner is started" in resp.text, (
+                        f"{what} -> {resp.status_code}, where a write of the state or the "
+                        f"structure beside the runner is a 409: {resp.text[:300]}")
+                    counts["refused beside the runner"] += 1
+                elif kind == "put params":
+                    assert resp.status_code in PARAMS_STATUSES, (what, resp.status_code, resp.text)
+                if resp.status_code < 300 and kind == "put params":
+                    applied = [at for action, at in log[seen:] if action == "write a node's params"]
+                    assert len(applied) == 1, (what, log[seen:])
+                    accepted.append((applied[0], (kind, node, params)))
+                    counts["applied between two steps"] += 1
+                else:
+                    assert _served_view(live) == view, (
+                        f"{what} -> {resp.status_code} and the graph the server reports changed")
+            _wait_for_steps(live, 1)
+            resp = live.client.post("/sim/stop")
+            assert resp.status_code == 200, resp.text
+        assert live.server.runner is None or not live.server.runner.is_alive
+        taken = int(live.server.relay.step_count)
+        counts["steps"] = taken
+
+        # The replay: the same steps, one at a time, and the accepted
+        # requests at the steps they were applied after.
+        done = 0
+
+        def step_to(n: int) -> None:
+            nonlocal done
+            assert n >= done, (n, done, accepted)
+            for _ in range(n - done):
+                assert replayed.client.post("/sim/step").status_code == 200
+            done = n
+
+        for at, (kind, node, params) in accepted:
+            step_to(at)
+            method, url, kwargs = live_request(replayed, kind, node, params)
+            resp = replayed.client.request(method, url, **kwargs)
+            assert resp.status_code == 200, (
+                f"{method} {url} {kwargs} was accepted beside the runner after step {at}, "
+                f"and the replay answers {resp.status_code}: {resp.text[:300]}")
+        step_to(taken)
+        what = (f"{start} ({bind}): {taken} steps of the runner with {accepted} applied, "
+                "against a fresh server replaying them")
+        assert_trees_identical(full_state(replayed.gm), full_state(live.gm),
+                               what=f"{what}: state")
+        assert_trees_identical(params_tree(replayed.gm), params_tree(live.gm),
+                               what=f"{what}: params")
+        assert O.saved_config(replayed.gm) == O.saved_config(live.gm), f"{what}: config"
+        reported = [served.client.get("/graph/state").text for served in (replayed, live)]
+        assert reported[0] == reported[1], f"{what}: the state the server reports"
+        assert int(replayed.server.relay.step_count) == taken
+    finally:
+        for served in (live, replayed):
+            with served.server._runner_lock:  # noqa: SLF001
+                served.server._stop_runner()  # noqa: SLF001
+            served.close()
+    return counts
+
+
+def test_writes_beside_the_runner_are_refused_or_applied_between_two_steps():
+    """A fixed sequence sent to a running graph, on a server that demands
+    the token: every route documented to answer 409 beside the runner does,
+    and changes nothing the server reports; a parameter write is taken or
+    refused as it is of an idle graph; and what the runner leaves when it is
+    stopped is, bit for bit, what a fresh server leaves that takes the same
+    steps one at a time and the accepted writes after the steps they were
+    applied after."""
+    requests = [("put params", "spring", {"stiffness": 20.0}),
+                ("put params", "rod", {"thermal_diffusivity": -1.0}),
+                *[(kind, "ball", None) for kind in REFUSED_WHILE_RUNNING],
+                ("put params", "rod", {"thermal_diffusivity": ALPHAS[0], "length": 0.75}),
+                ("save", "", None), ("compile", "", None),
+                ("put params", "ghost", {"stiffness": 1.0}),
+                ("put params", "ball", {"gravity": -1.0})]
+    counts = run_live("rod", "token", requests,
+                      waits=[2, 1, *[0] * len(REFUSED_WHILE_RUNNING), 1, 0, 0, 0, 2])
+    assert counts["refused beside the runner"] == len(REFUSED_WHILE_RUNNING), dict(counts)
+    assert counts["applied between two steps"] == 3 and counts["steps"] >= 7, dict(counts)
+
+
+@st.composite
+def live_sequences(draw):
+    """``(start, bind, requests, waits)``: up to six requests to a running
+    graph of any start but the empty one."""
+    start = draw(st.sampled_from(sorted(set(START_GRAPHS) - {"empty"})), label="start")
+    bind = draw(st.sampled_from(O.BINDS), label="bind")
+    nodes = {"rod": "HeatNode", "extra": "HeatNode", "spring": "SpringDamperNode",
+             "ball": "BallNode"}
+    present = sorted(start_graph(start)._nodes)  # noqa: SLF001
+    requests, waits = [], []
+    for _ in range(draw(st.integers(1, 6), label="requests")):
+        kind = draw(st.sampled_from(("put params",) * 6 + REFUSED_WHILE_RUNNING
+                                    + ("save", "compile")), label="kind")
+        node = draw(st.sampled_from(present), label="node")
+        params = None
+        if kind == "put params":
+            vocabulary = VOCABULARY[nodes[node]]
+            keys = draw(st.lists(st.sampled_from(sorted(vocabulary)), min_size=1, max_size=2,
+                                 unique=True), label="keys")
+            params = {key: draw(st.sampled_from(vocabulary[key] * 3 + AWKWARD[:6]), label=key)
+                      for key in keys}
+        requests.append((kind, node, params))
+        waits.append(draw(st.integers(0, 2), label="steps before it"))
+    return start, bind, requests, waits
+
+
+# Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_writes_beside_the_runner_are_refused_or_applied_between_two_steps
+@pytest.mark.slow  # the runner paces itself to the wall clock: a third of a second an example
+@given(sequence=live_sequences())
+def test_any_writes_beside_the_runner_leave_what_a_replay_of_the_accepted_ones_leaves(sequence):
+    """The property above for drawn requests, over every start graph --
+    coupled, mapped and multi-rate among them -- on either bind."""
+    start, bind, requests, waits = sequence
+    run_live(start, bind, requests, waits=waits)

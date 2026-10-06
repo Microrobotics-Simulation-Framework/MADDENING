@@ -1039,45 +1039,34 @@ def _rounding_keeps_the_radius(Hk, defect, active, rho, margin):
     of a product's rounding in each row of ``Hk``.  Every column of ``Hk``
     is such a product, so the matrix the exact products would have given
     is ``Hk + E`` with ``|E_ij| <= d_i`` on the active columns, ``d`` the
-    defect's magnitudes.  For any such ``E``, ``z`` is an eigenvalue of
-    ``Hk + E`` only if ``sigma_min(D^{-1} (z I - Hk)) <= ||D^{-1} E||_2
-    <= sqrt(k k_a)`` (``D = diag(d)``, ``k_a`` the active columns).  So
-    where that singular value is above ``sqrt(k k_a)`` at every point of
-    the circle ``|z| = rho + margin`` and of the circle of radius
-    *margin* about the dominant eigenvalue, no member of the family has
-    an eigenvalue on either circle, the count inside each is the same
-    for every member (the family is connected), and the radius of each
-    is within *margin* of ``rho``: a statement about every sign pattern
-    and every combination of columns, exact in the perturbation's size
-    (a near-defective eigenvalue moves by a root of it), where eight
-    sampled perturbations read 0.013 and 0.023 against margins of 0.037
-    and 0.045 on two float32 groups of rank six whose radius the exact
-    products put 0.044 and 0.051 away.  The circles are sampled at
+    defect's magnitudes.  ``z`` is an eigenvalue of ``Hk + E`` only if
+    ``v = R(z) E v`` for some ``v``, ``R(z) = (z I - Hk)^{-1}``, and then
+    ``|v| <= |R(z)| d (1_a^T |v|)`` entry by entry, which needs
+    ``g(z) = 1_a^T |R(z)| d >= 1`` (``1_a`` the active columns).  So where
+    ``g < 1`` at every point of the circle ``|z| = rho + margin`` and of
+    the circle of radius *margin* about the dominant eigenvalue, no member
+    of the family has an eigenvalue on either circle, the count inside
+    each is the same for every member (the family is connected), and the
+    radius of each is within *margin* of ``rho``: a statement about every
+    sign pattern and every combination of columns, and exact in the
+    perturbation's size (a near-defective eigenvalue moves by a root of
+    it), where eight sampled perturbations read 0.013 and 0.023 against
+    margins of 0.037 and 0.045 on two float32 groups of rank six whose
+    radius the exact products put 0.044 and 0.051 away.  Componentwise, so
+    a graded Jacobian (an offset, a small field) is held to the rounding
+    its own rows show and not to its norm's.  The circles are sampled at
     :data:`_CERTIFICATE_ANGLES` points each.  ``True`` on a backend
-    without ``eigvals`` (nothing is certified there; the sampled
-    movement stands alone).
+    without ``eigvals`` (nothing is certified there; the sampled movement
+    stands alone).
     """
     if jax.default_backend() not in _EIGVALS_BACKENDS:
         return jnp.ones((), bool)
     k = Hk.shape[0]
     dtype = Hk.dtype
-    eps = float(jnp.finfo(dtype).eps)
     finite = jnp.logical_and(jnp.all(jnp.isfinite(Hk)), jnp.all(jnp.isfinite(defect)))
     Hs = jnp.where(finite, Hk, jnp.zeros_like(Hk))
-    mag = jnp.where(finite, jnp.abs(defect), jnp.zeros_like(defect))
     on = active != 0
-    # Never exactly zero: a row the fresh product agreed on to the bit is
-    # held to ``sqrt(eps)`` of the largest disagreement (and a product
-    # that agreed everywhere to ``eps**2``; the entries are
-    # dimensionless).  Not ``eps`` of it: the rows are divided by ``d``,
-    # and a singular value is computed to ``eps`` of the largest one, so
-    # rows scaled ``1 / eps`` apart drowned the smallest in the SVD's own
-    # rounding and refused spectra known to sixteen digits.
-    d = mag + float(np.sqrt(eps)) * jnp.max(mag) + eps * eps
-    top = jnp.max(d)
-    row_scale = top / d
-    k_active = jnp.sum(on.astype(dtype))
-    bound = top * jnp.sqrt(k * jnp.maximum(k_active, 1.0))
+    d = jnp.where(jnp.logical_and(finite, on), jnp.abs(defect), jnp.zeros_like(defect))
     eig = jnp.linalg.eigvals(Hs)
     lead = eig[jnp.argmax(jnp.abs(eig))]
     angles = (jnp.arange(_CERTIFICATE_ANGLES, dtype=dtype) + 0.5) * (
@@ -1089,19 +1078,24 @@ def _rounding_keeps_the_radius(Hk, defect, active, rho, margin):
     eye = jnp.eye(k, dtype=dtype)
     # The family lives on the active block (a basis vector that was never
     # filled is zero, and so are its row and column of ``Hk`` and of every
-    # ``E``): the rest of the matrix is replaced by a diagonal above the
-    # bound, which takes no part in the smallest singular value.
+    # ``E``): the identity stands in for the rest.
     block = jnp.logical_and(on[:, None], on[None, :])
-    idle = jnp.where(on, jnp.zeros_like(d), 2.0 * bound + 1.0)
+    idle = jnp.diag(jnp.where(on, jnp.zeros_like(d), jnp.ones_like(d)))
+    on_f = on.astype(dtype)
 
-    def smallest(x, y):
+    def reach(x, y):
         # ``z I - Hk`` for complex ``z = x + i y`` as a real matrix of
-        # twice the size: the same singular values, each twice.
-        a = jnp.where(block, row_scale[:, None] * (x * eye - Hs), 0.0) + jnp.diag(idle)
-        b = jnp.where(block, row_scale[:, None] * (y * eye), 0.0)
-        return jnp.linalg.svd(jnp.block([[a, -b], [b, a]]), compute_uv=False)[-1]
+        # twice the size, whose inverse holds the real and imaginary
+        # parts of ``R(z)``.
+        a = jnp.where(block, x * eye - Hs, 0.0) + idle
+        b = jnp.where(block, y * eye, 0.0)
+        inv = jnp.linalg.inv(jnp.block([[a, -b], [b, a]]))
+        modulus = jnp.sqrt(inv[:k, :k] ** 2 + inv[k:, :k] ** 2)
+        return on_f @ (modulus @ d)
 
-    clear = jnp.all(jax.vmap(smallest)(re, im) > bound)
+    g = jax.vmap(reach)(re, im)
+    # NaN or inf (a point of a circle on an eigenvalue) is not below one.
+    clear = jnp.all(g < 1.0)
     return jnp.logical_and(finite, jnp.logical_and(clear, margin > 0))
 
 

@@ -216,8 +216,26 @@ def lattice_graph() -> GraphManager:
     return gm
 
 
-GRAPHS: dict[str, Callable[[], GraphManager]] = {"standard": standard_graph,
-                                                 "lattice": lattice_graph}
+def _compiled(build: Callable[[], GraphManager]) -> Callable[[], GraphManager]:
+    def graph() -> GraphManager:
+        with quiet():
+            gm = build()
+            gm.compile()
+        return gm
+    return graph
+
+
+#: The graphs of the routes' own seeds ...
+OWN_GRAPHS = ("standard", "lattice")
+#: ... and one of each kind the routes cannot build and users serve
+#: (``rest_oracle.COUPLED_AND_MAPPED_GRAPHS``): two rods ``rod`` and
+#: ``extra`` in a coupling group, the same two joined by a sparse mapped
+#: edge, and a spring, a ball and a rod at three rates.  The write routes
+#: have a seed for each.
+OTHER_GRAPHS = ("coupled (ift)", "mapped (sparse)", "multi-rate")
+GRAPHS: dict[str, Callable[[], GraphManager]] = {
+    "standard": standard_graph, "lattice": lattice_graph,
+    **{name: _compiled(O.COUPLED_AND_MAPPED_GRAPHS[name]) for name in OTHER_GRAPHS}}
 #: The checkpoint every served graph has saved, for the load route.
 SAVED = "saved.npz"
 
@@ -317,6 +335,34 @@ SEEDS: dict[str, tuple] = {
     "POST /sim/profile/jax/stop": (Seed(status=409),),
     "GET /sim/profile/jax/status": (Seed(),),
 }
+
+
+def _on_the_other_graphs(**seed: Any) -> tuple:
+    """One seed per graph of :data:`OTHER_GRAPHS` (each has a ``rod``)."""
+    return tuple(Seed(graph=graph, label=graph, **seed) for graph in OTHER_GRAPHS)
+
+
+_ROD_EDGE = {"source_node": "rod", "target_node": "extra", "source_field": "temperature",
+             "target_field": "heat_source"}
+for _key, _seeds in {
+    "PUT /graph/params/{node_name}": _on_the_other_graphs(
+        path={"node_name": "rod"}, body={"params": {"thermal_diffusivity": O.ROD_ALPHAS[0]}}),
+    "PUT /graph/state/{node_name}": _on_the_other_graphs(
+        path={"node_name": "rod"}, body=_whole_state("rod")),
+    "POST /sim/step": _on_the_other_graphs(),
+    "POST /sim/run": _on_the_other_graphs(query={"n_steps": 2}),
+    "POST /sim/reset": _on_the_other_graphs(),
+    "POST /checkpoint/load": _on_the_other_graphs(query={"path": SAVED}),
+    # The edge a coupling group iterates over, and a mapped one.
+    "DELETE /graph/edges": tuple(Seed(body=dict(_ROD_EDGE), graph=graph, label=graph)
+                                 for graph in OTHER_GRAPHS[:2]),
+    # Not a member of a coupling group: that removal is pinned in the
+    # sequence oracle as a finding.
+    "DELETE /graph/nodes/{name}": tuple(Seed(path={"name": "rod"}, graph=graph, label=graph)
+                                        for graph in OTHER_GRAPHS[1:]),
+}.items():
+    SEEDS[_key] = SEEDS[_key] + _seeds
+
 #: Routes whose acceptance leaves their own seed valid (a parameter or a
 #: state written again, a step, a save over a save): the graph is kept for
 #: the next variant.  After any other accepted write a fresh graph is served.
@@ -872,8 +918,14 @@ def _run_battery(op: Operation, seeds: tuple, chosen: Callable[[Variant], bool],
 
 #: One case per seed (a route with three seeds sends some three hundred
 #: requests, and serves a fresh graph after each one it accepts).
+_ALL_SEEDED = [(key, i, seed) for key in sorted(SEEDS) for i, seed in enumerate(SEEDS[key])]
 _SEEDED = [pytest.param(key, i, id=key + (f" ({seed.label})" if seed.label else ""))
-           for key in sorted(SEEDS) for i, seed in enumerate(SEEDS[key])]
+           for key, i, seed in _ALL_SEEDED if seed.graph in OWN_GRAPHS]
+#: The seeds on a coupled, a mapped and a multi-rate graph: their battery
+#: runs in the slow lane, where the fuzzer draws them too.
+_SEEDED_ON_OTHER_GRAPHS = [pytest.param(key, i, id=f"{key} ({seed.label})")
+                           for key, i, seed in _ALL_SEEDED if seed.graph in OTHER_GRAPHS]
+assert all(SEEDS[key][0].graph in OWN_GRAPHS for key in SEEDS)
 
 
 @pytest.mark.parametrize("key, index", _SEEDED)
@@ -881,6 +933,17 @@ def test_every_malformed_value_of_every_field_is_refused_whole_or_served(key, in
     """The battery over a route's own fields: each path parameter, query
     parameter and body member replaced in turn by every malformed value of
     its kind, left out, or joined by one the route does not have."""
+    _run_battery(IN_SCOPE[key], SEEDS[key][index:index + 1],
+                 lambda v: not v.where.startswith("header"))
+
+
+# Per push: tests/property/test_rest_requests_generated_from_the_schema.py::test_every_seed_is_answered_as_it_says_on_either_bind
+@pytest.mark.slow  # the battery over 22 more seeds, each on a graph that is compiled again after a write
+@pytest.mark.parametrize("key, index", _SEEDED_ON_OTHER_GRAPHS)
+def test_every_malformed_value_sent_to_a_coupled_mapped_or_multi_rate_graph_is_refused_whole_or_served(
+        key, index):
+    """The battery over a write route's fields, sent to a graph with a
+    coupling group, with a mapped edge and with nodes at three rates."""
     _run_battery(IN_SCOPE[key], SEEDS[key][index:index + 1],
                  lambda v: not v.where.startswith("header"))
 
@@ -1230,7 +1293,12 @@ def test_a_generated_request_is_refused_whole_or_served(key, data):
     JSON.  (JAX's recorder is not run: see :func:`jax_recorder_not_run`.
     The slow sibling below runs it.)"""
     op = IN_SCOPE[key]
-    seed, changes = data.draw(generated_requests(op, SEEDS[key]))
+    # The route's own seeds: the ones on a coupled, a mapped and a
+    # multi-rate graph are drawn in the slow lane (a served graph per seed
+    # and bind is most of this test's cost) and sent as they are on every
+    # push (test_every_seed_is_answered_as_it_says_on_either_bind).
+    own = tuple(seed for seed in SEEDS[key] if seed.graph in OWN_GRAPHS)
+    seed, changes = data.draw(generated_requests(op, own))
     bind = data.draw(st.sampled_from(O.BINDS), label="bind")
     credential = data.draw(st.integers(0, len(CREDENTIALS) - 1), label="without the token")
     with jax_recorder_not_run():
@@ -1376,25 +1444,30 @@ def test_without_the_token_every_route_is_refused_and_reveals_nothing(key, deman
         O.assert_nothing_changed(before, O.snapshot(served), f"{key} without the token")
 
 
-def test_every_seed_is_answered_for_a_token_holder_as_it_is_on_loopback():
-    """Every route's seed request, sent by a token-holder to a server that
-    demands the token, is answered as the seed says -- the status the
-    loopback battery starts from -- under the same invariants: so the
+@pytest.mark.parametrize("bind", O.BINDS)
+def test_every_seed_is_answered_as_it_says_on_either_bind(bind):
+    """Every route's seed request is answered as the seed says, under the
+    invariants.  From a token-holder, on a server that demands the token:
+    every seed, with the status the loopback battery starts from -- so the
     refusals above are the missing token's, and the routes a token-holder
-    reaches are the ones a loopback client does."""
+    reaches are the ones a loopback client does.  On loopback: the seeds on
+    a coupled, a mapped and a multi-rate graph, whose battery is in the
+    slow lane (the others' batteries start with this)."""
     problems, served = [], {}
     try:
         for key in sorted(SEEDS):
             op = IN_SCOPE[key]
             for seed in SEEDS[key]:
+                if bind == "loopback" and seed.graph in OWN_GRAPHS:
+                    continue
                 if seed.graph not in served:
-                    served[seed.graph] = serve(seed.graph, "token")
+                    served[seed.graph] = serve(seed.graph, bind)
                 found, resp = exchange(served[seed.graph], op,
                                        request_of(op, seed, served[seed.graph]))
                 problems += [f"{key} [{seed.label or 'seed'}]: {p}" for p in found]
                 if resp.status_code != seed.status:
                     problems.append(f"{key} [{seed.label or 'seed'}]: {resp.status_code}, "
-                                    f"where a loopback client is answered {seed.status}: "
+                                    f"where the seed says {seed.status}: "
                                     f"{resp.text[:200]}")
                 if not (resp.status_code >= 400 or op.method == "GET"
                         or key in KEEPS_ITS_SEED):

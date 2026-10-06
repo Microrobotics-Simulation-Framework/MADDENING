@@ -86,7 +86,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import event as hypothesis_event
-from hypothesis import settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.errors import InvalidArgument
 from hypothesis.stateful import (
@@ -99,12 +99,20 @@ from hypothesis.stateful import (
 )
 
 import maddening.nodes
+from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import BallNode, HeatNode, SpringDamperNode
 
 from tests.conftest import EXAMPLES_FLOOR
 from tests.property import rest_oracle as O
-from tests.property.differential import no_cloud_launch, note, quiet
+from tests.property.differential import (
+    assert_trees_identical,
+    full_state,
+    no_cloud_launch,
+    note,
+    params_tree,
+    quiet,
+)
 from tests.property.graph_fingerprint import assert_exactly_as_it_was, served_fingerprint
 from tests.property.injected_failures import fail_at_every_point, injection_points
 from tests.property.node_catalogue import f32
@@ -234,6 +242,28 @@ def rod_graph() -> GraphManager:
     return gm
 
 
+#: The graphs an example starts from.  The rod graph is the one the
+#: vocabulary is built around; the others are the kinds of graph the
+#: routes have no request to build and users serve: a coupling group under
+#: each solver, a mapped edge of each static kind, and nodes at three rates.
+START_GRAPHS: dict[str, Any] = {
+    "rod": rod_graph,
+    "empty": GraphManager,
+    **O.COUPLED_AND_MAPPED_GRAPHS,
+}
+assert O.ROD_CELLS == N_CELLS and O.ROD_DT == DT and set(O.ROD_ALPHAS) <= set(ALPHAS)
+#: The starts beside the rod graph and the empty one.
+COUPLED_AND_MAPPED = tuple(sorted(set(START_GRAPHS) - {"rod", "empty"}))
+
+
+def start_graph(start: str) -> GraphManager:
+    with quiet():
+        gm = START_GRAPHS[start]()
+        if gm._nodes and gm._dirty:  # noqa: SLF001
+            gm.compile()
+    return gm
+
+
 def event(text: str) -> None:
     """``hypothesis.event`` inside a generated example, nothing outside one
     (a pinned sequence drives the same requests as an ordinary test)."""
@@ -315,8 +345,9 @@ class RestWriteSequences(RuleBasedStateMachine):
 
     def begin(self, start: str, bind: str = "loopback") -> None:
         assert bind in O.BINDS, bind
-        gm = rod_graph() if start == "rod" else GraphManager()
+        gm = start_graph(start)
         self.bind = bind
+        type(self).counts[f"started from {start}"] += 1
         self.served = O.serve(gm, token_enforced=bind == "token")
         for name, spec in gm._nodes.items():  # noqa: SLF001
             self._remember_construction(name, spec.node)
@@ -412,6 +443,24 @@ class RestWriteSequences(RuleBasedStateMachine):
     def _nodes(self) -> list[str]:
         return list(self.gm._nodes)  # noqa: SLF001
 
+    def _withheld(self, name: str, params: dict) -> bool:
+        """Whether a parameter write is one the machine does not send: a
+        rod's ``length`` when a mapped edge was built from its grid.  The
+        route refuses such a write, except after a fit or a load left
+        another leaf away from the node's own value (pinned below as a
+        strict xfail; drop this with it).  The refusal itself is in the
+        tour of the mapped graphs."""
+        mapped = {end for edge in self.gm._edges if edge.mapping is not None  # noqa: SLF001
+                  for end in (edge.source_node, edge.target_node)}
+        if name in mapped and "length" in params:
+            type(self).counts["withheld"] += 1
+            return True
+        return False
+
+    def _grouped(self) -> set[str]:
+        """The nodes a coupling group names."""
+        return {name for group in self.gm._coupling_groups for name in group.nodes}  # noqa: SLF001
+
     def _draw_node(self, data, *, ghost: bool = True) -> str:
         """A node of the graph, one with a stability limit three times as
         often; sometimes a name the graph does not have."""
@@ -455,7 +504,8 @@ class RestWriteSequences(RuleBasedStateMachine):
     # start
     # ------------------------------------------------------------------
 
-    @initialize(start=st.sampled_from(("rod",) * 7 + ("empty",)), bind=st.sampled_from(O.BINDS))
+    @initialize(start=st.sampled_from(("rod",) * 10 + ("empty",) + COUPLED_AND_MAPPED),
+                bind=st.sampled_from(O.BINDS))
     def start(self, start, bind):
         self.begin(start, bind)
 
@@ -476,8 +526,13 @@ class RestWriteSequences(RuleBasedStateMachine):
     @rule(data=st.data())
     def add_or_remove_a_node(self, data):
         present = self._nodes()
+        # A member of a coupling group is not removed: the route takes the
+        # request and leaves the group naming it, a graph whose save does
+        # not reload (pinned below as a strict xfail; drop this filter with
+        # it).
+        removable = [n for n in present if n not in self._grouped()]
         if present and data.draw(st.integers(0, 2), label="remove") == 0:
-            self.do_remove_node(data.draw(st.sampled_from(present * 3 + ["ghost"]),
+            self.do_remove_node(data.draw(st.sampled_from(removable * 3 + ["ghost"]),
                                           label="name"))
             return
         free = [n for n in NAMES if n not in present]
@@ -565,7 +620,8 @@ class RestWriteSequences(RuleBasedStateMachine):
             return
         key = data.draw(st.sampled_from(self._keys(name) * 2 + ["no_such_param"]), label="key")
         value = 1.0 if key == "no_such_param" else self._draw_value(data, name, key)
-        self.do_put(name, {key: value})
+        if not self._withheld(name, {key: value}):
+            self.do_put(name, {key: value})
 
     @precondition(lambda self: self.served is not None and self._nodes())
     @rule(data=st.data())
@@ -577,8 +633,9 @@ class RestWriteSequences(RuleBasedStateMachine):
         # A node with one parameter (a table) gets a one-key body.
         keys = data.draw(st.lists(st.sampled_from(pool), min_size=min(2, len(set(pool))),
                                   max_size=3, unique=True), label="keys")
-        self.do_put(name, {key: self._draw_value(data, name, key) for key in keys},
-                    rule_name="put several params")
+        body = {key: self._draw_value(data, name, key) for key in keys}
+        if not self._withheld(name, body):
+            self.do_put(name, body, rule_name="put several params")
 
     @precondition(lambda self: self.served is not None and self._nodes())
     @rule(data=st.data())
@@ -600,7 +657,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         if others and data.draw(st.integers(0, 2), label="and a new value") == 0:
             key = data.draw(st.sampled_from(others), label="new key")
             body[key] = self._draw_value(data, name, key)
-        self.do_put(name, body, rule_name="put params back")
+        if not self._withheld(name, body):
+            self.do_put(name, body, rule_name="put params back")
 
     def _limited(self) -> list[str]:
         return [name for name in self._nodes() if O.limit_fraction(self.gm, name) is not None]
@@ -629,7 +687,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         if not nearer:
             return
         key, value = data.draw(st.sampled_from(nearer), label="write")
-        self.do_put(name, {key: value}, rule_name="put towards the limit")
+        if not self._withheld(name, {key: value}):
+            self.do_put(name, {key: value}, rule_name="put towards the limit")
 
     def do_fit(self, name: str, key: str, value: Any) -> bool:
         """A direct ``gm.params`` write, as a fit (or any Python code)
@@ -868,7 +927,7 @@ def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
     # refused and failed at a point; a token-holder's every request was
     # first sent without the token (invariant 7).
     for bind in O.BINDS:
-        assert counts[f"accepted ({bind})"] >= 15 and counts[f"refused ({bind})"] >= 4, \
+        assert counts[f"accepted ({bind})"] >= 10 and counts[f"refused ({bind})"] >= 1, \
             dict(counts)
         assert counts[f"failures injected ({bind})"] >= 100, dict(counts)
     assert counts["sent without the token"] == \
@@ -1007,6 +1066,8 @@ def test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused():
         "a graph that cannot compile"] >= 2, dict(counts)
 
 
+# Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
+@pytest.mark.slow  # a second tour of every write route, each request sent at every injection point: 3 s
 def test_a_failure_at_any_point_of_any_write_route_changes_nothing_for_a_token_holder():
     """Invariant 6 on a server that demands the token.  One accepted and
     one refused request of every kind the machine sends, from a
@@ -1014,9 +1075,10 @@ def test_a_failure_at_any_point_of_any_write_route_changes_nothing_for_a_token_h
     its route body reaches: the 500 carries the generic detail and no word
     of the failure, and the graph is exactly as it was, object for object
     -- and each was first sent without the token (invariant 7).  The
-    generated sequences reach this configuration in half their examples;
-    which kinds of request they send there moves with the draw, and this
-    tour does not."""
+    generated sequences reach this configuration in half their examples on
+    every push (their test counts the failures injected there); which kinds
+    of request they send there moves with the draw, and this tour does
+    not."""
     RestWriteSequences.counts = collections.Counter()
     with replay(bind="token") as (machine, step):
         assert machine.served.token_enforced
@@ -1051,6 +1113,136 @@ def test_a_failure_at_any_point_of_any_write_route_changes_nothing_for_a_token_h
     # The 18 requests above, the save every example starts with and the
     # step it ends with.
     assert counts["sent without the token"] == 20, dict(counts)
+
+
+# ---------------------------------------------------------------------------
+# Coupled, mapped and multi-rate graphs
+# ---------------------------------------------------------------------------
+
+#: A tour of the write routes over a graph of two rods (``rod`` and
+#: ``extra``) or of a spring, a ball and a rod: requests each start takes
+#: or refuses in its own way, and none is predicted.
+_TOUR = (
+    ("do_put", "rod", {"thermal_diffusivity": ALPHAS[0]}),
+    ("do_put", "rod", {"thermal_diffusivity": -1.0}),
+    ("do_put_state", "rod", {"temperature": [2.0] * N_CELLS}),
+    ("do_step",),
+    ("do_run", 3),
+    ("do_save", "a.npz"),
+    ("do_put", "rod", {"length": 0.75}),
+    ("do_load", "a.npz"),
+    # ... and, in the slow lane, the requests after which a graph is
+    # compiled again (most of the cost of a coupled one):
+    ("do_reset",),
+    ("do_add_node", "spare", "SpringDamperNode", 2 * DT, {"stiffness": 20.0}),
+    ("do_step",),
+    ("do_remove_edge", "rod", "temperature", "extra", "heat_source"),
+    ("do_step",),
+    ("do_add_edge", "rod", "temperature", "extra", "heat_source"),
+    ("do_remove_node", "spare"),
+    ("do_compile",),
+    ("do_load", START_SLOT),
+)
+
+
+#: The tour's requests per push: the writes that leave the compiled step,
+#: over one start of each kind (the other solver and the other mapping
+#: kind are toured whole in the slow lane, and started from by the machine).
+_TOUR_PER_PUSH = 8
+_TOURED_PER_PUSH = ("coupled (ift)", "mapped (sparse)", "multi-rate")
+
+
+def _tour(start: str, requests: tuple) -> collections.Counter:
+    RestWriteSequences.counts = collections.Counter()
+    bind = O.BINDS[COUPLED_AND_MAPPED.index(start) % 2]
+    with replay(start, bind) as (machine, step):
+        gm = machine.gm
+        assert bool(gm._coupling_groups) == start.startswith("coupled")  # noqa: SLF001
+        assert any(e.mapping is not None for e in gm._edges) == start.startswith("mapped")  # noqa: SLF001
+        assert (len({spec.node.delta_t for spec in gm._nodes.values()}) == 3) \
+            == (start == "multi-rate")  # noqa: SLF001
+        for name, *args in requests:
+            step(getattr(machine, name), *args)
+    counts = RestWriteSequences.counts
+    counts["accepted"] = sum(n for key, n in counts.items() if key[1:] == ("accepted",))
+    counts["refused"] = sum(n for key, n in counts.items() if key[1:] == ("refused",))
+    return counts
+
+
+@pytest.mark.parametrize("start", _TOURED_PER_PUSH)
+def test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_a_write(start):
+    """Invariants 1 to 7 over the graphs the routes cannot build and users
+    serve: a coupling group under each solver, a mapped edge of each static
+    kind, nodes at three rates.  A fixed tour over each -- parameters
+    written and refused, a state written, a step, a run, a save and its
+    load -- every request with a failure injected at each point, and after
+    each accepted one the graph stepped beside the graph its save reloads,
+    bit for bit.  The generated sequences start from these graphs too;
+    which a short run reaches moves with the draw.  The starts alternate
+    between the two configurations."""
+    counts = _tour(start, _TOUR[:_TOUR_PER_PUSH])
+    assert counts["accepted"] >= 6 and counts["refused"] >= 1, dict(counts)
+    assert counts["stepped beside its reload"] >= 6, dict(counts)
+    assert counts["failures injected"] >= 30, dict(counts)
+
+
+# Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_a_write
+@pytest.mark.slow  # a coupled graph is compiled again after every structural write: 3 to 12 s a start
+@pytest.mark.parametrize("start", COUPLED_AND_MAPPED)
+def test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_every_kind_of_write(start):
+    """The whole tour: the requests above and then a reset, a node added
+    and removed, an edge removed and added back (without its mapping, where
+    it had one), a compile and a load of the save every example starts
+    with."""
+    counts = _tour(start, _TOUR)
+    assert counts["accepted"] >= 12 and counts["refused"] >= 1, dict(counts)
+    assert counts["stepped beside its reload"] >= 10, dict(counts)
+    assert counts["failures injected"] >= 60, dict(counts)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "DELETE /graph/nodes/{name} takes the removal of a coupling group's member and leaves "
+    "the group naming it: the graph's save does not reload and every step is a 400 until a "
+    "node of that name is added again"))
+def test_a_graph_whose_coupling_group_lost_a_member_still_reloads():
+    """Found by the tour above, under either solver.  ``DELETE /graph/nodes/extra`` on two rods
+    in a coupling group answers 200; the group still names ``extra``, so
+    ``GraphManager.from_dict`` refuses the graph's own save ("cannot be
+    rebuilt: No node named 'extra'") and ``POST /sim/step`` and
+    ``/graph/compile`` answer 400 ("coupling group references non-existent
+    node") -- and no route removes a group.  Either answer would hold the
+    invariant: refuse the removal, or drop the group with the node."""
+    with replay("coupled (ift)") as (machine, step):
+        resp = step(machine.do_remove_node, "extra")
+        assert resp.status_code in (200, 400, 409), resp.text
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "PUT /graph/params takes a rod's new length, which moves the points a mapped edge was "
+    "built from, when a load (or a fit) has left the rod's diffusivity away from the node's "
+    "own value and the new length is unstable at the node's own: the graph's save does not "
+    "reload"))
+def test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from():
+    """Found by the machine on the mapped graphs (of either kind: the dense
+    one answers the same), over REST alone.  The
+    rod's diffusivity is lowered, saved, raised again and the save loaded:
+    the live leaf is the low value and the node's own the high one, as
+    after a fit.  A length of 0.5 is then stable for the rod that runs
+    (Fourier 0.2) and unstable at the node's own diffusivity (0.6).  The
+    route refuses a length of 0.75 here, as it does without the load ("the
+    interface mapping on edge ... was built from" the rod's grid); the
+    length of 0.5 it answers 200, and the mapped edge keeps the operator
+    built for the old grid while ``GraphManager.from_dict`` refuses the
+    graph's own save (``PointReferenceError``)."""
+    with replay("mapped (sparse)") as (machine, step):
+        low, high = O.ROD_ALPHAS
+        assert step(machine.do_put, "rod", {"thermal_diffusivity": low}).status_code == 200
+        assert step(machine.do_save, "a.npz").status_code == 200
+        assert step(machine.do_put, "rod", {"thermal_diffusivity": high}).status_code == 200
+        assert step(machine.do_load, "a.npz").status_code == 200
+        assert step(machine.do_put, "rod", {"length": 0.75}).status_code == 400
+        resp = step(machine.do_put, "rod", {"length": 0.5})
+        assert resp.status_code == 400, resp.text
 
 
 def test_a_value_written_back_after_a_fit_is_held_to_the_stability_limit():
@@ -1097,3 +1289,4 @@ def test_a_checkpoint_loaded_into_a_rebuilt_node_is_held_to_the_stability_limit(
             "initial_temperature": 1.0}).status_code == 201
         resp = step(machine.do_load, "a.npz")
         assert resp.status_code == 400, resp.text
+

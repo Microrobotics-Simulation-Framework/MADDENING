@@ -194,6 +194,87 @@ def serve(gm: Optional[GraphManager] = None, *, registry: Optional[dict] = None,
 
 
 # ---------------------------------------------------------------------------
+# Coupled, mapped and multi-rate graphs
+# ---------------------------------------------------------------------------
+# The kinds of graph the routes have no request to build and users serve.
+# Tiny, so that a compile is tens of milliseconds (a coupled one, a few
+# hundred): rods of eight and six cells, a spring, a ball.
+
+#: The rods' timestep and cell count, their diffusivities (Fourier numbers
+#: 0.05 and 0.15 at length 1: 5/64 and 15/64, exact in float32) and a
+#: temperature profile.
+ROD_DT = 0.01
+ROD_CELLS = 8
+ROD_ALPHAS = (0.078125, 0.234375)
+ROD_RAMP = tuple(float(np.float32(x)) for x in np.linspace(0.0, 1.0, ROD_CELLS))
+
+
+def two_rods(extra_cells: int = ROD_CELLS) -> GraphManager:
+    """A rod with a temperature profile and a second, cooler one of
+    *extra_cells* cells, both well inside their Fourier limits."""
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", ROD_DT, n_cells=ROD_CELLS, length=1.0,
+                         thermal_diffusivity=ROD_ALPHAS[1], initial_temperature=list(ROD_RAMP)))
+    gm.add_node(HeatNode("extra", ROD_DT, n_cells=extra_cells, length=1.0,
+                         thermal_diffusivity=ROD_ALPHAS[0], initial_temperature=0.5))
+    return gm
+
+
+def coupled_graph(solver: str) -> GraphManager:
+    """Two rods, each the other's heat source, iterated to a fixed point
+    within every step by a coupling group under *solver* (``"ift"``, the
+    default, or ``"fori"``)."""
+    gm = two_rods()
+    gm.add_edge("rod", "extra", "temperature", "heat_source")
+    gm.add_edge("extra", "rod", "temperature", "heat_source")
+    gm.add_coupling_group(["rod", "extra"], max_iterations=4, tolerance=1e-6, solver=solver)
+    return gm
+
+
+def mapped_graph(kind: str) -> GraphManager:
+    """A rod of eight cells heating one of six through a static mapping
+    between their grids, named by reference so that a save re-resolves it:
+    a dense nearest-neighbour matrix, or (``"sparse"``) the same operator
+    as a static sparse mapping."""
+    from maddening.core.coupling.mapping import nearest_neighbor_mapping
+    from maddening.core.coupling.sparse_mapping import sparse_nearest_neighbor_mapping
+
+    make = {"dense": nearest_neighbor_mapping, "sparse": sparse_nearest_neighbor_mapping}[kind]
+    gm = two_rods(extra_cells=6)
+    grid = {name: np.asarray(gm.get_node(name).static_data["grid_x"].value)
+            for name in ("rod", "extra")}
+    gm.add_edge("rod", "extra", "temperature", "heat_source", mapping=make(
+        grid["rod"], grid["extra"], source_ref={"node": "rod", "field": "grid_x"},
+        target_ref={"node": "extra", "field": "grid_x"}))
+    return gm
+
+
+def multi_rate_graph() -> GraphManager:
+    """A spring at :data:`ROD_DT`, a rod at twice it and a ball at four times
+    it, the spring and the ball each reading the other's position."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("spring", ROD_DT, stiffness=40.0, damping=0.5,
+                                 initial_position=0.5))
+    gm.add_node(BallNode("ball", 4 * ROD_DT, initial_position=3.0))
+    gm.add_node(HeatNode("rod", 2 * ROD_DT, n_cells=ROD_CELLS, length=1.0,
+                         thermal_diffusivity=ROD_ALPHAS[0], initial_temperature=list(ROD_RAMP)))
+    gm.add_edge("spring", "ball", "position", "table_position")
+    gm.add_edge("ball", "spring", "position", "anchor_position")
+    return gm
+
+
+#: The graphs above by name: a coupling group under each solver, a mapped
+#: edge of each static kind, nodes at three rates.
+COUPLED_AND_MAPPED_GRAPHS: dict[str, Callable[[], GraphManager]] = {
+    "coupled (ift)": lambda: coupled_graph("ift"),
+    "coupled (fori)": lambda: coupled_graph("fori"),
+    "mapped (dense)": lambda: mapped_graph("dense"),
+    "mapped (sparse)": lambda: mapped_graph("sparse"),
+    "multi-rate": multi_rate_graph,
+}
+
+
+# ---------------------------------------------------------------------------
 # 1. No reply is a 5xx
 # ---------------------------------------------------------------------------
 

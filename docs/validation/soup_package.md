@@ -259,8 +259,12 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-194 | DatasetGenerator pairs a forward edge's boundary input with the source's state before the step | `major` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-195 | The interface convergence norm reads a mapped edge's source field, not what the edge delivers | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
 | MADD-ANO-196 | A hand-written Mapping class's weight table was kept by reference and unchecked: an edit of gm.params rewrote the mapping, and a weight could be silently left out of a restore | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-197 | The library's warning probes silenced every thread of the process, and two that overlapped in two threads could leave every warning ignored for good | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-198 | A config from to_dict() shared its containers with the graph: editing one to build a variant changed the graph it came from | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-199 | A bfloat16 state or parameter leaf cannot be restored from a checkpoint | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
+| MADD-ANO-200 | A checkpoint value loaded into a bfloat16 leaf was cast with no check: a float32 1e-44 loaded as 0.0 and 3.4028235e38 as inf | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 
-*196 anomalies registered.  34 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 25 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*200 anomalies registered.  35 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 26 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

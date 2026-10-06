@@ -128,6 +128,24 @@ def test_a_value_a_bfloat16_field_can_hold_loads_as_the_cast_rounds_it(tmp_path,
     assert float(loaded[0]) == 1.5 and float(loaded[1]) != 0.1
 
 
+@pytest.mark.parametrize("member_dtype, value, stored", [
+    (np.float32, 1e-9, "0.0"), (np.float32, 1e5, "inf"), (np.float64, -1e-50, "-0.0"),
+], ids=["float32:1e-09", "float32:100000.0", "float64:-1e-50"])
+def test_a_value_a_float16_field_cannot_hold_is_refused(tmp_path, member_dtype, value, stored):
+    """The other 16-bit float, which NumPy does give a kind: it had the
+    rule already, and keeps it."""
+    with np.errstate(all="ignore"):
+        bare = np.asarray([value], member_dtype).astype(np.float16)
+    assert repr(float(bare[0])) == stored, "premise: float16 cannot hold this value"
+    values = np.full(N, 1.5, member_dtype)
+    values[2] = value
+    gm = _graph("float16")
+    before = _x(gm).copy()
+    with pytest.raises(ValueError, match="which this graph's float16 cannot hold"):
+        gm.load_state(_checkpoint(tmp_path, "n/x", values))
+    assert _x(gm).dtype == np.float16 and np.array_equal(_x(gm), before)
+
+
 def test_a_nan_loads_into_a_bfloat16_field_as_nan(tmp_path):
     values = np.asarray([1.0, np.nan, 2.0, -np.inf], np.float32)
     gm = _graph("bfloat16")

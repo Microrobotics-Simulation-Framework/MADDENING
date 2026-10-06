@@ -3762,8 +3762,13 @@ claims:
   conditions: >-
     a float64 checkpoint into float32 state and params at +-1e39, +-1e-50,
     +-1e-40, 3.4e38, +-0, inf and NaN; an int64 2**40, a fraction and NaN
-    into an int32 field; through POST /checkpoint/load. Not claimed for
-    16-bit floats, multi-rate graphs, sub-cycled groups or sharded graphs.
+    into an int32 field; through POST /checkpoint/load; a float32, float64
+    or float16 checkpoint into a bfloat16 state field (and a bfloat16
+    params leaf) at +-1e-44, 3.4028235e38, 1e39, -1e-50, -1e-39, inf and
+    NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50. Not
+    claimed for multi-rate graphs, sub-cycled groups or sharded graphs, nor
+    for a checkpoint that itself holds a bfloat16 member, which cannot be
+    loaded at all (MADD-ANO-199).
   oracle: the ValueError naming the leaf; the graph's state and params bit for bit; the loaded subnormal's sign.
   tests:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
@@ -3772,17 +3777,24 @@ claims:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_params_leaf_is_held_to_the_same_rule
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_that_would_wrap_is_refused_and_one_that_fits_loads
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_the_rest_route_answers_the_refusal_naming_no_path
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_cannot_hold_is_refused
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_can_hold_loads_as_the_cast_rounds_it
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_parameter_leaf_of_bfloat16_is_held_to_the_same_rule
+    - tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_float16_field_cannot_hold_is_refused
   status: verified
   notes: >-
     From v0.1.0 to v0.3.1 load_state narrowed a float64 checkpoint with
     jnp.array, and the 0.4.0 tree cast it to the live dtype, both with no
     check: 1e39 loaded as inf and -1e-50 as -0.0, silently (reproduced at
-    every tag).  The rule is the FMU's (MADD-ANO-137).
+    every tag).  The rule is the FMU's (MADD-ANO-137).  A bfloat16 leaf
+    was cast with no check on the 0.4.0 tree, because the rule was chosen
+    by the NumPy kind of the leaf's dtype and an extension dtype's is void
+    (MADD-ANO-200, never released).
   domains:
     f32: tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
     f64: tests/core/test_params_claims_in_float64.py::test_load_state_into_a_float64_field_loads_what_float32_could_not
     mixed_dtype: tests/core/test_params_claims_in_float64.py::test_load_state_into_a_float32_field_of_an_x64_graph_refuses_what_float32_cannot_hold
-    16bit: narrowed
+    16bit: tests/core/test_checkpoint_values_into_extension_dtypes.py::test_a_value_a_bfloat16_field_cannot_hold_is_refused
     jit: n/a
     grad: n/a
     vmap: n/a

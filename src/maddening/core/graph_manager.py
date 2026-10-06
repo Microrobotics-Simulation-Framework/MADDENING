@@ -1907,7 +1907,15 @@ class GraphManager:
         shape : tuple
             Array shape (default ``()`` for scalar).
         dtype
-            JAX dtype (default ``jnp.float32``).
+            JAX dtype (default ``jnp.float32``, also under
+            ``jax_enable_x64``: pass ``jnp.float64`` for a float64 input).
+            It is the dtype the input runs in.  A value handed to
+            :meth:`step`, :meth:`run_scan` or any other entry point is cast
+            to it at the step boundary, and the FMU export and the REST
+            server give the input the same type, so every entry point runs
+            the same number.  A value the cast changes (a float64 ``0.1``
+            into a float32 input, a fraction into an integer one) is
+            reported with a ``UserWarning``, once per input.
         """
         refusal = _graph_specs._field_name_refusal(target_field)
         if refusal is not None:
@@ -3350,6 +3358,10 @@ class GraphManager:
         ext_by_target: dict[str, list[ExternalInputSpec]] = defaultdict(list)
         for ei in self._external_inputs:
             ext_by_target[ei.target_node].append(ei)
+        # The dtype each one is declared with: every step program casts
+        # the inputs it is handed to it (``_cast_external_inputs``).
+        declared_input_dtypes = _graph_specs._declared_input_dtypes(
+            self._external_inputs)
 
         # Capture which nodes have external inputs (for the fast path)
         has_external = set(ext_by_target.keys())
@@ -3524,6 +3536,8 @@ class GraphManager:
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
             def graph_step(full_state, external_inputs, params=None):
+                external_inputs = _graph_specs._cast_external_inputs(
+                    external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
                 new_state = {k: v for k, v in full_state.items()}
 
@@ -3538,6 +3552,8 @@ class GraphManager:
         if has_coupling and not is_multirate:
             # ---- Coupling groups, uniform rate ----
             def graph_step_coupled(full_state, external_inputs, params=None):
+                external_inputs = _graph_specs._cast_external_inputs(
+                    external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
                 new_state = {k: v for k, v in full_state.items()}
 
@@ -3560,6 +3576,8 @@ class GraphManager:
 
         # ---- Multi-rate path (with or without coupling) ----
         def graph_step_multirate(full_state, external_inputs, params=None):
+            external_inputs = _graph_specs._cast_external_inputs(
+                external_inputs, declared_input_dtypes)
             node_params = _resolve_params(params)
             step_count = full_state[_graph_specs._META_KEY]["step_count"]
             new_state = {k: v for k, v in full_state.items()}
@@ -3665,6 +3683,48 @@ class GraphManager:
             ext.setdefault(ei.target_node, {})[ei.target_field] = leaf
         return ext
 
+    def _warn_of_input_casts(self, external_inputs: dict[str, dict]) -> None:
+        """Warn, once per input of this graph, of a supplied value that the
+        cast to its declared dtype changes.
+
+        Every step program casts an external input to the dtype it was
+        declared with (``_graph_specs._cast_external_inputs``).  Until
+        0.4.0 the step ran a supplied value in the dtype it arrived in, so
+        a graph whose values the cast changes -- a float64 value into the
+        default float32 declaration under ``jax_enable_x64``, a fraction
+        into an integer input -- now computes other numbers, and says so
+        here.  Nothing is said of a value the cast leaves as it was.
+        """
+        warned = self.__dict__.setdefault("_input_cast_warned", set())
+        for ei in self._external_inputs:
+            key = (ei.target_node, ei.target_field)
+            if key in warned:
+                continue
+            fields = external_inputs.get(ei.target_node)
+            if not fields or ei.target_field not in fields:
+                continue
+            dtype = jax.dtypes.canonicalize_dtype(ei.dtype)
+            kind = _graph_specs._input_cast_changes(fields[ei.target_field], dtype)
+            if kind is None:
+                continue
+            warned.add(key)
+            warnings.warn(
+                f"external input '{ei.target_node}.{ei.target_field}' is declared "
+                f"{dtype.name} and was handed {kind} value that {dtype.name} does "
+                f"not hold as given: the step runs it cast to {dtype.name}.  An "
+                f"external input is cast to its declared dtype at the step "
+                f"boundary, which is what the FMU export, the zeros of an omitted "
+                f"input and the saved configuration already took it to be; before "
+                f"0.4.0 the step ran a supplied value in the dtype it arrived in, "
+                f"so this graph's numbers have changed.  To run the value as "
+                f"handed in, declare the input with its dtype: "
+                f"add_external_input({ei.target_node!r}, {ei.target_field!r}, "
+                f"dtype=...) (float32 is the default, also under "
+                f"jax_enable_x64).  This is said once per input of a graph.",
+                UserWarning,
+                stacklevel=4,
+            )
+
     def _resolve_external_inputs(
         self, external_inputs: Optional[dict[str, dict]],
     ) -> dict[str, dict]:
@@ -3705,6 +3765,7 @@ class GraphManager:
             )
         if not declared:
             return external_inputs
+        self._warn_of_input_casts(external_inputs)
         # Complete from the per-compile zero cache.  Fresh outer dicts,
         # like ``_default_external_inputs``: callers may edit them.
         out: dict[str, dict] = {}
@@ -5428,6 +5489,8 @@ class GraphManager:
         ext_by_target: dict[str, list[ExternalInputSpec]] = defaultdict(list)
         for ei in self._external_inputs:
             ext_by_target[ei.target_node].append(ei)
+        declared_input_dtypes = _graph_specs._declared_input_dtypes(
+            self._external_inputs)
 
         has_external = set(ext_by_target.keys())
         has_coupling = bool(coupling_groups)
@@ -5509,6 +5572,8 @@ class GraphManager:
             return new_node_state
 
         def dt_step_fn(state, external_inputs, dt, params=None):
+            external_inputs = _graph_specs._cast_external_inputs(
+                external_inputs, declared_input_dtypes)
             if params is None:
                 params = params_snapshot
             else:

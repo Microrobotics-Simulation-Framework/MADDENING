@@ -117,6 +117,8 @@ against a token-holder who sets out to exhaust it (see the next section).
 More than 10^6 values in one
 request's params, `n_steps` over 100000 or an out-of-range training
 argument is a 422 from the request model, published in `/openapi.json`.
+The lists and objects in a request's params are counted against the same
+10^6 (a body of empty lists holds no value at all).
 An integer over 10^7 for an **integer** parameter (an array dimension) is a
 422 from the route, which reads the parameter's type -- the running node's
 value on `PUT /graph/params`, the constructor's default on `POST
@@ -164,7 +166,9 @@ stated; beyond them the server is not claimed to withstand:
   and dtype before reading it; it is not hardened against an archive built
   to cost memory or time in another way);
 * **resource exhaustion**: many requests, long runs, a graph at the size
-  caps, slow steps, training jobs;
+  caps, slow steps, training jobs; a request body at the size limit is
+  parsed on the event loop before any bound but its length is asked, and
+  no route answers meanwhile;
 * **pathological names** for nodes, fields and files, beyond the
   characters the routes refuse;
 * and it provides **no TLS** (above): put a non-loopback bind on a private
@@ -192,9 +196,9 @@ not loopback; `/healthz` and `/viz/*` never do.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/graph` | Return graph structure (nodes, edges, external inputs) |
-| POST | `/graph/nodes` | Add a node (`{type, name, timestep, params}`). The streams are sent the graph with it |
+| POST | `/graph/nodes` | Add a node (`{type, name, timestep, params}`). 400, and nothing added, for a node the graph could not step with its state as built: one update is traced as the graph would call it, and must return the fields, shapes and kinds of dtype of the node's initial state (a list given for a scalar constant fails this). The streams are sent the graph with it |
 | DELETE | `/graph/nodes/{name}` | Remove a node and its connected edges. A coupling group loses it as a member and keeps its options; a group left with fewer than two members is removed (the reply's `coupling_groups` says which changed; a node added back under the name is not a member, and no route adds a group). 400 when a mapping on an edge between two other nodes was built from the node's points. The streams are sent the graph without it |
-| POST | `/graph/edges` | Add an edge (`{source_node, target_node, source_field, target_field}`) |
+| POST | `/graph/edges` | Add an edge (`{source_node, target_node, source_field, target_field}`). The target field is not checked against what the target node declares: an edge to a field the node does not read is accepted and delivers nothing |
 | DELETE | `/graph/edges` | Remove an edge (same body as POST) |
 | POST | `/graph/compile` | Compile the graph (topo-sort + JIT). Returns schedule |
 | POST | `/graph/validate` | Validate the graph. Returns issues list |
@@ -256,6 +260,8 @@ then (`ROUTE_STABILITY` in `server.py`; each HTTP one carries
 |--------|------|-------------|
 | POST | `/surrogate/train` | Train a surrogate of one node in a background job. One job runs at a time (409 otherwise). The memory the job would take -- the data sweep over the whole graph, its dataset, the network -- is estimated first and refused (400) over `MAX_SURROGATE_TRAIN_BYTES`, and estimated again on the graph the sweep runs over: a graph that grew in between (a node added) ends the job `error`, naming the budget, before anything is swept. `width**2 * depth` of the network is bounded (422). The data come from a batched sweep that leaves the live simulation where it was. Replies `{job_id, status, estimated_bytes}` |
 | GET | `/surrogate/status/{job_id}` | The job's progress. The last `MAX_SURROGATE_JOBS_KEPT` (8) finished jobs are kept; a job stopped by a shutdown reads `cancelled` |
+| POST | `/surrogate/activate/{job_id}` | Replace the node with the trained surrogate (the runner is stopped first, the graph is reset). The node's edges at that moment are recorded for the revert |
+| POST | `/surrogate/deactivate/{node_name}` | Put the original node back (the runner is stopped first, the graph is reset), **with the edges recorded when the surrogate was activated**: an edge added to or from the node while the surrogate was active is removed with it and is not put back. The reply's `dropped_edges` lists each such edge (`[]` when there is none); add them again with `POST /graph/edges` |
 
 ### WebSocket
 

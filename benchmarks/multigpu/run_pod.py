@@ -3798,10 +3798,50 @@ def check_exchange_device_count(n_devices: int, *, dry_run: bool,
                          "pass --allow-fewer-devices to record it as deciding anyway")
 
 
+#: The least value each counting option takes: a run with fewer has
+#: nothing to time, to step or to solve.
+OPTION_MINIMUMS = {"cells": 1, "n_devices": 1, "warmup": 0, "repeats": 1, "steps": 1,
+                   "grad_steps": 1, "cg_max_iters": 1, "fields": 1}
+
+
+def check_option_values(args: argparse.Namespace) -> None:
+    """Refuse (``SystemExit`` with the reason: ``EXIT_REFUSED``) an option
+    value no goal can use, before the backend is loaded or anything runs.
+
+    ``--cells -5``, ``--repeats 0``, ``--steps 0`` and a ``--mesh`` file
+    that does not exist used to raise inside the first goal that read them
+    and exit as a crashed goal (5) with a traceback, where the runbook says
+    a refusal (2); ``--cells 0`` and ``--warmup -1`` ran and wrote a
+    passing record.  Every option of :func:`_parser` is asked: a count
+    against :data:`OPTION_MINIMUMS`, ``--mesh`` by loading it, ``--out`` as
+    a directory that exists or can be made; the options with ``choices``
+    and the flags are argparse's.
+    """
+    for dest, least in OPTION_MINIMUMS.items():
+        value = getattr(args, dest)
+        if value is None:
+            continue
+        option = "--" + dest.replace("_", "-")
+        for item in value if isinstance(value, list) else [value]:
+            if item < least:
+                raise SystemExit(f"{option} {item}: must be an integer >= {least}")
+    if args.out.exists() and not args.out.is_dir():
+        raise SystemExit(f"--out {args.out}: exists and is not a directory")
+    if args.mesh:
+        if not Path(args.mesh).is_file():
+            raise SystemExit(f"--mesh {args.mesh}: no such file")
+        try:
+            _MESH_CACHE[("file", str(args.mesh))] = load_mesh(args.mesh)
+        except Exception as exc:  # noqa: BLE001 - whatever makes it unreadable
+            raise SystemExit(f"--mesh {args.mesh}: cannot be read as a mesh "
+                             f"({type(exc).__name__}: {exc})") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.summarise is not None:
         return summarise(args.summarise)
+    check_option_values(args)
 
     _load_backend()
     gpu = on_gpu()

@@ -92,11 +92,130 @@ def test_an_option_it_does_not_take_still_exits_2(rp):
 
 
 def test_the_process_exit_status_of_a_crash(tmp_path):
-    """The ``__main__`` wiring, in a real process: a ``--mesh`` file that
-    does not exist raises inside the goal (``FileNotFoundError``)."""
-    proc = run_pod(_RUNNER, ["--goal", "forward", "--dry-run", "--out", tmp_path,
-                             "--mesh", tmp_path / "nope.npz"],
-                   pythonpath=str(_REPO / "src"), timeout=300)
+    """The ``__main__`` wiring, in a real process: an installation whose
+    ``maddening`` cannot be imported raises when the backend is loaded.
+    (A ``--mesh`` file that does not exist used to be the crash here; it
+    is a refusal now.)"""
+    broken = tmp_path / "broken" / "maddening"
+    broken.mkdir(parents=True)
+    (broken / "__init__.py").write_text("raise RuntimeError('seeded crash')\n")
+    proc = run_pod(_RUNNER, ["--goal", "forward", "--dry-run", "--out", tmp_path / "out"],
+                   pythonpath=str(broken.parent), timeout=300)
     assert proc.returncode == 5, proc.stdout + proc.stderr
-    assert "FileNotFoundError" in proc.stderr
+    assert "RuntimeError: seeded crash" in proc.stderr
     assert proc.stderr.strip().splitlines()[-1].startswith("CRASHED")
+
+
+# ---------------------------------------------------------------------------
+# An option value no goal can use is a refusal, before anything is loaded
+# ---------------------------------------------------------------------------
+# ``--cells -5``, ``--repeats 0``, ``--steps 0`` / ``-3`` and a ``--mesh``
+# that does not exist raised inside the first goal that read them (exit 5,
+# a traceback) where the runbook says 2; ``--cells 0`` and ``--warmup -1``
+# ran and wrote a passing record.
+
+def _bad_mesh(tmp_path: Path, kind: str) -> Path:
+    import numpy as np
+    path = tmp_path / {"missing": "nope.npz", "a directory": "dir.npz", "not an archive": "junk.npz",
+                       "no edges": "empty.npz", "edges of another shape": "flat.npy"}[kind]
+    if kind == "a directory":
+        path.mkdir()
+    elif kind == "not an archive":
+        path.write_bytes(b"not a zip archive")
+    elif kind == "no edges":
+        np.savez(path, partition=np.zeros(4, np.int32))
+    elif kind == "edges of another shape":
+        np.save(path, np.arange(6, dtype=np.int32))
+    return path
+
+
+_UNUSABLE = [
+    (["--cells", "-5"], "--cells -5: must be an integer >= 1"),
+    (["--cells", "0"], "--cells 0: must be an integer >= 1"),
+    (["--cells", "256", "0", "1024"], "--cells 0: must be an integer >= 1"),
+    (["--n-devices", "0"], "--n-devices 0: must be an integer >= 1"),
+    (["--n-devices", "-2"], "--n-devices -2: must be an integer >= 1"),
+    (["--warmup", "-1"], "--warmup -1: must be an integer >= 0"),
+    (["--repeats", "0"], "--repeats 0: must be an integer >= 1"),
+    (["--steps", "0"], "--steps 0: must be an integer >= 1"),
+    (["--steps", "-3"], "--steps -3: must be an integer >= 1"),
+    (["--grad-steps", "0"], "--grad-steps 0: must be an integer >= 1"),
+    (["--cg-max-iters", "0"], "--cg-max-iters 0: must be an integer >= 1"),
+    (["--fields", "0"], "--fields 0: must be an integer >= 1"),
+]
+
+
+def _refused_before_anything(rp, argv, tmp_path, capsys, monkeypatch) -> str:
+    """Run *argv* as a dry run with the backend and every goal replaced by
+    a recorder; return the last line of stderr of the refusal."""
+    reached = []
+    monkeypatch.setattr(rp, "_load_backend", lambda: reached.append("backend"))
+    for goal in rp.ALL_GOALS:
+        monkeypatch.setattr(rp, f"run_{goal}", lambda args, out, g=goal: reached.append(g))
+    out = tmp_path / "out"
+    status = rp.exit_status(["--goal", "all", "--dry-run", "--out", str(out), *argv])
+    err = capsys.readouterr().err.strip().splitlines()
+    assert status == rp.EXIT_REFUSED == 2, (status, err[-3:])
+    assert reached == [], f"{argv} was refused after {reached}"
+    assert not out.exists() or not list(out.iterdir())
+    assert "Traceback" not in "\n".join(err)
+    return err[-1]
+
+
+@pytest.mark.parametrize("argv, reason", _UNUSABLE, ids=[" ".join(a) for a, _ in _UNUSABLE])
+def test_a_count_no_goal_can_use_is_refused_before_the_backend_loads(
+        rp, tmp_path, capsys, monkeypatch, argv, reason):
+    assert _refused_before_anything(rp, argv, tmp_path, capsys, monkeypatch) == reason
+
+
+@pytest.mark.parametrize("kind, reason", [
+    ("missing", "no such file"), ("a directory", "no such file"),
+    ("not an archive", "cannot be read as a mesh"), ("no edges", "cannot be read as a mesh"),
+    ("edges of another shape", "edges must be (n_edges, 2)"),
+])
+def test_a_mesh_that_cannot_be_read_is_refused_before_the_backend_loads(
+        rp, tmp_path, capsys, monkeypatch, kind, reason):
+    mesh = _bad_mesh(tmp_path, kind)
+    last = _refused_before_anything(rp, ["--mesh", str(mesh)], tmp_path, capsys, monkeypatch)
+    assert last.startswith(f"--mesh {mesh}: ") and reason in last
+
+
+def test_an_out_that_is_a_file_is_refused_before_the_backend_loads(rp, tmp_path, capsys,
+                                                                   monkeypatch):
+    taken = tmp_path / "taken"
+    taken.write_text("")
+    monkeypatch.setattr(rp, "_load_backend", lambda: pytest.fail("the backend was loaded"))
+    assert rp.exit_status(["--goal", "halo", "--dry-run", "--out", str(taken)]) == 2
+    assert capsys.readouterr().err.strip().splitlines()[-1] == (
+        f"--out {taken}: exists and is not a directory")
+
+
+def test_the_least_value_of_every_count_and_a_readable_mesh_are_taken(rp, tmp_path):
+    import numpy as np
+    mesh = tmp_path / "ring.npz"
+    np.savez(mesh, edges=np.array([[0, 1], [1, 2], [2, 3], [3, 0]], np.int32))
+    argv = ["--goal", "all", "--dry-run", "--out", str(tmp_path / "out"), "--mesh", str(mesh)]
+    for dest, least in rp.OPTION_MINIMUMS.items():
+        argv += ["--" + dest.replace("_", "-"), str(least)]
+    args = rp.parse_args(argv)
+    rp.check_option_values(args)          # does not raise
+    assert rp._MESH_CACHE[("file", str(mesh))][0] == 4
+    # ... and an option left out is not asked.
+    rp.check_option_values(rp.parse_args(["--goal", "halo", "--dry-run", "--out", str(tmp_path)]))
+
+
+def test_every_option_of_the_parser_has_its_values_checked(rp):
+    """Fails closed on a new option: its values are argparse's (``choices``,
+    a flag), a counted minimum, or one of the paths asked by name."""
+    paths = {"out", "mesh", "summarise"}
+    unchecked = []
+    for action in rp._parser()._actions:
+        if action.dest == "help" or action.choices is not None or action.nargs == 0:
+            continue
+        if action.dest in rp.OPTION_MINIMUMS:
+            assert action.type is int, action.dest
+            continue
+        if action.dest not in paths:
+            unchecked.append(action.dest)
+    assert unchecked == []
+    assert set(rp.OPTION_MINIMUMS) <= {a.dest for a in rp._parser()._actions}

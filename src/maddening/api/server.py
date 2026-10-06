@@ -131,6 +131,7 @@ from maddening.core._param_probes import (
     _declared_boundary_zeros,
     _hook_outputs,
     _leaf_values_equal,
+    _node_update_layout_drift,
     _node_with_params,
     _params_holders,
 )
@@ -615,16 +616,24 @@ def _oversized_param(value: Any, path: str = "", *, integers: bool = True) -> Op
     What this function rejects is the plausible-but-too-big dimension,
     and it does so from the request model, as a 422.
     """
-    total = 0
+    total = containers = 0
     stack: list[tuple[Any, str]] = [(value, path)]
     while stack:
         item, where = stack.pop()
-        if isinstance(item, dict):
-            stack.extend((v, f"{where}.{k}" if where else str(k))
-                         for k, v in item.items())
-            continue
-        if isinstance(item, (list, tuple)):
-            stack.extend((v, f"{where}[{i}]") for i, v in enumerate(item))
+        if isinstance(item, (dict, list, tuple)):
+            # Lists and objects are counted too, against the same bound: a
+            # body of eleven million empty lists holds no value at all, so
+            # it passed this check and was refused for its shape only after
+            # twenty seconds of converting it, inside the graph's lock.
+            containers += 1
+            if containers > MAX_NODE_PARAM_ELEMENTS:
+                return (f"params: at most {MAX_NODE_PARAM_ELEMENTS} lists and objects "
+                        f"in total (this server is unauthenticated; see its README)")
+            if isinstance(item, dict):
+                stack.extend((v, f"{where}.{k}" if where else str(k))
+                             for k, v in item.items())
+            else:
+                stack.extend((v, f"{where}[{i}]") for i, v in enumerate(item))
             continue
         total += 1
         if total > MAX_NODE_PARAM_ELEMENTS:
@@ -929,23 +938,73 @@ def _state_elements(state: Any) -> int:
 
 
 def _dry_run_node(node, state: Any = None) -> None:
-    """Abstractly trace one ``update`` of a freshly built node on its own
-    initial state with zero boundary inputs: catches constants of the
-    wrong type / shape before the node enters the graph.
+    """Refuse (``ValueError``) a freshly built node the graph could not
+    step with its state's layout unchanged: one ``update`` is traced
+    abstractly on the node's own initial state the way the graph calls it
+    -- its params pytree injected where it takes one, with a zero for every
+    declared boundary input and again with none -- and what it returns is compared with that
+    state, leaf by leaf (names, shapes, kinds of dtype:
+    :func:`~maddening.core._param_probes._state_layout_drift`).  Raises
+    whatever the node's code raises while it is traced.
+
+    The trace used to call ``update`` without the params pytree and to
+    discard what it returned.  So a constant the step reads from the
+    pytree (``HeartPumpNode`` ``venous_pressure: null``) was accepted and
+    every later step was a 400; and a list where the node's state is a
+    scalar (``BallNode`` ``initial_velocity: [0, 0]``) was accepted, the
+    state changed shape at the first step (``GraphManager.step`` stores
+    such a state: MADD-ANO-220), and the graph's own checkpoint no longer
+    loaded after a reset.
 
     *state* is the node's initial state when the caller has already built
     it (the size check does), so it is not allocated twice.
     """
-    import jax  # noqa: PLC0415
-
     state = node.initial_state() if state is None else state
-    bi = {}
+    accepts = _method_accepts_params(node, "update")
+    spec = _NodeSpec(node=node, update_fn=node.update, timestep=node.delta_t,
+                     accepts_params=accepts)
+    leaves = node.params_pytree() if accepts else None
+    # With every declared input delivered (the node once its edges are
+    # added), then with none, as the graph steps it until then: a constant
+    # read only in the absence of an input is read by every step of the
+    # node as it is added.  (Warnings are not silenced: the trace is the
+    # node's first, as the graph's would be.)
+    drift = _node_update_layout_drift(spec, state, leaves)
+    if not drift:
+        try:
+            drift = _node_update_layout_drift(spec, state, leaves, {})
+        except KeyError:
+            # A node that needs an input it declares cannot step until its
+            # edge is added, and says so at the step: not refused.
+            drift = []
+    if drift:
+        raise ValueError(
+            "one update changes the layout of its state (" + "; ".join(drift)
+            + "), so its checkpoint would not load after a reset")
+
+
+def _dry_run_refusal(node_cls: Any, name: str, timestep: float, params: dict[str, Any],
+                     node: Any, state: Any) -> Optional[str]:
+    """Why ``POST /graph/nodes`` refuses *node* -- built by *node_cls* from
+    *params* -- for what :func:`_dry_run_node` finds, or ``None``.  The
+    reason names the parameters it can be told from: those without which
+    (each left to the class's default in turn) the node passes."""
     try:
-        for name, spec in (node.boundary_input_spec() or {}).items():
-            bi[name] = jnp.zeros(tuple(getattr(spec, "shape", ()) or ()), jnp.float32)
-    except Exception:  # noqa: BLE001 - descriptor is advisory
-        bi = {}
-    jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
+        _dry_run_node(node, state)
+    except Exception as exc:  # noqa: BLE001 - any trace failure is a refusal
+        reason = str(exc)
+    else:
+        return None
+    blamed = []
+    for key in params:
+        try:
+            _dry_run_node(node_cls(name=name, timestep=timestep,
+                                   **{k: v for k, v in params.items() if k != key}))
+        except Exception:  # noqa: BLE001 - not this parameter alone
+            continue
+        blamed.append(key)
+    where = (" (told from " + ", ".join(f"params.{k}" for k in blamed) + ")") if blamed else ""
+    return f"cannot run with these params{where}: {reason}"
 
 
 #: What a step raises because of the graph it is asked to run -- a node's
@@ -964,6 +1023,15 @@ _GRAPH_CONFIGURATION_ERRORS = (
     # not match, which ``POST /graph/edges`` accepts.  It was a 500.
     ExceptionGroup,
 )
+
+
+def _configuration_reason(exc: BaseException) -> str:
+    """What a graph that cannot compile said, on one line: every member of
+    the group ``compile()`` raises for its edges, or the error itself."""
+    if isinstance(exc, ExceptionGroup):
+        return f"{exc.message}: " + "; ".join(
+            f"{type(e).__name__}: {e}" for e in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _cannot_step_detail(exc: BaseException) -> str:
@@ -1003,18 +1071,30 @@ def _overflowing_float(value: Any, path: str = "") -> Optional[str]:
     return None
 
 
-def _json_value_count(value: Any) -> int:
-    """How many numbers a JSON *value* holds (nested lists flattened, a
-    scalar is one), counted without converting it to an array."""
-    total = 0
+def _json_value_count(value: Any) -> tuple[int, int]:
+    """``(numbers, lists)``: how many numbers a JSON *value* holds (nested
+    lists flattened, a scalar is one) and how many lists, counted without
+    converting it to an array."""
+    total = lists = 0
     stack = [value]
     while stack:
         item = stack.pop()
         if isinstance(item, (list, tuple)):
+            lists += 1
             stack.extend(item)
         else:
             total += 1
-    return total
+    return total, lists
+
+
+def _lists_in_shape(shape: tuple) -> int:
+    """How many lists the JSON spelling of an array of *shape* holds: one
+    for the array, one per row, and so on down to the last axis."""
+    lists, rows = 0, 1
+    for dim in shape:
+        lists += rows
+        rows *= int(dim)
+    return lists
 
 
 class _GraphLock:
@@ -3725,14 +3805,15 @@ class SimulationServer:
                 # Nodes do not validate their constants; a bad one only
                 # fails inside the trace and would wedge every later
                 # /sim/step.  Trace one update on the node's own initial
-                # state (abstractly, no compute) before it enters the graph.
-                try:
-                    _dry_run_node(node, initial_state)
-                except Exception as exc:  # noqa: BLE001 - any trace failure is a 400
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"node '{req.name}' cannot run with these params: {exc}",
-                    )
+                # state (abstractly, no compute) before it enters the graph,
+                # the way the graph calls it, and hold what it returns to
+                # that state's layout.
+                refusal = _dry_run_refusal(node_cls, req.name, req.timestep,
+                                           req.params, node, initial_state)
+                if refusal is not None:
+                    del initial_state, node
+                    raise HTTPException(status_code=400,
+                                        detail=f"node '{req.name}' {refusal}")
                 if req.name in self.gm._nodes:
                     raise HTTPException(status_code=409, detail=f"Node '{req.name}' already exists in the graph.")
                 try:
@@ -3901,7 +3982,17 @@ class SimulationServer:
                 # 16 million numbers for a scalar field took 2 GB to refuse.
                 for field, value in req.state.items():
                     want_size = int(np.prod(np.shape(live[field])))
-                    got_size = _json_value_count(value)
+                    got_size, got_lists = _json_value_count(value)
+                    # The lists as well as the numbers: a million empty
+                    # lists hold as many numbers as an empty field.
+                    if got_size == want_size and got_lists != _lists_in_shape(
+                            tuple(np.shape(live[field]))):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(f"{field}: expected shape "
+                                    f"{tuple(np.shape(live[field]))}, got a value "
+                                    f"nested in {got_lists} list(s)"),
+                        )
                     if got_size != want_size:
                         raise HTTPException(
                             status_code=400,
@@ -4497,12 +4588,26 @@ class SimulationServer:
                     # anything; done first here so ``before`` is the
                     # compiled graph's.
                     if self.gm._dirty or self.gm._compiled_step is None:
-                        self.gm.compile()
+                        try:
+                            self.gm.compile()
+                        except _GRAPH_CONFIGURATION_ERRORS as exc:
+                            # The graph's reason, as POST /sim/step gives
+                            # it: this used to be answered "could not load
+                            # checkpoint" of a file nothing was wrong with.
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(f"could not load checkpoint {path!r}: the graph "
+                                        "cannot compile with its current configuration "
+                                        f"({_configuration_reason(exc)}); nothing was "
+                                        "loaded"),
+                            ) from None
                     # Not an undo (a refusal is undone by the route's
                     # transaction, the compile above included): the values
                     # the checks below are asked against.
                     before = _state_and_params_snapshot(self.gm)
                     self.gm.load_state(str(target))
+                except HTTPException:
+                    raise
                 except CheckpointFormatError:
                     # NumPy's own reasons -- how to load the file unsafely --
                     # are not the client's business.
@@ -5240,7 +5345,13 @@ class SimulationServer:
         def surrogate_deactivate(node_name: str) -> Any:
             """Restore the original physics node (**experimental in 0.4.0**,
             to be hardened in 0.5.0; the runner is stopped first).  The graph is reset, and the streams are sent the reset
-            state at step 0; ``was_running`` as for activate."""
+            state at step 0; ``was_running`` as for activate.
+
+            The node comes back with the edges it had when the surrogate
+            was activated.  An edge added to or from it while the surrogate
+            was active is removed with the surrogate and is not put back:
+            ``dropped_edges`` lists each one (an empty list when there is
+            none), to be added again with ``POST /graph/edges``."""
             if node_name not in self._original_nodes:
                 raise HTTPException(
                     status_code=400,
@@ -5258,9 +5369,23 @@ class SimulationServer:
             except HTTPException as exc:
                 return self._after_stopping_the_runner(exc, "deactivated", was_running)
 
-        def deactivate_locked(node_name: str) -> dict[str, str]:
+        def deactivate_locked(node_name: str) -> dict[str, Any]:
             """``POST /surrogate/deactivate``, holding the graph lock."""
             orig_node, orig_edges, orig_ext = self._original_nodes[node_name]
+            # The revert puts back the edges recorded when the surrogate
+            # was activated: an edge the node was given since then is
+            # removed with the surrogate and not added back.  The reply
+            # says which (0.4.0's documented behaviour of an experimental
+            # route; it used to drop them without a word).
+            recorded = {(e.source_node, e.target_node, e.source_field, e.target_field)
+                        for e in orig_edges}
+            dropped_edges = [
+                {"source_node": e.source_node, "target_node": e.target_node,
+                 "source_field": e.source_field, "target_field": e.target_field}
+                for e in self.gm._edges
+                if node_name in (e.source_node, e.target_node)
+                and (e.source_node, e.target_node, e.source_field, e.target_field)
+                not in recorded]
 
             # The revert rebuilds a subgraph, and is all-or-nothing by the
             # route's transaction: anything raised here leaves the live
@@ -5342,7 +5467,8 @@ class SimulationServer:
             self._reset_state()
             del self._original_nodes[node_name]
 
-            return {"status": "deactivated", "node": node_name}
+            return {"status": "deactivated", "node": node_name,
+                    "dropped_edges": dropped_edges}
 
         # -- profile endpoints (v0.2 #9) -----------------------------------
 

@@ -720,6 +720,12 @@ class TestBoundsAndTransforms:
         assert abs(round_trip - value) <= 1e-4 * scale, (round_trip, value)
 
     @given(spec_value=spec_and_value(), u=_finite(-1e4, 1e4))
+    # Drawn at random, and failing, on a CI run: an upper bound that is a
+    # subnormal float32, which the clip flushed to -0.0, above the bound.
+    @example(spec_value=(ParamSpec(bounds=(None, -1.4e-45), transform=None), -1.0), u=0.0)
+    @example(spec_value=(ParamSpec(bounds=(1.4e-45, None), transform=None), 1.0), u=-3.0)
+    @example(spec_value=(ParamSpec(bounds=(-1e-40, 1e-40), transform=None), 0.0), u=7.0)
+    @example(spec_value=(ParamSpec(bounds=(0.0, 7.5e-37), transform="logit"), 1e-37), u=-800.0)
     @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_constrain_lands_inside_the_bounds_from_any_coordinate(
         self, spec_value, u,

@@ -3,6 +3,21 @@ built plain and with ``-fsanitize=address,undefined``, plus FMPy driving
 an ASan-instrumented build in a subprocess.  Skipped without a C
 compiler.  (Valgrind is not required; ASan/UBSan cover the same memory
 and UB classes on this toolchain.)
+
+**Which C source is tested.**  The two harnesses include the wrapper
+through the macro ``MADDENING_FMU_C``, which :func:`_build` sets to
+``maddening.fmi.package.C_SOURCE`` -- the source of the package Python
+imported, the one :func:`~maddening.fmi.package.build_fmu_binary` compiles.
+They used to include ``../../../src/maddening/fmi/c/maddening_fmu.c`` by
+relative path, so with a copy of ``src/`` on ``PYTHONPATH`` the FMU binary
+was built from the copy and these tests from the tree: a fault seeded in
+the copy's C file was never compiled into them.  To mutation-test the
+wrapper, copy ``src/`` to a scratch directory, seed the fault in the copy's
+``maddening/fmi/c/maddening_fmu.c`` and run this file (and the other
+``tests/fmi/test_c_*.py``) with ``PYTHONPATH=<scratch>/src``; the unit-test
+binary prints the path it was built from, and
+``test_the_c_harnesses_are_built_from_the_imported_packages_source`` pins
+it.
 """
 
 import os
@@ -25,8 +40,12 @@ SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1:halt_on_error=1",
            "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"}
 
 
-def _build(src: Path, out: Path, *flags: str, shared: bool = False) -> Path:
-    cmd = [CC, "-g", "-O1", "-Wall", "-Wextra", f"-I{FMI3_INCLUDE_DIR}", str(src), "-o", str(out),
+def _build(src: Path, out: Path, *flags: str, shared: bool = False,
+           wrapper: Path = C_SOURCE) -> Path:
+    """Compile ``src``.  A harness includes the wrapper source ``wrapper``
+    (the imported package's, unless a test names another)."""
+    cmd = [CC, "-g", "-O1", "-Wall", "-Wextra", f"-I{FMI3_INCLUDE_DIR}",
+           f'-DMADDENING_FMU_C="{wrapper}"', str(src), "-o", str(out),
            "-lpthread", *flags]
     if shared:
         cmd[1:1] = ["-shared", "-fPIC"]
@@ -50,7 +69,44 @@ def _run(exe: Path, *args: str, env: dict | None = None, timeout: float = 120) -
 def test_c_unit_tests(tmp_path, sanitized):
     exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit", *(SANITIZE if sanitized else []))
     out = _run(exe, env=SAN_ENV if sanitized else None)
-    assert "0 failures" in out, out
+    assert "checks, 0 failures" in out, out
+
+
+def test_the_c_harnesses_are_built_from_the_imported_packages_source(tmp_path):
+    """The unit-test binary is built from ``maddening.fmi.package.C_SOURCE``
+    and says so, and one built from another copy of the wrapper runs that
+    copy: a fault seeded in the copy -- here ``fmi3GetFMUState`` made to
+    allocate a new state object on every call, the leak it had -- fails the
+    unit tests, where the harness used to compile the tree's source whatever
+    was asked for."""
+    exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit")
+    out = _run(exe)
+    assert f"wrapper source: {C_SOURCE}\n" in out, out[:300]
+    assert Path(C_SOURCE).is_absolute()
+    source = Path(C_SOURCE).read_text()
+    reuse = "state_filled(in, state_if_live(in, *FMUState), src, n)"
+    version = '#define MADDENING_FMU_VERSION "'
+    assert source.count(reuse) == 1 and source.count(version) == 1
+    mutant = tmp_path / "mutant" / "maddening_fmu.c"
+    mutant.parent.mkdir()
+    mutant.write_text(
+        source.replace(reuse, "state_filled(in, state_if_live(NULL, *FMUState), src, n)")
+        .replace(version, version + "seeded-"))
+    exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit_mutant", wrapper=mutant)
+    proc = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120)
+    assert f"wrapper source: {mutant}\n" in proc.stdout, proc.stdout[:300]
+    assert 'wrapper version: seeded-' in proc.stdout
+    assert proc.returncode == 1 and "checks, 0 failures" not in proc.stdout, proc.stdout[-300:]
+    assert "live_allocs() == held" in proc.stderr and "state == first" in proc.stderr
+    # the fuzz harness takes the same macro (its self-check needs no change)
+    fuzz = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz_mutant", wrapper=mutant)
+    assert "seed=3 iterations=200" in _run_any(fuzz, "3", "200")
+
+
+def _run_any(exe: Path, *args: str) -> str:
+    """The stdout of ``exe``, whatever its exit code."""
+    return subprocess.run([str(exe), *args], capture_output=True, text=True,
+                          timeout=120).stdout
 
 
 # Languages whose locales use ',' as the decimal point, tried in order.
@@ -107,7 +163,7 @@ def test_c_unit_tests_under_a_comma_decimal_locale(tmp_path):
     exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit")
     out = _run(exe, env=env)
     assert "decimal point in effect: ," in out, (name, out[:400])
-    assert "0 failures" in out, out
+    assert "checks, 0 failures" in out, out
 
 
 # The wrapper paths the fuzz harness counts (MADDENING_FUZZ_COUNTERS); every
@@ -336,7 +392,7 @@ def test_c_unit_tests_under_valgrind(tmp_path):
            "--track-origins=yes", "-q", str(exe)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, f"exit {proc.returncode}\n{proc.stdout[-2000:]}\n{proc.stderr[-6000:]}"
-    assert "0 failures" in proc.stdout
+    assert "checks, 0 failures" in proc.stdout
 
 
 @pytest.mark.skipif(VALGRIND is None, reason="valgrind not installed")
@@ -365,7 +421,7 @@ def test_libfuzzer_short_campaign(tmp_path):
     """
     exe = tmp_path / "libfuzz"
     cmd = ["clang", "-g", "-O1", "-DLIBFUZZER", "-fsanitize=fuzzer,undefined",
-           "-fno-sanitize-recover=undefined",
+           "-fno-sanitize-recover=undefined", f'-DMADDENING_FMU_C="{C_SOURCE}"',
            f"-I{FMI3_INCLUDE_DIR}", str(C_DIR / "fuzz_maddening_fmu.c"), "-o", str(exe), "-lpthread"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

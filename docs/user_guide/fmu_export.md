@@ -82,6 +82,24 @@ long one stops at the first graph step after `stop()`, committing nothing.
 sidecar's state.  Model exchange and scheduled execution are refused at
 instantiation.
 
+**FMU states and their memory.**  An `fmi3FMUState` belongs to the instance
+whose call returned it, and the wrapper follows FMI 3.0's ownership rules
+function by function.  `fmi3GetFMUState` allocates when `*FMUState` is
+`NULL`; handed back a state it returned before (FMI 3.0: one "that is no
+longer needed and can be overwritten"), it reuses that object and returns
+the same pointer, so a master that keeps one variable and saves before
+every step holds one state.  Until 0.4.0's fix every call allocated a new
+object over the old one, which nothing could free: one whole state leaked
+per call, 82 kB for a 20000-cell rod.  A call that fails leaves the
+variable and its state as they were.  `fmi3SetFMUState` never changes the
+state it restores.  `fmi3DeserializeFMUState` always constructs a new state
+(the standard gives `*FMUState` no meaning on entry there, so free a state
+the variable still holds first).  `fmi3FreeFMUState` frees one and stores
+`NULL`; `fmi3FreeInstance` frees every state of the instance that is still
+live, so free a state before its instance, never after.  `fmi3Reset` and
+`fmi3Terminate` leave states valid: one saved before a reset restores
+after it.
+
 **Instances and time.**  One bridge serves one FMU instance at a time, and
 every instance starts where FMI 3.0 starts one.  When a new connection
 claims the bridge (`fmi3InstantiateCoSimulation`), the bridge resets to
@@ -108,7 +126,8 @@ covered.  A point inside it is adopted, so the importer's clock and the
 FMU's never drift apart.  A point outside it is `fmi3Error` with nothing
 advanced: an importer that jumped from 0.01 to 100 used to get one master
 step of physics labelled 100.01.  To go back in time, restore an FMU
-state; the clock moves with it.
+state; the clock moves with it, and so does the count it is held to (the
+start time and the master steps taken since, below).
 
 Both tolerances are a millionth of the master step at any master step.
 Their rounding slack is a few ulps of the times involved; it used to be
@@ -126,7 +145,10 @@ step (MADD-ANO-149).
 
 No rounding slack is ever more than a tenth of a master step, so the time
 the FMU reports stays within a millionth plus a tenth of a step of the time
-it has simulated, and always names the step its physics is at.  Uncapped,
+it has simulated, to the rounding of the float64 clock itself (the reported
+and the simulated time are each a float64 sum: at most three ulps of the
+time between them, under 0.02 of a step wherever the clock resolves a
+step), and always names the step its physics is at.  Uncapped,
 the slacks admitted whole steps where an ulp of the time is a sizeable part
 of one: at 1000 s an ulp is 0.11 of a 1e-12 s step, and a `doStep` a whole
 step ahead was adopted (MADD-ANO-168).  So a time whose 16 ulps pass a
@@ -141,6 +163,21 @@ sizes gathers up to half an ulp of the time per step, and is refused, with
 nothing advanced, once that passes a tenth of a step: after about 1.2
 million steps from 1 s at a 1e-9 s step, and not before about forty million
 from a start of 0 at any master step.
+
+Saving and restoring a state does not move that count.  The start time and
+the master steps taken since are part of the FMU state: `fmi3GetFMUState`
+saves them with the time and `fmi3SetFMUState` resumes them, so a master
+that saves and restores between steps (a rollback master) is held to the
+same bound, and gets the same answer to every step, as one that does not.
+Until 0.4.0's fix a restore started the count again at the restored time --
+the importer's own clock, with whatever it had gathered -- so every restore
+forgave the drift so far: with a save and restore after every step, step
+sizes 0.45 millionths of a step too long were never refused, and an honest
+running sum at 30000 s with a 1e-9 s step drifted 1.78 steps in 4000.  An
+archive without the count (one written before the fix) is refused by name;
+take the state again.  `fmi3EnterInitializationMode` still names a new
+start: given after a restore into a fresh or reset instance, its start time
+is the time, and the count starts there.
 
 The wrapper holds FMI 3.0's co-simulation states and refuses a call its
 state does not allow, with `fmi3Error`, a log message naming the state, and
@@ -201,13 +238,17 @@ Until 0.4.0 shipped, a Boolean or Int32 input was written `start="0.0"` and
 `continuous`.  FMPy's `simulate_fmu`, which validates the description by
 default, refused such an FMU.
 
-The `instantiationToken` covers every variable's start, bounds, variability,
-value reference and clocks, besides its name, type, causality and shape.  An
-FMU packaged from a description with other start values or bounds than the
-one a bridge serves fails `fmi3InstantiateCoSimulation` against it with a
-token mismatch.  It used to instantiate, advertising starts the bridge did
-not use.  Rebuild and re-package an FMU whenever its graph's parameters
-change.
+The `instantiationToken` covers every variable's start, bounds, unit,
+variability, value reference and clocks, besides its name, type, causality
+and shape: everything the description advertises for a variable but its
+description text.  An FMU packaged from a description with other start
+values, bounds or units than the one a bridge serves fails
+`fmi3InstantiateCoSimulation` against it with a token mismatch.  It used to
+instantiate, advertising starts the bridge did not use; and, until the unit
+was hashed too, an FMU packaged when a parameter was declared in N/m
+instantiated against a bridge serving the description that says kN/m.
+Rebuild and re-package an FMU whenever its graph's parameters, or their
+declared bounds or units, change.
 
 A node's name may hold `.params.` (`rig.params.v2`).  Its parameter
 variables (`rig.params.v2.params.elasticity`) carry their `(node, key)`, and
@@ -243,6 +284,15 @@ graph still reads it, so the bridge holds it at zero on every step, as
 passed only the exported inputs, and a node whose input was left out took
 its own "input missing" branch instead: a ball with no table fell through
 the floor.  A name the graph does not declare is a `ValueError`.
+
+`selected_outputs=[(node, field), ...]` exports a subset of the outputs.
+A pair that names no output this FMU can export is a `ValueError` naming
+the node and the field: a node the graph does not have, a field that is not
+one of its node's state fields, or a node whose stability level the FMU
+does not export.  Until 0.4.0's fix such a pair exported nothing in
+silence, so a misspelt field gave an FMU without that output.  An entry
+that is not a pair of names (`"spring.position"`, the form `selected_inputs`
+takes) is refused too, with the pair to pass.
 
 The in-process sidecar applies the same rule when it is given the graph's
 resolver (`input_resolver=gm._resolve_external_inputs`).
@@ -365,11 +415,27 @@ bridge refuses a variable of another type.  A JSON client that names no
 type is not checked.  The C wrapper also refuses a reply value its getter's
 C type cannot hold (a fraction, `NaN` or an out-of-range number for an
 integer type, anything but 0 or 1 for a Boolean, a finite number beyond
-`FLT_MAX` for a Float32), so no conversion is undefined behaviour, and an
-`fmi3SetInt64` / `fmi3SetUInt64` value a double cannot carry exactly (above
-2^53 in magnitude) is refused rather than rounded.  Wire order is
-little-endian; the C side converts only on a big-endian host (a `memcpy`
-everywhere else).
+`FLT_MAX` for a Float32), so no conversion is undefined behaviour.
+
+A float64 holds every value of every FMI type but two: an `Int64` or
+`UInt64` above 2^53 in magnitude is a float64 only where it is a multiple
+of the spacing there (2^53 + 2 is, 2^53 + 1 is not; the largest `Int64` and
+`UInt64` are not).  Such a value is never rounded, in either direction and
+on every path.  `fmi3SetInt64` / `fmi3SetUInt64` refuse one before anything
+is sent, and the bridge refuses a JSON `set` of one to an integer variable.
+A `get` of a variable *holding* one -- a model can, its state is in the
+type itself -- is refused by the bridge, naming the variable and the
+integer, so `fmi3GetInt64` / `fmi3GetUInt64` return `fmi3Error` instead of a
+neighbouring integer.  Until 0.4.0's fix they answered `fmi3OK` with
+9007199254740992 for a model holding 9007199254740993, and a JSON `set` of
+2^53 + 1 was stored as 2^53.  A value a float64 is crosses exactly at any
+magnitude, and the FMU-state archive carries every value in its own type.
+(For a float variable an integer literal means the nearest float, as any
+decimal literal does.)  Negative zero keeps its sign on both wire forms:
+the wrapper used to write it as `-0` on the JSON path, which a JSON reader
+takes for the integer 0, and the bridge now reads that literal as -0.0 from
+any client.  Wire order is little-endian; the C side converts only on a
+big-endian host (a `memcpy` everywhere else).
 
 **Robustness.**  Nothing in a binary frame is trusted: the bridge checks
 `header_len` against the payload, `n` against the raw length, the dtype,
@@ -382,7 +448,8 @@ and so is one set to `1e-50`, which would be stored as `0.0`; a value that
 rounds to a subnormal (`1e-40`) keeps its sign and magnitude and is held.
 A `set_state` archive is refused from its directory alone, before any
 member is decompressed, unless every member is one the model expects
-(`_token`, `_time`, its state fields, parameters and inputs, all `.npy`)
+(`_token`, `_time`, the drift reference `_t_ref` and `_n_ref`, its state
+fields, parameters and inputs, all `.npy`)
 and declares no more than the live array it replaces, with a cap on the
 total as well.  The C side checks the header count against the raw length
 and against the caller's array before any `memcpy`, refuses a reply
@@ -461,10 +528,19 @@ invalid.  An archive cannot change interface-mapping weights either
 (`params["mappings"]`): they are not FMI variables, so no `set` reaches
 them, and an archive that replaced them made the FMU compute a coupling its
 description does not describe (MADD-ANO-119).  A Boolean takes true / false
-or exactly 0 / 1 on both doors.  An
-archive must carry its time, and exactly the model's state fields,
-parameters and pending inputs: an archive missing an input used to restore
-with that input at zero (MADD-ANO-103).  The sidecar's own in-process
+or exactly 0 / 1 on both doors.  An integer leaf takes a whole number of
+its own range, judged without rounding it: the check used to compare
+through float64, where 2^63 equals the largest `Int64`.  An
+archive must carry its time, the drift reference its time is held to (the
+start time and the master steps taken since), and exactly the model's state
+fields, parameters and pending inputs: an archive missing an input used to
+restore with that input at zero (MADD-ANO-103).  The reference is checked
+as the time is -- a finite start time the clock resolves, a non-negative
+integer count -- and the archive's time must lie within half a master step
+of the simulated time the two give, which every archive the bridge writes
+does many times over.  That is a check that the archive describes an
+instant of this FMU, not a defence against an importer that rewrites one:
+an archive is the importer's word for its time, as a start time is.  The sidecar's own in-process
 doors apply the same checks with the same messages: `FmuSidecar.set_params`
 refuses what `set` refuses, and `FmuSidecar.set_fmu_state` refuses what
 `set_state` refuses, including parameters in a snapshot for a model with

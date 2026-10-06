@@ -542,7 +542,10 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K4", _CLAIMS, "        if value == NOT_APPLICABLE and d in covered:\n", "        if False:\n",
        CLAIMS, "n/a accepted for a domain the conditions name: an untested domain hidden as "
        "inapplicable"),
-    _M("K5", RST, "    fails. Not claimed for a server shutting down.\n", "    fails.\n", CLAIMS,
+    _M("K5", RST,
+       "    second slice fails, held to a replay of the counted steps. Not claimed\n"
+       "    for a server shutting down.\n",
+       "    second slice fails, held to a replay of the counted steps.\n", CLAIMS,
        "a narrowed server domain whose conditions no longer exclude it: REST-051 reads as "
        "claimed while the server shuts down"),
     _M("K6", RST, _STEPS_CELLS % _STEPS_SERVED,

@@ -25,7 +25,8 @@ And an edge's field names were not asked anything at all:
 
 ``add_node``, ``add_edge`` and ``add_external_input`` refuse each where the
 name is introduced, and what they take is shown to reload from every
-carrier.
+carrier (the USD stage in ``tests/usd/test_usd_node_names_a_stage_carries.py``,
+which the job that installs ``usd-core`` runs).
 """
 
 from __future__ import annotations
@@ -211,19 +212,6 @@ def test_the_names_add_node_takes_are_read_back_from_an_fmu_model_description(st
     variables = {el.get("name") for el in root.find("ModelVariables")}
     for name in ACCEPTED:
         assert f"{name}.position" in variables, name
-
-
-def test_the_names_add_node_takes_reload_from_a_usd_stage(stepped):
-    pxr = pytest.importorskip(
-        "pxr", reason="the USD carrier needs usd-core (pxr), which is not installed here")
-    from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
-
-    stage = pxr.Usd.Stage.CreateInMemory()
-    save_graph_to_usd(stepped, stage)
-    reread = pxr.Usd.Stage.CreateInMemory()
-    reread.GetRootLayer().ImportFromString(stage.GetRootLayer().ExportToString())
-    again = load_graph_from_usd(reread, node_registry=REGISTRY)
-    assert sorted(again._nodes) == sorted(stepped._nodes)   # noqa: SLF001
 
 
 def test_from_dict_refuses_a_config_naming_what_the_graph_could_not_save_again():

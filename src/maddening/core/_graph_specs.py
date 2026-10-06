@@ -531,9 +531,9 @@ def _input_cast_changes(value, dtype) -> Optional[str]:
         try:
             before = arr.astype(have)
             if have.kind == "c" and np.dtype(dtype).kind != "c":
-                if bool(np.any(before.imag != 0)):
+                if bool(np.any(np.imag(before) != 0)):
                     return f"a {have}"
-                before = before.real
+                before = np.real(before)
                 have = before.dtype
             after = before.astype(dtype)
             # Back in the dtype it came from, so the comparison is exact:

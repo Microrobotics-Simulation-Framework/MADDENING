@@ -198,7 +198,7 @@ def test_a_value_the_declared_dtype_holds_exactly_is_not_reported(value):
         np.testing.assert_array_equal(np.asarray(out["a"]["seen"]), np.float64(value))
 
 
-@pytest.mark.parametrize("value", [0.1, np.float64(0.1), 1e39, 16777217, 1 + 2j])
+@pytest.mark.parametrize("value", [0.1, np.float64(0.1), 1e39, 16777217, 1 + 2j, 2 + 0j])
 def test_without_x64_only_a_value_jax_would_not_have_narrowed_itself_is_reported(value):
     """Without x64 JAX takes a float64 ``0.1`` in as float32 before the
     graph sees it, as it always did: no number changed, nothing is said.

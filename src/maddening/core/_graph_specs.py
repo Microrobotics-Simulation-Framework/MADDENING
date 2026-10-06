@@ -195,9 +195,8 @@ def _edge_geom(edge: EdgeSpec, src_state, consumer_state):
     anchor, field = edge.geometry
     if anchor == "source":
         return src_state[edge.source_node][field]
-    if callable(consumer_state):
-        consumer_state = consumer_state()
-    return consumer_state[field]
+    held: Any = consumer_state() if callable(consumer_state) else consumer_state
+    return held[field]
 
 
 _GEOMETRY_ANCHORS = ("source", "target")
@@ -336,7 +335,8 @@ def _geometry_edge_issues(edges, nodes, state) -> list[str]:
             continue
         problems = getattr(e.mapping, "geometry_dtype_problems", None)
         if callable(problems):
-            errors, advisories = problems(dtype)
+            found: Any = problems(dtype)
+            errors, advisories = found
             issues.extend(f"ERROR: edge {e.key}: {text}." for text in errors)
             issues.extend(f"WARNING: edge {e.key}: {text}." for text in advisories)
     return issues

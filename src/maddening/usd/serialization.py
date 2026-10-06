@@ -92,6 +92,10 @@ if TYPE_CHECKING:
 _NODE_CLASS_REGISTRY: dict[str, type] = {}
 
 
+# The two attributes of an edge prim that hold its geometry (anchor, field).
+_GEOMETRY_ATTRS = ("maddening:geometryAnchor", "maddening:geometryField")
+
+
 def register_node_class(cls: type) -> type:
     """Register a SimulationNode subclass for USD deserialization.
 
@@ -384,6 +388,14 @@ def save_graph_to_usd(
                     prim.CreateAttribute(
                         attr_name, Sdf.ValueTypeNames.String,
                     ).Set(value)
+            # EXPERIMENTAL.  The moving geometry a geometry-dependent
+            # mapping reads: two attributes, created only for an edge that
+            # has one, so a stage of a graph without one is the stage it was.
+            if edge.geometry is not None:
+                for attr_name, value in zip(_GEOMETRY_ATTRS, edge.geometry):
+                    prim.CreateAttribute(
+                        attr_name, Sdf.ValueTypeNames.String,
+                    ).Set(value)
             if edge.mapping is not None:
                 # The spec (kind, hyper-parameters, point references) plus
                 # the shape ``describe()`` adds, as one JSON string — the
@@ -604,6 +616,25 @@ def load_graph_from_usd(
                 attr = child.GetAttribute(attr_name)
                 units[key] = attr.Get() if attr else None
 
+            # The edge's geometry: both attributes or neither.  One without
+            # the other is a damaged stage, and guessing the missing half
+            # would run a mapping on a field nobody chose.
+            held = []
+            for attr_name in _GEOMETRY_ATTRS:
+                attr = child.GetAttribute(attr_name)
+                held.append(attr.Get() if attr and attr.HasAuthoredValue() else None)
+            if (held[0] is None) != (held[1] is None):
+                present, absent = (
+                    _GEOMETRY_ATTRS if held[1] is None else _GEOMETRY_ATTRS[::-1])
+                raise ValueError(
+                    f"edge {source_node}.{source_field} -> "
+                    f"{target_node}.{target_field} ({child.GetPath()}): the stage "
+                    f"holds {present} without {absent}. An edge's geometry is "
+                    f"both attributes (the anchor, 'source' or 'target', and the "
+                    f"state field) or neither."
+                )
+            geometry = None if held[0] is None else (held[0], held[1])
+
             gm.add_edge(
                 source_node,
                 target_node,
@@ -612,6 +643,7 @@ def load_graph_from_usd(
                 transform=transform,
                 additive=bool(additive) if additive is not None else False,
                 mapping=mapping,
+                geometry=geometry,
                 **units,
             )
 

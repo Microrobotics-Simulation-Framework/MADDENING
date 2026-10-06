@@ -1700,7 +1700,8 @@ class GraphManager:
         tgt_spec = self._nodes.get(target)
         if tgt_spec is not None:
             bspec = tgt_spec.node.boundary_input_spec().get(target_field)
-            shape = tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ()
+            shape: tuple[Any, ...] = (
+                tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ())
             if shape and leads is not None:
                 if tuple(int(n) for n in shape[:len(leads[1])]) != leads[1]:
                     raise ValueError(
@@ -4249,6 +4250,28 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
+            **A group that resolves a geometry-dependent mapping**
+            (experimental: an edge into a member, from inside the group
+            or outside it, added with ``add_edge(..., geometry=...)``)
+            reports the solve's own ``"iterations"``,
+            ``"total_iterations"``, ``"residual"`` and ``"converged"``
+            and nothing else of the above: the diagnostics do not read a
+            moving geometry in 0.4.0, so ``"amplification"``,
+            ``"error_estimate"``, ``"rho_spectral"``,
+            ``"spectral_error_bound"`` and
+            ``"gradient_relative_error_bound"`` are NaN,
+            ``"gradient_error_estimate"`` is ``inf``, and
+            ``"ratio_usable"``, ``"spectral_usable"``,
+            ``"gradient_bound_usable"`` and ``"precision_limited"`` are
+            ``False``.  Such an entry has one more key,
+            ``"not_usable_reason"`` : str, which names the edges and
+            says why; no other group's entry has it.  The values are
+            withheld **here**: the internal ``_meta`` entry of the state
+            (which ``GET /graph/state`` of the REST server and an FMU
+            state archive carry verbatim) still holds what the step
+            itself computed for such a group, and those raw slots are
+            not a report and promise nothing.
+
             **After** :meth:`run_adaptive` **or** :meth:`run_adaptive_scan`
             the report describes the last accepted attempt's two kept
             half steps, the two solves ``strict_convergence`` checks:
@@ -6644,6 +6667,9 @@ class GraphManager:
         * ``precision_limited=True`` -- the residual is rounding, and
           ``converged`` can be ``True`` on a stalled iterate;
         * ``spectral_usable=False`` where a spectral bound was computed;
+        * in place of the three above, ``not_usable_reason`` for a group
+          that resolves a geometry-dependent mapping (experimental): its
+          bounds, estimates and ``*_usable`` flags are withheld;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

@@ -6,6 +6,7 @@ Moved verbatim out of ``maddening.core.graph_manager``.  Private.
 
 from __future__ import annotations
 
+import copy
 import math
 from typing import Optional
 
@@ -13,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling.acceleration import float_fields_of
+from maddening.core.coupling.group import CouplingGroup
 
 
 def _interface_edge_order(edges, member_order) -> list:
@@ -740,3 +742,33 @@ def _non_finite_reads_as_diverged(state_finite, residual, amplification):
         jnp.where(state_finite, residual, jnp.full_like(residual, jnp.inf)),
         jnp.where(state_finite, amplification, jnp.zeros_like(amplification)),
     )
+
+
+def _group_without_member(group: CouplingGroup, name: str) -> Optional[CouplingGroup]:
+    """*group* as ``GraphManager.remove_node`` leaves it when node *name*
+    is removed: the same object when it does not name the node; ``None``
+    (the group is removed) when fewer than two members would remain;
+    otherwise a group of the remaining members with every option kept --
+    ``accelerated_fields`` without the node's entry, and ``None`` (the
+    interface fields) when no other entry selects a field, which
+    ``CouplingGroup`` refuses to be told with an empty mapping.  The
+    options were validated, and warned about, when the group was made."""
+    if name not in group.nodes:
+        return group
+    nodes = group.nodes - {name}
+    if len(nodes) < 2:
+        return None
+    accelerated = group.accelerated_fields
+    if accelerated is not None:
+        accelerated = {k: v for k, v in accelerated.items() if k != name}
+        if not any(accelerated.values()):
+            accelerated = None
+    # A copy with the two fields set, not ``dataclasses.replace``: that
+    # runs ``__post_init__`` again, which warns again about every option
+    # the group was already warned about when it was made.  Nothing here
+    # needs validating a second time: the members are a subset, and the
+    # selection is a subset that still selects a field, or ``None``.
+    smaller = copy.copy(group)
+    object.__setattr__(smaller, "nodes", frozenset(nodes))
+    object.__setattr__(smaller, "accelerated_fields", accelerated)
+    return smaller

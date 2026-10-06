@@ -2213,7 +2213,12 @@ def test_a_strict_write_refuses_a_stale_node_reference_of_a_registered_kind(kind
     with pytest.raises(ValueError, match="no longer describes the points") as moved:
         gm.to_dict()
     assert "a.v->b.inp" in str(moved.value)
-    gm.remove_node("c")
+    with pytest.raises(ValueError, match="Cannot remove node 'c'"):
+        gm.remove_node("c")
+    # remove_node() refuses this removal while the edge holds the reference
+    # (MADD-ANO-214); the write-time check is for a graph that lost the node
+    # some other way.
+    gm._remove_node("c", replacing=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="unknown node 'c'"):
         gm.to_dict()
     assert gm.to_dict(strict_mappings=False)["edges"][0]["mapping"]["kind"] == kind

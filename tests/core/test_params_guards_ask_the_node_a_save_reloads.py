@@ -1,10 +1,12 @@
 """A params write is judged beside the values the graph runs with, whatever
 door they came in by.
 
-A fit, a ``gm.params`` write and a checkpoint load move a live leaf and
-leave the value the node was *constructed* with; ``PUT /graph/params``
-moves both.  So two graphs can hold the same live values -- and save the
-same config -- with different values in ``node.params``.  A guard that asks
+A fit, a ``gm.params`` write and ``GraphManager.load_state`` move a live
+leaf and leave the value the node was *constructed* with; ``PUT
+/graph/params`` moves both, and so does ``POST /checkpoint/load`` for each
+leaf it changes (it installs them with ``PUT``'s own function; it used to
+move the live leaf only).  So two graphs can hold the same live values --
+and save the same config -- with different values in ``node.params``.  A guard that asks
 what a *save of the graph would reload* has to ask it of the live values:
 ``from_dict`` builds the node from those.
 
@@ -59,10 +61,14 @@ SHORT = 0.5  # units: m
 
 _MAPPINGS = {"dense": nearest_neighbor_mapping, "sparse": sparse_nearest_neighbor_mapping}
 
-#: How the live diffusivity of rod ``a`` gets to ``LOW``.  After ``put``
-#: the node's own value is ``LOW`` too; after the others it is still the
-#: value the rod was built with.
+#: How the live diffusivity of rod ``a`` gets to ``LOW``.  After the two
+#: REST doors (``put``, and ``load``: ``POST /checkpoint/load``) the node's
+#: own value is ``LOW`` too; after the two in-process ones it is still the
+#: value the rod was built with, which is the state the guards were wrong
+#: in.
 DOORS = ("put", "fit", "load", "load_state")
+#: The doors that move the node's own value with the live leaf.
+MOVES_THE_NODES_OWN_VALUE = frozenset({"put", "load"})
 
 
 def _rods(alpha: float, kind: str | None) -> GraphManager:
@@ -116,7 +122,7 @@ def _lowered(door: str, root, *, alpha: float = HIGH, kind: str | None = "dense"
         gm.load_state(root / "low_state.npz")
     assert float(gm.params["nodes"]["a"]["thermal_diffusivity"]) == pytest.approx(LOW)
     own = gm.get_node("a").params["thermal_diffusivity"]
-    assert own == pytest.approx(LOW if door == "put" else alpha)
+    assert own == pytest.approx(LOW if door in MOVES_THE_NODES_OWN_VALUE else alpha)
     return gm, client
 
 
@@ -134,6 +140,43 @@ def _reloads_and_agrees(gm: GraphManager) -> None:
         for field, value in gm.get_node_state(name).items():
             np.testing.assert_array_equal(np.asarray(value),
                                           np.asarray(fresh.get_node_state(name)[field]))
+
+
+# ---------------------------------------------------------------------------
+# The doors themselves
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", [None, *sorted(_MAPPINGS)])
+@pytest.mark.parametrize("door", DOORS)
+def test_the_save_reloads_after_every_door(door, kind, tmp_path):
+    """Before any later write: whichever door moved the leaf, and whether
+    or not it moved the node's own value with it, the graph's save reloads
+    and steps as the graph does."""
+    gm, _client_unused = _lowered(door, tmp_path, kind=kind)
+    _reloads_and_agrees(gm)
+
+
+def test_a_load_moves_the_nodes_own_value_only_for_the_leaves_it_changes(tmp_path):
+    """``POST /checkpoint/load`` over a leaf a fit moved: the checkpoint
+    holds the fitted diffusivity (unchanged, so the node's own value stays
+    the built one, as after the fit) and another initial temperature
+    (changed, so installed on the node).  The guards are asked beside the
+    live leaves in that mixed state too."""
+    gm = _rods(HIGH, "dense")
+    client = _client(gm, tmp_path)
+    gm.params["nodes"]["a"]["thermal_diffusivity"] = jnp.asarray(LOW, jnp.float32)
+    assert client.post("/checkpoint/save", params={"path": "fitted.npz"}).status_code == 200
+    warm = np.linspace(3.0, 4.0, 6).tolist()
+    assert _put(client, {"initial_temperature": warm}).status_code == 200
+    resp = client.post("/checkpoint/load", params={"path": "fitted.npz"})
+    assert resp.status_code == 200, resp.text
+    own = gm.get_node("a").params
+    assert own["thermal_diffusivity"] == HIGH
+    np.testing.assert_allclose(own["initial_temperature"], np.linspace(1.0, 2.0, 6), rtol=1e-6)
+    resp = _put(client, {"length": SHORT})
+    assert resp.status_code == 400, resp.text
+    assert "was built from a.grid_x" in resp.json()["detail"], resp.text
+    _reloads_and_agrees(gm)
 
 
 # ---------------------------------------------------------------------------

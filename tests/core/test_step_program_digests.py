@@ -88,6 +88,11 @@ def _assert_captured(current: dict) -> None:
 
 @pytest.mark.parametrize("name", IN_PROCESS)
 def test_the_programs_of_a_graph_without_a_geometry_dependent_mapping_are_unchanged(name):
+    """Five programs per gate graph equal the capture's: the step as
+    ``compile()`` jits it, with traced and with baked parameters,
+    ``run_scan(3)``, ``run_sweep`` at batch 2 (a ``vmap`` of the step) and
+    the adaptive step.  Among the gate graphs are a multi-rate graph, a
+    sub-cycled group and a group with a predictor."""
     _assert_captured({name: _digests(name)})
 
 

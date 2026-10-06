@@ -159,6 +159,7 @@ user_guide/parameters
 user_guide/fmu_export
 user_guide/cloud_resume
 user_guide/inspection
+user_guide/geometry_dependent_mappings
 glossary
 ```
 

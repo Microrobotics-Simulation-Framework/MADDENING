@@ -171,8 +171,9 @@ class MultilinearGridMapping:
         abs(origin[a] + (n_a - 1) * spacing[a])) / spacing[a]`` cells.  At
         1/16 cell or worse that is an error (the weights mean nothing);
         at 1/1024 cell or worse, a warning.  An ``origin`` or ``spacing``
-        that is not a normal number of *dtype* (or an origin of exactly
-        zero) is an error: such a coordinate is read as zero.
+        that is not a normal number of *dtype* is an error: such a
+        coordinate is read as zero or infinity (an origin of exactly zero
+        is a normal case and is accepted).
         """
         info = np.finfo(np.dtype(dtype))
         eps, tiny, largest = float(info.eps), float(info.tiny), float(info.max)

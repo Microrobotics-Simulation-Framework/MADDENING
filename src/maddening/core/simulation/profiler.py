@@ -593,7 +593,7 @@ def _group_sweeps(gm) -> dict[str, int]:
     """``{group_key: waveform sweeps}``: how many fixed-point solves a step runs per group.
 
     One unless the group sub-cycles with ``waveform_iterations > 1``
-    (``maddening.core.graph_manager._group_waveform_sweeps``) -- and so
+    (``maddening.core.coupling._group_layout._group_waveform_sweeps``) -- and so
     the passes the one-iteration variant runs, one per sweep.
     """
     from maddening.core.coupling._group_layout import _group_waveform_sweeps  # noqa: PLC0415

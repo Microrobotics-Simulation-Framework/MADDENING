@@ -774,7 +774,7 @@ def _node_timesteps(graph_manager: Any) -> dict[str, float]:
     """Each node's timestep as the graph's step schedules it.
 
     A ``GraphManager``'s scheduled timesteps
-    (``maddening.core.graph_manager._scheduled_timesteps``): every member of
+    (``maddening.core._graph_specs._scheduled_timesteps``): every member of
     a sub-cycling coupling group at the group's largest member timestep,
     because the group solves once per macro step and an importer sees its
     members change only then.  A duck-typed graph without coupling groups

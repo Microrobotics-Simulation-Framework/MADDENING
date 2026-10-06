@@ -36,6 +36,7 @@ _ADD_EDGE_KWARGS = {
     "source_units": "source_units",
     "target_units": "target_units",
     "mapping": "mapping",
+    "geometry": "geometry",
 }
 
 # ``ordinal`` is the one field ``add_edge`` does not take: it numbers the
@@ -66,6 +67,11 @@ class EdgeSpec:
     # mapped edges a.v->b.inp are legal); makes ``key`` -- and with it the
     # ``params["mappings"]`` slot -- unique.  Assigned by ``add_edge``.
     ordinal: int = 0
+    # EXPERIMENTAL.  The moving geometry a geometry-dependent ``mapping``
+    # reads: ``(anchor, field)``, a state field of this edge's own source
+    # node (``anchor == "source"``) or target node (``"target"``).  ``None``
+    # for every other edge.  Not part of ``key``.
+    geometry: Optional[tuple[str, str]] = None
 
     @property
     def key(self) -> str:
@@ -143,6 +149,8 @@ class EdgeSpec:
             d["mapping"] = _mapping_config_dict(self.mapping)
         if self.ordinal:
             d["ordinal"] = self.ordinal
+        if self.geometry is not None:
+            d["geometry"] = {"anchor": self.geometry[0], "field": self.geometry[1]}
         if self.transform is not None:
             # The registered name reloads through add_edge(transform=str);
             # an unregistered callable can only be named, not rebuilt.
@@ -160,6 +168,8 @@ class EdgeSpec:
         arrow = f"{self.source_node}.{self.source_field} -> {self.target_node}.{self.target_field}"
         if self.mapping is not None:
             arrow += f"  (mapping {self.mapping!r})"
+        if self.geometry is not None:
+            arrow += f"  (geometry {self.geometry[0]}.{self.geometry[1]})"
         if self.transform is not None:
             arrow += f"  (via {self.transform.__qualname__})"
         if self.source_units or self.target_units:
@@ -167,7 +177,7 @@ class EdgeSpec:
         return f"EdgeSpec({arrow})"
 
 
-def _delivered(edge: EdgeSpec, value, mappings=None):
+def _delivered(edge: EdgeSpec, value, mappings=None, geom=None):
     """The value *edge* hands its target for *value* read at its source.
 
     The step's edge rule, in the one place it is written: the interface
@@ -192,6 +202,11 @@ def _delivered(edge: EdgeSpec, value, mappings=None):
         ``{edge.key: weights}``: the weights the step runs with, which a
         caller may override per step.  ``None``, or no entry for this
         edge, uses the mapping's own (``Mapping.apply(value, None)``).
+    geom : array, optional
+        The geometry a geometry-dependent mapping reads
+        (:attr:`EdgeSpec.geometry`), at the time level the caller resolved
+        it.  Passed to the mapping only for an edge that has a geometry;
+        every other edge makes the two-argument call it always made.
 
     Returns
     -------
@@ -203,7 +218,10 @@ def _delivered(edge: EdgeSpec, value, mappings=None):
         if mappings is not None:
             weights = mappings.get(edge.key)
         with jax.named_scope("edge:mapping"):
-            value = edge.mapping.apply(value, weights)
+            if edge.geometry is None:
+                value = edge.mapping.apply(value, weights)
+            else:
+                value = edge.mapping.apply(value, weights, geom)
     if edge.transform is not None:
         value = edge.transform(value)
     return value

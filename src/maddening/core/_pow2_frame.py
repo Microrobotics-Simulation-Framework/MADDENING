@@ -161,6 +161,20 @@ def pow2_exponent(value: float) -> int:
     return int(np.frexp(float(value))[1])
 
 
+def pow2_host_factor(value: float, dtype) -> float:
+    """The power of two ``p`` with ``abs(value) * p`` in ``[0.5, 1)``, as a
+    Python float, clamped so that ``p`` is a normal number of *dtype*.
+
+    The static form of the ``"common"`` frame, for a constant known on the
+    host (a grid spacing): the factor is chosen once, from a Python float,
+    and multiplies traced coordinates exactly.  ``1.0`` for zero.
+    """
+    info = np.finfo(np.dtype(dtype))
+    e = pow2_exponent(value) if value else 0
+    e = min(max(e, 1 - int(info.maxexp)), -int(info.minexp))
+    return float(np.ldexp(1.0, -e))
+
+
 def pow2_rescue(dtype):
     """``1 / finfo(dtype).tiny``: the fixed power of two that lifts the smallest
     normal number to one, as a scalar of *dtype*.

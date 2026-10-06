@@ -177,14 +177,107 @@ def _strong_typed(tree):
     return jax.tree.map(_fix, tree)
 
 
-def _apply_edge(edge: EdgeSpec, value, params):
+def _edge_geom(edge: EdgeSpec, src_state, consumer_state):
+    """The geometry *edge*'s mapping reads at one call site, or ``None``.
+
+    A source-anchored geometry is read from *src_state*, the same state
+    dict the edge's value is looked up in, so it has the value's time
+    level.  A target-anchored one is the named field of *consumer_state*:
+    the ``state`` argument of the hook (``update`` or
+    ``compute_boundary_fluxes``) the boundary inputs are being resolved
+    for.  *consumer_state* may be a zero-argument callable, called only
+    for a target-anchored geometry: a call site whose consumer state is
+    built after its boundary inputs then traces nothing new, and nothing
+    in another order, for every edge without one.
+    """
+    if edge.geometry is None:
+        return None
+    anchor, field = edge.geometry
+    if anchor == "source":
+        return src_state[edge.source_node][field]
+    if callable(consumer_state):
+        consumer_state = consumer_state()
+    return consumer_state[field]
+
+
+_GEOMETRY_ANCHORS = ("source", "target")
+
+
+def _checked_geometry(key: str, geometry, mapping) -> Optional[tuple[str, str]]:
+    """``add_edge``'s *geometry* as the tuple an :class:`EdgeSpec` holds.
+
+    Raises ``ValueError`` for a malformed value, for a geometry without a
+    geometry-dependent mapping, and for a geometry-dependent mapping
+    without a geometry.  ``None`` with any other mapping, or with no
+    mapping, is the edge every graph had.
+    """
+    reads = mapping is not None and bool(getattr(mapping, "needs_geometry", False))
+    if geometry is None:
+        if reads:
+            raise ValueError(
+                f"add_edge({key}): mapping {mapping!r} reads a moving geometry and "
+                f"none was given. Pass geometry=(\"source\", <state field>) or "
+                f"geometry=(\"target\", <state field>)."
+            )
+        return None
+    given = geometry
+    pair = None
+    if isinstance(geometry, dict):
+        if set(geometry) == {"anchor", "field"}:
+            pair = (geometry["anchor"], geometry["field"])
+    elif isinstance(geometry, (list, tuple)) and len(geometry) == 2:
+        pair = tuple(geometry)
+    if (pair is None or not all(isinstance(x, str) and x for x in pair)
+            or pair[0] not in _GEOMETRY_ANCHORS):
+        raise ValueError(
+            f"add_edge({key}): geometry must be (\"source\", <field>) or "
+            f"(\"target\", <field>), a state field of this edge's own source or "
+            f"target node; got {given!r}. A geometry held by any other node is not "
+            f"supported in 0.4.0: carry it in the source or target node's state."
+        )
+    if mapping is None:
+        raise ValueError(
+            f"add_edge({key}): geometry={pair!r} was given without a mapping. A "
+            f"geometry is the moving interface an interface mapping reads; pass "
+            f"mapping=<a geometry-dependent mapping> or drop geometry=."
+        )
+    if not reads:
+        raise ValueError(
+            f"add_edge({key}): mapping {mapping!r} is static (it reads no geometry), "
+            f"but geometry={pair!r} was given and would be ignored. Drop geometry=, or "
+            f"use a geometry-dependent mapping kind."
+        )
+    return (pair[0], pair[1])
+
+
+def _mapping_field_leads(mapping) -> Optional[tuple[tuple, tuple]]:
+    """``(source lead, target lead)`` of a mapping that declares
+    ``field_shapes()``: the leading axes of the field it reads and of the
+    field it delivers.  ``None`` for a mapping without the method, which
+    acts on axis 0 (``n_source`` in, ``n_target`` out) as every mapping
+    did."""
+    shapes = getattr(mapping, "field_shapes", None)
+    if shapes is None:
+        return None
+    source_lead, target_lead = shapes()
+    return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
+
+
+def _geometry_edge_keys(edges) -> list[str]:
+    """The keys of the edges of *edges* that read a geometry."""
+    return [e.key for e in edges if e.geometry is not None]
+
+
+def _apply_edge(edge: EdgeSpec, value, params, geom=None):
     """Mapping (interface transfer) first, then the scalar transform.
 
     The step's edge rule (:func:`maddening.core.edge._delivered`) with the
     step's resolved parameters: the mapping weights are ``params``'s
     ``mappings`` entry for the edge, baked or traced as the step has them.
+    *geom* is the geometry of a geometry-dependent mapping
+    (:func:`_edge_geom`); an edge without one ignores it.
     """
-    return _delivered(edge, value, None if params is None else params.mappings)
+    return _delivered(edge, value, None if params is None else params.mappings, geom)
 
 
 def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:

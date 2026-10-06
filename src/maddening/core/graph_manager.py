@@ -1546,6 +1546,8 @@ class GraphManager:
         source_units: Optional[str] = None,
         target_units: Optional[str] = None,
         mapping: Optional[Any] = None,
+        *,
+        geometry: Optional[Any] = None,
     ) -> None:
         """Add a data-dependency edge between two nodes.
 
@@ -1563,6 +1565,19 @@ class GraphManager:
         :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
         A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
         its dict form) is rebuilt first with :meth:`point_resolver`.
+
+        ``geometry`` (experimental) names the moving geometry a
+        geometry-dependent mapping reads: ``("source", field)`` or
+        ``("target", field)``, a state field of this edge's own source or
+        target node (the dict ``{"anchor": ..., "field": ...}`` is taken
+        too).  There is no default anchor.  A source-anchored geometry is
+        read at the time level the edge's value is read at; a
+        target-anchored one is the field of the state the target's hook
+        is called with.  It is required by a mapping whose
+        ``needs_geometry`` is true and refused with any other; the
+        field's presence, dtype (float32 or float64) and shape (the
+        mapping's ``geometry_shape``) are checked by :meth:`validate`.
+        An edge without one behaves exactly as it did.
 
         The *transform* parameter accepts either a callable or a
         string name registered via ``@register_transform``.  String
@@ -1587,6 +1602,8 @@ class GraphManager:
             carriage return), a surrogate or U+FFFE / U+FFFF.  A
             target field the target node does not declare is taken (a node
             may read an input it does not declare).
+            Also if ``geometry`` is malformed, is given without a
+            geometry-dependent mapping, or is missing for one.
         """
         for what, name in (("source", source_field), ("target", target_field)):
             refusal = _graph_specs._field_name_refusal(name)
@@ -1608,6 +1625,8 @@ class GraphManager:
                     mapping = MappingSpec.from_dict(mapping)
                 mapping = mapping.build(self.point_resolver())
             self._check_mapping_shapes(source, source_field, target, target_field, mapping)
+        geometry = _graph_specs._checked_geometry(
+            f"{source}.{source_field}->{target}.{target_field}", geometry, mapping)
         ordinal = 0
         if mapping is not None:
             # Mapping weights live in params["mappings"][edge.key]; a
@@ -1622,7 +1641,7 @@ class GraphManager:
             )
         edge = EdgeSpec(source, target, source_field, target_field,
                         transform, additive, source_units, target_units,
-                        mapping=mapping, ordinal=ordinal)
+                        mapping=mapping, ordinal=ordinal, geometry=geometry)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
@@ -1655,10 +1674,19 @@ class GraphManager:
                 f"mapping {mapping!r} on {source}.{source_field} -> "
                 f"{target}.{target_field}: {problem}"
             )
+        leads = _graph_specs._mapping_field_leads(mapping)
         src_spec = self._nodes.get(source)
         if src_spec is not None:
             src_state = src_spec.node.initial_state()
-            if source_field in src_state:
+            if source_field in src_state and leads is not None:
+                have = tuple(np.shape(src_state[source_field])[:len(leads[0])])
+                if have != leads[0]:
+                    raise ValueError(
+                        f"mapping {mapping!r} reads a field whose leading axes are "
+                        f"{leads[0]}, which does not match {source}.{source_field} "
+                        f"(shape {tuple(np.shape(src_state[source_field]))})"
+                    )
+            elif source_field in src_state:
                 n = int(np.prod(np.shape(src_state[source_field])[:1] or (1,)))
                 if mapping.n_source != n:
                     raise ValueError(
@@ -1669,7 +1697,14 @@ class GraphManager:
         if tgt_spec is not None:
             bspec = tgt_spec.node.boundary_input_spec().get(target_field)
             shape = tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ()
-            if shape and mapping.n_target != int(shape[0]):
+            if shape and leads is not None:
+                if tuple(int(n) for n in shape[:len(leads[1])]) != leads[1]:
+                    raise ValueError(
+                        f"mapping {mapping!r} delivers a field whose leading axes are "
+                        f"{leads[1]}, which does not match {target}.{target_field} "
+                        f"declared shape {shape}"
+                    )
+            elif shape and mapping.n_target != int(shape[0]):
                 raise ValueError(
                     f"mapping n_target={mapping.n_target} does not match "
                     f"{target}.{target_field} declared shape {shape}"
@@ -1724,7 +1759,9 @@ class GraphManager:
                 value = fluxes[edge.source_node][edge.source_field]
             else:
                 value = src_fields[edge.source_field]
-            value = _graph_specs._apply_edge(edge, value, resolved)
+            value = _graph_specs._apply_edge(
+                edge, value, resolved,
+                _graph_specs._edge_geom(edge, state, lambda: state[node_name]))
             if edge.additive and edge.target_field in out:
                 out[edge.target_field] = out[edge.target_field] + value
             else:
@@ -3125,6 +3162,12 @@ class GraphManager:
                 self._validate_params(params)
             return _graph_specs._ResolvedParams(params.get("nodes", {}), params.get("mappings", {}))
 
+        # Nodes with an incoming edge whose mapping reads a geometry from
+        # the node's own state (experimental; empty for every other graph).
+        target_geometry_nodes = frozenset(
+            e.target_node for e in self._edges
+            if e.geometry is not None and e.geometry[0] == "target")
+
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None,
@@ -3138,6 +3181,11 @@ class GraphManager:
                 (use new_state) even if they are in back_edge_set.
             """
             boundary_inputs: dict[str, Any] = {}
+            # Static: whether an incoming edge reads a geometry from this
+            # node's own state.  Only then is what each edge read kept,
+            # for the flux hook below.
+            reads_own_geometry = node_name in target_geometry_nodes
+            delivered: list = []
 
             for edge in edges_by_target[node_name]:
                 # Determine source state: back-edges read from full_state
@@ -3158,7 +3206,15 @@ class GraphManager:
                     value = flux_state[src_nn][edge.source_field]
                 else:
                     value = src_state[src_nn][edge.source_field]
-                value = _graph_specs._apply_edge(edge, value, node_params)
+                raw = value
+                # A geometry (experimental) is read where the value was:
+                # from ``src_state`` for a source anchor, and for a target
+                # anchor from the state ``update`` is about to receive.
+                value = _graph_specs._apply_edge(
+                    edge, value, node_params,
+                    _graph_specs._edge_geom(edge, src_state, new_state[node_name]))
+                if reads_own_geometry:
+                    delivered.append((edge, raw, src_state, value))
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -3181,6 +3237,28 @@ class GraphManager:
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
             if type(spec.node).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
+                if reads_own_geometry:
+                    # The flux hook is called with the post-update state,
+                    # so a geometry this node holds is read from that
+                    # state: the edges are resolved again, in the same
+                    # order, each from the value it read above.
+                    boundary_inputs = {}
+                    for edge, raw, src_state, value in delivered:
+                        if edge.geometry is not None and edge.geometry[0] == "target":
+                            value = _graph_specs._apply_edge(
+                                edge, raw, node_params,
+                                _graph_specs._edge_geom(edge, src_state, new_node_state))
+                        if edge.additive and edge.target_field in boundary_inputs:
+                            boundary_inputs[edge.target_field] = (
+                                boundary_inputs[edge.target_field] + value
+                            )
+                        else:
+                            boundary_inputs[edge.target_field] = value
+                    if node_name in has_external:
+                        node_ext = external_inputs.get(node_name, {})
+                        for ei in ext_by_target[node_name]:
+                            if ei.target_field in node_ext:
+                                boundary_inputs[ei.target_field] = node_ext[ei.target_field]
                 fluxes = _graph_specs._node_fluxes(
                     spec, new_node_state, boundary_inputs, spec.timestep,
                     node_params.nodes.get(node_name),
@@ -5984,6 +6062,7 @@ class GraphManager:
                 source_units=ed.get("source_units"),
                 target_units=ed.get("target_units"),
                 mapping=mapping,
+                geometry=ed.get("geometry"),
             )
         for owner, overrides in config.get("param_specs", {}).items():
             for key, spec_dict in overrides.items():

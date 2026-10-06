@@ -1300,6 +1300,18 @@ def build_mapping(spec: MappingSpec, resolve_points: Callable[[dict], Any]):
         _check_digest(n, spec.points[n], arrays[n])
     refs = {entry.references[n]: spec.points[n] for n in entry.arrays}
     mapping = entry.factory(**arrays, **spec.hyperparameters, **refs)
+    reads_geometry = bool(getattr(mapping, "needs_geometry", False))
+    if reads_geometry != entry.needs_geometry:
+        # The flag decides whether a config's edge may (and must) name a
+        # geometry; the object decides whether one is read.  They agree
+        # or nothing is built.
+        raise ValueError(
+            f"the factory registered for mapping kind {entry.kind!r} "
+            f"({_qualified(entry.factory)}) returned a mapping whose needs_geometry is "
+            f"{reads_geometry}, but the kind was registered with "
+            f"needs_geometry={entry.needs_geometry}; a kind's mappings either all read "
+            f"a moving geometry or none does"
+        )
     if not entry.builtin:
         _check_registered_result(entry, spec, mapping)
     return mapping

@@ -1359,7 +1359,11 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
         # not lost to the second sweep.
         grown = jnp.logical_and(h_next > _ARNOLDI_NOISE_ULPS * eps * anorm,
                                 h_next >= _ARNOLDI_REORTH_KEEP * h_first)
-        dropped = jnp.maximum(dropped, jnp.where(grown, 0.0, h_next))
+        # A leftover once the basis is the whole space is orthogonal to
+        # nothing: rounding by construction, not a direction that could
+        # have been one.
+        whole = jnp.sum((jnp.sum(Q * Q, axis=1) > 0).astype(dtype)) >= n
+        dropped = jnp.maximum(dropped, jnp.where(jnp.logical_or(grown, whole), 0.0, h_next))
         H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
         q_next = jnp.where(grown, w / jnp.where(grown, h_next, 1.0), 0.0)
         if extra is not None:
@@ -1484,7 +1488,11 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
         h_next = jnp.linalg.norm(w_q)
         grown = jnp.logical_and(h_next > _ARNOLDI_NOISE_ULPS * eps * anorm,
                                 h_next >= _ARNOLDI_REORTH_KEEP * h_first)
-        dropped = jnp.maximum(dropped, jnp.where(grown, 0.0, h_next))
+        # A leftover once the basis is the whole space is orthogonal to
+        # nothing: rounding by construction, not a direction that could
+        # have been one.
+        whole = jnp.sum((jnp.sum(Q * Q, axis=1) > 0).astype(dtype)) >= m
+        dropped = jnp.maximum(dropped, jnp.where(jnp.logical_or(grown, whole), 0.0, h_next))
         H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
         inv = jnp.where(grown, 1.0 / jnp.where(grown, h_next, 1.0), 0.0)
         q_next = w_q * inv

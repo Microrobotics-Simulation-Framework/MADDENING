@@ -372,7 +372,7 @@ READING_DOMAINS = {
 }
 
 
-def _assert_the_bound_holds_in(domain, mode, fixture="extract-last"):
+def _assert_the_bound_holds_in(domain, mode, fixture="extract-last", settled=True):
     """The audit's ``extract_last`` pair in *domain*'s dtype under *mode*, two passes.
 
     The oracle is the float64 fixed point of the affine map with its
@@ -405,7 +405,15 @@ def _assert_the_bound_holds_in(domain, mode, fixture="extract-last"):
         (np.atleast_1d(tn(uA)), np.atleast_1d(tn(uA_s))),
         (np.atleast_1d(uB[0]), np.atleast_1d(uB_s[0])),
     ], rtol)
-    assert d["spectral_usable"] and true > 0, (dict(d), true)     # the fixture premise
+    assert true > 0, (dict(d), true)                               # the fixture premise
+    if not settled:
+        # The dtype's rounding does not determine the radius (see the
+        # caller): the flag is withdrawn, and the number is still no
+        # smaller than the distance.
+        assert not d["spectral_usable"], (dict(d), true)
+        assert d["spectral_error_bound"] >= true, (dict(d), true)
+        return
+    assert d["spectral_usable"], (dict(d), true)
     _assert_bound_holds(d, true, (domain, mode, fixture))
 
 
@@ -428,8 +436,28 @@ def test_the_bound_holds_in_the_transformed_reading_in_float64_and_in_float16(do
                                           ("bfloat16", "gauss-seidel")])
 def test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_sweep(domain, mode,
                                                                                   fixture):
-    """bfloat16, and Gauss-Seidel in each of the three dtypes, both spellings of the selection."""
-    _assert_the_bound_holds_in(domain, mode, fixture)
+    """bfloat16, and Gauss-Seidel in each of the three dtypes, both spellings of the selection.
+
+    The pair's weighted Jacobian is far from normal (gains 50 and 0.01),
+    and only float64 determines its radius to the flag's margin under
+    every sweep:
+
+    * **bfloat16** (``eps = 2**-7``): the second Krylov direction of the
+      reading is 0.6% of the product, under one bfloat16 rounding of it,
+      and the breakdown test must take it for one.  Discarded, the
+      reading's radius reads 1.06 for 0.707 (Jacobi) -- a direction that
+      small returns with a gain of 90 -- so the bound is ``inf`` and
+      ``spectral_usable`` is False.  Kept (the rule before the threshold
+      was scaled to the products' rounding) the number was right by
+      trusting a direction the dtype cannot tell from noise.
+    * **float16 under Gauss-Seidel**: the fresh product disagrees with
+      the Arnoldi relation by 1.2e-4 in the row a gain of 66 multiplies,
+      which can move a radius of 0.5 by 0.09 against a margin of 0.025:
+      the rounding certificate refuses it.  The radius read is right
+      (0.5008) and the bound covers the distance 72 times over.
+    """
+    settled = domain == "f64"
+    _assert_the_bound_holds_in(domain, mode, fixture, settled=settled)
 
 
 @pytest.mark.parametrize("kind", ["transform", "mapping"])

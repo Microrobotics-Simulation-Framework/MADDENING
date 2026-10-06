@@ -729,6 +729,54 @@ def _new_node_type_refusal(cls: Any, params: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _kind_of_value(value: Any) -> str:
+    """What a constructor default is, in a refusal's words."""
+    if isinstance(value, bool):
+        return "a boolean"
+    if _is_integer(value):
+        return "an integer"
+    if isinstance(value, (float, np.floating)):
+        return "a number"
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, (list, tuple)):
+        return "a list"
+    return f"a {type(value).__name__}"
+
+
+def _constructor_refusal(cls: Any, name: str, timestep: float, params: dict[str, Any],
+                         exc: BaseException) -> str:
+    """The 400 of ``POST /graph/nodes`` for a constructor that raised *exc*
+    on *params*: the parameters the refusal can be told from -- those
+    without which (each left to the class's default in turn, as
+    :func:`_dry_run_refusal` tells them) the constructor takes the rest --
+    with the value sent and what the class's default is, then the
+    constructor's own words.
+
+    The reply used to be those words alone, and a constructor that had not
+    thought of the value answers with whatever Python raised: ``n_cells:
+    8.0`` was "'float' object cannot be interpreted as an integer" and
+    ``n_cells: 0`` "float division by zero", neither naming a parameter.
+    """
+    blamed = []
+    for key in params:
+        try:
+            cls(name=name, timestep=timestep,
+                **{k: v for k, v in params.items() if k != key})
+        except Exception:  # noqa: BLE001 - not this parameter alone
+            continue
+        blamed.append(key)
+    told = []
+    for key in blamed:
+        default = _constructor_default(cls, key)
+        expected = ("" if default is None
+                    else f" (the default is {default!r}, {_kind_of_value(default)})")
+        told.append(f"params.{key} = {params[key]!r}{expected}")
+    what = ", ".join(told) if told else "these params together"
+    said = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+    return f"node '{name}': {cls.__name__} refuses {what}: {said}"
+
+
 def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]:
     """:func:`_oversized_param`'s integer bound on ``POST /graph/nodes``'s
     *params*, asked of each value as its parameter's type reads it
@@ -3846,7 +3894,8 @@ class SimulationServer:
                 try:
                     node = node_cls(name=req.name, timestep=req.timestep, **req.params)
                 except Exception as exc:
-                    raise HTTPException(status_code=400, detail=str(exc))
+                    raise HTTPException(status_code=400, detail=_constructor_refusal(
+                        node_cls, req.name, req.timestep, req.params, exc))
                 # The ParamSpec bounds PUT /graph/params holds a write to,
                 # on the values this request gives: a damping of -5 below
                 # its bound of 0 was added, which PUT then refused to

@@ -67,12 +67,30 @@ def test_a_timestep_that_is_not_a_finite_positive_number_is_refused(literal):
     assert client.post("/sim/step").status_code == 200
 
 
-def test_a_finite_positive_timestep_is_taken():
+@pytest.mark.parametrize("literal", ["true", "false", '"0.5"', '" 0.25 "', '"1e-2"', '"1"',
+                                     "null", "[0.01]", '{"s": 0.01}', '""'])
+def test_a_timestep_that_is_not_a_json_number_is_refused(literal):
+    """A boolean, or text that can be read as a number, is not a timestep:
+    ``true`` added a node stepping at 1.0 s, and ``"0.5"``, ``" 0.25 "``
+    and ``"1e-2"`` were parsed, where the same kinds in ``params`` are a
+    400."""
     gm, _server, client = _served()
-    resp = _post_node(client, "new", "0.005")
+    resp = _post_node(client, "new", literal)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"][0]["loc"] == ["body", "timestep"]
+    assert "new" not in gm._nodes
+    assert client.post("/sim/step").status_code == 200
+
+
+@pytest.mark.parametrize("literal, timestep", [("0.005", 0.005), ("1", 1.0), ("2e-3", 0.002)])
+def test_a_finite_positive_timestep_is_taken(literal, timestep):
+    """A JSON number, an integer included."""
+    gm, _server, client = _served()
+    resp = _post_node(client, "new", literal)
     assert resp.status_code == 201, resp.text
-    assert resp.json()["node"]["timestep"] == 0.005
-    assert gm._nodes["new"].timestep == 0.005
+    assert resp.json()["node"]["timestep"] == timestep
+    assert gm._nodes["new"].timestep == timestep
+    assert isinstance(gm._nodes["new"].timestep, float)
 
 
 @pytest.mark.parametrize("timestep", [math.nan, math.inf, -math.inf, 0.0, -0.0, -0.01])

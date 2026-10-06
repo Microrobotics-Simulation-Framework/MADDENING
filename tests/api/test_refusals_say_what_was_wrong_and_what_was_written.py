@@ -16,6 +16,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax.numpy as jnp
 import pytest
 
 from tests._loopback_client import LoopbackTestClient as TestClient
@@ -23,9 +24,22 @@ from tests._loopback_client import LoopbackTestClient as TestClient
 import maddening.api.server as server_module
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
 from maddening.nodes import HeatNode, SpringDamperNode
 
 DT = 0.01
+
+
+class Grid(SimulationNode):
+    """A field of two axes."""
+
+    def initial_state(self):
+        return {"g": jnp.zeros((2, 3), jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return state
+
+
 REGISTRY = {"SpringDamperNode": SpringDamperNode, "HeatNode": HeatNode}
 
 
@@ -34,6 +48,7 @@ def served(tmp_path):
     gm = GraphManager()
     gm.add_node(SpringDamperNode("s", DT, stiffness=30.0, damping=2.0, initial_position=1.0))
     gm.add_node(HeatNode("rod", DT, n_cells=4, thermal_diffusivity=0.01))
+    gm.add_node(Grid("grid", DT))
     gm.compile()
     root = tmp_path / "root"
     root.mkdir()
@@ -175,3 +190,23 @@ def test_a_state_value_spelled_with_its_shapes_lists_is_written(served):
     assert client.put("/graph/state/rod", json={"state": {"temperature": [1.0, 2.0, 3.0, 4.0]}}
                       ).status_code == 200
     assert client.get("/graph/state/rod").json()["temperature"] == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_a_field_of_two_axes_is_held_to_one_list_per_row(served):
+    client, gm, root = served
+    rows = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert client.put("/graph/state/grid", json={"state": {"g": rows}}).status_code == 200
+    for value, lists in (([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 1),
+                         ([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], 4),
+                         ([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]], 5)):
+        resp = client.put("/graph/state/grid", json={"state": {"g": value}})
+        if lists == 4:
+            # As many lists as the shape has, in another arrangement: the
+            # shape check's refusal, as before.
+            assert resp.status_code == 400 and "shape" in resp.json()["detail"]
+        else:
+            assert resp.status_code == 400, resp.text
+            assert f"nested in {lists} list(s)" in resp.json()["detail"]
+    assert client.get("/graph/state/grid").json()["g"] == rows
+    assert [server_module._lists_in_shape(shape) for shape in
+            ((), (4,), (2, 3), (2, 3, 1), (0, 5), (5, 0))] == [0, 1, 3, 9, 1, 6]

@@ -49,6 +49,20 @@ class NeedsItsInput(SimulationNode):
         return {"drive": BoundaryInputSpec(shape=(), description="what it adds")}
 
 
+class ReadsThePytreeOnly(SimulationNode):
+    """Takes its constant from the injected params and nowhere else: the
+    graph always passes them, so the graph steps it."""
+
+    def __init__(self, name, timestep, gain=2.0):
+        super().__init__(name, timestep, gain=gain)
+
+    def initial_state(self):
+        return {"x": jnp.ones((), jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params):
+        return {"x": state["x"] * params["gain"]}
+
+
 class CountsInIntegers(SimulationNode):
     """A float state its update returns as an integer."""
 
@@ -69,7 +83,7 @@ class DropsAField(SimulationNode):
 
 REGISTRY = {cls.__name__: cls for cls in (
     BallNode, HeartPumpNode, RigidBody2DNode, RigidBodyNode, SpringDamperNode, TableNode,
-    NeedsItsInput, CountsInIntegers, DropsAField)}
+    NeedsItsInput, CountsInIntegers, DropsAField, ReadsThePytreeOnly)}
 
 
 @pytest.fixture()
@@ -182,3 +196,15 @@ def test_an_update_that_returns_another_kind_of_dtype_or_other_fields_is_a_400(
         served, type_name, needle):
     client, gm = served
     _assert_refused_whole(client, gm, _add(client, type_name, {}), needle)
+
+
+def test_a_node_that_reads_its_constants_from_the_params_pytree_only_is_added(served):
+    """The dry run calls ``update`` as the graph does, with the pytree: it
+    used to call it without, and refused a node the graph steps."""
+    client, gm = served
+    resp = _add(client, "ReadsThePytreeOnly", {"gain": 3.0})
+    assert resp.status_code == 201, resp.text
+    assert client.post("/sim/step").json()["new"]["x"] == 3.0
+    # ... and the same class with a gain the update cannot multiply by.
+    resp = _add(client, "ReadsThePytreeOnly", {"gain": [1.0, 2.0]}, name="other")
+    assert resp.status_code == 400 and "params.gain" in resp.json()["detail"]

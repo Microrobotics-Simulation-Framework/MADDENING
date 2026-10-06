@@ -1305,7 +1305,7 @@ claims:
     - docs/release_notes/v0.4.0.md:4281 (One unauthenticated request can no longer name unbounded work)
     - src/maddening/api/server.py:1090 (_allocation_refusal)
     - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
-  conditions: each bound at its edge; the state caps at patched values.
+  conditions: each bound at its edge; the state caps at patched values; the lists and objects of a request's params counted against the value bound ("The lists and objects in a request's params are counted against the same 10^6"), at a patched bound, on POST /graph/nodes and PUT /graph/params; a state value nested in other lists than its field's shape.
   oracle: the route's status code at the bound and one past it.
   tests:
     - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_run_of_exactly_the_step_bound_runs_and_one_more_is_a_422
@@ -1315,6 +1315,9 @@ claims:
     - tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_dimensions_that_multiply_are_caught_by_the_state_cap
     - tests/api/test_node_size_refused_before_construction.py::test_post_refuses_an_oversized_node_before_constructing_it
     - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_node_that_fills_the_graph_budget_exactly_is_added_and_one_more_element_is_refused
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_lists_and_objects_are_counted_like_values_by_every_params_model
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_as_many_lists_as_the_bound_are_not_refused_for_their_count
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_state_value_nested_in_other_lists_than_its_shape_is_refused_uncounted
   status: verified
   notes: >-
     Ambiguous in the first edition: the README and the release notes called
@@ -2542,7 +2545,11 @@ claims:
     "POST /graph/nodes: Add a node ({type, name, timestep, params})" -- an
     unknown type is a 400, an existing name a 409, and a node whose params
     its constructor or one abstract update refuses is a 400 and is not
-    added.  A POST /graph/nodes that is refused, or that fails at any
+    added.  The update is traced the way the graph calls it (the node's
+    params pytree injected; with every declared boundary input and with
+    none), and must return the fields, shapes and kinds of dtype of the
+    node's initial state: "400, and nothing added, for a node the graph
+    could not step with its state as built".  A POST /graph/nodes that is refused, or that fails at any
     point, leaves the graph as it was, by the route's transaction.  The
     refusals of names and text in the conditions are the ones that exist,
     stated for the server's audience (a trusted client on loopback, or a token-holder);
@@ -2562,6 +2569,13 @@ claims:
     it; any other name, a line break in it included, is taken); and, for a class with a text parameter, a text
     value that spells NaN, Infinity or -Infinity or holds a surrogate. A
     failure injected at every point of adding a node and of removing one.
+    For every class of the node catalogue, each numeric constructor
+    parameter at another rank, null and {} (a 201 must step, keep the
+    layout of initial_state() and reload its checkpoint after a reset); a
+    list where the state is a scalar on five classes; a constant the step
+    reads from the params pytree as null and {}; a list that sizes the
+    state consistently (taken); a node that needs an input it declares
+    (taken); an update returning an integer for a float, or fewer fields.
   oracle: status codes and the graph's nodes.
   tests:
     - tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -2576,6 +2590,13 @@ claims:
     - tests/api/test_names_and_text_are_refused_at_the_door_that_introduces_them.py::test_a_new_node_with_text_the_config_could_not_carry_is_a_400_and_no_node
     - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_value_of_a_rank_that_reshapes_the_state_at_the_first_step_is_a_400
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_constant_the_step_cannot_read_from_the_params_pytree_is_a_400
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_the_refusal_names_the_parameter_it_is_told_from_and_no_other
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_list_the_state_is_built_from_is_taken_and_its_checkpoint_reloads
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_node_that_needs_an_input_it_has_not_got_yet_is_still_added
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_an_update_that_returns_another_kind_of_dtype_or_other_fields_is_a_400
+    - tests/property/test_rest_requests_generated_from_the_schema.py::test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads
   status: verified
   domains:
     loopback_bind: tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -3332,13 +3353,14 @@ claims:
     - src/maddening/api/server.py:3110 (set_node_params)
     - src/maddening/api/server.py:1255 (_state_write_reason_before_building)
     - docs/user_guide/parameters.md:168 (Writing parameters over REST)
-  conditions: HeatNode n_cells, a grid shape, a pipe length; the constructor spied.
+  conditions: HeatNode n_cells, a grid shape, a pipe length; the constructor spied; a list and null for a ball's scalar constant, refused by this route and by POST /graph/nodes alike.
   oracle: 400 with no constructor call of the new size; nothing written.
   tests:
     - tests/api/test_params_endpoint_reload_agreement.py::test_a_new_cell_count_is_refused_before_a_rod_of_that_size_is_built
     - tests/api/test_params_endpoint_reload_agreement.py::test_a_state_over_the_cap_is_refused_before_it_is_built
     - tests/api/test_params_endpoint_reload_agreement.py::test_a_pipe_length_is_refused_before_a_pipe_of_that_length_is_built
     - tests/api/test_params_endpoint_constructed_values.py::test_a_value_that_changes_the_state_shape_is_refused_and_nothing_is_written
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_the_value_the_add_refuses_is_the_value_a_params_write_refuses
   status: verified
   domains:
     loopback_bind: tests/api/test_params_endpoint_reload_agreement.py::test_a_new_cell_count_is_refused_before_a_rod_of_that_size_is_built
@@ -3684,11 +3706,13 @@ claims:
   sources:
     - src/maddening/api/README.md:147 (Checkpoints)
     - src/maddening/api/server.py:3467 (checkpoint_save)
-  conditions: a graph run 7 steps; the default path.
+  conditions: a graph run 7 steps; the default path; the checkpoint's own move into place failing (nothing written, the directories it made removed) and the manifest's (the checkpoint written and loadable).
   oracle: verify_manifest on the file; the manifest's clock against the relay's; the reply's keys.
   tests:
     - tests/api/test_streams_after_a_checkpoint_load.py::test_the_manifest_records_the_hash_and_the_streams_clock
     - tests/api/test_api.py::TestCheckpointEndpoints::test_save_and_load
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_save_whose_first_move_fails_says_nothing_was_written_and_leaves_nothing
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_save_whose_manifest_move_fails_says_the_checkpoint_was_written
   status: verified
   notes: A save refused on the way is REST-101 and REST-102.
   domains:
@@ -3776,7 +3800,7 @@ claims:
     - src/maddening/api/server.py:3505 (checkpoint_load)
     - docs/user_guide/parameters.md:208 (Writing parameters over REST)
     - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
-  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, the same verdict as PUT /graph/params; a missing path; a failure injected at every point of a load, into a compiled graph and into an edited one.
+  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, the same verdict as PUT /graph/params; a missing path; a failure injected at every point of a load, into a compiled graph and into an edited one; a good file loaded into a graph that cannot compile (an edge between fields of different shapes) is a 400 that names the graph's reason, as POST /sim/step does, and loads once the edge is removed.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
@@ -3804,6 +3828,8 @@ claims:
     - tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_failure_at_any_point_of_a_write_route_changes_nothing
     - tests/api/test_a_request_that_fails_leaves_the_graph_as_it_was.py::test_a_refusal_of_the_routes_own_is_answered_as_it_was_and_changes_nothing
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_load_into_a_graph_that_cannot_compile_names_the_graphs_reason
+    - tests/api/test_refusals_say_what_was_wrong_and_what_was_written.py::test_a_file_that_is_not_a_checkpoint_is_still_answered_as_one
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-163): the load checked shapes,
@@ -6185,6 +6211,49 @@ claims:
     relabelled_records: n/a
     mixed_commits: n/a
 
+- id: REST-117
+  area: surrogate
+  claim: >-
+    POST /surrogate/deactivate/{node_name} (experimental in 0.4.0): "Put
+    the original node back (the runner is stopped first, the graph is
+    reset), with the edges recorded when the surrogate was activated: an
+    edge added to or from the node while the surrogate was active is
+    removed with it and is not put back.  The reply's dropped_edges lists
+    each such edge ([] when there is none)".
+  sources:
+    - src/maddening/api/README.md::Surrogates
+    - src/maddening/api/server.py::surrogate_deactivate
+  conditions: >-
+    a coupled ring with a surrogate recorded for one member; an edge added
+    from it and one to it while it is active; an edge added between two
+    other nodes (kept, and not listed); the graph reloads and steps as its
+    save after the revert.
+  oracle: the reply's dropped_edges, the node's edges after the revert against the record, and the graph against its reload.
+  tests:
+    - tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_deactivated_surrogate_comes_back_with_its_recorded_edges_and_says_what_it_dropped
+    - tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_deactivated_surrogate_with_no_edge_added_since_drops_none
+  status: verified
+  notes: >-
+    The maintainer's ruling of 2026-10-06 for 0.4.0: the revert rule is the
+    documented behaviour of an experimental route.  Keeping an edge added
+    while the surrogate was active is for 0.5.0.
+  domains:
+    loopback_bind: tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_deactivated_surrogate_comes_back_with_its_recorded_edges_and_says_what_it_dropped
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: tests/core/test_node_removal_leaves_nothing_naming_the_node.py::test_a_deactivated_surrogate_comes_back_with_its_recorded_edges_and_says_what_it_dropped
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
 - id: RPD-039
   area: run_pod-cli
   claim: >-
@@ -6202,8 +6271,14 @@ claims:
   conditions: >-
     every run a dry run: a refusal (more devices than are visible), a goal
     replaced by one that raises, with and without --keep-going, a failed and
-    a passing check, an option it does not take, and a --mesh file that does
-    not exist in a real process; the runbook's sections 2b and 3.
+    a passing check, an option it does not take, and an installation that
+    cannot import the library in a real process (a crash); every counting
+    option below its least value (--cells, --n-devices, --repeats, --steps,
+    --grad-steps, --cg-max-iters, --fields 0 or negative; --warmup -1), a
+    --mesh that is missing, a directory, not an archive, without edges or
+    of another shape, and an --out that is a file: each a refusal before
+    the backend is loaded, with no record written; every option of the
+    parser accounted for; the runbook's sections 2b and 3.
   oracle: >-
     the status, the last line of stderr, and the runbook's text.
   tests:
@@ -6214,6 +6289,11 @@ claims:
     - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_failed_check_still_exits_1_and_a_pass_0
     - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_an_option_it_does_not_take_still_exits_2
     - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_the_process_exit_status_of_a_crash
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_count_no_goal_can_use_is_refused_before_the_backend_loads
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_mesh_that_cannot_be_read_is_refused_before_the_backend_loads
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_an_out_that_is_a_file_is_refused_before_the_backend_loads
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_the_least_value_of_every_count_and_a_readable_mesh_are_taken
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_every_option_of_the_parser_has_its_values_checked
     - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_runbooks_exit_statuses_are_the_runners
   status: verified
   domains:

@@ -218,10 +218,10 @@ def _delivered(edge: EdgeSpec, value, mappings=None, geom=None):
         if mappings is not None:
             weights = mappings.get(edge.key)
         with jax.named_scope("edge:mapping"):
-            if edge.geometry is None:
-                value = edge.mapping.apply(value, weights)
-            else:
-                value = edge.mapping.apply(value, weights, geom)
+            # One application of the rule: an edge without a geometry
+            # makes the two-argument call it always made.
+            read = () if edge.geometry is None else (geom,)
+            value = edge.mapping.apply(value, weights, *read)
     if edge.transform is not None:
         value = edge.transform(value)
     return value

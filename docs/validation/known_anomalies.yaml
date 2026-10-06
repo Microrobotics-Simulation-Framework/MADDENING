@@ -15358,8 +15358,14 @@ anomalies:
       norm 700, a leftover of 2.4e-5) and 0.503 for 0.397.  Below the
       domain CPL-087 claims (fields no smaller than a hundredth of what
       drives them); none found inside it on three seeds of the slow
-      search and 2 800 uniform draws.  No release carries the spectral
-      bound.
+      search and 2 800 uniform draws.  A settling pair of stock
+      `SpringDamperNode`s enters the regime (velocities under a
+      hundredth of the positions that drive them): with the two nodes
+      declaring one evaluation, 2 of 1 376 float32 steps read settled
+      outside the margin (0.462 for 0.36).  The stock nodes therefore
+      do not declare `update_evaluations()` in 0.4.0, and a group of
+      them at its float floor reads `spectral_usable=False`.  No
+      release carries the spectral bound.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -15382,6 +15388,7 @@ anomalies:
       discarded direction is what would decide it.
     verification:
       - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_discarded_direction_does_not_hide_the_dominant_mode"
+      - "tests/core/test_coupling_stock_nodes_leave_the_evaluation_count_undeclared.py::test_a_settling_stock_spring_pair_is_never_usable_with_a_radius_outside_the_margin"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-227"

@@ -1007,6 +1007,52 @@ def test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused():
         "a graph that cannot compile"] >= 2, dict(counts)
 
 
+def test_a_failure_at_any_point_of_any_write_route_changes_nothing_for_a_token_holder():
+    """Invariant 6 on a server that demands the token.  One accepted and
+    one refused request of every kind the machine sends, from a
+    token-holder, each first sent with a failure injected at every point
+    its route body reaches: the 500 carries the generic detail and no word
+    of the failure, and the graph is exactly as it was, object for object
+    -- and each was first sent without the token (invariant 7).  The
+    generated sequences reach this configuration in half their examples;
+    which kinds of request they send there moves with the draw, and this
+    tour does not."""
+    RestWriteSequences.counts = collections.Counter()
+    with replay(bind="token") as (machine, step):
+        assert machine.served.token_enforced
+        for status, do, *args in (
+                (200, machine.do_put, "spring", {"stiffness": 20.0}),
+                (400, machine.do_put, "rod", {"thermal_diffusivity": ALPHAS[-1], "length": 0.5}),
+                (200, machine.do_put_state, "ball", {"position": 2.0, "velocity": 0.5}),
+                (400, machine.do_put_state, "ball", {"position": 2.0}),
+                (201, machine.do_add_node, "extra", "HeatNode", 0.02,
+                 {"n_cells": N_CELLS, "thermal_diffusivity": ALPHAS[0],
+                  "initial_temperature": 1.0}),
+                (409, machine.do_add_node, "extra", "BallNode", DT, {}),
+                (201, machine.do_add_edge, "ball", "position", "spring", "anchor_position"),
+                (200, machine.do_step,),
+                (200, machine.do_run, 2),
+                (200, machine.do_save, "a.npz"),
+                (200, machine.do_remove_edge, "ball", "position", "spring", "anchor_position"),
+                (404, machine.do_remove_edge, "ball", "position", "spring", "anchor_position"),
+                (200, machine.do_compile,),
+                (200, machine.do_reset,),
+                (200, machine.do_load, "a.npz"),
+                (404, machine.do_load, "never-saved.npz"),
+                (200, machine.do_remove_node, "extra"),
+                (404, machine.do_remove_node, "extra")):
+            resp = step(do, *args)
+            assert resp.status_code == status, (do.__name__, args, resp.status_code, resp.text)
+    counts = RestWriteSequences.counts
+    for kind in ("put params", "put state", "add node", "remove node", "add edge",
+                 "remove edge", "step", "run", "compile", "reset", "save", "load"):
+        assert counts[(kind, "failed at a point")] > 0, (kind, dict(counts))
+    assert counts["failures injected (token)"] == counts["failures injected"] >= 80, dict(counts)
+    # The 18 requests above, the save every example starts with and the
+    # step it ends with.
+    assert counts["sent without the token"] == 20, dict(counts)
+
+
 def test_a_value_written_back_after_a_fit_is_held_to_the_stability_limit():
     """MADD-ANO-178 at its shortest.  A fit moves the rod's diffusivity down
     (the node's own value stays at Fourier 0.45); a length of 0.75 is then

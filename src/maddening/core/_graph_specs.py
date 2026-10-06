@@ -263,6 +263,118 @@ def _mapping_field_leads(mapping) -> Optional[tuple[tuple, tuple]]:
     return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
 
 
+_GEOMETRY_DTYPES = ("float32", "float64")
+
+
+def _geometry_edge_issues(edges, nodes, state) -> list[str]:
+    """``validate()``'s issues about the geometry each edge names.
+
+    ``ERROR:`` for a geometry on an edge with a sharded end, one that is
+    not a state field of its anchor node (absent, or one of its boundary
+    fluxes), one that is not float32 or float64, and one whose shape the
+    mapping does not read; plus whatever the mapping itself says about
+    positions held in that dtype (``geometry_dtype_problems``, optional:
+    errors and ``WARNING:`` advisories).  Empty for a graph without a
+    geometry edge.
+    """
+    from maddening.core.node import SimulationNode  # noqa: PLC0415
+
+    issues: list[str] = []
+    for e in edges:
+        if e.geometry is None:
+            continue
+        anchor, field = e.geometry
+        for which, name in (("source", e.source_node), ("target", e.target_node)):
+            obj = nodes[name].node if name in nodes else None
+            for _ in range(64):
+                if obj is None:
+                    break
+                if getattr(obj, "_mesh", None) is not None:
+                    issues.append(
+                        f"ERROR: edge {e.key}: its {which} node {name!r} is sharded "
+                        f"({type(obj).__name__}). A geometry-dependent mapping is not "
+                        f"supported on an edge with a sharded end in 0.4.0. Use an "
+                        f"unsharded node on both ends.")
+                    break
+                nxt = getattr(obj, "physics_node", None)
+                obj = getattr(obj, "_inner", None) if nxt is None else nxt
+        holder = e.source_node if anchor == "source" else e.target_node
+        if holder not in state or holder not in nodes:
+            continue        # a missing node is reported by the edge checks
+        fields = state[holder]
+        if field not in fields:
+            node = nodes[holder].node
+            is_flux = (
+                type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes
+                and field in node.compute_boundary_fluxes(fields, {}, 0.0))
+            if is_flux:
+                issues.append(
+                    f"ERROR: edge {e.key}: geometry field {field!r} of {holder!r} is a "
+                    f"boundary flux (compute_boundary_fluxes), not a state field. A "
+                    f"geometry must be a state field in 0.4.0: a flux is recomputed "
+                    f"within a step and has no single time level. Hold the geometry in "
+                    f"{holder!r}'s state.")
+            else:
+                issues.append(
+                    f"ERROR: edge {e.key}: geometry field {field!r} is not in the state "
+                    f"of its {anchor} node {holder!r}. State fields: {sorted(fields)}.")
+            continue
+        value = fields[field]
+        dtype = getattr(value, "dtype", None)
+        if str(dtype) not in _GEOMETRY_DTYPES:
+            issues.append(
+                f"ERROR: edge {e.key}: geometry field {holder}.{field} has dtype {dtype}; "
+                f"a geometry must be a float32 or float64 array.")
+            continue
+        shape = tuple(int(n) for n in np.shape(value))
+        want = tuple(getattr(e.mapping, "geometry_shape", ()))
+        accepts = getattr(e.mapping, "accepts_geometry_shape", None)
+        if not (accepts(shape) if callable(accepts) else shape == want):
+            issues.append(
+                f"ERROR: edge {e.key}: geometry field {holder}.{field} has shape {shape}, "
+                f"but mapping {e.mapping!r} reads a geometry of shape {want}.")
+            continue
+        problems = getattr(e.mapping, "geometry_dtype_problems", None)
+        if callable(problems):
+            errors, advisories = problems(dtype)
+            issues.extend(f"ERROR: edge {e.key}: {text}." for text in errors)
+            issues.extend(f"WARNING: edge {e.key}: {text}." for text in advisories)
+    return issues
+
+
+def _refuse_unpreserved_geometry(edges, name: str, original, replacement) -> None:
+    """Raise ``ValueError`` if replacing node *name* (*original*) by
+    *replacement* would drop a geometry an edge reads from it.
+
+    For each edge anchored on *name*, the replacement's
+    ``initial_state()`` must hold the geometry field with the same shape
+    and a float32 or float64 dtype.  Asked before anything is removed, so
+    a refusal leaves the graph as it was.  Replacing the other end of a
+    geometry edge is not this function's concern.
+    """
+    new_state = None
+    for e in edges:
+        if e.geometry is None:
+            continue
+        anchor, field = e.geometry
+        if (e.source_node if anchor == "source" else e.target_node) != name:
+            continue
+        old = original.initial_state().get(field)
+        if old is None:
+            continue        # never valid: ``validate()`` reports it
+        if new_state is None:
+            new_state = replacement.initial_state()
+        new = new_state.get(field)
+        if (new is None or tuple(np.shape(new)) != tuple(np.shape(old))
+                or str(getattr(new, "dtype", None)) not in _GEOMETRY_DTYPES):
+            raise ValueError(
+                f"replace_node({name!r}): edge {e.key} reads its geometry from "
+                f"{name}.{field} (shape {tuple(np.shape(old))}, {old.dtype}), which the "
+                f"replacement {type(replacement).__name__} does not hold. Nothing was "
+                f"changed."
+            )
+
+
 def _geometry_edge_keys(edges) -> list[str]:
     """The keys of the edges of *edges* that read a geometry."""
     return [e.key for e in edges if e.geometry is not None]

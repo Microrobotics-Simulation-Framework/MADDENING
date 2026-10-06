@@ -249,6 +249,10 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
+        # Per group key, the keys of the geometry-dependent mapped edges
+        # the compiled step's pass resolves (experimental; empty for a
+        # group without one).  Such a group reports no bound.
+        self._committed_geometry_edges: dict[str, tuple] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
         # ``(name, entries)``; written when the step is traced.
@@ -2047,6 +2051,10 @@ class GraphManager:
                             f"Available: {list(self._state[e.source_node].keys())}"
                         )
 
+        # Geometry-dependent mappings (experimental): what each edge's
+        # geometry must be.  Nothing for a graph without one.
+        issues.extend(_graph_specs._geometry_edge_issues(self._edges, self._nodes, self._state))
+
         # Edge validation: shape, dtype, units against BoundaryInputSpec
         for e in self._edges:
             if e.target_node not in self._nodes:
@@ -2064,7 +2072,13 @@ class GraphManager:
             if src_val is not None:
                 src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
                 spec_shape = tuple(spec.shape)
-                if e.mapping is not None and src_shape:
+                leads = (None if e.mapping is None
+                         else _graph_specs._mapping_field_leads(e.mapping))
+                if leads is not None and src_shape:
+                    # A mapping that declares its field shapes replaces
+                    # the leading axes it reads by the ones it delivers.
+                    src_shape = leads[1] + src_shape[len(leads[0]):]
+                elif e.mapping is not None and src_shape:
                     # The mapping changes axis 0 to its n_target; the
                     # rest of the shape (vector components) passes through.
                     src_shape = (int(e.mapping.n_target),) + src_shape[1:]
@@ -2196,6 +2210,7 @@ class GraphManager:
             issues.extend(_group_layout._flux_edge_coupling_errors(
                 group, self._nodes, self._edges, self._state,
             ))
+            issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._edges))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
 
@@ -2856,6 +2871,11 @@ class GraphManager:
                 *_group_layout._group_evaluations(g, self._nodes, self._schedule, self._edges),
                 tuple(e for e in self._edges
                       if e.source_node in g.nodes and e.target_node in g.nodes))
+            for g in self._coupling_groups
+        }
+        self._committed_geometry_edges = {
+            "+".join(sorted(g.nodes)): tuple(
+                e.key for e in _group_layout._group_geometry_edges(g, self._edges))
             for g in self._coupling_groups
         }
         # Count Python-level traces of the step: a robust, JAX-version-
@@ -4469,6 +4489,31 @@ class GraphManager:
                     ),
                     "precision_limited": precision_limited,
                 })
+                geometry_keys = self._committed_geometry_edges.get(key, ())
+                if geometry_keys:
+                    # Experimental, 0.4.0: the diagnostics do not read a
+                    # moving geometry, so a group whose pass resolves a
+                    # geometry-dependent mapping reports the solve's own
+                    # outcome and nothing built on the float floor or on
+                    # the contraction estimates: every bound is NaN (the
+                    # gradient estimate ``inf``, as where the ratio is
+                    # rejected), every ``*_usable`` flag False, and the
+                    # report says why.
+                    result[key].update({
+                        "amplification": float("nan"),
+                        "error_estimate": float("nan"),
+                        "ratio_usable": False,
+                        "gradient_error_estimate": float("inf"),
+                        "rho_spectral": float("nan"),
+                        "spectral_error_bound": float("nan"),
+                        "spectral_usable": False,
+                        "gradient_relative_error_bound": float("nan"),
+                        "gradient_bound_usable": False,
+                        "precision_limited": False,
+                        "not_usable_reason": (
+                            _group_layout._GEOMETRY_DIAGNOSTICS_REASON.format(
+                                keys=list(geometry_keys))),
+                    })
         return result
 
     # ------------------------------------------------------------------
@@ -5118,6 +5163,7 @@ class GraphManager:
         check only the ones they keep, as a multi-rate step checks only
         the solves it applies (MADD-ANO-044).
         """
+        self._refuse_adaptive_geometry("_build_dt_step_fn")
         schedule = list(self._schedule)
         nodes_dict = dict(self._nodes)
         back_edge_set = set(self._back_edges)
@@ -5301,6 +5347,19 @@ class GraphManager:
             _reports._fold_kept_half_step_reports, tuple(coupling_groups))
         return dt_step_fn
 
+    def _refuse_adaptive_geometry(self, entry: str) -> None:
+        """Raise for a graph with a geometry-dependent mapping: the
+        adaptive steppers take half steps and discard attempts, and the
+        time level a geometry is read at across those is not defined."""
+        keys = _graph_specs._geometry_edge_keys(self._edges)
+        if keys:
+            raise RuntimeError(
+                f"{entry}: this graph has geometry-dependent mapping(s) on edge(s) "
+                f"{keys}, which the adaptive steppers do not support in 0.4.0: the time "
+                f"level a geometry is read at across half steps and rejected attempts "
+                f"is not defined yet. Use step / run_scan."
+            )
+
     def _adaptive_multirate_message(self, entry: str) -> str:
         """Why ``run_adaptive*`` refuses this (multi-rate) graph.
 
@@ -5413,6 +5472,7 @@ class GraphManager:
         # had just stopped being multi-rate.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive"))
+        self._refuse_adaptive_geometry("run_adaptive")
         self._refuse_xla_loop_hazards("run_adaptive", scan=False)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
@@ -5593,6 +5653,7 @@ class GraphManager:
         # After the recompile, for the reason given in ``run_adaptive``.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive_scan"))
+        self._refuse_adaptive_geometry("run_adaptive_scan")
         self._refuse_xla_loop_hazards("run_adaptive_scan", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)

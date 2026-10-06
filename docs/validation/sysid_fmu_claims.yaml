@@ -3765,10 +3765,9 @@ claims:
     into an int32 field; through POST /checkpoint/load; a float32, float64
     or float16 checkpoint into a bfloat16 state field (and a bfloat16
     params leaf) at +-1e-44, 3.4028235e38, 1e39, -1e-50, -1e-39, inf and
-    NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50. Not
-    claimed for multi-rate graphs, sub-cycled groups or sharded graphs, nor
-    for a checkpoint that itself holds a bfloat16 member, which cannot be
-    loaded at all (MADD-ANO-199).
+    NaN, and into a float16 state field at 1e-9, 1e5 and -1e-50 (a file
+    that itself holds a bfloat16 member is refused whole, MADD-ANO-199).
+    Not claimed for multi-rate graphs, sub-cycled groups or sharded graphs.
   oracle: the ValueError naming the leaf; the graph's state and params bit for bit; the loaded subnormal's sign.
   tests:
     - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused

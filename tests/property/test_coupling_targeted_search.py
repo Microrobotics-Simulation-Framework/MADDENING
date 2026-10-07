@@ -237,9 +237,13 @@ class Case:
         return float(np.finfo(CELLS[self.cell].dtype).eps)
 
 
-def values_of(case: Case) -> dict:
-    """The gains, biases, mappings and start of *case*, rounded to its dtype."""
-    cell = CELLS[case.cell]
+def values_of(case: Case, cell: "Cell | None" = None) -> dict:
+    """The gains, biases, mappings and start of *case*, rounded to its dtype.
+
+    *cell*: the cell to draw on in place of ``CELLS[case.cell]`` (the
+    nonlinear cells of ``test_coupling_nonlinear_search.py`` draw the same
+    numbers on cells of their own)."""
+    cell = CELLS[case.cell] if cell is None else cell
     topo, cfgs = cell.topo, cell.cfgs
     members = topo.groups[0]
     rng = np.random.default_rng(case.seed)
@@ -467,6 +471,41 @@ def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
     return worst
 
 
+def radius_scores(out: dict, J: np.ndarray, wv: np.ndarray, rho_reported: float, eps: float,
+                  seed: int) -> None:
+    """Write the two radius scores of a reported ``rho_spectral`` into
+    *out* (``"radius"`` and ``"radius_strict"``; the module docstring says
+    what each is), given the pass's Jacobian *J* at the state the report
+    describes and that state's weights *wv*.  *eps*: the analysis dtype's
+    (the group's, at least float32)."""
+    A = (wv[:, None] * J) / wv[None, :]
+    rho = _radius(J)
+    if math.isfinite(rho_reported):
+        allowance = max(_radius_allowance(A, rho, eps, seed), 1e-300)
+        norm_A = float(np.linalg.norm(A, 2))
+        off = abs(rho_reported - rho) if out["spectral_usable"] else 0.0
+        resolved = np.linalg.matrix_rank(J) <= SPECTRAL_KRYLOV_STEPS
+        if not resolved:
+            # "An estimate otherwise, which spectral_usable reports":
+            # past eight independent scalars nothing is called exact.  A
+            # settled estimate is read as good to the margin the flag
+            # tests it by, 5% of ``1 - rho``.
+            allowance += SPECTRAL_SETTLED_FRACTION * max(1.0 - rho, 0.0)
+            out["report"]["rank"] = int(np.linalg.matrix_rank(J))
+        if norm_A > 0 and np.linalg.norm(A @ A.T - A.T @ A, 2) <= 1e-9 * norm_A ** 2:
+            # Normal in the norm's weights: an estimate "from below",
+            # whatever the flag.
+            off = max(off, rho_reported - rho)
+        # The statement a user can check: within the flag's own margin of
+        # the radius, wherever the flag is set and the group has no more
+        # scalars than the Krylov steps resolve.
+        if out["spectral_usable"] and resolved:
+            out["radius_strict"] = abs(rho_reported - rho) / max(
+                SPECTRAL_SETTLED_FRACTION * (1.0 - rho_reported), 1e-300)
+        out["radius"] = off / allowance
+        out["report"]["jacobian_norm"] = norm_A
+
+
 @functools.lru_cache(maxsize=4096)
 def observe(case: Case) -> dict:
     """One step of *case* and the four scores of what it reported."""
@@ -505,36 +544,8 @@ def observe(case: Case) -> dict:
 
     J = _pass_jacobian(model)
     wv = _state_weights(model, step.state)
-    A = (wv[:, None] * J) / wv[None, :]
-    rho = _radius(J)
-    rho_reported = float(d["rho_spectral"])
-    out["report"]["rho_true"] = rho
-    # The analysis runs in the group's dtype (at least float32).
-    eps_analysis = case.eps
-    if math.isfinite(rho_reported):
-        allowance = max(_radius_allowance(A, rho, eps_analysis, case.seed), 1e-300)
-        norm_A = float(np.linalg.norm(A, 2))
-        off = abs(rho_reported - rho) if out["spectral_usable"] else 0.0
-        resolved = np.linalg.matrix_rank(J) <= SPECTRAL_KRYLOV_STEPS
-        if not resolved:
-            # "An estimate otherwise, which spectral_usable reports":
-            # past eight independent scalars nothing is called exact.  A
-            # settled estimate is read as good to the margin the flag
-            # tests it by, 5% of ``1 - rho``.
-            allowance += SPECTRAL_SETTLED_FRACTION * max(1.0 - rho, 0.0)
-            out["report"]["rank"] = int(np.linalg.matrix_rank(J))
-        if norm_A > 0 and np.linalg.norm(A @ A.T - A.T @ A, 2) <= 1e-9 * norm_A ** 2:
-            # Normal in the norm's weights: an estimate "from below",
-            # whatever the flag.
-            off = max(off, rho_reported - rho)
-        # The statement a user can check: within the flag's own margin of
-        # the radius, wherever the flag is set and the group has no more
-        # scalars than the Krylov steps resolve.
-        if out["spectral_usable"] and resolved:
-            out["radius_strict"] = abs(rho_reported - rho) / max(
-                SPECTRAL_SETTLED_FRACTION * (1.0 - rho_reported), 1e-300)
-        out["radius"] = off / allowance
-        out["report"]["jacobian_norm"] = norm_A
+    out["report"]["rho_true"] = _radius(J)
+    radius_scores(out, J, wv, float(d["rho_spectral"]), case.eps, case.seed)
 
     if out["spectral_usable"]:
         dist = model.returned_weight_distance(0, step.pre, step.state)

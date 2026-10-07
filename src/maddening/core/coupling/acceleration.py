@@ -992,12 +992,12 @@ def _lapack_input(A):
     return jnp.where(ok[..., None, None], A, jnp.zeros_like(A)), ok
 
 
-def _spectral_norm(A, unbounded=jnp.nan):
-    """``||A||_2`` per matrix (the last two axes), *unbounded* where
-    :func:`_lapack_input` withholds the matrix (NaN: what the SVD of a
+def _spectral_norm(A):
+    """``||A||_2`` per matrix (the last two axes), NaN where
+    :func:`_lapack_input` withholds the matrix (what the SVD of a
     non-finite matrix returns where it returns)."""
     safe, ok = _lapack_input(A)
-    return jnp.where(ok, jnp.linalg.norm(safe, ord=2, axis=(-2, -1)), unbounded)
+    return jnp.where(ok, jnp.linalg.norm(safe, ord=2, axis=(-2, -1)), jnp.nan)
 
 
 #: Backends on which ``jax.numpy.linalg.eigvals`` of a non-symmetric

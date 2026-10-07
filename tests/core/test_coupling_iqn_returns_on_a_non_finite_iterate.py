@@ -202,7 +202,7 @@ def test_the_secant_update_returns_on_every_non_finite_input(dtype):
                     x_raw = (x_old + r).astype(dtype)
                 args = (jnp.asarray(x_raw), jnp.asarray(x_old), jnp.asarray(r_prev),
                         jnp.asarray(x_old), jnp.asarray(V), jnp.asarray(W), jnp.int32(cols - 1),
-                        jnp.asarray(1.0, dtype), jnp.zeros(n, dtype))
+                        jnp.asarray(0.5, dtype), jnp.asarray(r_prev))
                 out = within_the_limit(lambda args=args: jax.block_until_ready(update(*args)))
                 x_new, new_V = np.asarray(out[0]), np.asarray(out[1])
                 if kind == "finite":
@@ -219,15 +219,14 @@ def test_the_secant_update_returns_on_every_non_finite_input(dtype):
 def test_no_svd_of_the_coupling_analysis_is_handed_a_matrix_that_is_not_finite(dtype):
     """``_lapack_input`` withholds exactly the matrices whose squares do
     not sum to a finite number, and returns every other unchanged;
-    ``_spectral_norm`` of a withheld matrix is NaN (or what the caller
-    asks for) and of any other the SVD's."""
+    ``_spectral_norm`` of a withheld matrix is NaN and of any other the
+    SVD's."""
     x64 = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", dtype == "float64")
     try:
         rng = np.random.default_rng(1)
         big = float(np.finfo(dtype).max)
         norm = jax.jit(acceleration._spectral_norm)                       # noqa: SLF001
-        norm_inf = jax.jit(lambda A: acceleration._spectral_norm(A, unbounded=jnp.inf))  # noqa: SLF001
         for n, m in ((4, 4), (12, 8), (16, 16)):
             A = rng.standard_normal((n, m)).astype(dtype)
             safe, ok = acceleration._lapack_input(jnp.asarray(A))        # noqa: SLF001
@@ -244,7 +243,6 @@ def test_no_svd_of_the_coupling_analysis_is_handed_a_matrix_that_is_not_finite(d
                 assert not bool(ok), (poison, n, m)
                 assert not np.any(np.asarray(safe)), (poison, n, m)
                 assert math.isnan(float(within_the_limit(lambda B=B: norm(jnp.asarray(B)))))
-                assert float(within_the_limit(lambda B=B: norm_inf(jnp.asarray(B)))) == math.inf
         # Per matrix of a batch.
         batch = rng.standard_normal((3, 4, 4)).astype(dtype)
         batch[1, 2, 2] = np.inf

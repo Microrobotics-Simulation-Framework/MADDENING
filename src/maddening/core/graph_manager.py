@@ -4418,19 +4418,17 @@ class GraphManager:
               entry is zero, by 1 where the array is) moves one pass
               from ``x_k`` by more than the pass's float resolution, the
               floor ``"spectral_error_bound"`` adds to the residual,
-              measured as that bound's distance is, or by an amount
-              that does not depend on the iterate (an additive constant,
-              a forcing: in the bound however weak); and where its
+              measured as that bound's distance is; and where its
               tangent through the group is not exactly zero.  A constant
               below that has a gradient that can be what the iterate's
               last rounding left of it, its relative error is then of
               order one or undefined, and the bound says nothing of it
               (it is not the worst probe): the centre or the curve of a
               nonlinearity evaluated on its centre, a term multiplied by
-              a field that has converged to zero -- and also a gain so
-              weak that its whole value moves the pass by less than the
-              pass resolves, whose gradient may be exact and is not
-              bounded here.  The gradient with respect to such a
+              a field that has converged to zero -- and also a gain or
+              a forcing so weak that its whole value moves the pass by
+              less than the pass resolves, whose gradient may be exact
+              and is not bounded here.  The gradient with respect to such a
               constant is small beside the others in the same units
               (measured: 1.5e-34 for an error of 1.7e-34 where the
               resolved constants' are up to 3.5e3, float64); check a

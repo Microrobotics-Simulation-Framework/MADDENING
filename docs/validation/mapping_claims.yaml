@@ -2472,7 +2472,7 @@ claims:
     allowed, and a non-finite state; the report's reading of the slot at the
     tolerance, above it and at NaN, on the float32 pair of MAP-036; the gap
     on every per-push draw of that pair (at most a fifth of the tolerance:
-    measured 3.2e-3 at most); the slot absent, and the report unchanged,
+    measured 3.1e-3 at most over 240 draws of it); the slot absent, and the report unchanged,
     for the same group without diagnostics. The steps compiled (jit) by
     the graph. Not claimed for float64 (x64) on every push (the slow hunt
     measures it), mixed dtypes, 16-bit dtypes, gradients, vmap, multi-rate

@@ -4803,10 +4803,19 @@ class GraphManager:
             **A group that resolves a geometry-dependent mapping**
             (experimental: an edge into a member, from inside the group
             or outside it, added with ``add_edge(..., geometry=...)``)
-            reports the solve's own ``"iterations"``,
+            reports everything above as any other group does where
+            every such mapping is a ``multilinear_grid``, the group's
+            ``convergence_norm`` is ``"l2"`` or ``"mixed"`` and the
+            group does not sub-cycle; with ``diagnostics=True`` its
+            step then compares its own Jacobian-vector product along
+            the positions with a finite difference of the pass, and
+            the bounds stand where the two agree to
+            ``GEOMETRY_GAP_TOLERANCE``.  Any other such group, and one
+            whose step failed that check, reports the solve's own
+            ``"iterations"``,
             ``"total_iterations"``, ``"residual"`` and ``"converged"``
-            and nothing else of the above: the diagnostics do not read a
-            moving geometry in 0.4.0, so ``"amplification"``,
+            and nothing else of the above: the diagnostics do not read
+            its moving geometry in 0.4.0, so ``"amplification"``,
             ``"error_estimate"``, ``"rho_spectral"``,
             ``"spectral_error_bound"`` and
             ``"gradient_relative_error_bound"`` are NaN,
@@ -4815,7 +4824,7 @@ class GraphManager:
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
-            says why; no other group's entry has it.  The values are
+            says which case it is; no other group's entry has it.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -7258,8 +7267,11 @@ class GraphManager:
           ``converged`` can be ``True`` on a stalled iterate;
         * ``spectral_usable=False`` where a spectral bound was computed;
         * in place of the three above, ``not_usable_reason`` for a group
-          that resolves a geometry-dependent mapping (experimental): its
-          bounds, estimates and ``*_usable`` flags are withheld;
+          that resolves a geometry-dependent mapping the diagnostics do
+          not read (experimental: any but a single-rate
+          ``multilinear_grid`` group under ``"l2"`` or ``"mixed"``
+          whose step passed its self-check): its bounds, estimates and
+          ``*_usable`` flags are withheld;
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;

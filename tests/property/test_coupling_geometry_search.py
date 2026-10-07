@@ -43,6 +43,8 @@ import numpy as np
 import pytest
 
 from maddening.core.coupling import _bounds
+from tests.property import coupled_graphs as cg
+from tests.property import coupling_reference as cr
 from tests.property import geometry_cells as gc
 from tests.property.geometry_cells import Case, Cell
 from tests.property.targeted_search import SLOW
@@ -150,7 +152,7 @@ def test_the_product_at_another_iterate_s_geometry_is_another_radius():
     first = ref.apply(ref.flat({n: {f: values[n][f] for f in s} for n, s in state.items()}))
     mask = gc.geometry_columns(cell, ref)
     elsewhere = np.where(mask, first, x)
-    other = gc.cr.radius(ref.jacobian(elsewhere))
+    other = cr.radius(ref.jacobian(elsewhere))
     true = seen["report"]["rho_true"]
     assert abs(other - true) > 1e-3 * true, (other, true)
     assert abs(seen["report"]["rho_spectral"] - other) > 1e-3 * other
@@ -368,7 +370,7 @@ def test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound():
     gm, report = _narrowed(dt_p=gc.DT / 2, subcycling=True)
     gg.assert_not_diagnosed(report, [e.key for e in gm._edges], "sub-cycled")   # noqa: SLF001
     assert "['P']" in report["not_usable_reason"]
-    assert "geometry_gap" not in gc.cg.group_meta(gm, gc.KEY)
+    assert "geometry_gap" not in cg.group_meta(gm, gc.KEY)
     gm, report = _narrowed()
     assert "not_usable_reason" not in report and math.isfinite(report["error_estimate"])
 
@@ -393,7 +395,7 @@ def test_a_geometry_held_outside_the_group_is_checked_as_a_constant_of_the_pass(
     there, and the group reports."""
     gm, report = _narrowed(norm="mixed", outside=True, diagnostics=True)
     assert "not_usable_reason" not in report and report["spectral_usable"] is True, report
-    gap = float(gc.cg.group_meta(gm, gc.KEY)["geometry_gap"])
+    gap = float(cg.group_meta(gm, gc.KEY)["geometry_gap"])
     assert 0 < gap <= HONEST_GAP, gap
 
 
@@ -403,6 +405,7 @@ def test_a_geometry_held_outside_the_group_is_checked_as_a_constant_of_the_pass(
 
 #: The hunts' seeds.
 HUNT_SEEDS = (2000, 2001, 2002)
+_HUNTS: dict = {}
 
 
 # Slow: three seeds of 60 random examples a search on each of four blocks
@@ -413,7 +416,7 @@ HUNT_SEEDS = (2000, 2001, 2002)
 @pytest.mark.parametrize("block,seed", [(b, s) for b in range(len(BLOCKS)) for s in HUNT_SEEDS])
 def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_group_with_a_geometry_edge(block, seed):
     """Not shrunk: the example that fails is reported as drawn."""
-    search = gc.Search(CELLS)
+    search = _HUNTS.setdefault(block, gc.Search(CELLS))   # a block's graphs compile once
     worst_gap = {"float32": 0.0, "float64": 0.0}
     limit = {"float32": HONEST_GAP, "float64": HONEST_GAP}
     for name in gc.SEARCHES + ("radius_strict",):

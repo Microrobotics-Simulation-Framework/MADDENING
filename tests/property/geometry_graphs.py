@@ -44,6 +44,56 @@ port sums in the same order in both graphs.
 :func:`two_body` builds the graph the differential and gradient tests
 draw from: a grid-side body ``F`` and a point-side body ``P`` joined in
 both directions, in or out of a coupling group, at one rate or two.
+
+**The twins with the edge-mapped graph's interface reading**
+(:func:`transform_twin`, :func:`relay_twin`; their docstrings say what
+each holds equal) and **the faults later work is held to.**  Diagnostics
+that read a geometry (the interface norm as a criterion with a geometry
+edge; the bounds in that reading with the geometry term) do not exist in
+0.4.0.  The table lists the faults that work must be caught on, the
+instrument expected to catch each, and -- where the fault can be seeded
+on today's tree in an analogous static-mapping or solve-path form -- the
+signal measured when it was (scratch copies of ``src/``, jaxlib 0.11.0,
+CPU; the instruments are ``tests/property/test_interface_reading_twins.py``
+and, for the numerical reference, ``tests/property/coupling_reference.py``
+and ``tests/property/test_coupling_nonlinear_search.py``):
+
+==  =========================================  ==================================  ==========================================
+#   fault                                      instrument                          analogue today, and the measured signal
+==  =========================================  ==================================  ==========================================
+1   the geometry term dropped from the         the numerical reference: its        none (a static mapping has no geometry
+    reading's Jacobian                         Jacobian is ``jacfwd`` of the       term).  The reference's own sensitivity:
+                                               pass with the geometry field in     a radius reported 10% low fails the
+                                               the iterate (radius, bound and      per-push radius search; an error bound
+                                               gradient scores); the relay         halved, or a gradient bound a twentieth,
+                                               twin's ``rho_spectral``             fails a per-push seed (mutants R1 to R3).
+2   the geometry read at the wrong time        the relay twin (residual, pass      solve path: a group's source-anchored
+    level inside the reading                   count, ``rho_spectral``); the       geometry read from the pre-step state
+                                               time-level reference of             in place of the dict its value is read
+                                               ``test_geometry_time_levels.py``    from.  The relay twin's step-for-step
+                                               for the solve it must agree with    equality fails after two passes: a
+                                                                                   field 2.6e-4 apart, 5.4e-7 allowed, zero
+                                                                                   unmutated (mutant F2-F3).  A converged
+                                                                                   solve does not see it: at a fixed point
+                                                                                   the iterate and the pass agree.
+3   the geometry taken from the iterate        the relay twin, whose relay         the same seeded fault, which is the
+    instead of the pre-step state (or the      computes the mapped value from      reverse (the pre-step state where the
+    reverse)                                   the fields of one update; the       iterate was due): F2-F3.
+                                               numerical reference
+4   the geometry's own rounding left out of    the numerical reference's floor     not seeded.  The relay twin does not
+    the precision floor                        score (the exact residual of the    judge a floor: its own is 13% from the
+                                               returned state above the reported   edge-mapped graph's by construction
+                                               one, over the reported floor) on    (a field read as stored against a
+                                               cells with a float32 geometry       mapping the norm evaluates).
+5   the mapping dropped from the interface     both twins                          seeded (mutant F5): the transform twin's
+    reading                                                                        and the relay twin's equalities both
+                                                                                   fail on the per-push case (residuals
+                                                                                   8.8% apart, 1.2e-4 allowed).
+6   the reading's Jacobian-vector product      ``PassReference                     a reading with a term its tangent does
+    disagreeing with a finite difference       .finite_difference_gap`` (the       not see: gap 1e-3 or more where the
+    (a later run-time self-check)              check itself, for the pass or       honest reading's is under 1e-7
+                                               for any reading written in JAX)     (``test_the_reference_s_jacobian_is_...``).
+==  =========================================  ==================================  ==========================================
 """
 
 from __future__ import annotations

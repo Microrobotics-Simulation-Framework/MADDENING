@@ -50,6 +50,8 @@ and a geometry field where a member holds one):
   read in) or for a scalar loss ``w . x``;
 * :meth:`PassReference.residual`: the exact residual ``P(x) - x`` of a
   returned state in the group's norm;
+* :meth:`PassReference.finite_difference_gap`: a Jacobian-vector product
+  (the pass's, or a reading's) against a central difference;
 * :meth:`PassReference.nonlinearity`: ``||(I - J(x))^{-1} (J_mean -
   J(x))||`` with ``J_mean`` the mean Jacobian over the segment from the
   fixed point to ``x`` -- the exact factor by which a linear bound taken
@@ -449,33 +451,57 @@ class PassReference:
         x = np.asarray(x, np.float64)
         return np.linalg.solve(np.eye(self.size) - self.jacobian(x), self.sensitivities(x))
 
-    def gradient_error(self, returned, fixed: FixedPoint, norm: Norm, *,
-                       loss: Optional[Sequence[float]] = None):
-        """``(worst, column)``: the worst relative error, over the scalar
-        constants, of the implicit derivative taken at the returned iterate
-        against the one at the fixed point.
+    def gradient_errors(self, returned, fixed: FixedPoint, norm: Norm, *,
+                        loss: Optional[Sequence[float]] = None) -> tuple:
+        """``(miss, at_iterate, at_fixed_point)``, one entry per scalar
+        constant: the size of the implicit derivative taken at the returned
+        iterate, of the one at the fixed point, and of their difference.
 
-        With *loss* (a cotangent ``w``: the loss is ``w . x``) the error is
-        of the scalar ``d loss / d c``, ``|w . (g_k - g*)| / |w . g_k|``.
-        Without, of the vector ``d x / d c`` in *norm* (linear fields:
-        selections of the iterate) at the returned state's weights, the
-        form ``gradient_relative_error_bound`` documents.
+        With *loss* (a cotangent ``w``: the loss is ``w . x``) the sizes
+        are of the scalar ``d loss / d c``.  Without, of the vector ``d x /
+        d c`` in *norm* (linear fields: selections of the iterate) at the
+        returned state's weights, the form
+        ``gradient_relative_error_bound`` documents.
         """
         x = np.asarray(returned, np.float64)
         g_k, g_star = self.implicit_derivatives(x), self.implicit_derivatives(fixed.x)
+        if loss is not None:
+            w = np.asarray(loss, np.float64)
+            return np.abs(w @ (g_k - g_star)), np.abs(w @ g_k), np.abs(w @ g_star)
         weights = norm.weights(x)
-        worst, column = 0.0, None
         zero = np.zeros(self.size)
-        for c in range(g_k.shape[1]):
-            if loss is not None:
-                w = np.asarray(loss, np.float64)
-                size, miss = abs(float(w @ g_k[:, c])), abs(float(w @ (g_k[:, c] - g_star[:, c])))
-            else:
-                size = norm.of_difference(g_k[:, c], zero, weights)
-                miss = norm.of_difference(g_k[:, c], g_star[:, c], weights)
-            if size > 0 and miss / size > worst:
-                worst, column = miss / size, c
+        columns = range(g_k.shape[1])
+        return (np.asarray([norm.of_difference(g_k[:, c], g_star[:, c], weights) for c in columns]),
+                np.asarray([norm.of_difference(g_k[:, c], zero, weights) for c in columns]),
+                np.asarray([norm.of_difference(g_star[:, c], zero, weights) for c in columns]))
+
+    def gradient_error(self, returned, fixed: FixedPoint, norm: Norm, *,
+                       loss: Optional[Sequence[float]] = None,
+                       columns: Optional[Sequence[bool]] = None):
+        """``(worst, column)``: the worst relative error ``|g_k - g*| /
+        |g_k|`` of :meth:`gradient_errors` over the scalar constants
+        (those *columns* marks, by the order of :meth:`constant_names`;
+        all of them by default)."""
+        miss, at_iterate, _at_fixed = self.gradient_errors(returned, fixed, norm, loss=loss)
+        worst, column = 0.0, None
+        for c in range(len(miss)):
+            if at_iterate[c] <= 0 or (columns is not None and not columns[c]):
+                continue
+            if miss[c] / at_iterate[c] > worst:
+                worst, column = float(miss[c] / at_iterate[c]), c
         return worst, column
+
+    def gradient_resolution(self, returned, norm: Norm) -> float:
+        """What this reference cannot resolve of a relative gradient error:
+        2**10 float64 ``eps`` times the resolvent's norm at the returned
+        iterate and the spread of *norm*'s weights (a derivative is a
+        dense solve, and a field a thousandth of another weighs a
+        thousand times as much)."""
+        x = np.asarray(returned, np.float64)
+        weights = [w for w in norm.weights(x) if w > 0]
+        spread = max(weights) / min(weights) if weights else 1.0
+        resolvent = float(np.linalg.norm(np.linalg.inv(np.eye(self.size) - self.jacobian(x)), 2))
+        return 2.0 ** 10 * EPS64 * spread * max(resolvent, 1.0)
 
     def nonlinearity(self, returned, fixed: FixedPoint, norm: Norm, *, nodes: int = 8) -> float:
         """``h = ||T (I - J(x))^{-1} (J_mean - J(x)) T^+||`` with ``T`` the
@@ -498,6 +524,43 @@ class PassReference:
         T = self.reading_matrix(norm, x)
         E = np.linalg.solve(np.eye(self.size) - J, mean - J)
         return float(np.linalg.norm(T @ E @ np.linalg.pinv(T), 2))
+
+    def finite_difference_gap(self, x, reading: Optional[Callable] = None, *,
+                              directions: int = 4, step: float = 1e-6, seed: int = 0) -> float:
+        """How far a Jacobian-vector product is from a central difference,
+        relative to the product: the worst over *directions* seeded
+        directions of ``|J v - (f(x + h v) - f(x - h v)) / 2h| / |J v|``.
+
+        ``f`` is the pass ``P`` and ``J`` its :meth:`jacobian`; with
+        *reading* (a JAX function of a flat iterate, differentiated here by
+        ``jax.jvp``) it is that reading and its own product -- the check a
+        run-time self-test of a reading's Jacobian would make.  ``h`` is
+        *step* times the iterate's size, so the difference is good to
+        about ``step ** 2`` on a smooth map.
+        """
+        x = np.asarray(x, np.float64)
+        rng = np.random.default_rng(seed)
+        h = step * max(float(np.max(np.abs(x))), 1.0)
+        J = None if reading is not None else self.jacobian(x)
+        worst = 0.0
+        for _ in range(directions):
+            v = rng.normal(size=x.shape)
+            if reading is None:
+                product = J @ v
+                difference = (self.apply(x + h * v) - self.apply(x - h * v)) / (2.0 * h)
+            else:
+                with x64():
+                    product = np.asarray(jax.jvp(
+                        lambda z: jnp.concatenate([jnp.ravel(f) for f in reading(z)]),
+                        (jnp.asarray(x),), (jnp.asarray(v),))[1])
+                    difference = (np.concatenate([np.ravel(np.asarray(f)) for f in reading(
+                        jnp.asarray(x + h * v))]) - np.concatenate([
+                            np.ravel(np.asarray(f)) for f in reading(jnp.asarray(x - h * v))])
+                    ) / (2.0 * h)
+            size = float(np.linalg.norm(product))
+            if size > 0:
+                worst = max(worst, float(np.linalg.norm(product - difference)) / size)
+        return worst
 
     def reading_matrix(self, norm: Norm, returned) -> np.ndarray:
         """The weighted reading of a *linear* norm as a matrix: its rows

@@ -58,11 +58,19 @@ is not affine:
    the returned state"): as the linear search scores them, against the
    reference's Jacobian **at the returned iterate**.
 3. *gradient* (CPL-093, CPL-095): the true relative error of the implicit
-   derivative taken at the returned iterate, the worst over every scalar
-   constant (the nonlinearity's ``c`` and ``s`` included), over
-   ``gradient_relative_error_bound`` where ``gradient_bound_usable`` --
-   the flag that certifies the Newton-Kantorovich check, which on these
-   cells is not trivially passed.
+   derivative taken at the returned iterate, the worst over the scalar
+   constants, over ``gradient_relative_error_bound`` where
+   ``gradient_bound_usable`` -- the flag that certifies the
+   Newton-Kantorovich check, which on these cells is not trivially
+   passed.  Two scores, by the constant: ``"gradient"`` over the gains,
+   biases and mapping weights, and ``"gradient_vanishing"`` over the
+   centre ``c`` and the curve ``s`` of every nonlinearity, which the
+   fixed point does not respond to (``phi`` depends on neither at ``u =
+   c``) and every other iterate does, so that ``|g_k - g*|`` is about
+   ``|g_k|``: the relative error is of order one however close the
+   iterate is, and a usable bound below that is short for that constant.
+   Both allow what the float64 reference itself cannot resolve
+   (:meth:`~tests.property.coupling_reference.PassReference.gradient_resolution`).
 4. *floor* (CPL-097, CPL-100): the exact residual of the returned state
    above the reported one, over the reported floor.
 
@@ -83,6 +91,7 @@ import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -531,6 +540,15 @@ def run_once(built: ct.Built, values: dict) -> ct.Step:
                    {0: cg.group_meta(gm, key)})
 
 
+def does_not_move_the_fixed_point(constant: str) -> bool:
+    """Whether *constant* (``node.leaf[i]``, as the reference names it) is
+    a nonlinearity's centre ``c<j>`` or curve ``s<j>``: at the fixed point
+    ``u = c`` and ``phi`` depends on neither, so the fixed point's
+    derivative with respect to it is zero (to the rounding of ``c``)."""
+    leaf = constant.split(".", 1)[1]
+    return leaf[0] in "cs" and leaf[1].isdigit()
+
+
 def leaves_float_range(cell: Cell, values: dict, ref: cr.PassReference) -> bool:
     """Whether plain passes from the drawn start leave *cell*'s float
     range before its cap, on a cell with a quasi-Newton acceleration.
@@ -565,15 +583,16 @@ def observe(case: Case) -> dict:
     ref = bound_reference(ref, values, twin)
     if leaves_float_range(cell, values, ref):
         # Not stepped (see ``leaves_float_range``): nothing is scored.
-        return dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0,
+        return dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, gradient_vanishing=0.0,
+                    floor=0.0,
                     spectral_usable=False, gradient_usable=False, floor_reported=False,
                     referenced=False, near=False, stepped=False, report={})
     with precision(cell.dtype == "float64"):
         step = run_once(built, values)
         d = dict(step.reports[0])
         floor = linear._reported_floor(built.gm, topo.group_key(0), step.metas[0], d)   # noqa: SLF001
-    out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0,
-               spectral_usable=bool(d["spectral_usable"]),
+    out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, gradient_vanishing=0.0,
+               floor=0.0, spectral_usable=bool(d["spectral_usable"]),
                gradient_usable=bool(d["gradient_bound_usable"]),
                floor_reported=math.isfinite(floor), referenced=False, near=False, stepped=True,
                report={k: d[k] for k in ("iterations", "converged", "residual", "rho_spectral",
@@ -627,11 +646,15 @@ def observe(case: Case) -> dict:
                             dist / reach if reach > 0 else (math.inf if dist > 0 else 0.0))
 
     if out["gradient_usable"]:
-        true, column = ref.gradient_error(x, fixed, raw)
-        bound = float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
-        out["gradient"] = math.inf if math.isnan(bound) else true / bound
-        out["report"].update(gradient_error=true, gradient_constant=(
-            None if column is None else ref.constant_names()[column]))
+        bound = (float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
+                 + ref.gradient_resolution(x, raw))
+        names = ref.constant_names()
+        for score, vanishing in (("gradient", False), ("gradient_vanishing", True)):
+            true, column = ref.gradient_error(x, fixed, raw, columns=[
+                does_not_move_the_fixed_point(n) is vanishing for n in names])
+            out[score] = math.inf if math.isnan(bound) else true / bound
+            out["report"].update({f"{score}_error": true, f"{score}_constant": (
+                None if column is None else ref.constant_names()[column])})
     return out
 
 
@@ -644,8 +667,8 @@ def observe(case: Case) -> dict:
 #: field from the fixed point still sees the Jacobian move by a tenth).
 CURVES = (-2.0, 2.0)
 
-THRESHOLD = linear.THRESHOLD
-FLAG = linear.FLAG
+THRESHOLD = {**linear.THRESHOLD, "gradient_vanishing": linear.THRESHOLD["gradient"]}
+FLAG = {**linear.FLAG, "gradient_vanishing": "gradient_usable"}
 SEARCHES = linear.SEARCHES
 #: The least fraction of a hunt's examples with the flag set, and with a
 #: reference (a fixed point Newton reached).
@@ -683,3 +706,361 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CL
                         referenced=sum(s["referenced"] for s in seen) / count,
                         near=sum(s["near"] for s in seen) / count,
                         stepped=sum(s["stepped"] for s in seen) / count)
+
+
+# ---------------------------------------------------------------------------
+# The reference, validated
+# ---------------------------------------------------------------------------
+
+
+def _per_push_draws(cells) -> list:
+    """The cases the linear search's four per-push searches draw, on *cells*."""
+    drawn = []
+    for name in linear.SEARCHES:
+        def score(case, name=name):
+            drawn.append(case)
+            return linear.scorer(name)(case)
+        targeted_search(linear.cases(cells, linear.CLAIMED), score, math.inf,
+                        profile=linear.EVERY_PUSH.seeded(sorted(linear.THRESHOLD).index(name)),
+                        label=name)
+    return list(dict.fromkeys(drawn))
+
+
+def assert_the_reference_reproduces_the_closed_form(drawn) -> dict:
+    """Every answer of the reference within :data:`ALLOWED` of the closed
+    form on each of *drawn*; the worst miss per answer."""
+    worst, compared = {}, 0
+    for case in drawn:
+        seen = against_the_closed_form(case)
+        misses = closed_form_misses(seen)
+        compared += bool(misses)
+        over = {k: v for k, v in misses.items() if v > 1.0}
+        assert not over, f"{case}: {over} ({seen})"
+        for k, v in misses.items():
+            worst[k] = max(worst.get(k, 0.0), v)
+    assert compared >= 0.9 * len(drawn), (compared, len(drawn))
+    return worst
+
+
+def test_the_reference_reproduces_the_closed_form_on_a_linear_cell():
+    """Per push: the ring of three float64 scalars under Jacobi and the
+    seed shapes on it.  Slow sibling:
+    :func:`test_the_reference_reproduces_the_closed_form_on_every_per_push_draw`."""
+    drawn = []
+    # Forty derandomised draws of the linear search's generator (not
+    # scored here: the slow sibling takes the search's own draws).
+    targeted_search(linear.cases((0,), linear.CLAIMED), lambda c: (drawn.append(c) or 0.0, None),
+                    math.inf, profile=dataclasses.replace(PER_PUSH, max_examples=40))
+    drawn += [c for c in linear.SEEDS.values() if c.cell == 0]
+    assert len(set(drawn)) >= 20, len(set(drawn))
+    assert_the_reference_reproduces_the_closed_form(drawn)
+
+
+# Slow: a twin compiled for each per-push cell of the linear search and for
+# its multi-rate cell, and every one of its per-push draws (about 600).
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_the_reference_reproduces_the_closed_form_on_a_linear_cell
+@pytest.mark.slow
+def test_the_reference_reproduces_the_closed_form_on_every_per_push_draw():
+    """Every per-push draw of the linear search (the five per-push cells:
+    both dtypes, both schedules, the l2 and interface norms, a mapped
+    ring, twelve scalars), the seed shapes, and the same number of draws
+    on the multi-rate cell (a sub-cycled member, linear interpolation)."""
+    drawn = _per_push_draws(linear.PER_PUSH_CELLS) + list(linear.SEEDS.values())
+    multirate = len(linear.PER_PUSH_CELLS)
+    assert linear.CELLS[multirate].structure.endswith("multirate")
+    drawn += _per_push_draws((multirate,))[:150]
+    worst = assert_the_reference_reproduces_the_closed_form(drawn)
+    print(f"{len(drawn)} draws; the worst miss over what is allowed: "
+          + ", ".join(f"{k} {v:.3g}" for k, v in sorted(worst.items())))
+
+
+@pytest.mark.parametrize("index", [0, pytest.param(2, marks=pytest.mark.slow),
+                                   pytest.param(len(linear.PER_PUSH_CELLS),
+                                                marks=pytest.mark.slow)])
+def test_several_passes_of_an_iterating_twin_are_compositions_of_the_single_pass(index):
+    """The single-pass branch of the step (``max_iterations=1``) runs the
+    pass an iterating group iterates: three passes of a twin that iterates
+    are three compositions of the reference's map, to float64 rounding.
+    (The ring under Jacobi per push; the mapped ring under Gauss-Seidel
+    and the multi-rate ring in the slow lane.)"""
+    cell = linear.CELLS[index]
+    values = linear.values_of(dataclasses.replace(_PROBE, cell=index))
+    built_twin, ref = _linear_twin(index)
+    ref = bound_reference(ref, values, built_twin)
+    knobs = {**cr.twin_knobs(cell.knobs), "max_iterations": 3, "predictor": "none",
+             "tolerance": 0.0}
+    with cr.x64():
+        several = ct.build(cell.topo, knobs, dtype="float64", mapping_kind=cell.mapping_kind)
+        ct.set_initial(several, values)
+        start = ref.flat({m: {"x": values["nodes"][m]["x0"]} for m in cell.topo.groups[0]})
+        assert cr.passes_compose(ref, several.gm, 3, start) <= 2.0 ** 6
+    # The premise: the pass depends on the iterate, apart from the pre-step state.
+    assert np.any(ref.apply(start) != ref.apply(start + 1.0))
+
+
+def test_the_reference_refuses_a_twin_it_cannot_read():
+    """One group, one pass, the linear predictor: anything else is refused
+    when the reference is built, not answered wrongly."""
+    cell = linear.CELLS[0]
+    with cr.x64():
+        iterating = ct.build(cell.topo, {"max_iterations": 3}, dtype="float64")
+        with pytest.raises(AssertionError, match="one pass under the linear predictor"):
+            cr.PassReference.of(iterating.gm)
+        fresh = ct.build(cell.topo, cr.twin_knobs(cell.knobs), dtype="float64")
+        # A fresh graph: every field zero after its step, so the slot does
+        # not say which member is where.
+        with pytest.raises(AssertionError, match="does not determine the layout"):
+            cr.PassReference.of(fresh.gm)
+
+
+# ---------------------------------------------------------------------------
+# The searches on the nonlinear cells
+# ---------------------------------------------------------------------------
+
+
+def test_the_nonlinear_fixed_point_is_the_linear_one_and_the_jacobian_moves():
+    """The premise of the cells, on the per-push one: the reference's fixed
+    point is the linear closed form's (the nonlinearity is centred on
+    it), and away from it the Jacobian is another matrix -- the part no
+    closed form here knows."""
+    case = Case(0, linear.Case(0, 7, 0.6, True, 1.0, 0.0, 1.0, 0, 1e-1, 0), 30.0)
+    seen = observe(case)
+    assert seen["stepped"] and seen["referenced"], seen
+    report = seen["report"]
+    assert report["fixed_point_vs_linear"] <= 2.0 ** 10 * case.eps ** 2 + 2.0 ** 10 * EPS64, report
+    assert abs(report["rho_at_fixed_point"] - 0.6) <= 1e-5, report
+    assert abs(report["rho_true"] - report["rho_at_fixed_point"]) >= 1e-3, report
+    assert report["nonlinearity"] >= 1e-3, report
+
+
+#: Examples on the per-push cell on which a number is close to its limit
+#: (found by a 500-example search of that cell), so that the per-push lane
+#: sees a bound that became too small without drawing for it:
+#: ``{name: (case, score, the least the score must still be)}``.
+SEEDS = {
+    # Five Jacobi passes from a whole field away: the distance is 0.88 of
+    # ``spectral_error_bound``.
+    "the-error-bound-an-eighth-above-the-distance": (
+        Case(0, linear.Case(0, 65535, 0.05, True, 1.0, 0.0, 1.0, -3, 1.0, 2), 1.0),
+        "bound", 0.75),
+    # A curve of 21 over a field: the radius is 0.399 at the returned
+    # iterate and 0.333 at the fixed point (``h`` = 0.14), and the
+    # derivative with respect to a gain is 24% off, a fourteenth of
+    # ``gradient_relative_error_bound``.
+    "the-jacobian-a-fifth-from-the-fixed-point-s": (
+        Case(0, linear.Case(0, 1, 1.0 / 3.0, False, 1.0, 0.0, 1.0, -1, 1.0, 0),
+             21.544346900318832), "gradient", 0.05),
+}
+
+
+@pytest.mark.parametrize("seed", sorted(SEEDS))
+def test_every_score_holds_on_the_nonlinear_seed_shapes(seed):
+    case, score, least = SEEDS[seed]
+    seen = observe(case)
+    assert seen["stepped"] and seen["referenced"] and seen[FLAG[score]], seen
+    over = {name: seen[name] for name in SEARCHES + ("radius_strict",)
+            if seen[name] > THRESHOLD[name]}
+    assert not over, f"{seed}: {over} ({seen['report']})"
+    assert seen[score] >= least, (
+        f"premise: {score} is {seen[score]!r} on {seed}, no longer near its limit "
+        f"({seen['report']})")
+
+
+def _held(name: str, fractions: dict) -> None:
+    assert fractions["referenced"] >= REFERENCED_FLOOR * fractions["stepped"], (name, fractions)
+    assert fractions["usable"] > 0, f"{name}: no example had its flag set ({fractions})"
+
+
+def test_a_usable_error_bound_reaches_the_distance_on_the_nonlinear_cell_per_push():
+    _report, fractions = search("bound")
+    _held("bound", fractions)
+    assert fractions["near"] > 0, fractions
+
+
+def test_a_settled_spectral_radius_is_the_radius_at_the_returned_iterate_per_push():
+    _report, fractions = search("radius")
+    _held("radius", fractions)
+
+
+def test_a_usable_gradient_bound_is_never_below_the_error_on_the_nonlinear_cell_per_push():
+    _report, fractions = search("gradient")
+    _held("gradient", fractions)
+
+
+def test_the_floor_covers_what_the_reported_residual_misses_on_the_nonlinear_cell_per_push():
+    _report, fractions = search("floor")
+    _held("floor", fractions)
+
+
+# Slow: 115 random examples a search on each of six blocks of seven cells,
+# each cell a compile of the graph with its diagnostics and of its twin;
+# the blocks outermost, so the searches share a block's compiled graphs.
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_error_bound_reaches_the_distance_on_the_nonlinear_cell_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("block,name", [(b, n) for b in range(len(BLOCKS))
+                                        for n in SEARCHES + ("radius_strict",)])
+def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_nonlinear_group(block, name):
+    """Not shrunk: the example that fails is reported as drawn (a shrink
+    here is thousands of steps)."""
+    profile = dataclasses.replace(SLOW, max_examples=115).seeded(1000 + block, shrink=False)
+    report, fractions = search(name, cells=BLOCKS[block], profile=profile)
+    print(f"{name}, block {block}: worst {report}; {fractions}")
+    assert fractions["referenced"] >= REFERENCED_FLOOR * fractions["stepped"], fractions
+    assert fractions["usable"] >= USABLE_FLOOR, (
+        f"{name}, block {block}: only {fractions['usable']:.2f} of the examples had the flag "
+        f"set (floor {USABLE_FLOOR})")
+
+
+def test_the_reference_s_jacobian_is_the_central_difference_of_its_pass():
+    """The dense Jacobian against a central difference of the pass map, on
+    the per-push nonlinear cell away from its fixed point, and the same
+    check on a reading (the interface norm's, written in JAX): the
+    self-check a reading's Jacobian-vector product can be held to."""
+    case = Case(0, linear.Case(0, 7, 0.6, True, 1.0, 0.0, 1.0, 0, 1e-1, 0), 30.0)
+    cell = CELLS[0]
+    values = values_of(case)
+    _built_graph, twin, ref = _built(0)
+    ref = bound_reference(ref, values, twin)
+    x = ref.flat({m: {"x": values["nodes"][m]["x0"]} for m in cell.topo.names})
+    assert ref.finite_difference_gap(x) <= 1e-7
+    H = {i: jnp.asarray(values["H"][i], jnp.float64) for i in values["H"]}
+
+    def reading(z):
+        out = []
+        for i, e in enumerate(cell.topo.edges):
+            src = ref.field(z, e.src, "x")
+            out.append(ct.TRANSFORM_FACTORS[e.transform] * (H[i] @ src if e.mapped else src))
+        return out
+
+    assert ref.finite_difference_gap(x, reading) <= 1e-7
+    # A reading whose product drops a term (one the tangent does not see)
+    # is caught by the same check.
+
+    def dropped(z):
+        return [f + jnp.sum(jax.lax.stop_gradient(z) ** 2) for f in reading(z)]
+
+    assert ref.finite_difference_gap(x, dropped) >= 1e-3
+
+
+# ---------------------------------------------------------------------------
+# What the search found
+# ---------------------------------------------------------------------------
+
+#: The findings of the hunt on this tree, each an example as drawn (the
+#: hunt does not shrink).  Strict: a fix turns each green.  ``EDGE``: at
+#: the edge of what the claim is made on, as the reason says; a ``CORE``
+#: finding would be inside it (the hunt found none).
+KNOWN = {
+    # A two-member float32 ring with saturating gains, started on its
+    # fixed point: one pass, residual 0, precision_limited.  The curve
+    # ``s`` of a nonlinearity moves the fixed point by nothing (the
+    # derivative with respect to it is zero there) and the returned
+    # iterate, a float32 rounding away, by a little: relative error 2.7,
+    # ``gradient_relative_error_bound`` 1.4e-6 with the flag set.
+    "CPL-093-EDGE-a-constant-the-fixed-point-does-not-respond-to-at-a-stalled-start": (
+        Case(1, linear.Case(0, 0, 0.05, False, 1.0, 0.0, 1.0, 0, 0.0, 0), 1.0),
+        "gradient_vanishing",
+        "FINDING (EDGE, CPL-093): for a constant whose derivative is zero at the fixed point "
+        "the relative gradient error is of order one at any other iterate; at a start stalled "
+        "on its float floor the usable bound reads 1.4e-6"),
+    # The same constant on a float64 hub converged in four passes from a
+    # start a whole field away: the bound reads 1.09 for a relative error
+    # of 1.134 (4% short).
+    "CPL-093-EDGE-a-constant-the-fixed-point-does-not-respond-to-four-percent-short": (
+        Case(26, linear.Case(0, 2619, 0.05, False, 1.0, 0.0, 1.0, 3, 1.0, 3), 10.0),
+        "gradient_vanishing",
+        "FINDING (EDGE, CPL-093): for a constant whose derivative is zero at the fixed point "
+        "the usable bound reads 1.09 for a relative error of 1.13"),
+}
+
+
+# Slow: each pin compiles its cell (a graph with diagnostics and a twin).
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_is_never_below_the_error_on_the_nonlinear_cell_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("case,score", [
+    pytest.param(case, score, marks=pytest.mark.xfail(strict=True, reason=reason))
+    for case, score, reason in KNOWN.values()], ids=list(KNOWN))
+def test_a_known_defect_the_nonlinear_search_reached_is_fixed(case, score):
+    seen = observe(case)
+    assert seen["stepped"] and seen["referenced"], seen
+    assert seen[FLAG[score]], f"the flag is no longer set: {seen['report']}"
+    assert seen[score] <= THRESHOLD[score], (
+        f"{score} is {seen[score]!r}, over {THRESHOLD[score]!r}: {seen['report']}")
+
+
+#: The example the hunt stopped on: the fan-out hub with products of two
+#: fields in float64, Jacobi under IQN-ILS, cap 120, non-normal gains,
+#: started a whole field from its fixed point.  Plain passes from that
+#: start leave float64 range on the eighth.
+_NEVER_RETURNS = Case(30, linear.Case(0, 3397, 0.6568215254870227, True, 1.0, 0.0, 1.0, 6, 1.0, 6),
+                      1.0)
+_STEP_IN_A_SUBPROCESS = """
+import sys
+from tests.property import test_coupling_nonlinear_search as nl
+from tests.property.sysid_transform_grid import precision
+case = nl._NEVER_RETURNS
+cell = nl.CELLS[case.cell]
+from tests.property import coupled_graphs as cg
+with precision(True):
+    built = nl.build(cell, cg.live_knobs({**cell.knobs, "acceleration": sys.argv[1]}), cell.dtype)
+    values = nl.values_of(case)
+    nl.run_once(built, nl.values_of(nl.Case(case.cell, nl._PROBE, 1.0)))   # compiled, and returns
+    print("COMPILED", flush=True)
+    step = nl.run_once(built, values)
+    print("RETURNED", int(step.reports[0]["iterations"]), bool(step.reports[0]["converged"]),
+          flush=True)
+"""
+
+
+def _steps_in_a_subprocess(acceleration: str, seconds: float) -> str:
+    """The output of one step of :data:`_NEVER_RETURNS` under
+    *acceleration*, in a process of its own given *seconds* after its
+    compile (a call that does not return cannot be scored in this one)."""
+    import pathlib  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    proc = subprocess.Popen([sys.executable, "-c", _STEP_IN_A_SUBPROCESS, acceleration],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                            cwd=root, env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                                [str(root / "src"), str(root),
+                                 os.environ.get("PYTHONPATH", "")])})
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "COMPILED", "the benign step did not return"
+        try:
+            out, _err = proc.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            return "TIMEOUT"
+        return out.strip()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+# Slow: a subprocess that compiles the cell and is then given 30 s for a
+# step that takes 0.05 s where it returns.
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_error_bound_reaches_the_distance_on_the_nonlinear_cell_per_push
+@pytest.mark.slow
+def test_a_group_that_leaves_float_range_without_a_quasi_newton_acceleration_returns():
+    """The control of the pin below: the same graph and start with no
+    acceleration returns from its step at the cap, not converged."""
+    assert _steps_in_a_subprocess("none", 30.0) == "RETURNED 120 False"
+
+
+# Slow: as the control above.
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_error_bound_reaches_the_distance_on_the_nonlinear_cell_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("acceleration", ["iqn-ils", "iqn-imvj"])
+@pytest.mark.xfail(strict=True, reason=(
+    "FINDING (EDGE, CPL-053/CPL-084): a group under acceleration='iqn-ils' or 'iqn-imvj' whose "
+    "iterate becomes non-finite before max_iterations never returns from step() (measured: no "
+    "return in 240 s; 0.05 s for a step of the same compiled graph that converges)"))
+def test_a_group_that_leaves_float_range_under_iqn_still_returns(acceleration):
+    """``converged`` False "means ... the group hit max_iterations"
+    (CPL-053) and ``residual`` is "inf on a non-finite state" (CPL-084):
+    both say the step returns.  With diagnostics on or off, under the l2
+    norm as under the mixed one; at a cap of 12, before the iterate is
+    non-finite, it returns."""
+    assert _steps_in_a_subprocess(acceleration, 30.0).startswith("RETURNED")

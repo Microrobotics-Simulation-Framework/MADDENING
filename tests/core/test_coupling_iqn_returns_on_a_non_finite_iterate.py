@@ -121,7 +121,7 @@ def _graph(acceleration_, dtype, **group):
     return gm
 
 
-def _step_reports_a_state_that_is_not_finite(acceleration_, dtype, **group):
+def _step_reports_a_state_that_is_not_finite(acceleration_, dtype, overflows=True, **group):
     x64 = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", dtype == "float64")
     try:
@@ -131,9 +131,10 @@ def _step_reports_a_state_that_is_not_finite(acceleration_, dtype, **group):
         state = np.asarray(gm.get_node_state("a")["x"])
     finally:
         jax.config.update("jax_enable_x64", x64)
-    assert not np.all(np.isfinite(state)), f"premise: the iterate stayed finite ({state})"
     assert report["converged"] is False, report
-    assert report["residual"] == math.inf, report
+    if overflows:
+        assert not np.all(np.isfinite(state)), f"premise: the iterate stayed finite ({state})"
+        assert report["residual"] == math.inf, report
     return report
 
 
@@ -151,7 +152,7 @@ def test_a_step_whose_iterate_leaves_float_range_under_iqn_returns(acceleration_
 # Per push: tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_a_step_whose_iterate_leaves_float_range_under_iqn_returns
 @pytest.mark.slow
 @pytest.mark.parametrize("group", [
-    dict(solver="fori", max_iterations=24),
+    dict(solver="fori", max_iterations=24, diagnostics=True),
     dict(diagnostics=True),
     dict(convergence_norm="l2"),
     dict(convergence_norm="interface"),
@@ -162,8 +163,12 @@ def test_the_step_returns_under_every_solver_norm_and_schedule(acceleration_, gr
     """The same step under the unrolled solver, with the diagnostics (whose
     analysis takes singular values at the returned state), under each norm
     and both schedules; and the accelerations that always
-    returned, beside it."""
-    report = _step_reports_a_state_that_is_not_finite(acceleration_, "float64", **group)
+    returned, beside it.  (Under Jacobi the quasi-Newton iterate of this
+    pair stalls at a finite state, not converged, on the tree before the
+    guard as well: there the step is only held to return and to say so.)"""
+    stalls = group.get("iteration_mode") == "jacobi" and acceleration_ in IQN
+    report = _step_reports_a_state_that_is_not_finite(acceleration_, "float64",
+                                                      overflows=not stalls, **group)
     assert report["iterations"] == group.get("max_iterations", 40), report
 
 

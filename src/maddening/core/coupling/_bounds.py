@@ -541,7 +541,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        the Jacobian's row space (``3 k`` JVPs); and the Newton step's
        second-order miss, ``t* - eta``, carried into each probe's bound.
 
-    ``11 + 4 k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``43 + 5 n_p`` forward), ``n_p``
+    ``11 + 4 k + 5 n_p + 2 k n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``43 + 21 n_p`` forward), ``n_p``
     the number of probes, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
@@ -868,10 +868,83 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     conventions = ift_gradient_error_bound(
         amp, distance, norm(secant_s), norm(delta_s), norm(t_s),
     )
+    along_step = ift_gradient_error_bound(jnp.ones((), dtype), distance, norm(resolved_secant),
+                                          norm(delta_s), norm(t_s))
+    step = norm(delta_s)
+    beta, rows = _full_resolvent_norm_and_rows(
+        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype))
+    # **The part of the distance that has no direction.**  The secant
+    # above is the change of ``G`` along ``delta``, which is the direction
+    # to the fixed point only as far as the residual it was solved from is
+    # the exact map's.  The measured residual is that plus the pass's own
+    # rounding, of norm up to the floor and of no known direction, so
+    # ``x* - x_k = delta + R e`` with ``||e|| <= floor``; and at an iterate
+    # whose residual is not above the floor ``delta`` is a stand-in and the
+    # whole distance has no direction.  A probe's ``G`` can change many
+    # times faster along another direction than along that one: a gain
+    # that multiplies a delivered value two source entries nearly cancel
+    # in has a small tangent and a change of ``G`` per unit distance set
+    # by the entries, and the fixed-seed stand-in read 5.1e-6 for a true
+    # error of 3.0e-5 on a float32 ring of mapped edges stalled at its
+    # floor (eight sign patterns of the stand-in: 1.7e-6 to 2.4e-5; the
+    # operator norm times the distance: 3.9e-5).  So that part of the
+    # distance is multiplied by the *operator norm* of ``z -> (I -
+    # J)^{-1} dG_i/dx z`` over the directions the Jacobian reads (its row
+    # space, as the Kantorovich constant below; the whole space where the
+    # range basis is square): one forward-over-forward product and one
+    # Jacobian-vector product per probe and direction, the derivative
+    # exact (no step to size, and exactly zero where ``G`` does not depend
+    # on the point, so an affine group with additive parameters still
+    # reads ``0.0``).
+    if rows is None:
+        # No transpose, so no basis of the row space: the whole space
+        # where that is at most a probed constant's size, else nothing
+        # bounds the undirected part (``inf`` below unless ``G`` is
+        # constant along the step).
+        rows_g = (jnp.eye(x_sg.shape[0], dtype=dtype)
+                  if x_sg.shape[0] <= GRADIENT_PROBE_ENTRY_LIMIT else None)
+    else:
+        rows_g = rows
+    if rows_g is None:
+        any_dir = jnp.where(norm(secant_s) > 0, jnp.inf, jnp.zeros_like(norm(secant_s)))
+    else:
+        # The direction is handed to the map at order one and the scale
+        # returned afterwards (a power of two, so nothing is rounded): with
+        # both tangents in state units their product left float32's range
+        # for a group near 2**100, and the map's second derivative dropped
+        # out of the norm.  Near 2**-100 it still does (the other tangent,
+        # the adjoint's own, is in state units, and framing it too loses
+        # the term at 2**100 instead): there a nonlinear map's undirected
+        # term is its first-order part alone, 3.5% of the bound on the
+        # pair of ``tests/core/test_coupling_bounds_in_any_units.py``.
+        unit = pow2_frame(s_inv * lift, mode="common")
+
+        def g_derivative(row, ts, z):
+            """``(I - J)^{-1} dG_row/dx z`` in the scaled coordinates."""
+            _, out = jax.jvp(lambda xx: linearisation(xx, row, ts), (x_sg,),
+                             ((z * (s_inv * lift * unit)).astype(x_dtype),))
+            return resolve(((s / lift) / unit) * out.astype(dtype))
+
+        dG = jax.vmap(
+            lambda row, ts: jax.vmap(lambda z: g_derivative(row, ts, z))(rows_g.T))(
+                jnp.arange(n_rows), t_s)
+        any_dir = jnp.linalg.norm(live[None, None, :] * dG, ord=2, axis=(-2, -1))
+    # The undirected distance: the floor through the resolvent (the larger
+    # of the Krylov factor the distance itself uses and the full norm),
+    # or the whole distance at an unresolved iterate.
+    floor_reach = spectral_error_bound(jnp.zeros((), dtype), rho, arnoldi_residual,
+                                       amplification, floor=floor)
+    if beta is not None:
+        floor_reach = jnp.maximum(floor_reach, beta * floor)
+    undirected = jnp.where(resolved, jnp.minimum(floor_reach, distance), distance)
+    tangent_size = norm(t_s)
+    any_dir_term = jnp.where(
+        any_dir > 0,
+        undirected * any_dir / jnp.where(tangent_size > 0, tangent_size, 1.0),
+        jnp.zeros_like(any_dir))
     per_probe = jnp.where(
         jnp.isfinite(conventions),
-        ift_gradient_error_bound(jnp.ones((), dtype), distance, norm(resolved_secant),
-                                 norm(delta_s), norm(t_s)),
+        jnp.where(resolved, along_step + any_dir_term, jnp.maximum(along_step, any_dir_term)),
         conventions,
     )
     # The worst probe the fixed point responds to.  A responding probe
@@ -914,9 +987,6 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # ``F'(x*) = 0.99`` with the forward 0.65-4.5% short of its fixed
     # point, the uncorrected bound read 0.20-0.96x the true relative
     # error with the flag True; ``h`` there is 0.48-0.58.
-    step = norm(delta_s)
-    beta, rows = _full_resolvent_norm_and_rows(
-        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype))
     jac_change = norm(jac_secant_s)
     if beta is None or rows is None:
         # No transpose to take the full norm with (a node the map cannot be

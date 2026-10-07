@@ -1020,6 +1020,85 @@ def _probe_coefficients(active):
     return c / jnp.where(nrm > 0, nrm, 1.0)
 
 
+#: Points per circle in :func:`_rounding_keeps_the_radius`.
+_CERTIFICATE_ANGLES = 32
+
+#: How far above ``SPECTRAL_SETTLED_FRACTION * (1 - rho)`` a spectrum
+#: that is not certified is reported unsettled by, as a factor of that
+#: margin: any amount above it reads ``spectral_usable=False``; a
+#: sixteenth is far above the comparison's own rounding and raises the
+#: margin :func:`spectral_error_bound` adds by no more than that.
+_UNSETTLED_OVER_MARGIN = 1.0625  # units: dimensionless -- a factor of the settle margin
+
+
+def _rounding_keeps_the_radius(Hk, defect, active, rho, margin):
+    """Whether rounding of the measured size can move ``rho(Hk)`` by *margin*.
+
+    *defect* is the disagreement of one fresh product with the Arnoldi
+    relation, component by component along the basis: the measured size
+    of a product's rounding in each row of ``Hk``.  Every column of ``Hk``
+    is such a product, so the matrix the exact products would have given
+    is ``Hk + E`` with ``|E_ij| <= d_i`` on the active columns, ``d`` the
+    defect's magnitudes.  ``z`` is an eigenvalue of ``Hk + E`` only if
+    ``v = R(z) E v`` for some ``v``, ``R(z) = (z I - Hk)^{-1}``, and then
+    ``|v| <= |R(z)| d (1_a^T |v|)`` entry by entry, which needs
+    ``g(z) = 1_a^T |R(z)| d >= 1`` (``1_a`` the active columns).  So where
+    ``g < 1`` at every point of the circle ``|z| = rho + margin`` and of
+    the circle of radius *margin* about the dominant eigenvalue, no member
+    of the family has an eigenvalue on either circle, the count inside
+    each is the same for every member (the family is connected), and the
+    radius of each is within *margin* of ``rho``: a statement about every
+    sign pattern and every combination of columns, and exact in the
+    perturbation's size (a near-defective eigenvalue moves by a root of
+    it), where eight sampled perturbations read 0.013 and 0.023 against
+    margins of 0.037 and 0.045 on two float32 groups of rank six whose
+    radius the exact products put 0.044 and 0.051 away.  Componentwise, so
+    a graded Jacobian (an offset, a small field) is held to the rounding
+    its own rows show and not to its norm's.  The circles are sampled at
+    :data:`_CERTIFICATE_ANGLES` points each.  ``True`` on a backend
+    without ``eigvals`` (nothing is certified there; the sampled movement
+    stands alone).
+    """
+    if jax.default_backend() not in _EIGVALS_BACKENDS:
+        return jnp.ones((), bool)
+    k = Hk.shape[0]
+    dtype = Hk.dtype
+    finite = jnp.logical_and(jnp.all(jnp.isfinite(Hk)), jnp.all(jnp.isfinite(defect)))
+    Hs = jnp.where(finite, Hk, jnp.zeros_like(Hk))
+    on = active != 0
+    d = jnp.where(jnp.logical_and(finite, on), jnp.abs(defect), jnp.zeros_like(defect))
+    eig = jnp.linalg.eigvals(Hs)
+    lead = eig[jnp.argmax(jnp.abs(eig))]
+    angles = (jnp.arange(_CERTIFICATE_ANGLES, dtype=dtype) + 0.5) * (
+        2.0 * jnp.pi / _CERTIFICATE_ANGLES)
+    radius = jnp.maximum(margin, jnp.zeros_like(margin))
+    cos, sin = jnp.cos(angles), jnp.sin(angles)
+    re = jnp.concatenate([(rho + radius) * cos, jnp.real(lead).astype(dtype) + radius * cos])
+    im = jnp.concatenate([(rho + radius) * sin, jnp.imag(lead).astype(dtype) + radius * sin])
+    eye = jnp.eye(k, dtype=dtype)
+    # The family lives on the active block (a basis vector that was never
+    # filled is zero, and so are its row and column of ``Hk`` and of every
+    # ``E``): the identity stands in for the rest.
+    block = jnp.logical_and(on[:, None], on[None, :])
+    idle = jnp.diag(jnp.where(on, jnp.zeros_like(d), jnp.ones_like(d)))
+    on_f = on.astype(dtype)
+
+    def reach(x, y):
+        # ``z I - Hk`` for complex ``z = x + i y`` as a real matrix of
+        # twice the size, whose inverse holds the real and imaginary
+        # parts of ``R(z)``.
+        a = jnp.where(block, x * eye - Hs, 0.0) + idle
+        b = jnp.where(block, y * eye, 0.0)
+        inv = jnp.linalg.inv(jnp.block([[a, -b], [b, a]]))
+        modulus = jnp.sqrt(inv[:k, :k] ** 2 + inv[k:, :k] ** 2)
+        return on_f @ (modulus @ d)
+
+    g = jax.vmap(reach)(re, im)
+    # NaN or inf (a point of a circle on an eigenvalue) is not below one.
+    clear = jnp.all(g < 1.0)
+    return jnp.logical_and(finite, jnp.logical_and(clear, margin > 0))
+
+
 def _compressed_spectrum(H, coefficients, column, extended):
     """``(rho, unsettled, amplification)`` of a Krylov-compressed Jacobian.
 
@@ -1082,8 +1161,17 @@ def _compressed_spectrum(H, coefficients, column, extended):
     right = right.at[0].set(coefficients)
     agreed = Hk[None] + (signs * defect[None, :])[:, :, None] * right[:, None, :]
     moved = jnp.max(jnp.abs(jax.vmap(_spectral_radius)(agreed) - rho))
+    # What the flag's margin is, and the least that reads as beyond it.
+    margin = SPECTRAL_SETTLED_FRACTION * (1.0 - rho)
+    beyond = _UNSETTLED_OVER_MARGIN * jnp.maximum(margin, jnp.zeros_like(margin))
+    certified = _rounding_keeps_the_radius(Hk, defect, active, rho, margin)
+    moved = jnp.where(certified, moved, jnp.maximum(moved, beyond))
     grown = jnp.zeros((k + 1, k + 1), Hk.dtype).at[:, :k].set(H).at[:, k].set(column)
-    unsettled = jnp.where(extended, jnp.abs(_spectral_radius(grown) - rho), moved)
+    # A space still growing at the cap is not invariant, and a Ritz value
+    # of a space that is not invariant is within no computed distance of
+    # the radius unless the Jacobian is normal: beyond the margin, always.
+    growing = jnp.maximum(jnp.abs(_spectral_radius(grown) - rho), beyond)
+    unsettled = jnp.where(extended, growing, moved)
     return rho, unsettled, amplification
 
 
@@ -1251,7 +1339,11 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
         # not lost to the second sweep.
         grown = jnp.logical_and(h_next > _ARNOLDI_NOISE_ULPS * eps * anorm,
                                 h_next >= _ARNOLDI_REORTH_KEEP * h_first)
-        dropped = jnp.maximum(dropped, jnp.where(grown, 0.0, h_next))
+        # A leftover once the basis is the whole space is orthogonal to
+        # nothing: rounding by construction, not a direction that could
+        # have been one.
+        whole = jnp.sum((jnp.sum(Q * Q, axis=1) > 0).astype(dtype)) >= n
+        dropped = jnp.maximum(dropped, jnp.where(jnp.logical_or(grown, whole), 0.0, h_next))
         H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
         q_next = jnp.where(grown, w / jnp.where(grown, h_next, 1.0), 0.0)
         if extra is not None:
@@ -1276,7 +1368,12 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     column = Q @ matvec(jnp.where(extended, Q[k], c @ Q[:k]))
     rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
     # A direction a breakdown discarded is a part of ``A q_j`` outside the
-    # space, as ``h_{k+1,k}`` is: both are what the space missed.
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.  (Its
+    # bare norm: what it could do to the radius of a Jacobian far from
+    # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
+    # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
+    # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
+    # open below the claimed domain, MADD-ANO-230.)
     residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         # The certificate, tested rather than assumed: the fraction of
@@ -1374,7 +1471,11 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
         h_next = jnp.linalg.norm(w_q)
         grown = jnp.logical_and(h_next > _ARNOLDI_NOISE_ULPS * eps * anorm,
                                 h_next >= _ARNOLDI_REORTH_KEEP * h_first)
-        dropped = jnp.maximum(dropped, jnp.where(grown, 0.0, h_next))
+        # A leftover once the basis is the whole space is orthogonal to
+        # nothing: rounding by construction, not a direction that could
+        # have been one.
+        whole = jnp.sum((jnp.sum(Q * Q, axis=1) > 0).astype(dtype)) >= m
+        dropped = jnp.maximum(dropped, jnp.where(jnp.logical_or(grown, whole), 0.0, h_next))
         H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
         inv = jnp.where(grown, 1.0 / jnp.where(grown, h_next, 1.0), 0.0)
         q_next = w_q * inv
@@ -1399,7 +1500,12 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     column = Q @ jnp.asarray(measure(jnp.asarray(matvec(probe_u), dtype)), dtype)
     rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
     # A direction a breakdown discarded is a part of ``A q_j`` outside the
-    # space, as ``h_{k+1,k}`` is: both are what the space missed.
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.  (Its
+    # bare norm: what it could do to the radius of a Jacobian far from
+    # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
+    # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
+    # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
+    # open below the claimed domain, MADD-ANO-230.)
     residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
     if extra is not None:
         ex_norm = jnp.linalg.norm(extra_q)

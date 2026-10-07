@@ -784,6 +784,42 @@ FIXED = {
     # for 0.0500, the repeated squaring's own rounding (eigvals: 0.049998).
     "a-float32-ring-of-five-the-squaring-misread": (
         Case(23, 0, 0.05, True, 0.02025875358340762, 0.0, 1.0, 6, 0.0, 0), "radius", True),
+    # A float32 Jacobi ring of mapped edges stopped at its float floor:
+    # gradient_relative_error_bound 5.1e-6 for a true 3.0e-5 (found by the
+    # floor search, twelve examples of one hunt).  The bound took the
+    # change of the adjoint's right-hand side along one fixed-seed
+    # direction where the residual, at its floor, gives none; it now takes
+    # the operator norm over the directions the Jacobian reads
+    # (MADD-ANO-226): 1.2e-4, usable.
+    # A float32 multi-rate ring whose small field is 1e-6 of its driver
+    # read rho_spectral 1e-12 for 1.25e-4.  The sub-cycled member's
+    # boundary interpolation ``a + alpha * (b - a)`` rounded the tangent of
+    # the new value at one float32 eps of the old one's, so the loop left
+    # the Jacobian-vector products.  Its tangent is now ``(1 - alpha)
+    # a_dot + alpha b_dot`` (the value is unchanged): usable and right
+    # (MADD-ANO-222).
+    "MADD-ANO-222-a-loop-below-a-fields-rounding-is-in-the-products": (
+        Case(len(_FIRST), 5, 0.05, False, 1e-6, 0.0, 1.0, 0, 0.0, 5), "radius", True),
+    # Twelve float32 scalars under Jacobi, non-normal gains: 0.273 for
+    # 0.219 with the Arnoldi residual and the ninth vector's movement of
+    # the radius both inside the margin.  A space still growing at the cap
+    # is not invariant and its Ritz value is within no computed distance
+    # of the radius: never settled (MADD-ANO-225).
+    "MADD-ANO-225-a-space-still-growing-at-the-cap-is-not-settled": (
+        Case(4, 0, 0.21902815820121518, True, 1.0, 0.0, 1.0, -6, 1e-09, 0), "radius", False),
+    # Twelve float32 scalars under Gauss-Seidel (rank six), non-normal, a
+    # field 0.015 of its driver: 0.250 for 0.206 and 0.107 for 0.056 with
+    # eight sampled perturbations moving the radius by a third to a half
+    # of the margin.  The certificate over every perturbation of the
+    # measured size refuses both (MADD-ANO-229).
+    "MADD-ANO-229-a-radius-rounding-can-move-is-not-settled-i": (
+        Case(41, 29814, 0.453609867338665, True, 0.01539605614570328, 0.0, 1.0, 1, 0.0, 0),
+        "radius_strict", False),
+    "MADD-ANO-229-a-radius-rounding-can-move-is-not-settled-ii": (
+        Case(41, 51310, 0.23676567122390113, True, 0.016305935878241445, 0.0, 1.0, -1,
+             3.188721180654517e-07, 6), "radius_strict", False),
+    "MADD-ANO-226-the-gradient-bound-at-the-float-floor": (
+        Case(53, 6984, 0.05, False, 1.0, 0.0, 1.0, 6, 1.0, 3), "gradient", True),
 }
 
 
@@ -800,35 +836,6 @@ def test_a_defect_the_search_reached_stays_fixed(name):
 #: example of a hunt over the widened domain that names it.  Strict: the
 #: fix turns each green, and its domain then joins :data:`CLAIMED`.
 KNOWN = {
-    # A float32 multi-rate ring whose small field is 1e-6 of its driver
-    # reads rho_spectral 1e-12 for 1.25e-4, spectral_usable.  The loop
-    # passes through a change of the driver 3.5e-8 of the driver's own
-    # magnitude, and the sub-cycled member's boundary interpolation
-    # ``a + alpha * (b - a)`` rounds the tangent of the new value at one
-    # float32 eps of the old one's: the Jacobian-vector product is exact
-    # along the small field alone and loses the loop along any vector
-    # with a driver component -- as the float32 pass itself does (the
-    # iteration stalls in one pass).  Not the estimator's arithmetic:
-    # the product it is handed (MADD-ANO-222).
-    "a-float32-field-at-its-drivers-rounding-reads-a-zero-radius": _known(
-        Case(len(_FIRST), 5, 0.05, False, 1e-6, 0.0, 1.0, 0, 0.0, 5), "radius",
-        "MADD-ANO-222: a loop below a float32 field's rounding is not in the products"),
-    # Twelve float32 scalars under Jacobi, non-normal gains: 0.273 for
-    # 0.219 with the Arnoldi residual and the ninth vector's movement of
-    # the radius both inside the margin (found by the floor search, one
-    # example in 9 660 over twelve hunts; the tree before reads the same).
-    # Past eight scalars the claim is "an estimate", and for a non-normal
-    # Jacobian neither test bounds its error.
-    "MADD-ANO-225-a-non-normal-estimate-past-eight-scalars": _known(
-        Case(4, 0, 0.21902815820121518, True, 1.0, 0.0, 1.0, -6, 1e-09, 0), "radius",
-        "MADD-ANO-225: past eight scalars a non-normal radius reads settled 1.5 margins off"),
-    # A float32 Jacobi ring of mapped edges stopped at its float floor:
-    # gradient_relative_error_bound 5.1e-6 for a true 3.0e-5 (250 float32
-    # eps), gradient_bound_usable (found by the floor search, twelve
-    # examples of one hunt; the tree before reads the same).
-    "MADD-ANO-226-the-gradient-bound-at-the-float-floor": _known(
-        Case(53, 6984, 0.05, False, 1.0, 0.0, 1.0, 6, 1.0, 3), "gradient",
-        "MADD-ANO-226: the gradient bound of a precision-limited iterate reads below the error"),
     # A mapping row [1, -1] on a field 1e4 times the difference, read in
     # the same Gauss-Seidel pass, stalled in float32: the exact residual is
     # 16 floors and the bound 0.06x the distance, spectral_usable (found

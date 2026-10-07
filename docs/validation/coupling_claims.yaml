@@ -416,12 +416,21 @@ claims:
     the verdict (converged); atol=0 (a declared dead band is units by
     definition); every quantity rescaled by the same factor and the map
     equivariant under it (no absolute forcing); magnitudes inside the normal
-    float range.  Power-of-two factors give bit-identical runs; decimal
-    factors change the inputs' rounding and so can move the pass count, not
-    the verdict.
-  oracle: the same group at another scale (bit-identity for powers of two).
+    float range.  Exact for power-of-two factors: bit-identical runs (state,
+    pass count, residual, error estimate, verdict).  A decimal factor rounds
+    the inputs differently: the error estimate moves by rounding, within 1%
+    of itself plus 16 float floors (residual_precision_floor) of the
+    unscaled one (measured, float32: 0.17% and 4.7 floors), so the pass
+    count can move, and so can the verdict of a group that stops at its
+    iteration cap with the estimate inside that band about the threshold
+    (measured: 0.85 to 1.51 thresholds over eleven decimal factors, two
+    verdicts differing).  Anywhere else the verdict is the unscaled one.
+  oracle: the same group at another scale (bit-identity for powers of two; the stated band for decimal factors).
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in
+    - tests/core/test_coupling_verdict_under_a_decimal_change_of_units.py::test_a_power_of_two_change_of_units_is_the_same_run
+    - tests/core/test_coupling_verdict_under_a_decimal_change_of_units.py::test_a_decimal_change_of_units_moves_the_estimate_by_no_more_than_the_stated_rounding
+    - tests/core/test_coupling_verdict_under_a_decimal_change_of_units.py::test_a_decimal_change_of_units_moves_the_verdict_only_at_the_cap_within_that_rounding
     - tests/property/test_differential_coupling_units.py::test_a_coupled_group_takes_the_same_passes_at_every_scale
     - tests/property/test_coupling_convergence_at_every_field_scale.py::test_a_small_field_is_not_dropped_merely_for_being_small
   status: verified
@@ -580,7 +589,7 @@ claims:
     The diagnostics cost "9 Jacobian-vector products for the spectrum (18
     under convergence_norm="interface" with a mapping or a transform on an
     internal edge, or a field that more than one internal edge reads
-    ...) and 11 + 4 k + 5 n_p more for the bound per group per step (plus one
+    ...) and 11 + 4 k + 5 n_p + 2 k n_p more for the bound per group per step (plus one
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
     at most 64 entries, one per larger constant)"; arnoldi_spectral_radius "costs n_steps + 1
@@ -594,7 +603,7 @@ claims:
   oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_plus_one_jacobian_vector_products
-    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_plus_two_k_n_p_products
     - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_nine_more_products
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is
@@ -3257,23 +3266,26 @@ claims:
     (1) What a user can check: wherever spectral_usable is True and no
     more than eight scalars cross the group's edges,
     |rho_spectral - rho| <= 5% of (1 - rho_spectral) (score
-    "radius_strict").  Past eight scalars the value is an estimate and the
-    flag says that the Arnoldi residual and a ninth Krylov vector's
-    movement of the radius are within that margin, which bounds the error
-    for a normal Jacobian only: twelve non-normal float32 scalars read
-    0.273 for 0.219, flag set (MADD-ANO-225, open).  (2) For rank at most eight, rho_spectral is the
+    "radius_strict").  Past that the Krylov space is still growing at the
+    cap, the value is an estimate and the flag is False (it read 0.273 for
+    0.219 on twelve non-normal float32 scalars with the flag set:
+    MADD-ANO-225, resolved).  (2) For rank at most eight, rho_spectral is the
     radius of a matrix within the analysis dtype's rounding of the weighted
     Jacobian: within 1e-4 of the radius plus its movement under
     perturbations of norm 8 eps ||A|| (score "radius"; 1e-9 of the radius
-    and better on the float64 pins).  The flag's margin is held by
-    measurement, not by a bound: one more Jacobian-vector product (the
-    ninth Krylov vector where the space is still growing, otherwise a
-    combination of the basis against the Arnoldi relation) moves the radius
-    by at most the margin.  Made for fields no smaller than a hundredth of
-    what drives them: a loop that passes through a change of a field below
-    that field's rounding is not in the products at all (a float32
-    sub-cycled ring with a field 1e-6 of its driver reads 1e-12 for
-    1.25e-4, flag set: MADD-ANO-222, open).  On a backend where JAX lowers
+    and better on the float64 pins).  The flag's margin is held by a
+    certificate over the measured rounding: one more Jacobian-vector
+    product (a combination of the basis against the Arnoldi relation)
+    gives each row's rounding, no perturbation of that size entry by entry
+    puts an eigenvalue of the compression on the circle |z| = rho + margin
+    or on the circle of that radius about the dominant one
+    (MADD-ANO-229).  The measured size is one product's, and a direction
+    the breakdown test discarded counts for its bare norm.
+    Made for fields no smaller than a hundredth of what drives them; below
+    that a float32 group's radius is more often undetermined and the flag
+    False.  (A sub-cycled member's interpolated boundary value lost a loop
+    below a field's rounding from the products: MADD-ANO-222, resolved.)
+    On a backend where JAX lowers
     no non-symmetric eigenvalue problem (neither CPU nor GPU) the
     compressed radius comes from repeated squaring, which in float32 is
     not backward stable (MADD-ANO-223).
@@ -3586,14 +3598,14 @@ claims:
   area: report
   claim: >-
     spectral_usable: "the bound above is finite and the Arnoldi space had
-    settled: the Arnoldi residual h_{k+1,k}, any direction the breakdown
-    test discarded as rounding, and the distance one more Jacobian-vector
-    product moves rho_spectral (the ninth Krylov vector where the space was
-    still growing; where it was not, the product's disagreement with the
-    eight before it, which is rounding's) are each at most 5% of
-    1 - rho_spectral.  False where nothing was computed, where the bound is
-    inf, for a group with more independent interface scalars than the eight
-    Krylov steps resolve ... where the residual never entered the Krylov
+    settled: the Krylov space closed within the eight steps, any
+    direction the breakdown test discarded as rounding is at most
+    5% of 1 - rho_spectral, and no rounding of the size one more
+    Jacobian-vector product measures can move the radius by that much.
+    False where nothing was computed, where the bound is inf, for a group
+    whose Krylov space is still growing at the cap -- more than seven
+    independent interface scalars, or more than eight where they are the
+    whole state ... where the residual never entered the Krylov
     space ... and where the residual is at its float floor
     (precision_limited) while a node in the group has not declared
     update_evaluations()."
@@ -3669,10 +3681,14 @@ claims:
     derivative only.  The resolvent is applied exactly to each probe's
     secant (MADD-ANO-142; per-entry probes MADD-ANO-143).  Its norms are
     the state's fields: under convergence_norm="interface" with an edge
-    transform, the raw source fields, before the transform.  Not held at
-    the float floor in float32: a Jacobi ring of mapped edges stopped with
-    precision_limited=True read 5.1e-6 for a true 3.0e-5, flag set
-    (MADD-ANO-226, open).
+    transform, the raw source fields, before the transform.  The part of
+    the distance that is the pass's rounding has no direction and is
+    multiplied by the operator norm of the right-hand side's change over
+    the directions the Jacobian reads (it took one stand-in direction and
+    read 5.1e-6 for a true 3.0e-5 at the float floor: MADD-ANO-226,
+    resolved); where the pass has no reverse mode and more than 64 state
+    entries that norm is unavailable and the bound is inf unless the
+    right-hand side does not depend on the state.
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep

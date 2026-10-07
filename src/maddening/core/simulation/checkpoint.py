@@ -207,21 +207,36 @@ def _check_mapping_structures(graph_manager: "GraphManager", archive: "_Checkpoi
     A sparse mapping's weights are one number per slot of an index the
     checkpoint does not carry.  Restored onto a different index of the same
     shape they would run an operator nobody computed, and nothing about
-    their shape or values could tell.  So for every edge whose weights this
-    load would install, the structure digest saved beside them must be the
+    their shape or values could tell.  So for every edge the checkpoint
+    carries weights for, the structure digest saved beside them must be the
     live mapping's -- both absent (a dense mapping, whose weights are the
-    whole operator) or both present and equal.  Raises before anything is
-    read into the graph.
+    whole operator) or both present and equal -- and every one of those
+    weights must be a leaf the live mapping has.  Raises before anything
+    is read into the graph.
+
+    The digest is judged whatever the weights are called.  It used to be
+    judged only for a saved leaf the live mapping also had, and a saved
+    leaf the live mapping lacked was skipped: the stock dense mappings
+    call their matrix ``H`` and the sparse ones their values ``W``, so a
+    sparse edge's checkpoint loaded into the dense edge of the same key
+    (and the reverse) returned normally and installed nothing.
     """
     live = _mapping_structures(graph_manager)
     current = graph_manager.params.get("mappings", {})
     for edge_key, saved in mapping_keys.items():
-        if edge_key not in current:
-            continue
-        installs = sorted(name for name in saved
-                          if name != _STRUCTURE_MEMBER and name in current[edge_key])
+        installs = sorted(name for name in saved if name != _STRUCTURE_MEMBER)
         if not installs:
+            # A digest with no weights beside it answers for nothing.
             continue
+        if edge_key not in current:
+            weights = ", ".join(repr(name) for name in installs)
+            raise ValueError(
+                f"Checkpoint mapping weights {weights} were saved for edge "
+                f"{edge_key!r}, and this graph has no mapping weights under that "
+                f"key (it has them for: {sorted(current) or 'no edge'}): the edge "
+                f"was removed or renamed, or its mapping now carries no weights.  "
+                f"Nothing was loaded."
+            )
         recorded: Optional[bytes] = None
         key = saved.get(_STRUCTURE_MEMBER)
         if key is not None:
@@ -233,9 +248,18 @@ def _check_mapping_structures(graph_manager: "GraphManager", archive: "_Checkpoi
                 )
             recorded = archive.read(key).tobytes()
         mine = live.get(edge_key)
-        if recorded == mine:
-            continue
         weights = ", ".join(repr(name) for name in installs)
+        if recorded == mine:
+            unknown = [name for name in installs if name not in current[edge_key]]
+            if unknown:
+                raise ValueError(
+                    f"Checkpoint mapping weights "
+                    f"{', '.join(repr(name) for name in unknown)} for edge "
+                    f"{edge_key!r} have no counterpart in this graph, whose mapping "
+                    f"on that edge has {sorted(current[edge_key])}: they were saved "
+                    f"for another kind of mapping.  Nothing was loaded."
+                )
+            continue
         if recorded is not None and mine is not None:
             raise ValueError(
                 f"Checkpoint mapping weights {weights} for edge {edge_key!r} were saved "
@@ -288,7 +312,10 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         and a state value already ``inf`` or ``NaN`` loads as it was).
         Also if it holds weights of a sparse interface mapping that were
         saved for another sparsity pattern than the live mapping's -- or
-        for a dense mapping, or the reverse -- whatever their shape
+        for a dense mapping, or the reverse -- whatever their shape and
+        whatever the weights are called, or mapping weights the live
+        graph has no leaf for: another leaf name on the same edge, or an
+        edge that carries no mapping weights here
         (:func:`_check_mapping_structures`).
         A parameter leaf is not asked what ``PUT /graph/params`` asks --
         its ``ParamSpec`` bounds, finiteness, the node's constructor -- as a
@@ -433,7 +460,9 @@ def _load_from_archive(graph_manager: "GraphManager", archive: "_CheckpointArchi
     # and validating afterwards left a failed resume married to the
     # checkpoint's states and the graph's fresh params -- silently, and
     # the cloud entry point logged it as a fresh start.  Unknown nodes
-    # and keys are ignored (a node may have stopped accepting params);
+    # and keys are ignored (a node may have stopped accepting params;
+    # an unknown mapping edge or weight is not among them: it is refused
+    # by ``_check_mapping_structures`` before this runs);
     # a leaf whose shape differs from the live one is an error, like a
     # state field, because restoring it would run the graph wrong.
     def _stage_params(section: str, saved_tree: dict) -> list:

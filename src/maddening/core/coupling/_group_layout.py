@@ -182,65 +182,51 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     return True
 
 
-def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, dividers) -> dict:
-    """``{member: (field, ...)}``: the floating fields *group*'s solve returns recomputed at the state it returns.
+def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -> dict:
+    """``{member: (field, ...)}``: the floating fields *group*'s solve returns recomputed at the iterate it accepts.
 
     ``convergence_norm="interface"`` measures, on each pass, how far what
     the internal edges deliver moved between an iterate and its successor,
-    and nothing else.  A floating field **no internal edge reads** feeds
-    nothing back, so the iteration does not need it, yet the iterate
-    carries the value some earlier pass gave it: under Jacobi the one
-    computed from the *previous* iterate's readings, under a relaxation a
-    blend of every pass so far.  A one-way pair under Jacobi returned its
-    target computed from the pre-step source with ``converged=True``,
-    ``iterations=1`` and a residual of exactly zero (MADD-ANO-238).
+    and nothing else.  The members of the iterate it accepts were computed
+    from the readings of the iterate *before* it, which the exit does not
+    compare with anything.  So the norm answers only for a field it
+    **measures whole**: the source field of an internal edge that delivers
+    it as it is, with no mapping and no transform
+    (:func:`maddening.core.edge._delivered` applies nothing else).  Every
+    other floating field could be returned from a pass before the readings
+    the verdict was taken on, with ``converged=True``:
 
-    The solve returns these fields as one pass computes them **at the
-    state it returns** -- from the very readings the verdict was taken on
-    -- as it does a member's non-floating fields.  No edge reads them, so
-    the pass, the readings and the residual of the returned state are the
-    ones measured, and no iterate or pass count moves.  They are named for
+    * a field **no internal edge reads** (a one-way pair under Jacobi
+      returned its target computed from the pre-step source at
+      ``iterations=1`` and a residual of exactly zero: MADD-ANO-238);
+    * a field internal edges read **only through a mapping or a
+      transform**, which may deliver less than the field: the part of it
+      they do not deliver is measured by nothing (MADD-ANO-239).
 
-    * a member that reads an internal edge from the previous iterate:
-      every internal edge under Jacobi; under Gauss-Seidel an edge whose
-      source does not run before its target in *schedule* (the sweep
-      order), and every internal edge into a sub-cycled member that
-      interpolates between the previous iterate and the pass
-      (``boundary_interpolation`` other than ``"constant"``);
-    * every member with an internal input under an acceleration, which
-      relaxes or extrapolates what it is handed.
+    The return rule (``_with_nonfloat_fields_at`` in the step): a field
+    measured whole keeps the accepted iterate's value, bit for bit; every
+    field named here takes the value **one plain pass of the group's own
+    schedule computes at the accepted iterate**, from the readings the
+    verdict was taken on.  One rule for every member, schedule,
+    acceleration, solver and verdict: under a relaxation an unmeasured
+    field is a blend of every pass so far, and a member a sweep feeds
+    forward lags too once its inputs came through a mapping, so no
+    narrower set was found that is right everywhere.
 
-    Not covered: a field internal edges read **only through a mapping or
-    a transform**, which may deliver less than the field.  It feeds back,
-    so it cannot be recomputed without moving the readings the verdict was
-    taken on; the part of it the edges do not deliver is measured by
-    nothing (MADD-ANO-239, open).
-
-    ``{}`` for every other norm, and for an interface group with no such
-    field: such a group keeps its compiled step.  Static.
+    ``{}`` for every other norm, and for an interface group whose every
+    floating field is measured whole: such a group keeps its compiled
+    step and is not charged the pass.  Static.  **The one place the set
+    is defined**: it must follow the norm's own reading rule, so that a
+    field the norm does measure whole is never recomputed.
     """
     if group.convergence_norm != "interface":
         return {}
-    order = {nn: i for i, nn in enumerate(schedule)}
     floats = float_fields_of(state, list(schedule))
-    read = {(e.source_node, e.source_field) for e in interface_edges}
-    jacobi = group.iteration_mode == "jacobi"
-    interpolates = group.boundary_interpolation != "constant"
-    accelerated = group.acceleration != "none"
-    fed, behind = set(), set()
-    for e in interface_edges:
-        target = e.target_node
-        fed.add(target)
-        if (jacobi or order[e.source_node] >= order[target]
-                or (interpolates and dividers.get(target, 1) > 1)):
-            behind.add(target)
-    refreshed = {}
-    for nn in schedule:
-        if nn in behind or (accelerated and nn in fed):
-            unread = tuple(f for f in floats[nn] if (nn, f) not in read)
-            if unread:
-                refreshed[nn] = unread
-    return refreshed
+    whole = {(e.source_node, e.source_field) for e in interface_edges
+             if e.mapping is None and e.transform is None}
+    missed = {nn: tuple(f for f in floats[nn] if (nn, f) not in whole)
+              for nn in schedule}
+    return {nn: fields for nn, fields in missed.items() if fields}
 
 
 #: Every ``_meta`` slot a coupling group can own, as the suffix after

@@ -1,38 +1,51 @@
-"""``converged=True`` under ``convergence_norm="interface"`` is a statement about the state returned.
+"""What a coupling group returns under ``convergence_norm="interface"``, and what its report is of.
 
 The interface norm measures, on each pass, how far what the group's
 internal edges deliver moved between an iterate and its successor.  The
-members of that iterate were computed from the readings of the one before
-it, so a floating field the norm does not measure whole can hold a value
-those settled readings never produced:
+members of the iterate it accepts were computed from the readings of the
+one *before* it, which the exit compares with nothing.  So every floating
+field the norm does not **measure whole** -- the source field of an
+internal edge that carries no mapping and no transform -- could be
+returned from a pass the settled readings never produced, with
+``converged=True``:
 
-* a field **no internal edge reads**.  A one-way pair ``A -> B`` under
-  Jacobi stopped on its first pass -- ``A`` does not depend on the iterate,
-  so what it delivers "stopped moving" at once, with a residual of exactly
-  zero -- and returned ``B`` computed from the *pre-step* ``A``, with
-  ``converged=True`` and ``iterations=1`` (MADD-ANO-238; 0.1.0 to 0.3.1).
-  A weakly coupled pair returned such a field a few hundred tolerances
-  off, under Gauss-Seidel too (the member that reads a back edge), and a
-  fixed relaxation left it a blend of every pass so far.  The solve now
-  returns these fields as one pass computes them at the state it returns
-  -- from the readings the verdict was taken on -- and changes nothing
-  else: iterates, residuals and pass counts are the ones they were;
-* a field edges read **only through a mapping or a transform** that
-  delivers less than the field.  It feeds back, so it cannot be recomputed
-  without moving the readings the verdict was taken on, and the part of it
-  the edges do not deliver is still measured by nothing: MADD-ANO-239,
-  open, pinned here by strict xfails.
+* a field **no internal edge reads**: a one-way pair ``A -> B`` under
+  Jacobi returned ``B`` computed from the *pre-step* ``A`` at
+  ``iterations=1`` and a residual of exactly zero (MADD-ANO-238; 0.1.0 to
+  0.3.1);
+* a field edges read **only through a mapping or a transform**: the part
+  of it they do not deliver was measured by nothing (MADD-ANO-239; 0.1.0
+  to 0.3.1).
 
-Every oracle here is a float64 closed form of the linear map the graph
-holds; none calls the code under test.  The static rule
-(``_fields_the_interface_norm_misses``) is checked on its own, branch by
-branch.
+**The return rule.**  With ``x`` the iterate the loop accepts (or stops on
+at its cap) and ``F`` one plain pass of the group's schedule: a field
+measured whole is returned as ``x`` holds it, bit for bit; every other
+floating field as ``F(x)`` holds it.  One rule for every member, schedule,
+acceleration, solver and verdict.  Its consequences, each tested here:
+
+* the report (``iterations``, ``residual``, ``converged``) is of ``x`` and
+  is the one the loop measured: no iterate, residual or pass count moves;
+* the returned state is not an iterate of the loop.  Its readings differ
+  from those of ``x`` only on the edges whose source field was recomputed,
+  and there by exactly the term the residual holds for that edge: **the
+  readings of the returned state are within the reported residual of those
+  of ``x``, in the residual's own weights**;
+* ``max_iterations=1`` returns its one pass as it is (one pass has to cost
+  one pass).
+
+Every oracle is a float64 closed form of the linear map the graph holds:
+the fixed point, and one pass at a given iterate.  The accepted iterate
+itself is read from the same library with the rule switched off (``_rule``
+patches the name the step reads, and shows the patch was read).
 """
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import os
 import warnings
+from unittest import mock
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -41,7 +54,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import _coupled_block
 from maddening.core.coupling._group_layout import _fields_the_interface_norm_misses
+from maddening.core.coupling.acceleration import float_fields_of
 from maddening.core.coupling.group import CouplingGroup
 from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.edge import EdgeSpec
@@ -54,16 +69,18 @@ RTOL = 1e-4
 
 class _Lin(SimulationNode):
     """``u <- alpha u_pre + c + sum_p G_p @ inp_p``; with *wide*, also
-    ``w <- 1 + sum_p K_p @ inp_p``, a field no edge reads."""
+    ``w <- 1 + sum_p K_p @ inp_p``, a field no edge reads.  *calls* counts
+    the evaluations of ``update`` the compiled step runs."""
 
-    def __init__(self, name, n, ports, alpha, c, u0, dtype, wide):
-        super().__init__(name, 1.0)
+    def __init__(self, name, n, ports, alpha, c, u0, dtype, wide, timestep=1.0, calls=None):
+        super().__init__(name, timestep)
         self._n, self._dtype, self._wide = n, dtype, wide
         self._ports = {p: (np.asarray(G, dtype), np.asarray(K, dtype))
                        for p, (G, K) in ports.items()}
         self._alpha = dtype(alpha)
         self._c = np.asarray(c, dtype)
         self._u0 = np.asarray(u0, dtype)
+        self._calls = calls
 
     def initial_state(self):
         s = {"u": jnp.asarray(self._u0)}
@@ -77,6 +94,8 @@ class _Lin(SimulationNode):
                 for p, (G, _K) in self._ports.items()}
 
     def update(self, state, boundary_inputs, dt):
+        if self._calls is not None:
+            jax.debug.callback(lambda: self._calls.append(self.name))
         u = self._alpha * state["u"] + jnp.asarray(self._c)
         w = jnp.ones(self._n, self._dtype)
         for p, (G, K) in self._ports.items():
@@ -97,7 +116,10 @@ def _first(v):
 A = ("A", 2, 0.5, [1.0, -2.0], [4.0, 4.0])
 B = ("B", 2, 0.0, [0.25, 0.5], [-3.0, 5.0])
 C = ("C", 2, 0.0, [-1.0, 0.75], [2.0, -6.0])
-D = ("D", 2, 0.0, [0.5, 0.5], [1.0, 1.0])
+#: ``B`` and ``C`` with a memory of their own pre-step value: what a step
+#: returns for them is what the next one starts from.
+B_KEEPS = ("B", 2, 0.5, [0.25, 0.5], [-3.0, 5.0])
+C_KEEPS = ("C", 2, 0.25, [-1.0, 0.75], [2.0, -6.0])
 G = np.array([[0.7, 0.3], [-0.4, 0.9]])
 #: The gain of the unread field ``w``: order one, so a reading one pass old
 #: shows in it at the size of that reading's change.
@@ -107,7 +129,7 @@ H = np.array([[1.0, 0.5], [-0.25, 1.5]])
 SELECT = np.array([[1.0, 0.0]])
 
 
-def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), compile_=True):
+def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), timesteps=None, calls=None):
     """*edges*: ``(src, dst, G, how)`` with *how* ``None`` (plain), a matrix
     (the edge's mapping) or a callable (its transform)."""
     ports = {name: {} for name, *_ in nodes}
@@ -116,7 +138,8 @@ def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), compile_=True):
         ports[dst][f"p{i}"] = (gain, K[:, :gain.shape[1]])
     gm = GraphManager()
     for name, n, alpha, c, u0 in nodes:
-        gm.add_node(_Lin(name, n, ports[name], alpha, c, u0, dtype, name in wide))
+        gm.add_node(_Lin(name, n, ports[name], alpha, c, u0, dtype, name in wide,
+                         timestep=(timesteps or {}).get(name, 1.0), calls=calls))
     for i, (src, dst, _gain, how) in enumerate(edges):
         extra = {}
         if callable(how):
@@ -126,9 +149,10 @@ def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), compile_=True):
         gm.add_edge(src, dst, "u", f"p{i}", **extra)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")         # the deprecated "fori" says so
-        gm.add_coupling_group([name for name, *_ in nodes], diagnostics=True, **group)
-        if compile_:
-            gm.compile()
+        # ``"fori"`` reports only with its diagnostics on.
+        gm.add_coupling_group([name for name, *_ in nodes],
+                              diagnostics=group.get("solver") == "fori", **group)
+        gm.compile()
     return gm
 
 
@@ -141,16 +165,22 @@ def _delivers(how, n):
     return np.asarray(how, np.float64)
 
 
-def _fixed_point(nodes, edges, wide=()):
-    """``{node: {field: value}}`` with every edge reading the new value, in float64."""
+def _sizes(nodes):
+    return {name: n for name, n, *_ in nodes}
+
+
+def _fixed_point(nodes, edges, wide=(), pre=None):
+    """``{node: {field: value}}`` with every edge reading the new value, in
+    float64: the step's fixed point from *pre* (the nodes' own starts)."""
     off, k = {}, 0
     for name, n, *_ in nodes:
         off[name] = k
         k += n
-    size = {name: n for name, n, *_ in nodes}
+    size = _sizes(nodes)
     M, b = np.zeros((k, k)), np.zeros(k)
     for name, n, alpha, c, u0 in nodes:
-        b[off[name]:off[name] + n] = alpha * np.asarray(u0, float) + np.asarray(c, float)
+        start = u0 if pre is None else pre[name]["u"]
+        b[off[name]:off[name] + n] = alpha * np.asarray(start, float) + np.asarray(c, float)
     for src, dst, gain, how in edges:
         M[off[dst]:off[dst] + size[dst], off[src]:off[src] + size[src]] += (
             np.asarray(gain, float) @ _delivers(how, size[src]))
@@ -165,13 +195,99 @@ def _fixed_point(nodes, edges, wide=()):
     return out
 
 
-def _distance(gm, want):
+def _plain_pass(nodes, edges, x, schedule, wide=(), order=None):
+    """``F(x)`` in float64: one plain pass of *schedule* at the iterate *x*,
+    from the nodes' own starts.  Under Gauss-Seidel a member reads this
+    pass's value of every member before it in the sweep (*order*, the
+    graph's own) and *x* for the others; under Jacobi it reads *x*
+    throughout."""
+    size, new = _sizes(nodes), {}
+    by_name = {node[0]: node for node in nodes}
+    for name, n, alpha, c, u0 in (by_name[m] for m in order or by_name):
+        u = alpha * np.asarray(u0, float) + np.asarray(c, float)
+        w = np.ones(n)
+        for src, dst, gain, how in edges:
+            if dst != name:
+                continue
+            read = new[src] if schedule == "gauss-seidel" and src in new else x[src]
+            delivered = _delivers(how, size[src]) @ np.asarray(read["u"], float)
+            u = u + np.asarray(gain, float) @ delivered
+            w = w + K[:, :np.asarray(gain).shape[1]] @ delivered
+        new[name] = {"u": u, "w": w} if name in wide else {"u": u}
+    return new
+
+
+def _residual_terms(nodes, edges, new, old, rtol):
+    """``{edge index: (sum of squares, entries)}`` of the interface norm of
+    *new* against *old*: what each internal edge delivers, each entry over
+    ``rtol`` times the delivered value's largest magnitude at either; an
+    edge that delivers nothing but zeros is left out (the dead band at
+    ``atol=0``).  The norm is the root of the summed squares over the
+    summed entries."""
+    size, terms = _sizes(nodes), {}
+    for i, (src, _dst, _gain, how) in enumerate(edges):
+        D = _delivers(how, size[src])
+        a, b = D @ np.asarray(new[src]["u"], float), D @ np.asarray(old[src]["u"], float)
+        ref = max(float(np.max(np.abs(a))), float(np.max(np.abs(b))))
+        if ref > 0:
+            terms[i] = (float(np.sum(((a - b) / (rtol * ref)) ** 2)), a.size)
+    return terms
+
+
+def _whole(edges):
+    """The fields the norm measures whole: delivered as they are by an edge."""
+    return {(src, "u") for src, _dst, _gain, how in edges if how is None}
+
+
+@contextlib.contextmanager
+def _rule(which):
+    """The step's return rule replaced: ``"none"`` recomputes nothing (the
+    solve returns the iterate it accepted), ``"all"`` every floating field
+    (one plain pass at that iterate); ``None`` is the library's own.  Yields
+    the list of groups the step asked the rule about: the patch is on the
+    name ``_coupled_block`` reads, and a caller asserts it was read."""
+    real, seen = _coupled_block._fields_the_interface_norm_misses, []
+
+    def rule(group, interface_edges, schedule, state):
+        seen.append(tuple(schedule))
+        if which is None or group.convergence_norm != "interface":
+            return real(group, interface_edges, schedule, state)
+        if which == "none":
+            return {}
+        floats = float_fields_of(state, list(schedule))
+        return {nn: fields for nn, fields in floats.items() if fields}
+
+    with mock.patch.object(_coupled_block, "_fields_the_interface_norm_misses", rule):
+        yield seen
+
+
+def _solve(nodes, edges, group, *, rule=None, x64=False, wide=(), steps=1, timesteps=None,
+           calls=None):
+    """``(state, report)`` after *steps* steps of a fresh graph: every field
+    as the array the graph holds; ``report["sweep"]`` is the members in the
+    order a pass runs them."""
+    with cd.x64(x64), _rule(rule) as seen:
+        gm = _graph(nodes, edges, group, dtype=np.float64 if x64 else np.float32,
+                    wide=wide, timesteps=timesteps, calls=calls)
+        for _ in range(steps):
+            gm.step()
+        if calls is not None:
+            jax.effects_barrier()
+        (report,) = gm.coupling_diagnostics().values()
+        report = dict(report, sweep=[m for m in gm.schedule if m in _sizes(nodes)])
+        state = {name: {f: np.asarray(v) for f, v in gm.get_node_state(name).items()}
+                 for name, *_ in nodes}
+    assert seen, "the step never asked the return rule: the patch is on the wrong name"
+    return state, report
+
+
+def _distance(state, want):
     """The worst field's ``max |x - x*| / max |x*|``, and which field it is."""
     worst, where = 0.0, None
     for name, fields in want.items():
-        state = gm.get_node_state(name)
         for f, v in fields.items():
-            d = float(np.max(np.abs(np.asarray(state[f], np.float64) - v)) / np.max(np.abs(v)))
+            d = float(np.max(np.abs(np.asarray(state[name][f], np.float64) - v))
+                      / np.max(np.abs(v)))
             if d > worst:
                 worst, where = d, f"{name}.{f}"
     return worst, where
@@ -179,16 +295,225 @@ def _distance(gm, want):
 
 def _step(nodes, edges, group, *, x64=False, wide=()):
     """``(distance to the fixed point, where, report)`` of one step from the start."""
-    with cd.x64(x64):
-        gm = _graph(nodes, edges, group, dtype=np.float64 if x64 else np.float32, wide=wide)
-        gm.step()
-        (report,) = gm.coupling_diagnostics().values()
-        distance, where = _distance(gm, _fixed_point(nodes, edges, wide))
+    state, report = _solve(nodes, edges, group, x64=x64, wide=wide)
+    distance, where = _distance(state, _fixed_point(nodes, edges, wide))
     return distance, where, report
 
 
 def _eps(x64):
     return float(np.finfo(np.float64 if x64 else np.float32).eps)
+
+
+# ---------------------------------------------------------------------------
+# The rule: what is returned, and what the report is of
+# ---------------------------------------------------------------------------
+
+#: Each member's first entry reads the other's at a loop gain of 0.3; its
+#: second entry, which a selection does not deliver, reads the other's
+#: first at order one.
+G_A = np.array([[0.5], [1.0]])
+G_B = np.array([[0.6], [-0.7]])
+
+#: ``name: (nodes, edges, members with the unread field w)``.  Loop gains
+#: of about 0.3, so a cap of three passes is reached well outside ``RTOL``.
+CASES = {
+    # ``u`` delivered whole both ways; ``w`` read by no edge.
+    "unread": ([A, B], [("A", "B", G, None), ("B", "A", 0.3 * G.T, None)], ("A", "B")),
+    # ``u`` read only through a mapping that loses nothing.
+    "mapped": ([A, B], [("A", "B", G, H), ("B", "A", 0.3 * G.T, H)], ()),
+    # ... through a mapping that delivers one entry of two.
+    "selected": ([A, B], [("A", "B", G_B, SELECT), ("B", "A", G_A, SELECT)], ("B",)),
+    # ... through a transform that does.
+    "transformed": ([A, B], [("A", "B", G_B, _first), ("B", "A", G_A, _first)], ()),
+    # ``A.u`` and ``C.u`` each read whole by ``B`` and through a selection
+    # by the other, so measured whole; ``B.u`` and ``C.w`` read by nothing.
+    "tail": ([A, B, C], [("A", "B", G, None), ("A", "C", G_B, SELECT),
+                            ("C", "B", 0.5 * G, None), ("C", "A", G_A, SELECT)], ("C",)),
+}
+ACCELERATIONS = {
+    "none": {},
+    "fixed": dict(acceleration="fixed", relaxation=0.5),
+    "aitken": dict(acceleration="aitken"),
+    "iqn-ils": dict(acceleration="iqn-ils"),
+    "iqn-imvj": dict(acceleration="iqn-imvj", jacobian_reuse=2),
+}
+#: Passes enough for every row to converge.
+CONVERGES = 40
+#: ``(case, schedule, solver, acceleration, cap)``: ``cap`` ``None`` lets
+#: the group converge, 3 stops it well short.
+GRID = tuple(itertools.product(tuple(CASES), ("jacobi", "gauss-seidel"), ("ift", "fori"),
+                               ACCELERATIONS, (None, 3)))
+#: The rows run on every push: every case, schedule, solver, acceleration
+#: and verdict at least twice, and every case under both solvers.
+PER_PUSH = (
+    ("unread", "jacobi", "ift", "none", None),
+    ("unread", "gauss-seidel", "fori", "iqn-ils", 3),
+    ("unread", "gauss-seidel", "ift", "fixed", None),
+    ("mapped", "gauss-seidel", "ift", "none", None),
+    ("mapped", "jacobi", "fori", "aitken", 3),
+    ("mapped", "jacobi", "ift", "iqn-imvj", None),
+    ("selected", "jacobi", "ift", "fixed", 3),
+    ("selected", "gauss-seidel", "fori", "none", None),
+    ("selected", "gauss-seidel", "ift", "iqn-ils", None),
+    ("transformed", "jacobi", "fori", "none", 3),
+    ("transformed", "gauss-seidel", "ift", "aitken", None),
+    ("tail", "jacobi", "ift", "none", None),
+    ("tail", "jacobi", "fori", "iqn-imvj", 3),
+    ("tail", "gauss-seidel", "ift", "fixed", None),
+)
+assert set(PER_PUSH) <= set(GRID)
+
+
+def _row_id(row):
+    return "-".join(str(part) for part in row)
+
+
+def assert_the_return_rule(case, schedule, solver, acceleration, cap, *, x64=False):
+    """The returned state is the accepted iterate with its unmeasured fields
+    from one plain pass, and the report is of the accepted iterate."""
+    nodes, edges, wide = CASES[case]
+    group = dict(iteration_mode=schedule, convergence_norm="interface", rtol=RTOL,
+                 solver=solver, **ACCELERATIONS[acceleration])
+    group["max_iterations"] = CONVERGES if cap is None else cap
+    returned, report = _solve(nodes, edges, group, wide=wide, x64=x64)
+    accepted, loop = _solve(nodes, edges, group, wide=wide, rule="none", x64=x64)
+    where = _row_id((case, schedule, solver, acceleration, cap))
+
+    # 1. The rule moves no iterate, residual or pass count.
+    assert (report["iterations"], report["converged"]) == (
+        loop["iterations"], loop["converged"]), where
+    assert float(report["residual"]) == float(loop["residual"]), where
+    assert report["converged"] is (cap is None), (where, report["iterations"])
+    if cap is not None:
+        assert report["iterations"] == cap, where
+
+    # 2. A field measured whole is the accepted iterate's, to the bit; every
+    #    other is one plain pass at the accepted iterate.
+    after = _plain_pass(nodes, edges, accepted, schedule, wide, report["sweep"])
+    whole, eps, moved = _whole(edges), _eps(x64), 0.0
+    for name, fields in returned.items():
+        for f, value in fields.items():
+            if (name, f) in whole:
+                assert np.array_equal(value, accepted[name][f]), (where, name, f)
+                continue
+            scale = float(np.max(np.abs(after[name][f])))
+            gap = float(np.max(np.abs(value.astype(np.float64) - after[name][f])))
+            assert gap <= 32 * eps * scale, (
+                f"{where}: {name}.{f} is {gap / scale:.2e} (relative) from one plain pass "
+                f"at the accepted iterate")
+            moved = max(moved, float(np.max(np.abs(
+                value.astype(np.float64) - accepted[name][f]))) / scale)
+    if acceleration == "none" or cap is not None:
+        # (An accelerated solve of a linear group can stop on the fixed
+        # point to rounding, where the pass changes nothing.)
+        assert moved > 64 * eps, f"{where}: the rule changed nothing; the row tests nothing"
+
+    # 3. The report is of the accepted iterate: its residual is the norm of
+    #    the pass at it.  A float32 residual carries the rounding of its
+    #    readings over ``rtol``.
+    terms = _residual_terms(nodes, edges, after, accepted, RTOL)
+    count = sum(n for _sq, n in terms.values())
+    restated = float(np.sqrt(sum(sq for sq, _n in terms.values()) / max(count, 1)))
+    slack = 2e-3 * restated + 16 * eps / RTOL
+    assert abs(float(report["residual"]) - restated) <= slack, (where, report, restated)
+
+    # 4. The readings of the returned state are within the reported residual
+    #    of the accepted iterate's, in the residual's own weights: they
+    #    moved on the edges whose source was recomputed, by that edge's own
+    #    term of the residual, and nowhere else.
+    drift = _residual_terms(nodes, edges, returned, accepted, RTOL)
+    recomputed = {i for i, (src, *_rest) in enumerate(edges) if (src, "u") not in whole}
+    assert set(drift) <= set(terms), where
+    for i, (sq, _n) in drift.items():
+        if i in recomputed:
+            assert abs(np.sqrt(sq) - np.sqrt(terms[i][0])) <= slack * np.sqrt(count), (where, i)
+        else:
+            assert sq == 0.0, (where, i)
+    readings_moved = float(np.sqrt(sum(sq for sq, _n in drift.values()) / max(count, 1)))
+    assert readings_moved <= float(report["residual"]) + slack, (
+        f"{where}: the returned state's readings are {readings_moved:.4g} from the accepted "
+        f"iterate's; the report says residual={report['residual']!r}")
+    if recomputed == set(range(len(edges))):
+        assert abs(readings_moved - float(report["residual"])) <= slack, where
+
+
+@pytest.mark.parametrize("row", PER_PUSH, ids=_row_id)
+def test_the_solve_returns_the_accepted_iterate_with_its_unmeasured_fields_from_one_pass(row):
+    assert_the_return_rule(*row)
+
+
+@pytest.mark.parametrize("row", [PER_PUSH[3], PER_PUSH[6]], ids=_row_id)
+def test_the_return_rule_holds_in_float64(row):
+    assert_the_return_rule(*row, x64=True)
+
+
+# Per push: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_solve_returns_the_accepted_iterate_with_its_unmeasured_fields_from_one_pass
+@pytest.mark.slow
+@pytest.mark.parametrize("row", [r for r in GRID if r not in PER_PUSH], ids=_row_id)
+def test_the_return_rule_holds_under_every_schedule_solver_acceleration_and_verdict(row):
+    assert_the_return_rule(*row)
+
+
+@pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])
+def test_a_sub_cycled_member_is_returned_by_the_same_rule(schedule):
+    """``B`` at half the group's timestep, sub-stepped twice per pass between
+    interpolated readings.  No closed form here: the pass is the library's
+    own, read by recomputing every field (``"all"``)."""
+    nodes, edges, wide = CASES["selected"]
+    group = dict(iteration_mode=schedule, convergence_norm="interface", rtol=RTOL,
+                 subcycling=True, boundary_interpolation="linear", max_iterations=CONVERGES)
+    kw = dict(wide=wide, timesteps={"A": 1.0, "B": 0.5})
+    returned, report = _solve(nodes, edges, group, **kw)
+    accepted, loop = _solve(nodes, edges, group, rule="none", **kw)
+    after, _ = _solve(nodes, edges, group, rule="all", **kw)
+    assert report["converged"] is True
+    assert (report["iterations"], float(report["residual"])) == (
+        loop["iterations"], float(loop["residual"]))
+    differs = False
+    for name, fields in returned.items():
+        for f, value in fields.items():
+            assert np.array_equal(value, after[name][f]), (name, f)     # nothing is whole here
+            differs = differs or not np.array_equal(value, accepted[name][f])
+    assert differs, "the accepted iterate is already the pass at it: the case tests nothing"
+
+
+def test_a_cap_of_one_returns_its_one_pass_as_it_is():
+    """``max_iterations=1`` is a request for one staggered pass and costs
+    one: nothing is recomputed, and the residual is how far that pass moved."""
+    nodes, edges, wide = CASES["selected"]
+    group = dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL,
+                 max_iterations=1)
+    calls = []
+    returned, report = _solve(nodes, edges, group, wide=wide, calls=calls)
+    accepted, _ = _solve(nodes, edges, group, wide=wide, rule="none")
+    assert report["iterations"] == 1 and len(calls) == len(nodes)
+    for name, fields in returned.items():
+        for f, value in fields.items():
+            assert np.array_equal(value, accepted[name][f]), (name, f)
+
+
+#: A pair whose every floating field an edge delivers whole.
+CASES["whole"] = ([A, B], [("A", "B", G, None), ("B", "A", 0.3 * G.T, None)], ())
+
+
+@pytest.mark.parametrize("case,solver,extra", [
+    ("whole", "ift", 0), ("whole", "fori", 0), ("unread", "ift", 2), ("selected", "fori", 2),
+    ("tail", "ift", 3)])
+def test_the_rule_costs_one_evaluation_of_the_pass_and_only_where_it_recomputes(
+        case, solver, extra):
+    """Counted as calls of the members' ``update`` in the compiled step: one
+    more of each member where a field is recomputed, none in a group whose
+    every floating field is measured whole."""
+    nodes, edges, wide = CASES[case]
+    group = dict(iteration_mode="gauss-seidel", convergence_norm="interface", rtol=RTOL,
+                 solver=solver, max_iterations=CONVERGES)
+    counts = {}
+    for rule in (None, "none"):
+        calls = []
+        _state, report = _solve(nodes, edges, group, wide=wide, rule=rule, calls=calls)
+        counts[rule] = len(calls)
+    assert report["converged"] is True
+    assert counts[None] - counts["none"] == extra, counts
 
 
 # ---------------------------------------------------------------------------
@@ -215,18 +540,14 @@ def test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_return
         f"converged at iterations={report['iterations']} residual={report['residual']}")
 
 
-@pytest.mark.parametrize("group", [
-    dict(acceleration="fixed", relaxation=0.5),
-    dict(acceleration="fixed", relaxation=1.3),
-    dict(acceleration="aitken"),
-    dict(acceleration="iqn-ils"),
-    dict(acceleration="iqn-imvj", jacobian_reuse=2),
-], ids=lambda g: f"{g['acceleration']}{g.get('relaxation', '')}")
+@pytest.mark.parametrize("acceleration", [a for a in ACCELERATIONS if a != "none"] + ["over"])
 @pytest.mark.parametrize("solver", ["ift", "fori"])
-def test_no_acceleration_leaves_a_one_way_target_between_passes(solver, group):
+def test_no_acceleration_leaves_a_one_way_target_between_passes(solver, acceleration):
     """A relaxation blends every pass so far into a field nothing measures:
     at 0.5 the target was half-way from the stale value to the right one,
     6800 tolerances off."""
+    group = (dict(acceleration="fixed", relaxation=1.3) if acceleration == "over"
+             else ACCELERATIONS[acceleration])
     distance, where, report = _step(
         [A, B], [("A", "B", G, None)],
         dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL,
@@ -273,48 +594,27 @@ def test_a_field_no_edge_reads_is_within_the_tolerance_in_a_weakly_coupled_pair(
         f"(iterations={report['iterations']})")
 
 
-def test_the_refreshed_field_carries_the_fixed_points_derivative():
-    """``dB/dA_pre`` through the step is the closed form's: the field is
-    recomputed outside the implicit rule and differentiated as a pass is."""
-    gm = _graph([A, B], [("A", "B", G, None)],
-                dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL))
-    gm.step()
-    gm.reset_state()
-    compiled, base = gm._compiled_step, gm._state       # noqa: SLF001
-
-    def target(a_pre):
-        state = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
-        state["A"]["u"] = a_pre
-        return compiled(state, {})["B"]["u"]
-
-    jac = jax.jacfwd(target)(jnp.asarray(A[4], jnp.float32))
-    np.testing.assert_allclose(np.asarray(jac), A[2] * G, rtol=1e-6, atol=1e-7)
-
-
 # ---------------------------------------------------------------------------
 # A field edges read only through a mapping or a transform
 # ---------------------------------------------------------------------------
 
 #: ``B``'s first entry does not depend on what ``B`` reads; its second does.
 G_SECOND = np.array([[0.0, 0.0], [-0.4, 0.9]])
+#: The chain whose middle member's second entry no edge delivers.
+LOSSY_CHAIN = {how_id: [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], how)]
+               for how_id, how in (("mapping", SELECT), ("transform", _first))}
 
 
-_OPEN = pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-239 (open): the part of a field its edges deliver only through a mapping or "
-    "a transform is measured by nothing"))
-
-
-@_OPEN
-@pytest.mark.parametrize("how", [SELECT, _first], ids=["mapping", "transform"])
-def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind(how):
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+@pytest.mark.parametrize("how", sorted(LOSSY_CHAIN))
+def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind(how, solver):
     """``A -> B -> C`` with ``B`` delivered through a selection of its first
     entry, which no input moves: what ``B`` delivers is settled from the
     first pass, a residual of exactly zero, while its second entry still
     held the pre-step ``A``.  The same stale member, behind a mapping."""
-    edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], how)]
     distance, where, report = _step(
-        [A, B, C], edges, dict(iteration_mode="jacobi", convergence_norm="interface",
-                               rtol=RTOL))
+        [A, B, C], LOSSY_CHAIN[how],
+        dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL, solver=solver))
     assert report["converged"] is True
     assert distance <= 16 * _eps(False), (where, distance, report["iterations"])
 
@@ -322,37 +622,112 @@ def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind
 #: Each member's first entry reads the other's at 0.03 (the loop the norm
 #: watches gains a digit and a half per pass); its second entry, which no
 #: edge delivers, reads the other's first at order one.
-G_A = np.array([[0.03], [1.0]])
-G_B = np.array([[0.03], [-0.7]])
+G_A_WEAK = np.array([[0.03], [1.0]])
+G_B_WEAK = np.array([[0.03], [-0.7]])
 
 
-@_OPEN
-def test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes():
-    """The same chain under ``acceleration="fixed"`` at 0.5: ``B``'s second
-    entry is a blend of the passes so far, and would be after a second pass
-    within the threshold too."""
-    edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], SELECT)]
+@pytest.mark.parametrize("relaxation", [0.5, 1.3])
+def test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes(relaxation):
+    """The same chain under ``acceleration="fixed"``: ``B``'s second entry
+    was a blend of the passes so far, and would have been after a second
+    pass within the threshold too."""
     distance, where, report = _step(
-        [A, B, C], edges, dict(iteration_mode="jacobi", convergence_norm="interface",
-                               rtol=RTOL, acceleration="fixed", relaxation=0.5))
+        [A, B, C], LOSSY_CHAIN["mapping"],
+        dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL,
+             acceleration="fixed", relaxation=relaxation))
     assert report["converged"] is True
     assert distance <= RTOL, (where, distance, report["iterations"])
 
 
-@_OPEN
+@pytest.mark.parametrize("how", [SELECT, _first], ids=["mapping", "transform"])
 @pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])
-def test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair(schedule):
+def test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair(schedule, how):
     """Both edges deliver a first entry; each member's second entry is
     computed from the other's first and measured by nothing.  On the pass
     the delivered entries met the tolerance, the second entries held what
     the pass before had delivered, nine tolerances away."""
-    edges = [("A", "B", G_B, SELECT), ("B", "A", G_A, SELECT)]
+    edges = [("A", "B", G_B_WEAK, how), ("B", "A", G_A_WEAK, how)]
     distance, where, report = _step(
         [A, B], edges, dict(iteration_mode=schedule, convergence_norm="interface", rtol=RTOL))
     assert report["converged"] is True
     assert distance <= RTOL, (
         f"{where} is {distance / RTOL:.1f} tolerances from the fixed point "
         f"(iterations={report['iterations']})")
+
+
+# ---------------------------------------------------------------------------
+# More than one step: a recomputed field is the next step's start
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", ["no-edge", "mapping", "transform"])
+def test_every_step_of_a_trajectory_ends_at_its_own_fixed_point(case):
+    """Three steps.  ``B`` and ``C`` carry half and a quarter of their
+    pre-step value into the next step, so a field returned a pass behind
+    is a wrong start too: the trajectory left the closed form's and never
+    came back."""
+    nodes = [A, B_KEEPS, C_KEEPS]
+    edges = ([("A", "B", G, None), ("B", "C", G.T, None)] if case == "no-edge"
+             else LOSSY_CHAIN[case])
+    state, report = _solve(nodes, edges, dict(
+        iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL), steps=3)
+    want = None
+    for _ in range(3):
+        want = _fixed_point(nodes, edges, pre=want)
+    distance, where = _distance(state, want)
+    assert report["converged"] is True
+    assert distance <= 64 * _eps(False), (where, distance)
+
+
+# ---------------------------------------------------------------------------
+# Derivatives: a recomputed field carries the fixed point's
+# ---------------------------------------------------------------------------
+
+#: ``case: (nodes, edges, the recomputed field differentiated)``.
+DERIVATIVES = {
+    "no-edge": ([A, B], [("A", "B", G, None)], ("B", "u")),
+    "mapping": ([A, B, C], LOSSY_CHAIN["mapping"], ("B", "u")),
+    "transform": ([A, B, C], LOSSY_CHAIN["transform"], ("B", "u")),
+}
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+@pytest.mark.parametrize("case", sorted(DERIVATIVES))
+def test_a_recomputed_field_carries_the_fixed_points_derivative(case, solver):
+    """``d field / d A_pre`` through the step, by ``jvp`` and by ``grad``,
+    against the closed form's.  The field is recomputed outside the implicit
+    rule and differentiated as a pass is; returned a pass behind, it had the
+    derivative of the value it held (a one-way target: ``G`` where the fixed
+    point's is ``alpha G``)."""
+    nodes, edges, (name, f) = DERIVATIVES[case]
+    with cd.x64(True):
+        gm = _graph(nodes, edges, dict(iteration_mode="jacobi", convergence_norm="interface",
+                                       rtol=1e-12, solver=solver, max_iterations=4),
+                    dtype=np.float64)
+        gm.step()
+        assert next(iter(gm.coupling_diagnostics().values()))["converged"] is True
+        gm.reset_state()
+        compiled, base = gm._compiled_step, gm._state       # noqa: SLF001
+
+        def field(a_pre):
+            state = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
+            state["A"]["u"] = a_pre
+            return compiled(state, {})[name][f]
+
+        a0 = jnp.asarray(A[4], jnp.float64)
+        tangent, cotangent = jnp.asarray([1.0, -0.5]), jnp.asarray([0.25, 2.0])
+        pushed = np.asarray(jax.jvp(field, (a0,), (tangent,))[1])
+        pulled = np.asarray(jax.grad(lambda a: field(a) @ cotangent)(a0))
+
+    want = np.zeros((2, 2))
+    here = {n_[0]: {"u": np.asarray(n_[4], float)} for n_ in nodes}
+    base_point = _fixed_point(nodes, edges, pre=here)[name][f]
+    for j in range(2):
+        moved = {k: {"u": v["u"].copy()} for k, v in here.items()}
+        moved["A"]["u"][j] += 1.0
+        want[:, j] = _fixed_point(nodes, edges, pre=moved)[name][f] - base_point
+    assert np.max(np.abs(want)) > 0.1, "the field does not depend on A: nothing is tested"
+    np.testing.assert_allclose(pushed, want @ np.asarray(tangent), rtol=1e-9, atol=1e-10)
+    np.testing.assert_allclose(pulled, np.asarray(cotangent) @ want, rtol=1e-9, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -366,12 +741,12 @@ _STATE = {
 }
 
 
-def _rule(edges, *, order=("a", "b", "c"), dividers=None, **group):
+def _named(edges, *, order=("a", "b", "c"), **group):
     group.setdefault("convergence_norm", "interface")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         g = CouplingGroup(nodes=frozenset(order), **group)
-    return _fields_the_interface_norm_misses(g, edges, list(order), _STATE, dividers or {})
+    return _fields_the_interface_norm_misses(g, edges, list(order), _STATE)
 
 
 def _edge(src, dst, **kw):
@@ -384,48 +759,47 @@ _MAPPED = matrix_mapping(np.eye(2, dtype=np.float32))
 
 def test_only_the_interface_norm_misses_a_field():
     for norm in ("l2", "mixed"):
-        assert _rule(_RING, convergence_norm=norm, iteration_mode="jacobi") == {}
+        assert _named(_RING, convergence_norm=norm, iteration_mode="jacobi") == {}
+        assert _named([_edge("a", "b", mapping=_MAPPED)], convergence_norm=norm) == {}
 
 
-def test_under_jacobi_every_fed_member_reads_the_previous_iterate():
-    """Unread floating fields are named (never a counter); a field delivered
-    whole is not; a member with no internal input is not."""
-    assert _rule(_RING, iteration_mode="jacobi") == {"a": ("w",), "b": ("w",)}
-    assert _rule([_edge("a", "b")], iteration_mode="jacobi") == {"b": ("u", "w")}
+def test_a_field_an_edge_delivers_as_it_is_is_measured_whole_and_never_named():
+    """Every ``u`` of the ring is; the unread ``w`` are named, a counter never."""
+    assert _named(_RING) == {"a": ("w",), "b": ("w",)}
 
 
-def test_under_gauss_seidel_only_a_back_edges_target_reads_the_previous_iterate():
-    assert _rule(_RING, iteration_mode="gauss-seidel") == {"a": ("w",)}
-    assert _rule([_edge("a", "b")], iteration_mode="gauss-seidel") == {}
-    assert _rule([_edge("b", "a")], iteration_mode="gauss-seidel") == {"a": ("u", "w")}
-    # ... and a member that reads itself.
-    assert _rule([_edge("b", "b")], iteration_mode="gauss-seidel") == {"b": ("w",)}
+def test_a_group_whose_every_floating_field_is_measured_whole_names_nothing():
+    """Such a group keeps the compiled step it had and pays no pass."""
+    state = {"a": {"u": jnp.zeros(2), "count": jnp.zeros((), jnp.int32)}, "b": {"u": jnp.zeros(2)}}
+    g = CouplingGroup(nodes=frozenset("ab"), convergence_norm="interface")
+    pair = [_edge("a", "b"), _edge("b", "a")]
+    assert _fields_the_interface_norm_misses(g, pair, ["a", "b"], state) == {}
 
 
-def test_a_sub_cycled_member_that_interpolates_reads_the_previous_iterate():
-    forward = [_edge("a", "b")]
-    kw = dict(iteration_mode="gauss-seidel", subcycling=True)
-    assert _rule(forward, dividers={"a": 1, "b": 4}, **kw) == {"b": ("u", "w")}
-    assert _rule(forward, dividers={"a": 4, "b": 1}, **kw) == {}
-    assert _rule(forward, dividers={"a": 1, "b": 4}, boundary_interpolation="constant",
-                 **kw) == {}
-
-
-@pytest.mark.parametrize("acceleration", ["fixed", "aitken", "iqn-ils", "iqn-imvj"])
-def test_an_acceleration_refreshes_every_fed_members_unread_fields(acceleration):
-    """It relaxes or extrapolates what it is handed, in whatever order the
-    members ran; a member no internal edge feeds does not depend on the
-    iterate and is left alone."""
-    refreshed = _rule([_edge("a", "b")], iteration_mode="gauss-seidel",
-                      acceleration=acceleration)
-    assert refreshed == {"b": ("u", "w")}
+@pytest.mark.parametrize("acceleration", sorted(ACCELERATIONS))
+@pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])
+def test_every_other_floating_field_of_every_member_is_named_whatever_the_loop(
+        schedule, acceleration):
+    """One rule: a member no internal edge feeds, and one a Gauss-Seidel
+    sweep feeds forward, are named like the rest."""
+    kw = dict(iteration_mode=schedule, acceleration=acceleration)
+    assert _named([_edge("a", "b")], **kw) == {"a": ("w",), "b": ("u", "w"), "c": ("u",)}
+    assert _named([_edge("b", "a")], **kw) == {"a": ("u", "w"), "b": ("w",), "c": ("u",)}
 
 
 @pytest.mark.parametrize("lossy", [dict(mapping=_MAPPED), dict(transform=_first)],
                          ids=["mapping", "transform"])
-@pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])
-def test_a_field_read_through_a_mapping_or_a_transform_is_never_recomputed(schedule, lossy):
-    """It is read, so recomputing it would move the readings the verdict was
-    taken on; the member's other unread fields are still refreshed."""
+def test_a_field_read_only_through_a_mapping_or_a_transform_is_named(lossy):
+    """Even an identity mapping: what a mapping delivers cannot be told from
+    the field statically."""
     ring = [_edge("a", "b", **lossy), _edge("b", "c"), _edge("c", "a")]
-    assert _rule(ring, iteration_mode=schedule)["a"] == ("w",)
+    assert _named(ring) == {"a": ("u", "w"), "b": ("w",)}
+
+
+@pytest.mark.parametrize("lossy", [dict(mapping=_MAPPED), dict(transform=_first)],
+                         ids=["mapping", "transform"])
+def test_a_field_one_edge_delivers_whole_is_not_named_for_another_that_maps_it(lossy):
+    """Recomputing a field the norm measures would move a reading the
+    verdict was taken on."""
+    edges = [_edge("a", "b"), _edge("a", "c", **lossy), _edge("b", "a"), _edge("c", "a")]
+    assert _named(edges) == {"a": ("w",), "b": ("w",)}

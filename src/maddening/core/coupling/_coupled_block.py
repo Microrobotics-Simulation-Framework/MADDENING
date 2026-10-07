@@ -392,12 +392,12 @@ def _run_coupled_block_impl(
     group_dividers = _group_dividers(group, nodes) or {}
     use_subcycling = bool(group_dividers)
     # Static: the floating fields the interface norm does not measure
-    # because no internal edge reads them, in the members whose value
-    # the iterate can leave behind its readings.  The solve returns them
-    # as a pass computes them at the returned state.  Empty for every
-    # other group, whose compiled step is the one it was.
+    # whole (read by no internal edge, or only through a mapping or a
+    # transform).  The solve returns them as one plain pass computes them
+    # at the iterate it accepts.  Empty for every other group, whose
+    # compiled step is the one it was.
     refreshed_fields = _fields_the_interface_norm_misses(
-        group, interface_edges_in_order, group_node_names, new_state, group_dividers)
+        group, interface_edges_in_order, group_node_names, new_state)
     # The group's macro timestep: the time one coupling pass covers.
     macro_dt = (max(nodes[nn].timestep for nn in group_dividers)
                 if use_subcycling else None)
@@ -931,13 +931,16 @@ def _run_coupled_block_impl(
                                    **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
             if refreshed_fields:
                 # The floating fields the interface norm does not measure
-                # and no internal edge reads
-                # (``_fields_the_interface_norm_misses``), by the same
-                # rule: as the pass computes them at this state, from the
-                # readings its verdict was taken on.  No edge reads them,
-                # so the pass of the state returned, its readings and its
-                # residual are the ones measured.  Differentiated: at a
-                # fixed point this is the field's own derivative.
+                # whole (``_fields_the_interface_norm_misses``), by the
+                # same rule: as one plain pass computes them at this
+                # iterate, from the readings its verdict was taken on.  A
+                # field read through a mapping or a transform is among
+                # them, so the state returned is not an iterate of the
+                # loop: its readings are within the reported residual of
+                # this iterate's, in the group's norm (the residual *is*
+                # the scaled change of the readings over this pass), and
+                # the report describes this iterate.  Differentiated: at
+                # a fixed point this is the field's own derivative.
                 s_fresh = one_pass(s_full)
                 for nn, fields in refreshed_fields.items():
                     out[nn] = {**out[nn], **{f: s_fresh[nn][f] for f in fields}}

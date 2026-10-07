@@ -897,7 +897,7 @@ def test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_c
         np.testing.assert_allclose(np.asarray(got), [1.3, 2.7], rtol=1e-6)
 
 
-def _ring(anchor, *, subcycled, iteration_mode):
+def _written_ring(anchor, *, subcycled, iteration_mode):
     """``a -> b`` through the geometry edge and ``b -> a`` through a static
     one, in a coupling group; *subcycled* halves ``b``'s timestep, so its
     inputs are interpolated between two iterates."""
@@ -920,7 +920,7 @@ def test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group(
         anchor, node, subcycled, iteration_mode):
     """Every read of a geometry inside a coupled solve asks the same rule,
     the interpolated read of a sub-cycled member's source included."""
-    gm = _ring(anchor, subcycled=subcycled, iteration_mode=iteration_mode)
+    gm = _written_ring(anchor, subcycled=subcycled, iteration_mode=iteration_mode)
     gm.compile()
     gm.step()
     _rewritten(gm, node, "float16")

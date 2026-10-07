@@ -1240,6 +1240,15 @@ def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(
 # matrices held dense score 0.48, and rightly over every entry: there each
 # is a weight and ``gradient_relative_error_bound`` covers it (5.6e-3,
 # against 1.0e-3 on the sparse graph).
+#
+# Which patterns can show it: the relative error of the derivative with
+# respect to a weight is that of the source entry it reads, whatever its
+# row (the weight moves the pass along one fixed direction, by that
+# entry).  So the entries outside a pattern change the worst only in a
+# column that holds none -- a source entry the mapping never reads.  A
+# local gather has such columns (the example reads two of eight cells); a
+# ragged pattern has a full row and none, so its scores are the same
+# numbers under either enumeration.
 
 _LOCAL_SPARSE = Cell("side-2-8-r", "float64", 6, 5, "sparse-local")
 #: The example: two markers and eight cells, four of each edge's sixteen
@@ -1338,6 +1347,20 @@ def test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern
     assert left_out and left_out <= outside, "the premise: the fixed point moves with them"
     assert not set(as_sparse) & outside
     assert as_sparse == {name: error for name, error in as_dense.items() if name not in outside}
+    # A weight's error is its source entry's: every entry of a column has
+    # one error, so only a column no weight reads can raise the worst.
+    patterns = {i: ct.mapping_pattern(topo, i, kind) for i, e in enumerate(topo.edges) if e.mapped}
+    for i in patterns:
+        columns: dict = {}
+        for (_node, _port, at, (_row, column)), error in as_dense.items():
+            if at == i:
+                columns.setdefault(column, []).append(error)
+        assert all(max(errors) - min(errors) <= 1e-9 * max(errors) for errors in columns.values())
+    unread = {(i, int(b)) for i, pattern in patterns.items()
+              for b in np.nonzero(~pattern.any(axis=0))[0]}
+    assert bool(unread) is (kind == "sparse-local")
+    if not unread:
+        assert max(as_dense.values()) == max(as_sparse.values())
 
     # A weight at zero is still a weight: the pattern says so, not the values.
     edge = next(i for i, e in enumerate(topo.edges) if e.mapped)
@@ -1355,7 +1378,7 @@ def test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern
                  for error, c in gradient_errors(model, pre, state, "matrix-local")}
         assert local == as_dense
         beyond = max(as_dense, key=as_dense.get)
-        assert beyond in outside
+        assert beyond in outside and (beyond[2], beyond[3][1]) in unread
         assert as_dense[beyond] > 4.0 * max(as_sparse.values()), (
             as_dense[beyond], max(as_sparse.values()))
 

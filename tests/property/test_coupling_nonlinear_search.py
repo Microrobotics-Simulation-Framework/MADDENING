@@ -775,42 +775,44 @@ def test_the_reference_reproduces_the_closed_form_on_every_per_push_draw():
           + ", ".join(f"{k} {v:.3g}" for k, v in sorted(worst.items())))
 
 
-# Slow: a sparse cell of the linear search and its twin compiled, per kind.
+# Slow: a sparse cell of the linear search and its twin compiled.
 # Per push: tests/property/test_coupling_nonlinear_search.py::test_the_reference_reproduces_the_closed_form_on_a_linear_cell
 @pytest.mark.slow
-@pytest.mark.parametrize("kind", ["sparse-local", "sparse-ragged"])
-def test_the_reference_reproduces_the_closed_form_on_a_sparse_cell(kind):
+def test_the_reference_reproduces_the_closed_form_on_a_sparse_cell():
     """The two oracles name a sparse edge's constants by different routes
     and must take the same ones: the reference differentiates the twin's
     own parameter tree, which holds the weights of the pattern and nothing
     else, and the closed form asks the mapping kind which entries of its
-    dense matrix are weights.  On a cell stopped after five passes, every
-    answer agrees, the gradient error among them -- taken over every entry
-    of the matrix, the closed form's is five times the reference's on the
-    local example (``linear.OUTSIDE_THE_PATTERN``)."""
-    index = next(i for i, c in enumerate(linear.CELLS)
-                 if c.mapping_kind == kind and c.dtype == "float64" and c.cap == 5)
+    dense matrix are weights.  On the local sparse cell, stopped after five
+    passes, every answer agrees, the gradient error among them; taken over
+    every entry of the matrix the closed form's is five times the
+    reference's on ``linear.OUTSIDE_THE_PATTERN``.
+
+    (A local pattern, because the relative error of the derivative with
+    respect to a weight is that of the source entry it reads, whatever its
+    row: the entries outside a pattern change the worst only where a
+    column holds none, and a ragged pattern has a full row.)"""
+    index = linear.OUTSIDE_THE_PATTERN.cell
     cell = linear.CELLS[index]
-    drawn = []
+    kind = cell.mapping_kind
+    assert kind == "sparse-local" and cell.cap == 5
+    drawn = [linear.OUTSIDE_THE_PATTERN]
     targeted_search(linear.cases((index,), linear.CLAIMED),
                     lambda c: (drawn.append(c) or 0.0, None), math.inf,
                     profile=dataclasses.replace(PER_PUSH, max_examples=40))
-    if kind == "sparse-local":
-        assert linear.OUTSIDE_THE_PATTERN.cell == index
-        drawn.append(linear.OUTSIDE_THE_PATTERN)
     worst = assert_the_reference_reproduces_the_closed_form(drawn)
     # The premise: the pass of the twin (bound by the comparison) moves
-    # with one mapping weight per pattern entry -- a padded slot of a
-    # ragged layout is a leaf it does not read -- and the patterns hold
-    # fewer entries than the matrices have.
+    # with one mapping weight per pattern entry, the patterns hold fewer
+    # entries than the matrices have, and a column of one holds none.
     _twin, ref = _linear_twin(index)
-    mapped = [i for i, e in enumerate(cell.topo.edges) if e.mapped]
-    held = sum(int(ct.mapping_pattern(cell.topo, i, kind).sum()) for i in mapped)
-    entries = sum(ct.mapping_pattern(cell.topo, i, kind).size for i in mapped)
+    patterns = [ct.mapping_pattern(cell.topo, i, kind)
+                for i, e in enumerate(cell.topo.edges) if e.mapped]
+    held, entries = sum(int(p.sum()) for p in patterns), sum(p.size for p in patterns)
     moves = np.any(ref.sensitivities(np.ones(ref.size)) != 0.0, axis=0)
     weights = sum(bool(m) for name, m in zip(ref.constant_names(), moves)
                   if name.startswith("mapping:"))
     assert weights == held < entries, (weights, held, entries)
+    assert any(not p.any(axis=0).all() for p in patterns)
     print(f"{kind}, cell {index}: {len(drawn)} draws; the worst miss over what is allowed: "
           + ", ".join(f"{k} {v:.3g}" for k, v in sorted(worst.items())))
 

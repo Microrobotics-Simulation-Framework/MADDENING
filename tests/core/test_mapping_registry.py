@@ -447,9 +447,11 @@ def test_the_same_config_loads_once_the_program_imports_the_registering_module(
 def test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing(
         tmp_path, monkeypatch):
     """A checkpoint carries weights under edge keys and weight names, never
-    a kind.  One whose member names spell an importable module -- as an
-    edge, as a weight, as a kind-like path -- restores the weights it has
-    for this graph's edges, ignores the rest, and imports nothing."""
+    a kind.  One whose member names spell an importable module imports
+    nothing: as the owner of a node parameter it is ignored and the load
+    restores the weights it has for this graph's edges; as a mapping edge
+    or a mapping weight this graph does not have it is refused (a saved
+    mapping weight is never dropped), and the graph is as it was."""
     marker = tmp_path / "imported"
     (tmp_path / "checkpoint_kind_sentinel.py").write_text(
         f"open({str(marker)!r}, 'w').write('imported')\n", encoding="utf-8")
@@ -462,9 +464,6 @@ def test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing(
     with np.load(path, allow_pickle=False) as archive:
         members = {k: archive[k] for k in archive.files}
     weight = members[f"_params_mappings/{C2F}/W"]
-    members["_params_mappings/checkpoint_kind_sentinel/W"] = weight
-    members[f"_params_mappings/{C2F}/checkpoint_kind_sentinel"] = weight
-    members["_params_mappings/checkpoint_kind_sentinel.build/kind"] = np.asarray(1.0)
     members["_params/checkpoint_kind_sentinel/kind"] = np.asarray(1.0)
     np.savez(path, **members)
 
@@ -474,6 +473,23 @@ def test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing(
     assert_same_weights(fresh.params["mappings"][C2F],
                         {name: np.asarray(leaf) for name, leaf in trained.items()})
     assert "checkpoint_kind_sentinel" not in sys.modules and not marker.exists()
+
+    spelt = {
+        "an edge": ("_params_mappings/checkpoint_kind_sentinel/W", weight),
+        "a weight": (f"_params_mappings/{C2F}/checkpoint_kind_sentinel", weight),
+        "a kind-like path": ("_params_mappings/checkpoint_kind_sentinel.build/kind",
+                             np.asarray(1.0)),
+    }
+    for where, (member, value) in spelt.items():
+        np.savez(path, **{**members, member: value})
+        fresh = _rods(KINDS[INVERSE_DISTANCE].build)
+        fresh.compile()
+        before = {name: np.asarray(leaf).copy()
+                  for name, leaf in fresh.params["mappings"][C2F].items()}
+        with pytest.raises(ValueError, match="checkpoint_kind_sentinel.*Nothing was loaded"):
+            load_state(fresh, path)
+        assert_same_weights(fresh.params["mappings"][C2F], before)
+        assert "checkpoint_kind_sentinel" not in sys.modules and not marker.exists(), where
 
 
 _IMPORT_MACHINERY = ("importlib", "pkgutil", "runpy", "imp", "zipimport", "pkg_resources",

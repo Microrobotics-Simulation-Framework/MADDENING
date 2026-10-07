@@ -341,6 +341,9 @@ def test_a_transform_that_stepped_the_graph_leaves_the_report_of_the_step_before
 
     def loss(p):
         graph.run_scan(1, params=p)
+        # A write to the traced state: the copy kept before the transform
+        # is the one the graph comes back to, and stays.
+        graph.set_node_state("c", {"y": graph.get_node_state("a")["x"]})
         return jnp.sum(graph.get_node_state("a")["x"])
 
     jax.make_jaxpr(loss)(graph.params)

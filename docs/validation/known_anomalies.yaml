@@ -15505,3 +15505,101 @@ anomalies:
       - "tests/property/test_rest_requests_generated_from_the_schema.py::test_every_integer_query_declares_its_range"
       - "tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-231"
+    title: "coupling_diagnostics() measured the residual's float floor on the live state: after set_node_state the same step read another spectral_error_bound (0.0 with spectral_usable=True where every member was written to zero)"
+    description: >
+      The `_meta` slots of a report are the step's own record, but the
+      float floor that `spectral_error_bound` adds, `precision_limited`
+      reads and `spectral_usable` rests on was computed at report time
+      from the node states the graph held then.  A state write after the
+      step (`set_node_state`, `PUT /graph/state/{node}`) therefore gave
+      the same step another report.  Measured before the fix (CPU,
+      jaxlib 0.11.0): float32 Gauss-Seidel pairs with gains 0.999 and
+      0.9999 at tolerance 1e-9 stall at `residual == 0.0`, where the
+      floor is the whole bound; with both members written to zero (a
+      field at exactly zero leaves the norm) the report read
+      `spectral_error_bound = 0.0`, `spectral_usable=True`,
+      `precision_limited=False` for a state 9.0e-5 and 7.6e-4 from its
+      fixed point.  Writing one member to zero shrank the bound 1.37
+      times; at tolerance 1e-6 the bound shrank 12.7 times and stayed
+      above the distance.  Only a group whose interface norm reads a
+      mapped edge stored its floor in the step.  No release carries the
+      floor or the spectral bound.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound of 0.0 flagged usable for a state that is not at its fixed
+      point is a silent wrong result, never `minor`.  Not `critical`: it
+      is reported, not applied, and it needs a state write between the
+      step and the read.  `context_dependent` as for the other bound
+      entries.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.simulation.checkpoint.save_state"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The graph keeps a shallow copy of the state (references, no data)
+      from the first write after a step, beside the report slots it goes
+      with, and the report is measured on it while those slots are still
+      the ones in the graph; a step drops it.  The doors that keep it are
+      `set_node_state` (so `PUT /graph/state/{node}` and `load_state`),
+      `add_node` and `remove_node`.  An assignment into the private
+      `gm._state` dict is not seen.  A checkpoint saved after a member
+      was written to other values holds the written state, so it is
+      saved with that group's `iterations` counter at 0: loaded, the
+      group has no report until it steps (the step only writes that
+      counter, so the restart is unchanged).  The replaced arrays stay
+      referenced until the next step.
+    verification:
+      - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report"
+      - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write"
+      - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_of_a_written_state_carries_no_report"
+      - "tests/property/test_coupling_targeted_search.py::test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterwards"
+      - "tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_state_put_after_the_step_does_not_move_its_report"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-232"
+    title: "A gradient_relative_error_bound whose flag is False can read NaN on a GPU backend where the CPU backend reads a number"
+    description: >
+      One local GPU run (jax 0.11.0, float32,
+      `benchmarks/results/gpu_eigvals_probe/RESULT.md`): the stock spring
+      pair under `solver="ift"`, `diagnostics=True`, after 40 steps with
+      the residual exactly 0, reported
+      `gradient_relative_error_bound` 4.3e-6 on CPU and NaN on the GPU,
+      `gradient_bound_usable=False` on both (the pair is at its float
+      floor and stock nodes do not declare their evaluation count).  The
+      other reported numbers agreed to rounding.  Inside the contract:
+      the flag says the number is not to be used, and NaN is a documented
+      reading of a bound that was not computed.  The cause is not
+      established.  Read on CPU: every quotient in the bound is guarded,
+      and the eight-vector range basis captures this pair's Jacobian
+      (four state entries) with or without one-ulp noise on its
+      products, so the documented NaN paths (nothing responds, range not
+      captured, a non-finite tangent) are not reached there; forcing
+      "not captured" on CPU gives the GPU's reading.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Not a wrong result: the value is flagged not usable on both
+      backends, and a NaN cannot be taken for a bound.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Read `gradient_bound_usable` before the value, as documented; do
+      not compare a not-usable value between backends.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: >
+      A usable bound has not been seen to differ in kind between
+      backends: in float64, where the flags were True, every reported
+      number equalled the CPU's to rounding.  Finding the intermediate
+      needs a GPU run with the bound's parts printed.
+    verification: []
+    github_issue: null

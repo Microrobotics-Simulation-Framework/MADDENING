@@ -16,8 +16,6 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import pytest
 
-pytest.importorskip("fastapi", reason="the REST server needs fastapi")
-
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode

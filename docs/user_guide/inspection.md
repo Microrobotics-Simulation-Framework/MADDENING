@@ -361,6 +361,30 @@ relay, `N` for a loop of `N` sub-steps), and read
 a float32 group with a field under a hundredth of what drives it should be run in float64 before
 its flag is relied on (MADD-ANO-230).
 
+**What `diagnostics=True` costs.**  It is opt-in per group, and the work is done in every step of
+that group.  Beside the solve, the step runs 9 Jacobian-vector products for the spectrum (18 under
+`convergence_norm="interface"` with a mapping or a transform on an internal edge, or a field more
+than one internal edge reads) and `11 + 4 k + 5 n_p + 2 k n_p` more for the gradient bound
+(`k <= 8`, `n_p` the probed constants), then small dense factorisations (QR, linear solves, an
+SVD) and one non-symmetric eigenvalue solve of a matrix of at most 9 x 9.  The eigenvalue solve
+runs in LAPACK on the host; on a GPU backend it is a device round trip in every step.  Measured
+once on a two-spring pair in float32 (an RTX A2000 laptop GPU, jax 0.11.0,
+`benchmarks/results/gpu_eigvals_probe/RESULT.md`): a step takes 0.3 ms with diagnostics off and
+6 to 8 ms with them on, about 4 ms of it the eigenvalue solve; on CPU the same diagnostics-on step
+takes 0.25 to 0.5 ms.
+
+**A report describes the step that ran.**  The bound's float floor is measured on the state the
+step returned.  Writing the state afterwards (`set_node_state`, `PUT /graph/state/{node}`) does not
+change the entry: it describes that step until the group steps again.  A checkpoint saved after a
+member's state was written holds the written state and no report for that group; loaded, the group
+has no entry until it steps.
+
+**A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
+`False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in
+kind between backends: on the pair above after 40 float32 steps (residual exactly 0),
+`gradient_relative_error_bound` read 4.3e-6 on CPU and NaN on the GPU, with the flag `False` on
+both (MADD-ANO-232).
+
 ## Graphs that are not ready
 
 None of these methods compiles a graph or puts it back after a

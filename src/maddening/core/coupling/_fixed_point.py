@@ -52,7 +52,7 @@ _TWO_PASS_EXIT = ("aitken",)
 
 def _fixed_point_while(
     step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
-    acceleration, relaxation, n_reuse, sub_idx,
+    acceleration, relaxation, n_reuse, sub_idx, lagged_reading=False,
 ):
     """Early-exit fixed-point iteration ``x = F(x)`` with acceleration.
 
@@ -223,6 +223,30 @@ def _fixed_point_while(
     residual sequence is ever measured dipping, add the name to
     ``_TWO_PASS_EXIT``.
 
+    **A lagged reading must settle twice too** (``lagged_reading``,
+    static).  Under ``convergence_norm="interface"`` the residual reads
+    what the group's internal edges deliver, and ``x_k``'s members were
+    computed from the readings of ``x_{k-1}``: where a member takes an
+    input from the previous iterate and has a field no edge delivers
+    whole (``_state_lags_the_reading``), ``r_k <= threshold`` says the
+    readings of ``x_k`` and of its successor agree and nothing about the
+    readings that field was computed from.  A one-way pair under Jacobi
+    stopped on its first pass with a residual of exactly zero -- the
+    source does not depend on the iterate -- and returned a target
+    computed from the pre-step source (MADD-ANO-235).  Such a group
+    stops only when the previous residual is at or below ``threshold``
+    as well, which is the statement that the readings ``x_k`` was
+    computed from are within the threshold of the ones judged: the same
+    streak as Aitken's, for a different reason.  At the cap the state
+    returned is the successor, computed from the readings of the last
+    iterate the loop measured, so the residual reported there is the
+    larger of the extra evaluation's and the loop's last whenever the
+    loop's last was above ``threshold`` -- the change of the readings
+    over the pass that computed the state -- and the verdict every
+    reader derives from it cannot be ``True`` on a state computed from
+    readings that had not settled.  Every other group's criterion,
+    report and program are unchanged.
+
     Returns ``(x_star, n_iters, final_res, final_amp, (V, W))``:
     ``n_iters`` is the number of coupling passes that produced
     ``x_star`` (an int32) -- the pre-loop
@@ -351,7 +375,8 @@ def _fixed_point_while(
     # See the docstring for why this list holds Aitken and not IQN.
     # An empty ``prev`` slot means the carry -- and so the emitted HLO
     # -- is unchanged for every acceleration that is not on it.
-    two_pass_exit = acceleration in _TWO_PASS_EXIT
+    # ``lagged_reading`` asks for the same streak; see the docstring.
+    two_pass_exit = acceleration in _TWO_PASS_EXIT or lagged_reading
 
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
         first_pass_relaxed_amplification,
@@ -461,7 +486,12 @@ def _fixed_point_while(
 
     def _measure_at_cap(_x):
         r = jnp.asarray(step_pure(_x, *consts)[1]).astype(acc_dt)   # as the body's
-        return r, amplification(r, loop_res, res_prev)
+        amp = amplification(r, loop_res, res_prev)
+        if lagged_reading:
+            # ``_x`` was computed from the readings ``loop_res`` saw move;
+            # see the docstring.
+            r = jnp.where(loop_res > threshold, jnp.maximum(r, loop_res), r)
+        return r, amp
 
     # ``final_amp`` has to describe the pair that ends on the state
     # being returned.  On the criterion that pair is

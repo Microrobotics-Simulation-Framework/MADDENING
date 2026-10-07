@@ -182,6 +182,59 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     return True
 
 
+def _state_lags_the_reading(group, interface_edges, schedule, state, dividers) -> bool:
+    """Can *group*'s norm pass on readings its returned state was not computed from?
+
+    ``convergence_norm="interface"`` measures, on each pass, how far what
+    the internal edges deliver moved between an iterate and its successor.
+    A member that takes an input from the *previous* iterate was computed
+    from readings one pass older than the pair the norm compared, and a
+    field of it that no edge delivers is measured by nothing: the solve
+    stopped on readings that had settled while that field still held the
+    value of readings that had not.  A one-way pair under Jacobi returned
+    its target computed from the pre-step source with ``converged=True``,
+    ``iterations=1`` and a residual of exactly zero (MADD-ANO-235).
+
+    True when some member both
+
+    * reads an internal edge from the previous iterate: every internal
+      edge under Jacobi; under Gauss-Seidel an edge whose source does not
+      run before its target in *schedule* (the sweep order), and every
+      internal edge into a sub-cycled member, whose sub-steps interpolate
+      between the previous iterate and the pass (``boundary_interpolation``
+      other than ``"constant"``); and
+    * has a floating field the norm does not measure whole: one that no
+      internal edge delivers as it is (no mapping, no transform).
+
+    The solve of such a group stops only when the readings also moved
+    within the threshold over the pass that computed the state it returns
+    (``lagged_reading`` in ``_fixed_point_while``).  A member whose every
+    floating field is delivered whole is measured directly, as under
+    ``"mixed"``, and needs nothing more: such a group keeps its passes and
+    its compiled step.  Static.
+    """
+    if group.convergence_norm != "interface":
+        return False
+    order = {nn: i for i, nn in enumerate(schedule)}
+    floats = float_fields_of(state, list(schedule))
+    whole = {
+        (e.source_node, e.source_field) for e in interface_edges
+        if e.mapping is None and e.transform is None
+    }
+    jacobi = group.iteration_mode == "jacobi"
+    interpolates = group.boundary_interpolation != "constant"
+    for e in interface_edges:
+        target = e.target_node
+        behind = (
+            jacobi
+            or order[e.source_node] >= order[target]
+            or (interpolates and dividers.get(target, 1) > 1)
+        )
+        if behind and any((target, f) not in whole for f in floats[target]):
+            return True
+    return False
+
+
 #: Every ``_meta`` slot a coupling group can own, as the suffix after
 #: ``coupling_<group key>_``.  Read by :func:`_refuse_colliding_group_keys`.
 _GROUP_META_SUFFIXES = (

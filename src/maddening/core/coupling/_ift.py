@@ -27,6 +27,7 @@ from maddening.core.coupling._fixed_point import _fixed_point_while
 def _ift_solve_impl(
     step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
     acceleration, relaxation, n_reuse, sub_idx, linear_solver,
+    lagged_reading=False,
 ):
     """Returns ``(x_star, aux)`` with ``x_star = F(x_star, *consts)``.
 
@@ -76,8 +77,8 @@ def _ift_solve_impl(
     ``rtol`` for ``"mixed"`` and ``"interface"``, whose threshold is
     hard-coded to 1.0) if the gradient has to match the forward.
 
-    ``acceleration`` / ``relaxation`` / ``n_reuse`` are static and
-    control only the forward iterator.  The derivative *rule* is the same
+    ``acceleration`` / ``relaxation`` / ``n_reuse`` / ``lagged_reading``
+    are static and control only the forward iterator.  The derivative *rule* is the same
     for all of them -- it is ``F``'s, linearised at the iterate the
     forward returns, whatever path reached it -- so the gradients agree
     to the extent the returned iterates do: exactly on a map affine in
@@ -88,7 +89,7 @@ def _ift_solve_impl(
     """
     x_star, n_iters, final_res, final_amp, vw = _fixed_point_while(
         step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
-        acceleration, relaxation, n_reuse, sub_idx,
+        acceleration, relaxation, n_reuse, sub_idx, lagged_reading,
     )
     return x_star, (n_iters, final_res, final_amp, vw)
 
@@ -431,7 +432,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
 
 def _ift_solve_jvp(
     step_pure, threshold, max_iter, acceleration, relaxation, n_reuse,
-    sub_idx, linear_solver, primals, tangents,
+    sub_idx, linear_solver, lagged_reading, primals, tangents,
 ):
     # Tangent rule of the implicit function theorem at ``x*``:
     #     (I - dF/dx) x_dot = dF/d(consts) . consts_dot
@@ -446,6 +447,7 @@ def _ift_solve_jvp(
     x_star, aux = _ift_solve(
         step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
         acceleration, relaxation, n_reuse, sub_idx, linear_solver,
+        lagged_reading,
     )
     _, rhs = jax.jvp(
         lambda cc: _F_dispatch(step_pure, x_star, cc), (consts,), (consts_dot,)
@@ -474,10 +476,11 @@ def _zero_tangent(x):
 #                  6=max_iter (static int), 7=acceleration (static str),
 #                  8=relaxation (static float), 9=n_reuse (static int),
 #                  10=sub_idx (static tuple | None), 11=linear_solver
-#                  (static str).  4=first_res is a *traced* scalar (the
+#                  (static str), 12=lagged_reading (static bool, default
+#                  False).  4=first_res is a *traced* scalar (the
 #                  residual of the pass before the loop), so it is a
 #                  primal with an ignored tangent, not a static.
 _ift_solve = jax.custom_jvp(
-    _ift_solve_impl, nondiff_argnums=(0, 5, 6, 7, 8, 9, 10, 11)
+    _ift_solve_impl, nondiff_argnums=(0, 5, 6, 7, 8, 9, 10, 11, 12)
 )
 _ift_solve.defjvp(_ift_solve_jvp)

@@ -44,6 +44,7 @@ from maddening.core.coupling._group_layout import (
     _non_finite_reads_as_diverged,
     _reading_is_the_fields,
     _reads_mapping_weights,
+    _state_lags_the_reading,
     _state_measurable,
 )
 from maddening.core.coupling._bounds import (
@@ -374,6 +375,11 @@ def _run_coupled_block_impl(
     # does not sub-cycle, including ``subcycling=True`` over one timestep).
     group_dividers = _group_dividers(group, nodes) or {}
     use_subcycling = bool(group_dividers)
+    # Static: whether the interface norm can settle on readings a member
+    # of the returned state was not computed from, in which case the
+    # solve also holds the previous residual to the threshold.
+    lagged_reading = _state_lags_the_reading(
+        group, interface_edges_in_order, group_node_names, new_state, group_dividers)
     # The group's macro timestep: the time one coupling pass covers.
     macro_dt = (max(nodes[nn].timestep for nn in group_dividers)
                 if use_subcycling else None)
@@ -800,6 +806,15 @@ def _run_coupled_block_impl(
             error_amplification(residual, prev_residual, prev2_residual),
             group.acceleration, group.relaxation, first)
         return estimated_error(residual, amp, step_scale), amp
+
+    def _passes(est, prev_residual):
+        """The fori path's latch for every acceleration but Aitken: the
+        estimate at or below the threshold, and under a lagged reading
+        the previous residual too (``_fixed_point_while``)."""
+        met = est <= conv_threshold
+        if lagged_reading:
+            met = met & (prev_residual <= conv_threshold)
+        return met
 
     # Convergence threshold depends on norm type
     conv_threshold_value = (
@@ -1415,6 +1430,7 @@ def _run_coupled_block_impl(
                 int(n_reuse),
                 sub_idx,
                 str(group.linear_solver),
+                lagged_reading,
             )
             # The verdict on a non-finite state is taken over *every*
             # floating field of the group, not only the ones the norm
@@ -1689,7 +1705,7 @@ def _run_coupled_block_impl(
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
-                    new_converged = converged | (est <= conv_threshold)
+                    new_converged = converged | _passes(est, prev_res)
                     x_old = _flatten(s_cur) * accel_frame
                     x_raw = _flatten(s_raw) * accel_frame
                     (x_new, nV, nW, nnc,
@@ -1735,7 +1751,7 @@ def _run_coupled_block_impl(
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
-                    new_converged = converged | (est <= conv_threshold)
+                    new_converged = converged | _passes(est, prev_res)
                     x_old = _flatten(s_cur) * accel_frame
                     x_raw = _flatten(s_raw) * accel_frame
                     (x_new, nV, nW, nnc,
@@ -1778,7 +1794,7 @@ def _run_coupled_block_impl(
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2,
                                           relax_first and i == 1)
-                    new_converged = converged | (est <= conv_threshold)
+                    new_converged = converged | _passes(est, prev_res)
                     x_old = _flatten(s_cur) * accel_frame
                     x_raw = _flatten(s_raw) * accel_frame
                     x_rel = fixed_relaxation(x_old, x_raw, omega_val) / accel_frame
@@ -1809,7 +1825,7 @@ def _run_coupled_block_impl(
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2,
                                           relax_first and i == 1)
-                    new_converged = converged | (est <= conv_threshold)
+                    new_converged = converged | _passes(est, prev_res)
                     x_old = _flatten(s_cur) * accel_frame
                     x_raw = _flatten(s_raw) * accel_frame
                     x_rel = fixed_relaxation(x_old, x_raw, omega_val) / accel_frame
@@ -1834,7 +1850,7 @@ def _run_coupled_block_impl(
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
-                    new_converged = converged | (est <= conv_threshold)
+                    new_converged = converged | _passes(est, prev_res)
                     s_merged = _merge(s_cur, s_new, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
@@ -1859,7 +1875,7 @@ def _run_coupled_block_impl(
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
-                    new_converged = converged | (est <= conv_threshold)
+                    new_converged = converged | _passes(est, prev_res)
                     s_merged = _merge(s_cur, s_new, new_converged)
                     return s_merged, new_converged, residual, prev_res
 
@@ -1884,7 +1900,12 @@ def _run_coupled_block_impl(
 
             def _measure_at_cap(_s):
                 r = _compute_residual(one_pass(_s), _s)
-                return r, error_amplification(r, loop_res, prev_loop_res)
+                amp = error_amplification(r, loop_res, prev_loop_res)
+                if lagged_reading:
+                    # As the ift path reports it (``_fixed_point_while``).
+                    r = jnp.where(loop_res > conv_threshold,
+                                  jnp.maximum(r, loop_res), r)
+                return r, amp
 
             def _at_latch(_s):
                 # The amplification the criterion used on the latching

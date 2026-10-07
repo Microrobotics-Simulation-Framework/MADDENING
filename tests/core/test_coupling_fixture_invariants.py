@@ -303,19 +303,17 @@ def _blind_spot(measured, reachable):
 #: land on top of a recorded one unnoticed.
 _DRIFT_FACTOR = 4.0
 
-_KNOWN_DISAGREEMENTS = {
-    # measured here; best rtol reaches while every row still converges
-    ("stiff-pair-0.5", "gs/iqn-ils/interface"): _blind_spot(1.60e-01, 1.60e-01),
-    ("stiff-pair-0.5", "gs/iqn-imvj5/interface"): _blind_spot(4.58e-01, 3.15e-01),
-    ("stiff-pair-0.5", "jac/iqn-ils/interface"): _blind_spot(4.43e-01, 3.37e-01),
-    ("stiff-pair-0.5", "jac/iqn-imvj5/interface"): _blind_spot(5.61e-01, 3.14e-01),
-    ("chain-5", "gs/iqn-imvj5/interface"): _blind_spot(3.50e-01, 2.65e-04),
-    ("chain-5", "jac/iqn-ils/interface"): _blind_spot(2.55e-02, 2.55e-02),
-    ("chain-5", "jac/iqn-imvj5/interface"): _blind_spot(5.55e-01, 6.70e-02),
-    ("ring-8", "gs/iqn-imvj5/interface"): _blind_spot(2.25e+00, 2.72e-04),
-    ("ring-8", "jac/iqn-ils/interface"): _blind_spot(3.38e-02, 1.11e-03),
-    ("ring-8", "jac/iqn-imvj5/interface"): _blind_spot(1.69e+00, 5.11e-04),
-}
+#: **Empty since MADD-ANO-235 was fixed.**  The ten ``iqn-*`` / interface
+#: rows recorded here (deviations of 2.6e-02 to 2.25 on ``stiff-pair-0.5``,
+#: ``chain-5`` and ``ring-8``) were ``velocity``, a field no internal edge
+#: reads, returned from a pass computed before the interface the verdict
+#: was taken on.  The solve now returns such a field as one pass computes
+#: it at the returned state, and all ten agree with plain Gauss-Seidel
+#: within ``_INTERFACE_AGREEMENT`` (2.1e-05 to 8.2e-03 measured) at the
+#: fixtures' own ``rtol`` and the same iteration counts, with the
+#: auto-detected accelerated set unchanged.  The history above is how the
+#: rows were first read; the machinery below stays for the next entry.
+_KNOWN_DISAGREEMENTS: dict = {}
 
 
 #: Iteration cap for the "same fixed point" lanes, overriding whatever

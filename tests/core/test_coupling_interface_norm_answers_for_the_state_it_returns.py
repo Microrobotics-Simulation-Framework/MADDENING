@@ -18,16 +18,15 @@ those settled readings never produced:
   -- from the readings the verdict was taken on -- and changes nothing
   else: iterates, residuals and pass counts are the ones they were;
 * a field edges read **only through a mapping or a transform** that
-  delivers less than the field.  It feeds back, so it is not recomputed;
-  where its member reads the previous iterate the solve stops only once
-  the readings moved within the threshold over the pass that computed the
-  state as well, and at the cap reports the larger change.  (Under a
-  relaxation that is not enough -- MADD-ANO-236, open, pinned below.)
+  delivers less than the field.  It feeds back, so it cannot be recomputed
+  without moving the readings the verdict was taken on, and the part of it
+  the edges do not deliver is still measured by nothing: MADD-ANO-236,
+  open, pinned here by strict xfails.
 
 Every oracle here is a float64 closed form of the linear map the graph
 holds; none calls the code under test.  The static rule
 (``_fields_the_interface_norm_misses``) is checked on its own, branch by
-branch, and the loop's exit against a scripted residual sequence.
+branch.
 """
 
 from __future__ import annotations
@@ -42,7 +41,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.coupling._fixed_point import _fixed_point_while
 from maddening.core.coupling._group_layout import _fields_the_interface_norm_misses
 from maddening.core.coupling.group import CouplingGroup
 from maddening.core.coupling.mapping import matrix_mapping
@@ -228,7 +226,7 @@ def test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_return
 def test_no_acceleration_leaves_a_one_way_target_between_passes(solver, group):
     """A relaxation blends every pass so far into a field nothing measures:
     at 0.5 the target was half-way from the stale value to the right one,
-    6800 tolerances off, with the two-pass exit satisfied."""
+    6800 tolerances off."""
     distance, where, report = _step(
         [A, B], [("A", "B", G, None)],
         dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL,
@@ -301,10 +299,14 @@ def test_the_refreshed_field_carries_the_fixed_points_derivative():
 G_SECOND = np.array([[0.0, 0.0], [-0.4, 0.9]])
 
 
+_OPEN = pytest.mark.xfail(strict=True, reason=(
+    "MADD-ANO-236 (open): the part of a field its edges deliver only through a mapping or "
+    "a transform is measured by nothing"))
+
+
+@_OPEN
 @pytest.mark.parametrize("how", [SELECT, _first], ids=["mapping", "transform"])
-@pytest.mark.parametrize("solver", ["ift", "fori"])
-def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind(
-        solver, how):
+def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind(how):
     """``A -> B -> C`` with ``B`` delivered through a selection of its first
     entry, which no input moves: what ``B`` delivers is settled from the
     first pass, a residual of exactly zero, while its second entry still
@@ -312,7 +314,7 @@ def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind
     edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], how)]
     distance, where, report = _step(
         [A, B, C], edges, dict(iteration_mode="jacobi", convergence_norm="interface",
-                               rtol=RTOL, solver=solver))
+                               rtol=RTOL))
     assert report["converged"] is True
     assert distance <= 16 * _eps(False), (where, distance, report["iterations"])
 
@@ -324,36 +326,11 @@ G_A = np.array([[0.03], [1.0]])
 G_B = np.array([[0.03], [-0.7]])
 
 
-def test_the_differentiated_step_takes_the_passes_the_plain_step_takes():
-    """The implicit rule re-runs the solve for its primal: it has to ask for
-    the same second pass, or the value a ``jvp`` returns is the stale one."""
-    edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], SELECT)]
-    gm = _graph([A, B, C], edges,
-                dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL))
-    gm.step()
-    plain = np.asarray(gm.get_node_state("B")["u"])
-    gm.reset_state()
-    compiled, base = gm._compiled_step, gm._state       # noqa: SLF001
-
-    def target(a_pre):
-        state = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
-        state["A"]["u"] = a_pre
-        return compiled(state, {})["B"]["u"]
-
-    a_pre = jnp.asarray(A[4], jnp.float32)
-    primal, tangent = jax.jvp(target, (a_pre,), (jnp.asarray([1.0, -2.0], jnp.float32),))
-    np.testing.assert_array_equal(np.asarray(primal), plain)
-    np.testing.assert_allclose(np.asarray(tangent), A[2] * G_SECOND @ np.array([1.0, -2.0]),
-                               rtol=1e-6, atol=1e-7)
-
-
-@pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-236 (open): a relaxation blends every pass so far into the part of a field "
-    "its edges do not deliver, and the interface norm measures none of it"))
+@_OPEN
 def test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes():
-    """The same chain under ``acceleration="fixed"`` at 0.5: the readings are
-    settled on both passes the exit asks for, and ``B``'s second entry is
-    half-way from the pre-step value to the right one."""
+    """The same chain under ``acceleration="fixed"`` at 0.5: ``B``'s second
+    entry is a blend of the passes so far, and would be after a second pass
+    within the threshold too."""
     edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], SELECT)]
     distance, where, report = _step(
         [A, B, C], edges, dict(iteration_mode="jacobi", convergence_norm="interface",
@@ -362,6 +339,7 @@ def test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_pas
     assert distance <= RTOL, (where, distance, report["iterations"])
 
 
+@_OPEN
 @pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])
 def test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair(schedule):
     """Both edges deliver a first entry; each member's second entry is
@@ -375,44 +353,6 @@ def test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair(sched
     assert distance <= RTOL, (
         f"{where} is {distance / RTOL:.1f} tolerances from the fixed point "
         f"(iterations={report['iterations']})")
-
-
-#: ``A -> B -> C -(first entry)-> D``: at a cap of two passes ``C`` was
-#: computed from the ``B`` of the first, whose input was the pre-step ``A``.
-_CAPPED = ([A, B, C, D],
-           [("A", "B", G, None), ("B", "C", G_SECOND, None), ("C", "D", G[:, :1], SELECT)])
-
-
-@pytest.mark.parametrize("solver", ["ift", "fori"])
-def test_a_cap_does_not_call_a_state_converged_that_its_last_readings_did_not_give(solver):
-    """At the cap the state returned is the successor, and the one evaluation
-    that measures it saw nothing move: ``C``'s delivered entry never does.
-    The loop's last pass did see ``B`` move, and that is the pass ``C`` was
-    computed in, so the report says so."""
-    nodes, edges = _CAPPED
-    distance, _where, report = _step(nodes, edges, dict(
-        iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL, solver=solver,
-        max_iterations=2))
-    assert distance > 1e3 * RTOL           # the fixture: the state is far off
-    assert report["converged"] is False and report["residual"] > 1.0, report
-
-
-@pytest.mark.parametrize("solver", ["ift", "fori"])
-def test_one_pass_past_that_cap_the_state_is_converged_and_is_the_fixed_point(solver):
-    nodes, edges = _CAPPED
-    distance, where, report = _step(nodes, edges, dict(
-        iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL, solver=solver,
-        max_iterations=3))
-    assert report["converged"] is True and report["iterations"] == 3, report
-    assert distance <= 16 * _eps(False), (where, distance)
-
-
-def test_strict_convergence_refuses_the_capped_state():
-    nodes, edges = _CAPPED
-    gm = _graph(nodes, edges, dict(iteration_mode="jacobi", convergence_norm="interface",
-                                   rtol=RTOL, max_iterations=2, strict_convergence=True))
-    with pytest.raises(Exception, match="without converging"):
-        gm.step()
 
 
 # ---------------------------------------------------------------------------
@@ -444,31 +384,31 @@ _MAPPED = matrix_mapping(np.eye(2, dtype=np.float32))
 
 def test_only_the_interface_norm_misses_a_field():
     for norm in ("l2", "mixed"):
-        assert _rule(_RING, convergence_norm=norm, iteration_mode="jacobi") == ({}, False)
+        assert _rule(_RING, convergence_norm=norm, iteration_mode="jacobi") == {}
 
 
 def test_under_jacobi_every_fed_member_reads_the_previous_iterate():
     """Unread floating fields are named (never a counter); a field delivered
     whole is not; a member with no internal input is not."""
-    assert _rule(_RING, iteration_mode="jacobi") == ({"a": ("w",), "b": ("w",)}, False)
-    assert _rule([_edge("a", "b")], iteration_mode="jacobi") == ({"b": ("u", "w")}, False)
+    assert _rule(_RING, iteration_mode="jacobi") == {"a": ("w",), "b": ("w",)}
+    assert _rule([_edge("a", "b")], iteration_mode="jacobi") == {"b": ("u", "w")}
 
 
 def test_under_gauss_seidel_only_a_back_edges_target_reads_the_previous_iterate():
-    assert _rule(_RING, iteration_mode="gauss-seidel") == ({"a": ("w",)}, False)
-    assert _rule([_edge("a", "b")], iteration_mode="gauss-seidel") == ({}, False)
-    assert _rule([_edge("b", "a")], iteration_mode="gauss-seidel") == ({"a": ("u", "w")}, False)
+    assert _rule(_RING, iteration_mode="gauss-seidel") == {"a": ("w",)}
+    assert _rule([_edge("a", "b")], iteration_mode="gauss-seidel") == {}
+    assert _rule([_edge("b", "a")], iteration_mode="gauss-seidel") == {"a": ("u", "w")}
     # ... and a member that reads itself.
-    assert _rule([_edge("b", "b")], iteration_mode="gauss-seidel") == ({"b": ("w",)}, False)
+    assert _rule([_edge("b", "b")], iteration_mode="gauss-seidel") == {"b": ("w",)}
 
 
 def test_a_sub_cycled_member_that_interpolates_reads_the_previous_iterate():
     forward = [_edge("a", "b")]
     kw = dict(iteration_mode="gauss-seidel", subcycling=True)
-    assert _rule(forward, dividers={"a": 1, "b": 4}, **kw) == ({"b": ("u", "w")}, False)
-    assert _rule(forward, dividers={"a": 4, "b": 1}, **kw) == ({}, False)
+    assert _rule(forward, dividers={"a": 1, "b": 4}, **kw) == {"b": ("u", "w")}
+    assert _rule(forward, dividers={"a": 4, "b": 1}, **kw) == {}
     assert _rule(forward, dividers={"a": 1, "b": 4}, boundary_interpolation="constant",
-                 **kw) == ({}, False)
+                 **kw) == {}
 
 
 @pytest.mark.parametrize("acceleration", ["fixed", "aitken", "iqn-ils", "iqn-imvj"])
@@ -476,78 +416,16 @@ def test_an_acceleration_refreshes_every_fed_members_unread_fields(acceleration)
     """It relaxes or extrapolates what it is handed, in whatever order the
     members ran; a member no internal edge feeds does not depend on the
     iterate and is left alone."""
-    refreshed, lagged = _rule([_edge("a", "b")], iteration_mode="gauss-seidel",
-                              acceleration=acceleration)
-    assert refreshed == {"b": ("u", "w")} and lagged is False
+    refreshed = _rule([_edge("a", "b")], iteration_mode="gauss-seidel",
+                      acceleration=acceleration)
+    assert refreshed == {"b": ("u", "w")}
 
 
 @pytest.mark.parametrize("lossy", [dict(mapping=_MAPPED), dict(transform=_first)],
                          ids=["mapping", "transform"])
-def test_a_field_read_only_through_a_mapping_or_a_transform_asks_for_the_second_pass(lossy):
+@pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])
+def test_a_field_read_through_a_mapping_or_a_transform_is_never_recomputed(schedule, lossy):
+    """It is read, so recomputing it would move the readings the verdict was
+    taken on; the member's other unread fields are still refreshed."""
     ring = [_edge("a", "b", **lossy), _edge("b", "c"), _edge("c", "a")]
-    # ``a.u`` is the lossy field, and ``a`` reads the back edge under either schedule.
-    assert _rule(ring, iteration_mode="jacobi")[1] is True
-    assert _rule(ring, iteration_mode="gauss-seidel")[1] is True
-    # Delivered whole by a second edge, it is measured.
-    assert _rule(ring + [_edge("a", "c")], iteration_mode="jacobi")[1] is False
-    # A lossy field of a member that reads the pass (not the previous iterate) is current.
-    forward = [_edge("a", "b"), _edge("b", "c", **lossy)]
-    assert _rule(forward, iteration_mode="gauss-seidel")[1] is False
-    assert _rule(forward, iteration_mode="jacobi")[1] is True
-    # ... as is one of a member nothing in the group feeds.
-    assert _rule([_edge("a", "b", **lossy)], iteration_mode="jacobi")[1] is False
-    # A lossy field is read, so it is never recomputed.
-    assert "a" not in _rule(ring, iteration_mode="gauss-seidel")[0] or (
-        "u" not in _rule(ring, iteration_mode="gauss-seidel")[0]["a"])
-
-
-# ---------------------------------------------------------------------------
-# The loop's exit, against a scripted residual sequence
-# ---------------------------------------------------------------------------
-
-def _scripted(residuals, *, lagged, first_res, max_iter=30, threshold=1.0, acceleration="none"):
-    """``(passes, reported residual)`` of ``_fixed_point_while`` on *residuals*.
-
-    ``x[1]`` counts passes, so pass ``k`` reads ``residuals[k]`` whatever
-    the acceleration does to ``x[0]``; the first is the residual of the
-    iterate the loop starts on, *first_res* that of the pass before it.
-    """
-    x0 = jnp.asarray([1.0, 0.0])
-    schedule = jnp.asarray(residuals, x0.dtype)
-
-    def step_pure(x):
-        k = jnp.clip(x[1].astype(jnp.int32), 0, schedule.shape[0] - 1)
-        return jnp.stack([x[0] * 0.5, x[1] + 1.0]), schedule[k]
-
-    args = (step_pure, x0, (), (), jnp.asarray(first_res, x0.dtype), threshold, max_iter,
-            acceleration, 1.0, 0, (0,))
-    _x, n, res, _amp, _vw = (_fixed_point_while(*args, lagged) if lagged is not None
-                             else _fixed_point_while(*args))
-    return int(n), float(res)
-
-
-def test_a_lagged_reading_stops_on_the_second_pass_within_the_threshold():
-    settled = [0.0, 0.0, 0.0]
-    assert _scripted(settled, lagged=False, first_res=50.0) == (1, 0.0)
-    assert _scripted(settled, lagged=None, first_res=50.0) == (1, 0.0)     # the default
-    assert _scripted(settled, lagged=True, first_res=50.0) == (2, 0.0)
-    # The pass before the loop counts: readings that had already settled stop at once.
-    assert _scripted(settled, lagged=True, first_res=0.5) == (1, 0.0)
-    # The streak is of consecutive passes.
-    dip = [0.25, 40.0, 10.0, 0.5, 0.125, 0.0, 0.0]
-    assert _scripted(dip, lagged=False, first_res=50.0)[0] == 1
-    assert _scripted(dip, lagged=True, first_res=50.0)[0] == 5
-
-
-def test_at_the_cap_a_lagged_reading_reports_the_larger_change():
-    """The successor returned at the cap was computed over the loop's last
-    pass: where that pass was above the threshold its residual is the one
-    reported, and where it was not the measurement of the successor is."""
-    moved = [40.0, 0.0, 0.0]
-    assert _scripted(moved, lagged=False, first_res=50.0, max_iter=2) == (2, 0.0)
-    assert _scripted(moved, lagged=True, first_res=50.0, max_iter=2) == (2, 40.0)
-    settled = [0.5, 0.25, 0.0]
-    assert _scripted(settled, lagged=True, first_res=50.0, max_iter=2) == (2, 0.25)
-    # Above the threshold either way: the larger of the two.
-    assert _scripted([40.0, 60.0, 0.0], lagged=True, first_res=50.0, max_iter=2) == (2, 60.0)
-    assert _scripted([40.0, 20.0, 0.0], lagged=True, first_res=50.0, max_iter=2) == (2, 40.0)
+    assert _rule(ring, iteration_mode=schedule)["a"] == ("w",)

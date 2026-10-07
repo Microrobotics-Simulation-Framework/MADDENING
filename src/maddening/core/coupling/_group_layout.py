@@ -182,57 +182,48 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     return True
 
 
-def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, dividers):
-    """``(refreshed, lagged_reading)``: what *group*'s norm does not measure, and how the solve answers for it.
+def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, dividers) -> dict:
+    """``{member: (field, ...)}``: the floating fields *group*'s solve returns recomputed at the state it returns.
 
     ``convergence_norm="interface"`` measures, on each pass, how far what
     the internal edges deliver moved between an iterate and its successor,
-    and nothing else.  Two kinds of floating field escape it:
+    and nothing else.  A floating field **no internal edge reads** feeds
+    nothing back, so the iteration does not need it, yet the iterate
+    carries the value some earlier pass gave it: under Jacobi the one
+    computed from the *previous* iterate's readings, under a relaxation a
+    blend of every pass so far.  A one-way pair under Jacobi returned its
+    target computed from the pre-step source with ``converged=True``,
+    ``iterations=1`` and a residual of exactly zero (MADD-ANO-235).
 
-    * a field **no internal edge reads**.  It feeds nothing back, so the
-      iteration does not need it, yet the iterate carries the value some
-      earlier pass gave it: under Jacobi the one computed from the
-      *previous* iterate's readings, under a relaxation a blend of every
-      pass so far.  A one-way pair under Jacobi returned its target
-      computed from the pre-step source with ``converged=True``,
-      ``iterations=1`` and a residual of exactly zero (MADD-ANO-235).
-      *refreshed* names these fields, ``{member: (field, ...)}``: the solve
-      returns them as one pass computes them **at the state it returns**
-      -- from the very readings the verdict was taken on -- as it does a
-      member's non-floating fields.  They are named for a member with an
-      internal input that reads the previous iterate (below), and for
-      every member with an internal input under an acceleration, which
+    The solve returns these fields as one pass computes them **at the
+    state it returns** -- from the very readings the verdict was taken on
+    -- as it does a member's non-floating fields.  No edge reads them, so
+    the pass, the readings and the residual of the returned state are the
+    ones measured, and no iterate or pass count moves.  They are named for
+
+    * a member that reads an internal edge from the previous iterate:
+      every internal edge under Jacobi; under Gauss-Seidel an edge whose
+      source does not run before its target in *schedule* (the sweep
+      order), and every internal edge into a sub-cycled member that
+      interpolates between the previous iterate and the pass
+      (``boundary_interpolation`` other than ``"constant"``);
+    * every member with an internal input under an acceleration, which
       relaxes or extrapolates what it is handed.
-    * a field internal edges read **only through a mapping or a
-      transform**, which may deliver less than the field.  It does feed
-      back, so it cannot be recomputed without moving the readings; where
-      its member reads the previous iterate, the part of it the edges do
-      not deliver was computed from readings one pass older than the pair
-      compared.  *lagged_reading* is ``True`` for a group with such a
-      field: its solve stops only when the readings also moved within the
-      threshold over the pass that computed the state
-      (``_fixed_point_while``).
 
-    A member reads the previous iterate on every internal edge under
-    Jacobi; under Gauss-Seidel on an edge whose source does not run before
-    it in *schedule* (the sweep order), and on every internal edge when it
-    is sub-cycled and interpolates between the previous iterate and the
-    pass (``boundary_interpolation`` other than ``"constant"``).
+    Not covered: a field internal edges read **only through a mapping or
+    a transform**, which may deliver less than the field.  It feeds back,
+    so it cannot be recomputed without moving the readings the verdict was
+    taken on; the part of it the edges do not deliver is measured by
+    nothing (MADD-ANO-236, open).
 
-    A field an internal edge delivers whole (no mapping, no transform) is
-    measured directly, as under ``"mixed"``.  ``({}, False)`` for every
-    other norm, and for an interface group with neither kind of field:
-    such a group keeps its passes and its compiled step.  Static.
+    ``{}`` for every other norm, and for an interface group with no such
+    field: such a group keeps its compiled step.  Static.
     """
     if group.convergence_norm != "interface":
-        return {}, False
+        return {}
     order = {nn: i for i, nn in enumerate(schedule)}
     floats = float_fields_of(state, list(schedule))
     read = {(e.source_node, e.source_field) for e in interface_edges}
-    whole = {
-        (e.source_node, e.source_field) for e in interface_edges
-        if e.mapping is None and e.transform is None
-    }
     jacobi = group.iteration_mode == "jacobi"
     interpolates = group.boundary_interpolation != "constant"
     accelerated = group.acceleration != "none"
@@ -249,10 +240,7 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, d
             unread = tuple(f for f in floats[nn] if (nn, f) not in read)
             if unread:
                 refreshed[nn] = unread
-    lagged_reading = any(
-        (nn, f) in read and (nn, f) not in whole
-        for nn in schedule if nn in behind for f in floats[nn])
-    return refreshed, lagged_reading
+    return refreshed
 
 
 #: Every ``_meta`` slot a coupling group can own, as the suffix after

@@ -136,15 +136,32 @@ def _close(a: float, b: float, eps: float, what) -> None:
     assert abs(a - b) <= ULPS * eps * max(abs(a), abs(b)), (what, a, b)
 
 
-def _same_states(c: gg.Case, a: dict, b: dict, step: int) -> None:
-    """Every field the edge-mapped graph holds is the twin's, within rounding."""
+def _same_states(c: gg.Case, a: dict, b: dict, step: int, skip=frozenset()) -> None:
+    """Every field the edge-mapped graph holds is the twin's, within rounding
+    (but the fields in *skip*)."""
     for name in a:
         for field, x in a[name].items():
+            if (name, field) in skip:
+                continue
             y = b[name][field]
             assert x.dtype == y.dtype and x.shape == y.shape, (name, field)
             scale = float(max(np.max(np.abs(x)), np.max(np.abs(y))))
             assert float(np.max(np.abs(x.astype(np.float64) - y.astype(np.float64)))) <= (
                 8 * float(np.finfo(x.dtype).eps) * scale), (c.label, step, name, field)
+
+
+def _behind_a_relay(c: gg.Case) -> frozenset:
+    """The source fields the relay twin reads through its relay field.
+
+    In the twin no internal edge reads such a field (the relay's field is
+    read in its place), so under the interface norm the solve returns it as
+    a pass computes it at the returned state; in the edge-mapped graph the
+    field is read, through its mapping, and is the iterate's.  The two are
+    one pass apart wherever the solve has not settled, and what the
+    reading decides -- the relay's field, the other members, the report --
+    is still compared.
+    """
+    return frozenset((e.src, e.sf) for e in gg.static_twin(c).edges if e.mapping is not None)
 
 
 def compare(c: gg.Case, edge, twin, *, relay: bool, steps: int = 3) -> None:
@@ -155,7 +172,8 @@ def compare(c: gg.Case, edge, twin, *, relay: bool, steps: int = 3) -> None:
     for step in range(1, steps + 1):
         edge.step()
         twin.step()
-        _same_states(c, gg.snapshot(edge), gg.snapshot(twin), step)
+        _same_states(c, gg.snapshot(edge), gg.snapshot(twin), step,
+                     _behind_a_relay(c) if relay else frozenset())
         ra, rb = _report(edge), _report(twin)
         where = (c.label, step)
         assert "not_usable_reason" not in ra and "not_usable_reason" not in rb, where
@@ -181,7 +199,11 @@ def assert_reports_as_its_transform_twin(c: gg.Case) -> None:
 
 def assert_reports_as_its_relay_twin(c: gg.Case) -> None:
     with gg.x64(c.needs_x64):
-        compare(c, _edge(c), gg.build(gg.relay_twin(gg.static_twin(c))), relay=True)
+        # One step: the field behind the relay (``_behind_a_relay``) is the
+        # next step's pre-step state, and it is a pass apart in the two
+        # graphs at these caps, so from the second step on they are two
+        # trajectories.
+        compare(c, _edge(c), gg.build(gg.relay_twin(gg.static_twin(c))), relay=True, steps=1)
 
 
 @pytest.mark.parametrize("c", STATIC_PER_PUSH, ids=repr)

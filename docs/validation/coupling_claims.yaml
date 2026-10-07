@@ -5677,29 +5677,38 @@ claims:
     "The floor is measured on the state the step returned, and stays so when
     the state is written afterwards (set_node_state, PUT /graph/state, a node
     replaced): the entry describes the step that ran until the group steps
-    again, the state is reset or a member is removed.  A checkpoint saved
-    after such a write to a member holds the written state, not the returned
-    one, so it is saved with no report for that group: loaded, the group has
-    no entry until it steps."
+    again, the state is reset or a member is removed.  A checkpoint is
+    a copy of the state, _meta included, so one saved after such a write to
+    a member holds the written state and not the returned one; it carries a
+    marker saying so, and the graph that loads it reports the group with
+    spectral_error_bound NaN, spectral_usable, gradient_bound_usable and
+    precision_limited False and a not_usable_reason, until the group
+    steps.  The entry's other numbers are the slots' own."
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (precision_limited)
     - src/maddening/core/graph_manager.py::GraphManager._keep_state_for_reports
-    - src/maddening/core/graph_manager.py::GraphManager._report_slots_a_written_state_ends
+    - src/maddening/core/graph_manager.py::GraphManager._groups_written_after_their_step
+    - src/maddening/core/graph_manager.py::GraphManager._loaded_after_a_write
+    - src/maddening/core/simulation/checkpoint.py::_load_from_archive
     - src/maddening/core/simulation/checkpoint.py::save_state
   conditions: >-
     as stated: writes through set_node_state (which the REST state route and
     load_state use), add_node and remove_node.  An assignment into the
     private gm._state is not seen.  A group that stores its floor in the
-    step (CPL-188) does not read the kept state and keeps its report in a
-    checkpoint.
+    step (CPL-188) does not read the kept state and is never marked.  The
+    marker is the archive member _reports/<group>/written_after_step,
+    present only for such a group; an archive without it loads as before,
+    and a marker for a group the graph does not have is ignored.
   oracle: the report read before the write, key for key.
   tests:
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_next_step_is_reported_from_the_state_it_left
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_loaded_checkpoint_is_reported_as_the_step_it_saved
-    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_of_a_written_state_carries_no_report
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_keeps_the_report_where_no_member_changed
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_an_archive_without_the_marker_loads_as_it_always_did
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_node_cannot_take_the_markers_prefix
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_failed_load_leaves_the_report_of_the_step_before_it
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_recompile_keeps_the_report_and_what_it_was_measured_on
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_reset_state_and_a_removed_member_still_end_the_report
@@ -5707,7 +5716,7 @@ claims:
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_traced_write_keeps_no_tracer_for_the_report
     - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_profilers_measurements_hand_the_report_back_with_the_state
     - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_state_put_after_the_step_does_not_move_its_report
-    - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_checkpoint_saved_over_rest_after_a_put_loads_with_no_report
+    - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_checkpoint_saved_over_rest_after_a_put_reloads_the_state_and_withholds_the_bound
     - tests/property/test_coupling_targeted_search.py::test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterwards
   status: verified
   domains:
@@ -5722,5 +5731,5 @@ claims:
     sub_cycled: n/a
     predictors_warm_starts: n/a
     adaptive: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write[run_adaptive]'
-    checkpoint_restart: tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_of_a_written_state_carries_no_report
+    checkpoint_restart: tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step
     sharded: n/a

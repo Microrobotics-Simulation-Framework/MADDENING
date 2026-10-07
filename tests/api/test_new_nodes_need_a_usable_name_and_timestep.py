@@ -31,7 +31,7 @@ from maddening.nodes import BallNode
 from tests._loopback_client import LoopbackTestClient as TestClient
 
 REGISTRY = {"BallNode": BallNode}
-RESERVED = ["_meta", "_params", "_params_mappings"]
+RESERVED = ["_meta", "_params", "_params_mappings", "_reports"]
 
 
 def _served(*, nodes=True, root=None):

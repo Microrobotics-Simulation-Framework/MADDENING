@@ -307,6 +307,15 @@ _GEOMETRY_DIAGNOSTICS_REASON = (
 )
 
 
+_WRITTEN_BEFORE_SAVE_REASON = (
+    "this report was loaded from a checkpoint saved after the group's state had been "
+    "written (set_node_state) since its last step; the state that step returned, which "
+    "the float floor is measured on, is not in the checkpoint, so spectral_error_bound, "
+    "precision_limited and the *_usable flags are not reported until the group steps. "
+    "iterations, residual, converged and the estimates are the step's own."
+)
+
+
 def _geometry_edge_coupling_errors(group, edges) -> list[str]:
     """``ERROR:`` issues for a group setting a geometry-dependent mapping
     cannot serve (experimental; empty for every other group).

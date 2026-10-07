@@ -84,7 +84,7 @@ def test_a_state_put_after_the_step_does_not_move_its_report(served):
     assert _report(gm) == first
 
 
-def test_a_checkpoint_saved_over_rest_after_a_put_loads_with_no_report(served):
+def test_a_checkpoint_saved_over_rest_after_a_put_reloads_the_state_and_withholds_the_bound(served):
     gm, client = served
     assert client.post("/sim/reset").status_code == 200
     assert client.post("/sim/step").status_code == 200
@@ -93,10 +93,16 @@ def test_a_checkpoint_saved_over_rest_after_a_put_loads_with_no_report(served):
     _zero(client)
     assert client.post("/checkpoint/save", params={"path": "written.npz"}).status_code == 200
     assert _report(gm) == first
+    before = client.get("/graph/state").json()
 
     reply = client.post("/checkpoint/load", params={"path": "written.npz"})
     assert reply.status_code == 200, reply.text
-    assert _report(gm) is None
+    # A checkpoint is a copy of the state, ``_meta`` included.
+    assert client.get("/graph/state").json() == before
+    loaded = _report(gm)
+    assert loaded["spectral_usable"] is False and loaded["precision_limited"] is False
+    assert "written" in loaded["not_usable_reason"]
+    assert loaded["iterations"] == first["iterations"]
     reply = client.post("/checkpoint/load", params={"path": "stepped.npz"})
     assert reply.status_code == 200, reply.text
     assert _report(gm) == first

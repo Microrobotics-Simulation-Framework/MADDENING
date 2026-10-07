@@ -15578,16 +15578,21 @@ anomalies:
       the ones in the graph; a step drops it.  The doors that keep it are
       `set_node_state` (so `PUT /graph/state/{node}` and `load_state`),
       `add_node` and `remove_node`.  An assignment into the private
-      `gm._state` dict is not seen.  A checkpoint saved after a member
-      was written to other values holds the written state, so it is
-      saved with that group's `iterations` counter at 0: loaded, the
-      group has no report until it steps (the step only writes that
-      counter, so the restart is unchanged).  The replaced arrays stay
-      referenced until the next step.
+      `gm._state` dict is not seen.  A checkpoint is a copy of the
+      state, `_meta` included, and holds the written state, not the one
+      the step returned.  One saved after a member was written to other
+      values carries the member `_reports/<group>/written_after_step`,
+      and the graph that loads it reports that group's
+      `spectral_error_bound` as NaN, `spectral_usable`,
+      `gradient_bound_usable` and `precision_limited` as False, with a
+      `not_usable_reason`, until the group steps: the bound cannot be
+      recovered from such a checkpoint.  An archive without the member
+      loads as before.  `_reports` joins the node names the graph
+      refuses.  The replaced arrays stay referenced until the next step.
     verification:
       - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report"
       - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write"
-      - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_of_a_written_state_carries_no_report"
+      - "tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step"
       - "tests/property/test_coupling_targeted_search.py::test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterwards"
       - "tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_state_put_after_the_step_does_not_move_its_report"
     github_issue: null

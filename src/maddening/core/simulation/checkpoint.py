@@ -43,6 +43,11 @@ _MAPPINGS_KEY = "_params_mappings"
 #: Python identifier, so it can never be taken for a weight: a weight's
 #: name is one (``register_mapping``'s contract for ``params_pytree()``).
 _STRUCTURE_MEMBER = "structure.sha256"
+#: ``_reports/<group key>/written_after_step``: present (a uint8 one) for a
+#: coupling group whose state was written after its last step.  Optional;
+#: an archive without it loads as it always did.
+_REPORTS_KEY = "_reports"
+_WRITTEN_MEMBER = "written_after_step"
 _DIGEST_BYTES = hashlib.sha256().digest_size
 
 # Schema version for the integrity manifest.
@@ -99,13 +104,14 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
 
     Notes
     -----
-    ``_meta`` is saved as it is, with one exception: a coupling group
-    whose members' state was written to other values after its last step
-    (``set_node_state``) is saved with its ``iterations`` counter at 0,
-    so the loaded graph has no ``coupling_diagnostics()`` entry for it
-    until it steps.  The archive holds the written state, and the
-    report's float floor is measured on the state the step returned.
-    The step only writes that counter, so the restart is unchanged.
+    The state and ``_meta`` are saved as they are.  Where a coupling
+    group's members were written to other values after its last step
+    (``set_node_state``), the archive also carries
+    ``_reports/<group>/written_after_step``: the state that step returned,
+    which the report's float floor is measured on, is not in the archive,
+    and the graph that loads it reports that group's bound and
+    ``*_usable`` flags as not usable, with a ``not_usable_reason``,
+    until the group steps.
     """
     path = Path(path)
 
@@ -122,16 +128,18 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
     # Access the raw internal state dict directly.
     raw_state = graph_manager._state  # noqa: SLF001
     if _META_KEY in raw_state:
-        # A coupling group whose members were written after its last step
-        # is saved with no report: the archive holds the written state,
-        # which is not the state that step returned, and the report's
-        # float floor is measured on the returned state.
-        ended = graph_manager._report_slots_a_written_state_ends()  # noqa: SLF001
         for field_name, value in raw_state[_META_KEY].items():
             key = f"{_META_KEY}/{field_name}"
             arrays[key] = np.asarray(value)
-            if field_name in ended:
-                arrays[key] = np.zeros_like(arrays[key])
+        # The state and ``_meta`` are saved as they are.  What the archive
+        # cannot hold is the state a coupling group's last step returned
+        # where a member has been written since, and the report's float
+        # floor is measured on that: the fact goes beside the state, one
+        # member per such group, and the load reports the group's
+        # floor-dependent entries as not usable.  No member where no
+        # group is in that case, so every other archive is as it was.
+        for group_key in graph_manager._groups_written_after_their_step():  # noqa: SLF001
+            arrays[f"{_REPORTS_KEY}/{group_key}/{_WRITTEN_MEMBER}"] = np.ones((), np.uint8)
 
     # Differentiable graph parameters (node constants), so a calibrated
     # graph restores with the values it was calibrated to.
@@ -338,6 +346,7 @@ def _load_from_archive(graph_manager: "GraphManager", archive: "_CheckpointArchi
     node_keys: dict[str, dict[str, str]] = {}
     param_keys: dict[str, dict[str, str]] = {}
     mapping_keys: dict[str, dict[str, str]] = {}
+    written_groups: list[str] = []
 
     for flat_key in archive:
         parts = flat_key.split("/", 1)
@@ -355,6 +364,12 @@ def _load_from_archive(graph_manager: "GraphManager", archive: "_CheckpointArchi
         elif prefix == _MAPPINGS_KEY:
             edge_key, wname = field.rsplit("/", 1)
             mapping_keys.setdefault(edge_key, {})[wname] = flat_key
+        elif prefix == _REPORTS_KEY:
+            # Read by name only: presence is the content.  A group this
+            # graph does not have is ignored, as its ``_meta`` slots are.
+            group_key, member = field.rsplit("/", 1) if "/" in field else (field, "")
+            if member == _WRITTEN_MEMBER:
+                written_groups.append(group_key)
         else:
             node_keys.setdefault(prefix, {})[field] = flat_key
 
@@ -507,6 +522,9 @@ def _load_from_archive(graph_manager: "GraphManager", archive: "_CheckpointArchi
     except BaseException:
         _restore_state_and_params(graph_manager, undo)
         raise
+    # Only once the load has succeeded: the reports it installed, and
+    # which of them describe a state written after its step.
+    graph_manager._note_loaded_after_a_write(written_groups)  # noqa: SLF001
 
 
 class CheckpointFormatError(ValueError):

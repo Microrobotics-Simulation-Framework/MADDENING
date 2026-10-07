@@ -247,34 +247,105 @@ def test_a_loaded_checkpoint_is_reported_as_the_step_it_saved(stepped, graph, tm
     assert _report(graph) == first
 
 
-def test_a_checkpoint_of_a_written_state_carries_no_report(graph, tmp_path):
-    """Saved after a write, the archive holds the written state and not
-    what the step left: loaded, the group has no report until it steps
-    (its counter is saved at 0, "no step taken yet"), and the restart
+#: What the report of a group loaded from such a checkpoint withholds.
+WITHHELD = {"spectral_usable": False, "gradient_bound_usable": False,
+            "precision_limited": False, "spectral_error_bound": "nan"}
+
+
+def _archive_members(path):
+    with np.load(path) as archive:
+        return {name: archive[name] for name in archive.files}
+
+
+def test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step(
+        graph, tmp_path):
+    """Saved after a write, the archive holds the written state and
+    ``_meta`` exactly as they are, plus one member saying the group's state
+    was written after its last step.  The graph that loads it has the same
+    state, ``_meta`` included, and reports what rests on the float floor
+    as not usable, with the reason, until the group steps; the restart
     steps bit for bit like the graph that saved it."""
     graph.step()
     first = _report(graph)
     WRITES["both members to zero"](graph)
     path = graph.save_state(tmp_path / "written.npz")
     assert _report(graph) == first            # saving moved nothing
-    saved_meta = {k: np.asarray(v) for k, v in graph._state["_meta"].items()}
+    live_meta = {k: np.asarray(v) for k, v in graph._state["_meta"].items()}
+    members = _archive_members(path)
+    for slot, value in live_meta.items():
+        assert members[f"_meta/{slot}"].tobytes() == value.tobytes(), slot
+        assert members[f"_meta/{slot}"].dtype == value.dtype, slot
+    assert [m for m in members if m.startswith("_reports/")] == [
+        f"_reports/{KEY}/written_after_step"]
     graph.step()
     want = ({n: np.asarray(graph.get_node_state(n)["x"]) for n in ("a", "b")}, _report(graph))
 
     graph.reset_state()
     graph.load_state(path)
-    assert _report(graph) is None
-    for slot, value in saved_meta.items():
+    for slot, value in live_meta.items():
         got = np.asarray(graph._state["_meta"][slot])
-        if slot == f"coupling_{KEY}_iterations":
-            assert int(got) == 0 and got.dtype == value.dtype
-        else:
-            assert got.tobytes() == value.tobytes(), slot
+        assert got.tobytes() == value.tobytes() and got.dtype == value.dtype, slot
     np.testing.assert_array_equal(np.asarray(graph.get_node_state("a")["x"]), 0.0)
+    loaded = _report(graph)
+    assert "written" in loaded["not_usable_reason"]
+    for key, value in loaded.items():
+        if key == "not_usable_reason":
+            continue
+        assert value == WITHHELD.get(key, first[key]), key
+    # It stays so under a further write, and a save of it says so again.
+    WRITES["both members a million times larger"](graph)
+    assert _report(graph) == loaded
+    graph.load_state(path)
+    again = graph.save_state(tmp_path / "again.npz")
+    assert f"_reports/{KEY}/written_after_step" in _archive_members(again)
+    table = graph.coupling_report()
+    flags = " ".join(next(iter(table))["flags"])
+    assert "no bound reported" in flags and "saved after" in flags, flags
+    # The next step brings a whole report.
     graph.step()
     for name in ("a", "b"):
         assert np.asarray(graph.get_node_state(name)["x"]).tobytes() == want[0][name].tobytes()
     assert _report(graph) == want[1]
+    assert "not_usable_reason" not in want[1]
+
+
+def test_an_archive_without_the_marker_loads_as_it_always_did(graph, tmp_path):
+    """Both directions: the marker stripped from an archive (what a build
+    without it wrote) loads, with the report measured on the loaded state;
+    and a checkpoint saved straight after a step has no marker at all."""
+    graph.step()
+    first = _report(graph)
+    clean = graph.save_state(tmp_path / "stepped.npz")
+    assert not [m for m in _archive_members(clean) if m.startswith("_reports/")]
+    WRITES["one member to zero"](graph)
+    marked = _archive_members(graph.save_state(tmp_path / "written.npz"))
+    stripped = {k: v for k, v in marked.items() if not k.startswith("_reports/")}
+    assert len(stripped) == len(marked) - 1
+    np.savez(tmp_path / "stripped.npz", **stripped)
+    graph.reset_state()
+    graph.load_state(tmp_path / "stripped.npz")
+    old = _report(graph)
+    assert "not_usable_reason" not in old and old["iterations"] == first["iterations"]
+    # A marker for a group this graph does not have is ignored.
+    foreign = dict(stripped)
+    foreign["_reports/x+y/written_after_step"] = np.ones((), np.uint8)
+    np.savez(tmp_path / "foreign.npz", **foreign)
+    graph.load_state(tmp_path / "foreign.npz")
+    assert _report(graph) == old
+    # A marked load that fails leaves no mark behind.
+    graph.load_state(clean)
+    broken = dict(marked)
+    broken["a/x"] = np.zeros(N + 1, np.float32)
+    np.savez(tmp_path / "broken.npz", **broken)
+    with pytest.raises(ValueError):
+        graph.load_state(tmp_path / "broken.npz")
+    assert _report(graph) == first
+
+
+def test_a_node_cannot_take_the_markers_prefix():
+    gm = GraphManager()
+    with pytest.raises(ValueError, match="reserves for its own state and checkpoints"):
+        gm.add_node(Idle("_reports"))
 
 
 @pytest.mark.parametrize("write", ["a node outside the group", "the values it already holds"])

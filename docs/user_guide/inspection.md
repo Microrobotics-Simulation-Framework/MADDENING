@@ -375,9 +375,11 @@ takes 0.25 to 0.5 ms.
 
 **A report describes the step that ran.**  The bound's float floor is measured on the state the
 step returned.  Writing the state afterwards (`set_node_state`, `PUT /graph/state/{node}`) does not
-change the entry: it describes that step until the group steps again.  A checkpoint saved after a
-member's state was written holds the written state and no report for that group; loaded, the group
-has no entry until it steps.
+change the entry: it describes that step until the group steps again.  A checkpoint is a copy of the
+state, so one saved after a member's state was written holds the written state and not the returned
+one.  It says so, and the graph that loads it reports that group's `spectral_error_bound` as NaN and
+its `spectral_usable`, `gradient_bound_usable` and `precision_limited` as `False`, with a
+`not_usable_reason`, until the group steps.
 
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in

@@ -9,6 +9,7 @@ A MADDENING {term}`node <Node>` is a **{term}`pure function <Pure function>` wra
 - `initial_state(params) -> dict` — returns the initial state arrays
 - `update(state, boundary_inputs, dt) -> new_state` — returns a new state dict
 - `update()` must be **{term}`JAX-traceable`**: no Python-level side effects, no data-dependent control flow, no print statements. Use `jnp.where` instead of `if/else`.
+- `update()` returns the state layout it was given: the same fields, each with the shape and kind of dtype `initial_state()` built. A step that changes one (a list passed for a scalar constant broadcasts a scalar field) is refused by `GraphManager.step`, `run` and `run_adaptive` with a `ValueError` naming the node and the field, as `run_scan` refuses it.
 - State is **immutable** — return a new dict, don't mutate in place
 - Parameters live in `self.params`, not in state
 

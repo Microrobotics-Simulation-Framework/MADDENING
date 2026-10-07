@@ -2472,8 +2472,21 @@ def iqn_ils_update(
     # then rounded its secant step differently from the same group at
     # scale 1.  An exact power of two leaves every product of a matrix in
     # range as it was.
+    #
+    # The factorisation is never handed a non-finite matrix: LAPACK's
+    # divide-and-conquer SVD does not return on some matrices that hold an
+    # ``inf`` (measured: a 12 x 8 matrix with one ``inf`` entry, float32
+    # and float64), so a group whose iterate left float range before its
+    # cap never returned from its step.  The matrix is replaced by zeros
+    # BEFORE the call (a select after it would still run the call: both
+    # sides of a ``where`` are computed), and the quasi-Newton step is
+    # then not taken (``is_valid`` below), which is what a non-finite
+    # ``c`` already meant.  A finite matrix passes through unchanged.
     ls_pow2 = pow2_frame(V_masked, residual)
-    c = jnp.linalg.pinv(V_masked * ls_pow2, rtol=1e-6) @ (-(residual * ls_pow2))
+    ls_matrix = V_masked * ls_pow2
+    ls_finite = jnp.all(jnp.isfinite(ls_matrix))
+    c = (jnp.linalg.pinv(jnp.where(ls_finite, ls_matrix, jnp.zeros_like(ls_matrix)), rtol=1e-6)
+         @ (-(residual * ls_pow2)))
 
     # QN correction
     correction = W_masked @ c + residual
@@ -2504,7 +2517,8 @@ def iqn_ils_update(
     correction_norm = jnp.sqrt(jnp.sum((correction * pow2) ** 2))
     residual_norm = jnp.sqrt(jnp.sum((residual * pow2) ** 2))
     is_valid = (
-        jnp.all(jnp.isfinite(x_qn))
+        ls_finite
+        & jnp.all(jnp.isfinite(x_qn))
         & (correction_norm < 1e6 * residual_norm)
         & (new_n_cols > 0)
     )

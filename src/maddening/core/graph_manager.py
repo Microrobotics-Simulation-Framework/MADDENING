@@ -1456,6 +1456,7 @@ class GraphManager:
     # ParamSpec: trainable mask, bounds, reparametrisation
     # ------------------------------------------------------------------
 
+    @stability(StabilityLevel.EVOLVING)
     def param_specs(self) -> dict:
         """``{"nodes": {name: {key: ParamSpec}}, "mappings": {}}`` mirroring
         :attr:`params`: each node's :meth:`SimulationNode.param_specs`
@@ -1482,6 +1483,7 @@ class GraphManager:
             out["mappings"][edge.key] = merged
         return out
 
+    @stability(StabilityLevel.EVOLVING)
     def set_param_spec(self, node: str, key: str, spec: ParamSpec) -> None:
         """Override one parameter's :class:`ParamSpec` for this graph
         (e.g. freeze a node's ``mass`` when the data cannot identify it,
@@ -1532,6 +1534,7 @@ class GraphManager:
         if dirties:
             self._dirty = True
 
+    @stability(StabilityLevel.EVOLVING)
     def trainable_mask(self, params: Optional[dict] = None) -> dict:
         """``params``-shaped pytree of Python bools (``True`` = an
         optimiser may move the leaf)."""
@@ -1597,6 +1600,7 @@ class GraphManager:
             out[key] = np.asarray(value).tolist()
         return out
 
+    @stability(StabilityLevel.EVOLVING)
     def param_spec_overrides(self) -> dict[str, dict[str, ParamSpec]]:
         """Graph-level overrides set with :meth:`set_param_spec`."""
         return {n: dict(o) for n, o in self._param_spec_overrides.items() if o}

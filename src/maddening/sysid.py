@@ -3923,8 +3923,44 @@ _JUMP_MAX_MOVE = 2.0 ** -10
 #: coordinate's float spacing moves its value by 6e-4, at 21 -- and on the
 #: stock bouncing ball, whose bounce moves by one time step, 2.2e4 to
 #: 4.4e5 over 55 endings.  ``2**10`` sits between, a factor of 48 above
-#: the one and 21 below the other.
+#: the one and 21 below the other.  A wider draw (4,500 fits of the ball,
+#: jaxlib 0.10.2 and 0.11.0) reads 1.9e3 to 5.8e5 at 261 jump endings and
+#: 341 at one more: a small jump reads low over a whole candidate, so a
+#: ratio above ``2**5`` is read a second time (:data:`_JUMP_SUSPECT`,
+#: :data:`_JUMP_ACROSS`).
 _JUMP_EXCESS = 2.0 ** 10
+
+#: The ratio above which :func:`_one_sided_excess` reads a rejected
+#: candidate a second time, across one spacing of the coordinates
+#: (:func:`_excess_across_a_spacing`).  ``2**5`` is above every ratio
+#: measured on a smooth ending (:data:`_JUMP_EXCESS`: at most 21), so
+#: those are read exactly as before.
+_JUMP_SUSPECT = 2.0 ** 5
+
+#: The second reading at which a candidate between the two thresholds
+#: above is a jump.  The ratio of a whole candidate understates a small
+#: jump: it divides the jump by the model's change over the candidate's
+#: length, and a late bounce that moves by one time step changes few
+#: samples.  The second reading divides by the model's change over one
+#: spacing instead; the measure of the rounding is the same.  Measured
+#: (CPU, jaxlib 0.10.2 and 0.11.0, the same on both) on the stock ball:
+#: two fits ended ``converged=True`` at ratios of 341 and 456 -- a jump of
+#: 0.015 in the residual's norm, 22 float spacings of the elasticity from
+#: the iterate, read from a candidate 35 spacings long -- where the second
+#: reading is 1.8e3 and 2.0e3; it is 3.4e4 or more at the other 261 jump
+#: endings of 4,500 drawn fits, and at most 5.2 at the six that ended on a
+#: piece's own minimum.  On smooth residuals stopped by the floor rule
+#: (140 endings of the per-push and slow sysid tests, float32 and x64,
+#: none of them asked: their first reading is under ``2**5``) it would be
+#: at most 13, but for the wide ``logit`` fit of :data:`_JUMP_EXCESS` at
+#: 52.  ``2**8`` sits between, a factor of 4.9 above the one and 6.9 below
+#: the other.
+_JUMP_ACROSS = 2.0 ** 8
+
+#: Halvings :func:`_excess_across_a_spacing` may take to bring a
+#: candidate's step down to one spacing of the coordinates: more than the
+#: bits of a float64 significand, so the cap is never what stops it.
+_JUMP_BISECTIONS = 64
 
 
 def _norm64(x) -> float:
@@ -3961,9 +3997,58 @@ def _gain_in_the_gap(r, J, undamped, theta, rises) -> bool:
                 and promised > 0.0)
 
 
-def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
-    """``(excess, move)``: how one-sided the residual is around ``theta``,
-    read from candidates a Levenberg-Marquardt iteration rejected.
+def _excess_across_a_spacing(th, r64, J64, cand, cand_r, behind, mirror, dtype) -> float:
+    """The one-sided ratio of :func:`_one_sided_excess` for the rejected
+    ``cand``, with the residual's departure and the model's change taken
+    across one spacing of the coordinates inside the step from ``th``
+    instead of over its whole length.
+
+    The step is halved, each time keeping the half over which the residual
+    departs further from the linear model, until its two ends are
+    neighbours on the coordinates' grid.  The departure between those two
+    is then compared with ``behind`` -- the departure at the mirror image
+    of the whole candidate, which :func:`_one_sided_excess` measured --
+    plus the model's change over the one spacing.
+
+    A jump the candidate crossed is between the two ends, whole: the
+    numerator is what it was for the whole candidate, and the model's
+    change, which diluted it, is a spacing's worth.  Of a differentiable
+    residual one spacing holds only a part of the candidate's departure,
+    and its mirror image's departure is of the same size: the reading
+    is of order one however the residual curves.  ``behind`` is kept from
+    the whole candidate, not measured again across one spacing, because
+    one pair of neighbours is no measure of the rounding: their residuals
+    often agree exactly (measured: readings of 4e3 to 1e6 at smooth
+    floors with the mirror image taken across one spacing too).
+
+    ``0.0`` where a residual is not finite.
+    """
+    lo, lo_r = th, r64
+    hi, hi_r = np.asarray(cand, dtype=np.float64), np.asarray(cand_r, dtype=np.float64)
+    for _ in range(_JUMP_BISECTIONS):
+        mid, mid_r = mirror(jnp.asarray(0.5 * (lo + hi), dtype=dtype))
+        mid = np.asarray(mid, dtype=np.float64)
+        mid_r = np.asarray(mid_r, dtype=np.float64)
+        if np.array_equal(mid, lo) or np.array_equal(mid, hi):
+            break
+        near = _norm64(mid_r - lo_r - J64 @ (mid - lo))
+        far = _norm64(hi_r - mid_r - J64 @ (hi - mid))
+        if far > near:
+            lo, lo_r = mid, mid_r
+        else:
+            hi, hi_r = mid, mid_r
+    predicted = J64 @ (hi - lo)
+    ahead = _norm64(hi_r - lo_r - predicted)
+    scale = behind + _norm64(predicted)
+    if not (np.isfinite(ahead) and np.isfinite(scale)) or ahead == 0.0:
+        return 0.0
+    return float(ahead / scale) if scale > 0.0 else float(np.inf)
+
+
+def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float, bool]:
+    """``(excess, move, jumped)``: how one-sided the residual is around
+    ``theta``, read from candidates a Levenberg-Marquardt iteration
+    rejected, and whether that is a jump.
 
     For a rejected candidate ``theta + d`` the residual's departure from
     the linear model, ``||r(theta + d) - r - J d||``, is compared with the
@@ -3983,6 +4068,17 @@ def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
     jump over those.  No scale has to be assumed for the rounding: the
     mirror image measures it on the problem itself.
 
+    A ratio above :data:`_JUMP_EXCESS` is a jump.  The model's change
+    grows with the candidate and a jump does not, so a small jump read
+    from a long candidate gives a ratio between the two kinds: a candidate
+    above :data:`_JUMP_SUSPECT` and not above :data:`_JUMP_EXCESS` is read
+    a second time, across one spacing of the coordinates
+    (:func:`_excess_across_a_spacing`), and is a jump where that reading
+    is above :data:`_JUMP_ACROSS`.  ``excess`` and ``move`` are those of
+    the candidate with the largest reading among the jumps, or among all
+    of them where none is one; the second reading is reported only for a
+    candidate it made a jump.
+
     ``rejected`` holds ``(candidate, residual, move)``; ``mirror(th)``
     returns the coordinates ``th`` is evaluated at (projected onto the
     bounds, on the leaves' grid) and the residual there.  A candidate whose
@@ -3992,7 +4088,7 @@ def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
     th = np.asarray(theta, dtype=np.float64)
     r64 = np.asarray(r, dtype=np.float64)
     J64 = np.asarray(J, dtype=np.float64)
-    excess, at_move = 0.0, 0.0
+    excess, at_move, jumped = 0.0, 0.0, False
     for cand, cand_r, move in rejected:
         d = np.asarray(cand, dtype=np.float64) - th
         if not d.any():
@@ -4008,9 +4104,15 @@ def _one_sided_excess(theta, r, J, rejected, mirror) -> tuple[float, float]:
         if not (np.isfinite(ahead) and np.isfinite(scale)) or ahead == 0.0:
             continue
         ratio = ahead / scale if scale > 0.0 else np.inf
-        if ratio > excess:
-            excess, at_move = float(ratio), float(move)
-    return excess, at_move
+        is_jump = ratio > _JUMP_EXCESS
+        if _JUMP_SUSPECT < ratio <= _JUMP_EXCESS:
+            across = _excess_across_a_spacing(
+                th, r64, J64, cand, cand_r, behind, mirror, theta.dtype)
+            if across > _JUMP_ACROSS:
+                ratio, is_jump = across, True
+        if (is_jump, ratio) > (jumped, excess):
+            excess, at_move, jumped = float(ratio), float(move), bool(is_jump)
+    return excess, at_move, jumped
 
 
 
@@ -5802,11 +5904,21 @@ def fit_lm(
     linearisation's own change, the rejection is a jump and not rounding,
     which is alike on both sides.  The run then ends ``converged=False``
     with a :class:`RuntimeWarning` naming a residual that is not
-    differentiable; ``params`` is the lowest loss it found.  Measured, in
+    differentiable; ``params`` is the lowest loss it found.  A small jump
+    read from a long candidate falls short of that (the linearisation's
+    change grows with the step, the jump does not), so a candidate at more
+    than ``2**5`` is read a second time: its step is halved down to the
+    one float spacing of the coordinates across which the residual departs
+    most (a residual evaluation a halving), and it is a jump where that
+    departure is ``2**8`` times the other side's and the linearisation's
+    change over one spacing.  Measured, in
     float32 and under x64: at most 21 on fits of smooth residuals stopped
     by the floor rule (the spring over its transforms, units and noise
     levels; ``HeartPumpNode`` at noise 0.02 and 1), and 2.2e4 to 4.4e5 on
-    the ball (float32).  Not detected: a *kink* -- a continuous residual whose slope
+    the ball (float32); the second reading, at most 52 on the former and
+    1.8e3 or more on the ball's jumps, two of which read 341 and 456 the
+    first time.
+    Not detected: a *kink* -- a continuous residual whose slope
     jumps -- in whose crease a run ends ``converged=True``, at a point no
     step lowers the loss from but whose ``J`` is one-sided; a jump whose
     mirror image the bounds do not allow; and a jump beside an iterate the
@@ -6312,7 +6424,7 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
-        jump = (0.0, 0.0)
+        jump = (0.0, 0.0, False)
         verdict["representable"] = True
         # A loss of exactly 0.0 from a residual that is not: the framed
         # sum's unframing underflowed float64 (a float64 residual below
@@ -6467,10 +6579,10 @@ def fit_lm(
                     # loss that can be far above the minimum.  The rejected
                     # candidates tell the two apart (:func:`_one_sided_excess`).
                     jump = _one_sided_excess(theta, r, J, rejected, _mirrored)
-                    stationary = not jump[0] > _JUMP_EXCESS
+                    stationary = not jump[2]
         if again:
             continue
-        if jump[0] > _JUMP_EXCESS:
+        if jump[2]:
             warnings.warn(_JUMP_WARNING.format(move=jump[1], excess=jump[0]),
                           RuntimeWarning, stacklevel=2)
             break

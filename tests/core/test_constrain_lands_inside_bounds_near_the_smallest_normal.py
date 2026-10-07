@@ -154,6 +154,17 @@ def test_a_logit_interval_narrower_than_four_smallest_normals_is_refused_by_name
                 spec.to_constrained(jnp.asarray(F(0.0)))
             with pytest.raises(ValueError, match="cannot map .* is a subnormal"):
                 spec.to_unconstrained(jnp.asarray(F(0.5)))
+        # The same shape as a property test drew it (float32: 0.85 of the
+        # smallest normal).  Under x64 it is an ordinary bound, and mapped.
+        drawn = ParamSpec(bounds=(1.0027701900272462e-38, 1.0), transform="logit")
+        if np.dtype(dtype) == np.float32:
+            for refused in (lambda: drawn.to_constrained(jnp.asarray(F(0.0))),
+                            lambda: drawn.to_unconstrained(jnp.asarray(F(0.5))),
+                            lambda: drawn.check(jnp.asarray(F(0.5)))):
+                with pytest.raises(ValueError, match="cannot map .* is a subnormal"):
+                    refused()
+        else:
+            drawn.check(drawn.to_constrained(jnp.asarray(F(0.0))))
         for lo, hi in ((0.0, tiny), (0.0, 3.5 * tiny), (-tiny, tiny), (tiny, 2 * tiny)):
             spec = ParamSpec(bounds=(lo, hi), transform="logit")
             with pytest.raises(ValueError, match="cannot map .* width .* smallest normals"):

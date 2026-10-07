@@ -393,6 +393,13 @@ Requirements:
 - Return a dict of JAX arrays
 - Keys become available as `source_field` on edges
 - Called automatically after each node update during edge resolution
+- On a multi-rate graph, a node slower than the base step holds its state
+  between the base steps it fires on, and the hook is called on **every**
+  base step with the state the node holds after that step and the
+  boundary inputs resolved at that step: a reader gets the flux of the
+  held state (as a reader of a state field gets the held state), computed
+  with this base step's inputs.  It is the flux a reader would compute
+  itself from the held state it can read.
 - If `update` takes `params`, take it here too and read the same
   constants from it: the graph passes the node's `gm.params` entry on
   every flux evaluation, so a calibrated constant changes the flux the

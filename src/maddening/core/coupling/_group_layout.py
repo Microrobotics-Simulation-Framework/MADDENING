@@ -249,7 +249,7 @@ _GROUP_META_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification", "rho_spectral",
     "spectral_residual", "spectral_amplification",
     "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
-    "V", "W", "pred_count", "pred_0", "pred_1", "pred_2",
+    "geometry_gap", "V", "W", "pred_count", "pred_0", "pred_1", "pred_2",
 )
 
 
@@ -358,14 +358,90 @@ def _group_geometry_edges(group, edges) -> list:
     return [e for e in edges if e.geometry is not None and e.target_node in group.nodes]
 
 
+#: The mapping kind whose moving geometry the coupling diagnostics read.
+_DIAGNOSED_GEOMETRY_KIND = "multilinear_grid"
+#: The convergence norms a group with a geometry edge is diagnosed under:
+#: the two that measure the members' state, the geometry included.
+_DIAGNOSED_GEOMETRY_NORMS = ("l2", "mixed")
+
 #: Why a group whose pass resolves a geometry-dependent mapping reports no
-#: bound (``coupling_diagnostics()[key]["not_usable_reason"]``).
+#: bound (``coupling_diagnostics()[key]["not_usable_reason"]``): the stem
+#: every such reason starts with, and what each case adds.
 _GEOMETRY_DIAGNOSTICS_REASON = (
     "the group resolves geometry-dependent mapping(s) on edge(s) {keys}; in 0.4.0 the "
-    "coupling diagnostics do not read a moving geometry (the float floor and the "
-    "bounds built on it leave it out), so no bound or estimate is reported for this "
-    "group. iterations, residual and converged are the solve's own."
+    "coupling diagnostics do not read a moving geometry {why}, so no bound or estimate "
+    "is reported for this group. iterations, residual and converged are the solve's own."
 )
+_GEOMETRY_KIND_WHY = (
+    "of a mapping kind other than 'multilinear_grid' (edge(s) {others} carry kind(s) "
+    "{kinds})"
+)
+_GEOMETRY_NORM_WHY = (
+    "under convergence_norm={norm!r} (they do under 'l2' and 'mixed', which measure the "
+    "members' state, the geometry included)"
+)
+_GEOMETRY_SUBCYCLED_WHY = (
+    "in a sub-cycled group (members {members} take several sub-steps per pass, and the "
+    "geometry of each sub-step is not followed)"
+)
+_GEOMETRY_SELF_CHECK_WHY = (
+    "where the pass's Jacobian-vector product along the geometry disagrees with a finite "
+    "difference of the pass along the same direction (relative gap {gap:.3g}, allowed "
+    "{allowed:.3g}: a member or a mapping whose derivative is not that of its value, or a "
+    "state the check could not be evaluated at)"
+)
+
+
+def _geometry_diagnostics_refusal(group, nodes, edges) -> Optional[str]:
+    """Why *group*'s report withholds its bounds on account of a geometry
+    edge, whatever the step measures; ``None`` for a group without one and
+    for a group the diagnostics read the geometry of.
+
+    Experimental.  The diagnostics read a moving geometry for the
+    ``multilinear_grid`` kind, under ``convergence_norm="l2"`` or
+    ``"mixed"``, in a group that does not sub-cycle.  The step then checks
+    its own Jacobian-vector product along the geometry
+    (``_bounds._geometry_product_gap``), and the report withholds the
+    bounds where that check fails
+    (:func:`_geometry_self_check_reason`).
+    """
+    geometry = _group_geometry_edges(group, edges)
+    if not geometry:
+        return None
+    keys = [e.key for e in geometry]
+    others = [e for e in geometry
+              if getattr(e.mapping, "kind", None) != _DIAGNOSED_GEOMETRY_KIND]
+    if others:
+        why = _GEOMETRY_KIND_WHY.format(
+            others=[e.key for e in others],
+            kinds=sorted({str(getattr(e.mapping, "kind", None)) for e in others}))
+    elif group.convergence_norm not in _DIAGNOSED_GEOMETRY_NORMS:
+        why = _GEOMETRY_NORM_WHY.format(norm=group.convergence_norm)
+    elif _group_dividers(group, nodes):
+        dividers = _group_dividers(group, nodes) or {}
+        why = _GEOMETRY_SUBCYCLED_WHY.format(
+            members=sorted(n for n, d in dividers.items() if d > 1))
+    else:
+        return None
+    return _GEOMETRY_DIAGNOSTICS_REASON.format(keys=keys, why=why)
+
+
+def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
+    """The reason of a report whose step failed its geometry self-check."""
+    return _GEOMETRY_DIAGNOSTICS_REASON.format(
+        keys=list(keys), why=_GEOMETRY_SELF_CHECK_WHY.format(gap=gap, allowed=allowed))
+
+
+def _geometry_holders(group, edges) -> list:
+    """``[(node, field, mapping)]``: each geometry field *group*'s pass
+    reads, once, with the first mapping that reads it (the step of the
+    self-check is taken on that mapping's lattice)."""
+    seen: dict = {}
+    for e in _group_geometry_edges(group, edges):
+        anchor, field = e.geometry
+        holder = e.source_node if anchor == "source" else e.target_node
+        seen.setdefault((holder, field), e.mapping)
+    return [(node, field, mapping) for (node, field), mapping in seen.items()]
 
 
 _WRITTEN_BEFORE_SAVE_REASON = (

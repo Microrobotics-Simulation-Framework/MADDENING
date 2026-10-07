@@ -48,7 +48,7 @@ bit.
 in the harness's phase-1 block): the interface norm over a geometry edge
 is refused at compile in 0.4.0.  Each such case asserts the refusal and
 that its relay twin compiles and reports today; when
-``DIAGNOSTICS_READ_GEOMETRY`` is set the slow test compares the two
+``INTERFACE_NORM_READS_GEOMETRY`` is set the slow test compares the two
 reports as the static cases are compared.
 """
 
@@ -342,7 +342,7 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_b
         keys = [e.key for e in gg.build(gg.two_body(c), compile=False).edges
                 if e.geometry is not None]
         assert len(keys) == 2, keys
-        if gg.DIAGNOSTICS_READ_GEOMETRY:
+        if gg.INTERFACE_NORM_READS_GEOMETRY:
             gg.build(gg.two_body(c))        # accepted, once diagnostics read a geometry
         else:
             gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)), keys)
@@ -358,11 +358,11 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_b
 def test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin(c):
     """PHASE 1 (see ``geometry_graphs``): the relay twin of a refused case
     reports a usable spectrum today -- the report the edge-mapped graph is
-    held to once ``DIAGNOSTICS_READ_GEOMETRY`` is set, by the comparison of
+    held to once ``INTERFACE_NORM_READS_GEOMETRY`` is set, by the comparison of
     the static cases."""
     with gg.x64(c.needs_x64):
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
-        if not gg.DIAGNOSTICS_READ_GEOMETRY:
+        if not gg.INTERFACE_NORM_READS_GEOMETRY:
             twin.step()
             report = twin.coupling_diagnostics()[KEY]
             assert bool(report["spectral_usable"]) and np.isfinite(

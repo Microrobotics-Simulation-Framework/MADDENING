@@ -3292,8 +3292,18 @@ claims:
     no non-symmetric eigenvalue problem (neither CPU nor GPU) the
     compressed radius comes from repeated squaring, which in float32 is
     not backward stable (MADD-ANO-223).
+    A group with a geometry edge (experimental; MAP-036: multilinear_grid
+    mappings, one rate, the l2 or the mixed norm): the Jacobian is the
+    pass's with respect to the members' whole state, the positions a
+    source-anchored edge reads from the iterate included; rho_spectral is
+    within 1e-5 of the radius of the float64 reference's dense Jacobian
+    on float32 draws where the Jacobian without its position columns has
+    a radius 12% and 14% off, and both statements above are scored
+    against that reference.
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
+    - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - tests/core/test_coupling_error_bound.py::test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum
     - tests/core/test_coupling_error_bound.py::test_arnoldi_leaves_a_residual_where_the_space_is_too_small
     - tests/core/test_coupling_error_bound.py::test_a_non_normal_spectrum_larger_than_the_space_can_read_above_its_radius
@@ -3364,8 +3374,18 @@ claims:
     the bound rests on the counted floor (CPL-092, CPL-102), which does not
     see a same-pass read that differences entries of one field
     (MADD-ANO-212, open).
+    A group with a geometry edge (experimental; MAP-036: multilinear_grid
+    mappings, one rate, the l2 or the mixed norm) is not a linear F: a
+    gather or a scatter is nonlinear in the positions it reads.  The bound
+    is the linearisation's at the returned iterate, in the norm of the
+    members' state, positions included, and is held against the float64
+    reference's fixed point with the factor 1 / (1 - h) of the nonlinear
+    search, h the reference's measure of how far the Jacobian moves
+    between the returned iterate and the fixed point, on examples whose
+    points stay in one lattice cell between the two.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not
     - tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_is_never_below_the_true_distance
@@ -3703,8 +3723,15 @@ claims:
     floor) is not in the bound, which says nothing of it; it read 1.09 for
     a relative error of 1.134 with those probes in it (MADD-ANO-234,
     resolved).
+    A group with a geometry edge (experimental; MAP-036: multilinear_grid
+    mappings, one rate, the l2 or the mixed norm): the constants probed
+    include the positions a target-anchored edge reads from a member's
+    pre-step state, and the bound is held against the float64 reference's
+    implicit derivative for every constant of the members the pass
+    resolves.
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
     - tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed_at_one_cap
     - tests/core/test_coupling_gradient_error_bound.py::test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap
@@ -3938,8 +3965,15 @@ claims:
     mapping, with the weights passed as `mappings`, then its transform),
     each at the coarser of its own dtype's eps and its source field's
     (MADD-ANO-211).
+    A group with a geometry edge (experimental; MAP-036: multilinear_grid
+    mappings, one rate, the l2 or the mixed norm): the floor is the
+    members' state's, each position field at its own dtype's eps, with
+    the measured gain of a read through the gather or the scatter in the
+    evaluation count; the exact residual of the returned float32 state is
+    held to the reported one plus the floor against the float64 reference.
   oracle: closed form.
   tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_floor_of_a_mapped_edge_counts_what_it_delivers
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_is_no_finer_than_the_field_it_was_computed_from
     - tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
@@ -5748,8 +5782,56 @@ claims:
     adaptive: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write[run_adaptive]'
     checkpoint_restart: tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step
     sharded: n/a
-
 - id: CPL-190
+  area: edges
+  claim: >-
+    On a multi-rate graph a slow node's flux is the flux of the state it
+    holds: "a node slower than the base step holds its state between the
+    base steps it fires on, and the hook is called on every base step with
+    the state the node holds after that step and the boundary inputs
+    resolved at that step: a reader gets the flux of the held state (as a
+    reader of a state field gets the held state)".
+  sources:
+    - docs/developer_guide/node_authoring.md (Exposing Flux Quantities)
+    - docs/algorithm_guide/coupling/interface_mapping.md (The time level a geometry is read at)
+    - src/maddening/core/graph_manager.py::GraphManager._build_step_fn
+  conditions: >-
+    an ungrouped chain driver -> producer -> consumer whose flux depends on
+    the producer's state and on its input; rate dividers 2, 3 and 4 on the
+    producer or on the consumer; the nodes and edges added in either
+    order; integer-valued float32 states, so every comparison is exact on
+    any JAX version; step, run_scan_with_history, and one vmap over the
+    phases of the divider; a target-anchored geometry of the slow node.
+    Not claimed for a flux edge that crosses a coupling group's boundary
+    (MADD-ANO-156), float64, mixed dtypes, 16-bit floats, gradients,
+    sub-cycled groups, run_adaptive, checkpoint restarts or sharded
+    graphs.
+  oracle: >-
+    a NumPy float64 simulation written from the documented rule (fire when
+    step_count % divider == 0, hold otherwise; the flux of the held state
+    with this base step's inputs), compared exactly at every base step.
+  tests:
+    - tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_reader_of_a_slow_nodes_flux_receives_the_flux_of_the_held_state
+    - tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_slow_nodes_flux_hook_reads_its_geometry_from_the_held_state
+    - tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_flux_reader_follows_the_held_state_at_every_base_step
+    - tests/core/test_multirate_flux_is_of_the_held_state.py::test_the_scanned_and_batched_steps_publish_the_held_flux_too
+  status: verified
+  domains:
+    f32: tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_flux_reader_follows_the_held_state_at_every_base_step
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_flux_reader_follows_the_held_state_at_every_base_step
+    grad: narrowed
+    vmap: tests/core/test_multirate_flux_is_of_the_held_state.py::test_the_scanned_and_batched_steps_publish_the_held_flux_too
+    multi_rate: tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_flux_reader_follows_the_held_state_at_every_base_step
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: CPL-191
   area: criterion
   claim: >-
     Under convergence_norm="interface", "a floating field no internal edge

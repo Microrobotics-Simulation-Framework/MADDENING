@@ -27,8 +27,9 @@ around it with the multilinear weights of its position in that cell.
   in the coordinates is reproduced.
 * ``mode="conservative"`` *scatters* points to grid:
   ``out[I[p, s]] += W[p, s] * field[p]``.  It preserves the plain sum
-  (``sum(out) == sum(field)``, the weights of a point sum to one): it
-  deposits amounts.  It divides by no cell volume and applies no
+  to the rounding of the geometry's dtype (``sum(out) == sum(field)`` to
+  that rounding: the weights of a point are computed in the geometry's
+  dtype and sum to one there): it deposits amounts.  It divides by no cell volume and applies no
   quadrature weight; turning the result into a density belongs to a node
   or to the edge's ``transform``.
 
@@ -40,8 +41,9 @@ lattice's hull, coordinate by coordinate: gather extrapolates constantly,
 scatter deposits on the boundary, the weights still sum to one, and the
 derivative with respect to a coordinate strictly outside is zero.  A
 **non-finite** coordinate is not clamped: every weight of that point is
-NaN at flat index 0, so gather returns NaN for that point only and scatter
-puts NaN in the cells of index 0.
+NaN, on the ``2**d`` corners of the grid's first cell (index 0 or 1 on
+each axis), so gather returns NaN for that point only and scatter puts NaN
+in those corner cells and no other.
 
 **Precision.**  Indices and weights are computed in the geometry's dtype,
 in a static power-of-two frame of the spacing (so a spacing far below one
@@ -67,6 +69,7 @@ geometry.
 from __future__ import annotations
 
 import itertools
+import math
 from typing import Any, Optional
 
 import jax.numpy as jnp
@@ -221,6 +224,13 @@ class MultilinearGridMapping:
         if not jnp.issubdtype(geom.dtype, jnp.floating):
             raise TypeError(
                 f"{KIND}: the geometry has dtype {geom.dtype}; positions are floating-point")
+        # Asked here as well as by ``compile()``: a program is traced
+        # again when the geometry's dtype changes, so a float32 geometry
+        # written into a graph that was compiled with a float64 one (a
+        # state write is not a recompile) is refused at its first step.
+        unresolved, _ = self.geometry_dtype_problems(geom.dtype)
+        if unresolved:
+            raise ValueError(f"{KIND}: " + "; ".join(unresolved))
         if geom.ndim == 1:
             geom = geom[:, None]
         T = geom.dtype
@@ -257,6 +267,34 @@ class MultilinearGridMapping:
             index.append(flat)
             weight.append(jnp.where(finite, w, nan))
         return jnp.stack(index, axis=1), jnp.stack(weight, axis=1)
+
+    def _probe_step(self, geom):
+        """A small step of every position towards the middle of its
+        lattice cell, per coordinate: the direction the coupling
+        diagnostics' self-check moves a geometry along
+        (``_bounds._geometry_product_gap``).
+
+        ``sqrt(eps)`` of the spacing (at least two ``eps`` of the
+        coordinate, so that the step is not lost in it), signed so that no
+        point crosses a lattice plane: the stencil is one polynomial along
+        the whole step, and a finite difference over it is a derivative.
+        Zero for a non-finite coordinate.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        eps = float(jnp.finfo(T).eps)
+        steps = []
+        for a in range(self._d):
+            p = pow2_host_factor(self.spacing[a], T)
+            u = (cols[:, a] * jnp.asarray(p, T) - jnp.asarray(self.origin[a] * p, T)) / (
+                jnp.asarray(self.spacing[a] * p, T))
+            size = jnp.maximum(jnp.asarray(math.sqrt(eps) * self.spacing[a], T),
+                               2 * jnp.asarray(eps, T) * jnp.abs(cols[:, a]))
+            below_the_middle = (u - jnp.floor(u)) * 2 < 1
+            step = jnp.where(below_the_middle, size, -size)
+            steps.append(jnp.where(jnp.isfinite(cols[:, a]), step, jnp.zeros((), T)))
+        return jnp.stack(steps, axis=1).reshape(geom.shape)
 
     def _floating(self, field, what: str):
         field = jnp.asarray(field)

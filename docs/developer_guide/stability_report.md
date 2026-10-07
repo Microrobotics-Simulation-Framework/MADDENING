@@ -75,6 +75,8 @@ import time.  Levels:
 | `maddening.core.graph_manager.GraphManager.coupling_report` | experimental |
 | `maddening.core.graph_manager.GraphManager.format_graph` | experimental |
 | `maddening.core.graph_manager.GraphManager.memory_estimate` | experimental |
+| `maddening.core.graph_manager.GraphManager.param_spec_overrides` | evolving |
+| `maddening.core.graph_manager.GraphManager.param_specs` | evolving |
 | `maddening.core.graph_manager.GraphManager.params_table` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_coupling_report` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_graph` | experimental |
@@ -82,9 +84,11 @@ import time.  Levels:
 | `maddening.core.graph_manager.GraphManager.print_memory_estimate` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_params_table` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_state_summary` | experimental |
+| `maddening.core.graph_manager.GraphManager.set_param_spec` | evolving |
 | `maddening.core.graph_manager.GraphManager.state_summary` | experimental |
 | `maddening.core.graph_manager.GraphManager.to_dot` | experimental |
 | `maddening.core.graph_manager.GraphManager.to_mermaid` | experimental |
+| `maddening.core.graph_manager.GraphManager.trainable_mask` | evolving |
 | `maddening.core.graph_manager.ShardingIssue` | evolving |
 | `maddening.core.inspection.InspectionTable` | experimental |
 | `maddening.core.inspection.coupling_report` | experimental |
@@ -223,4 +227,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*203 API surfaces registered.*
+*207 API surfaces registered.*

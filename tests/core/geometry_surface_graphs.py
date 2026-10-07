@@ -111,13 +111,17 @@ def static_matrices():
 
 
 def graph(*, group: bool = False, geometry: bool = True, compile: bool = True,
-          edges: bool = True, **group_kw) -> GraphManager:
+          edges: bool = True, substeps: int = 1, **group_kw) -> GraphManager:
     """The two-node graph; with ``geometry=False`` its static twin (the
     matrices of the first positions on ordinary mapped edges); with
-    ``edges=False`` the two nodes alone."""
+    ``edges=False`` the two nodes alone; with ``substeps > 1`` the markers
+    take that many sub-steps per step of the grid, and the group
+    sub-cycles."""
     gm = GraphManager()
     gm.add_node(GridField("grid", DT))
-    gm.add_node(Markers("markers", DT))
+    gm.add_node(Markers("markers", DT / substeps))
+    if substeps > 1:
+        group_kw = {"subcycling": True, **group_kw}
     if not edges:
         pass
     elif geometry:

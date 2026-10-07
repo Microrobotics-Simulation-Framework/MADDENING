@@ -81,6 +81,10 @@ jobs:
         # so this lane is the only one that runs them.  Each self-skips
         # when its tool is missing; without this step the valgrind run
         # would skip here silently and run nowhere.
+        # apt-get can wait on a silent mirror with no output (it did, for
+        # 1 h 50 min, in ci.yml on 2026-10-07): ten minutes, then the job
+        # fails and is rerun, instead of spending the lane's 180.
+        timeout-minutes: 10
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
 
       - name: Run full suite (slow lane)

@@ -177,6 +177,9 @@ def _strong_typed(tree):
     return jax.tree.map(_fix, tree)
 
 
+_GEOMETRY_DTYPES = ("float32", "float64")
+
+
 def _edge_geom(edge: EdgeSpec, src_state, consumer_state):
     """The geometry *edge*'s mapping reads at one call site, or ``None``.
 
@@ -194,9 +197,42 @@ def _edge_geom(edge: EdgeSpec, src_state, consumer_state):
         return None
     anchor, field = edge.geometry
     if anchor == "source":
-        return src_state[edge.source_node][field]
+        return _traceable_geometry(edge, field, src_state[edge.source_node][field])
     held: Any = consumer_state() if callable(consumer_state) else consumer_state
-    return held[field]
+    return _traceable_geometry(edge, field, held[field])
+
+
+def _traceable_geometry(edge: EdgeSpec, field: str, value):
+    """*value*, the geometry field *field* that *edge* is about to read, or
+    a refusal.
+
+    The dtype rules ``validate()`` applies to a geometry field at
+    ``compile()`` -- float32 or float64, and fine enough for the mapping
+    (its ``geometry_dtype_problems``) -- asked again where a program is
+    traced.  A state write is not a recompile, so a geometry compiled as
+    float64 and then written as float32 (``set_node_state``) reached the
+    kernel unasked and every sample of a grid it could not resolve came
+    back wrong; a program is traced again when a dtype changes, so asking
+    here cannot be bypassed.  Host-side: nothing is added to the program.
+    """
+    dtype = getattr(value, "dtype", None)
+    if str(dtype) not in _GEOMETRY_DTYPES:
+        raise TypeError(
+            f"edge {edge.key}: its geometry field {field!r} now has dtype "
+            f"{dtype} in the state being stepped; a geometry must be a float32 or "
+            f"float64 array.  compile() checks the state it is given: a state write "
+            f"made after it, or an update that returns another dtype, is checked here.")
+    problems = getattr(edge.mapping, "geometry_dtype_problems", None)
+    if callable(problems):
+        found: Any = problems(dtype)
+        errors = found[0]
+        if errors:
+            raise ValueError(
+                f"edge {edge.key}: {'; '.join(errors)}.  The geometry field "
+                f"{field!r} has dtype {dtype} in the state being stepped.  "
+                f"compile() checks the state it is given: a state write made after it, "
+                f"or an update that returns another dtype, is checked here.")
+    return value
 
 
 _GEOMETRY_ANCHORS = ("source", "target")
@@ -262,7 +298,6 @@ def _mapping_field_leads(mapping) -> Optional[tuple[tuple, tuple]]:
     return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
 
 
-_GEOMETRY_DTYPES = ("float32", "float64")
 
 
 def _geometry_edge_issues(edges, nodes, state) -> list[str]:

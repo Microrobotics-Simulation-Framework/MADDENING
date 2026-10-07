@@ -260,9 +260,9 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile(c):
 
 
 def test_the_phase_1_refusals_are_the_interface_norm_cases_and_only_those():
-    assert gg.DIAGNOSTICS_READ_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
+    assert gg.INTERFACE_NORM_READS_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
     assert all(c.group is not None and c.down and c.up for c in REFUSED_IN_PHASE_1)
-    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.DIAGNOSTICS_READ_GEOMETRY
+    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.INTERFACE_NORM_READS_GEOMETRY
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +334,11 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         else:
             lo, hi = sorted((res_a, res_b))
             assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, res_a, res_b)
-        if not gg.DIAGNOSTICS_READ_GEOMETRY:
+        if gg.withheld(c) is not None:
             # PHASE 1 (see ``geometry_graphs``): beyond the solve's outcome,
-            # compared above, the edge-mapped group reports no bound and
-            # says why.  The comparison below is what a later phase restores.
-            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c))
+            # compared above, a group of another mapping kind and a
+            # sub-cycled one report no bound and say which they are.
+            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c), gg.withheld(c))
             continue
         # Everything else a report says: the same keys, the same verdicts,
         # and after the same number of passes the same numbers to within a
@@ -506,7 +506,7 @@ def test_a_report_s_float_floor_counts_a_source_anchored_geometry():
     c = case("floor", kind="multilinear", geom_dtype="float64", adv=0.3, **SOURCES,
              group=dict(max_iterations=80, convergence_norm="interface", rtol=1e-6,
                         diagnostics=True))
-    if not gg.DIAGNOSTICS_READ_GEOMETRY:
+    if not gg.INTERFACE_NORM_READS_GEOMETRY:
         # PHASE 1 (see ``geometry_graphs``): the interface norm over a
         # geometry edge is refused; the comparison below is a later phase's.
         with gg.x64(True):
@@ -667,6 +667,40 @@ def test_the_inlined_twin_keeps_names_orders_and_groups_and_uses_plain_edges_onl
     assert isinstance(twin.node("P"), gg.InlinedFluxMappingNode)
     assert type(twin.node("F")) is gg.InlinedMappingNode
     assert type(twin.node("R")) is gg.Reader and type(twin.node("E")) is gg.Body
+
+
+def test_two_geometry_edges_into_one_port_are_inlined_on_a_port_each():
+    """Two grid-side bodies deliver into ``P.u`` through a mapping each,
+    the second additively: the twin gives each edge its own value and
+    geometry port.  (They used to share ``"u@value"``, the second value
+    replacing the first before either was mapped: the twin's states were
+    0.11 to 0.17 from the edge-mapped graph's with nothing refused.  No
+    case of this module has that shape.)"""
+    rng = np.random.default_rng(5)
+    mats = [rng.uniform(-0.6, 0.6, size=(gg.M_POINTS, gg.N_MATRIX)) for _ in range(3)]
+
+    def graph():
+        nodes = [gg.Body("F1", DT, n=gg.N_MATRIX, geoms={"A": mats[0]}, seed=21),
+                 gg.Body("F2", DT, n=gg.N_MATRIX, geoms={"A": mats[1]}, seed=22),
+                 gg.Body("P", DT, n=gg.M_POINTS, geoms={"A": mats[2]}, seed=23)]
+        mapping = lambda: gg.geom_matrix_mapping(gg.M_POINTS, gg.N_MATRIX)   # noqa: E731
+        return gg.GGraph(nodes, [
+            gg.GEdge("F1", "P", "x", "u", mapping=mapping(), geometry=("source", "A")),
+            gg.GEdge("F2", "P", "x", "u", mapping=mapping(), geometry=("target", "A"),
+                     additive=True)])
+
+    twin = gg.inline_geometry(graph())
+    assert [(e.src, e.tf) for e in twin.edges] == [
+        ("F1", "u@value"), ("F1", "u@geometry"), ("F2", "u@value@1")]
+    edge, inline = gg.build(graph()), gg.build(twin)
+    for a, b in zip(gg.run_steps(edge, 3), gg.run_steps(inline, 3)):
+        for name in a:
+            for field in a[name]:
+                np.testing.assert_allclose(a[name][field], b[name][field], rtol=2e-6, atol=1e-7)
+    # Both edges reach the port: with either removed the state is another.
+    alone = gg.GGraph(graph().nodes, graph().edges[:1])
+    last, only = gg.run_steps(edge, 3)[-1], gg.run_steps(gg.build(alone), 3)[-1]
+    assert np.max(np.abs(last["P"]["x"] - only["P"]["x"])) > 1e-2
 
 
 def test_a_geometry_edge_that_is_not_the_last_into_its_port_is_refused_by_the_twin():
@@ -993,3 +1027,138 @@ def test_a_frozen_geometry_equals_the_static_mapping_in_every_domain(domain, nam
                     model.check_step(step.pre, step.state, step.reports,
                                      thresholds=ct.thresholds_of(knobs),
                                      where=f"{what} step {k}")
+
+
+# =============================================================================
+# THE FROZEN IDENTITY UNDER THE INTERFACE NORM  (the static half now; the
+# comparison waits for the geometry stage)
+# =============================================================================
+#
+# ``compile()`` refuses the interface norm over a geometry edge in 0.4.0
+# (phase 1, above), so the frozen identity has never been stated for that
+# norm.  Two rules are about to be written for it -- which side of a
+# *static* mapping the norm reads (``ct.INTERFACE_SIDE``; the decision of
+# 2026-10-07 is the compact side: a target larger than its source is read
+# at the source), and later what it reads of a geometry edge (a gather as
+# delivered; a scatter at its source value, plus the geometry) -- and a
+# frozen geometry edge *is* a static mapping, so the two must be one rule.
+#
+# * The static half runs today: one coupling pass of the static twin under
+#   the interface norm reports the residual of the returned state against
+#   the pre-step state, restated here from the two snapshots and the twin's
+#   matrices under the tree's rule, and *not* under the other rule (each
+#   case has a scatter onto a larger target, so the two differ).
+# * The comparison is written and waits (strict, on the refusal): the frozen
+#   graph returns the static twin's states and verdict, and its residual is
+#   the twin's with the geometry the scatter edge reads counted in the pool
+#   (a field that does not move adds entries and no change:
+#   :func:`frozen_interface_entries`).
+
+_ONE_PASS = dict(max_iterations=1, convergence_norm="interface", rtol=1e-6)
+FROZEN_INTERFACE = [
+    case("frozen group, multilinear, interface norm, one pass", kind="multilinear",
+         dtype="float64", group=_ONE_PASS, **_FROZEN, **SOURCES),
+    case("frozen group, multilinear, interface norm, one pass, Jacobi, P first",
+         kind="multilinear", dtype="float64", order=("P", "F"),
+         group=dict(_ONE_PASS, iteration_mode="jacobi"), **_FROZEN, **P_HOLDS),
+    case("frozen group, matrix, interface norm, one pass", dtype="float64", group=_ONE_PASS,
+         **_FROZEN, **F_HOLDS),
+]
+
+
+def _one_pass_steps(gm, steps: int) -> list:
+    """``[(pre, post, report)]`` of *steps* steps from the initial state."""
+    gm.reset_state()
+    out = []
+    for _ in range(steps):
+        pre = gg.snapshot(gm)
+        gm.step()
+        out.append((pre, gg.snapshot(gm), dict(gm.coupling_diagnostics()["F+P"])))
+    return out
+
+
+def static_interface_residual(c: gg.Case, pre: dict, post: dict, rule: str):
+    """``(residual, entries)`` of one pass of *c*'s static twin under *rule*.
+
+    The interface norm of the returned state against the pre-step state:
+    each internal edge's reading -- ``H x`` of its source where it is read
+    as delivered, the source's ``x`` where *rule* is ``"compact"`` and the
+    target is larger -- changes by ``rtol`` times its largest magnitude
+    over both, pooled into one RMS.
+    """
+    assert rule in ("delivered", "compact"), rule
+    rtol = float(c.knobs["rtol"])
+    total, count = 0.0, 0
+    for which, src in (("down", "F"), ("up", "P")):
+        H = np.asarray(gg.static_matrix(c, which), np.float64)
+        new, old = (np.asarray(s[src]["x"], np.float64) for s in (post, pre))
+        if not (rule == "compact" and H.shape[0] > H.shape[1]):
+            new, old = H @ new, H @ old
+        ref = max(float(np.max(np.abs(new))), float(np.max(np.abs(old))))
+        if ref > 0:
+            total += float(np.sum(((new - old) / (rtol * ref)) ** 2))
+            count += new.size
+    return float(np.sqrt(total / max(count, 1))), count
+
+
+def frozen_interface_entries(c: gg.Case, state: dict) -> int:
+    """The entries a *frozen* geometry adds to the interface norm's pool.
+
+    The decision for geometry edges: a gather is read as delivered, with
+    nothing of its geometry; a scatter at its source value plus the
+    geometry it reads, which does not move here and so adds its entries to
+    the count and nothing to the sum (a field that is zero everywhere
+    leaves the norm).  The stage that makes the norm read a geometry owns
+    this function: it is the one place the two rules meet.
+    """
+    extra = 0
+    for which in ("down", "up"):
+        n_target, n_source = gg.static_matrix(c, which).shape
+        if n_target <= n_source:
+            continue
+        field = "pos" if c.kind == "multilinear" else ("A" if which == "down" else "B")
+        held = np.asarray(state[gg.holder(c, which)][field])
+        extra += int(held.size) if np.any(held != 0) else 0
+    return extra
+
+
+@pytest.mark.parametrize("c", FROZEN_INTERFACE, ids=repr)
+def test_the_static_twin_of_a_frozen_case_reports_the_interface_residual_of_the_trees_rule(c):
+    other = "compact" if ct.INTERFACE_SIDE == "delivered" else "delivered"
+    with gg.x64(c.needs_x64):
+        static = gg.build(gg.static_twin(c))
+        steps = _one_pass_steps(static, c.steps)
+    assert any(H.shape[0] > H.shape[1] for H in (gg.static_matrix(c, w) for w in ("down", "up")))
+    for k, (pre, post, report) in enumerate(steps, start=1):
+        assert int(report["iterations"]) == 1, (c.label, k, report)
+        reported = float(report["residual"])
+        restated, _n = static_interface_residual(c, pre, post, ct.INTERFACE_SIDE)
+        assert abs(reported - restated) <= 1e-9 * restated, (
+            f"{c.label} step {k}: the static twin reports {reported!r}; the "
+            f"{ct.INTERFACE_SIDE} reading of its two states gives {restated!r}")
+        wrong, _n = static_interface_residual(c, pre, post, other)
+        assert abs(reported - wrong) > 1e-3 * reported, (
+            f"{c.label} step {k}: the two rules read this case alike ({reported!r}, "
+            f"{wrong!r}): it cannot tell them apart")
+
+
+@pytest.mark.xfail(not gg.INTERFACE_NORM_READS_GEOMETRY, strict=True, raises=RuntimeError,
+                   reason="waiting for the geometry stage: compile() refuses the interface "
+                          "norm over a geometry edge in 0.4.0")
+@pytest.mark.parametrize("c", FROZEN_INTERFACE, ids=repr)
+def test_a_frozen_geometry_reports_as_its_static_mapping_under_the_interface_norm(c):
+    with gg.x64(c.needs_x64):
+        frozen = gg.build(gg.two_body(c))       # (refused today: the strict xfail)
+        static = gg.build(gg.static_twin(c))
+        a, b = _one_pass_steps(frozen, c.steps), _one_pass_steps(static, c.steps)
+    for k, ((_pre_a, post_a, ra), (pre_b, post_b, rb)) in enumerate(zip(a, b), start=1):
+        assert_same_states(c, post_a, post_b, step=k)
+        assert int(ra["iterations"]) == int(rb["iterations"]) == 1, (c.label, k, ra, rb)
+        assert bool(ra["converged"]) == bool(rb["converged"]), (c.label, k, ra, rb)
+        _res, entries = static_interface_residual(c, pre_b, post_b, ct.INTERFACE_SIDE)
+        extra = frozen_interface_entries(c, post_a)
+        want = float(rb["residual"]) * np.sqrt(entries / (entries + extra))
+        assert abs(float(ra["residual"]) - want) <= 1e-9 * want, (
+            f"{c.label} step {k}: the frozen graph reports residual {ra['residual']!r}; "
+            f"its static twin's {rb['residual']!r} over {entries} entries, with the "
+            f"{extra} of the geometry the scatter reads, is {want!r}")

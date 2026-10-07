@@ -7,10 +7,13 @@ that meets such an edge or the report of a group that resolves one:
 * the inspection texts name the edge's geometry (``format_graph``,
   ``to_mermaid``, ``to_dot``), and those of a graph without one do not
   mention the word;
-* a group that resolves a geometry-dependent mapping reports its solve
-  and withholds every bound, with the string ``not_usable_reason``; every
-  printer and serialiser of a report takes that entry and shows the
-  reason instead of a caveat about a value that is not there;
+* a single-rate group whose geometry edges are ``multilinear_grid``
+  reports its bounds like any other group, and its printed report has no
+  word about a geometry; a group the diagnostics do not read the geometry
+  of (here a sub-cycled one) reports its solve and withholds every bound,
+  with the string ``not_usable_reason``; every printer and serialiser of
+  a report takes that entry and shows the reason instead of a caveat
+  about a value that is not there;
 * a checkpoint holds the geometry as the node state it is and nothing for
   the mapping, which has no weights; a restart is the uninterrupted run.
 
@@ -44,6 +47,12 @@ def _stepped(**kw):
 @pytest.fixture(scope="module")
 def grouped():
     return _stepped(group=True)
+
+
+@pytest.fixture(scope="module")
+def withheld():
+    """The group sub-cycled: the diagnostics do not read its geometry."""
+    return _stepped(group=True, substeps=2)
 
 
 @pytest.fixture(scope="module")
@@ -104,10 +113,35 @@ def test_an_uncompiled_graph_s_text_names_the_geometry_too():
 # ---------------------------------------------------------------------------
 
 
-def test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value(grouped):
+def test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_no_reason(grouped):
+    """The diagnostics read this group's geometry: the report is any other
+    group's, on every printer."""
+    report = grouped.coupling_diagnostics()[G.GROUP]
+    assert "not_usable_reason" not in report
+    # At its tolerance the solve stops on the float floor: the report says
+    # so, as it does for the static twin, and prints that caveat.
+    assert report["ratio_usable"] is True and report["precision_limited"] is True
+    for bound in ("rho_spectral", "spectral_error_bound", "gradient_relative_error_bound",
+                  "error_estimate"):
+        assert math.isfinite(report[bound]), (bound, dict(report))
+    slot = f"coupling_{G.GROUP}_geometry_gap"
+    assert float(grouped._state["_meta"][slot]) < 0.025  # noqa: SLF001
+    (row,) = list(grouped.coupling_report())
+    assert row["spectral_error_bound"] == report["spectral_error_bound"]
+    assert not any("no bound" in flag or "geometry" in flag for flag in row["flags"])
+    assert any(flag.startswith("precision_limited=True") for flag in row["flags"]), row["flags"]
+    buffer = io.StringIO()
+    grouped.print_coupling_report(file=buffer)
+    assert "geometry" not in buffer.getvalue()
+    json.loads(json_codec.dumps(dict(report)))
+
+
+def test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value(withheld):
+    grouped = withheld
     report = grouped.coupling_diagnostics()[G.GROUP]
     reason = report["not_usable_reason"]
     assert isinstance(reason, str) and G.GATHER in reason and G.SCATTER in reason
+    assert "in a sub-cycled group" in reason and "['markers']" in reason
     table = grouped.coupling_report()
     (row,) = list(table)
     assert row["iterations"] == report["iterations"] and row["converged"] is report["converged"]
@@ -134,7 +168,8 @@ def test_the_twin_s_report_keeps_its_own_caveats(grouped_twin):
         assert any(flag.startswith(caveat) for flag in row["flags"]) == bool(due), row["flags"]
 
 
-def test_the_printed_coupling_report_prints_the_reason(grouped):
+def test_the_printed_coupling_report_prints_the_reason(withheld):
+    grouped = withheld
     buffer = io.StringIO()
     grouped.print_coupling_report(file=buffer)
     text = _flat(buffer.getvalue())
@@ -147,7 +182,8 @@ def test_the_printed_coupling_report_prints_the_reason(grouped):
         assert "the solve's own" in _flat(narrow.getvalue())
 
 
-def test_a_report_with_the_reason_is_json_and_comes_back_as_it_was(grouped):
+def test_a_report_with_the_reason_is_json_and_comes_back_as_it_was(withheld):
+    grouped = withheld
     report = dict(grouped.coupling_diagnostics()[G.GROUP])
     back = json_codec.loads(json_codec.dumps(report))
     assert back["not_usable_reason"] == report["not_usable_reason"]
@@ -167,13 +203,18 @@ def test_the_profiler_reads_the_pass_count_of_a_group_with_a_geometry_edge():
     gm = G.graph(group=True, diagnostics=False)
     report = profile_graph(gm, n_steps=2, n_warmup=1, counts=False)
     assert report.coupling_iters[G.GROUP] == gm.coupling_diagnostics()[G.GROUP]["iterations"] > 0
-    assert "not_usable_reason" in gm.coupling_diagnostics()[G.GROUP]
+    assert "not_usable_reason" not in gm.coupling_diagnostics()[G.GROUP]
+    slow = G.graph(group=True, diagnostics=False, substeps=2)
+    report = profile_graph(slow, n_steps=2, n_warmup=1, counts=False)
+    assert report.coupling_iters[G.GROUP] == slow.coupling_diagnostics()[G.GROUP]["iterations"] > 0
+    assert "not_usable_reason" in slow.coupling_diagnostics()[G.GROUP]
 
 
-def test_the_raw_meta_slots_are_still_the_step_s_own_while_the_report_withholds_them(grouped):
+def test_the_raw_meta_slots_are_still_the_step_s_own_while_the_report_withholds_them(withheld):
     """Documented, not promised (``coupling_diagnostics``): the internal
     ``_meta`` entry keeps what the step computed for such a group; only
     the report withholds it."""
+    grouped = withheld
     slot = f"coupling_{G.GROUP}_amplification"
     assert slot in grouped._state["_meta"]  # noqa: SLF001
     assert math.isnan(grouped.coupling_diagnostics()[G.GROUP]["amplification"])

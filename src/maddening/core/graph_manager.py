@@ -281,6 +281,7 @@ class GraphManager:
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
         self._committed_geometry_edges: dict[str, tuple] = {}
+        self._committed_geometry_refusals: dict[str, Optional[str]] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
         # ``(name, entries)``; written when the step is traced.
@@ -1455,6 +1456,7 @@ class GraphManager:
     # ParamSpec: trainable mask, bounds, reparametrisation
     # ------------------------------------------------------------------
 
+    @stability(StabilityLevel.EVOLVING)
     def param_specs(self) -> dict:
         """``{"nodes": {name: {key: ParamSpec}}, "mappings": {}}`` mirroring
         :attr:`params`: each node's :meth:`SimulationNode.param_specs`
@@ -1481,6 +1483,7 @@ class GraphManager:
             out["mappings"][edge.key] = merged
         return out
 
+    @stability(StabilityLevel.EVOLVING)
     def set_param_spec(self, node: str, key: str, spec: ParamSpec) -> None:
         """Override one parameter's :class:`ParamSpec` for this graph
         (e.g. freeze a node's ``mass`` when the data cannot identify it,
@@ -1531,6 +1534,7 @@ class GraphManager:
         if dirties:
             self._dirty = True
 
+    @stability(StabilityLevel.EVOLVING)
     def trainable_mask(self, params: Optional[dict] = None) -> dict:
         """``params``-shaped pytree of Python bools (``True`` = an
         optimiser may move the leaf)."""
@@ -1596,6 +1600,7 @@ class GraphManager:
             out[key] = np.asarray(value).tolist()
         return out
 
+    @stability(StabilityLevel.EVOLVING)
     def param_spec_overrides(self) -> dict[str, dict[str, ParamSpec]]:
         """Graph-level overrides set with :meth:`set_param_spec`."""
         return {n: dict(o) for n, o in self._param_spec_overrides.items() if o}
@@ -2784,6 +2789,15 @@ class GraphManager:
                         meta[f"coupling_{key}_pass_evaluations"] = jnp.array(
                             jnp.nan, dtype=spec_dtype
                         )
+                        if (_group_layout._group_geometry_edges(g, self._edges)
+                                and _group_layout._geometry_diagnostics_refusal(
+                                    g, self._nodes, self._edges) is None):
+                            # The self-check of the pass's product along
+                            # a geometry (experimental): written by the
+                            # step under the same condition.
+                            meta[f"coupling_{key}_geometry_gap"] = jnp.array(
+                                jnp.nan, dtype=spec_dtype
+                            )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -3116,6 +3130,13 @@ class GraphManager:
                 e.key for e in _group_layout._group_geometry_edges(g, self._edges))
             for g in self._coupling_groups
         }
+        # Why each such group's report withholds its bounds whatever the
+        # step measures (``None``: the diagnostics read its geometry).
+        self._committed_geometry_refusals = {
+            "+".join(sorted(g.nodes)): _group_layout._geometry_diagnostics_refusal(
+                g, self._nodes, self._edges)
+            for g in self._coupling_groups
+        }
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -3432,7 +3453,7 @@ class GraphManager:
 
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
-            force_forward_edges=None,
+            force_forward_edges=None, hold=None,
         ):
             """Resolve boundary inputs and update a single node.
 
@@ -3441,6 +3462,14 @@ class GraphManager:
             force_forward_edges : set or None
                 If provided, edges in this set are treated as forward
                 (use new_state) even if they are in back_edge_set.
+            hold : callable or None
+                Multi-rate only, for a node whose rate divider is above
+                one: maps the result of ``update`` to the state the node
+                holds after this base step (that result on a base step
+                the node fires on, its unchanged state on any other).
+                The flux hook is called on what it returns, so a reader
+                of a flux sees the flux of a state the graph holds, as a
+                reader of a state field does.
             """
             boundary_inputs: dict[str, Any] = {}
             # Static: whether an incoming edge reads a geometry from this
@@ -3495,6 +3524,13 @@ class GraphManager:
                 spec, new_state[node_name], boundary_inputs, spec.timestep,
                 node_params.nodes.get(node_name),
             )
+            if hold is not None:
+                # Before the flux hook, not after it: the hook used to be
+                # called on the result of ``update`` on every base step,
+                # so between a slow node's firings its readers received
+                # the flux of a state the step then threw away (and a
+                # geometry the node holds was read from that state).
+                new_node_state = hold(new_node_state)
 
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
@@ -3622,26 +3658,32 @@ class GraphManager:
             step_count = full_state[_graph_specs._META_KEY]["step_count"]
             new_state = {k: v for k, v in full_state.items()}
 
-            def _apply_multirate(node_name, updated, current_state):
+            def _held(node_name, current_state):
+                """What ``update``'s result becomes on this base step.
+
+                ``None`` for a node that fires on every base step.  For
+                a slower one, a selection between the result and the
+                state the node already holds, applied inside
+                ``_resolve_and_update_node`` before the flux hook.
+                """
                 rd = rate_dividers[node_name]
                 if rd == 1:
-                    return updated
+                    return None
                 should_run = (step_count % rd) == 0
-                return jax.tree.map(
+                held_state = current_state[node_name]
+                return lambda updated: jax.tree.map(
                     lambda new_val, old_val: jnp.where(should_run, new_val, old_val),
                     updated,
-                    current_state[node_name],
+                    held_state,
                 )
 
             if has_coupling:
                 for block in blocks:
                     if block[0] == "node":
                         node_name = block[1]
-                        updated = _resolve_and_update_node(
-                            node_name, new_state, full_state, external_inputs, node_params
-                        )
-                        new_state[node_name] = _apply_multirate(
-                            node_name, updated, new_state
+                        new_state[node_name] = _resolve_and_update_node(
+                            node_name, new_state, full_state, external_inputs, node_params,
+                            hold=_held(node_name, new_state),
                         )
                     else:
                         _, group, group_schedule = block
@@ -3692,11 +3734,9 @@ class GraphManager:
                             }
             else:
                 for node_name in schedule:
-                    updated = _resolve_and_update_node(
-                        node_name, new_state, full_state, external_inputs, node_params
-                    )
-                    new_state[node_name] = _apply_multirate(
-                        node_name, updated, new_state
+                    new_state[node_name] = _resolve_and_update_node(
+                        node_name, new_state, full_state, external_inputs, node_params,
+                        hold=_held(node_name, new_state),
                     )
 
             # Increment step counter (preserve diagnostic keys)
@@ -4786,10 +4826,19 @@ class GraphManager:
             **A group that resolves a geometry-dependent mapping**
             (experimental: an edge into a member, from inside the group
             or outside it, added with ``add_edge(..., geometry=...)``)
-            reports the solve's own ``"iterations"``,
+            reports everything above as any other group does where
+            every such mapping is a ``multilinear_grid``, the group's
+            ``convergence_norm`` is ``"l2"`` or ``"mixed"`` and the
+            group does not sub-cycle; with ``diagnostics=True`` its
+            step then compares its own Jacobian-vector product along
+            the positions with a finite difference of the pass, and
+            the bounds stand where the two agree to
+            ``GEOMETRY_GAP_TOLERANCE``.  Any other such group, and one
+            whose step failed that check, reports the solve's own
+            ``"iterations"``,
             ``"total_iterations"``, ``"residual"`` and ``"converged"``
-            and nothing else of the above: the diagnostics do not read a
-            moving geometry in 0.4.0, so ``"amplification"``,
+            and nothing else of the above: the diagnostics do not read
+            its moving geometry in 0.4.0, so ``"amplification"``,
             ``"error_estimate"``, ``"rho_spectral"``,
             ``"spectral_error_bound"`` and
             ``"gradient_relative_error_bound"`` are NaN,
@@ -4798,7 +4847,7 @@ class GraphManager:
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
-            says why; no other group's entry has it.  The values are
+            says which case it is; no other group's entry has it.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -5064,15 +5113,27 @@ class GraphManager:
                         "not_usable_reason": _group_layout._WRITTEN_BEFORE_SAVE_REASON,
                     })
                 geometry_keys = self._committed_geometry_edges.get(key, ())
-                if geometry_keys:
-                    # Experimental, 0.4.0: the diagnostics do not read a
-                    # moving geometry, so a group whose pass resolves a
-                    # geometry-dependent mapping reports the solve's own
-                    # outcome and nothing built on the float floor or on
-                    # the contraction estimates: every bound is NaN (the
-                    # gradient estimate ``inf``, as where the ratio is
-                    # rejected), every ``*_usable`` flag False, and the
-                    # report says why.
+                geometry_reason = (self._committed_geometry_refusals.get(key)
+                                   if geometry_keys else None)
+                gap = meta.get(f"coupling_{key}_geometry_gap") if geometry_keys else None
+                if geometry_reason is None and gap is not None and math.isfinite(rho_spec):
+                    # The step compared its own Jacobian-vector product
+                    # along the geometry with a finite difference of the
+                    # pass (``_bounds._geometry_product_gap``).  Read only
+                    # where the step computed a spectrum to check.
+                    if not float(gap) <= _bounds.GEOMETRY_GAP_TOLERANCE:
+                        geometry_reason = _group_layout._geometry_self_check_reason(
+                            geometry_keys, float(gap), _bounds.GEOMETRY_GAP_TOLERANCE)
+                if geometry_reason is not None:
+                    # Experimental: where the diagnostics do not read this
+                    # group's moving geometry (another mapping kind, the
+                    # interface norm, a sub-cycled group), or where the
+                    # step's self-check of the geometry term failed, the
+                    # group reports the solve's own outcome and nothing
+                    # built on the float floor or on the contraction
+                    # estimates: every bound is NaN (the gradient estimate
+                    # ``inf``, as where the ratio is rejected), every
+                    # ``*_usable`` flag False, and the report says why.
                     result[key].update({
                         "amplification": float("nan"),
                         "error_estimate": float("nan"),
@@ -5084,9 +5145,7 @@ class GraphManager:
                         "gradient_relative_error_bound": float("nan"),
                         "gradient_bound_usable": False,
                         "precision_limited": False,
-                        "not_usable_reason": (
-                            _group_layout._GEOMETRY_DIAGNOSTICS_REASON.format(
-                                keys=list(geometry_keys))),
+                        "not_usable_reason": geometry_reason,
                     })
         return result
 
@@ -6356,7 +6415,7 @@ class GraphManager:
             key = "+".join(sorted(group.nodes))
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
-                           "pass_evaluations", "reading_floor"):
+                           "pass_evaluations", "reading_floor", "geometry_gap"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):
@@ -7231,8 +7290,11 @@ class GraphManager:
           ``converged`` can be ``True`` on a stalled iterate;
         * ``spectral_usable=False`` where a spectral bound was computed;
         * in place of the three above, ``not_usable_reason`` for a group
-          that resolves a geometry-dependent mapping (experimental): its
-          bounds, estimates and ``*_usable`` flags are withheld;
+          that resolves a geometry-dependent mapping the diagnostics do
+          not read (experimental: any but a single-rate
+          ``multilinear_grid`` group under ``"l2"`` or ``"mixed"``
+          whose step passed its self-check): its bounds, estimates and
+          ``*_usable`` flags are withheld;
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;

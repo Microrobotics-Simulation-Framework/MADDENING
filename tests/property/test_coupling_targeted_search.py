@@ -907,3 +907,287 @@ def test_a_known_defect_the_search_reached_is_fixed(case, score):
     assert seen[FLAG[score]], f"the flag is no longer set: {seen['report']}"
     assert seen[score] <= THRESHOLD[score], (
         f"{score} is {seen[score]!r}, over {THRESHOLD[score]!r}: {seen['report']}")
+
+
+# =============================================================================
+# THE INTERFACE NORM'S SIDE OF A MAPPED EDGE  (a block of its own: everything
+# below is the fifth score and its cells; nothing above reads it)
+# =============================================================================
+#
+# ``convergence_norm="interface"`` reads a mapped internal edge on one side
+# of its mapping.  The decision of 2026-10-07 is the *compact* side (a
+# target larger than its source is read at the source; a tie and a smaller
+# target as delivered); this tree reads what every edge delivers
+# (``ct.INTERFACE_SIDE``).  A wrong side is a criterion that is diluted by
+# the large field's entry count, or measured on a scale the consumer never
+# sees, and a fifth score finds either:
+#
+# 5. *side* (``"side"``): where the group reports ``converged`` under the
+#    interface norm, the true distance to the fixed point in the compact
+#    readings over ``K`` tolerances, ``K`` the constant the loop's own
+#    operator gives a residual at its threshold
+#    (:meth:`~tests.property.coupled_topologies.LinearModel.interface_claim`).
+#
+# **The generator** draws a pair (or the hub) of
+# :func:`~tests.property.coupled_topologies.side_topologies`, whose two
+# mapped internal edges have size ratios from 1/300 to 300 and a tie, held
+# dense, dense with a local (interpolation) matrix, or sparse; the loop
+# gain; and how far from the fixed point the step starts.
+#
+# **Where it holds today** is where the two rules read the same thing: the
+# tie.  Every other cell has an edge onto a larger target and waits for the
+# rule (:data:`SIDE_AWAITING`): the per-push search runs the tie -- and one
+# cell of ratio 300 from the day ``ct.INTERFACE_SIDE`` says ``"compact"``
+# -- and what the hunt reaches on the rest today is pinned below, strict,
+# beside the dilution pins of ``test_coupling_interface_side.py``.
+#
+# The same structures at small sizes join :data:`CELLS` (after every cell
+# the searches above index, which keep their numbers), so the four scores
+# above are taken on mappings between sizes too: the spectral analysis and
+# the floor read the edges by an enumeration of their own, and a bound
+# taken on another reading than the criterion's is a wrong bound.
+
+SIDE_STRUCTURES = ct.side_topologies()
+STRUCTURES = {**STRUCTURES, **SIDE_STRUCTURES}
+#: The interface norm under Jacobi, which no row above has.
+KNOBS = KNOBS + (
+    dict(acceleration="none", iteration_mode="jacobi", convergence_norm="interface"),
+)
+_JACOBI_INTERFACE = len(KNOBS) - 1
+#: Small cells for the four scores above, with ``diagnostics=True``: no
+#: member has more than eight entries, so every gain has at most 64 and
+#: the gradient bound is made per entry (``GRADIENT_PROBE_ENTRY_LIMIT``;
+#: with a member of twelve the search reads a "gradient" score of 1.9,
+#: which is outside CPL-093's conditions and no finding).
+SIDE_DIAGNOSED = (
+    Cell("side-4-4", "float64", 6, 120, "matrix-local"),
+    Cell("side-2-8", "float64", _JACOBI_INTERFACE, 120, "matrix-local"),
+    Cell("side-3-6", "float32", 2, 120, "matrix"),
+    Cell("side-2-8-r", "float64", 6, 5, "matrix-local"),
+    Cell("side-hub", "float32", 6, 120, "matrix-local"),
+    Cell("side-2-8-r", "float64", 6, 5, "sparse-local"),
+    Cell("side-hub", "float32", 6, 120, "sparse-local"),
+)
+SIDE_DIAGNOSED_CELLS = tuple(range(len(CELLS), len(CELLS) + len(SIDE_DIAGNOSED)))
+#: The gradient score differentiates with respect to *every* entry of a
+#: mapping's matrix (:func:`_gradient_error`); a sparse mapping has no
+#: constant outside its pattern, and a local pattern is mostly outside (the
+#: score reads 2.6 on entries that do not exist), so that search takes the
+#: cells that hold their matrix dense.
+SIDE_DIAGNOSED_DENSE = tuple(i for i, c in zip(SIDE_DIAGNOSED_CELLS, SIDE_DIAGNOSED)
+                             if c.mapping_kind.startswith("matrix"))
+#: Float64 cells with a dense gather for the widened draw below: a mapping
+#: row that differences two entries of a large source field
+#: (``Domain.cancel``).  There the delivered value and the source field are
+#: on different scales, so an analysis taken on one reading under a
+#: criterion taken on the other reports a wrong bound -- which, on a
+#: well-conditioned mapping, it does not (seeded: the "bound" search over
+#: :data:`SIDE_DIAGNOSED` alone lets it through).
+SIDE_CANCELLING = (
+    Cell("side-3-6", "float64", 6, 120, "matrix"),
+    Cell("side-2-8", "float64", _JACOBI_INTERFACE, 120, "matrix"),
+)
+SIDE_CANCELLING_CELLS = tuple(range(len(CELLS) + len(SIDE_DIAGNOSED),
+                                    len(CELLS) + len(SIDE_DIAGNOSED) + len(SIDE_CANCELLING)))
+SIDE_CANCEL = Domain(cancel=30.0)
+CELLS = CELLS + SIDE_DIAGNOSED + SIDE_CANCELLING
+
+AWAITING_THE_SIDE_RULE = ct.INTERFACE_SIDE != "compact"
+SIDE_DECISION = ("the interface norm reads a mapped edge on its compact side (decision of "
+                 "2026-10-07); this tree reads what a scatter delivers")
+SIDE_CAP = 200
+_SIDE_ACCELERATIONS = (
+    dict(acceleration="none"), dict(acceleration="aitken"),
+    dict(acceleration="fixed", relaxation=0.7), dict(acceleration="iqn-ils"))
+
+
+@dataclasses.dataclass(frozen=True)
+class SideCell:
+    """One compiled graph of the fifth score (no diagnostics: it reads the verdict)."""
+
+    structure: str
+    mapping_kind: str
+    dtype: str
+    schedule: str
+    acceleration: int = 0
+
+    @property
+    def topo(self) -> ct.Topology:
+        return SIDE_STRUCTURES[self.structure]
+
+    @property
+    def knobs(self) -> dict:
+        return cg.live_knobs(dict(
+            _SIDE_ACCELERATIONS[self.acceleration], iteration_mode=self.schedule,
+            convergence_norm="interface", rtol=RTOL, solver="ift", max_iterations=SIDE_CAP))
+
+    @property
+    def awaits(self) -> bool:
+        """Does a compact-side rule read this cell differently from a delivered one?"""
+        topo = self.topo
+        return any(topo.edges[i].mapped
+                   and topo.node(topo.edges[i].dst).n > topo.node(topo.edges[i].src).n
+                   for i in topo.internal_edges(0))
+
+
+def _side_cells() -> tuple:
+    """Every structure under every mapping kind, the dtype, the schedule and
+    the acceleration rotated over them."""
+    out = []
+    kinds = ("matrix", "matrix-local", "sparse-local")
+    for s, name in enumerate(sorted(SIDE_STRUCTURES)):
+        for k, kind in enumerate(kinds):
+            out.append(SideCell(name, kind, ("float64", "float32")[(s + k) % 2],
+                                ("gauss-seidel", "jacobi")[(s + 2 * k) % 2],
+                                (s + k) % len(_SIDE_ACCELERATIONS)))
+    return tuple(out)
+
+
+#: The per-push cells first: the tie, and the cell of ratio 300 that joins
+#: it when the rule lands; then the second cell a pin lives on.
+_SIDE_TIE = SideCell("side-4-4", "sparse-local", "float64", "jacobi")
+_SIDE_300 = SideCell("side-1-300", "sparse-local", "float32", "jacobi")
+_SIDE_300_DENSE = SideCell("side-1-300", "matrix-local", "float64", "gauss-seidel")
+_SIDE_FIRST = (_SIDE_TIE, _SIDE_300, _SIDE_300_DENSE)
+SIDE_CELLS = _SIDE_FIRST + tuple(c for c in _side_cells() if c not in _SIDE_FIRST)
+SIDE_AWAITING = tuple(i for i, c in enumerate(SIDE_CELLS) if c.awaits)
+SIDE_CLAIMED = tuple(i for i, c in enumerate(SIDE_CELLS)
+                     if not (c.awaits and AWAITING_THE_SIDE_RULE))
+SIDE_PER_PUSH = tuple(i for i in (0, 1) if i in SIDE_CLAIMED)
+
+
+@functools.lru_cache(maxsize=len(SIDE_CELLS))
+def _side_built(index: int) -> ct.Built:
+    cell = SIDE_CELLS[index]
+    with precision(cell.dtype == "float64"):
+        return ct.build(cell.topo, cell.knobs, dtype=cell.dtype, mapping_kind=cell.mapping_kind)
+
+
+@dataclasses.dataclass(frozen=True)
+class SideCase:
+    cell: int
+    seed: int
+    rho: float
+    #: How far from the biases the step starts, in field magnitudes.
+    offset: float
+
+
+@functools.lru_cache(maxsize=4096)
+def observe_side(case: SideCase) -> dict:
+    """One step of *case* and the fifth score of its verdict."""
+    cell = SIDE_CELLS[case.cell]
+    topo, cfgs = cell.topo, ct.group_cfgs_of([cell.knobs])
+    values = ct.side_values(topo, np.random.default_rng(case.seed), case.rho, dtype=cell.dtype,
+                            group_cfgs=cfgs, mapping_kind=cell.mapping_kind,
+                            offset=case.offset)
+    with precision(cell.dtype == "float64"):
+        (step,) = ct.run(_side_built(case.cell), values, 1)
+    d = step.reports[0]
+    out = dict(side=0.0, converged=bool(d["converged"]),
+               report={k: d[k] for k in ("iterations", "converged", "residual")})
+    if not out["converged"] or not all(np.all(np.isfinite(s["x"])) for s in step.state.values()):
+        return out
+    model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cfgs)
+    distance, K = model.interface_claim(0, step.pre, step.state, "compact")
+    out["side"] = distance / K
+    out["report"].update(distance=distance, K=K)
+    return out
+
+
+def side_cases(cells=SIDE_CLAIMED):
+    return st.builds(SideCase, cell=st.sampled_from(tuple(cells)), seed=st.integers(0, 2 ** 16),
+                     rho=st.floats(0.05, 0.95),
+                     offset=st.one_of(st.just(1.0), _decades(-3.0, 1.0)))
+
+
+#: A distance of ``K`` tolerances holds exactly in exact arithmetic; the
+#: allowance is the bound score's.
+SIDE_THRESHOLD = THRESHOLD["bound"]
+
+
+def search_side(cells, profile, *, fail: bool = True):
+    """Run the fifth search over *cells*; ``(report, converged fraction)``."""
+    drawn = []
+
+    def score(case: SideCase):
+        drawn.append(case)
+        seen = observe_side(case)
+        return seen["side"], seen["report"]
+
+    report = targeted_search(side_cases(cells), score, SIDE_THRESHOLD, profile=profile,
+                             label="side", fail=fail)
+    return report, sum(observe_side(c)["converged"] for c in drawn) / max(len(drawn), 1)
+
+
+def test_a_converged_interface_quantity_is_within_K_tolerances_per_push():
+    _report, converged = search_side(SIDE_PER_PUSH, EVERY_PUSH.seeded(len(THRESHOLD)))
+    assert converged > 0.5, f"only {converged:.2f} of the examples converged"
+
+
+# Slow: every claimed cell, 800 random examples.
+# Per push: tests/property/test_coupling_targeted_search.py::test_a_converged_interface_quantity_is_within_K_tolerances_per_push
+@pytest.mark.slow
+def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances():
+    report, converged = search_side(SIDE_CLAIMED, SLOW)
+    print(f"side, {len(SIDE_CLAIMED)} cells: worst {report}; converged fraction {converged:.2f}")
+    assert converged >= USABLE_FLOOR
+
+
+# Slow: the cells that wait for the rule (some thirty compiles on this tree).  Strict:
+# until the rule lands the hunt must *reach* the dilution, which is what
+# shows the score can find a wrong side; afterwards these cells are claimed
+# and the test above hunts them.
+# Per push: tests/property/test_coupling_targeted_search.py::test_a_known_side_defect_the_search_reached_is_fixed
+@pytest.mark.slow
+@pytest.mark.xfail(AWAITING_THE_SIDE_RULE, strict=True, raises=AssertionError,
+                   reason=SIDE_DECISION)
+def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances_on_a_larger_target():
+    search_side(SIDE_AWAITING, dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4))
+
+
+def _known_side(case: SideCase):
+    return pytest.param(case, marks=pytest.mark.xfail(
+        AWAITING_THE_SIDE_RULE, strict=True, raises=AssertionError, reason=SIDE_DECISION))
+
+
+#: What the fifth search reaches on this tree: a converged pair whose one
+#: marker value is several ``K`` tolerances from its fixed point, the
+#: scatter onto 300 entries pooled into the norm.  Each is over the
+#: threshold by a factor of two or more on jaxlib 0.10.2, 0.11.0 and 0.11.2.
+KNOWN_SIDE = {
+    "a-scatter-onto-300-sparse": _known_side(SideCase(1, 1, 0.6, 1.0)),
+    "a-scatter-onto-300-dense-local": _known_side(SideCase(2, 3, 0.5, 1.0)),
+}
+
+
+@pytest.mark.parametrize("case", list(KNOWN_SIDE.values()), ids=list(KNOWN_SIDE))
+def test_a_known_side_defect_the_search_reached_is_fixed(case):
+    seen = observe_side(case)
+    assert seen["converged"], seen["report"]
+    assert seen["side"] <= SIDE_THRESHOLD, (
+        f"converged at {seen['side']:.3g} K tolerances from the fixed point in the compact "
+        f"readings: {seen['report']}")
+
+
+# Slow: seven more cells compiled with diagnostics, the four searches on them.
+# Per push: tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("name", SEARCHES)
+def test_the_reported_numbers_hold_on_cells_with_a_mapping_between_sizes(name):
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4)
+    cells = SIDE_DIAGNOSED_DENSE if name == "gradient" else SIDE_DIAGNOSED_CELLS
+    report, usable = search(name, cells=cells, profile=profile)
+    print(f"{name}, side cells: worst {report}; usable fraction {usable:.2f}")
+    assert usable > 0, f"{name}: no example had the flag set"
+
+
+# Slow: two more cells compiled with diagnostics.
+# Per push: tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ("bound", "floor"))
+def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(name):
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4)
+    report, usable = search(name, cells=SIDE_CANCELLING_CELLS, domain=SIDE_CANCEL,
+                            profile=profile)
+    print(f"{name}, cancelling side cells: worst {report}; usable fraction {usable:.2f}")
+    assert usable > 0, f"{name}: no example had the flag set"

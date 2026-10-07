@@ -113,22 +113,38 @@ names the edge and says what to do.
 | `replace_node`, `POST /surrogate/activate`, `POST /surrogate/deactivate` | a replacement that does not hold the geometry field with the same shape and a float32 or float64 dtype; nothing is changed (the REST routes answer 409) |
 | `DatasetGenerator` | a target node fed through a geometry edge |
 | the `multilinear_grid` kind | a non-floating field, when the step is traced |
+| any entry point that traces a step (`step`, `run`, `run_scan`, `resolve_boundary_inputs`, ...) | a geometry whose dtype a state write made after `compile()` (`set_node_state`), or a node's own `update`, changed to one `compile()` refuses: not float32 or float64, or too coarse for the grid.  A program is traced again when a dtype changes, and the rule is asked then |
 
 ## Limits in 0.4.0
 
-* **The solve path only.**  The step, the coupling passes and their
-  gradients read the geometry.  The coupling *diagnostics* do not: for a
-  coupling group that resolves a geometry-dependent mapping,
-  `coupling_diagnostics()` reports `iterations`, `total_iterations`,
-  `residual` and `converged`, and no bound or estimate.  Every bound is
-  NaN, every `*_usable` flag is `False`, and the entry's
-  `not_usable_reason` says why.  `coupling_report()` and
-  `print_coupling_report()` print that reason.  The internal `_meta`
-  entry of the state (which `GET /graph/state` returns) still holds what
-  the step computed for such a group; it is not a report and promises
-  nothing.
-* **No interface norm** for such a group: use `convergence_norm="l2"` or
-  `"mixed"`.
+* **Coupling diagnostics read a geometry in one case.**  The step, the
+  coupling passes and their gradients read the geometry everywhere.
+  `coupling_diagnostics()` reports the bounds of a group that resolves a
+  geometry-dependent mapping (`rho_spectral`, `spectral_error_bound`,
+  `gradient_relative_error_bound`, the estimates and the `*_usable`
+  flags, as for any other group) when all of these hold:
+  every such mapping is a `multilinear_grid`; the group's
+  `convergence_norm` is `"l2"` or `"mixed"`; the group does not
+  sub-cycle.  With `diagnostics=True` the step then also checks itself:
+  it compares its Jacobian-vector product along the positions with a
+  finite difference of the pass along the same direction, and where the
+  two differ by more than a quarter (`GEOMETRY_GAP_TOLERANCE`) the
+  report withholds the bounds.  That happens for a node whose derivative
+  is not the derivative of its value (a `stop_gradient` on an input, a
+  rounding), and on a step whose state is not finite.
+* **Everywhere else the report says so.**  For any other group that
+  resolves a geometry-dependent mapping (another mapping kind, a
+  sub-cycled group, the interface norm with a geometry edge entering
+  from outside), `coupling_diagnostics()` reports `iterations`,
+  `total_iterations`, `residual` and `converged`, and no bound or
+  estimate.  Every bound is NaN, every `*_usable` flag is `False`, and
+  the entry's `not_usable_reason` says which case it is.
+  `coupling_report()` and `print_coupling_report()` print that reason.
+  The internal `_meta` entry of the state (which `GET /graph/state`
+  returns) still holds what the step computed for such a group; it is
+  not a report and promises nothing.
+* **No interface norm** for a group with a geometry-dependent mapping on
+  an internal edge: use `convergence_norm="l2"` or `"mixed"`.
 * **No adaptive stepping** and **no sharded nodes** on a geometry edge.
 * **The geometry is a state field of the edge's own source or target.**
   To use positions another node holds, carry them in the source's or the
@@ -143,6 +159,15 @@ names the edge and says what to do.
   `needs_geometry = True` and `geometry_shape`; see the `Mapping`
   protocol's docstring for the optional attributes.
 
-The time level each call site reads a geometry at, and the kernel's
-mathematics, are in the algorithm guide:
+## The time level a geometry is read at, in short
+
+| Call site | A target-anchored geometry is |
+|---|---|
+| The target's `update` | the `g` of the state `update` receives |
+| The target's flux hook (`compute_boundary_fluxes`) | the post-update `g` |
+| Multi-rate, the flux hook of a node slower than the base step | the `g` the node holds after the base step: post-update when it fires, the held `g` when it does not |
+| A slow source's value and source-anchored geometry | what the source holds between its steps |
+
+The full table (coupling passes, sub-cycled members, back edges), and the
+kernel's mathematics, are in the algorithm guide:
 [Geometry-dependent mappings](../algorithm_guide/coupling/interface_mapping.md#geometry-dependent-mappings).

@@ -2570,7 +2570,7 @@ def search_topologies() -> dict:
 
 #: The member sizes of the ``side-<small>-<large>`` pairs: the size ratio of
 #: their two mapped edges runs from 1/300 to 300, with a tie.
-SIDE_PAIRS = ((1, 300), (3, 300), (2, 60), (2, 12), (3, 6), (4, 4))
+SIDE_PAIRS = ((1, 300), (3, 300), (2, 60), (2, 12), (2, 8), (3, 6), (4, 4))
 
 
 def side_topologies() -> dict:
@@ -2585,7 +2585,7 @@ def side_topologies() -> dict:
       but the tie holds an edge of each direction;
     * ``side-<s>-<g>-r``: the same with the large member swept first;
     * ``side-hub``: a hub ``h`` (4) whose one field is read by a gather
-      edge (to ``s``, 2) and by a scatter edge (to ``g``, 12), each leaf
+      edge (to ``s``, 2) and by a scatter edge (to ``g``, 8), each leaf
       feeding the hub back through a mapped edge of its own: one source
       field read once per edge, each by its own edge's rule.
 
@@ -2595,7 +2595,8 @@ def side_topologies() -> dict:
     """
     out = {}
     for small, large in SIDE_PAIRS:
-        for reverse in ((False, True) if (small, large) in ((3, 300), (2, 12)) else (False,)):
+        for reverse in ((False, True) if (small, large) in ((3, 300), (2, 12), (2, 8))
+                        else (False,)):
             b = TopologyBuilder()
             for name in (("g", "s") if reverse else ("s", "g")):
                 b.node(name, small if name == "s" else large, alpha=0.0)
@@ -2607,7 +2608,7 @@ def side_topologies() -> dict:
     b = TopologyBuilder()
     b.node("h", 4, alpha=0.0)
     b.node("s", 2, alpha=0.25)
-    b.node("g", 12, alpha=0.0)
+    b.node("g", 8, alpha=0.0)
     b.edge("h", "s", mapped=True)
     b.edge("h", "g", mapped=True)
     b.edge("s", "h", mapped=True)

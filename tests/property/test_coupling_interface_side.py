@@ -563,7 +563,7 @@ def test_a_declared_side_overrides_the_sizes_edge_by_edge():
 
 
 def test_a_hubs_field_is_read_once_per_edge_by_each_edges_own_rule():
-    """``h`` (4) feeds a gather edge (to 2) and a scatter edge (to 12): the
+    """``h`` (4) feeds a gather edge (to 2) and a scatter edge (to 8): the
     compact rule reads its field twice, as two delivered entries and as its
     own four, and the two leaves' fields by their own edges' rules."""
     topo = SIDE["side-hub"]

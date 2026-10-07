@@ -733,25 +733,46 @@ def test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piec
 
 @pytest.mark.parametrize("cell", _READ_ACROSS_ONE_SPACING)
 def test_fit_lm_reads_a_small_jump_of_the_ball_from_a_long_candidate(cell, monkeypatch):
-    """What the two endings are, not only that the score passes them: the
-    whole candidate reads between the two thresholds, the second reading
-    across one spacing is over its own, and the run ends
-    ``converged=False`` with the warning of a residual that is not
-    differentiable.  Without the second reading it is ``converged=True``
-    where the loss still falls along the piece."""
-    real, second = sysid._excess_across_a_spacing, []  # noqa: SLF001
+    """What the two endings are, not only that the score passes them: no
+    whole candidate reads as a jump, the largest reads between the two
+    thresholds, a second reading across one spacing is over its own, and
+    the run ends ``converged=False`` with the warning of a residual that
+    is not differentiable.  Without the second reading it is
+    ``converged=True`` where the loss still falls along the piece.
 
-    def watched(*args):
-        second.append(real(*args))
+    How many candidates are read a second time, and their readings, are
+    the trajectory's rounding and differ between jaxlib versions (one at
+    2.0e3 on 0.10.2 and 0.11.0, two at 4.4e3 and 2.1e3 on 0.11.2 for the
+    first cell), so neither is asserted."""
+    across, excess = sysid._excess_across_a_spacing, sysid._one_sided_excess  # noqa: SLF001
+    second, verdicts, first = [], [], []
+
+    def watched_across(*args):
+        second.append(across(*args))
         return second[-1]
 
-    monkeypatch.setattr(sysid, "_excess_across_a_spacing", watched)
+    def watched_excess(*args):
+        verdicts.append(excess(*args))
+        with monkeypatch.context() as patch:
+            patch.setattr(sysid, "_JUMP_SUSPECT", np.inf)
+            first.append(excess(*args))
+        return verdicts[-1]
+
+    monkeypatch.setattr(sysid, "_excess_across_a_spacing", watched_across)
+    monkeypatch.setattr(sysid, "_one_sided_excess", watched_excess)
     with precision(False):
         _, res, messages = _fit_of_the_ball(BallCase(*cell))
     assert not res.converged
     assert sum("not differentiable" in text for text in messages) == 1
-    assert len(second) == 1 and second[0] > 2.0 ** 2 * sysid._JUMP_ACROSS  # noqa: SLF001
-    assert f"{second[0]:.1e} times further" in "".join(messages)
+    reading, _, jumped = verdicts[-1]
+    whole, _, whole_jumped = first[-1]
+    # The first reading alone finds no jump, and is in the band that is
+    # read again; the verdict is a second reading, over its threshold.
+    assert not whole_jumped
+    assert sysid._JUMP_SUSPECT < whole <= sysid._JUMP_EXCESS  # noqa: SLF001
+    assert jumped and reading in second and reading > sysid._JUMP_ACROSS  # noqa: SLF001
+    assert f"{reading:.1e} times further" in "".join(messages)
+    monkeypatch.setattr(sysid, "_one_sided_excess", excess)
     # The second reading is put to its own threshold: one between that and
     # the first reading's ends the run the same way.
     between = 2.0 * sysid._JUMP_ACROSS  # noqa: SLF001

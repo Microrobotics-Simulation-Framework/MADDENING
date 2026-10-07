@@ -143,7 +143,9 @@ ASME V&V 40
 Multi-rate
    A scheduling mode where different nodes advance at different `dt`s,
    reconciled by a GCD-based scheduler. Used for stiff subsystems that need a
-   smaller step than the rest of the graph.
+   smaller step than the rest of the graph. Between the base steps a slower
+   node fires on, its readers see what it holds: its held state, and the
+   flux (`compute_boundary_fluxes`) of that held state.
 
 Surrogate
    A neural network (MLP / DeepONet / FNO) trained to mimic a slow physics

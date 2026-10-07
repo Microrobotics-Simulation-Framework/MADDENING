@@ -27,6 +27,7 @@ from maddening.core._graph_specs import (
     _META_KEY,
     _apply_edge,
     _edge_geom,
+    _traceable_geometry,
     _correction_accepts_params,
     _node_fluxes,
     _node_update,
@@ -598,8 +599,12 @@ def _run_coupled_block_impl(
                     # snapshots with the same weight, componentwise, and
                     # the mapping is applied to the interpolated pair.
                     g_field = edge.geometry[1]
-                    g_prev = s_prev[edge.source_node][g_field]
-                    g_cur = s_cur[edge.source_node][g_field]
+                    # The dtype rules ``_edge_geom`` asks of every other
+                    # read, asked of both ends of this one.
+                    g_prev = _traceable_geometry(
+                        edge, g_field, s_prev[edge.source_node][g_field])
+                    g_cur = _traceable_geometry(
+                        edge, g_field, s_cur[edge.source_node][g_field])
                     if use_quadratic_interp and s_prev_prev is not None:
                         g_pp = s_prev_prev[edge.source_node][g_field]
                         geom = (

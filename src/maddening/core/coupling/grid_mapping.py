@@ -27,8 +27,9 @@ around it with the multilinear weights of its position in that cell.
   in the coordinates is reproduced.
 * ``mode="conservative"`` *scatters* points to grid:
   ``out[I[p, s]] += W[p, s] * field[p]``.  It preserves the plain sum
-  (``sum(out) == sum(field)``, the weights of a point sum to one): it
-  deposits amounts.  It divides by no cell volume and applies no
+  to the rounding of the geometry's dtype (``sum(out) == sum(field)`` to
+  that rounding: the weights of a point are computed in the geometry's
+  dtype and sum to one there): it deposits amounts.  It divides by no cell volume and applies no
   quadrature weight; turning the result into a density belongs to a node
   or to the edge's ``transform``.
 
@@ -40,8 +41,9 @@ lattice's hull, coordinate by coordinate: gather extrapolates constantly,
 scatter deposits on the boundary, the weights still sum to one, and the
 derivative with respect to a coordinate strictly outside is zero.  A
 **non-finite** coordinate is not clamped: every weight of that point is
-NaN at flat index 0, so gather returns NaN for that point only and scatter
-puts NaN in the cells of index 0.
+NaN, on the ``2**d`` corners of the grid's first cell (index 0 or 1 on
+each axis), so gather returns NaN for that point only and scatter puts NaN
+in those corner cells and no other.
 
 **Precision.**  Indices and weights are computed in the geometry's dtype,
 in a static power-of-two frame of the spacing (so a spacing far below one
@@ -222,6 +224,13 @@ class MultilinearGridMapping:
         if not jnp.issubdtype(geom.dtype, jnp.floating):
             raise TypeError(
                 f"{KIND}: the geometry has dtype {geom.dtype}; positions are floating-point")
+        # Asked here as well as by ``compile()``: a program is traced
+        # again when the geometry's dtype changes, so a float32 geometry
+        # written into a graph that was compiled with a float64 one (a
+        # state write is not a recompile) is refused at its first step.
+        unresolved, _ = self.geometry_dtype_problems(geom.dtype)
+        if unresolved:
+            raise ValueError(f"{KIND}: " + "; ".join(unresolved))
         if geom.ndim == 1:
             geom = geom[:, None]
         T = geom.dtype

@@ -661,7 +661,13 @@ index and row counts) beside the weights, and `load_state` -- and `POST
 /checkpoint/load` -- refuses weights whose digest is not the live
 mapping's, before anything is loaded: weights saved for other points or
 another index of the same shape, for the same index in the other layout,
-or for a dense mapping (and a dense mapping refuses a sparse one's).  A
+or for a dense mapping (and a dense mapping refuses a sparse one's).  The
+digest is judged whatever the weights are called -- a stock sparse
+mapping's weights are `W` and a stock dense one's are `H`, and neither
+checkpoint loads into the other -- and a checkpoint that carries mapping
+weights this graph has no leaf for (another leaf name on the edge, or an
+edge that has no mapping weights here) is refused too: a saved mapping
+weight is installed or the load fails, never dropped.  A
 mapping class of your own that applies its weights through a structure
 gets the same check by defining `structure_digest()`.
 
@@ -814,7 +820,10 @@ Two rules cover every call site.
   interpolated between two snapshots (a sub-cycled member of a coupling
   group), the geometry is interpolated between the same two snapshots
   with the same weight, componentwise, and the mapping is applied to the
-  interpolated value at the interpolated geometry.
+  interpolated value at the interpolated geometry.  Those two snapshots
+  are two *iterates* of the same end-of-step value -- the pass's incoming
+  iterate and the in-pass state -- not the source at two times: see the
+  note under the table.
 * **Target-anchored** (`geometry=("target", g)`): the geometry is field
   `g` of the `state` argument of the hook the boundary inputs are being
   resolved for, `update` or `compute_boundary_fluxes`.
@@ -825,18 +834,42 @@ Two rules cover every call site.
 | Plain step, back edge | the previous step | the source's `g` of the previous step | the target's pre-step `g` |
 | Plain step, the target's flux hook | as for its `update` | as for its `update` | the target's **post-update** `g`: the edges are resolved again for the hook |
 | Multi-rate, slow source | the state the source holds between its steps | the same held state | the target's current state |
+| Multi-rate, a slow node's flux hook | as for its `update` at this base step | as for its `update` | the `g` the node holds after this base step: post-update when it fires, the held `g` when it does not |
 | Group member's `update`, Gauss-Seidel | the in-pass state | the in-pass `g` | the member's pre-step `g`, at every pass |
 | Group member's `update`, Jacobi | the incoming iterate | the incoming iterate's `g` | the member's pre-step `g` |
 | Group member's flux, seeded before a pass | the incoming iterate | the incoming iterate's `g` | the incoming iterate's `g` of the member |
 | Group member's flux after its update | the in-pass state | the in-pass `g` | the member's in-pass, post-update `g` |
-| Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d` | `g_prev + a (g_cur - g_prev)`, then the mapping | the member's state before this sub-step |
-| Sub-cycled member, `"constant"` | the end-of-step value | the end-of-step `g` | the member's state before this sub-step |
+| Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d`: `v_prev` the pass's incoming iterate, `v_cur` the in-pass state | `g_prev + a (g_cur - g_prev)` of the same two iterates, then the mapping | the member's state before this sub-step |
+| Sub-cycled member, `"constant"` | the in-pass state (an end-of-step estimate) | the in-pass `g` | the member's state before this sub-step |
 | An edge from outside the group | not interpolated | read with the value | by the hook, as above |
 | `resolve_boundary_inputs` (inspection) | the current state | the current state's `g` | the node's current `g` |
 
 A target-anchored geometry is therefore the same at every pass of a
 coupling solve, because members integrate from the pre-step state; a
 source-anchored one is part of the iterate.
+
+**What "linear" interpolates between.**  Both ends are estimates of the
+source's *end*-of-step value: the iterate the pass was handed and the
+state the pass has built so far.  It is not an interpolation in time
+across the sub-steps (MADD-ANO-027), so "linear" and "constant" read the
+same value and the same geometry wherever the two iterates coincide:
+under `iteration_mode="jacobi"`, for a source scheduled after the
+sub-cycled member, and, to the solve's tolerance, at a converged solve
+(a sub-cycled float64 pair with the source scheduled first: the two modes
+1.2e-4 apart, relative, at `tolerance=1e-4` and 1.7e-13 apart at
+`tolerance=1e-13`; with the source scheduled second, identical).
+See `boundary_interpolation` in the
+[coupling guide](../../developer_guide/coupling_algorithm_guide.md).
+
+**A slow node's flux on a multi-rate graph.**  A node whose rate divider
+is above one holds its state between the base steps it fires on, and its
+flux hook is called on every base step with the state the node holds
+after that step and the boundary inputs resolved at that step.  A reader
+of the flux therefore sees the flux of the held state, as a reader of a
+state field sees the held state, and a target-anchored geometry of that
+node is the held `g` on the base steps the node does not fire on.  (The
+hook used to be called on the result of `update` before the step decided
+whether to keep it: MADD-ANO-235.)
 
 The interpolation of a geometry is **componentwise**.  A geometry whose
 components are not affine coordinates (a unit quaternion, an angle across
@@ -890,7 +923,11 @@ $$
 
 Gather reproduces any field that is multilinear in the coordinates, at
 every point inside the hull of the lattice.  Scatter preserves the plain
-sum, $\sum_j g_j = \sum_p y_p$: it deposits *amounts*.  It divides by no
+sum, $\sum_j g_j = \sum_p y_p$, to the rounding of the geometry's dtype:
+it deposits *amounts*, and the weights of a point, computed in the
+geometry's dtype, sum to one only to that rounding (a float64 field
+scattered at a float32 geometry: 1.5e-11 relative over 20,000 points,
+where a float64 geometry gives 1e-16).  It divides by no
 cell volume and applies no quadrature weight; turning the result into a
 density belongs to a node or to the edge's `transform`.  `apply_T` of one
 mode is `apply` of the other at the same positions.
@@ -898,9 +935,10 @@ mode is `apply` of the other at the same positions.
 **Outside the grid.**  A point outside the hull is clamped to it,
 coordinate by coordinate ($\bar u$ above): gather extrapolates constantly,
 scatter deposits on the boundary, and the weights still sum to one.  A
-non-finite coordinate is not clamped: every weight of that point is NaN at
-flat index 0, so gather returns NaN for that point only and scatter puts
-NaN in the cells of index 0.
+non-finite coordinate is not clamped: every weight of that point is NaN,
+on the $2^d$ corners of the grid's first cell (index 0 or 1 on each axis;
+index 0 alone on an axis of one point), so gather returns NaN for that
+point only and scatter puts NaN in those corner cells and no other.
 
 **Derivative with respect to a position.**  Inside a cell,
 $\partial y_p / \partial x_{p,a}$ is the slope of the multilinear
@@ -924,7 +962,14 @@ $$
 cells.  When that is 1/16 of a cell or more for the dtype the geometry
 field has, `compile()` refuses the graph; at 1/1024 or more, `validate()`
 reports a warning.  Hold the geometry in float64 or move the origin of the
-coordinates closer to the grid.
+coordinates closer to the grid.  The refusal is not only `compile()`'s: a
+geometry compiled as float64 and later written as float32
+(`set_node_state` is not a recompile) changes the dtype of the program,
+which is then traced again, and the same rule is asked at that trace --
+`step()` and the run methods raise `ValueError` naming the edge instead
+of sampling a grid the positions cannot resolve; the kernel asks it of a
+direct `apply` call as well.  (So is the float32-or-float64 rule, with a
+`TypeError`.)
 
 **Determinism.**  Gather is a fixed left fold over the $2^d$ corners.
 Scatter is a scatter-add with repeated indices: on CPU it accumulates in

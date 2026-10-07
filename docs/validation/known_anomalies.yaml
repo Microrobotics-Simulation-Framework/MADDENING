@@ -15788,3 +15788,157 @@ anomalies:
       - "tests/property/test_coupling_nonlinear_search.py::test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_bound"
       - "tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-235"
+    title: "On a multi-rate graph a slow node's flux was computed from a state the step discarded: between the node's firings its readers received the flux of the next state, not of the one held"
+    description: >
+      A node whose rate divider is above one fires on one base step in
+      `divider` and holds its state on the others.  The plain multi-rate
+      step ran the node's `update` on every base step, called
+      `compute_boundary_fluxes` on the result, published that flux to the
+      node's readers, and only afterwards selected between the result and
+      the held state.  On a base step the node does not fire on, a reader
+      of a STATE field saw the held state, and a reader of a FLUX saw the
+      flux of `update(held state)`: a state the graph never holds at that
+      step.  A counter that adds one per firing at twice the base step,
+      with the flux equal to its state: after base steps 0 to 4 the node
+      holds 1, 1, 2, 2, 3 and its reader received 1, 2, 2, 3, 3.  Measured
+      identically at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git
+      archive` of each tag, CPU, jaxlib 0.11.0) and on the 0.4.0
+      development tree, where an edge with `geometry=("target", g)` into
+      such a node also had its mapping re-resolved for the hook at the
+      discarded state's `g`.  Resolved in 0.4.0: the selection is made
+      before the hook, so the hook is called on every base step with the
+      state the node holds after that step and the boundary inputs
+      resolved at that step.  A single-rate graph, and a node that fires
+      on every base step, compile to the program they did.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the step returns, and the value a reader received is a
+      plausible flux, that of the slow node one firing ahead.  It needs a
+      multi-rate graph in which a node slower than the base step defines
+      `compute_boundary_fluxes` and another node reads one of its keys;
+      the error is one slow step of lead on the base steps between
+      firings, and none on the steps the node fires on.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.node.SimulationNode.compute_boundary_fluxes"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, carry the quantity in a state field of the slow node
+      (a state edge delivers the held value), or run the producer at the
+      base timestep.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The hook is evaluated with the boundary inputs of the current base
+      step, so a flux that depends on a fast neighbour follows that
+      neighbour between firings; it is not the flux published at the last
+      firing, held.  A coupling group at a divider above one solves, and
+      computes its members' fluxes, only on the base steps it fires on,
+      and a flux edge that crosses a group's boundary still fails to
+      trace (MADD-ANO-156).  The adaptive steppers refuse multi-rate
+      graphs.
+    verification:
+      - "tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_reader_of_a_slow_nodes_flux_receives_the_flux_of_the_held_state"
+      - "tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_slow_nodes_flux_hook_reads_its_geometry_from_the_held_state"
+      - "tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_flux_reader_follows_the_held_state_at_every_base_step"
+      - "tests/core/test_multirate_flux_is_of_the_held_state.py::test_the_scanned_and_batched_steps_publish_the_held_flux_too"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-236"
+    title: "A checkpoint of a sparse mapped edge loaded into the dense edge of the same key, and the reverse, returned normally and installed none of the saved weights"
+    description: >
+      `load_state` judged a checkpoint's mapping structure digest only for
+      a saved weight the live mapping also had a leaf for, and skipped a
+      saved weight it had no leaf for.  The library's dense mappings call
+      their matrix `H` and its sparse ones call their values `W`, so on
+      one edge key the two share no leaf name: a checkpoint saved from a
+      `sparse_nearest_neighbor_mapping` edge and loaded into a graph whose
+      same edge is a `nearest_neighbor_mapping` (and the reverse) was
+      neither refused nor installed.  The node states loaded, the trained
+      or edited weights were dropped, and nothing was raised or warned:
+      weights doubled before the save delivered `[1, 4, 8]` after the
+      load where the saving graph delivers `[2, 8, 16]`.  The guide said
+      such a load is refused.  Mapping weights in a checkpoint are new in
+      0.4.0; no release has this.  Resolved before release: the digest is
+      judged for every edge the checkpoint carries weights for, whatever
+      they are called, and a saved mapping weight the live graph has no
+      leaf for (another leaf name on the edge, or an edge with no mapping
+      weights here) is refused before anything is loaded, through
+      `load_state`, `GraphManager.load_state`, `load_state_with_manifest`
+      and `POST /checkpoint/load`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the load reports success and the graph runs with the
+      weights it was built with, not the calibrated ones in the file.
+      It needs the mapping on an edge to have been changed between the
+      save and the load from a dense kind to a sparse kind or back.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.load_state"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A hand-written archive that carries a mapping weight for an edge or
+      a leaf the graph does not have is now refused where it was ignored;
+      an unknown owner or key of a NODE parameter is still ignored.  The
+      FMU's own state archive installs no mapping weight at all.
+    verification:
+      - "tests/core/test_checkpoint_sparse_structure.py::test_stock_dense_and_sparse_checkpoints_do_not_load_into_each_other"
+      - "tests/core/test_checkpoint_sparse_structure.py::test_a_saved_weight_the_live_mapping_has_no_leaf_for_is_refused"
+      - "tests/core/test_checkpoint_sparse_structure.py::test_weights_saved_for_an_edge_the_graph_has_none_for_are_refused"
+      - "tests/core/test_checkpoint_sparse_structure.py::test_every_door_refuses_a_checkpoint_of_the_other_stock_kind"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-237"
+    title: "A geometry written as float32 after compile() bypassed the resolution refusal: on a grid float32 cannot resolve, step() ran and every sample was 0.0"
+    description: >
+      The dtype rules for the geometry of a geometry-dependent mapping --
+      float32 or float64, and fine enough for the mapping's grid -- were
+      asked only by `validate()`, which `compile()` runs on the state it
+      is given.  A state write is not a recompile.  A `multilinear_grid`
+      at origin 1e6 with spacing 1e-3 is refused at `compile()` with a
+      float32 geometry (located to 119 cells); compiled with a float64
+      geometry and then handed the same positions as float32 by
+      `set_node_state`, the graph stepped with no error or warning and
+      every one of the four samples was 0.0 where the float64 run gives
+      0.3, 1.3, 2.3 and 3.3.  A float16 or bfloat16 geometry written the
+      same way was accepted too.  Geometry-dependent mappings are new in
+      0.4.0; no release has this.  Resolved before release: the rules are
+      asked again at every geometry read of a traced program (a program
+      is traced again whenever a dtype changes), including the
+      interpolated read of a sub-cycled group member, and by the
+      `multilinear_grid` kernel itself for a direct call.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: finite, plausible samples of the wrong cells.  It needs a
+      grid far from the origin of its coordinates relative to its
+      spacing, and a state write after `compile()` that narrows the
+      geometry field.
+    affected_components:
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `set_node_state` itself still accepts the write; the refusal comes
+      from the next entry point that traces a step, and the graph steps
+      again once a float64 geometry is written back.  The 1/1024-cell
+      warning remains `validate()`'s alone.  A mapping class of the
+      caller's own is asked through its `geometry_dtype_problems`, if it
+      defines one.
+    verification:
+      - "tests/core/test_geometry_edge_refusals.py::test_a_float32_geometry_written_after_compile_meets_the_resolution_rule"
+      - "tests/core/test_geometry_edge_refusals.py::test_g7_holds_for_a_geometry_written_after_compile"
+      - "tests/core/test_geometry_edge_refusals.py::test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group"
+      - "tests/core/test_geometry_edge_refusals.py::test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_called_directly"
+    github_issue: null

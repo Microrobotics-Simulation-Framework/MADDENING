@@ -510,3 +510,126 @@ def test_post_checkpoint_load_refuses_weights_saved_for_another_pattern(tmp_path
     assert loaded.status_code == 200, loaded.text
     np.testing.assert_array_equal(np.asarray(same.params["mappings"][A2B]["W"]),
                                   np.asarray(saved.params["mappings"][A2B]["W"]))
+
+
+# ---------------------------------------------------------------------------
+# The library's own dense and sparse kinds, whose weights have other names
+# ---------------------------------------------------------------------------
+# A stock dense mapping's leaf is ``H`` and a stock sparse one's is ``W``:
+# on one edge key they share no leaf name.  The digest used to be judged
+# only for a saved leaf the live mapping also had, so each of these loads
+# returned normally and installed nothing.
+
+def _stock_pair(kind: str) -> GraphManager:
+    """``a`` (4) onto ``b`` (6) by nearest neighbour, dense or sparse."""
+    from maddening.core.coupling.mapping import nearest_neighbor_mapping
+
+    gm = GraphManager()
+    gm.add_node(Interface("a", 0.125, n=4))
+    gm.add_node(Interface("b", 0.125, n=6, rate=0.25))
+    xa, xb = np.linspace(0.0, 1.0, 4), np.linspace(0.0, 1.0, 6)
+    build = {"dense": nearest_neighbor_mapping, "sparse": sparse_nearest_neighbor_mapping}
+    gm.add_edge("a", "b", "x", "inp", mapping=build[kind](xa, xb))
+    gm.compile()
+    return gm
+
+
+_CROSS = {
+    ("sparse", "dense"): ("were saved for a sparse mapping", "'W'"),
+    ("dense", "sparse"): ("do not say which sparsity pattern they were saved for", "'H'"),
+}
+
+
+@pytest.mark.parametrize("saved_kind, live_kind", sorted(_CROSS))
+def test_stock_dense_and_sparse_checkpoints_do_not_load_into_each_other(
+        saved_kind, live_kind, tmp_path):
+    saved, live = _stock_pair(saved_kind), _stock_pair(live_kind)
+    assert not set(saved.params["mappings"][A2B]) & set(live.params["mappings"][A2B])
+    _train(saved)
+    path = save_state(saved, tmp_path / saved_kind)
+    before = _snapshot(live)
+    words, leaf = _CROSS[saved_kind, live_kind]
+    with pytest.raises(ValueError) as refused:
+        load_state(live, path)
+    message = str(refused.value)
+    assert words in message and leaf in message and A2B in message
+    assert message.endswith("Nothing was loaded.")
+    _assert_untouched(live, before)
+
+
+@pytest.mark.parametrize("kind", ["dense", "sparse"])
+def test_a_stock_checkpoint_loads_into_its_own_kind_and_the_checkpoint_wins(kind, tmp_path):
+    saved, live = _stock_pair(kind), _stock_pair(kind)
+    moved = _train(saved)
+    load_state(live, save_state(saved, tmp_path / kind))
+    for name, value in moved[A2B].items():
+        np.testing.assert_array_equal(np.asarray(live.params["mappings"][A2B][name]), value)
+
+
+def test_a_saved_weight_the_live_mapping_has_no_leaf_for_is_refused(tmp_path):
+    """Both dense, so neither side has a digest; the leaf names differ
+    (``H`` saved, ``W`` live).  Nothing but the name could tell."""
+    saved = _stock_pair("dense")
+    live = GraphManager()
+    live.add_node(Interface("a", 0.125, n=4))
+    live.add_node(Interface("b", 0.125, n=6, rate=0.25))
+    live.add_edge("a", "b", "x", "inp", mapping=_DenseW(
+        jnp.asarray(np.asarray(saved.params["mappings"][A2B]["H"]))))
+    live.compile()
+    _train(saved)
+    path = save_state(saved, tmp_path / "dense")
+    before = _snapshot(live)
+    with pytest.raises(ValueError, match="'H' for edge .* have no counterpart in this graph"):
+        load_state(live, path)
+    _assert_untouched(live, before)
+
+
+def test_weights_saved_for_an_edge_the_graph_has_none_for_are_refused(tmp_path):
+    """The same nodes and state fields, so nothing else refuses: the live
+    edge carries no mapping, and the saved weights would be dropped."""
+    saved = _stock_pair("sparse")
+    _train(saved)
+    path = save_state(saved, tmp_path / "sparse")
+    live = GraphManager()
+    live.add_node(Interface("a", 0.125, n=4))
+    live.add_node(Interface("b", 0.125, n=6, rate=0.25))
+    live.compile()
+    assert not live.params.get("mappings")
+    before = _snapshot(live)
+    with pytest.raises(ValueError, match="this graph has no mapping weights under that key"):
+        load_state(live, path)
+    _assert_untouched(live, before)
+
+
+@pytest.mark.parametrize("saved_kind, live_kind", sorted(_CROSS))
+def test_every_door_refuses_a_checkpoint_of_the_other_stock_kind(
+        saved_kind, live_kind, tmp_path):
+    """``GraphManager.load_state``, the manifest-verifying load and
+    ``POST /checkpoint/load`` all reach the same check."""
+    from maddening.core.simulation.checkpoint import (
+        load_state_with_manifest, save_state_with_manifest)
+
+    saved = _stock_pair(saved_kind)
+    _train(saved)
+    path, _ = save_state_with_manifest(saved, tmp_path / "trained.npz")
+    words, _ = _CROSS[saved_kind, live_kind]
+
+    live = _stock_pair(live_kind)
+    before = _snapshot(live)
+    with pytest.raises(ValueError, match=words):
+        live.load_state(str(path))
+    _assert_untouched(live, before)
+    with pytest.raises(ValueError, match=words):
+        load_state_with_manifest(live, path)
+    _assert_untouched(live, before)
+
+    pytest.importorskip("fastapi", reason="the REST door needs the server extra")
+    from maddening.api.server import SimulationServer
+    from tests._loopback_client import LoopbackTestClient as TestClient
+
+    server = SimulationServer(REGISTRY, graph_manager=live, checkpoint_root=str(tmp_path))
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    refused = client.post("/checkpoint/load", params={"path": "trained.npz"})
+    assert refused.status_code == 400, refused.text
+    assert words in refused.json()["detail"]
+    _assert_untouched(live, before)

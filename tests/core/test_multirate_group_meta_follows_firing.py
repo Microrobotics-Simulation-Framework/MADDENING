@@ -157,6 +157,66 @@ def test_strict_convergence_still_raises_about_an_applied_solve():
         gm.step()
 
 
+def _capped_strict_graph():
+    """The graph whose applied solve (phase 0) cannot meet its tolerance
+    within its cap, and whose discarded solves (phases 3 and 5, gains 2 and
+    3) do not contract at all."""
+    gm = GraphManager()
+    gm.add_node(_Phase("clock", 0.001))
+    gm.add_node(_Gained("a", 0.01, bias=1.0, phased=True))
+    gm.add_node(_Gained("b", 0.01, bias=0.0, phased=False))
+    gm.add_edge("clock", "a", "phase", "phase")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=2, tolerance=1e-7,
+                          strict_convergence=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    return gm
+
+
+def _at_base_step(state, count):
+    """``state`` as the compiled step sees it on base step ``count``."""
+    meta = dict(state["_meta"])
+    meta["step_count"] = jnp.asarray(count, meta["step_count"].dtype)
+    clock = {"phase": jnp.float32((count - 1) % 10)}
+    return {**state, "clock": clock, "_meta": meta}
+
+
+def _batched_step(gm, counts):
+    step = gm._build_step_fn()
+    ext = gm._default_external_inputs()
+    states = [_at_base_step(gm._state, c) for c in counts]
+    batch = jax.tree.map(lambda *leaves: jnp.stack(leaves), *states)
+    return states, jax.jit(jax.vmap(step, in_axes=(0, None)))(batch, ext)
+
+
+def test_a_batched_strict_check_is_silent_about_solves_no_element_applies():
+    """The strict check's firing gate, on its own.
+
+    One at a time a non-firing base step never runs the solve (the
+    ``cond`` skips it), so nothing there can tell a gated check from an
+    ungated one.  Under ``vmap`` both branches run: every element here is
+    between firings, each discarded solve fails its tolerance, and the
+    step must neither raise nor move the coupled members.
+    """
+    gm = _capped_strict_graph()
+    states, out = _batched_step(gm, [3, 5])
+    for i, state in enumerate(states):
+        for name in ("a", "b"):
+            assert (np.asarray(out[name]["x"][i]).tobytes()
+                    == np.asarray(state[name]["x"]).tobytes()), (i, name)
+
+
+def test_a_batched_strict_check_raises_when_one_element_applies_an_unconverged_solve():
+    """...and the gate lets the applied solve through: one firing element
+    whose solve exits at its cap raises, whatever the others do."""
+    gm = _capped_strict_graph()
+    with pytest.raises(Exception, match="without converging"):
+        _batched_step(gm, [5, 10])
+
+
 def test_the_linear_predictor_learns_only_from_applied_solves():
     """Two applied solves in, the extrapolated guess is still near the answer.
 

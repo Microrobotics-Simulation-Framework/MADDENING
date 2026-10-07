@@ -3398,6 +3398,7 @@ claims:
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_interface_norm_counts_a_field_once_for_every_edge_that_reads_it
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice
     - tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report
   status: verified
   notes: >-
     The round-6 audit found the interface norm's transformed reading
@@ -3638,6 +3639,7 @@ claims:
     - tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed
     - tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor
     - tests/property/test_differential_coupling_interactions.py::test_a_usable_spectral_bound_bounds_the_distance_in_every_row
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report
   status: verified
   domains:
     f32: tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
@@ -3882,6 +3884,7 @@ claims:
     - tests/core/test_coupling_precision_floor.py::test_precision_limited_is_the_residual_at_or_below_the_floor
     - tests/core/test_coupling_precision_floor.py::test_a_residual_above_the_floor_is_not_precision_limited
     - tests/core/test_coupling_precision_floor.py::test_a_sub_stepped_node_is_floored_per_evaluation
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report
   status: verified
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_precision_limited_is_the_residual_at_or_below_the_floor
@@ -5042,14 +5045,21 @@ claims:
     - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_the_verdict_reads_every_coupling_group
     - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_the_mask_drops_the_window_the_report_calls_unconverged
     - tests/core/test_sysid_mask_reads_the_last_waveform_sweep.py::test_a_window_whose_first_sweep_hit_its_cap_is_kept_by_the_mask
+    - 'tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_a_window_whose_early_steps_hit_the_cap_is_dropped_though_its_last_step_converged'
+    - 'tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_the_same_window_is_kept_when_the_cap_lets_every_step_converge'
+    - tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_multiple_shooting_drops_the_recovering_window_and_keeps_the_converged_one
   status: verified
   domains:
-    f32: tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_masked_window_contributes_nothing_whatever_its_samples_hold
+    f32:
+      - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_masked_window_contributes_nothing_whatever_its_samples_hold
+      - 'tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_a_window_whose_early_steps_hit_the_cap_is_dropped_though_its_last_step_converged[30-1]'
     f64: narrowed
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows
-    grad: tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows
+    grad:
+      - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows
+      - tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_multiple_shooting_drops_the_recovering_window_and_keeps_the_converged_one
     vmap: narrowed
     multi_rate: tests/core/test_multirate_group_meta_follows_firing.py::test_the_sysid_mask_keeps_a_window_whose_applied_solve_converged
     sub_cycled: tests/core/test_sysid_mask_reads_the_last_waveform_sweep.py::test_a_window_whose_first_sweep_hit_its_cap_is_kept_by_the_mask
@@ -5076,9 +5086,12 @@ claims:
     - tests/core/test_sysid_mask_refuses_unrecorded_group.py::test_every_group_that_records_a_verdict_is_masked
     - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_refuses_a_mask_unconverged_that_is_not_a_bool
     - tests/core/test_multirate_group_meta_follows_firing.py::test_the_sysid_mask_keeps_a_window_whose_applied_solve_converged
+    - tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_the_window_recovers_its_last_step_converges_and_its_early_ones_do_not
   status: verified
   domains:
-    f32: tests/core/test_sysid_mask_refuses_unrecorded_group.py::test_every_group_that_records_a_verdict_is_masked
+    f32:
+      - tests/core/test_sysid_mask_refuses_unrecorded_group.py::test_every_group_that_records_a_verdict_is_masked
+      - tests/core/test_sysid_mask_reads_every_step_of_the_window.py::test_multiple_shooting_drops_the_recovering_window_and_keeps_the_converged_one
     f64: n/a
     mixed_dtype: n/a
     16bit: n/a
@@ -5623,8 +5636,8 @@ claims:
     source field is floating: only that group owns the `_meta` slot
     coupling_<key>_reading_floor (the floor per evaluation, NaN until a
     step has written it, restarted with the group's other report slots);
-    every other group's floor is taken from the returned state alone, as it
-    was.  A state whose slot was never written (a checkpoint from before
+    every other group's floor is taken from the returned state alone, which
+    the graph keeps across a later state write (CPL-189).  A state whose slot was never written (a checkpoint from before
     the slot existed) is read with the graph's own weights.
   oracle: >-
     residual_precision_floor of the returned state under the step's
@@ -5657,3 +5670,66 @@ claims:
     adaptive: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[adaptive]'
     checkpoint_restart: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[checkpoint_restart]'
     sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-188]'
+
+- id: CPL-189
+  area: report
+  claim: >-
+    "The floor is measured on the state the step returned, and stays so when
+    the state is written afterwards (set_node_state, PUT /graph/state, a node
+    replaced): the entry describes the step that ran until the group steps
+    again, the state is reset or a member is removed.  A checkpoint is
+    a copy of the state, _meta included, so one saved after such a write to
+    a member holds the written state and not the returned one; it carries a
+    marker saying so, and the graph that loads it reports the group with
+    spectral_error_bound NaN, spectral_usable, gradient_bound_usable and
+    precision_limited False and a not_usable_reason, until the group
+    steps.  The entry's other numbers are the slots' own."
+  sources:
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (precision_limited)
+    - src/maddening/core/graph_manager.py::GraphManager._keep_state_for_reports
+    - src/maddening/core/graph_manager.py::GraphManager._groups_written_after_their_step
+    - src/maddening/core/graph_manager.py::GraphManager._loaded_after_a_write
+    - src/maddening/core/simulation/checkpoint.py::_load_from_archive
+    - src/maddening/core/simulation/checkpoint.py::save_state
+  conditions: >-
+    as stated: writes through set_node_state (which the REST state route and
+    load_state use), add_node and remove_node.  An assignment into the
+    private gm._state is not seen.  A group that stores its floor in the
+    step (CPL-188) does not read the kept state and is never marked.  The
+    marker is the archive member _reports/<group>/written_after_step,
+    present only for such a group; an archive without it loads as before,
+    and a marker for a group the graph does not have is ignored.
+  oracle: the report read before the write, key for key.
+  tests:
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_next_step_is_reported_from_the_state_it_left
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_loaded_checkpoint_is_reported_as_the_step_it_saved
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_keeps_the_report_where_no_member_changed
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_an_archive_without_the_marker_loads_as_it_always_did
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_node_cannot_take_the_markers_prefix
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_failed_load_leaves_the_report_of_the_step_before_it
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_recompile_keeps_the_report_and_what_it_was_measured_on
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_reset_state_and_a_removed_member_still_end_the_report
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_transform_that_stepped_the_graph_leaves_the_report_of_the_step_before_it
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_traced_write_keeps_no_tracer_for_the_report
+    - tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_profilers_measurements_hand_the_report_back_with_the_state
+    - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_state_put_after_the_step_does_not_move_its_report
+    - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_checkpoint_saved_over_rest_after_a_put_reloads_the_state_and_withholds_the_bound
+    - tests/property/test_coupling_targeted_search.py::test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterwards
+  status: verified
+  domains:
+    f32: tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_write_after_the_step_does_not_move_its_report
+    f64: 'tests/property/test_coupling_targeted_search.py::test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterwards[gain-0.98-in-other-units]'
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write[run_scan]'
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write[run_adaptive]'
+    checkpoint_restart: tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step
+    sharded: n/a

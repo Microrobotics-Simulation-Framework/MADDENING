@@ -260,6 +260,12 @@ class GraphManager:
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
+        # What the last step left, kept from the first write made to the
+        # state after it; see ``_keep_state_for_reports``.
+        self._state_as_reported: Optional[tuple[dict, dict]] = None
+        # Groups whose report was loaded from a checkpoint saved after
+        # their state was written; see ``_note_loaded_after_a_write``.
+        self._reports_loaded_after_a_write: dict[str, tuple] = {}
         # The rate dividers of the step that is actually compiled, as
         # opposed to ``_rate_dividers``, which ``compile`` overwrites on
         # its way through and leaves behind if it raises.  This is what
@@ -1664,6 +1670,7 @@ class GraphManager:
         # must leave the graph exactly as it was.
         state = node.initial_state()
         self._nodes[node.name] = spec
+        self._keep_state_for_reports()
         self._state[node.name] = state
         self._dirty = True
         self._notify(EVENT_NODE_ADDED, node.name)
@@ -2044,6 +2051,7 @@ class GraphManager:
         # ``pop`` rather than ``del``: a graph whose state entry is missing
         # must still be removable, so the removal cannot itself fail
         # half-way and leave ``_nodes`` and ``_state`` disagreeing.
+        self._keep_state_for_reports()
         self._state.pop(name, None)
         self._edges = [
             e for e in self._edges
@@ -3879,6 +3887,10 @@ class GraphManager:
         else:
             self._state_traced = False
             self._state_before_trace = None
+            # The state being stored is what its own step left.  (A traced
+            # one is put back to the state before it, whose reports the
+            # kept copy still describes.)
+            self._state_as_reported = None
         self._state = new_state
         if self._underflow_check_pending and not self._state_traced:
             self._underflow_check_pending = False
@@ -3965,6 +3977,142 @@ class GraphManager:
             RuntimeWarning,
             stacklevel=3,
         )
+
+    # ------------------------------------------------------------------
+    # A report describes the step that ran
+    # ------------------------------------------------------------------
+
+    def _keep_state_for_reports(self) -> None:
+        """Keep what the last step left, before a write that is not a step's.
+
+        ``coupling_diagnostics()`` measures the residual's float floor on
+        the state the step returned.  The ``_meta`` slots are the step's
+        own record, but the node states are live, so the same step's
+        ``spectral_error_bound``, ``precision_limited`` and
+        ``spectral_usable`` moved when the state was written afterwards:
+        a float32 pair stalled at ``residual == 0.0`` read a bound of
+        ``0.0``, ``spectral_usable=True``, after ``set_node_state`` to
+        zeros, 9e-5 from its fixed point.
+
+        Called by every door that writes node states in place
+        (``set_node_state`` -- so ``PUT /graph/state`` and
+        ``load_state`` -- ``add_node``, ``remove_node``) *before* its
+        write.  The first such write after a step keeps a shallow copy of
+        the state (references to the arrays, no data) beside the report
+        slots it goes with; later ones find it there.  A step drops it
+        (``_store_state``), so it holds the replaced arrays only until
+        the next step.  The reader (``_state_a_report_describes``) uses
+        it only while the group's slots are still the very objects kept
+        here, so a door that brings its own slots -- a step, a loaded
+        checkpoint, ``reset_state``, a recompile that restarts a
+        replaced group -- needs no bookkeeping: the report then reads
+        the live state, which is what came with those slots.
+
+        Nothing is kept while the state holds tracers: the graph is put
+        back to the state before the trace, which the copy already kept
+        (or the live state) describes.
+        """
+        if self._state_traced or not self._committed_floor_inputs:
+            return
+        meta = self._state.get(_graph_specs._META_KEY)
+        if not meta:
+            return
+        kept = self._state_as_reported
+        if (kept is not None and len(kept[1]) == len(meta)
+                and all(kept[1].get(slot) is value for slot, value in meta.items())):
+            return
+        self._state_as_reported = (
+            {name: fields for name, fields in self._state.items()
+             if name != _graph_specs._META_KEY},
+            dict(meta),
+        )
+
+    def _state_a_report_describes(self, slots: Sequence[str], nodes) -> dict:
+        """The node states the step that wrote ``slots`` left.
+
+        The copy kept before the first later write
+        (:meth:`_keep_state_for_reports`) while ``slots`` are still the
+        objects it was kept with; otherwise the live state.
+        """
+        kept = self._state_as_reported
+        if kept is None:
+            return self._state
+        state, kept_meta = kept
+        meta = self._state.get(_graph_specs._META_KEY, {})
+        if (all(slot in meta and kept_meta.get(slot) is meta[slot] for slot in slots)
+                and all(name in state for name in nodes)):
+            return state
+        return self._state
+
+    def _groups_written_after_their_step(self) -> list[str]:
+        """The groups a checkpoint marks "state written after the last step".
+
+        A checkpoint is a copy of the state, ``_meta`` included, and holds
+        the *written* state: what the step returned, which the report's
+        float floor is measured on, is not in it.  So the archive carries
+        the fact beside the state (``checkpoint.save_state``), and the
+        graph that loads it reports the group's floor-dependent entries
+        as not usable (:meth:`_loaded_after_a_write`).
+
+        A group is marked where its report is measured on a kept copy
+        because a member has since been written to other values, and
+        where this graph itself loaded it marked and has not stepped it
+        since.  Not a group that stores its floor in the step (CPL-188).
+        """
+        meta = self._state.get(_graph_specs._META_KEY, {})
+        if not meta:
+            return []
+        marked = []
+        for key in self._committed_floor_inputs:
+            nodes = key.split("+")
+            slots = (f"coupling_{key}_iterations", f"coupling_{key}_residual")
+            if any(slot not in meta for slot in slots) or int(meta[slots[0]]) <= 0:
+                continue    # no report to qualify
+            stored = meta.get(f"coupling_{key}_reading_floor")
+            if stored is not None and np.isfinite(np.asarray(stored)):
+                continue    # the step stored this group's floor itself
+            if self._loaded_after_a_write(key):
+                marked.append(key)
+                continue
+            state = self._state_a_report_describes(slots, nodes)
+            if state is self._state:
+                continue
+            for name in nodes:
+                live = self._state.get(name)
+                if live is None or state[name] is live:
+                    continue
+                if (set(live) != set(state[name]) or any(
+                        np.asarray(live[f]).tobytes() != np.asarray(state[name][f]).tobytes()
+                        or np.asarray(live[f]).dtype != np.asarray(state[name][f]).dtype
+                        for f in live)):
+                    marked.append(key)
+                    break
+        return marked
+
+    def _note_loaded_after_a_write(self, keys) -> None:
+        """Record that a checkpoint just loaded marks *keys* as written
+        after their last step (``checkpoint.load_state``, on success).
+
+        Kept beside the report slots the load installed: the record holds
+        while they are the ones in the graph, so the group's next step, a
+        reset or another load ends it with no bookkeeping.
+        """
+        meta = self._state.get(_graph_specs._META_KEY, {})
+        self._reports_loaded_after_a_write = {
+            key: (meta.get(f"coupling_{key}_iterations"), meta.get(f"coupling_{key}_residual"))
+            for key in keys if key in self._committed_floor_inputs
+        }
+
+    def _loaded_after_a_write(self, key: str) -> bool:
+        """Whether *key*'s report came from a checkpoint saved after its
+        members were written (see :meth:`_note_loaded_after_a_write`)."""
+        noted = self._reports_loaded_after_a_write.get(key)
+        if noted is None:
+            return False
+        meta = self._state.get(_graph_specs._META_KEY, {})
+        return (noted[0] is not None
+                and meta.get(f"coupling_{key}_iterations") is noted[0]
+                and meta.get(f"coupling_{key}_residual") is noted[1])
 
     # ------------------------------------------------------------------
     # Internal helpers for _meta stripping
@@ -4582,6 +4730,19 @@ class GraphManager:
               count declared the bound with its floor *is* a bound, and
               a group converged to float32 -- the best a float32 group
               can do -- stays usable.
+              The floor is measured on the state the step returned,
+              and stays so when the state is written afterwards
+              (``set_node_state``, ``PUT /graph/state``, a node replaced):
+              the entry describes the step that ran until the group steps
+              again, the state is reset or a member is removed.  A
+              checkpoint is a copy of the state, ``_meta`` included, so
+              one saved after such a write to a member holds the written
+              state and not the returned one; it carries a marker saying
+              so, and the graph that loads it reports the group with
+              ``"spectral_error_bound"`` NaN, ``"spectral_usable"``,
+              ``"gradient_bound_usable"`` and ``"precision_limited"``
+              ``False`` and a ``"not_usable_reason"``, until the group
+              steps.  The entry's other numbers are the slots' own.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -4813,8 +4974,11 @@ class GraphManager:
                     unit = np.asarray(measured_floor)
                     floor = float(unit * np.asarray(evaluations, unit.dtype))
                 else:
+                    # On the state the step left, not on whatever has been
+                    # written to it since (``_keep_state_for_reports``).
                     floor = float(residual_precision_floor(
-                        self._state, sorted(group.nodes), group.convergence_norm,
+                        self._state_a_report_describes((iter_key, res_key), group.nodes),
+                        sorted(group.nodes), group.convergence_norm,
                         group.atol, group.rtol, list(internal_edges),
                         evaluations=evaluations,
                         mappings=(self._params or {}).get("mappings"),
@@ -4862,6 +5026,21 @@ class GraphManager:
                     ),
                     "precision_limited": precision_limited,
                 })
+                if self._loaded_after_a_write(key) and not (
+                        measured_floor is not None
+                        and np.isfinite(np.asarray(measured_floor))):
+                    # The checkpoint this report was loaded from was saved
+                    # after the group's state had been written: the state
+                    # the step returned, which the floor is measured on,
+                    # is not in it.  Everything built on the floor is
+                    # withheld; the slots' own numbers stand.
+                    result[key].update({
+                        "spectral_error_bound": float("nan"),
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "precision_limited": False,
+                        "not_usable_reason": _group_layout._WRITTEN_BEFORE_SAVE_REASON,
+                    })
                 geometry_keys = self._committed_geometry_edges.get(key, ())
                 if geometry_keys:
                     # Experimental, 0.4.0: the diagnostics do not read a
@@ -6115,6 +6294,7 @@ class GraphManager:
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         state = _graph_specs._strong_typed(state)
+        self._keep_state_for_reports()
         if _graph_specs._holds_tracer({name: state}) and not self._state_traced:
             # Snapshot before the write, per node, so the recovery has
             # something untraced to go back to.  Only on the tracer path,
@@ -7031,6 +7211,9 @@ class GraphManager:
         * in place of the three above, ``not_usable_reason`` for a group
           that resolves a geometry-dependent mapping (experimental): its
           bounds, estimates and ``*_usable`` flags are withheld;
+        * ``not_usable_reason`` for a group loaded from a checkpoint saved
+          after its state was written: the bound and the flags that rest
+          on the float floor are withheld;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

@@ -209,7 +209,7 @@ def _leaf_layout(leaf: Any) -> tuple[tuple, Any]:
     dtype = getattr(leaf, "dtype", None)
     if dtype is None:
         dtype = jnp.result_type(leaf)
-    if jax.dtypes.issubdtype(dtype, jax.dtypes.extended):
+    if jnp.issubdtype(dtype, jax.dtypes.extended):
         # A PRNG key (``key<fry>``): not a NumPy dtype, and a kind of its own.
         return shape, dtype
     return shape, np.dtype(jax.dtypes.canonicalize_dtype(dtype))
@@ -242,7 +242,7 @@ def _prng_key_leaves(state: Any) -> list[str]:
     JSON form, so no reply could carry the node's state."""
     return [_leaf_path(path)
             for path, leaf in jax.tree_util.tree_flatten_with_path(state)[0]
-            if jax.dtypes.issubdtype(_leaf_layout(leaf)[1], jax.dtypes.extended)]
+            if jnp.issubdtype(_leaf_layout(leaf)[1], jax.dtypes.extended)]
 
 
 def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list[str]:

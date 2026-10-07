@@ -785,8 +785,9 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
             details.append(f"sharded: {shard}")
         node_items.append((f"{name}  {_type_text(spec.node)}", tuple(details)))
 
-    internal = {id(e) for g in groups for e in gm._edges
-                if e.source_node in g.nodes and e.target_node in g.nodes}
+    from maddening.core.coupling._interface_plan import internal_edges  # noqa: PLC0415
+
+    internal = {id(e) for g in groups for e in internal_edges(gm._edges, g.nodes)}
     back = {id(e) for e in gm._back_edges} if status.ever_compiled else set()
     edge_items = []
     for edge in gm._edges:

@@ -34,6 +34,7 @@ from maddening.core._graph_specs import (
 from maddening.core.coupling._group_layout import (
     _group_accel_fields,
     _group_dividers,
+    _fields_the_interface_norm_misses,
     _group_evaluations,
     _group_pass_structure,
     _group_reads,
@@ -44,7 +45,6 @@ from maddening.core.coupling._group_layout import (
     _non_finite_reads_as_diverged,
     _reading_is_the_fields,
     _reads_mapping_weights,
-    _state_lags_the_reading,
     _state_measurable,
 )
 from maddening.core.coupling._bounds import (
@@ -375,10 +375,14 @@ def _run_coupled_block_impl(
     # does not sub-cycle, including ``subcycling=True`` over one timestep).
     group_dividers = _group_dividers(group, nodes) or {}
     use_subcycling = bool(group_dividers)
-    # Static: whether the interface norm can settle on readings a member
-    # of the returned state was not computed from, in which case the
-    # solve also holds the previous residual to the threshold.
-    lagged_reading = _state_lags_the_reading(
+    # Static: the floating fields the interface norm does not measure.
+    # ``refreshed_fields`` (read by no internal edge) are returned as a
+    # pass computes them at the returned state; under ``lagged_reading``
+    # (a field read only through a mapping or a transform, in a member
+    # that reads the previous iterate) the solve also holds the previous
+    # residual to the threshold.  Empty and ``False`` for every group
+    # the norm measures whole.
+    refreshed_fields, lagged_reading = _fields_the_interface_norm_misses(
         group, interface_edges_in_order, group_node_names, new_state, group_dividers)
     # The group's macro timestep: the time one coupling pass covers.
     macro_dt = (max(nodes[nn].timestep for nn in group_dividers)
@@ -902,19 +906,32 @@ def _run_coupled_block_impl(
             from this pass has a derivative, and the floating state's --
             the IFT rule's, or the unrolled loop's -- is untouched.
             """
-            if not any(nonfloat_fields.values()):
+            if not any(nonfloat_fields.values()) and not refreshed_fields:
                 return s_full
-            frozen = jax.tree.map(
-                lambda v: (jax.lax.stop_gradient(v)
-                           if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
-                s_full,
-            )
-            s_leaves = one_pass(frozen)
             out = dict(s_full)
-            for nn in group_node_names:
-                if nonfloat_fields[nn]:
-                    out[nn] = {**s_full[nn],
-                               **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
+            if any(nonfloat_fields.values()):
+                frozen = jax.tree.map(
+                    lambda v: (jax.lax.stop_gradient(v)
+                               if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
+                    s_full,
+                )
+                s_leaves = one_pass(frozen)
+                for nn in group_node_names:
+                    if nonfloat_fields[nn]:
+                        out[nn] = {**s_full[nn],
+                                   **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
+            if refreshed_fields:
+                # The floating fields the interface norm does not measure
+                # and no internal edge reads
+                # (``_fields_the_interface_norm_misses``), by the same
+                # rule: as the pass computes them at this state, from the
+                # readings its verdict was taken on.  No edge reads them,
+                # so the pass of the state returned, its readings and its
+                # residual are the ones measured.  Differentiated: at a
+                # fixed point this is the field's own derivative.
+                s_fresh = one_pass(s_full)
+                for nn, fields in refreshed_fields.items():
+                    out[nn] = {**out[nn], **{f: s_fresh[nn][f] for f in fields}}
             return out
 
         if max_iters <= 1:

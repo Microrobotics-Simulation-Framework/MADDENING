@@ -182,57 +182,77 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     return True
 
 
-def _state_lags_the_reading(group, interface_edges, schedule, state, dividers) -> bool:
-    """Can *group*'s norm pass on readings its returned state was not computed from?
+def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, dividers):
+    """``(refreshed, lagged_reading)``: what *group*'s norm does not measure, and how the solve answers for it.
 
     ``convergence_norm="interface"`` measures, on each pass, how far what
-    the internal edges deliver moved between an iterate and its successor.
-    A member that takes an input from the *previous* iterate was computed
-    from readings one pass older than the pair the norm compared, and a
-    field of it that no edge delivers is measured by nothing: the solve
-    stopped on readings that had settled while that field still held the
-    value of readings that had not.  A one-way pair under Jacobi returned
-    its target computed from the pre-step source with ``converged=True``,
-    ``iterations=1`` and a residual of exactly zero (MADD-ANO-235).
+    the internal edges deliver moved between an iterate and its successor,
+    and nothing else.  Two kinds of floating field escape it:
 
-    True when some member both
+    * a field **no internal edge reads**.  It feeds nothing back, so the
+      iteration does not need it, yet the iterate carries the value some
+      earlier pass gave it: under Jacobi the one computed from the
+      *previous* iterate's readings, under a relaxation a blend of every
+      pass so far.  A one-way pair under Jacobi returned its target
+      computed from the pre-step source with ``converged=True``,
+      ``iterations=1`` and a residual of exactly zero (MADD-ANO-235).
+      *refreshed* names these fields, ``{member: (field, ...)}``: the solve
+      returns them as one pass computes them **at the state it returns**
+      -- from the very readings the verdict was taken on -- as it does a
+      member's non-floating fields.  They are named for a member with an
+      internal input that reads the previous iterate (below), and for
+      every member with an internal input under an acceleration, which
+      relaxes or extrapolates what it is handed.
+    * a field internal edges read **only through a mapping or a
+      transform**, which may deliver less than the field.  It does feed
+      back, so it cannot be recomputed without moving the readings; where
+      its member reads the previous iterate, the part of it the edges do
+      not deliver was computed from readings one pass older than the pair
+      compared.  *lagged_reading* is ``True`` for a group with such a
+      field: its solve stops only when the readings also moved within the
+      threshold over the pass that computed the state
+      (``_fixed_point_while``).
 
-    * reads an internal edge from the previous iterate: every internal
-      edge under Jacobi; under Gauss-Seidel an edge whose source does not
-      run before its target in *schedule* (the sweep order), and every
-      internal edge into a sub-cycled member, whose sub-steps interpolate
-      between the previous iterate and the pass (``boundary_interpolation``
-      other than ``"constant"``); and
-    * has a floating field the norm does not measure whole: one that no
-      internal edge delivers as it is (no mapping, no transform).
+    A member reads the previous iterate on every internal edge under
+    Jacobi; under Gauss-Seidel on an edge whose source does not run before
+    it in *schedule* (the sweep order), and on every internal edge when it
+    is sub-cycled and interpolates between the previous iterate and the
+    pass (``boundary_interpolation`` other than ``"constant"``).
 
-    The solve of such a group stops only when the readings also moved
-    within the threshold over the pass that computed the state it returns
-    (``lagged_reading`` in ``_fixed_point_while``).  A member whose every
-    floating field is delivered whole is measured directly, as under
-    ``"mixed"``, and needs nothing more: such a group keeps its passes and
-    its compiled step.  Static.
+    A field an internal edge delivers whole (no mapping, no transform) is
+    measured directly, as under ``"mixed"``.  ``({}, False)`` for every
+    other norm, and for an interface group with neither kind of field:
+    such a group keeps its passes and its compiled step.  Static.
     """
     if group.convergence_norm != "interface":
-        return False
+        return {}, False
     order = {nn: i for i, nn in enumerate(schedule)}
     floats = float_fields_of(state, list(schedule))
+    read = {(e.source_node, e.source_field) for e in interface_edges}
     whole = {
         (e.source_node, e.source_field) for e in interface_edges
         if e.mapping is None and e.transform is None
     }
     jacobi = group.iteration_mode == "jacobi"
     interpolates = group.boundary_interpolation != "constant"
+    accelerated = group.acceleration != "none"
+    fed, behind = set(), set()
     for e in interface_edges:
         target = e.target_node
-        behind = (
-            jacobi
-            or order[e.source_node] >= order[target]
-            or (interpolates and dividers.get(target, 1) > 1)
-        )
-        if behind and any((target, f) not in whole for f in floats[target]):
-            return True
-    return False
+        fed.add(target)
+        if (jacobi or order[e.source_node] >= order[target]
+                or (interpolates and dividers.get(target, 1) > 1)):
+            behind.add(target)
+    refreshed = {}
+    for nn in schedule:
+        if nn in behind or (accelerated and nn in fed):
+            unread = tuple(f for f in floats[nn] if (nn, f) not in read)
+            if unread:
+                refreshed[nn] = unread
+    lagged_reading = any(
+        (nn, f) in read and (nn, f) not in whole
+        for nn in schedule if nn in behind for f in floats[nn])
+    return refreshed, lagged_reading
 
 
 #: Every ``_meta`` slot a coupling group can own, as the suffix after

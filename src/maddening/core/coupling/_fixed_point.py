@@ -226,26 +226,26 @@ def _fixed_point_while(
     **A lagged reading must settle twice too** (``lagged_reading``,
     static).  Under ``convergence_norm="interface"`` the residual reads
     what the group's internal edges deliver, and ``x_k``'s members were
-    computed from the readings of ``x_{k-1}``: where a member takes an
-    input from the previous iterate and has a field no edge delivers
-    whole (``_state_lags_the_reading``), ``r_k <= threshold`` says the
-    readings of ``x_k`` and of its successor agree and nothing about the
-    readings that field was computed from.  A one-way pair under Jacobi
-    stopped on its first pass with a residual of exactly zero -- the
-    source does not depend on the iterate -- and returned a target
-    computed from the pre-step source (MADD-ANO-235).  Such a group
-    stops only when the previous residual is at or below ``threshold``
-    as well, which is the statement that the readings ``x_k`` was
-    computed from are within the threshold of the ones judged: the same
-    streak as Aitken's, for a different reason.  At the cap the state
-    returned is the successor, computed from the readings of the last
-    iterate the loop measured, so the residual reported there is the
-    larger of the extra evaluation's and the loop's last whenever the
-    loop's last was above ``threshold`` -- the change of the readings
-    over the pass that computed the state -- and the verdict every
-    reader derives from it cannot be ``True`` on a state computed from
-    readings that had not settled.  Every other group's criterion,
-    report and program are unchanged.
+    computed from the readings of ``x_{k-1}``.  Where a member takes an
+    input from the previous iterate and has a field the edges deliver
+    only through a mapping or a transform
+    (``_fields_the_interface_norm_misses``), ``r_k <= threshold`` says
+    the readings of ``x_k`` and of its successor agree, and nothing
+    about the readings the undelivered part of that field was computed
+    from (MADD-ANO-235).  Such a group stops only when the previous
+    residual is at or below ``threshold`` as well, which is the
+    statement that the readings ``x_k`` was computed from are within
+    the threshold of the ones judged: the same streak as Aitken's, for
+    a different reason.  At the cap the state returned is the
+    successor, computed from the readings of the last iterate the loop
+    measured, so the residual reported there is the larger of the extra
+    evaluation's and the loop's last whenever the loop's last was above
+    ``threshold`` -- the change of the readings over the pass that
+    computed the state -- and the verdict every reader derives from it
+    cannot be ``True`` on a state computed from readings that had not
+    settled.  Every other group's criterion, report and program are
+    unchanged.  (A field no edge reads at all is not this loop's
+    concern: the step recomputes it at the state this returns.)
 
     Returns ``(x_star, n_iters, final_res, final_amp, (V, W))``:
     ``n_iters`` is the number of coupling passes that produced

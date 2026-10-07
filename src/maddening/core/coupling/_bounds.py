@@ -23,6 +23,84 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
+#: The largest relative gap between the pass's Jacobian-vector product
+#: along a geometry and a finite difference of the pass along the same
+#: direction (:func:`_geometry_product_gap`) at which
+#: ``coupling_diagnostics()`` still reports the bounds of a group with a
+#: geometry edge.  Experimental.  A product that does not see the geometry
+#: at all reads a gap of 1 on every field the geometry moves, one that
+#: sees half of it 0.5; an honest pass reads the finite difference's own
+#: error, a few ``sqrt(eps)`` of the geometry's dtype.
+GEOMETRY_GAP_TOLERANCE = 0.25  # units: relative gap
+#: How many of the residual's float resolutions the finite difference of
+#: :func:`_geometry_product_gap` is allowed as rounding, per field: a
+#: field the geometry moves by less than this is not compared.
+_GEOMETRY_GAP_RESOLUTIONS = 32.0  # units: resolutions
+
+
+def _geometry_product_gap(step_pure, x_star, consts, directions, weights, resolution,
+                          field_ids, n_fields):
+    """How far the pass's Jacobian-vector product along a geometry is from
+    a finite difference of the pass along the same direction (experimental).
+
+    The spectral estimate and the gradient bound of a group are built from
+    Jacobian-vector products of its pass ``F``.  Where an edge's mapping
+    reads a moving geometry, ``F`` depends on the iterate and on the
+    pre-step state *through* that geometry, and a product that did not
+    see it would be the product of another map: a spectral radius read
+    low with every flag set.  This is the check that it does, on the
+    object the estimates differentiate (``step_pure``).
+
+    *directions* is a sequence of ``(dx, dconsts)``: a step of the flat
+    iterate and one per constant (``None`` where a constant is not
+    moved), each moving only geometry the pass reads -- the positions
+    held in the iterate, and those held in a constant of the pass (a
+    member's pre-step state, a node outside the group).  For each, with
+    ``t`` the step as the floats realise it (``(x + dx) - x``),
+
+        ``gap_f = ||D (F(x + t) - F(x) - J t)||_f
+                  / (max(||D (F(x + t) - F(x))||_f, ||D J t||_f) + c ||res||_f)``
+
+    per field ``f`` of the state (*field_ids* maps an entry to its field;
+    a term in one field is not diluted by another's), ``D`` the *weights*,
+    ``res`` the residual's float *resolution* and ``c``
+    :data:`_GEOMETRY_GAP_RESOLUTIONS`.  Returns the largest ``gap_f`` over
+    the fields and the directions, in the analysis dtype: 0 where the
+    geometry moves nothing, NaN where it cannot be evaluated.  One
+    Jacobian-vector product and one evaluation of the pass per direction.
+    """
+    x = jax.lax.stop_gradient(x_star)
+    cc = tuple(jax.lax.stop_gradient(c) for c in consts)
+    work = _analysis_dtype(x.dtype)
+    d = jax.lax.stop_gradient(jnp.asarray(weights, work))
+    res = jax.lax.stop_gradient(jnp.asarray(resolution, work))
+    ids = np.asarray(field_ids, np.int32)
+
+    def by_field(v):
+        return jnp.sqrt(jax.ops.segment_sum(v * v, ids, num_segments=n_fields))
+
+    noise = _GEOMETRY_GAP_RESOLUTIONS * by_field(res)
+    worst = jnp.zeros((), work)
+    for dx, dconsts in directions:
+        x1 = x + jax.lax.stop_gradient(dx)
+        c1 = tuple(c if t is None else c + jax.lax.stop_gradient(t)
+                   for c, t in zip(cc, dconsts))
+        tangents = tuple(jnp.zeros_like(c) if t is None else moved - c
+                         for c, t, moved in zip(cc, dconsts, c1))
+        base, product = jax.jvp(lambda x_, *c_: _F_dispatch(step_pure, x_, c_),
+                                (x, *cc), (x1 - x, *tangents))
+        difference = (_F_dispatch(step_pure, x1, c1) - base).astype(work)
+        product = product.astype(work)
+        miss = by_field(d * (difference - product))
+        size = jnp.maximum(by_field(d * difference), by_field(d * product)) + noise
+        gap = jnp.where(size > 0, miss / jnp.where(size > 0, size, 1.0), 0.0)
+        # ``max`` drops a NaN on some backends' orderings; a gap that is
+        # not a number is the answer.
+        gap = jnp.where(jnp.all(jnp.isfinite(gap)), jnp.max(gap), jnp.nan)
+        worst = jnp.where(jnp.isnan(gap) | jnp.isnan(worst), jnp.nan, jnp.maximum(worst, gap))
+    return worst
+
+
 def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
                       resolution=None, field_reference=None, map_eps=None):
     """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.

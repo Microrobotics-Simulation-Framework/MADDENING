@@ -446,9 +446,9 @@ def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind:
     returned iterate, for every constant ``c`` of
     :func:`gradient_constants` the fixed point depends on.
 
-    *mapping_kind*: how the graph *model* describes holds its mapped edges
-    (the cell's; a model is the dense one whatever the kind, so it cannot
-    say).
+    *mapping_kind*: how the graph that *model* describes holds its mapped
+    edges (the cell's: a model is the dense one whatever the kind, and
+    cannot say).
 
     With the pass ``F(x) = (I - L)^{-1} (U x + c_g)`` and ``M = L + U``,
     the implicit derivative at an iterate ``x`` is ``(I - M)^{-1} (dL F(x)

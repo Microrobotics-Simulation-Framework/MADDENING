@@ -4411,7 +4411,27 @@ class GraphManager:
               fixed point responds to no constant, where a constant's
               tangent through the group is not finite (that constant
               has no gradient to bound) and where the returned state is
-              not finite.  Costs
+              not finite.  **Only for a constant the pass resolves.**  A
+              relative error is a statement about a gradient that has a
+              size: a constant is in the bound where moving it by its
+              own magnitude (by its array's largest magnitude where the
+              entry is zero, by 1 where the array is) moves one pass
+              from ``x_k`` by more than the pass's float resolution, the
+              floor ``"spectral_error_bound"`` adds to the residual,
+              measured as that bound's distance is; and where its
+              tangent through the group is not exactly zero.  A constant
+              below that has a gradient that is what rounding left of
+              terms the size of the fields, its relative error is of
+              order one or undefined, and the bound says nothing of it
+              (it is not the worst probe): the centre or the curve of a
+              nonlinearity evaluated on its centre, a term multiplied by
+              a field that has converged to zero.  The gradient with
+              respect to such a constant is small beside the others in
+              the same units (measured: 1.5e-34 for an error of 1.7e-34
+              where the resolved constants' are up to 3.5e3, float64);
+              check a constant with one Jacobian-vector product of the
+              pass, or treat a gradient many orders below its
+              neighbours' as zero.  Costs
               ``11 + 4 k + 5 n_p + 2 k n_p`` Jacobian-vector products per group per
               step beside the spectral bound's eight (plus one
               linearisation and ``k`` reverse-mode products where the

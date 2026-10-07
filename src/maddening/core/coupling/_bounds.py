@@ -643,10 +643,12 @@ def _full_resolvent_norm_and_rows(U, M, make_transpose):
     the directions ``J`` reads at no further reverse-mode cost.  ``(None,
     None)`` without a transpose.
     """
+    from maddening.core.coupling.acceleration import _spectral_norm  # noqa: PLC0415
+
     n, k = U.shape
     eye_k = jnp.eye(k, dtype=M.dtype)
     if n <= k:
-        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2), jnp.eye(n, dtype=M.dtype)
+        return _spectral_norm(jnp.linalg.inv(eye_k - M)), jnp.eye(n, dtype=M.dtype)
     matvec_t = make_transpose()
     if matvec_t is None:
         return None, None
@@ -654,7 +656,7 @@ def _full_resolvent_norm_and_rows(U, M, make_transpose):
     P, _ = jnp.linalg.qr(jnp.concatenate([U, B.T], axis=1))
     T = jnp.eye(P.shape[1], dtype=M.dtype) + (P.T @ U) @ jnp.linalg.solve(eye_k - M, B @ P)
     R, _ = jnp.linalg.qr(B.T)
-    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype)), R
+    return jnp.maximum(_spectral_norm(T), jnp.ones((), M.dtype)), R
 
 
 def _kantorovich_root_and_miss(step, h):
@@ -678,6 +680,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                                arnoldi_residual, amplification, res):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        _spectral_norm,
         ift_gradient_error_bound,
         jacobian_range_basis,
         resolvent_apply,
@@ -928,7 +931,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         dG = jax.vmap(
             lambda row, ts: jax.vmap(lambda z: g_derivative(row, ts, z))(rows_g.T))(
                 jnp.arange(n_rows), t_s)
-        any_dir = jnp.linalg.norm(live[None, None, :] * dG, ord=2, axis=(-2, -1))
+        # A derivative that is not finite bounds nothing: ``inf``, so the
+        # probe's bound is (a NaN here compared False below and the term
+        # was dropped).
+        any_dir = _spectral_norm(live[None, None, :] * dG, unbounded=jnp.inf)
     # The undirected distance: the floor through the resolvent (the larger
     # of the Krylov factor the distance itself uses and the full norm),
     # or the whole distance at an unresolved iterate.
@@ -1048,7 +1054,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         JR = jax.vmap(lambda xx: jax.vmap(lambda z: jac_at(xx, z))(rows.T))(points)
         JR = jax.lax.optimization_barrier(JR).astype(dtype)
         change = live * _framed_difference(JR[1], JR[0], s / lift)
-        op_change = jnp.linalg.norm(live * jax.vmap(resolve)(change), ord=2)
+        op_change = _spectral_norm(live * jax.vmap(resolve)(change))
         numerator = jnp.maximum(beta * jac_change, op_change * step)
     h = jnp.where(
         step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,

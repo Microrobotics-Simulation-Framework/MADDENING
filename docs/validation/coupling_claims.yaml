@@ -1997,6 +1997,7 @@ claims:
     - tests/core/test_coupling_claims_graphs.py::test_unconverged_means_at_the_cap_or_not_finite
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_residual_at_the_default_rtol_is_finite_and_held_in_float32
+    - tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_a_step_whose_iterate_leaves_float_range_under_iqn_returns
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_unconverged_means_at_the_cap_or_not_finite
@@ -3140,6 +3141,8 @@ claims:
     - tests/core/test_coupling_non_finite_state.py::test_strict_convergence_names_the_non_finite_state
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_residual_at_the_default_rtol_is_finite_and_held_in_float32
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_a_state_beyond_its_dtypes_range
+    - tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_a_step_whose_iterate_leaves_float_range_under_iqn_returns
+    - tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_the_secant_update_returns_on_every_non_finite_input
   status: verified
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged
@@ -3688,7 +3691,14 @@ claims:
     read 5.1e-6 for a true 3.0e-5 at the float floor: MADD-ANO-226,
     resolved); where the pass has no reverse mode and more than 64 state
     entries that norm is unavailable and the bound is inf unless the
-    right-hand side does not depend on the state.
+    right-hand side does not depend on the state.  A constant the pass
+    resolves: moving it by its own magnitude moves one pass from x_k by
+    more than the residual's float floor, in the bound's norm, and its
+    tangent is not exactly zero.  A constant below that (the centre or the
+    curve of a nonlinearity evaluated on its centre: the fixed point does
+    not respond to it, and its gradient at x_k is rounding) is not in the
+    bound, which says nothing of it; it read 1.09 for a relative error of
+    1.134 with those probes in it (MADD-ANO-232, resolved).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
@@ -3706,6 +3716,9 @@ claims:
     - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap
     - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn
     - tests/property/test_coupling_targeted_search.py::test_a_usable_gradient_bound_is_never_below_the_error_per_push
+    - tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_is_never_below_the_error_on_the_nonlinear_cell_per_push
+    - tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push
+    - tests/property/test_coupling_nonlinear_search.py::test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_bound
   status: verified
   notes: >-
     16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16

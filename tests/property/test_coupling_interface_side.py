@@ -48,27 +48,39 @@ signal is the first test that failed); "rule" rows need the rule to exist
 and are written as the change to make to it then.
 
 ====  ======================================================  ========================================================
-id    fault                                                   caught by
+id    fault                                                   caught by (measured signal)
 ====  ======================================================  ========================================================
-T1    today: ``_interface_readings`` yields the source        ``test_the_plain_loop_stops_where_the_reference_of_its_
-      value where the delivered one is prescribed             rule_does[gather-only-...-delivered]`` (residual)
-T2    today: the pool's count is the source field's size      the same test, a two-way row (residual)
-      (the value right, the large side's entries counted)
-T3    today: a field read by two edges is read once           ``test_a_step_is_the_models_under_its_rule[side-hub-...]``
-T4    today: ``_delivered`` applies the transform before      ``test_the_plain_loop_...[...offset...-delivered]``
+T1    today: ``_interface_readings`` yields the source        caught: ``test_the_plain_loop_stops_where_the_reference_
+      value where the delivered one is prescribed             of_its_rule_does[gather-only-...-delivered]`` (residual)
+T2    today: the pool counts the source field's entries       caught: the same test on a gather-only and a
+      (the value right, the other side's count)               scatter-only row.  A two-way row cannot see it: the
+                                                              two edges' counts swap and their sum is the same
+T3    today: a field read by two edges is read once           caught: ``test_a_step_is_the_models_under_its_rule
+                                                              [side-hub-...-delivered]``
+T4    today: ``_delivered`` applies the transform before      caught: ``test_the_plain_loop_...[...-offset-delivered]``
       the mapping
-T5    today: the spectral analysis reads the source values    ``test_coupling_targeted_search.py::test_the_reported_
-      (``_reading_parts``), the criterion the delivered       numbers_hold_on_cells_with_a_mapping_between_sizes``
-T6    today: the floor reads the source values                survives: the floor is ``4 eps / rtol`` per entry on
-      (``residual_precision_floor``)                          either side (see "What no instrument here sees")
+T5    today: the spectral analysis reads the source values    **survives** the "bound" score of
+      (``_reading_parts`` in ``_coupled_block.py``) under a   ``test_coupling_targeted_search.py`` on the cells with
+      criterion on the delivered ones                         a mapping between sizes, with and without a
+                                                              differencing gather row, and
+                                                              ``test_interface_reading_twins.py``: the bound it
+                                                              reports is another number (8.17 for 1.05 on a
+                                                              differencing row, 0.1068 for 0.1093 on a plain one)
+                                                              but seldom one below the distance.  See R4
+T6    today: the floor reads the source values                survives (expected): see below
+      (``residual_precision_floor``)
 R1    rule: delivered read where the source is prescribed     the dilution pins (they keep failing) and every
       (today's tree)                                          ``...-compact`` row of the two comparisons
 R2    rule: the source read where delivered is prescribed     ``...[gather-only-...-compact]`` rows; the tie rows
       (a gather, or a tie, read at its source)
 R3    rule: the source value read, the delivered value's      the dilution pins (the residual is the diluted one);
       entry count pooled                                      ``...-compact`` residuals
-R4    rule: the tie decided differently in the criterion      tie rows (``tie-...``, ``side-4-4``): residual and
-      and in the spectral weights                             passes; the search's "bound" score on ``side-4-4``
+R4    rule: the tie, or the side, decided differently in      tie rows (``tie-...``, ``side-4-4``) for the criterion;
+      the criterion, the floor and the spectral weights       ``test_an_edge_mapped_graph_s_diagnostics_are_its_
+      (three enumerations: ``_interface_readings``,           marker_side_twin_s``: the twin reads the compact side
+      ``_read_fields``, ``_interface_state_fields``)          by construction, so every reported number of the
+                                                              edge-mapped graph must be the twin's to 1e-6 -- the
+                                                              comparison T5 has no equivalent of today
 R5    rule: the side taken from the weights' shape (a sparse  ``sparse`` against ``sparse-transposed`` rows: one
       layout's ``(rows, k)``), or from weights seen at build  matrix, three weight shapes; every graph is built
                                                               with zero weights and stepped with ``params``
@@ -86,7 +98,11 @@ same number unless a reading is exactly zero or dead-banded on one side
 only (T6 survives).  IQN's ``_interface_state_fields`` chooses the state
 fields the accelerator works on, which the side rule does not change; a
 wrong choice there moves pass counts, not a verdict's truth, and is held
-only through the property under ``iqn-*``.
+only through the property under ``iqn-*``.  And on this tree nothing
+catches T5: a spectral analysis on another reading than the criterion's
+gives a different bound that is rarely an *understated* one, which is all
+a score against the true distance can see.  The marker-side twin is the
+instrument for it and can only run once the two graphs share a criterion.
 """
 
 from __future__ import annotations
@@ -95,6 +111,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import dataclasses
 import math
 
 import numpy as np
@@ -215,8 +232,8 @@ SMALL, LARGE, HUGE = 1000, 100_000, 1_000_000
 #: The least growth of the excess between two sizes that counts as the
 #: measured dilution, as a fraction of ``sqrt(large / small)`` (the entry
 #: count's growth: 10 between 1e3 and 1e5).  Measured on this tree at the
-#: pinned draw: 0.65 to 1.3 of it over the pinned rows on three jax
-#: versions; a third leaves a factor of two.
+#: pinned draw: 0.63 to 1.20 of it over the pinned rows, the same on jaxlib
+#: 0.10.2, 0.11.0 and 0.11.2; a third leaves most of a factor of two.
 GROWTH_FRACTION = 1.0 / 3.0
 
 PINNED = (
@@ -383,6 +400,58 @@ def test_the_plain_loop_stops_where_the_reference_of_its_rule_does(shape, rule):
         f"the step took {seen['iterations']} passes; the plain loop under the {rule} "
         f"reading stops after {expected['iterations']} (margin {expected['margin']:.3g})")
     assert abs(expected["residual"] - seen["residual"]) <= tight * restated
+
+
+TWIN_SHAPES = (
+    sg.Shape("two-way", 2000, 20, "sparse", "gauss-seidel", "float64"),
+    sg.Shape("two-way", 500, 6, "matrix", "jacobi", "float64"),
+    sg.Shape("two-way", 2000, 20, "sparse-transposed", "gauss-seidel", "float32"),
+)
+#: The same with ``diagnostics=True`` (twelve seconds a compile: slow).
+TWIN_DIAGNOSED = tuple(dataclasses.replace(s, diagnostics=True) for s in TWIN_SHAPES)
+#: Every number of a report, to the rounding of two differently ordered
+#: float evaluations of one problem (the spectral keys come from eight
+#: Krylov steps of it).
+TWIN_RTOL = {"float64": 1e-6, "float32": 2e-2}
+
+
+def _twin_reports(shape: sg.Shape):
+    draw = _exit_draw(shape, "compact")
+    seen = sg.run(shape, draw)
+    ref = seen["reference"]
+    with precision(shape.dtype == "float64"):
+        twin = sg.run(shape, draw, graph=sg.marker_side_twin(shape, ref))
+    return ref, seen, twin
+
+
+@pytest.mark.parametrize("shape", TWIN_SHAPES, ids=_id)
+def test_the_marker_side_twin_stops_where_the_compact_reference_does(shape):
+    """The twin is the compact rule built out of plain edges: valid today."""
+    ref, _seen, twin = _twin_reports(shape)
+    expected = ref.plain_exit("compact")
+    tight = 1e-9 if shape.dtype == "float64" else 2e-3
+    assert abs(twin["residual"] - twin["residual_compact"]) <= tight * twin["residual"]
+    assert (twin["iterations"], twin["converged"]) == (expected["iterations"], True)
+    assert twin["excess"] <= 1.0
+
+
+def _same_reports(shape: sg.Shape) -> None:
+    _ref, seen, twin = _twin_reports(shape)
+    a, b = seen["report"], twin["report"]
+    assert sorted(a) == sorted(b)
+    rtol = TWIN_RTOL[shape.dtype]
+    differ = {}
+    for key in a:
+        va, vb = a[key], b[key]
+        if isinstance(va, (bool, np.bool_, str, type(None))) or isinstance(vb, (str, type(None))):
+            same = va == vb
+        else:
+            va, vb = float(va), float(vb)
+            same = (math.isnan(va) and math.isnan(vb)) or abs(va - vb) <= rtol * max(
+                abs(va), abs(vb))
+        if not same:
+            differ[key] = (va, vb)
+    assert not differ, f"{_id(shape)}: (edge-mapped, twin) {differ}"
 
 
 def test_the_two_rules_stop_on_different_passes_where_they_differ():
@@ -581,3 +650,25 @@ def test_a_hubs_field_is_read_once_per_edge_by_each_edges_own_rule():
         assert set(cols) <= set(range(off[e.src], off[e.src] + topo.node(e.src).n))
     assert read == {("h", "s"): ("delivered", 2), ("h", "g"): ("source", 4),
                     ("s", "h"): ("source", 2), ("g", "h"): ("delivered", 4)}
+
+
+@pytest.mark.xfail(AWAITING, strict=True, raises=AssertionError, reason=DECISION)
+@pytest.mark.parametrize("shape", TWIN_SHAPES, ids=_id)
+def test_an_edge_mapped_graph_reports_what_its_marker_side_twin_reports(shape):
+    """Every key of ``coupling_diagnostics()`` without diagnostics: the
+    passes, the residual, the estimate and the verdict."""
+    _same_reports(shape)
+
+
+# Slow: six graphs compiled with diagnostics.
+# Per push: tests/property/test_coupling_interface_side.py::test_an_edge_mapped_graph_reports_what_its_marker_side_twin_reports
+@pytest.mark.slow
+@pytest.mark.xfail(AWAITING, strict=True, raises=AssertionError, reason=DECISION)
+@pytest.mark.parametrize("shape", TWIN_DIAGNOSED, ids=_id)
+def test_an_edge_mapped_graph_s_diagnostics_are_its_marker_side_twin_s(shape):
+    """With ``diagnostics=True``: the criterion, the float floor behind
+    ``precision_limited`` and the spectral analysis each enumerate the
+    edges for themselves, and the three must read one side -- the spectral
+    radius, the error bound and the gradient bound of the two graphs are
+    then the same numbers."""
+    _same_reports(shape)

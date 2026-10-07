@@ -976,7 +976,21 @@ SIDE_DIAGNOSED_CELLS = tuple(range(len(CELLS), len(CELLS) + len(SIDE_DIAGNOSED))
 #: cells that hold their matrix dense.
 SIDE_DIAGNOSED_DENSE = tuple(i for i, c in zip(SIDE_DIAGNOSED_CELLS, SIDE_DIAGNOSED)
                              if c.mapping_kind.startswith("matrix"))
-CELLS = CELLS + SIDE_DIAGNOSED
+#: Float64 cells with a dense gather for the widened draw below: a mapping
+#: row that differences two entries of a large source field
+#: (``Domain.cancel``).  There the delivered value and the source field are
+#: on different scales, so an analysis taken on one reading under a
+#: criterion taken on the other reports a wrong bound -- which, on a
+#: well-conditioned mapping, it does not (seeded: the "bound" search over
+#: :data:`SIDE_DIAGNOSED` alone lets it through).
+SIDE_CANCELLING = (
+    Cell("side-3-6", "float64", 6, 120, "matrix"),
+    Cell("side-2-8", "float64", _JACOBI_INTERFACE, 120, "matrix"),
+)
+SIDE_CANCELLING_CELLS = tuple(range(len(CELLS) + len(SIDE_DIAGNOSED),
+                                    len(CELLS) + len(SIDE_DIAGNOSED) + len(SIDE_CANCELLING)))
+SIDE_CANCEL = Domain(cancel=30.0)
+CELLS = CELLS + SIDE_DIAGNOSED + SIDE_CANCELLING
 
 AWAITING_THE_SIDE_RULE = ct.INTERFACE_SIDE != "compact"
 SIDE_DECISION = ("the interface norm reads a mapped edge on its compact side (decision of "
@@ -1164,4 +1178,16 @@ def test_the_reported_numbers_hold_on_cells_with_a_mapping_between_sizes(name):
     cells = SIDE_DIAGNOSED_DENSE if name == "gradient" else SIDE_DIAGNOSED_CELLS
     report, usable = search(name, cells=cells, profile=profile)
     print(f"{name}, side cells: worst {report}; usable fraction {usable:.2f}")
+    assert usable > 0, f"{name}: no example had the flag set"
+
+
+# Slow: two more cells compiled with diagnostics.
+# Per push: tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ("bound", "floor"))
+def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(name):
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4)
+    report, usable = search(name, cells=SIDE_CANCELLING_CELLS, domain=SIDE_CANCEL,
+                            profile=profile)
+    print(f"{name}, cancelling side cells: worst {report}; usable fraction {usable:.2f}")
     assert usable > 0, f"{name}: no example had the flag set"

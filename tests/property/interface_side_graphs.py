@@ -185,6 +185,8 @@ class Shape:
     #: the offset; a delivered reading does, and an offset -- unlike a scale
     #: -- changes the magnitude the norm divides by.
     offset: float = 0.0
+    #: ``diagnostics=True`` on the group (the spectral keys of the report).
+    diagnostics: bool = False
 
     def __post_init__(self):
         assert self.kind in KINDS and self.mapping in MAPPINGS, self
@@ -195,7 +197,7 @@ class Shape:
     def group(self) -> dict:
         return dict(ACCELERATIONS[self.acceleration], iteration_mode=self.schedule,
                     convergence_norm=self.norm, rtol=RTOL, max_iterations=self.cap,
-                    solver="ift")
+                    solver="ift", **({"diagnostics": True} if self.diagnostics else {}))
 
 
 def marker_cells(shape: Shape, which: int) -> np.ndarray:
@@ -597,6 +599,39 @@ class Reference:
             assert weights.shape == live.shape, (weights.shape, live.shape)
             mappings[key][leaf] = jnp.asarray(weights, live.dtype)
         return {**base, "nodes": nodes, "mappings": mappings}
+
+
+def marker_side_twin(shape: Shape, ref: "Reference") -> Built:
+    """The two-way graph of *shape* with its scatter applied inside ``q``.
+
+    ``p -> q`` is a plain edge of ``m`` marker values and ``q`` spreads
+    them itself, with the weights of *ref*; ``q -> p`` is the same gather
+    edge.  The same coupled problem, and both internal edges carry ``m``
+    numbers: **its interface norm reads the compact side by construction**,
+    whatever rule the library has.  An edge-mapped graph under the compact
+    rule must report what this one reports -- every number of the report
+    at once, with no model of any of them.
+    """
+    assert shape.kind == "two-way" and not shape.offset, shape
+    N, m = shape.n_large, shape.n_small
+    scatter, gather = edges_of(shape)
+    gm = GraphManager()
+    gm.add_node(SideNode("p", 1.0, n=m, port=m, dtype=shape.dtype))
+    gm.add_node(SideNode("q", 1.0, n=N, port=m, dtype=shape.dtype,
+                         index=np.stack([scatter.cells, scatter.cells + 1], axis=1),
+                         weight=np.asarray(ref.entries[0]).reshape(m, 2)))
+    gm.add_edge("p", "q", "x", "u")
+    slots = None
+    if shape.mapping == "matrix":
+        mapping = matrix_mapping(np.zeros((m, N), shape.dtype))
+    else:
+        slots = slots_of(gather, shape, scatter=False)
+        mapping = sparse_matrix_mapping(slots.index, np.zeros(slots.index.shape, shape.dtype),
+                                        n_source=N)
+    gm.add_edge("q", "p", "x", "u", mapping=mapping)
+    gm.add_coupling_group(["p", "q"], **shape.group)
+    gm.compile()
+    return Built(gm, shape, (scatter, gather), {1: (gm._edges[1].key, slots)})  # noqa: SLF001
 
 
 @functools.lru_cache(maxsize=8)

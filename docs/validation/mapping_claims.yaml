@@ -1028,8 +1028,13 @@ claims:
     live mapping's, before anything is loaded: weights saved for other
     points or another index of the same shape, for the same index in the
     other layout, or for a dense mapping (and a dense mapping refuses a
-    sparse one's).  A mapping class of your own that applies its weights
-    through a structure gets the same check by defining structure_digest()."
+    sparse one's).  The digest is judged whatever the weights are called ...
+    and a checkpoint that carries mapping weights this graph has no leaf
+    for (another leaf name on the edge, or an edge that has no mapping
+    weights here) is refused too: a saved mapping weight is installed or
+    the load fails, never dropped.  A mapping class of your own that
+    applies its weights through a structure gets the same check by defining
+    structure_digest()."
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The index is structure, the weights are parameters)
     - src/maddening/core/simulation/checkpoint.py (_check_mapping_structures)
@@ -1038,7 +1043,13 @@ claims:
     and by a graph rebuilt from its config; weights saved for another
     pattern under the same edge key, leaf name, shape and values; the two
     conservative forms; one index read by rows and by columns; a dense
-    matrix called W onto a sparse mapping of its shape, and the reverse; an
+    matrix called W onto a sparse mapping of its shape, and the reverse;
+    the library's own nearest-neighbour kinds, dense (leaf H) and sparse
+    (leaf W), each checkpoint into the other's graph, through load_state,
+    GraphManager.load_state, load_state_with_manifest and POST
+    /checkpoint/load, and into its own kind, where the checkpoint's
+    weights win; a dense leaf H onto a dense mapping whose leaf is W; a
+    checkpoint with weights for an edge that carries no mapping here; an
     archive whose digest was removed, has one bit flipped, 31 bytes, another
     integer type, text or two axes; a digest with no weights beside it,
     which installs nothing and is not judged; a mapping whose
@@ -1068,6 +1079,11 @@ claims:
     - tests/core/test_checkpoint_sparse_structure.py::test_a_mapping_that_reports_no_valid_digest_cannot_be_saved
     - tests/core/test_checkpoint_sparse_structure.py::test_any_mapping_class_can_declare_a_structure
     - tests/core/test_checkpoint_sparse_structure.py::test_post_checkpoint_load_refuses_weights_saved_for_another_pattern
+    - tests/core/test_checkpoint_sparse_structure.py::test_stock_dense_and_sparse_checkpoints_do_not_load_into_each_other
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_stock_checkpoint_loads_into_its_own_kind_and_the_checkpoint_wins
+    - tests/core/test_checkpoint_sparse_structure.py::test_a_saved_weight_the_live_mapping_has_no_leaf_for_is_refused
+    - tests/core/test_checkpoint_sparse_structure.py::test_weights_saved_for_an_edge_the_graph_has_none_for_are_refused
+    - tests/core/test_checkpoint_sparse_structure.py::test_every_door_refuses_a_checkpoint_of_the_other_stock_kind
   status: verified
   domains:
     f32: n/a
@@ -1535,7 +1551,11 @@ claims:
     solvers, the l2 and mixed norms and a linear predictor; a sub-cycled
     member (twice and four times) under linear and constant interpolation,
     including a single pass, where the interpolated geometry is not hidden
-    by convergence; a multi-rate graph of two rates; float32 and float64
+    by convergence; a multi-rate graph of two rates; the flux hook of a
+    node at twice the base step, fed through a target-anchored
+    multilinear_grid edge whose field is the coordinate, so that the
+    sample its flux carries is the position it was taken at (the held g on
+    the base steps the node does not fire on); float32 and float64
     under x64; resolve_boundary_inputs on a stepped graph. The steps
     compiled (jit) by the graph. Not claimed for mixed dtypes, 16-bit
     dtypes, gradients, vmap, run_adaptive, checkpoints or sharded graphs.
@@ -1549,6 +1569,7 @@ claims:
     - 'tests/property/test_geometry_time_levels.py::test_a_single_pass_reads_the_interpolated_geometry_at_every_sub_step'
     - 'tests/property/test_geometry_time_levels.py::test_resolve_boundary_inputs_reads_the_geometry_of_the_current_state'
     - 'tests/property/test_geometry_time_levels.py::test_the_cases_cover_every_row_of_the_table'
+    - 'tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_slow_nodes_flux_hook_reads_its_geometry_from_the_held_state'
   status: verified
   notes: >-
     The row "the target's flux hook, plain step" is not in the linear
@@ -2213,10 +2234,16 @@ claims:
     When that is 1/16 of a cell or more for the dtype the geometry field
     has, compile() refuses the graph; at 1/1024 or more, validate() reports
     a warning." An origin or spacing outside the normal range of the
-    geometry's dtype is refused.
+    geometry's dtype is refused. "The refusal is not only compile()'s: a
+    geometry compiled as float64 and later written as float32
+    (set_node_state is not a recompile) changes the dtype of the program,
+    which is then traced again, and the same rule is asked at that trace
+    ... the kernel asks it of a direct apply call as well. (So is the
+    float32-or-float64 rule, with a TypeError.)"
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
     - src/maddening/core/coupling/grid_mapping.py (MultilinearGridMapping.geometry_dtype_problems)
+    - src/maddening/core/_graph_specs.py (_traceable_geometry)
   conditions: >-
     a float32 geometry on a one-dimensional grid whose extent puts the
     estimate exactly at, and one point under, each of the two thresholds; a
@@ -2224,27 +2251,42 @@ claims:
     grid with a subnormal or an overflowing origin or spacing for float32;
     the same grids with a float64 geometry (under x64), which resolves them.
     Host-side: decided from the grid and the field's dtype when the graph is
-    validated.
+    validated, and again when a program is traced: the origin-1e6 grid
+    compiled with a float64 geometry and handed a float32 one by
+    set_node_state, on either anchor, at step, run, run_scan,
+    run_scan_with_history and resolve_boundary_inputs, and the float64
+    geometry written back; a float32 write on a grid float32 resolves,
+    which steps; an int32, uint32, bool, float16 or bfloat16 geometry
+    written after compile, in a plain graph and inside a coupling group
+    (Gauss-Seidel and Jacobi, one-rate and with a sub-cycled member under
+    linear interpolation); the kernel called directly.
   oracle: >-
     the ERROR: or WARNING: issue from validate() and the RuntimeError from
     compile(), naming the edge, the axis and the cells resolved; no issue
-    one point under a threshold.
+    one point under a threshold; the ValueError (resolution) or TypeError
+    (dtype) of the first traced entry point after the write, naming the
+    edge and the dtype.
   tests:
     - 'tests/core/test_geometry_edge_refusals.py::test_the_resolution_thresholds_are_a_sixteenth_and_a_1024th_of_a_cell'
     - 'tests/core/test_geometry_edge_refusals.py::test_a_grid_far_from_the_origin_of_a_float32_geometry_is_refused_at_compile'
     - 'tests/core/test_geometry_edge_refusals.py::test_a_grid_a_float32_geometry_resolves_only_coarsely_warns_at_compile'
     - 'tests/core/test_geometry_edge_refusals.py::test_a_grid_outside_the_normal_range_of_the_geometry_s_dtype_is_refused'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_float32_geometry_written_after_compile_meets_the_resolution_rule'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_float32_geometry_the_grid_resolves_is_accepted_after_compile'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g7_holds_for_a_geometry_written_after_compile'
+    - 'tests/core/test_geometry_edge_refusals.py::test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group'
+    - 'tests/core/test_geometry_edge_refusals.py::test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_called_directly'
   status: verified
   domains:
     f32: 'tests/core/test_geometry_edge_refusals.py::test_the_resolution_thresholds_are_a_sixteenth_and_a_1024th_of_a_cell'
     f64: 'tests/core/test_geometry_edge_refusals.py::test_a_grid_far_from_the_origin_of_a_float32_geometry_is_refused_at_compile'
     mixed_dtype: n/a
-    16bit: n/a
+    16bit: 'tests/core/test_geometry_edge_refusals.py::test_g7_holds_for_a_geometry_written_after_compile'
     jit: n/a
     grad: n/a
     vmap: n/a
     multi_rate: n/a
-    sub_cycled: n/a
+    sub_cycled: 'tests/core/test_geometry_edge_refusals.py::test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group'
     predictors_warm_starts: n/a
     adaptive: n/a
     checkpoint_restart: n/a

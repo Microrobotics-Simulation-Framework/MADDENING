@@ -113,6 +113,7 @@ names the edge and says what to do.
 | `replace_node`, `POST /surrogate/activate`, `POST /surrogate/deactivate` | a replacement that does not hold the geometry field with the same shape and a float32 or float64 dtype; nothing is changed (the REST routes answer 409) |
 | `DatasetGenerator` | a target node fed through a geometry edge |
 | the `multilinear_grid` kind | a non-floating field, when the step is traced |
+| any entry point that traces a step (`step`, `run`, `run_scan`, `resolve_boundary_inputs`, ...) | a geometry whose dtype a state write made after `compile()` (`set_node_state`), or a node's own `update`, changed to one `compile()` refuses: not float32 or float64, or too coarse for the grid.  A program is traced again when a dtype changes, and the rule is asked then |
 
 ## Limits in 0.4.0
 
@@ -143,6 +144,15 @@ names the edge and says what to do.
   `needs_geometry = True` and `geometry_shape`; see the `Mapping`
   protocol's docstring for the optional attributes.
 
-The time level each call site reads a geometry at, and the kernel's
-mathematics, are in the algorithm guide:
+## The time level a geometry is read at, in short
+
+| Call site | A target-anchored geometry is |
+|---|---|
+| The target's `update` | the `g` of the state `update` receives |
+| The target's flux hook (`compute_boundary_fluxes`) | the post-update `g` |
+| Multi-rate, the flux hook of a node slower than the base step | the `g` the node holds after the base step: post-update when it fires, the held `g` when it does not |
+| A slow source's value and source-anchored geometry | what the source holds between its steps |
+
+The full table (coupling passes, sub-cycled members, back edges), and the
+kernel's mathematics, are in the algorithm guide:
 [Geometry-dependent mappings](../algorithm_guide/coupling/interface_mapping.md#geometry-dependent-mappings).

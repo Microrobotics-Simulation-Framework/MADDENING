@@ -661,7 +661,13 @@ index and row counts) beside the weights, and `load_state` -- and `POST
 /checkpoint/load` -- refuses weights whose digest is not the live
 mapping's, before anything is loaded: weights saved for other points or
 another index of the same shape, for the same index in the other layout,
-or for a dense mapping (and a dense mapping refuses a sparse one's).  A
+or for a dense mapping (and a dense mapping refuses a sparse one's).  The
+digest is judged whatever the weights are called -- a stock sparse
+mapping's weights are `W` and a stock dense one's are `H`, and neither
+checkpoint loads into the other -- and a checkpoint that carries mapping
+weights this graph has no leaf for (another leaf name on the edge, or an
+edge that has no mapping weights here) is refused too: a saved mapping
+weight is installed or the load fails, never dropped.  A
 mapping class of your own that applies its weights through a structure
 gets the same check by defining `structure_digest()`.
 
@@ -956,7 +962,14 @@ $$
 cells.  When that is 1/16 of a cell or more for the dtype the geometry
 field has, `compile()` refuses the graph; at 1/1024 or more, `validate()`
 reports a warning.  Hold the geometry in float64 or move the origin of the
-coordinates closer to the grid.
+coordinates closer to the grid.  The refusal is not only `compile()`'s: a
+geometry compiled as float64 and later written as float32
+(`set_node_state` is not a recompile) changes the dtype of the program,
+which is then traced again, and the same rule is asked at that trace --
+`step()` and the run methods raise `ValueError` naming the edge instead
+of sampling a grid the positions cannot resolve; the kernel asks it of a
+direct `apply` call as well.  (So is the float32-or-float64 rule, with a
+`TypeError`.)
 
 **Determinism.**  Gather is a fixed left fold over the $2^d$ corners.
 Scatter is a scatter-add with repeated indices: on CPU it accumulates in

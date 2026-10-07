@@ -91,6 +91,11 @@ CPL = "docs/validation/coupling_claims.yaml"
 RST = "docs/validation/rest_runpod_claims.yaml"
 SYS = "docs/validation/sysid_fmu_claims.yaml"
 MAP = "docs/validation/mapping_claims.yaml"
+#: The coupling search's gradient oracle: what it enumerates against what a
+#: build holds, then against the dense enumeration (neither compiles a graph).
+_SEARCH = "tests/property/test_coupling_targeted_search.py"
+ORACLE = (f"{_SEARCH}::test_the_gradient_constants_of_a_mapped_edge_are_the_weights_its_build_holds",
+          f"{_SEARCH}::test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern")
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -644,6 +649,12 @@ MUTANTS: tuple[Mutant, ...] = (
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
        CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "
        "guard's source reader with what pytest collects from tests/usd"),
+    # --- O: a search's oracle, tests/property/test_coupling_targeted_search.py ---
+    _M("O1", _SEARCH, "            held = ct.parameter_entries(topo, i, mapping_kind)\n",
+       "            held = np.ones_like(ct.parameter_entries(topo, i, mapping_kind))\n", ORACLE,
+       "the coupling search's gradient score taken over every entry of a mapped edge's matrix: on a "
+       "sparse mapping it differentiates entries outside the pattern, which the graph does not hold "
+       "(a score of 2.6 with the flag set, from constants that do not exist)"),
 )
 
 

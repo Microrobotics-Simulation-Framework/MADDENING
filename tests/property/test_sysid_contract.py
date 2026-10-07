@@ -641,9 +641,56 @@ def _rollout_residual(gm, obs, node="s"):
 # ---------------------------------------------------------------------------
 
 
+#: The smallest normal float32: ``spec_and_value`` values are float32 leaves.
+_F32_TINY = float(np.finfo(np.float32).tiny)
+#: Drawn at random, and failing two tests of ``TestBoundsAndTransforms``, in
+#: local runs: a ``logit`` lower bound that is a subnormal float32.
+_SUBNORMAL_LOGIT_LOWER_BOUND = 1.0027701900272462e-38
+
+
+def _logit_bound_a_float32_leaf_can_have(bound: float) -> float:
+    """``bound``, or ``0.0`` where it is a subnormal float32 number.
+
+    A ``logit`` spec with such a bound cannot map a float32 leaf and says
+    so by name (``ParamSpec._require_representable``: the transform's
+    arithmetic reads a subnormal operand as zero, so every value would be
+    measured from another bound than the one declared).  That refusal is
+    held by ``tests/core/test_constrain_lands_inside_bounds_near_the_smallest_normal.py::test_a_logit_interval_narrower_than_four_smallest_normals_is_refused_by_name``;
+    the properties here are about specs the library maps.  A draw of one
+    is moved to the bound the message recommends rather than rejected:
+    nothing is thrown away, and the neighbour is a spec that has to work.
+    Bounds no float32 holds exactly, and subnormal bounds of the other
+    transforms, are left as drawn: those are legal.
+    """
+    with np.errstate(under="ignore"):
+        rounded = abs(float(np.float32(bound)))
+    return 0.0 if 0.0 < rounded < _F32_TINY else bound
+
+
+def test_the_spec_strategy_moves_only_a_subnormal_logit_bound():
+    move = _logit_bound_a_float32_leaf_can_have
+    assert _SUBNORMAL_LOGIT_LOWER_BOUND < _F32_TINY
+    for subnormal in (_SUBNORMAL_LOGIT_LOWER_BOUND, -_SUBNORMAL_LOGIT_LOWER_BOUND,
+                      1.4e-45, -1e-40, float(np.nextafter(np.float32(_F32_TINY), np.float32(0)))):
+        assert move(subnormal) == 0.0
+    # Zero, the smallest normal either side, a number below every float32
+    # (it rounds to zero, and the library reads it so), ordinary bounds and
+    # one no float32 holds exactly: as drawn.
+    for kept in (0.0, _F32_TINY, -_F32_TINY, 1e-60, 1e-30, -20.0, 1.6977594293117515):
+        assert move(kept) == kept
+    # What it guards: the drawn spec is refused for a float32 leaf, and its
+    # neighbour is mapped.
+    with pytest.raises(ValueError, match="cannot map .* is a subnormal"):
+        ParamSpec(bounds=(_SUBNORMAL_LOGIT_LOWER_BOUND, 1.0),
+                  transform="logit").to_constrained(jnp.float32(0.0))
+    spec = ParamSpec(bounds=(move(_SUBNORMAL_LOGIT_LOWER_BOUND), 1.0), transform="logit")
+    spec.check(spec.to_constrained(jnp.float32(0.0)))
+
+
 @st.composite
 def spec_and_value(draw):
-    """A constructible ``ParamSpec`` and a value strictly inside its bounds.
+    """A constructible ``ParamSpec`` that maps a float32 leaf, and a value
+    strictly inside its bounds.
 
     The intervals are kept wide (at least 1e-2, and wide relative to
     their endpoints) because ``to_constrained`` documents that an
@@ -656,6 +703,9 @@ def spec_and_value(draw):
     lo = draw(_finite(-20.0, 20.0))
     span = draw(_finite(1e-2, 40.0))
     if transform == "logit":
+        # ``lo + span`` is never subnormal: ``span`` is at least 1e-2, and
+        # a float64 sum of that size is zero or far above 1e-38.
+        lo = _logit_bound_a_float32_leaf_can_have(lo)
         bounds = (lo, lo + span)
         value = lo + span * draw(_finite(0.05, 0.95))
     elif transform == "log":
@@ -705,6 +755,10 @@ class TestBoundsAndTransforms:
             ParamSpec(transform="softplus")
 
     @given(spec_value=spec_and_value())
+    # The two sides of the bound the strategy moves: zero, and the
+    # smallest normal float32 (a subnormal one is refused by name).
+    @example(spec_value=(ParamSpec(bounds=(0.0, 1.0), transform="logit"), 0.5))
+    @example(spec_value=(ParamSpec(bounds=(_F32_TINY, 1.0), transform="logit"), 0.5))
     @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_constrain_inverts_unconstrain_inside_the_bounds(self, spec_value):
         spec, value = spec_value
@@ -726,6 +780,7 @@ class TestBoundsAndTransforms:
     @example(spec_value=(ParamSpec(bounds=(1.4e-45, None), transform=None), 1.0), u=-3.0)
     @example(spec_value=(ParamSpec(bounds=(-1e-40, 1e-40), transform=None), 0.0), u=7.0)
     @example(spec_value=(ParamSpec(bounds=(0.0, 7.5e-37), transform="logit"), 1e-37), u=-800.0)
+    @example(spec_value=(ParamSpec(bounds=(_F32_TINY, 1.0), transform="logit"), 0.5), u=-800.0)
     @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_constrain_lands_inside_the_bounds_from_any_coordinate(
         self, spec_value, u,

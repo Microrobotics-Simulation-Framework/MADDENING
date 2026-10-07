@@ -3699,7 +3699,7 @@ claims:
     not respond to it, and its gradient at x_k is rounding; and a gain or
     forcing so weak that its whole value moves the pass by less than the
     floor) is not in the bound, which says nothing of it; it read 1.09 for
-    a relative error of 1.134 with those probes in it (MADD-ANO-232,
+    a relative error of 1.134 with those probes in it (MADD-ANO-234,
     resolved).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:

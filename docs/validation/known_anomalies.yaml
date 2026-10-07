@@ -15534,7 +15534,7 @@ anomalies:
       - "tests/api/test_profile_endpoints.py::TestSimProfile::test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-231"
+  - anomaly_id: "MADD-ANO-233"
     title: "A coupling group under IQN whose iterate left float range before its cap never returned from step()"
     description: >
       `acceleration="iqn-ils"` and `"iqn-imvj"` solve a least-squares
@@ -15602,7 +15602,7 @@ anomalies:
       - "tests/property/test_coupling_nonlinear_search.py::test_a_group_that_leaves_float_range_under_iqn_still_returns"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-232"
+  - anomaly_id: "MADD-ANO-234"
     title: "gradient_relative_error_bound read below the error, gradient_bound_usable=True, with a constant in it whose tangent is rounding: 1.09 for a relative error of 1.134"
     description: >
       The bound is the worst, over one probe per scalar constant, of a

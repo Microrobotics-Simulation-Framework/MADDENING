@@ -1170,12 +1170,13 @@ def _compressed_spectrum(H, coefficients, column, extended):
     k = H.shape[1]
     Hk = H[:k, :k]
     rho = _spectral_radius(Hk)
-    # Never an SVD of a matrix that is not finite (``_lapack_input``): its
-    # smallest singular value then reads NaN, as it did where the driver
-    # returned, and the amplification ``inf``.
-    shifted, shifted_ok = _lapack_input(jnp.eye(k, dtype=Hk.dtype) - Hk)
+    # Never an SVD of a matrix that is not finite (``_lapack_input``): the
+    # zeros that stand in for one have no singular value above zero, so
+    # the amplification reads ``inf``, as it did where the driver returned
+    # (a NaN singular value is not above zero either).
+    shifted, _ = _lapack_input(jnp.eye(k, dtype=Hk.dtype) - Hk)
     sigma = jnp.linalg.svd(shifted, compute_uv=False)
-    sigma_min = jnp.where(shifted_ok, sigma[-1], jnp.nan)
+    sigma_min = sigma[-1]
     invertible = sigma_min > 0
     amplification = jnp.where(
         invertible, 1.0 / jnp.where(invertible, sigma_min, 1.0), jnp.inf,

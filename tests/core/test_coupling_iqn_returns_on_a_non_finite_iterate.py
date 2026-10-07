@@ -210,7 +210,9 @@ def test_the_secant_update_returns_on_every_non_finite_input(dtype):
                 elif not np.all(np.isfinite(new_V)):
                     aitken = np.asarray(acceleration.aitken_relaxation(
                         args[1], args[0], args[8], args[7])[0])
-                    np.testing.assert_array_equal(x_new, aitken, err_msg=f"{kind}, {n} x {cols}")
+                    # Compiled against not: an ulp or two (a fused multiply-add).
+                    np.testing.assert_allclose(x_new, aitken, rtol=16 * np.finfo(dtype).eps,
+                                               err_msg=f"{kind}, {n} x {cols}")
     finally:
         jax.config.update("jax_enable_x64", x64)
 

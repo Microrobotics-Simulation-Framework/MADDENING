@@ -850,6 +850,13 @@ SEEDS = {
     "the-jacobian-a-fifth-from-the-fixed-point-s": (
         Case(0, linear.Case(0, 1, 1.0 / 3.0, False, 1.0, 0.0, 1.0, -1, 1.0, 0),
              21.544346900318832), "gradient", 0.05),
+    # Five Jacobi passes from a whole field away: the pass resolves six of
+    # the twelve centres and curves, the relative error of the gradient
+    # with respect to one is of order one (the fixed point does not
+    # respond to it), and the bound reads 1.27, the error 0.79 of it.
+    "a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point": (
+        Case(0, linear.Case(0, 1, 0.3, False, 1.0, 0.0, 1.0, 0, 1.0, 0), 1.0),
+        "gradient_vanishing", 0.5),
 }
 
 
@@ -891,11 +898,13 @@ def test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push(
     """A nonlinearity's centre and curve do not move the fixed point, so
     the relative error of the gradient with respect to one is of order one
     at any other iterate: the bound reads above it wherever the pass
-    resolves the constant, and leaves the constant out where it does not
-    (premise: some examples have such a constant scored)."""
+    resolves the constant, and leaves the constant out where it does not.
+    (This cell's twenty examples end within a float32 rounding of their
+    fixed points, where none is resolved; the seed
+    ``a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point``
+    holds one that is, and the slow hunt holds that some are.)"""
     _report, fractions = search("gradient_vanishing")
     _held("gradient_vanishing", fractions)
-    assert fractions["vanishing_scored"] > 0, fractions
 
 
 def test_the_floor_covers_what_the_reported_residual_misses_on_the_nonlinear_cell_per_push():
@@ -920,6 +929,9 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_nonlinear_group(block, 
     assert fractions["usable"] >= USABLE_FLOOR, (
         f"{name}, block {block}: only {fractions['usable']:.2f} of the examples had the flag "
         f"set (floor {USABLE_FLOOR})")
+    if name == "gradient_vanishing":
+        # Measured 0.17 to 0.57 by block: the score is not empty.
+        assert fractions["vanishing_scored"] > 0, fractions
 
 
 def test_the_reference_s_jacobian_is_the_central_difference_of_its_pass():

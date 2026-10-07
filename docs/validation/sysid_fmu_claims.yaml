@@ -2624,7 +2624,10 @@ claims:
     linearisation on the candidate's side than on the other side and than
     the linearisation's own change, the rejection is a jump and not
     rounding ... The run then ends converged=False with a RuntimeWarning
-    naming a residual that is not differentiable"; an iteration "whose
+    naming a residual that is not differentiable"; "a candidate at more
+    than 2**5 is read a second time ... and it is a jump where that
+    departure is 2**8 times the other side's and the linearisation's
+    change over one spacing"; an iteration "whose
     ladder began above lam0 while the undamped step was rejected ...
     Where the undamped step promised, on the linear model, 2**10 times
     more than the short candidates lost to rounding -- or every candidate
@@ -2649,7 +2652,8 @@ claims:
     an event, a contact or a valve whose timing depends on a trained
     parameter, MADD-ANO-021): converged=False and the warning where a
     rejected candidate within 2**-10 of a parameter shows the jump against
-    its mirror image (the stock TableNode -> BallNode graph, float32; that
+    its mirror image, over its whole length or across one float spacing
+    inside it (the stock TableNode -> BallNode graph, float32; that
     graph does not run under x64); not detected, and not claimed: a kink
     (a continuous residual whose slope jumps), a jump whose mirror image
     the bounds do not allow, a jump beside an iterate the proposal test
@@ -2679,6 +2683,13 @@ claims:
     - tests/core/test_sysid_non_differentiable_residual.py::test_a_candidate_with_no_mirror_image_or_no_finite_residual_says_nothing
     - tests/core/test_sysid_non_differentiable_residual.py::test_an_iteration_whose_damped_candidates_never_moved_is_asked_again
     - tests/core/test_sysid_non_differentiable_residual.py::test_candidates_that_never_move_are_asked_again_once_only
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_small_jump_inside_a_long_candidate_is_read_across_one_spacing
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_jump_read_the_second_time_is_the_one_reported
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_small_jump_met_by_one_on_the_other_side_is_not_one_sided
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_smooth_residual_read_a_second_time_is_still_not_a_jump
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_candidate_outside_the_two_thresholds_is_read_once
+    - tests/core/test_sysid_non_differentiable_residual.py::test_a_second_reading_through_a_residual_that_is_not_finite_says_nothing
+    - tests/property/test_sysid_targeted_search.py::test_fit_lm_reads_a_small_jump_of_the_ball_from_a_long_candidate
     - tests/property/test_sysid_targeted_search.py::test_no_wrong_fit_among_the_fixed_draws
     - tests/property/test_sysid_targeted_search.py::test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece
   status: verified

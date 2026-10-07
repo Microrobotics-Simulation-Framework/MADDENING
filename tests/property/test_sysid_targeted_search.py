@@ -615,24 +615,31 @@ def _ball_problem() -> _Problem:
     return _BALL["problem"]
 
 
+def _fit_of_the_ball(case: BallCase, key="ball"):
+    """``fit_lm`` on ``case`` (inside ``precision(False)``): the problem,
+    the result and the messages of the warnings it raised."""
+    problem = _ball_problem()
+    start = jax.tree.map(lambda x: x, problem.params)
+
+    def put(node, leaf, value):
+        start["nodes"][node][leaf] = jnp.asarray(value, start["nodes"][node][leaf].dtype)
+
+    put("record", "elasticity", case.elasticity_true)
+    put("record", "gravity", -9.81 * case.gravity_true)
+    put("ball", "elasticity", case.elasticity_start)
+    put("ball", "gravity", -9.81 * case.gravity_start)
+    with _shared_programs(key), warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_lm(problem.gm, problem.residual, params=start)
+    return problem, res, [str(w.message) for w in caught]
+
+
 def converged_beside_a_lower_loss(case: BallCase):
     """(d) ``converged=True`` on a residual with jumps is still a point no
     nearby one lowers the loss from by more than rounding explains."""
     key = "ball"
     with precision(False):
-        problem = _ball_problem()
-        start = jax.tree.map(lambda x: x, problem.params)
-
-        def put(node, leaf, value):
-            start["nodes"][node][leaf] = jnp.asarray(value, start["nodes"][node][leaf].dtype)
-
-        put("record", "elasticity", case.elasticity_true)
-        put("record", "gravity", -9.81 * case.gravity_true)
-        put("ball", "elasticity", case.elasticity_start)
-        put("ball", "gravity", -9.81 * case.gravity_start)
-        with _shared_programs(key), warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            res = fit_lm(problem.gm, problem.residual, params=start)
+        problem, res, _ = _fit_of_the_ball(case, key)
         details = (bool(res.converged), float(res.best_loss), int(res.n_iter))
         if not res.converged:
             return 0.0, details
@@ -700,10 +707,21 @@ def test_no_wrong_fit_found_by_the_search(name):
 #: too short to gain more than the loss's rounding, with the undamped step
 #: across the next jump; the floor rule now asks such an iterate again from
 #: the starting damping (a score of 30 before; ``converged=True`` at a loss
-#: of 0.021).
+#: of 0.021).  The last two were found by the slow hunt on jaxlib 0.10.2
+#: (the same on 0.11.0) and among 4,500 uniform draws: a *small* jump, 22
+#: float spacings of the elasticity from the iterate, read from a rejected
+#: candidate 35 spacings long, where the jump over the whole candidate's
+#: linear change is 456 and 341 -- under the ``2**10`` that reads a jump;
+#: such a candidate is now read a second time, across one spacing (scores
+#: of 11.8 and 5.6 before; ``converged=True`` at a loss of 0.006).
+_READ_ACROSS_ONE_SPACING = [
+    (0.6133024381551229, 0.7699776319888987, 0.5, 1.0),
+    (0.5903806445545127, 0.7114224216650756, 0.719718582123716, 1.1640531624602226),
+]
 _CONVERGED_WHERE_THE_LOSS_FELL = [
     (0.7, 1.0, 0.625, 1.333521432163324),
     (0.7, 1.2429505644303036, 0.625, 1.0),
+    *_READ_ACROSS_ONE_SPACING,
 ]
 
 
@@ -711,6 +729,44 @@ _CONVERGED_WHERE_THE_LOSS_FELL = [
 def test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece(cell):
     score, details = converged_beside_a_lower_loss(BallCase(*cell))
     assert score <= BESIDE, (score, details)
+
+
+@pytest.mark.parametrize("cell", _READ_ACROSS_ONE_SPACING)
+def test_fit_lm_reads_a_small_jump_of_the_ball_from_a_long_candidate(cell, monkeypatch):
+    """What the two endings are, not only that the score passes them: the
+    whole candidate reads between the two thresholds, the second reading
+    across one spacing is over its own, and the run ends
+    ``converged=False`` with the warning of a residual that is not
+    differentiable.  Without the second reading it is ``converged=True``
+    where the loss still falls along the piece."""
+    real, second = sysid._excess_across_a_spacing, []  # noqa: SLF001
+
+    def watched(*args):
+        second.append(real(*args))
+        return second[-1]
+
+    monkeypatch.setattr(sysid, "_excess_across_a_spacing", watched)
+    with precision(False):
+        _, res, messages = _fit_of_the_ball(BallCase(*cell))
+    assert not res.converged
+    assert sum("not differentiable" in text for text in messages) == 1
+    assert len(second) == 1 and second[0] > 2.0 ** 2 * sysid._JUMP_ACROSS  # noqa: SLF001
+    assert f"{second[0]:.1e} times further" in "".join(messages)
+    # The second reading is put to its own threshold: one between that and
+    # the first reading's ends the run the same way.
+    between = 2.0 * sysid._JUMP_ACROSS  # noqa: SLF001
+    assert between < sysid._JUMP_EXCESS  # noqa: SLF001
+    monkeypatch.setattr(sysid, "_excess_across_a_spacing", lambda *args: between)
+    with precision(False):
+        _, capped, messages = _fit_of_the_ball(BallCase(*cell))
+    assert not capped.converged and capped.best_loss == res.best_loss
+    assert sum("not differentiable" in text for text in messages) == 1
+    assert f"{between:.1e} times further" in "".join(messages)
+    # Premise: the reading of the whole candidate alone leaves it converged,
+    # at the same point, with the score over its threshold.
+    monkeypatch.setattr(sysid, "_JUMP_SUSPECT", np.inf)
+    score, details = converged_beside_a_lower_loss(BallCase(*cell))
+    assert details[0] and details[1] == res.best_loss and score > BESIDE, (score, details)
 
 
 #: Fits that stopped with iterations left, ``converged=False``, the damping

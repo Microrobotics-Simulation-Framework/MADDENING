@@ -14716,6 +14716,32 @@ anomalies:
       the 90 random starts converged above the minimum, and a targeted
       search of 800 drawn fits of the ball finds no fit converged where the
       loss still falls along the piece it is on.
+
+      A residual case, found by the slow random hunt on 2026-10-07 (CPU,
+      jaxlib 0.10.2; the same to the last digit on 0.11.0) and fixed
+      before any release: a small jump read from a long candidate.  The
+      ratio divides the jump by the linearisation's change over the
+      candidate, which grows with its length, and a late bounce that moves
+      by one time step changes few samples.  Two fits of the ball (the
+      hunt's, and one of 4,500 uniformly drawn) ended `converged=True` at
+      a loss of 0.006 with ratios of 456 and 341 -- a jump of 0.015 in the
+      residual's norm, 22 float spacings of the elasticity from the
+      iterate, read from a candidate 35 spacings long -- where the loss
+      still fell along the piece by 11.8 and 5.6 times what its rounding
+      explains.  A candidate above `2**5` and not above `2**10` is now
+      read a second time: its step is halved down to the one float spacing
+      of the coordinates across which the residual departs most from its
+      linearisation, and it is a jump where that departure is `2**8` times
+      its mirror image's (the whole candidate's, as before) plus the
+      linearisation's change over one spacing.  Measured: 2.0e3 and 1.8e3
+      at those two endings and 3.4e4 or more at the other 261 jump endings
+      of the 4,500 draws; at most 52 on smooth fits stopped by the floor
+      rule (140 endings, none of which is asked: their first reading is
+      at most 21).  After the fix: no fit converged
+      where the loss still falls along its piece among the 4,500 draws or
+      in the hunt on three seeds (800 examples each), on either jaxlib;
+      of the 250 endings that existing per-push and slow tests put to
+      the floor rule (140 of smooth fits), none changed.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -14743,9 +14769,11 @@ anomalies:
       test passes because it is stationary on its own piece; and a fit
       converged at the interior minimum of a smooth piece that is not the
       lowest (a local minimum, with the lower piece as near as 1e-3 of a
-      parameter on the ball).  The threshold is measured, not derived: a
-      jump smaller than `2**10` times the linear change of a step of a few
-      float spacings reads as rounding.  The root cause, the missing
+      parameter on the ball).  The thresholds are measured, not derived:
+      a jump reads as rounding where it is smaller than `2**5` times the
+      linear change of the rejected step that crossed it, or than `2**8`
+      times what the residual departs from its linearisation by at that
+      step's mirror image.  The root cause, the missing
       event-time derivative, is MADD-ANO-021 and stays open.
     verification:
       - "tests/core/test_sysid_non_differentiable_residual.py::test_fit_lm_is_converged_on_the_ball_only_at_the_minimum"
@@ -14755,6 +14783,9 @@ anomalies:
       - "tests/core/test_sysid_non_differentiable_residual.py::test_an_iteration_whose_damped_candidates_never_moved_is_asked_again"
       - "tests/property/test_sysid_targeted_search.py::test_no_wrong_fit_among_the_fixed_draws"
       - "tests/property/test_sysid_targeted_search.py::test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece"
+      - "tests/property/test_sysid_targeted_search.py::test_fit_lm_reads_a_small_jump_of_the_ball_from_a_long_candidate"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_a_small_jump_inside_a_long_candidate_is_read_across_one_spacing"
+      - "tests/core/test_sysid_non_differentiable_residual.py::test_a_smooth_residual_read_a_second_time_is_still_not_a_jump"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-217"

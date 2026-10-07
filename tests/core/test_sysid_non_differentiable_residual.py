@@ -219,17 +219,20 @@ def test_a_smooth_fit_stopped_by_the_floor_rule_is_still_converged(noisy_spring,
                         for k in ("stiffness", "damping")])
     assert np.ptp(np.asarray(answers), axis=0).max() < 1e-3
     assert read, "premise: at least one of the fits was stopped by the floor rule"
-    # Of order one; the threshold is 2**10.
-    assert max(read) < sysid._JUMP_EXCESS / 2.0 ** 4  # noqa: SLF001
+    # Of order one; the threshold is 2**10, and nothing is read a second
+    # time below 2**5.
+    assert max(read) < sysid._JUMP_SUSPECT  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------
 # The one-sided test itself
 # ---------------------------------------------------------------------------
 
-def _excess(fn, theta, steps, lo=-np.inf, hi=np.inf):
+def _reading(fn, theta, steps, lo=-np.inf, hi=np.inf, asked=None):
     """``_one_sided_excess`` of ``fn`` at ``theta`` for candidates
-    ``theta + step``, with its Jacobian by ``jacfwd``."""
+    ``theta + step``, with its Jacobian by ``jacfwd``: ``(excess, move,
+    jumped)``.  ``asked`` collects the points it evaluated (mirror images
+    and halvings)."""
     theta = jnp.asarray(theta, jnp.float64 if jax.config.jax_enable_x64 else jnp.float32)
     r, J = fn(theta), jax.jacfwd(fn)(theta)
     rejected = []
@@ -239,9 +242,19 @@ def _excess(fn, theta, steps, lo=-np.inf, hi=np.inf):
 
     def mirror(th):
         th = jnp.clip(th, lo, hi)
+        if asked is not None:
+            asked.append(np.asarray(th))
         return th, fn(th)
 
     return sysid._one_sided_excess(theta, r, J, rejected, mirror)  # noqa: SLF001
+
+
+def _excess(fn, theta, steps, **kwargs):
+    """``(excess, move)`` of :func:`_reading`, the verdict being the
+    threshold's: a jump exactly where ``excess`` is over ``2**10``."""
+    excess, move, jumped = _reading(fn, theta, steps, **kwargs)
+    assert jumped == (excess > sysid._JUMP_EXCESS)  # noqa: SLF001
+    return excess, move
 
 
 def _smooth(th):
@@ -283,6 +296,122 @@ def test_a_candidate_with_no_mirror_image_or_no_finite_residual_says_nothing():
 
     assert _excess(to_nan, [1.0, 0.5], [[1e-4, 0.0]])[0] == 0.0
     assert _excess(to_nan, [1.0, 0.5], [[-1e-4, 0.0]])[0] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# A small jump read from a long candidate: the second reading
+# ---------------------------------------------------------------------------
+
+#: A step of 0.02 in the second entry, read from a candidate of 2e-4: the
+#: jump over the linear change of the whole candidate (2.8e-4) is about 70,
+#: between the two thresholds of the first reading.
+_SMALL_JUMP, _LONG_STEP = 0.02, [2e-4, 0.0]
+
+
+def _small_jump(at):
+    def fn(th):
+        return _smooth(th) + (jnp.where(th[0] > at, _SMALL_JUMP, 0.0)
+                              * jnp.asarray([0.0, 1.0, 0.0]))
+    return fn
+
+
+def _steep(th):
+    # Smooth, with a slope that grows by exp(6.5) over a step of 2e-4.
+    return jnp.stack([jnp.exp(3.25e4 * (th[0] - 1.0)), th[1]])
+
+
+def _first_reading(monkeypatch, fn, steps, **kwargs):
+    """The reading with no second one: ``(excess, move, jumped)``, and the
+    premise that the largest ratio is between the two thresholds."""
+    with monkeypatch.context() as patch:
+        patch.setattr(sysid, "_JUMP_SUSPECT", np.inf)
+        whole = _reading(fn, [1.0, 0.5], steps, **kwargs)
+    assert sysid._JUMP_EXCESS > whole[0] > sysid._JUMP_SUSPECT  # noqa: SLF001
+    assert not whole[2]
+    return whole
+
+
+# The edge beside the iterate, and inside the candidate's step (the fit of
+# the ball that showed this ended 22 float spacings from its edge).
+@pytest.mark.parametrize("at", [1.0, 1.00005, 1.00019])
+def test_a_small_jump_inside_a_long_candidate_is_read_across_one_spacing(at, monkeypatch):
+    whole = _first_reading(monkeypatch, _small_jump(at), [_LONG_STEP])
+    excess, move, jumped = _reading(_small_jump(at), [1.0, 0.5], [_LONG_STEP])
+    assert jumped and move == pytest.approx(2e-4)
+    # The jump over the mirror image's departure and one float32 spacing's
+    # linear change: tens of thousands.
+    assert excess > 2.0 ** 4 * sysid._JUMP_ACROSS > whole[0]  # noqa: SLF001
+
+
+def test_a_jump_read_the_second_time_is_the_one_reported(monkeypatch):
+    """Beside a candidate whose first reading is larger and which is no
+    jump, whichever of the two comes first."""
+    def fn(th):
+        # Along the first coordinate the small jump, met on the other side
+        # by one 400 times smaller; along the second a smooth residual
+        # whose slope grows by exp(9) over a step of 1e-4.
+        met = jnp.where(2.0 - th[0] > 1.00005, _SMALL_JUMP / 400.0, 0.0)
+        steep = jnp.exp(9e4 * (th[1] - 0.5))
+        return _small_jump(1.00005)(th) + jnp.stack([met, 0.0 * met, steep])
+
+    jump, smooth = _LONG_STEP, [0.0, 1e-4]
+    only_jump = _reading(fn, [1.0, 0.5], [jump])
+    only_smooth = _reading(fn, [1.0, 0.5], [smooth])
+    assert only_jump[2] and not only_smooth[2]
+    # Premise: the smooth candidate's reading is the larger number.
+    assert sysid._JUMP_EXCESS > only_smooth[0] > only_jump[0] > sysid._JUMP_ACROSS  # noqa: SLF001
+    assert only_jump[1] == pytest.approx(2e-4) and only_smooth[1] == pytest.approx(1e-4)
+    for steps in ([jump, smooth], [smooth, jump]):
+        assert _reading(fn, [1.0, 0.5], steps) == only_jump
+
+
+def test_a_small_jump_met_by_one_on_the_other_side_is_not_one_sided(monkeypatch):
+    """A second, smaller jump where the mirror image of the candidate
+    falls: the second reading is the ratio of the two jumps, under its
+    threshold, and the candidate keeps its first."""
+    def fn(th):
+        return _small_jump(1.00005)(th) + (jnp.where(2.0 - th[0] > 1.00005, 3e-4, 0.0)
+                                           * jnp.asarray([1.0, 0.0, 0.0]))
+
+    asked = []
+    reading = _reading(fn, [1.0, 0.5], [_LONG_STEP], asked=asked)
+    assert len(asked) > 4, "premise: the candidate was read a second time"
+    assert reading == _first_reading(monkeypatch, fn, [_LONG_STEP])
+
+
+def test_a_smooth_residual_read_a_second_time_is_still_not_a_jump(monkeypatch):
+    """A residual curved enough over the candidate to be read again: one
+    spacing holds a small part of the departure, and the mirror image's is
+    of its size."""
+    asked, across = [], []
+    real = sysid._excess_across_a_spacing  # noqa: SLF001
+    monkeypatch.setattr(sysid, "_excess_across_a_spacing",
+                        lambda *args: across.append(real(*args)) or across[-1])
+    reading = _reading(_steep, [1.0, 0.5], [_LONG_STEP], asked=asked)
+    assert len(asked) > 4 and len(across) == 1
+    assert 0.0 < across[0] < 1.0
+    assert reading == _first_reading(monkeypatch, _steep, [_LONG_STEP])
+
+
+def test_a_candidate_outside_the_two_thresholds_is_read_once():
+    """A ratio of order one costs the mirror image and nothing more, and
+    one over the upper threshold needs no second reading."""
+    for fn, steps in ((_smooth, [[1e-4, 0.0], [-2e-4, 1e-4], [3e-5, 3e-5]]),
+                      (_jumping, [[1e-4, 0.0]])):
+        asked = []
+        _excess(fn, [1.0, 0.5], steps, asked=asked)
+        assert len(asked) == len(steps)
+
+
+def test_a_second_reading_through_a_residual_that_is_not_finite_says_nothing(monkeypatch):
+    def fn(th):
+        gap = (th[0] > 1.00004) & (th[0] < 1.00016)
+        return _small_jump(1.00005)(th) + jnp.where(gap, jnp.nan, 0.0)
+
+    asked = []
+    reading = _reading(fn, [1.0, 0.5], [_LONG_STEP], asked=asked)
+    assert len(asked) > 4, "premise: the candidate was read a second time"
+    assert reading == _first_reading(monkeypatch, fn, [_LONG_STEP])
 
 
 # ---------------------------------------------------------------------------

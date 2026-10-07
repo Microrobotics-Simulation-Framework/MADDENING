@@ -324,6 +324,29 @@ G_A = np.array([[0.03], [1.0]])
 G_B = np.array([[0.03], [-0.7]])
 
 
+def test_the_differentiated_step_takes_the_passes_the_plain_step_takes():
+    """The implicit rule re-runs the solve for its primal: it has to ask for
+    the same second pass, or the value a ``jvp`` returns is the stale one."""
+    edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], SELECT)]
+    gm = _graph([A, B, C], edges,
+                dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL))
+    gm.step()
+    plain = np.asarray(gm.get_node_state("B")["u"])
+    gm.reset_state()
+    compiled, base = gm._compiled_step, gm._state       # noqa: SLF001
+
+    def target(a_pre):
+        state = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
+        state["A"]["u"] = a_pre
+        return compiled(state, {})["B"]["u"]
+
+    a_pre = jnp.asarray(A[4], jnp.float32)
+    primal, tangent = jax.jvp(target, (a_pre,), (jnp.asarray([1.0, -2.0], jnp.float32),))
+    np.testing.assert_array_equal(np.asarray(primal), plain)
+    np.testing.assert_allclose(np.asarray(tangent), A[2] * G_SECOND @ np.array([1.0, -2.0]),
+                               rtol=1e-6, atol=1e-7)
+
+
 @pytest.mark.xfail(strict=True, reason=(
     "MADD-ANO-236 (open): a relaxation blends every pass so far into the part of a field "
     "its edges do not deliver, and the interface norm measures none of it"))

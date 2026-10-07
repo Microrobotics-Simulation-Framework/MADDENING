@@ -965,21 +965,26 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # the tangent's size, and a tangent that is rounding has none: where
     # moving the constant by the probe's whole size (its own magnitude)
     # moves one pass by no more than the pass's float resolution -- the
-    # floor the distance carries, in this norm -- the right-hand side is
-    # what cancellation left of terms the size of the fields, and so is
-    # the tangent solved from it.  That is the same statement as a zero
-    # tangent (the fixed point does not respond to the probe) made at the
-    # resolution it can be made at, and such a probe is not in the worst
-    # either.  It used to be: for the centre and the curve of a
-    # nonlinearity evaluated on its centre (a constant the fixed point
-    # does not respond to; right-hand sides of 2e-33 to 5e-18 beside ones
-    # of order one, float64) the bound read 1.09 for a relative error of
-    # 1.134 on a converged hub, usable.  The absolute error for such a
-    # constant is of the size of its tangent (1.7e-34 there, beside
-    # gradients of 3.5e3).  A right-hand side that is not finite still
-    # counts (its NaN bound poisons the maximum).
+    # floor the distance carries, in this norm -- *and* that movement
+    # depends on the iterate, the right-hand side is what the iterate's
+    # last rounding made it, and so is the tangent solved from it.  That
+    # is the same statement as a zero tangent (the fixed point does not
+    # respond to the probe) made at the resolution it can be made at, and
+    # such a probe is not in the worst either.  It used to be: for the
+    # centre and the curve of a nonlinearity evaluated on its centre (a
+    # constant the fixed point does not respond to; right-hand sides of
+    # 2e-33 to 5e-18 beside ones of order one, float64) the bound read
+    # 1.09 for a relative error of 1.134 on a converged hub, usable.  The
+    # absolute error for such a constant is of the size of its tangent
+    # (1.7e-34 there, beside gradients of 3.5e3).  A probe whose
+    # right-hand side does not depend on the iterate (an additive
+    # constant: ``any_dir`` is exactly zero) is resolved at any size, a
+    # weak forcing included; and one that is not finite still counts (its
+    # NaN bound poisons the maximum).
     rhs_size = norm(s * w)
-    resolved_probe = jnp.logical_or(rhs_size > floor, jnp.logical_not(jnp.isfinite(rhs_size)))
+    resolved_probe = jnp.logical_or(
+        jnp.logical_or(rhs_size > floor, jnp.logical_not(jnp.isfinite(rhs_size))),
+        any_dir == 0)
     responds = jnp.logical_and(
         jnp.logical_or(norm(t_s) > 0, jnp.logical_not(jnp.isfinite(norm(t_s)))),
         resolved_probe)

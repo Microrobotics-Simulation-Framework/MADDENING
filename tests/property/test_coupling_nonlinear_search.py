@@ -623,10 +623,12 @@ def observe(case: Case) -> dict:
         names = ref.constant_names()
         # CPL-093 is made for a constant the pass resolves: moving it by
         # its own magnitude moves one pass by more than the residual's
-        # float floor.  Held here to ``RESOLVED_MARGIN`` floors (the two
-        # sides are two computations of one comparison).
+        # float floor, or by an amount that does not depend on the iterate
+        # (an additive constant).  Held here to ``RESOLVED_MARGIN`` floors
+        # (the two sides are two computations of one comparison).
         response = ref.pass_responses(x, raw)
-        resolved = [not out["floor_reported"] or r > RESOLVED_MARGIN * floor for r in response]
+        resolved = [not out["floor_reported"] or r > RESOLVED_MARGIN * floor or not through
+                    for r, through in zip(response, ref.read_through_the_iterate(x))]
         out["report"]["constants_resolved"] = (sum(resolved), len(resolved))
         for score, vanishing in (("gradient", False), ("gradient_vanishing", True)):
             mine = [does_not_move_the_fixed_point(n) is vanishing for n in names]

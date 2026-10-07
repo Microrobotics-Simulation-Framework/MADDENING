@@ -570,8 +570,14 @@ tangent is exactly zero is left out (the fixed point does not respond to
 it), and so is a probe the pass does not *resolve* — moving the constant
 by the probe's whole size (its own magnitude) moves one pass from `x_k`
 by no more than the floor the distance carries, `‖s · F_c ċ‖ ≤ floor` in
-the bound's own norm. Its right-hand side is then what cancellation left
-of terms the size of the fields, and so is the tangent solved from it.
+the bound's own norm, and that movement depends on the iterate (a probe
+whose right-hand side does not, an additive constant, is kept at any
+size). Its right-hand side can then be what the iterate's last rounding,
+or a cancellation inside the node's own derivative, left of it, and so is
+the tangent solved from it: the saturating `c + tanh(s (u − c)) / s` has
+`∂/∂s = d sech²(s d) / s − tanh(s d) / s²`, two terms of size `d / s`
+that cancel to `−(2/3) s d³`, which at `d = 1e-12` is 24 orders below
+either.
 The case that showed it: the centre `c` and the curve `s` of a
 nonlinearity `φ(u; c, s)` with `φ(c) = c`, `φ′(c) = 1`, evaluated where
 `u = c`. The fixed point does not respond to either, the returned iterate
@@ -582,9 +588,15 @@ for those probes beside ones of order one; without them it reads 5.3e-12
 for an error of 5.3e-12 over the gains). Where such a constant *is*
 resolved (an iterate stopped well short of the fixed point) it is in the
 bound, which then reads above one: the relative error of that gradient
-is of order one, and the bound says so. A weak constant is left out by
-the same rule: a gain whose whole value moves the pass by less than the
-pass can resolve has a gradient no pass in that dtype can tell from zero.
+is of order one, and the bound says so. A weak *multiplicative* constant
+is left out by the same rule, although its tangent may be exact: a gain
+whose whole value moves the pass by less than the pass resolves. Nothing
+the bound measures tells that case from the cancelled one (the
+sensitivity of the tangent to a floor-sized change of the state read 1.6%
+for the saturating curve above, whose relative error is 113%), so the
+rule is the magnitude's. On 108 drawn float32 and float64 rings of three
+members the bound moved on two (2.3e-5 to 6.8e-6, 1.8e-2 to 2.5e-4: a
+weak gain was its worst probe) and no flag changed.
 
 Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
 gradient from tight `ift` and `fori` arms that agree, every point a

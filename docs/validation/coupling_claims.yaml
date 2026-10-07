@@ -3693,12 +3693,15 @@ claims:
     entries that norm is unavailable and the bound is inf unless the
     right-hand side does not depend on the state.  A constant the pass
     resolves: moving it by its own magnitude moves one pass from x_k by
-    more than the residual's float floor, in the bound's norm, and its
-    tangent is not exactly zero.  A constant below that (the centre or the
-    curve of a nonlinearity evaluated on its centre: the fixed point does
-    not respond to it, and its gradient at x_k is rounding) is not in the
-    bound, which says nothing of it; it read 1.09 for a relative error of
-    1.134 with those probes in it (MADD-ANO-232, resolved).
+    more than the residual's float floor, in the bound's norm, or by an
+    amount that does not depend on the iterate (an additive constant), and
+    its tangent is not exactly zero.  A constant below that (the centre or
+    the curve of a nonlinearity evaluated on its centre: the fixed point
+    does not respond to it, and its gradient at x_k is rounding; and a
+    gain so weak that its whole value moves the pass by less than the
+    floor) is not in the bound, which says nothing of it; it read 1.09 for
+    a relative error of 1.134 with those probes in it (MADD-ANO-232,
+    resolved).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep

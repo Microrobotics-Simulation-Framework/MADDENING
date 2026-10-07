@@ -373,6 +373,17 @@ class PassReference:
         return np.asarray([norm.of_difference(moved[:, c], zero, weights)
                            for c in range(moved.shape[1])])
 
+    def read_through_the_iterate(self, x) -> np.ndarray:
+        """Per scalar constant, whether its ``dP/dc`` depends on the
+        iterate (it differs, in any bit, at a second point a third of each
+        entry's size away).  An additive constant's does not, and the
+        gradient bound keeps such a probe at any size."""
+        x = np.asarray(x, np.float64)
+        here = self.sensitivities(x)
+        there = self.sensitivities(x + 0.375 * (np.abs(x) + 1.0))
+        return np.asarray([not np.array_equal(here[:, c], there[:, c])
+                           for c in range(here.shape[1])])
+
     def constant_names(self) -> list:
         """``node.leaf[i]`` / ``mapping:key.leaf[i]`` per column of :meth:`sensitivities`."""
         with x64():

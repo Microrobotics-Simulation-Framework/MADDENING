@@ -11,14 +11,14 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from maddening.core._pow2_frame import pow2_frame, pow2_rescue
-from maddening.core.coupling._interface_plan import interface_records
+from maddening.core.coupling._interface_plan import InterfacePlan, interface_records
 
 
 # ------------------------------------------------------------------
@@ -472,7 +472,7 @@ def _reading_eps(source_dtype, value) -> float:
 def coupling_residual_interface(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
-    interface_edges: list,
+    interface_edges: Union[list, InterfacePlan],
     atol: float = 0.0,
     rtol: float = 1e-6,
     mappings: Optional[dict] = None,
@@ -496,7 +496,8 @@ def coupling_residual_interface(
     s_old : dict
         Previous iteration state.
     interface_edges : list of EdgeSpec
-        Edges internal to the coupling group.
+        Edges internal to the coupling group.  (The compiled step hands
+        the group's own description of them, an ``InterfacePlan``.)
     atol : float
         Dead band, in the interface quantity's own units: below this a
         quantity leaves the norm and stops being held to any criterion.

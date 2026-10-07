@@ -15789,7 +15789,7 @@ anomalies:
       - "tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-235"
+  - anomaly_id: "MADD-ANO-238"
     title: "Under convergence_norm=\"interface\" a converged group returned a member computed from readings that had not settled: a one-way pair under Jacobi returned its target at the pre-step source, converged=True, iterations=1, residual 0"
     description: >
       The interface norm measures, on each pass, how far what a group's
@@ -15822,7 +15822,7 @@ anomalies:
       the rule the non-floating fields already followed.  Iterates,
       residuals and pass counts are unchanged, and the ten rows agree within
       8.2e-03.  A field read only through a mapping or a transform is not
-      covered: MADD-ANO-236.
+      covered: MADD-ANO-239.
     severity: major
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -15847,14 +15847,14 @@ anomalies:
       pass per solve, of which only that field's arithmetic is kept.  The
       recomputed field is the next step's pre-step state, so a trajectory
       stepped at an unconverged cap differs from the one 0.3.1 stepped.
-      A field read only through a mapping or a transform is MADD-ANO-236.
+      A field read only through a mapping or a transform is MADD-ANO-239.
     verification:
       - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns"
       - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_field_no_edge_reads_is_within_the_tolerance_in_a_weakly_coupled_pair"
       - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push"
       - "tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point"
 
-  - anomaly_id: "MADD-ANO-236"
+  - anomaly_id: "MADD-ANO-239"
     title: "Under convergence_norm=\"interface\" the part of a field its edges deliver only through a mapping or a transform is measured by nothing: converged=True with that part a pass behind, or between passes under a relaxation"
     description: >
       A field internal edges read only through a mapping or a transform
@@ -15872,7 +15872,7 @@ anomalies:
       tolerances off under Jacobi and under Gauss-Seidel.  `"mixed"` is
       right in each case.  The same at 0.1.0 to 0.3.1.  The field feeds the
       readings, so it cannot be recomputed at the returned state as
-      MADD-ANO-235's fix does for a field no edge reads.  Holding the exit
+      MADD-ANO-238's fix does for a field no edge reads.  Holding the exit
       to a second consecutive pass within the threshold closes it without
       an acceleration and under the IQN pair (measured on these graphs) but
       not under a relaxation, and since a mapping that loses nothing cannot

@@ -303,7 +303,7 @@ def _blind_spot(measured, reachable):
 #: land on top of a recorded one unnoticed.
 _DRIFT_FACTOR = 4.0
 
-#: **Empty since MADD-ANO-235 was fixed.**  The ten ``iqn-*`` / interface
+#: **Empty since MADD-ANO-238 was fixed.**  The ten ``iqn-*`` / interface
 #: rows recorded here (deviations of 2.6e-02 to 2.25 on ``stiff-pair-0.5``,
 #: ``chain-5`` and ``ring-8``) were ``velocity``, a field no internal edge
 #: reads, returned from a pass computed before the interface the verdict

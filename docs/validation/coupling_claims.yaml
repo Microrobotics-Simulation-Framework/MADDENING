@@ -5769,7 +5769,7 @@ claims:
     internal edges into a member whose own fields no edge reads; float32
     and float64; the derivative of a recomputed field through the jitted
     step.  A field internal edges read only through a mapping or a
-    transform is MADD-ANO-236 (open).  max_iterations=1 returns its single
+    transform is MADD-ANO-239 (open).  max_iterations=1 returns its single
     pass and reports how far the readings moved over it.  Not claimed for
     mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled
     groups, predictors and warm starts, run_adaptive, a checkpoint restart
@@ -5791,7 +5791,7 @@ claims:
     - tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point
   status: verified
   notes: >-
-    Until MADD-ANO-235 was fixed the norm stopped on readings that had
+    Until MADD-ANO-238 was fixed the norm stopped on readings that had
     settled while a member still held the value of readings that had not:
     a one-way pair under Jacobi returned its target computed from the
     pre-step source, converged=True, iterations=1, residual 0 (0.1.0 to

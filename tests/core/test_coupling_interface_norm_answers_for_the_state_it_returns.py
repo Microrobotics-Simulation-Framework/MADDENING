@@ -10,7 +10,7 @@ those settled readings never produced:
   Jacobi stopped on its first pass -- ``A`` does not depend on the iterate,
   so what it delivers "stopped moving" at once, with a residual of exactly
   zero -- and returned ``B`` computed from the *pre-step* ``A``, with
-  ``converged=True`` and ``iterations=1`` (MADD-ANO-235; 0.1.0 to 0.3.1).
+  ``converged=True`` and ``iterations=1`` (MADD-ANO-238; 0.1.0 to 0.3.1).
   A weakly coupled pair returned such a field a few hundred tolerances
   off, under Gauss-Seidel too (the member that reads a back edge), and a
   fixed relaxation left it a blend of every pass so far.  The solve now
@@ -20,7 +20,7 @@ those settled readings never produced:
 * a field edges read **only through a mapping or a transform** that
   delivers less than the field.  It feeds back, so it cannot be recomputed
   without moving the readings the verdict was taken on, and the part of it
-  the edges do not deliver is still measured by nothing: MADD-ANO-236,
+  the edges do not deliver is still measured by nothing: MADD-ANO-239,
   open, pinned here by strict xfails.
 
 Every oracle here is a float64 closed form of the linear map the graph
@@ -300,7 +300,7 @@ G_SECOND = np.array([[0.0, 0.0], [-0.4, 0.9]])
 
 
 _OPEN = pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-236 (open): the part of a field its edges deliver only through a mapping or "
+    "MADD-ANO-239 (open): the part of a field its edges deliver only through a mapping or "
     "a transform is measured by nothing"))
 
 

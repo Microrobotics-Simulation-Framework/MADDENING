@@ -193,7 +193,7 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, d
     computed from the *previous* iterate's readings, under a relaxation a
     blend of every pass so far.  A one-way pair under Jacobi returned its
     target computed from the pre-step source with ``converged=True``,
-    ``iterations=1`` and a residual of exactly zero (MADD-ANO-235).
+    ``iterations=1`` and a residual of exactly zero (MADD-ANO-238).
 
     The solve returns these fields as one pass computes them **at the
     state it returns** -- from the very readings the verdict was taken on
@@ -214,7 +214,7 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state, d
     a transform**, which may deliver less than the field.  It feeds back,
     so it cannot be recomputed without moving the readings the verdict was
     taken on; the part of it the edges do not deliver is measured by
-    nothing (MADD-ANO-236, open).
+    nothing (MADD-ANO-239, open).
 
     ``{}`` for every other norm, and for an interface group with no such
     field: such a group keeps its compiled step.  Static.

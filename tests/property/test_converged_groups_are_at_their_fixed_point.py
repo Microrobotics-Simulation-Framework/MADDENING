@@ -9,7 +9,7 @@ what the norm leaves out: ``"l2"`` and ``"mixed"`` measure the state, and
 group to its reported residual *in its own norm*, so a member the interface
 norm does not read had no allowance and was skipped -- and a one-way group
 under Jacobi returned such a member computed from the pre-step value of
-what it reads, converged (MADD-ANO-235).
+what it reads, converged (MADD-ANO-238).
 
 **The property.**  For a group of linear relays the fixed point is a
 float64 solve.  Each member's *defect* at the returned state -- its value
@@ -25,7 +25,7 @@ with -- is what the tolerance bounds, member by member:
   compared, so its defect is at most its gains times that.
 
 (A field edges read only through a mapping that loses part of it is the
-open MADD-ANO-236: the ``lossy-ring`` shape is held under the state norms
+open MADD-ANO-239: the ``lossy-ring`` shape is held under the state norms
 and pinned under the interface norm.)
 
 So for every member ``|defect| <= SLACK tau (|x| + sum_e |G_e| |reading_e|)``
@@ -107,7 +107,7 @@ TOPOLOGIES = _topologies()
 #: The mapped edges of ``lossy-ring`` deliver two entries of three.
 _DELIVERED = {"lossy-ring": 2}
 PER_PUSH = ("one-way-mapped", "cycle-tail", "lossy-ring")
-#: The cell MADD-ANO-236 lives in: not asked of the property, pinned below.
+#: The cell MADD-ANO-239 lives in: not asked of the property, pinned below.
 _OPEN_CELL = ("lossy-ring", "interface")
 
 
@@ -256,7 +256,7 @@ def test_a_converged_group_is_at_its_fixed_point_per_push(name, schedule, norm, 
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-236 (open): the part of a field its edges deliver only through a mapping is "
+    "MADD-ANO-239 (open): the part of a field its edges deliver only through a mapping is "
     "measured by nothing, and under Jacobi it is a pass behind the readings"))
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(draws=_DRAWS)
@@ -308,7 +308,7 @@ def test_a_converged_group_is_at_its_fixed_point(name, schedule, norm, solver, d
     _hold(name, schedule, norm, draws, solver)
 
 
-# Slow: 36 compiled cells (``lossy-ring`` is MADD-ANO-236's).
+# Slow: 36 compiled cells (``lossy-ring`` is MADD-ANO-239's).
 # Per push: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("extra", _ACCELERATED, ids=lambda e: dict(e)["acceleration"])

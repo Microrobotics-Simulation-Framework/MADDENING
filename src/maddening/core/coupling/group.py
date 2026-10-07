@@ -114,7 +114,7 @@ class CouplingGroup:
         measured through them alone: the part of it they do not deliver
         can be a pass behind, or under ``"aitken"`` or ``"fixed"`` a
         blend of the passes so far, with ``converged=True``
-        (MADD-ANO-236).  Use ``"mixed"`` where that part matters.
+        (MADD-ANO-239).  Use ``"mixed"`` where that part matters.
     atol : float
         Dead band, in each field's own units: a field whose magnitude
         does not exceed ``atol`` counts as being at zero, **leaves the

@@ -381,6 +381,13 @@ one.  It says so, and the graph that loads it reports that group's `spectral_err
 its `spectral_usable`, `gradient_bound_usable` and `precision_limited` as `False`, with a
 `not_usable_reason`, until the group steps.
 
+**A group with a geometry-dependent mapping** (experimental, see
+[Geometry-dependent mappings](geometry_dependent_mappings.md)) reports like any other group where
+every such mapping is a `multilinear_grid`, the norm is `"l2"` or `"mixed"` and the group does not
+sub-cycle.  Otherwise, and on a step whose self-check of the geometry term failed, its entry has
+`iterations`, `total_iterations`, `residual` and `converged`, every bound NaN, every `*_usable`
+flag `False`, and a `not_usable_reason` that says which case it is.
+
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in
 kind between backends: on the pair above after 40 float32 steps (residual exactly 0),

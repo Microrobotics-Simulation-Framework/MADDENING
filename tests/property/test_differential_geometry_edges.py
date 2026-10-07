@@ -260,9 +260,9 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile(c):
 
 
 def test_the_phase_1_refusals_are_the_interface_norm_cases_and_only_those():
-    assert gg.DIAGNOSTICS_READ_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
+    assert gg.INTERFACE_NORM_READS_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
     assert all(c.group is not None and c.down and c.up for c in REFUSED_IN_PHASE_1)
-    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.DIAGNOSTICS_READ_GEOMETRY
+    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.INTERFACE_NORM_READS_GEOMETRY
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +334,11 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         else:
             lo, hi = sorted((res_a, res_b))
             assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, res_a, res_b)
-        if not gg.DIAGNOSTICS_READ_GEOMETRY:
+        if gg.withheld(c) is not None:
             # PHASE 1 (see ``geometry_graphs``): beyond the solve's outcome,
-            # compared above, the edge-mapped group reports no bound and
-            # says why.  The comparison below is what a later phase restores.
-            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c))
+            # compared above, a group of another mapping kind and a
+            # sub-cycled one report no bound and say which they are.
+            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c), gg.withheld(c))
             continue
         # Everything else a report says: the same keys, the same verdicts,
         # and after the same number of passes the same numbers to within a
@@ -506,7 +506,7 @@ def test_a_report_s_float_floor_counts_a_source_anchored_geometry():
     c = case("floor", kind="multilinear", geom_dtype="float64", adv=0.3, **SOURCES,
              group=dict(max_iterations=80, convergence_norm="interface", rtol=1e-6,
                         diagnostics=True))
-    if not gg.DIAGNOSTICS_READ_GEOMETRY:
+    if not gg.INTERFACE_NORM_READS_GEOMETRY:
         # PHASE 1 (see ``geometry_graphs``): the interface norm over a
         # geometry edge is refused; the comparison below is a later phase's.
         with gg.x64(True):
@@ -667,6 +667,40 @@ def test_the_inlined_twin_keeps_names_orders_and_groups_and_uses_plain_edges_onl
     assert isinstance(twin.node("P"), gg.InlinedFluxMappingNode)
     assert type(twin.node("F")) is gg.InlinedMappingNode
     assert type(twin.node("R")) is gg.Reader and type(twin.node("E")) is gg.Body
+
+
+def test_two_geometry_edges_into_one_port_are_inlined_on_a_port_each():
+    """Two grid-side bodies deliver into ``P.u`` through a mapping each,
+    the second additively: the twin gives each edge its own value and
+    geometry port.  (They used to share ``"u@value"``, the second value
+    replacing the first before either was mapped: the twin's states were
+    0.11 to 0.17 from the edge-mapped graph's with nothing refused.  No
+    case of this module has that shape.)"""
+    rng = np.random.default_rng(5)
+    mats = [rng.uniform(-0.6, 0.6, size=(gg.M_POINTS, gg.N_MATRIX)) for _ in range(3)]
+
+    def graph():
+        nodes = [gg.Body("F1", DT, n=gg.N_MATRIX, geoms={"A": mats[0]}, seed=21),
+                 gg.Body("F2", DT, n=gg.N_MATRIX, geoms={"A": mats[1]}, seed=22),
+                 gg.Body("P", DT, n=gg.M_POINTS, geoms={"A": mats[2]}, seed=23)]
+        mapping = lambda: gg.geom_matrix_mapping(gg.M_POINTS, gg.N_MATRIX)   # noqa: E731
+        return gg.GGraph(nodes, [
+            gg.GEdge("F1", "P", "x", "u", mapping=mapping(), geometry=("source", "A")),
+            gg.GEdge("F2", "P", "x", "u", mapping=mapping(), geometry=("target", "A"),
+                     additive=True)])
+
+    twin = gg.inline_geometry(graph())
+    assert [(e.src, e.tf) for e in twin.edges] == [
+        ("F1", "u@value"), ("F1", "u@geometry"), ("F2", "u@value@1")]
+    edge, inline = gg.build(graph()), gg.build(twin)
+    for a, b in zip(gg.run_steps(edge, 3), gg.run_steps(inline, 3)):
+        for name in a:
+            for field in a[name]:
+                np.testing.assert_allclose(a[name][field], b[name][field], rtol=2e-6, atol=1e-7)
+    # Both edges reach the port: with either removed the state is another.
+    alone = gg.GGraph(graph().nodes, graph().edges[:1])
+    last, only = gg.run_steps(edge, 3)[-1], gg.run_steps(gg.build(alone), 3)[-1]
+    assert np.max(np.abs(last["P"]["x"] - only["P"]["x"])) > 1e-2
 
 
 def test_a_geometry_edge_that_is_not_the_last_into_its_port_is_refused_by_the_twin():

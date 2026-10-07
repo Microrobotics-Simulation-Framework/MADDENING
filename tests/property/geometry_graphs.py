@@ -47,13 +47,16 @@ both directions, in or out of a coupling group, at one rate or two.
 
 **The twins with the edge-mapped graph's interface reading**
 (:func:`transform_twin`, :func:`relay_twin`; their docstrings say what
-each holds equal) and **the faults later work is held to.**  Diagnostics
-that read a geometry (the interface norm as a criterion with a geometry
-edge; the bounds in that reading with the geometry term) do not exist in
-0.4.0.  The table lists the faults that work must be caught on, the
-instrument expected to catch each, and -- where the fault can be seeded
-on today's tree in an analogous static-mapping or solve-path form -- the
-signal measured when it was (scratch copies of ``src/``, jaxlib 0.11.0,
+each holds equal) and **the faults later work is held to.**  The bounds
+of a single-rate ``multilinear_grid`` group under ``"l2"`` and ``"mixed"``
+read the geometry (``tests/property/test_coupling_geometry_search.py``
+holds them to the numerical reference and lists the faults seeded on
+them: 1, 2, 3 and 6 below are caught there per push).  The interface norm
+as a criterion with a geometry edge, and the bounds in that reading with
+the geometry term, do not exist in 0.4.0.  The table lists the faults
+that work must be caught on, the instrument expected to catch each, and
+-- where the fault can be seeded on today's tree in an analogous
+static-mapping or solve-path form -- the signal measured when it was (scratch copies of ``src/``, jaxlib 0.11.0,
 CPU; the instruments are ``tests/property/test_interface_reading_twins.py``
 and, for the numerical reference, ``tests/property/coupling_reference.py``
 and ``tests/property/test_coupling_nonlinear_search.py``):
@@ -94,6 +97,28 @@ and ``tests/property/test_coupling_nonlinear_search.py``):
     (a later run-time self-check)              check itself, for the pass or       honest reading's is under 1e-7
                                                for any reading written in JAX)     (``test_the_reference_s_jacobian_is_...``).
 ==  =========================================  ==================================  ==========================================
+
+**Seeded on the bounds under ``"l2"`` and ``"mixed"``** (the stage that made
+them read a ``multilinear_grid`` geometry; scratch copies of ``src/``,
+jaxlib 0.11.0, each caught by a per-push test of
+``test_coupling_geometry_search.py`` unless another file is named):
+
+* 1, in the estimator only (the position columns of the iterate behind
+  ``stop_gradient`` in the product handed to the spectrum): the reference's
+  radius score reads 3.0 (limit 1) and the radius seeds fail.  Seeded at
+  the pass's own read of the geometry instead, the same fault reaches the
+  reference's ``jacfwd`` too, which then agrees with the estimator: only
+  the run-time self-check, a finite difference, sees it (a gap of 1,
+  tolerance 0.25), and with the self-check's comparison disabled as well
+  the radius seeds fail on their premise alone.
+* 2, the product taken with the first pass's positions: radius score 25.
+* 3, a target-anchored geometry read from the iterate (seeded in the pass:
+  in this stage the product is the pass's): the node-inlined twin, a field
+  5.4e-4 apart with 5.3e-7 allowed (``test_differential_geometry_edges.py``),
+  and the time-level reference (``test_geometry_time_levels.py``).
+* 6, the comparison disabled in the step (the gap returned as zero, or
+  taken over all fields at once), in the report, or never traced: the
+  self-check's own three tests.
 """
 
 from __future__ import annotations
@@ -341,6 +366,11 @@ class GGraph:
 @dataclasses.dataclass(frozen=True)
 class _Inlined:
     tf: str
+    #: The ports the unmapped value and (source anchor) the geometry arrive
+    #: on: ``"<tf>@value"`` and ``"<tf>@geometry"``, with ``"@<k>"`` appended
+    #: for the ``k``-th further geometry edge into the same port.
+    value_port: str
+    geometry_port: str
     mapping: Any
     anchor: str
     gfield: str
@@ -383,16 +413,16 @@ class InlinedMappingNode(SimulationNode):
     def boundary_input_spec(self):
         spec = dict(self._wrapped.boundary_input_spec())
         for it in self._inlined:
-            spec[f"{it.tf}@value"] = it.value_spec
+            spec[it.value_port] = it.value_spec
             if it.geometry_spec is not None:
-                spec[f"{it.tf}@geometry"] = it.geometry_spec
+                spec[it.geometry_port] = it.geometry_spec
         return spec
 
     def _inner_inputs(self, state, boundary_inputs):
         bi = dict(boundary_inputs)
         for it in self._inlined:
-            value = bi.pop(f"{it.tf}@value", None)
-            geom = (bi.pop(f"{it.tf}@geometry", None) if it.anchor == "source"
+            value = bi.pop(it.value_port, None)
+            geom = (bi.pop(it.geometry_port, None) if it.anchor == "source"
                     else state[it.gfield])
             if value is None:
                 continue        # not resolved for this call (a flux seeded later)
@@ -458,13 +488,20 @@ def inline_geometry(graph: GGraph) -> GGraph:
             f"{e}: a geometry edge must be the last edge into its port")
         anchor, gfield = e.geometry
         source = graph.node(e.src)
-        edges.append(GEdge(e.src, e.dst, e.sf, f"{e.tf}@value"))
+        # A port of its own for each geometry edge: two into one target
+        # port used to share ``"<tf>@value"``, where the second edge's
+        # value replaced the first's before either was mapped.
+        nth = sum(it.tf == e.tf for it in inlined.get(e.dst, []))
+        suffix = f"@{nth}" if nth else ""
+        value_port, geometry_port = f"{e.tf}@value{suffix}", f"{e.tf}@geometry{suffix}"
+        edges.append(GEdge(e.src, e.dst, e.sf, value_port))
         geometry_spec = None
         if anchor == "source":
-            edges.append(GEdge(e.src, e.dst, gfield, f"{e.tf}@geometry"))
+            edges.append(GEdge(e.src, e.dst, gfield, geometry_port))
             geometry_spec = _port_spec(source.initial_state()[gfield])
         inlined.setdefault(e.dst, []).append(_Inlined(
-            e.tf, e.mapping, anchor, gfield, resolve_transform(e.transform), e.additive,
+            e.tf, value_port, geometry_port, e.mapping, anchor, gfield,
+            resolve_transform(e.transform), e.additive,
             _port_spec(_source_value(source, e.sf)), geometry_spec))
     nodes = []
     for nd in graph.nodes:
@@ -671,25 +708,34 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 # =============================================================================
 # PHASE 1 OF GEOMETRY EDGES (0.4.0): THE ONE PLACE THIS HARNESS IS NARROWED
 #
-# The harness was written for diagnostics that read a moving geometry.  In
-# 0.4.0 they do not, by decision, and the library says so instead of
-# reporting numbers that leave the geometry out:
+# The harness was written for diagnostics that read a moving geometry.
 #
-# * a coupling group whose pass resolves a geometry-dependent mapping reports
-#   the solve's own outcome (``SOLVE_OUTCOME``) and nothing else: every bound
-#   NaN (the gradient estimate ``inf``), every ``*_usable`` flag False, and
-#   ``not_usable_reason`` saying why (:func:`assert_not_diagnosed`);
+# **What reads one now** (``DIAGNOSTICS_READ_GEOMETRY = True``): a
+# single-rate coupling group under ``convergence_norm="l2"`` or ``"mixed"``
+# whose geometry edges all carry the ``multilinear_grid`` kind reports
+# every bound and flag as any other group does, and the tests compare every
+# key of its report with the node-inlined twin's (:func:`withheld` returns
+# ``None`` for the case).
+#
+# **What still does not**, and what the library says instead of reporting
+# numbers that leave the geometry out:
+#
+# * a group with a geometry edge of another kind (``test_geom_matrix``
+#   here), or a sub-cycled one, reports the solve's own outcome
+#   (``SOLVE_OUTCOME``) and nothing else: every bound NaN (the gradient
+#   estimate ``inf``), every ``*_usable`` flag False, and
+#   ``not_usable_reason`` saying which of the two it is
+#   (:func:`withheld`, :func:`assert_not_diagnosed`);
 # * ``convergence_norm="interface"`` on a group with a geometry-dependent
 #   mapping on an internal edge is refused by ``compile()``
-#   (:func:`assert_interface_norm_refused`).
+#   (``INTERFACE_NORM_READS_GEOMETRY = False``,
+#   :func:`assert_interface_norm_refused`).
 #
-# The tests that compared those diagnostics with the node-inlined twin's, and
-# the cases that ran the interface norm, read this block.  Nothing was
-# deleted: set ``DIAGNOSTICS_READ_GEOMETRY = True`` when a later phase makes
-# the diagnostics read the geometry, and the original comparisons and cases
-# run again.
+# Nothing was deleted: set ``INTERFACE_NORM_READS_GEOMETRY = True`` when a
+# later stage makes the interface norm read the geometry, and the cases
+# that ran it run again.
 #
-# Waiting for that phase too: ``RELAY_INTERFACE_CASES`` (defined after
+# Waiting for that stage too: ``RELAY_INTERFACE_CASES`` (defined after
 # ``case``, below), the interface norm over source-anchored geometry edges,
 # whose relay twin (``relay_twin``) has the edge-mapped graph's interface
 # reading.  ``tests/property/test_interface_reading_twins.py`` asserts each
@@ -697,27 +743,49 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 # compares the two reports as it compares a static mapping's today.
 # =============================================================================
 
-#: Whether coupling diagnostics account for a moving geometry.
-DIAGNOSTICS_READ_GEOMETRY = False
-#: What a report still says about a group with a geometry edge.
+#: Whether coupling diagnostics account for a moving geometry at all (the
+#: ``multilinear_grid`` kind on a single-rate group under ``"l2"`` or
+#: ``"mixed"``: see :func:`withheld`).
+DIAGNOSTICS_READ_GEOMETRY = True
+#: Whether the interface norm reads a geometry (and compiles over one).
+INTERFACE_NORM_READS_GEOMETRY = False
+#: What a report still says about a group whose bounds are withheld.
 SOLVE_OUTCOME = ("iterations", "total_iterations", "residual", "converged")
 _NOT_USABLE = {"amplification": "nan", "error_estimate": "nan", "ratio_usable": False,
                "gradient_error_estimate": "inf", "rho_spectral": "nan",
                "spectral_error_bound": "nan", "spectral_usable": False,
                "gradient_relative_error_bound": "nan", "gradient_bound_usable": False,
                "precision_limited": False}
+#: What each reason for withholding says, beside the stem every one has.
+WHY = {"kind": "other than 'multilinear_grid'",
+       "sub-cycled": "in a sub-cycled group",
+       "norm": "under convergence_norm='interface'",
+       "self-check": "disagrees with a finite difference of the pass"}
 
 
 def interface_norm_refused(knobs) -> bool:
     """Whether a group with these knobs and a geometry-dependent mapping on
     an internal edge is refused at compile (phase 1)."""
-    return (not DIAGNOSTICS_READ_GEOMETRY and knobs is not None
+    return (not INTERFACE_NORM_READS_GEOMETRY and knobs is not None
             and dict(knobs).get("convergence_norm") == "interface")
 
 
-def assert_not_diagnosed(report, keys) -> None:
+def withheld(c: "Case") -> Optional[str]:
+    """Why the report of *c*'s group withholds its bounds (a key of
+    :data:`WHY`), or ``None`` where the diagnostics read its geometry."""
+    if not DIAGNOSTICS_READ_GEOMETRY:
+        return "kind"
+    if c.kind != "multilinear":
+        return "kind"
+    if c.dt_f != c.dt_p and dict(c.knobs or {}).get("subcycling"):
+        return "sub-cycled"
+    return None
+
+
+def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
     """*report* (one group of ``coupling_diagnostics()``) says the solve's
-    outcome, no bound, no usable flag, and why, naming the edges *keys*."""
+    outcome, no bound, no usable flag, and why, naming the edges *keys*;
+    *why* is the key of :data:`WHY` the reason must be."""
     assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason"}, sorted(report)
     for name, want in _NOT_USABLE.items():
         got = report[name]
@@ -732,6 +800,9 @@ def assert_not_diagnosed(report, keys) -> None:
     assert "do not read a moving geometry" in reason, reason
     for key in keys:
         assert key in reason, (key, reason)
+    if why is not None:
+        assert WHY[why] in reason, (why, reason)
+        assert not any(text in reason for name, text in WHY.items() if name != why), reason
     assert np.isfinite(report["residual"]) and int(report["iterations"]) >= 1, report
 
 

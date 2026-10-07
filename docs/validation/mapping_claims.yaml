@@ -1985,48 +1985,65 @@ claims:
 - id: MAP-036
   area: geometry-dependent mapping diagnostics
   claim: >-
-    "The diagnostics do not" read a geometry: "A coupling group whose pass
-    resolves a geometry-dependent mapping (on an edge into a member, from
-    inside the group or from outside) reports its solve, iterations,
-    total_iterations, residual and converged, and withholds everything built
-    on the float floor or on the contraction estimates: the bounds and
-    estimates are NaN (gradient_error_estimate is inf), ratio_usable,
-    spectral_usable, gradient_bound_usable and precision_limited are False,
-    and the entry has a not_usable_reason string that says so."
-    coupling_report() and print_coupling_report() print that reason in place
-    of the caveats that read the withheld values, the report is JSON with
-    the reason in it, and the profiler reads its pass count. The internal
-    _meta entry "still holds what the step computed for such a group; it is
-    not a report and promises nothing."
+    "The diagnostics read it in one case: a coupling group that does not
+    sub-cycle, under convergence_norm="l2" or "mixed", every
+    geometry-dependent mapping of whose pass is a multilinear_grid." "Such a
+    group reports every bound and flag as any other group does": the
+    Jacobian-vector products behind rho_spectral and the gradient bound
+    carry "the pass's dependence on the iterate through the positions".
+    Any other group that resolves a geometry-dependent mapping, and one
+    whose step failed its self-check (MAP-045), "reports its solve,
+    iterations, total_iterations, residual and converged, and withholds
+    everything built on the float floor or on the contraction estimates: the
+    bounds and estimates are NaN (gradient_error_estimate is inf),
+    ratio_usable, spectral_usable, gradient_bound_usable and
+    precision_limited are False, and the entry has a not_usable_reason
+    string that says so" (MAP-046 to MAP-048 are the cases).
+    coupling_report() and print_coupling_report() print the report of a
+    diagnosed group as any other group's, and for a withheld one that reason
+    in place of the caveats that read the withheld values; the report is
+    JSON with the reason in it, and the profiler reads its pass count.
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
-    - 'src/maddening/core/graph_manager.py (GraphManager.coupling_diagnostics, Returns)'
-    - src/maddening/core/inspection.py (_coupling_flags)
+    - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
+    - 'src/maddening/core/coupling/_group_layout.py::_geometry_diagnostics_refusal'
+    - 'src/maddening/core/inspection.py::_coupling_flags'
   conditions: >-
-    a two-member group with diagnostics on, with a geometry edge of either
-    anchor inside it and with one entering it from outside, under the l2 and
-    the mixed norm, at a loose and at a tight tolerance, where the same
-    graphs with the rule switched off report every withheld flag True and
-    every withheld bound finite; every group case of the node-inlined
-    harness, whose solve outcome is compared with the twin's and whose other
-    entries are asserted withheld: float32, float64 under x64, a sub-cycled
-    member, a predictor; the report table, its printed text at three widths,
-    its JSON encoding and the profiler on the grid-and-markers group; a
-    group of the same nodes with static mappings, which keeps its own
-    caveats and has no such key. The steps compiled (jit) by the graph. Not
-    claimed for mixed dtypes, 16-bit dtypes, gradients, vmap, multi-rate
-    graphs, run_adaptive, checkpoints or sharded graphs.
+    solver="ift" with diagnostics=True; a grid-side and a point-side member
+    joined by a gather and a scatter of the multilinear_grid kind, each
+    reading the positions of its source from the iterate or of its target
+    from the pre-step state, the positions moving with the member's mapped
+    input or not; the four reported numbers scored against the float64
+    reference of the coupling search (its jacfwd Jacobian has every
+    position in the iterate) on a float32 pair under Jacobi and the mixed
+    norm on every push, and in the slow hunt on float32 and float64 (x64)
+    pairs under every stock acceleration, both schedules, the l2 and the
+    mixed norm, one- and two-dimensional lattices, origins up to forty
+    spacings from zero, on examples whose points stay in one lattice cell
+    between the returned iterate and the fixed point; every report key
+    equal to the node-inlined twin's on every single-rate multilinear
+    group case of the harness, a predictor among them; the report under a
+    state write and a checkpoint saved after one (save_state, load_state),
+    which withholds what rests on the float floor like any other group's;
+    the report table, its printed text and its JSON encoding. The steps
+    compiled (jit) by the graph. Not claimed for mixed dtypes, 16-bit
+    dtypes, gradients through the report, vmap, multi-rate graphs,
+    sub-cycled groups (MAP-047), run_adaptive or sharded graphs.
   oracle: >-
-    each of the ten withheld entries against the documented value, with the
-    same graph's unwithheld report as the control that the entry would
-    otherwise have been usable; the solve outcome against the node-inlined
-    twin's; the printed and encoded text.
+    the numerical float64 reference (the pass map of an x64 twin, its fixed
+    point by Newton, its dense Jacobian): the radius at the returned
+    iterate, the distance to the fixed point, the implicit derivative's
+    error and the exact residual; the node-inlined twin's report, key for
+    key; the printed and encoded text.
   tests:
-    - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
-    - 'tests/core/test_geometry_edge_refusals.py::test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed'
+    - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_product_at_another_iterate_s_geometry_is_another_radius'
     - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
     - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    - 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_no_reason'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_twin_s_report_keeps_its_own_caveats'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_printed_coupling_report_prints_the_reason'
@@ -2036,23 +2053,40 @@ claims:
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_texts_of_a_graph_without_a_geometry_edge_do_not_mention_one'
   status: verified
   notes: >-
-    A probe of an l2 group before the rule existed gave the node-inlined
-    twin's report to every printed digit, bounds included: the values are
-    withheld because no oracle holds them yet for a moving geometry, not
-    because one showed them wrong.
+    Established before the rule changed, on the tree that withheld every
+    such report (the narrowing lifted on the host only): the estimator's
+    products already carried the geometry. rho_spectral was within 7.4e-15
+    of the reference's radius on a float64 pair whose edges both read
+    positions from the iterate, on draws where the Jacobian without its
+    position columns is up to 45% off; 1.3e-15 with still positions, 1.5e-15
+    with target anchors, 3.5e-15 with one of each; 3.8e-7 and 4.8e-7 in
+    float32. The pass reads a geometry from its own tracers, and the
+    products are taken of the pass. Under these two norms every list of
+    fields the estimate is built on is "every floating field of every
+    member", the positions among them: the iterate, the norm's weights, the
+    residual and the floor's resolution (the interface norm's reading is the
+    one list that leaves a position out, and is not used here; the
+    quasi-Newton interface set adds a source-anchored geometry by its own
+    rule). Slow, run once on each JAX lane: under Gauss-Seidel, where a
+    member updated before the holder reads the positions from the iterate,
+    rho_spectral is the reference's radius to 1e-9 on draws where the
+    Jacobian without its position columns is 30% and 45% off, and a product
+    without them in the estimator reads 0.397 for 0.274; where the sweep
+    updates the holder first no position is read from the iterate and the
+    reference's Jacobian has zero in every position column.
   domains:
-    f32: 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    f32: 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     f64: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
     mixed_dtype: narrowed
     16bit: narrowed
-    jit: 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    jit: 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     grad: narrowed
     vmap: narrowed
     multi_rate: narrowed
-    sub_cycled: 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+    sub_cycled: narrowed
     predictors_warm_starts: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker'
     sharded: narrowed
 
 - id: MAP-037
@@ -2408,4 +2442,206 @@ claims:
     checkpoint_restart:
       - 'tests/core/test_geometry_edge_surfaces.py::test_a_restart_from_a_checkpoint_is_the_uninterrupted_run'
       - 'tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence[geometry]'
+    sharded: narrowed
+
+- id: MAP-045
+  area: geometry-dependent mapping diagnostics
+  claim: >-
+    The self-check of the geometry term: "With diagnostics=True the step
+    checks that claim on itself. It moves every position the pass reads by
+    sqrt(eps) of the lattice spacing towards the middle of its cell", "once
+    where the positions are in the iterate and once where they are constants
+    of the pass, and compares the product along that step with the
+    difference of two evaluations of the pass, field by field". "A product
+    that does not see the geometry reads 1 on every field the positions move
+    by more than 32 resolutions, an honest pass the finite difference's
+    rounding". "Where the gap is above GEOMETRY_GAP_TOLERANCE (0.25) or
+    cannot be evaluated, the report withholds the bounds", with a
+    not_usable_reason that gives the gap. "The check costs one product and
+    one evaluation of the pass per direction, and exists only in the step of
+    such a group with diagnostics on."
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - 'src/maddening/core/coupling/_bounds.py::_geometry_product_gap'
+    - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_GAP_TOLERANCE'
+    - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._probe_step'
+    - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
+  conditions: >-
+    the arithmetic on a two-field float32 map whose tangent is all, half
+    and none of its derivative, a field moved by less than the rounding
+    allowed, and a non-finite state; the report's reading of the slot at the
+    tolerance, above it and at NaN, on the float32 pair of MAP-036; the gap
+    on every per-push draw of that pair (at most a fifth of the tolerance:
+    measured 3.1e-3 at most over 240 draws of it); the slot absent, and the report unchanged,
+    for the same group without diagnostics. The steps compiled (jit) by
+    the graph. Not claimed for float64 (x64) on every push (the slow hunt
+    measures it), mixed dtypes, 16-bit dtypes, gradients, vmap, multi-rate
+    graphs, sub-cycled groups, predictors, run_adaptive, checkpoints or
+    sharded graphs.
+  oracle: >-
+    the share of the derivative a constructed product does not see (0, a
+    half, one); the documented tolerance; the float64 reference's scores on
+    the same draws as the evidence that the passing groups are honest.
+  tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_the_gap_is_the_share_of_the_derivative_the_product_does_not_see'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_self_check_is_traced_only_with_diagnostics_on_a_geometry_group'
+  status: verified
+  notes: >-
+    Slow, run once on each JAX lane: a member whose tangent in its mapped
+    input is half its derivative reads a gap of 0.4 to 0.6 with the
+    positions read from the iterate and with them read from the pre-step
+    state, and its report is withheld; a geometry held by a node outside
+    the group is moved as a constant of the pass; the hunt of MAP-036
+    asserts the check never fires and holds every gap to a fifth of the
+    tolerance.
+  domains:
+    f32: 'tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-046
+  area: geometry-dependent mapping diagnostics
+  claim: >-
+    Narrowed: a geometry-dependent mapping "of another kind". A coupling
+    group whose pass resolves a geometry-dependent mapping other than a
+    multilinear_grid (a kind registered with needs_geometry=True) "reports
+    its solve" and "withholds everything built on the float floor or on the
+    contraction estimates", and its not_usable_reason names the edges and
+    the kinds.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
+    - 'src/maddening/core/coupling/_group_layout.py::_geometry_diagnostics_refusal'
+  conditions: >-
+    a two-member float32 group with diagnostics on and a geometry edge of a
+    registered test kind, of either anchor inside it and entering it from
+    outside, under the l2 and the mixed norm, at a loose and at a tight
+    tolerance, where the same graphs with the rule switched off report
+    every withheld flag True and every withheld bound finite; every group
+    case of the node-inlined harness with that kind. The steps compiled
+    (jit) by the graph. Not claimed for float64 (x64), mixed dtypes, 16-bit
+    dtypes, gradients, vmap, multi-rate graphs, sub-cycled groups,
+    predictors, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    each of the ten withheld entries against the documented value, the
+    reason's text, and the same graph's unwithheld report as the control.
+  tests:
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed'
+    - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+  status: verified
+  domains:
+    f32: 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-047
+  area: geometry-dependent mapping diagnostics
+  claim: >-
+    Narrowed: a group "that sub-cycles". A sub-cycled coupling group whose
+    pass resolves a geometry-dependent mapping, multilinear_grid included,
+    "reports its solve" and withholds every bound, and its
+    not_usable_reason names the edges and the members that take several
+    sub-steps per pass.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
+    - 'src/maddening/core/coupling/_group_layout.py::_geometry_diagnostics_refusal'
+  conditions: >-
+    sub-cycled float32 groups of two multilinear_grid edges with the point
+    side at half the grid side's timestep: one without diagnostics, whose
+    single-rate control has no reason, and the grid-and-markers group with
+    them, on the report table, its printed text, its JSON encoding and the
+    profiler; the sub-cycled group cases of the node-inlined harness. The
+    steps compiled (jit) by the graph. Not claimed for float64 (x64), mixed
+    dtypes, 16-bit dtypes, gradients, vmap, multi-rate graphs outside a
+    group, predictors, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    the ten withheld entries against the documented values and the reason's
+    text; the single-rate control.
+  tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value'
+    - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
+  status: verified
+  domains:
+    f32: 'tests/property/test_coupling_geometry_search.py::test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/property/test_coupling_geometry_search.py::test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: 'tests/property/test_coupling_geometry_search.py::test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound'
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: MAP-048
+  area: geometry-dependent mapping diagnostics
+  claim: >-
+    Narrowed: a group "that uses the interface norm". An internal
+    geometry edge under convergence_norm="interface" "is refused at
+    compile()" (MAP-035); a group under that norm with a geometry-dependent
+    mapping on an edge entering it from outside compiles, "reports its
+    solve" and withholds every bound, and its not_usable_reason names the
+    norm.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
+    - 'src/maddening/core/coupling/_group_layout.py::_geometry_diagnostics_refusal'
+  conditions: >-
+    a float32 pair joined by static mappings under the interface norm, with
+    a multilinear_grid edge into one member from a third node that holds
+    the positions, without diagnostics. The steps compiled (jit) by the
+    graph. Not claimed for float64 (x64), mixed dtypes, 16-bit dtypes,
+    gradients, vmap, multi-rate graphs, sub-cycled groups, predictors,
+    run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    the ten withheld entries against the documented values and the reason's
+    text.
+  tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
+  status: verified
+  notes: >-
+    Slow, run once on each JAX lane: the same graph under the mixed norm
+    with diagnostics reports its bounds, the outside node's positions moved
+    by the self-check as a constant of the pass.
+  domains:
+    f32: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
     sharded: narrowed

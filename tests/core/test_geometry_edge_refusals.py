@@ -736,16 +736,18 @@ def test_the_interface_norm_on_a_group_with_a_geometry_edge_is_refused_at_compil
 @pytest.mark.parametrize("anchor, norm", [("source", "l2"), ("target", "mixed")])
 def test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason(anchor,
                                                                                     norm):
-    """Diagnostics do not read a moving geometry in 0.4.0: the report keeps
-    the solve's outcome, every bound is NaN, every ``*_usable`` flag False,
-    and ``not_usable_reason`` names the edge.  The same group with a static
+    """Diagnostics do not read the moving geometry of a mapping kind other
+    than ``multilinear_grid`` in 0.4.0: the report keeps the solve's
+    outcome, every bound is NaN, every ``*_usable`` flag False, and
+    ``not_usable_reason`` names the edge and the kind.  The same group with a static
     mapping reports its bounds as it always did, and has no such key."""
     gm = _ring(norm, mapping=_geom(), geometry=(anchor, "g"))
     gm.compile()
     assert gm.coupling_diagnostics() == {}
     gm.step()
     report = gm.coupling_diagnostics()["a+b"]
-    gg.assert_not_diagnosed(report, [KEY])
+    gg.assert_not_diagnosed(report, [KEY], "kind")
+    assert "'test_geom_matrix'" in report["not_usable_reason"]
     assert bool(report["converged"])
     # The premise: every entry the report withholds would otherwise have
     # said something.  Read the same slots as a group without a geometry
@@ -754,7 +756,7 @@ def test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_re
     loose = _ring(norm, 1e-3, mapping=_geom(), geometry=(anchor, "g"))
     loose.compile()
     loose.step()
-    gg.assert_not_diagnosed(loose.coupling_diagnostics()["a+b"], [KEY])
+    gg.assert_not_diagnosed(loose.coupling_diagnostics()["a+b"], [KEY], "kind")
     for graph in (gm, loose):
         graph._committed_geometry_edges = {}          # noqa: SLF001
     unnarrowed, tight = loose.coupling_diagnostics()["a+b"], gm.coupling_diagnostics()["a+b"]
@@ -796,5 +798,5 @@ def test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed():
         gm.step()
         return gm.coupling_diagnostics()["b+c"]
 
-    gg.assert_not_diagnosed(build(True), ["a.x->b.u"])
+    gg.assert_not_diagnosed(build(True), ["a.x->b.u"], "kind")
     assert "not_usable_reason" not in build(False)

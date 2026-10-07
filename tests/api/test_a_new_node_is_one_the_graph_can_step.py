@@ -15,6 +15,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -80,7 +81,19 @@ class DropsAField(SimulationNode):
         return {"x": state["x"]}
 
 
+class DrawsFromAKey(SimulationNode):
+    """Carries a PRNG key in its state."""
+
+    def initial_state(self):
+        return {"key": jax.random.key(0), "x": jnp.zeros((), jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        key, sub = jax.random.split(state["key"])
+        return {"key": key, "x": state["x"] + dt * jax.random.normal(sub)}
+
+
 REGISTRY = {cls.__name__: cls for cls in (
+    DrawsFromAKey,
     BallNode, HeartPumpNode, RigidBody2DNode, RigidBodyNode, SpringDamperNode, TableNode,
     NeedsItsInput, CountsInIntegers, DropsAField, ReadsThePytreeOnly)}
 
@@ -227,3 +240,14 @@ def test_a_node_the_door_never_saw_is_refused_where_the_graph_steps(tmp_path):
             assert resp.status_code == 400, resp.text
             assert "'b/position' has shape () before the update and (2,) after it" in resp.text
             assert gm._state is held
+
+
+def test_a_node_whose_state_holds_a_prng_key_is_refused_by_name(served):
+    """A key has no JSON form, so no reply could carry the state.  The
+    refusal used to be an accident of the layout comparison (an internal
+    error about an extended dtype); the comparison now takes a key, and
+    the door says what it refuses."""
+    client, gm = served
+    resp = _add(client, "DrawsFromAKey", {})
+    _assert_refused_whole(client, gm, resp, "PRNG key", "'key'", "no JSON form")
+    assert "canonicalize_dtype" not in resp.text

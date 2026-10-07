@@ -373,3 +373,46 @@ def test_the_comparison_names_every_kind_of_difference():
     # The abstract values of a trace compare like arrays.
     abstract = jax.eval_shape(lambda: before)
     assert _param_probes._state_layout_drift(before, abstract) == []
+
+
+class _Draws(SimulationNode):
+    """Carries a PRNG key in its state, as a stochastic node does."""
+
+    def initial_state(self):
+        return {"key": jax.random.key(0), "x": jnp.zeros((), jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        key, sub = jax.random.split(state["key"])
+        return {"key": key, "x": state["x"] + dt * jax.random.normal(sub)}
+
+
+class _SpendsItsKey(_Draws):
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"key": jax.random.key_data(state["key"]), "x": state["x"]}
+
+
+def test_a_prng_key_in_the_state_is_a_leaf_of_a_kind_of_its_own():
+    """A key's dtype (``key<fry>``) is not a NumPy dtype and has no kind
+    letter: it is compared as itself.  The comparison used to raise on it
+    (``canonicalize_dtype called on extended dtype``), which refused every
+    step of a graph that carries a key."""
+    gm = GraphManager()
+    gm.add_node(_Draws("d", DT))
+    gm.step()
+    gm.run(2)
+    assert gm._state["d"]["key"].dtype == jax.random.key(0).dtype
+    assert _drift(_Draws("d", DT)) == []
+    key, other = jax.random.key(0), jax.random.key(0, impl="rbg")
+    assert _param_probes._state_layout_drift({"k": key}, {"k": jax.random.split(key)[0]}) == []
+    for after in (other, jnp.zeros((), jnp.uint32)):
+        (found,) = _param_probes._state_layout_drift({"k": key}, {"k": after})
+        assert "'k' has dtype key<fry> before the update" in found
+    assert _param_probes._state_layout_drift({"k": key}, {"k": other}, dtypes=False) == []
+    # ... and a node that returns the key's bits for the key is refused.
+    spent = GraphManager()
+    spent.add_node(_SpendsItsKey("d", DT))
+    spent.compile()
+    held = spent._state
+    with pytest.raises(ValueError, match="'d/key' has shape"):
+        spent.step()
+    assert spent._state is held

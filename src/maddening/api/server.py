@@ -135,6 +135,7 @@ from maddening.core._param_probes import (
     _hook_outputs,
     _leaf_values_equal,
     _node_update_layout_drift,
+    _prng_key_leaves,
     _node_with_params,
     _params_holders,
 )
@@ -1063,6 +1064,15 @@ def _dry_run_node(node, state: Any = None) -> None:
     spec = _NodeSpec(node=node, update_fn=node.update, timestep=node.delta_t,
                      accepts_params=accepts)
     leaves = node.params_pytree() if accepts else None
+    # A PRNG key in the state has no JSON form: every reply that carries
+    # the state (``POST /sim/step``) would fail.  Refused here by name (it
+    # used to be refused by accident, as an internal error of the layout
+    # comparison, which now compares a key as a kind of its own).
+    keyed = _prng_key_leaves(state)
+    if keyed:
+        raise ValueError(
+            f"its state holds a PRNG key ({', '.join(map(repr, keyed))}), which has no "
+            "JSON form, so no reply could carry the state")
     # With every declared input delivered (the node once its edges are
     # added), then with none, as the graph steps it until then: a constant
     # read only in the absence of an input is read by every step of the

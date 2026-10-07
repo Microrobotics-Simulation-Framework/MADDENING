@@ -209,7 +209,18 @@ def _leaf_layout(leaf: Any) -> tuple[tuple, Any]:
     dtype = getattr(leaf, "dtype", None)
     if dtype is None:
         dtype = jnp.result_type(leaf)
+    if jax.dtypes.issubdtype(dtype, jax.dtypes.extended):
+        # A PRNG key (``key<fry>``): not a NumPy dtype, and a kind of its own.
+        return shape, dtype
     return shape, np.dtype(jax.dtypes.canonicalize_dtype(dtype))
+
+
+def _dtype_kind(dtype: Any) -> Any:
+    """The kind of a :func:`_leaf_layout` dtype: NumPy's one-letter kind
+    (boolean, integer, float, complex), and for an extended dtype -- a PRNG
+    key, which has none -- the dtype itself, so a key is a key of the same
+    implementation and nothing else."""
+    return getattr(dtype, "kind", dtype)
 
 
 def _leaf_path(path: tuple) -> str:
@@ -225,10 +236,20 @@ def _leaf_path(path: tuple) -> str:
     return "/".join(parts)
 
 
+def _prng_key_leaves(state: Any) -> list[str]:
+    """The leaves of *state* that are PRNG keys (an extended dtype), by
+    path.  The REST server refuses a new node that has one: a key has no
+    JSON form, so no reply could carry the node's state."""
+    return [_leaf_path(path)
+            for path, leaf in jax.tree_util.tree_flatten_with_path(state)[0]
+            if jax.dtypes.issubdtype(_leaf_layout(leaf)[1], jax.dtypes.extended)]
+
+
 def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list[str]:
     """How the state layout *after* differs from *before*: one line per
     leaf that is missing, new, of another shape or (with *dtypes*) of
-    another kind of dtype (boolean, integer, float, complex); empty when
+    another kind of dtype (boolean, integer, float, complex, or a PRNG
+    key of one implementation); empty when
     the two trees have the same layout.  A dtype's width is not compared:
     with x64 enabled every stock node's update returns ``float64`` for the
     ``float32`` its ``initial_state()`` builds, and the state reloads.
@@ -254,7 +275,7 @@ def _state_layout_drift(before: Any, after: Any, *, dtypes: bool = True) -> list
         if shape_before != shape_after:
             found.append(f"{name!r} has shape {shape_before} before the update "
                          f"and {shape_after} after it")
-        elif dtypes and dtype_before.kind != dtype_after.kind:
+        elif dtypes and _dtype_kind(dtype_before) != _dtype_kind(dtype_after):
             found.append(f"{name!r} has dtype {dtype_before} before the update "
                          f"and {dtype_after} after it")
     found.extend(f"{name!r} appears only after the update" for name in new if name not in old)

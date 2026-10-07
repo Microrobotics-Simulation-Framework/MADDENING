@@ -814,7 +814,10 @@ Two rules cover every call site.
   interpolated between two snapshots (a sub-cycled member of a coupling
   group), the geometry is interpolated between the same two snapshots
   with the same weight, componentwise, and the mapping is applied to the
-  interpolated value at the interpolated geometry.
+  interpolated value at the interpolated geometry.  Those two snapshots
+  are two *iterates* of the same end-of-step value -- the pass's incoming
+  iterate and the in-pass state -- not the source at two times: see the
+  note under the table.
 * **Target-anchored** (`geometry=("target", g)`): the geometry is field
   `g` of the `state` argument of the hook the boundary inputs are being
   resolved for, `update` or `compute_boundary_fluxes`.
@@ -825,18 +828,42 @@ Two rules cover every call site.
 | Plain step, back edge | the previous step | the source's `g` of the previous step | the target's pre-step `g` |
 | Plain step, the target's flux hook | as for its `update` | as for its `update` | the target's **post-update** `g`: the edges are resolved again for the hook |
 | Multi-rate, slow source | the state the source holds between its steps | the same held state | the target's current state |
+| Multi-rate, a slow node's flux hook | as for its `update` at this base step | as for its `update` | the `g` the node holds after this base step: post-update when it fires, the held `g` when it does not |
 | Group member's `update`, Gauss-Seidel | the in-pass state | the in-pass `g` | the member's pre-step `g`, at every pass |
 | Group member's `update`, Jacobi | the incoming iterate | the incoming iterate's `g` | the member's pre-step `g` |
 | Group member's flux, seeded before a pass | the incoming iterate | the incoming iterate's `g` | the incoming iterate's `g` of the member |
 | Group member's flux after its update | the in-pass state | the in-pass `g` | the member's in-pass, post-update `g` |
-| Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d` | `g_prev + a (g_cur - g_prev)`, then the mapping | the member's state before this sub-step |
-| Sub-cycled member, `"constant"` | the end-of-step value | the end-of-step `g` | the member's state before this sub-step |
+| Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d`: `v_prev` the pass's incoming iterate, `v_cur` the in-pass state | `g_prev + a (g_cur - g_prev)` of the same two iterates, then the mapping | the member's state before this sub-step |
+| Sub-cycled member, `"constant"` | the in-pass state (an end-of-step estimate) | the in-pass `g` | the member's state before this sub-step |
 | An edge from outside the group | not interpolated | read with the value | by the hook, as above |
 | `resolve_boundary_inputs` (inspection) | the current state | the current state's `g` | the node's current `g` |
 
 A target-anchored geometry is therefore the same at every pass of a
 coupling solve, because members integrate from the pre-step state; a
 source-anchored one is part of the iterate.
+
+**What "linear" interpolates between.**  Both ends are estimates of the
+source's *end*-of-step value: the iterate the pass was handed and the
+state the pass has built so far.  It is not an interpolation in time
+across the sub-steps (MADD-ANO-027), so "linear" and "constant" read the
+same value and the same geometry wherever the two iterates coincide:
+under `iteration_mode="jacobi"`, for a source scheduled after the
+sub-cycled member, and, to the solve's tolerance, at a converged solve
+(a sub-cycled float64 pair with the source scheduled first: the two modes
+1.2e-4 apart, relative, at `tolerance=1e-4` and 1.7e-13 apart at
+`tolerance=1e-13`; with the source scheduled second, identical).
+See `boundary_interpolation` in the
+[coupling guide](../../developer_guide/coupling_algorithm_guide.md).
+
+**A slow node's flux on a multi-rate graph.**  A node whose rate divider
+is above one holds its state between the base steps it fires on, and its
+flux hook is called on every base step with the state the node holds
+after that step and the boundary inputs resolved at that step.  A reader
+of the flux therefore sees the flux of the held state, as a reader of a
+state field sees the held state, and a target-anchored geometry of that
+node is the held `g` on the base steps the node does not fire on.  (The
+hook used to be called on the result of `update` before the step decided
+whether to keep it: MADD-ANO-235.)
 
 The interpolation of a geometry is **componentwise**.  A geometry whose
 components are not affine coordinates (a unit quaternion, an angle across

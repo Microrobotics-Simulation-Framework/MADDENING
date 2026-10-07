@@ -895,3 +895,35 @@ def test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_c
     with gg.x64(True):
         got = mapping.apply(field, None, jnp.asarray(points, jnp.float64))
         np.testing.assert_allclose(np.asarray(got), [1.3, 2.7], rtol=1e-6)
+
+
+def _ring(anchor, *, subcycled, iteration_mode):
+    """``a -> b`` through the geometry edge and ``b -> a`` through a static
+    one, in a coupling group; *subcycled* halves ``b``'s timestep, so its
+    inputs are interpolated between two iterates."""
+    gm = GraphManager()
+    gm.add_node(Holder("a", 1.0, n=N_SOURCE))
+    gm.add_node(Holder("b", 0.5 if subcycled else 1.0, n=N_TARGET))
+    gm.add_edge("a", "b", "x", "u", mapping=_geom(), geometry=(anchor, "g"))
+    gm.add_edge("b", "a", "x", "u", mapping=matrix_mapping(
+        np.full((N_SOURCE, N_TARGET), 1 / 16, np.float32)))
+    gm.add_coupling_group(["a", "b"], max_iterations=30, tolerance=1e-5,
+                          subcycling=subcycled, iteration_mode=iteration_mode,
+                          **({"boundary_interpolation": "linear"} if subcycled else {}))
+    return gm
+
+
+@pytest.mark.parametrize("iteration_mode", ["gauss-seidel", "jacobi"])
+@pytest.mark.parametrize("subcycled", [False, True], ids=["one-rate", "sub-cycled"])
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group(
+        anchor, node, subcycled, iteration_mode):
+    """Every read of a geometry inside a coupled solve asks the same rule,
+    the interpolated read of a sub-cycled member's source included."""
+    gm = _ring(anchor, subcycled=subcycled, iteration_mode=iteration_mode)
+    gm.compile()
+    gm.step()
+    _rewritten(gm, node, "float16")
+    with pytest.raises(TypeError, match=f"edge {KEY}: its geometry field 'g' now has "
+                                        f"dtype float16"):
+        gm.step()

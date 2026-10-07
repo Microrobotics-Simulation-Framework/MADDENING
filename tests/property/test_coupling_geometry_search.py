@@ -269,14 +269,19 @@ class HalfTangent(gc.GeoRelay):
 # Per push: tests/property/test_coupling_geometry_search.py::test_the_gap_is_the_share_of_the_derivative_the_product_does_not_see
 # Per push: tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance
 @pytest.mark.slow
-def test_a_pass_whose_product_along_the_geometry_is_not_its_derivative_reports_no_bound():
+@pytest.mark.parametrize("anchors", [("source", "source"), ("target", "target")],
+                         ids=["read from the iterate", "read from the pre-step state"])
+def test_a_pass_whose_product_along_the_geometry_is_not_its_derivative_reports_no_bound(
+        anchors):
     """The pass's value follows the positions and its tangent follows
     them half as far: the self-check reads a gap of a half, and the
     report withholds every bound with the reason, as for a geometry the
-    diagnostics do not read."""
+    diagnostics do not read.  Once with the positions read from the
+    iterate (the check's first direction) and once with them read from
+    the members' pre-step state, constants of the pass (its second)."""
     from tests.property import geometry_graphs as gg  # noqa: PLC0415
 
-    cell = Cell(("source", "source"), True, "float32", 0, 5)
+    cell = Cell(anchors, True, "float32", 0, 5)
     with gc.precision(False):
         gm = gc.build(cell, cell.knobs, cell.dtype, node=HalfTangent)
     values = gc.values_of(Case(0, 8, 0.7, 0.2), cell)

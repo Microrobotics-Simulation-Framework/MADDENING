@@ -20,7 +20,10 @@ returns).
 
 from __future__ import annotations
 
+import atexit
 import math
+import os
+import sys
 import threading
 
 import jax
@@ -38,6 +41,25 @@ IQN = ("iqn-ils", "iqn-imvj")
 DTYPES = ("float32", "float64")
 
 
+_STUCK = []
+
+
+def _leave_without_finalising():
+    """A thread that never returns from LAPACK aborts the interpreter when
+    it finalises (exit -6, after the report): leave by ``os._exit`` once
+    everything else at exit has run, with the failing status."""
+    if _STUCK:
+        return
+    _STUCK.append(True)
+
+    def leave():
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+
+    atexit.register(leave)
+
+
 def within_the_limit(fn):
     """``fn()`` from a daemon thread, or a failure after :data:`LIMIT` seconds."""
     box: dict = {}
@@ -51,7 +73,9 @@ def within_the_limit(fn):
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     thread.join(LIMIT)
-    assert not thread.is_alive(), f"no return in {LIMIT:.0f} s"
+    if thread.is_alive():
+        _leave_without_finalising()
+        pytest.fail(f"no return in {LIMIT:.0f} s")
     if "error" in box:
         raise box["error"]
     return box["value"]

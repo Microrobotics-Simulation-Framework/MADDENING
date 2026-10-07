@@ -78,7 +78,7 @@ R3    rule: the source value read, the delivered value's      the dilution pins 
 R4    rule: the tie, or the side, decided differently in      tie rows (``tie-...``, ``side-4-4``) for the criterion;
       the criterion, the floor and the spectral weights       ``test_an_edge_mapped_graph_s_diagnostics_are_its_
       (three enumerations: ``_interface_readings``,           marker_side_twin_s``: the twin reads the compact side
-      ``_read_fields``, ``_interface_state_fields``)          by construction, so every reported number of the
+      ``_read_fields``, ``InterfacePlan.iqn_fields``)         by construction, so every reported number of the
                                                               edge-mapped graph must be the twin's to 1e-6 -- the
                                                               comparison T5 has no equivalent of today
 R5    rule: the side taken from the weights' shape (a sparse  ``sparse`` against ``sparse-transposed`` rows: one
@@ -95,7 +95,7 @@ R7    rule: a hub's field read once, by one edge's rule       ``side-hub`` rows 
 ``PRECISION_FLOOR_ULPS * eps / rtol`` per entry the norm reads, whichever
 entries those are, so a floor taken on the other side of a mapping is the
 same number unless a reading is exactly zero or dead-banded on one side
-only (T6 survives).  IQN's ``_interface_state_fields`` chooses the state
+only (T6 survives).  IQN's ``InterfacePlan.iqn_fields`` chooses the state
 fields the accelerator works on, which the side rule does not change; a
 wrong choice there moves pass counts, not a verdict's truth, and is held
 only through the property under ``iqn-*``.  And on this tree nothing

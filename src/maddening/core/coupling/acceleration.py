@@ -527,7 +527,7 @@ def coupling_residual_interface(
     edges in an order fixed by the group itself: by each edge's source's
     place in the group's sweep, then its source field, its target's place,
     its target field and its ordinal (``_interface_edge_order`` in
-    ``core/coupling/_group_layout.py``), the order the L2 and mixed norms sum the
+    ``core/coupling/_interface_plan.py``), the order the L2 and mixed norms sum the
     members in.  So the norm depends neither on the order of the
     ``add_edge`` calls nor on the nodes' names.  Before 0.4.0 it summed in
     the order the edges had been added: the same group built with its

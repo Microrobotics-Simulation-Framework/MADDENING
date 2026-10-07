@@ -74,6 +74,7 @@ from maddening.core.coupling.acceleration import (
     coupling_residual_l2,
     coupling_residual_mixed,
     relaxation_step_scale,
+    spectral_rate_settled,
 )
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 
@@ -1072,6 +1073,29 @@ def _normal_contractions(draw):
     return A, c, acceleration, relaxation
 
 
+#: A normal contraction whose flag 0.4.0 withdraws (eigenvalues 0 and 0.5
+#: five times; float32): see the test below for why.
+_GROWING_AT_THE_CAP = (
+    np.array([
+        [0.499134, -0.0089817, 0.01601435, -0.00283523, -0.00622292, 0.00695405],
+        [-0.0089817, 0.40684713, 0.16609148, -0.02940534, -0.06454052, 0.07212334],
+        [0.01601435, 0.16609148, 0.20385906, 0.05242969, 0.11507568, -0.12859584],
+        [-0.00283523, -0.02940534, 0.05242969, 0.49071769, -0.02037335, 0.022767],
+        [-0.00622292, -0.06454052, 0.11507568, -0.02037335, 0.45528341, 0.04997031],
+        [0.00695405, 0.07212334, -0.12859584, 0.022767, 0.04997031, 0.44415872],
+    ]),
+    np.array([-0.05665856, 1.55795134, 1.73617406, -0.56881921, 0.28611932, -0.71252244]),
+    "none",
+    1.0,
+)
+
+#: The least share of drawn normal contractions ``spectral_usable`` is set
+#: on.  Measured over this test's own draws (CPU, jaxlib 0.11.0): 300 of
+#: 300 over fifteen seeded runs of twenty, and the one draw pinned above in
+#: one unseeded run.  The floor leaves two of twenty.
+_NORMAL_USABLE_FLOOR = 0.9  # units: dimensionless -- a share of the drawn examples
+
+
 # Slow-marked (still run by slow-tests.yml): the draw varies the mode count
 # (a shape) and, under ``"fixed"``, the static relaxation factor, so most
 # examples are a compile of their own (31-37 s on the CI runner).  The
@@ -1081,43 +1105,78 @@ def _normal_contractions(draw):
 # Per push: tests/property/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds and
 # tests/core/test_coupling_error_bound.py::test_the_spectral_bound_does_not_depend_on_the_relaxation_factor
 @pytest.mark.slow
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
-@given(case=_normal_contractions())
-def test_the_spectral_bound_holds_on_random_normal_contractions(case):
-    """``spectral_error_bound >= ||x - x*||`` for any normal ``A``.
+def test_the_spectral_bound_holds_on_random_normal_contractions():
+    """Where ``spectral_usable``, ``spectral_error_bound >= ||x - x*||`` and
+    ``rho_spectral`` is the radius, for any normal ``A``; and the flag is
+    set on at least :data:`_NORMAL_USABLE_FLOOR` of the draws.
 
     Under ``"none"`` and ``"fixed"`` at any relaxation, with negative
     eigenvalues, alternation and a spectral radius up to 0.98, and
     whether or not the group met its criterion within the cap -- the
-    bound is about the returned iterate, not about convergence.  The
-    spectrum is exact here (``n <= 6 < SPECTRAL_KRYLOV_STEPS``), so
-    ``spectral_usable`` is asserted True rather than assumed: a False
-    would mean the Arnoldi breakdown handling stopped resolving a
-    resolvable spectrum.
+    bound is about the returned iterate, not about convergence.
+
+    **Why the flag is not asserted on every draw.**  This test used to
+    assert ``spectral_usable is True`` on each, reasoning that the spectrum
+    is exact (``n <= 6 < SPECTRAL_KRYLOV_STEPS``).  No claim says so: the
+    bound is claimed where the flag is set (CPL-088), and the flag is
+    False "for a group whose Krylov space is still growing at the cap"
+    (CPL-092), a rule 0.4.0 holds without exception since a Ritz value of
+    a space that is not invariant is within no computed distance of the
+    radius.  :data:`_GROWING_AT_THE_CAP` is a normal contraction it
+    withdraws the flag on: five equal eigenvalues, so the Krylov space of
+    the start vector closes after two steps and continues from the
+    residual, whose part outside the one eigenspace is the float32
+    iterate's rounding (1e-4 of a residual of 2.6e-4, far above the
+    breakdown test's eight ulps of a product).  That is carried as a
+    direction, each later step grows by 1e-5 to 5e-4, and the space is
+    still growing at step eight.  The radius and the bound it reported
+    were right; the flag declines to say so.  The example is pinned, and
+    the share of draws the flag is set on is held to a floor instead, so
+    a change that withdraws it broadly still fails here.
     """
-    A, c, acceleration, relaxation = case
-    kw = dict(acceleration=acceleration)
-    if acceleration == "fixed":
-        kw["relaxation"] = relaxation
-    gm = _linear_cycle(A, c, max_iterations=400,
-                       tolerance=_ANALYTIC_TOLERANCE, **kw)
-    gm.step()
-    d = gm.coupling_diagnostics()["a+b"]
-    # The fixed point of the float32 map the graph evaluates (see
-    # ``_exact_distance``), taken in float64.
-    A32 = np.asarray(A, np.float32).astype(np.float64)
-    c32 = np.asarray(c, np.float32).astype(np.float64)
-    x_star = np.linalg.solve(np.eye(len(c)) - A32, c32)
-    distance = _distance_to(gm, x_star)
-    rho = float(np.max(np.abs(np.linalg.eigvalsh(A))))
-    note(f"rho={rho} {acceleration} omega={relaxation} distance={distance} {d}")
-    assert d["spectral_usable"] is True, d
-    assert d["rho_spectral"] == pytest.approx(rho, abs=1e-4), (
-        f"rho_spectral={d['rho_spectral']} for a spectral radius of {rho}"
-    )
-    # Bare: the key carries its own float resolution (see the two-mode
-    # property above).
-    assert d["spectral_error_bound"] >= distance, (
-        f"{acceleration} omega={relaxation}: bound {d['spectral_error_bound']:.4e} "
-        f"below the true distance {distance:.4e} at rho={rho:.4f}"
-    )
+    usable = []
+
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    @example(case=_GROWING_AT_THE_CAP)
+    @given(case=_normal_contractions())
+    def check(case):
+        A, c, acceleration, relaxation = case
+        kw = dict(acceleration=acceleration)
+        if acceleration == "fixed":
+            kw["relaxation"] = relaxation
+        gm = _linear_cycle(A, c, max_iterations=400,
+                           tolerance=_ANALYTIC_TOLERANCE, **kw)
+        gm.step()
+        d = gm.coupling_diagnostics()["a+b"]
+        # The fixed point of the float32 map the graph evaluates (see
+        # ``_exact_distance``), taken in float64.
+        A32 = np.asarray(A, np.float32).astype(np.float64)
+        c32 = np.asarray(c, np.float32).astype(np.float64)
+        x_star = np.linalg.solve(np.eye(len(c)) - A32, c32)
+        distance = _distance_to(gm, x_star)
+        rho = float(np.max(np.abs(np.linalg.eigvalsh(A))))
+        note(f"rho={rho} {acceleration} omega={relaxation} distance={distance} {d}")
+        usable.append(bool(d["spectral_usable"]))
+        if not d["spectral_usable"]:
+            # Withdrawn for the reason the flag documents, not for none:
+            # the stored Arnoldi residual is over the settle margin.
+            stored = float(gm._state["_meta"]["coupling_a+b_spectral_residual"])
+            assert not bool(spectral_rate_settled(d["rho_spectral"], stored)), d
+            return
+        assert d["rho_spectral"] == pytest.approx(rho, abs=1e-4), (
+            f"rho_spectral={d['rho_spectral']} for a spectral radius of {rho}"
+        )
+        # Bare: the key carries its own float resolution (see the two-mode
+        # property above).
+        assert d["spectral_error_bound"] >= distance, (
+            f"{acceleration} omega={relaxation}: bound {d['spectral_error_bound']:.4e} "
+            f"below the true distance {distance:.4e} at rho={rho:.4f}"
+        )
+
+    check()
+    assert not usable[0], "the pinned draw: its Krylov space grows at the cap"
+    drawn = usable[1:]
+    assert drawn, "no example was drawn"
+    print(f"spectral_usable on {sum(drawn)} of {len(drawn)} drawn normal contractions")
+    assert float(np.mean(drawn)) >= _NORMAL_USABLE_FLOOR, (
+        f"spectral_usable on {sum(drawn)} of {len(drawn)} normal contractions")

@@ -565,3 +565,57 @@ def test_per_node_timing_feeds_each_node_its_declared_inputs():
     rep = profile_graph(gm, n_steps=2, n_warmup=1, counts=False)
     assert set(rep.node_times_ms) == {"a", "b"} and all(
         t > 0 for t in rep.node_times_ms.values()), rep.node_times_ms
+
+
+class _Lin(SimulationNode):
+    """``x <- 0.9 * u + b``: a Gauss-Seidel pair of these contracts 0.81 per pass."""
+
+    def __init__(self, name, b):
+        super().__init__(name, 0.01, b=jnp.float32(b))
+
+    def initial_state(self):
+        return {"x": jnp.zeros((), jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.zeros((), jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt):
+        # ``.get``: the profiler times each node with no inputs at all.
+        u = boundary_inputs.get("u", jnp.zeros((), jnp.float32))
+        return {"x": jnp.float32(0.9) * u + self.params["b"]}
+
+
+def test_the_fractions_count_every_step_of_a_window_that_recovers():
+    """``at_cap_fraction`` and ``converged_fraction`` are shares of the
+    window's steps, not the verdict of its last one.
+
+    Every other window here is uniform (all at the cap, or none), where a
+    statistic read from the last step alone gives the same number.  This
+    pair starts 15 from its fixed point with a cap of 4 passes: its first
+    steps exit at the cap unconverged and, each step starting from the
+    previous iterate, the later ones converge.
+    """
+    gm = GraphManager()
+    gm.add_node(_Lin("a", 1.0))
+    gm.add_node(_Lin("b", 2.0))
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=4, tolerance=1e-6)
+    gm.compile()
+    n_stat = 30
+    rep = profile_graph(gm, n_steps=5, n_warmup=0, n_stat_steps=n_stat,
+                        measure_coupling=False, counts=False)
+    st = rep.coupling_iter_stats["a+b"]
+
+    gm.reset_state()
+    at_cap, converged = [], []
+    for _ in range(n_stat):
+        gm.step()
+        d = gm.coupling_diagnostics()["a+b"]
+        at_cap.append(d["iterations"] >= 4)
+        converged.append(d["converged"])
+    assert not converged[0] and converged[-1] and not at_cap[-1], (at_cap, converged)
+    assert st["n"] == n_stat
+    assert 0.0 < st["converged_fraction"] == float(np.mean(converged)) < 1.0, st
+    assert 0.0 < st["at_cap_fraction"] == float(np.mean(at_cap)) < 1.0, st

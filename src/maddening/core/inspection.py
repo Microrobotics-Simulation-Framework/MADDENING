@@ -1344,6 +1344,17 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
                      + ("; under solver='ift' the gradient through this step is unreliable"
                         if group.solver == "ift" else ""))
     reason = d.get("not_usable_reason")
+    estimate = d.get("error_estimate")
+    if reason and isinstance(estimate, float) and not math.isnan(estimate):
+        # Only what rests on the float floor is withheld (a checkpoint
+        # saved after the state was written): the estimates are there,
+        # and their caveats below still apply.
+        flags.append(f"no bound reported: {reason}")
+        if not d["ratio_usable"]:
+            flags.append("ratio_usable=False: the contraction ratio was unusable, so the "
+                         "criterion fell back to the raw residual test; converged reports that "
+                         "test, not a distance estimate (MADD-ANO-005)")
+        return flags
     if reason:
         # The report withholds every bound, estimate and ``*_usable`` flag
         # of this group, so the caveats below (which read them) would be

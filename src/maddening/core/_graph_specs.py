@@ -565,7 +565,7 @@ _META_KEY = "_meta"
 #: State and checkpoint keys a node may not be named: the graph's own state
 #: (``_meta``) and a checkpoint's params prefixes
 #: (``maddening.core.simulation.checkpoint``).
-_RESERVED_STATE_KEYS = frozenset({_META_KEY, "_params", "_params_mappings"})
+_RESERVED_STATE_KEYS = frozenset({_META_KEY, "_params", "_params_mappings", "_reports"})
 
 
 def _uncarriable_characters(text: str) -> list[str]:
@@ -639,7 +639,8 @@ def _node_name_refusal(name: Any) -> Optional[str]:
     if name in _RESERVED_STATE_KEYS:
         # The graph's own state lives under ``_meta`` (coupling and
         # multirate carries) and a checkpoint keeps the params under
-        # ``_params`` and ``_params_mappings``.  A node named for one of
+        # ``_params`` and ``_params_mappings`` (and a per-group marker
+        # under ``_reports``).  A node named for one of
         # them was taken (POST /graph/nodes answered 201), the next
         # compile dropped its state, every step was a KeyError and a
         # checkpoint save was refused until the node was deleted.

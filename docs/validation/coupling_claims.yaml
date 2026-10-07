@@ -5748,3 +5748,75 @@ claims:
     adaptive: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_the_report_of_every_stepping_entry_point_survives_a_write[run_adaptive]'
     checkpoint_restart: tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_the_step
     sharded: n/a
+
+- id: CPL-190
+  area: criterion
+  claim: >-
+    Under convergence_norm="interface", "a floating field no internal edge
+    reads is returned as one pass computes it at the returned state, from
+    the readings the verdict was taken on; a field edges read only through
+    a mapping or a transform is measured through them alone, and a group
+    whose member reads such a field's inputs from the previous iterate
+    stops on the second consecutive pass within the threshold", and at the
+    cap reports the larger of its last two changes where the loop's last
+    was above the threshold.  So converged=True puts every member within
+    the tolerance of its update at the state returned, as under "mixed"
+    and "l2".
+  sources:
+    - src/maddening/core/coupling/group.py::CouplingGroup (convergence_norm)
+    - src/maddening/core/coupling/_group_layout.py::_fields_the_interface_norm_misses
+    - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while (lagged_reading)
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (_with_nonfloat_fields_at)
+  conditions: >-
+    A group whose members are linear in what they read; both schedules,
+    both solvers; plain, mapped and transformed internal edges; float32
+    and float64; the derivative of a recomputed field through the jitted
+    step.  With acceleration="none" or the IQN pair for a field read only
+    through a mapping or a transform; with every acceleration for a field
+    no edge reads.  The part of a field its edges do not deliver under
+    "aitken" or "fixed" is MADD-ANO-236 (open).  max_iterations=1 returns
+    its single pass and reports how far the readings moved over it.  Not
+    claimed for mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
+    sub-cycled groups, predictors and warm starts, run_adaptive, a
+    checkpoint restart or sharded graphs.
+  oracle: >-
+    the float64 fixed point of the linear map the graph holds; each
+    member's defect at the returned state against the per-entry change its
+    threshold allows, and the state within the resolvent of those
+    allowances.
+  tests:
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_no_acceleration_leaves_a_one_way_target_between_passes
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_chain_under_jacobi_returns_its_last_member_at_the_members_before_it
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_field_no_edge_reads_is_within_the_tolerance_in_a_weakly_coupled_pair
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_cap_does_not_call_a_state_converged_that_its_last_readings_did_not_give
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_strict_convergence_refuses_the_capped_state
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_lagged_reading_stops_on_the_second_pass_within_the_threshold
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_at_the_cap_a_lagged_reading_reports_the_larger_change
+    - tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
+    - tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point
+  status: verified
+  notes: >-
+    Until MADD-ANO-235 was fixed the norm stopped on readings that had
+    settled while a member still held the value of readings that had not:
+    a one-way pair under Jacobi returned its target computed from the
+    pre-step source, converged=True, iterations=1, residual 0 (0.1.0 to
+    0.3.1).  A group whose every field is delivered whole by an internal
+    edge is measured as under "mixed" and its passes, values and compiled
+    step are unchanged.
+  domains:
+    f32: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_chain_under_jacobi_returns_its_last_member_at_the_members_before_it
+    f64: 'tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns[plain-f64-ift]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
+    grad: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_refreshed_field_carries_the_fixed_points_derivative
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed

@@ -21,7 +21,8 @@ those settled readings never produced:
   delivers less than the field.  It feeds back, so it is not recomputed;
   where its member reads the previous iterate the solve stops only once
   the readings moved within the threshold over the pass that computed the
-  state as well, and at the cap reports the larger change.
+  state as well, and at the cap reports the larger change.  (Under a
+  relaxation that is not enough -- MADD-ANO-236, open, pinned below.)
 
 Every oracle here is a float64 closed form of the linear map the graph
 holds; none calls the code under test.  The static rule
@@ -321,6 +322,21 @@ def test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind
 #: edge delivers, reads the other's first at order one.
 G_A = np.array([[0.03], [1.0]])
 G_B = np.array([[0.03], [-0.7]])
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "MADD-ANO-236 (open): a relaxation blends every pass so far into the part of a field "
+    "its edges do not deliver, and the interface norm measures none of it"))
+def test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes():
+    """The same chain under ``acceleration="fixed"`` at 0.5: the readings are
+    settled on both passes the exit asks for, and ``B``'s second entry is
+    half-way from the pre-step value to the right one."""
+    edges = [("A", "B", G_SECOND, None), ("B", "C", G[:, :1], SELECT)]
+    distance, where, report = _step(
+        [A, B, C], edges, dict(iteration_mode="jacobi", convergence_norm="interface",
+                               rtol=RTOL, acceleration="fixed", relaxation=0.5))
+    assert report["converged"] is True
+    assert distance <= RTOL, (where, distance, report["iterations"])
 
 
 @pytest.mark.parametrize("schedule", ["jacobi", "gauss-seidel"])

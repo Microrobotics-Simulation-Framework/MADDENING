@@ -15788,3 +15788,110 @@ anomalies:
       - "tests/property/test_coupling_nonlinear_search.py::test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_bound"
       - "tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-235"
+    title: "Under convergence_norm=\"interface\" a converged group returned a member computed from readings that had not settled: a one-way pair under Jacobi returned its target at the pre-step source, converged=True, iterations=1, residual 0"
+    description: >
+      The interface norm measures, on each pass, how far what a group's
+      internal edges deliver moved between an iterate and its successor.
+      The members of that iterate were computed from the readings of the
+      iterate before it, and a floating field the norm does not measure
+      whole -- one no internal edge reads, or one read only through a
+      mapping or a transform -- was measured by nothing.  A one-way pair
+      `A -> B` under `iteration_mode="jacobi"` stopped on its first pass:
+      `A` does not depend on the iterate, so what it delivers had "stopped
+      moving" with a residual of exactly zero, and `B` was returned as
+      computed from the pre-step `A` (state error 2.2 on values of order
+      one; 2.9 through a static `matrix_mapping`; both solvers; reproduced
+      at 0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1).  A chain `A -> B -> C`
+      returned `C` one pass behind `B` (1.5e4 tolerances).  A pair coupled
+      at a loop gain of 0.01 with a field no edge reads returned that field
+      up to 384 tolerances off under Jacobi and 25 under Gauss-Seidel (the
+      member that reads the back edge), where `"mixed"` held 1.7; a cycle
+      with a one-way tail returned the tail 5 tolerances off.  Under
+      `acceleration="fixed"` the field was a blend of every pass so far
+      (6800 tolerances at a relaxation of 0.5).  A pair whose every field
+      is delivered whole by an internal edge was never affected: there the
+      norm measures the state, and its solve is bit for bit the `"mixed"`
+      one.  Found by a spike on an unrelated feature.  Resolved in 0.4.0: a
+      field no internal edge reads is returned as one pass computes it at
+      the returned state (the rule the non-floating fields already
+      followed; iterates, residuals and pass counts unchanged); a group
+      whose member reads the previous iterate and has a field read only
+      through a mapping or a transform stops on the second consecutive
+      pass within the threshold, and at the cap reports the larger change.
+    severity: major
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A state far from the group's fixed point reported `converged=True` is
+      a silent wrong result, never `minor`; `strict_convergence`, the sysid
+      mask and the profiler read the same verdict.  Not `critical`: it needs
+      the interface norm, which is not the default, and a field that norm
+      does not measure whole.  `context_dependent` because whether the
+      unmeasured field is used downstream is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: `convergence_norm="mixed"` (or `"l2"`), which measure
+      every member's state, or `iteration_mode="gauss-seidel"` for a group
+      with no cycle.
+    resolution_status: resolved
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The second pass is asked of the whole reading, not only of what the
+      lagging member reads, so a cap can report a state unconverged that one
+      more pass would confirm.  A group with a field no edge reads pays one
+      more evaluation of its pass per solve, of which only that field's
+      arithmetic is kept.  The remaining case, a relaxation over a field
+      read only through a mapping or a transform, is MADD-ANO-236.
+    verification:
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_field_no_edge_reads_is_within_the_tolerance_in_a_weakly_coupled_pair"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair"
+      - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push"
+
+  - anomaly_id: "MADD-ANO-236"
+    title: "Under convergence_norm=\"interface\" with acceleration=\"fixed\" or \"aitken\", the part of a field its edges deliver only through a mapping or a transform is relaxed and not measured: converged=True with that part between passes"
+    description: >
+      A field internal edges read only through a mapping or a transform
+      that delivers less than the field (a selection, a restriction) has a
+      part the interface norm does not see.  `"fixed"` and `"aitken"` relax
+      the whole field, so that part is a blend of every pass so far and
+      converges at the relaxation's own rate, whatever the readings do.
+      Measured (CPU, jaxlib 0.11.0, float32): a chain `A -> B -> C` under
+      Jacobi with `B` delivered through a selection of its first entry,
+      which no input moves, and `acceleration="fixed"` at 0.5 returns `B`'s
+      second entry at +0.9 where the fixed point is -0.7, half-way from the
+      pre-step value, with `converged=True` and `iterations=2`;
+      `"mixed"` takes 16 passes and is right to 1e-4.  Through 0.3.1 the
+      same graph returned the pre-step value (MADD-ANO-235).  With
+      `acceleration="none"` and the IQN pair the field is right: the second
+      pass MADD-ANO-235's fix asks for covers it.  The field feeds the
+      readings, so it cannot be recomputed at the returned state without
+      moving what the verdict was taken on; measuring it changes what the
+      interface norm is.  Open.
+    severity: major
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A part of the state far from the fixed point with `converged=True` is
+      a silent wrong result, never `minor`.  Not `critical`: it needs the
+      interface norm, a relaxation, and an internal edge that delivers less
+      than the field it reads, and the part concerned is one no member of
+      the group reads.  `context_dependent` because whether anything
+      outside the group reads it is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      `convergence_norm="mixed"` wherever a field is delivered through a
+      mapping or a transform that loses part of it and that part is used;
+      or `acceleration="none"`, `"iqn-ils"` or `"iqn-imvj"`; or a second,
+      plain internal edge that delivers the field whole.
+    resolution_status: open
+    residual_risk: >
+      Documented on `CouplingGroup.convergence_norm`.  Nothing in the
+      report says a field has an undelivered part.
+    verification:
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes"

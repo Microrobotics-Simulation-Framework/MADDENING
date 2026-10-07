@@ -97,6 +97,28 @@ and ``tests/property/test_coupling_nonlinear_search.py``):
     (a later run-time self-check)              check itself, for the pass or       honest reading's is under 1e-7
                                                for any reading written in JAX)     (``test_the_reference_s_jacobian_is_...``).
 ==  =========================================  ==================================  ==========================================
+
+**Seeded on the bounds under ``"l2"`` and ``"mixed"``** (the stage that made
+them read a ``multilinear_grid`` geometry; scratch copies of ``src/``,
+jaxlib 0.11.0, each caught by a per-push test of
+``test_coupling_geometry_search.py`` unless another file is named):
+
+* 1, in the estimator only (the position columns of the iterate behind
+  ``stop_gradient`` in the product handed to the spectrum): the reference's
+  radius score reads 3.0 (limit 1) and the radius seeds fail.  Seeded at
+  the pass's own read of the geometry instead, the same fault reaches the
+  reference's ``jacfwd`` too, which then agrees with the estimator: only
+  the run-time self-check, a finite difference, sees it (a gap of 1,
+  tolerance 0.25), and with the self-check's comparison disabled as well
+  the radius seeds fail on their premise alone.
+* 2, the product taken with the first pass's positions: radius score 25.
+* 3, a target-anchored geometry read from the iterate (seeded in the pass:
+  in this stage the product is the pass's): the node-inlined twin, a field
+  5.4e-4 apart with 5.3e-7 allowed (``test_differential_geometry_edges.py``),
+  and the time-level reference (``test_geometry_time_levels.py``).
+* 6, the comparison disabled in the step (the gap returned as zero, or
+  taken over all fields at once), in the report, or never traced: the
+  self-check's own three tests.
 """
 
 from __future__ import annotations
@@ -344,6 +366,11 @@ class GGraph:
 @dataclasses.dataclass(frozen=True)
 class _Inlined:
     tf: str
+    #: The ports the unmapped value and (source anchor) the geometry arrive
+    #: on: ``"<tf>@value"`` and ``"<tf>@geometry"``, with ``"@<k>"`` appended
+    #: for the ``k``-th further geometry edge into the same port.
+    value_port: str
+    geometry_port: str
     mapping: Any
     anchor: str
     gfield: str
@@ -386,16 +413,16 @@ class InlinedMappingNode(SimulationNode):
     def boundary_input_spec(self):
         spec = dict(self._wrapped.boundary_input_spec())
         for it in self._inlined:
-            spec[f"{it.tf}@value"] = it.value_spec
+            spec[it.value_port] = it.value_spec
             if it.geometry_spec is not None:
-                spec[f"{it.tf}@geometry"] = it.geometry_spec
+                spec[it.geometry_port] = it.geometry_spec
         return spec
 
     def _inner_inputs(self, state, boundary_inputs):
         bi = dict(boundary_inputs)
         for it in self._inlined:
-            value = bi.pop(f"{it.tf}@value", None)
-            geom = (bi.pop(f"{it.tf}@geometry", None) if it.anchor == "source"
+            value = bi.pop(it.value_port, None)
+            geom = (bi.pop(it.geometry_port, None) if it.anchor == "source"
                     else state[it.gfield])
             if value is None:
                 continue        # not resolved for this call (a flux seeded later)
@@ -461,13 +488,20 @@ def inline_geometry(graph: GGraph) -> GGraph:
             f"{e}: a geometry edge must be the last edge into its port")
         anchor, gfield = e.geometry
         source = graph.node(e.src)
-        edges.append(GEdge(e.src, e.dst, e.sf, f"{e.tf}@value"))
+        # A port of its own for each geometry edge: two into one target
+        # port used to share ``"<tf>@value"``, where the second edge's
+        # value replaced the first's before either was mapped.
+        nth = sum(it.tf == e.tf for it in inlined.get(e.dst, []))
+        suffix = f"@{nth}" if nth else ""
+        value_port, geometry_port = f"{e.tf}@value{suffix}", f"{e.tf}@geometry{suffix}"
+        edges.append(GEdge(e.src, e.dst, e.sf, value_port))
         geometry_spec = None
         if anchor == "source":
-            edges.append(GEdge(e.src, e.dst, gfield, f"{e.tf}@geometry"))
+            edges.append(GEdge(e.src, e.dst, gfield, geometry_port))
             geometry_spec = _port_spec(source.initial_state()[gfield])
         inlined.setdefault(e.dst, []).append(_Inlined(
-            e.tf, e.mapping, anchor, gfield, resolve_transform(e.transform), e.additive,
+            e.tf, value_port, geometry_port, e.mapping, anchor, gfield,
+            resolve_transform(e.transform), e.additive,
             _port_spec(_source_value(source, e.sf)), geometry_spec))
     nodes = []
     for nd in graph.nodes:

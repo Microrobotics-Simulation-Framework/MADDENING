@@ -135,6 +135,70 @@ def test_the_reported_radius_has_the_geometry_term_in_it(seed):
     assert not over, (over, report)
 
 
+#: The Gauss-Seidel cells (slow).  The first: both edges read their
+#: source's positions; ``F`` is updated first and reads ``P.pos`` from the
+#: iterate, so the geometry is in the pass's Jacobian (the draws: 30% and
+#: 45% of the radius).  The second: both edges read ``P.pos`` and ``P`` is
+#: updated first, so the scatter reads the positions *this pass* has just
+#: returned and the gather the pre-step ones: the sweep never reads a
+#: position from the iterate, and the Jacobian has no geometry column.
+GS_CELLS = (Cell(("source", "source"), True, "float64", 0, 5),
+            Cell(("target", "source"), True, "float64", 0, 5, order=("P", "F")))
+GS_SEARCH = gc.Search(GS_CELLS)
+GS_RADIUS_SEEDS = {"the-geometry-raises-the-radius": (Case(0, 7, 0.05, 0.1), 0.25),
+                   "the-geometry-lowers-the-radius": (Case(0, 8, 0.7, 0.2), 0.25)}
+
+
+# Slow: a compile of a float64 group with its diagnostics, and of its twin.
+# Per push: tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", sorted(GS_RADIUS_SEEDS))
+def test_the_reported_radius_has_the_geometry_term_in_it_under_gauss_seidel(seed):
+    """The other schedule: a member updated before the holder of the
+    positions it reads takes them from the iterate, and the geometry term
+    is in the Gauss-Seidel pass's Jacobian.  ``rho_spectral`` is the
+    float64 reference's radius to 1e-9 where the Jacobian without its
+    position columns is a quarter or more off."""
+    case, least = GS_RADIUS_SEEDS[seed]
+    seen = GS_SEARCH.observe(case)
+    report = seen["report"]
+    assert seen["scored"] and seen["spectral_usable"] and seen["reason"] is None, seen
+    true, without = report["rho_true"], report["rho_without_geometry"]
+    assert abs(without - true) >= least * true, (without, true)
+    assert abs(report["rho_spectral"] - true) <= 1e-9 * true, report
+    over = {name: seen[name] for name in gc.SEARCHES + ("radius_strict",)
+            if seen[name] > gc.THRESHOLD[name]}
+    assert not over, (over, report)
+
+
+# Slow: a compile of a float64 group with its diagnostics, and of its twin.
+# Per push: tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it
+@pytest.mark.slow
+def test_a_sweep_that_updates_the_holder_first_has_no_geometry_column():
+    """Where Gauss-Seidel updates the holder of the positions before every
+    member that reads them, no read of a position is from the iterate: the
+    reference's Jacobian has exactly zero in every position column, a
+    product without the geometry is the same product, and the report is
+    the reference's all the same (the self-check moves the positions the
+    gather reads from the pre-step state)."""
+    cell = GS_CELLS[1]
+    for seed in (7, 8):
+        case = Case(1, seed, 0.7, 0.2)
+        seen = GS_SEARCH.observe(case)
+        report = seen["report"]
+        assert seen["scored"] and seen["spectral_usable"] and seen["reason"] is None, seen
+        _gm, twin, ref = GS_SEARCH._built(1)                # noqa: SLF001
+        values = gc.values_of(case, cell)
+        ref = gc.bound_reference(ref, twin, values)
+        with gc.precision(True):
+            _pre, state, _d, _meta = gc.run_once(_gm, values)
+        J = ref.jacobian(ref.flat(state))
+        assert not np.any(J[:, gc.geometry_columns(cell, ref)])
+        assert report["rho_without_geometry"] == report["rho_true"]
+        assert abs(report["rho_spectral"] - report["rho_true"]) <= 1e-9 * report["rho_true"]
+        assert report["geometry_gap"] <= HONEST_GAP
+
+
 def test_the_product_at_another_iterate_s_geometry_is_another_radius():
     """The premise of the fault "the geometry read at another time
     level": on a radius seed the Jacobian at the first pass's geometry

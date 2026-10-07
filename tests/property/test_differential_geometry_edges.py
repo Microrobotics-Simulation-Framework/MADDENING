@@ -669,6 +669,40 @@ def test_the_inlined_twin_keeps_names_orders_and_groups_and_uses_plain_edges_onl
     assert type(twin.node("R")) is gg.Reader and type(twin.node("E")) is gg.Body
 
 
+def test_two_geometry_edges_into_one_port_are_inlined_on_a_port_each():
+    """Two grid-side bodies deliver into ``P.u`` through a mapping each,
+    the second additively: the twin gives each edge its own value and
+    geometry port.  (They used to share ``"u@value"``, the second value
+    replacing the first before either was mapped: the twin's states were
+    0.11 to 0.17 from the edge-mapped graph's with nothing refused.  No
+    case of this module has that shape.)"""
+    rng = np.random.default_rng(5)
+    mats = [rng.uniform(-0.6, 0.6, size=(gg.M_POINTS, gg.N_MATRIX)) for _ in range(3)]
+
+    def graph():
+        nodes = [gg.Body("F1", DT, n=gg.N_MATRIX, geoms={"A": mats[0]}, seed=21),
+                 gg.Body("F2", DT, n=gg.N_MATRIX, geoms={"A": mats[1]}, seed=22),
+                 gg.Body("P", DT, n=gg.M_POINTS, geoms={"A": mats[2]}, seed=23)]
+        mapping = lambda: gg.geom_matrix_mapping(gg.M_POINTS, gg.N_MATRIX)   # noqa: E731
+        return gg.GGraph(nodes, [
+            gg.GEdge("F1", "P", "x", "u", mapping=mapping(), geometry=("source", "A")),
+            gg.GEdge("F2", "P", "x", "u", mapping=mapping(), geometry=("target", "A"),
+                     additive=True)])
+
+    twin = gg.inline_geometry(graph())
+    assert [(e.src, e.tf) for e in twin.edges] == [
+        ("F1", "u@value"), ("F1", "u@geometry"), ("F2", "u@value@1")]
+    edge, inline = gg.build(graph()), gg.build(twin)
+    for a, b in zip(gg.run_steps(edge, 3), gg.run_steps(inline, 3)):
+        for name in a:
+            for field in a[name]:
+                np.testing.assert_allclose(a[name][field], b[name][field], rtol=2e-6, atol=1e-7)
+    # Both edges reach the port: with either removed the state is another.
+    alone = gg.GGraph(graph().nodes, graph().edges[:1])
+    last, only = gg.run_steps(edge, 3)[-1], gg.run_steps(gg.build(alone), 3)[-1]
+    assert np.max(np.abs(last["P"]["x"] - only["P"]["x"])) > 1e-2
+
+
 def test_a_geometry_edge_that_is_not_the_last_into_its_port_is_refused_by_the_twin():
     """The additive sum of a port follows the edge order, and the twin adds
     the mapped value last: a geometry edge ahead of a plain one would sum

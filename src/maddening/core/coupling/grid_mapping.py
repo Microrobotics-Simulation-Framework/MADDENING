@@ -221,6 +221,13 @@ class MultilinearGridMapping:
         if not jnp.issubdtype(geom.dtype, jnp.floating):
             raise TypeError(
                 f"{KIND}: the geometry has dtype {geom.dtype}; positions are floating-point")
+        # Asked here as well as by ``compile()``: a program is traced
+        # again when the geometry's dtype changes, so a float32 geometry
+        # written into a graph that was compiled with a float64 one (a
+        # state write is not a recompile) is refused at its first step.
+        unresolved, _ = self.geometry_dtype_problems(geom.dtype)
+        if unresolved:
+            raise ValueError(f"{KIND}: " + "; ".join(unresolved))
         if geom.ndim == 1:
             geom = geom[:, None]
         T = geom.dtype

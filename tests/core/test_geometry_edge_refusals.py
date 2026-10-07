@@ -798,3 +798,100 @@ def test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed():
 
     gg.assert_not_diagnosed(build(True), ["a.x->b.u"])
     assert "not_usable_reason" not in build(False)
+
+
+# ---------------------------------------------------------------------------
+# The dtype rules hold for a geometry written after compile()
+# ---------------------------------------------------------------------------
+# ``validate()`` asks them of the state ``compile()`` is given.  A state
+# write is not a recompile: a geometry compiled as float64 and written as
+# float32 used to reach the kernel unasked, and on a grid float32 cannot
+# resolve every sample came back 0.0.  They are asked again where a
+# program is traced, which a change of dtype always causes.
+
+_ENTRIES = {
+    "step": lambda gm: gm.step(),
+    "run": lambda gm: gm.run(2),
+    "run_scan": lambda gm: gm.run_scan(2),
+    "run_scan_with_history": lambda gm: gm.run_scan_with_history(2),
+    "resolve_boundary_inputs": lambda gm: gm.resolve_boundary_inputs("b"),
+}
+
+
+def _rewritten(gm, node, dtype):
+    state = dict(gm.get_node_state(node))
+    state["g"] = jnp.asarray(np.asarray(state["g"]), dtype=dtype)
+    gm.set_node_state(node, state)
+    assert str(gm.get_node_state(node)["g"].dtype) == dtype
+
+
+@pytest.mark.parametrize("entry", sorted(_ENTRIES))
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_a_float32_geometry_written_after_compile_meets_the_resolution_rule(
+        anchor, node, entry):
+    """Origin 1e6, spacing 1e-3, compiled with a float64 geometry and then
+    handed a float32 one by ``set_node_state``: refused with the number
+    ``compile()`` gives, at whichever entry point traces first; and the
+    float64 geometry written back runs."""
+    with gg.x64(True):
+        cls = _holder_of("float64")
+        if anchor == "target":
+            mapping = gg.multilinear((1.0e6, 0.0, 0.0), (1.0e-3, 1.0, 1.0), (N_SOURCE, 1, 1),
+                                     n_points=N_TARGET, mode="consistent")
+        else:
+            mapping = gg.multilinear((1.0e6, 0.0), (1.0e-3, 1.0), (N_TARGET, 1),
+                                     n_points=N_SOURCE, mode="conservative")
+        gm = GraphManager()
+        gm.add_node(cls("a", 1.0, n=N_SOURCE, rows=N_SOURCE, cols=2))
+        gm.add_node(cls("b", 1.0, n=N_TARGET))
+        gm.add_edge("a", "b", "x", "u", mapping=mapping, geometry=(anchor, "g"))
+        gm.compile()
+        gm.step()
+        _rewritten(gm, node, "float32")
+        with pytest.raises(ValueError) as refused:
+            _ENTRIES[entry](gm)
+        message = str(refused.value)
+        assert f"edge {KEY}: a float32 geometry locates a point on axis 0" in message
+        assert "only to 119 of a cell" in message and "'g' has dtype float32" in message
+        _rewritten(gm, node, "float64")
+        _ENTRIES[entry](gm)
+
+
+def test_a_float32_geometry_the_grid_resolves_is_accepted_after_compile():
+    """The rule is about resolution, not about a changed dtype: on a grid
+    at the origin the float32 write retraces and steps."""
+    with gg.x64(True):
+        gm = _grid_graph(0.0, 1.0, dtype="float64")
+        gm.compile()
+        gm.step()
+        _rewritten(gm, "b", "float32")
+        gm.step()
+        assert str(gm.get_node_state("b")["g"].dtype) == "float32"
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "bool", "float16", "bfloat16"])
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g7_holds_for_a_geometry_written_after_compile(anchor, node, dtype):
+    """``compile()`` refuses a geometry that is not float32 or float64
+    (G7); so does the first step after a write that makes it one."""
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    gm.step()
+    _rewritten(gm, node, dtype)
+    with pytest.raises(TypeError, match=f"edge {KEY}: its geometry field 'g' now has "
+                                        f"dtype {dtype}"):
+        gm.step()
+
+
+def test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_called_directly():
+    """Outside any graph: ``apply`` with positions in a dtype the grid's
+    coordinates are too coarse in raises instead of returning samples."""
+    mapping = gg.multilinear((1.0e6,), (1.0e-3,), (6,), n_points=2, mode="consistent")
+    field = jnp.arange(6, dtype=jnp.float32)
+    points = np.asarray([[1.0e6 + 0.0013], [1.0e6 + 0.0027]])
+    with pytest.raises(ValueError, match="multilinear_grid: a float32 geometry locates a "
+                                         "point on axis 0 .* only to 119 of a cell"):
+        mapping.apply(field, None, jnp.asarray(points, jnp.float32))
+    with gg.x64(True):
+        got = mapping.apply(field, None, jnp.asarray(points, jnp.float64))
+        np.testing.assert_allclose(np.asarray(got), [1.3, 2.7], rtol=1e-6)

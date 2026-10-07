@@ -56,9 +56,10 @@ and held to a floor in the slow profile):
    ``rho_spectral`` as an upper estimate, so none is scored;
 3. *gradient bound* (CPL-093): the true relative error of the implicit
    derivative taken at the returned iterate against the same dense solve
-   at the fixed point, the worst over every scalar gain and mapping
-   weight, over ``gradient_relative_error_bound``, where
-   ``gradient_bound_usable``;
+   at the fixed point, the worst over every scalar gain and every mapping
+   weight the graph holds (:func:`gradient_constants`: every entry of a
+   matrix held dense, the pattern's entries of a sparse mapping), over
+   ``gradient_relative_error_bound``, where ``gradient_bound_usable``;
 4. *floor* (CPL-097, CPL-100): how far the exact residual of the returned
    state is *above* the reported one, over the floor the report used --
    at a stalled iterate, whose reported residual is zero, the plateau
@@ -411,9 +412,43 @@ def _radius_allowance(A: np.ndarray, rho: float, eps: float, seed: int) -> float
     return 1e-4 * rho + 16.0 * moved
 
 
-def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
-    """The worst relative error of ``d x* / d c`` taken at the returned
-    iterate, over every scalar gain and mapping weight ``c`` of the group.
+def gradient_constants(topo: ct.Topology, mapping_kind: str) -> list:
+    """The scalar constants the gradient score is taken over: what a graph
+    of *topo* built under *mapping_kind* holds as parameters of its group.
+
+    Every entry of every gain of every member, and of each mapped edge the
+    entries :func:`~tests.property.coupled_topologies.parameter_entries`
+    names: every entry of a matrix held dense, the pattern's entries of a
+    sparse one.  An entry outside a sparse pattern is structure -- the
+    graph has no weight there, no user can ask for a derivative with
+    respect to one and ``gradient_relative_error_bound`` says nothing of
+    it -- so it is no constant; an entry of the pattern is one whatever
+    its drawn weight.  Each as the keyword arguments that name it:
+    ``node, port, entry`` or ``edge, entry``.
+    """
+    constants = []
+    for m in topo.groups[0]:
+        nd = topo.node(m)
+        assert not nd.three_arg, (
+            f"{m} reads its gains when the step is traced: the graph holds no parameter there")
+        for j in range(nd.ports):
+            constants += [dict(node=m, port=j, entry=(a, b))
+                          for a in range(nd.n) for b in range(nd.n)]
+    for i, e in enumerate(topo.edges):
+        if e.mapped:
+            held = ct.parameter_entries(topo, i, mapping_kind)
+            constants += [dict(edge=i, entry=(int(a), int(b))) for a, b in zip(*np.nonzero(held))]
+    return constants
+
+
+def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> list:
+    """``(relative error, constant)`` of ``d x* / d c`` taken at the
+    returned iterate, for every constant ``c`` of
+    :func:`gradient_constants` the fixed point depends on.
+
+    *mapping_kind*: how the graph *model* describes holds its mapped edges
+    (the cell's; a model is the dense one whatever the kind, so it cannot
+    say).
 
     With the pass ``F(x) = (I - L)^{-1} (U x + c_g)`` and ``M = L + U``,
     the implicit derivative at an iterate ``x`` is ``(I - M)^{-1} (dL F(x)
@@ -423,6 +458,14 @@ def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
     the group's norm reads, each over its magnitude at the returned state.
     """
     topo = model.topo
+    assert model.geometry is None, "a geometry-dependent mapping holds no weights"
+    for i, e in enumerate(topo.edges):
+        if e.mapped:
+            # The model is the graph's only where its matrix is zero
+            # wherever the graph holds nothing.
+            outside = ~ct.parameter_entries(topo, i, mapping_kind)
+            assert not np.any(np.asarray(model.values["H"][i])[outside]), (
+                f"edge {i}: the model's matrix is not one a {mapping_kind!r} edge holds")
     members, off, k = model._group_layout(0)  # noqa: SLF001
     L, U = model.group_pass(0)
     cg_ = model.group_constant(0, pre, state)
@@ -449,27 +492,22 @@ def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
         L1, U1 = other.group_pass(0)
         return L1 - L, U1 - U
 
-    constants = []
-    for m in members:
-        nd = topo.node(m)
-        for j in range(nd.ports):
-            constants += [dict(node=m, port=j, entry=(a, b))
-                          for a in range(nd.n) for b in range(nd.n)]
-    for i, e in enumerate(topo.edges):
-        if e.mapped:
-            H = np.asarray(model.values["H"][i])
-            pattern = np.ones(H.shape, bool)
-            constants += [dict(edge=i, entry=(a, b)) for a in range(H.shape[0])
-                          for b in range(H.shape[1]) if pattern[a, b]]
-    worst = 0.0
-    for c in constants:
+    errors = []
+    for c in gradient_constants(topo, mapping_kind):
         dL, dU = moved(**c)
         t_k = resolvent @ np.asarray(dL @ F + dU @ x, np.float64)
         miss = resolvent @ np.asarray(dL @ (F - xs) + dU @ (x - xs), np.float64)
         size = float(np.linalg.norm(WS @ t_k))
         if size > 0:
-            worst = max(worst, float(np.linalg.norm(WS @ miss)) / size)
-    return worst
+            errors.append((float(np.linalg.norm(WS @ miss)) / size, c))
+    return errors
+
+
+def _gradient_error(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> float:
+    """The worst of :func:`gradient_errors`: over every scalar gain and
+    every mapping weight the graph holds."""
+    return max((error for error, _c in gradient_errors(model, pre, state, mapping_kind)),
+               default=0.0)
 
 
 def radius_scores(out: dict, J: np.ndarray, wv: np.ndarray, rho_reported: float, eps: float,
@@ -557,14 +595,17 @@ def observe(case: Case) -> dict:
         out["report"]["distance"] = dist
 
     if out["gradient_usable"]:
-        true = _gradient_error(model, step.pre, step.state)
+        true, constant = max(
+            gradient_errors(model, step.pre, step.state, cell.mapping_kind),
+            key=lambda error: error[0], default=(0.0, None))
         # The bound is on the error of stopping early.  The derivative it
         # is relative to is itself a float solve, good to no better than a
         # few ``eps``: an error below 64 of them (the allowance of the
         # domain check of CPL-093) is not one a gradient in this dtype has.
         bound = float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
         out["gradient"] = math.inf if math.isnan(bound) else true / bound
-        out["report"]["gradient_error"] = true
+        out["report"].update(gradient_error=true, gradient_constant=constant,
+                             gradient_allowed=bound)
     return out
 
 

@@ -216,8 +216,11 @@ def against_the_closed_form(case: linear.Case) -> dict:
     dist, dist_exact = ref.distance(x, fixed, norm), model.returned_weight_distance(
         0, step.pre, step.state)
     _dn, _b, detail = model.group_report_consistency(0, step.pre, step.state, 0.0)
+    # The reference differentiates the twin's own parameter tree; the
+    # closed form is told how the cell holds its mapped edges, so that it
+    # takes the same constants (a sparse edge has none outside its pattern).
     grad, grad_exact = ref.gradient_error(x, fixed, raw)[0], linear._gradient_error(   # noqa: SLF001
-        model, step.pre, step.state)
+        model, step.pre, step.state, cell.mapping_kind)
     scale = max(float(np.max(np.abs(x_star))), np.finfo(np.float64).tiny)
     # A relative norm divides a field by ``rtol`` times its size: one float64
     # rounding of a field is this much of the norm's unit.

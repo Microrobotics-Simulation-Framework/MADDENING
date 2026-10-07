@@ -172,6 +172,9 @@ def bound_reference(ref: cr.PassReference, values: dict, built_twin: ct.Built) -
 
 #: The example a twin's layout probe steps (see ``PassReference.of``).
 _PROBE = linear.Case(0, 1, 0.6, False, 1.0, 0.0, 1.0, 0, 0.5, 0)
+#: The linear search's multi-rate cell, found by what it is (the cell's
+#: place in ``linear.CELLS`` is the linear search's to keep).
+_LINEAR_MULTIRATE = linear.CELLS.index(linear.Cell("ring-3-multirate", "float32", 6, 5))
 
 
 @functools.lru_cache(maxsize=8)
@@ -380,15 +383,30 @@ class Cell:
                 else self.kind)
 
 
+#: The rows of ``linear.KNOBS`` and the caps the rotation below takes,
+#: FROZEN: the seven rows and two caps the linear search held when these
+#: cells were laid out.  The rotation is over these tuples and never over
+#: the length of a table of another module: a row appended to
+#: ``linear.KNOBS`` (2026-10-07) silently turned 21 of the 43 cells into
+#: other configurations, under pins whose comments described the old ones.
+#: A new configuration is a new cell, appended (:data:`APPENDED`);
+#: ``tests/property/test_coupling_search_cells_are_pinned.py`` holds every
+#: cell's configuration per push.
+ROTATED_KNOBS = (0, 1, 2, 3, 4, 5, 6)
+ROTATED_CAPS = (5, 120)
+
+
 def _cells() -> tuple:
     """Every structure with every nonlinearity at both dtypes, the
-    configurations and the caps rotated as the linear search rotates them."""
+    configurations and the caps rotated as the linear search rotated them
+    over :data:`ROTATED_KNOBS` and :data:`ROTATED_CAPS`."""
     out = []
     for s, name in enumerate(STRUCTURES):
         for q, kind in enumerate(KINDS):
             for t, dtype in enumerate(("float32", "float64")):
-                knob = (s + 3 * t + 2 * q) % len(linear.KNOBS)
-                out.append(Cell(name, dtype, knob, linear.CAPS[(s + t + q) % 2], kind))
+                knob = ROTATED_KNOBS[(s + 3 * t + 2 * q) % len(ROTATED_KNOBS)]
+                out.append(Cell(name, dtype, knob,
+                                ROTATED_CAPS[(s + t + q) % len(ROTATED_CAPS)], kind))
     return tuple(out)
 
 
@@ -764,9 +782,7 @@ def test_the_reference_reproduces_the_closed_form_on_every_per_push_draw():
     ring, twelve scalars), the seed shapes, and the same number of draws
     on the multi-rate cell (a sub-cycled member, linear interpolation)."""
     drawn = _per_push_draws(linear.PER_PUSH_CELLS) + list(linear.SEEDS.values())
-    multirate = len(linear.PER_PUSH_CELLS)
-    assert linear.CELLS[multirate].structure.endswith("multirate")
-    drawn += _per_push_draws((multirate,))[:150]
+    drawn += _per_push_draws((_LINEAR_MULTIRATE,))[:150]
     worst = assert_the_reference_reproduces_the_closed_form(drawn)
     print(f"{len(drawn)} draws; the worst miss over what is allowed: "
           + ", ".join(f"{k} {v:.3g}" for k, v in sorted(worst.items())))
@@ -775,8 +791,7 @@ def test_the_reference_reproduces_the_closed_form_on_every_per_push_draw():
 # Slow (the marked cells): a twin and an iterating twin compiled per cell.
 # Per push: tests/property/test_coupling_nonlinear_search.py::test_several_passes_of_an_iterating_twin_are_compositions_of_the_single_pass
 @pytest.mark.parametrize("index", [0, pytest.param(2, marks=pytest.mark.slow),
-                                   pytest.param(len(linear.PER_PUSH_CELLS),
-                                                marks=pytest.mark.slow)])
+                                   pytest.param(_LINEAR_MULTIRATE, marks=pytest.mark.slow)])
 def test_several_passes_of_an_iterating_twin_are_compositions_of_the_single_pass(index):
     """The single-pass branch of the step (``max_iterations=1``) runs the
     pass an iterating group iterates: three passes of a twin that iterates

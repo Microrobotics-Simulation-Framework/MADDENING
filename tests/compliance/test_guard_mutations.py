@@ -429,12 +429,21 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("Y38", CI, "          key: ${{ steps.cc.outputs.key }}-${{ github.sha }}\n\n      - name: Upload test durations",
        "          key: ${{ steps.cc.outputs.key }}\n\n      - name: Upload test durations", CI_ALL,
        "the first cache saved per key is kept for good (keys are immutable): PRs restore an ever older base"),
+    _M("Y39", CI, "        timeout-minutes: 10\n        run: sudo apt-get update",
+       "        run: sudo apt-get update", CI_ALL,
+       "a silent package mirror holds a per-push runner for six hours (it did for 1 h 50 min on 2026-10-07)"),
+    _M("Y40", CI, "        timeout-minutes: 10\n        run: sudo apt-get update",
+       "        timeout-minutes: 600\n        run: sudo apt-get update", CI_ALL,
+       "the install step has a limit in name only"),
     # --- Z: the slow lane, .github/workflows/slow-tests.yml -------------------
     _M("Z1", SL, '          echo "pytest exited with code ${{ steps.pytest.outputs.exit_code }}"\n          exit 1',
        '          echo "pytest exited with code ${{ steps.pytest.outputs.exit_code }}"', CI_ALL,
        "the slow lane goes green on ordinary test failures"),
     _M("Z2", SL, "sudo apt-get install -y -qq valgrind clang", "sudo apt-get install -y -qq clang", CI_ALL,
        "the valgrind tests skip in the only lane that runs them"),
+    _M("Z10", SL, "        timeout-minutes: 10\n        run: sudo apt-get update",
+       "        run: sudo apt-get update", CI_ALL,
+       "a silent package mirror holds a slow-lane runner for the job's 180 minutes"),
     _M("Z3", SL, "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
                  "        env:\n",
        "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"

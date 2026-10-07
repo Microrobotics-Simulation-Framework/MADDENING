@@ -199,6 +199,11 @@ jobs:
         # that is what this step is for.  The unit binary under valgrind and
         # the libFuzzer campaign -- the only use of clang -- are slow-marked
         # and run in slow-tests.yml, which installs both itself.
+        # A package mirror that stops answering leaves apt-get waiting with no
+        # output: on 2026-10-07 this step hung for 1 h 50 min in one shard
+        # while the other eleven jobs were green.  The install takes under a
+        # minute; ten is the limit, and a rerun of the job is the remedy.
+        timeout-minutes: 10
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
 
       - name: Compilation cache mode

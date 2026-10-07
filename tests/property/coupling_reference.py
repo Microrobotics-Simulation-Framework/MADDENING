@@ -349,6 +349,30 @@ class PassReference:
             return np.asarray(self._jit_sens(jnp.asarray(x, jnp.float64), theta, self._pre,
                                              self._params))
 
+    def pass_responses(self, x, norm: Norm) -> np.ndarray:
+        """How far one pass from iterate *x* moves, in *norm* at *x*'s
+        weights, when each scalar constant is moved by its own magnitude
+        (a zero entry by its constant's largest magnitude, or by 1 for an
+        all-zero constant): the size ``gradient_relative_error_bound``
+        probes a constant at, and the quantity it compares with the
+        residual's float floor to say whether the pass resolves the
+        constant at all.  One entry per column of :meth:`sensitivities`."""
+        x = np.asarray(x, np.float64)
+        with x64():
+            theta, _restore = ravel_pytree(self._constants_of(self._params))
+        theta = np.abs(np.asarray(theta, np.float64))
+        names = self.constant_names()
+        tops: dict = {}
+        for name, value in zip(names, theta):
+            leaf = name.rsplit("[", 1)[0]
+            tops[leaf] = max(tops.get(leaf, 0.0), float(value))
+        scale = np.asarray([value if value > 0 else (tops[name.rsplit("[", 1)[0]] or 1.0)
+                            for name, value in zip(names, theta)])
+        moved = self.sensitivities(x) * scale[None, :]
+        weights, zero = norm.weights(x), np.zeros(self.size)
+        return np.asarray([norm.of_difference(moved[:, c], zero, weights)
+                           for c in range(moved.shape[1])])
+
     def constant_names(self) -> list:
         """``node.leaf[i]`` / ``mapping:key.leaf[i]`` per column of :meth:`sensitivities`."""
         with x64():

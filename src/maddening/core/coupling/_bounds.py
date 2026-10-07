@@ -954,7 +954,29 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # A probe whose tangent could not be computed (non-finite) counts as
     # responding, so its NaN bound poisons the maximum; it used to drop
     # out silently where the tangent was NaN (``NaN > 0`` is False).
-    responds = jnp.logical_or(norm(t_s) > 0, jnp.logical_not(jnp.isfinite(norm(t_s))))
+    #
+    # **And only a probe the pass resolves.**  A relative error divides by
+    # the tangent's size, and a tangent that is rounding has none: where
+    # moving the constant by the probe's whole size (its own magnitude)
+    # moves one pass by no more than the pass's float resolution -- the
+    # floor the distance carries, in this norm -- the right-hand side is
+    # what cancellation left of terms the size of the fields, and so is
+    # the tangent solved from it.  That is the same statement as a zero
+    # tangent (the fixed point does not respond to the probe) made at the
+    # resolution it can be made at, and such a probe is not in the worst
+    # either.  It used to be: for the centre and the curve of a
+    # nonlinearity evaluated on its centre (a constant the fixed point
+    # does not respond to; right-hand sides of 2e-33 to 5e-18 beside ones
+    # of order one, float64) the bound read 1.09 for a relative error of
+    # 1.134 on a converged hub, usable.  The absolute error for such a
+    # constant is of the size of its tangent (1.7e-34 there, beside
+    # gradients of 3.5e3).  A right-hand side that is not finite still
+    # counts (its NaN bound poisons the maximum).
+    rhs_size = norm(s * w)
+    resolved_probe = jnp.logical_or(rhs_size > floor, jnp.logical_not(jnp.isfinite(rhs_size)))
+    responds = jnp.logical_and(
+        jnp.logical_or(norm(t_s) > 0, jnp.logical_not(jnp.isfinite(norm(t_s)))),
+        resolved_probe)
     worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
     worst = jnp.where(jnp.any(responds), worst, nan)
 

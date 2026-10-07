@@ -651,9 +651,19 @@ def observe(case: Case) -> dict:
         bound = (float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
                  + ref.gradient_resolution(x, raw))
         names = ref.constant_names()
+        # CPL-093 is made for a constant the pass resolves: moving it by
+        # its own magnitude moves one pass by more than the residual's
+        # float floor.  Held here to ``RESOLVED_MARGIN`` floors (the two
+        # sides are two computations of one comparison).
+        response = ref.pass_responses(x, raw)
+        resolved = [not out["floor_reported"] or r > RESOLVED_MARGIN * floor for r in response]
+        out["report"]["constants_resolved"] = (sum(resolved), len(resolved))
         for score, vanishing in (("gradient", False), ("gradient_vanishing", True)):
+            mine = [does_not_move_the_fixed_point(n) is vanishing for n in names]
+            out["report"][f"{score}_constants"] = (
+                sum(m and r for m, r in zip(mine, resolved)), sum(mine))
             true, column = ref.gradient_error(x, fixed, raw, columns=[
-                does_not_move_the_fixed_point(n) is vanishing for n in names])
+                m and r for m, r in zip(mine, resolved)])
             out[score] = math.inf if math.isnan(bound) else true / bound
             out["report"].update({f"{score}_error": true, f"{score}_constant": (
                 None if column is None else ref.constant_names()[column])})
@@ -679,6 +689,11 @@ SEARCHES = linear.SEARCHES
 #: a fixed point (measured: 0.93 to 1.00; a capped solve from a start a
 #: whole field away can return where Newton reaches none).
 USABLE_FLOOR = 0.25
+#: A constant is scored for the gradient bound where its pass response
+#: (``PassReference.pass_responses``) is above this many floors: the
+#: bound drops a probe at one floor, by its own float32 or float64
+#: arithmetic, and the reference measures the response in float64.
+RESOLVED_MARGIN = 2.0
 REFERENCED_FLOOR = 0.75
 
 

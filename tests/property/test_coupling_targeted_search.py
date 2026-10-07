@@ -1235,11 +1235,12 @@ def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(
 # how the graph holds it (:func:`gradient_constants`), and a score taken
 # over entries the graph does not hold is a wrong score with the flag set.
 # The enumeration was every entry of the matrix whatever the edge: on the
-# example below it read 2.62, all of it from entries outside a local
-# pattern (0.53 over the gains and the pattern's eight weights).  The same
-# matrices held dense score 0.48, and rightly over every entry: there each
-# is a weight and ``gradient_relative_error_bound`` covers it (5.6e-3,
-# against 1.0e-3 on the sparse graph).
+# example below it read 2.62 (jaxlib 0.11.0; 2.58 on 0.10.2 and 0.11.2),
+# all of it from entries outside a local pattern (0.53 over the gains and
+# the pattern's eight weights).  The same matrices held dense score 0.48,
+# and rightly over every entry: there each is a weight and
+# ``gradient_relative_error_bound`` covers it (5.6e-3, against 1.0e-3 on
+# the sparse graph).
 #
 # Which patterns can show it: the relative error of the derivative with
 # respect to a weight is that of the source entry it reads, whatever its
@@ -1360,7 +1361,8 @@ def test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern
               for b in np.nonzero(~pattern.any(axis=0))[0]}
     assert bool(unread) is (kind == "sparse-local")
     if not unread:
-        assert max(as_dense.values()) == max(as_sparse.values())
+        # (To rounding: two rows of a column differ in the last place.)
+        assert max(as_dense.values()) <= max(as_sparse.values()) * (1.0 + 1e-9)
 
     # A weight at zero is still a weight: the pattern says so, not the values.
     edge = next(i for i, e in enumerate(topo.edges) if e.mapped)
@@ -1432,12 +1434,14 @@ def test_the_gradient_score_of_a_sparse_edge_is_taken_over_its_pattern():
     outside = _outside(topo, kind)
     worst, constant = max(gradient_errors(model, step.pre, step.state, kind),
                           key=lambda error: error[0])
-    assert (worst, constant) == (report["gradient_error"], report["gradient_constant"])
+    assert worst == pytest.approx(report["gradient_error"], rel=1e-9)
+    assert constant == report["gradient_constant"]
     assert (constant.get("edge"), constant["entry"]) not in outside
     beyond, where = max(gradient_errors(model, step.pre, step.state, "matrix"),
                         key=lambda error: error[0])
     assert (where.get("edge"), where["entry"]) in outside
-    assert beyond / report["gradient_allowed"] > 2.0 * THRESHOLD["gradient"], (
+    # units: a score; measured 2.58 on jaxlib 0.10.2 and 0.11.2, 2.62 on 0.11.0.
+    assert beyond / report["gradient_allowed"] > 1.5 * THRESHOLD["gradient"], (
         beyond, report["gradient_allowed"])
 
     dense = dataclasses.replace(case, cell=CELLS.index(

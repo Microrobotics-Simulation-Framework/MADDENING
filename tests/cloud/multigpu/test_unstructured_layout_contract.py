@@ -353,12 +353,28 @@ def test_a_node_declaring_its_integral_runs_in_a_graph_like_the_unsharded_node(s
     assert np.all(np.isfinite(np.asarray(gm.get_node_state("src")["total"])))
 
 
-def test_a_node_without_an_initial_integral_steps_in_a_graph():
-    """``gm.step()`` feeds step 1's output (now carrying the integral) back
-    in: three steps, the integral of the last."""
-    gm = _graph(ShardedUnstructuredNode(_Source(8), create_device_mesh(shape=(2,)),
-                                        _chain_layout(8, 2)))
+def test_a_node_without_an_initial_integral_is_handed_its_own_output_back():
+    """The wrapper takes step 1's output (now carrying the integral) back
+    in: three steps, the integral of the last.  The steps are the wrapper's
+    own, jitted as a graph jits them.
+
+    A graph does not store that first step any more: its state would gain
+    a field ``initial_state()`` did not build, so a checkpoint of it would
+    not fit the graph after a reset (``GraphManager.step`` refuses a step
+    that changes the state's layout, MADD-ANO-220, as ``run_scan`` always
+    has).  In a graph the node declares its integral, as the test above
+    does."""
+    node = ShardedUnstructuredNode(_Source(8), create_device_mesh(shape=(2,)),
+                                   _chain_layout(8, 2))
+    step = jax.jit(lambda state: node.update(state, {}, 0.1))
+    state = node.initial_state()
+    assert "total" not in state
     for _ in range(3):
+        state = step(state)
+    assert float(np.asarray(state["total"])) == pytest.approx(36.0 + 8 * 0.3, rel=1e-6)
+
+    gm = _graph(node)
+    held = gm._state
+    with pytest.raises(ValueError, match="'src/total' appears only after the update"):
         gm.step()
-    assert float(np.asarray(gm.get_node_state("src")["total"])) == pytest.approx(
-        36.0 + 8 * 0.3, rel=1e-6)
+    assert gm._state is held

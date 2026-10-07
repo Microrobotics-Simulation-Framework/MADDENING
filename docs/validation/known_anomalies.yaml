@@ -4287,7 +4287,7 @@ anomalies:
       - "tests/cloud/multigpu/test_integral_listed_as_state_field.py::test_an_integral_listed_in_state_fields_is_summed_over_the_shards"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_domain_integral_fed_back_as_state_steps_again"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_declaring_its_integral_runs_in_a_graph_like_the_unsharded_node"
-      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_without_an_initial_integral_steps_in_a_graph"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_without_an_initial_integral_is_handed_its_own_output_back"
       - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_a_vector_domain_integral_in_the_state_runs_in_a_graph_like_the_unsharded_node"
       - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_a_per_shard_domain_integral_fed_back_by_a_graph_steps_again"
       - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_the_initial_value_of_an_integral_is_placed_as_the_step_returns_it"
@@ -14929,12 +14929,23 @@ anomalies:
       cannot use (`HeartPumpNode` `venous_pressure: null`), after which
       every `POST /sim/step` answered 400, is refused there too.
 
-      In process the step entry points are unchanged.  A check of the
-      stepped state's keys and shapes in `step` (once per compile,
-      host-side) was written and withdrawn: it refuses the fixture the
-      compile-count gate's own tests use to provoke a retrace
-      (`tests/core/test_compile_counts.py`, a state that grows on its
-      first step), so it waits for a decision on that fixture.
+      Resolved in 0.4.0 in process too.  `step` and `run` compare the
+      stepped state with the state it replaces -- keys, shapes and kinds
+      of dtype (boolean, integer, float, complex) -- once per trace of the
+      compiled step, host-side, and `run_adaptive` compares the first
+      step it keeps; a difference is a `ValueError` naming the node and
+      the leaf, and nothing is stored (the graph holds the state it held,
+      no observer is told of a step, no callback is called).  A step that
+      is traced again (a new compile; an external input of another shape,
+      which broadcast a scalar leaf at a later step) is compared again.
+      A leaf whose kind of dtype changed (an integer count returned as a
+      float) was stored the same way and is refused the same way.  The
+      FMU sidecar and bridge, which run the compiled step on a state of
+      their own, make the same comparison (`FmuSidecar.step`; an error
+      reply from the bridge, nothing committed).  Nothing is traced and
+      no node's `update` is called for it: the compiled programs are
+      unchanged.  A dtype's width is not compared (with x64 enabled a
+      stock node returns float64 for a float32 state).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -14947,22 +14958,39 @@ anomalies:
       - "maddening.core.graph_manager.GraphManager.step"
       - "maddening.core.graph_manager.GraphManager.run"
       - "maddening.core.graph_manager.GraphManager.run_adaptive"
-    affected_versions: ">=0.1.0"
+      - "maddening.fmi.sidecar.FmuSidecar.step"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
-      Give a node's constants the rank its state has (a scalar for a scalar
-      field), and advance a graph you have not checked with `run_scan`,
-      which refuses a step that changes the state's layout.  Over REST,
-      0.4.0 refuses such a node where it is added.
-    resolution_status: "open"
-    resolution_version: null
-    residual_risk: null
+      On 0.1.0 to 0.3.1 give a node's constants the rank its state has (a
+      scalar for a scalar field), and advance a graph you have not checked
+      with `run_scan`, which refuses a step that changes the state's
+      layout.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Changed behaviour: a step that changes the shape or the kind of
+      dtype of a state leaf, or the fields of a node's state, raises
+      `ValueError` where it was stored; a graph that relied on its state
+      growing at the first step must build the state at its final layout
+      in `initial_state()`.  That includes a node whose `update` returns a
+      field `initial_state()` does not build (a domain integral it only
+      emits): `step` stored the first step of such a node, sharded or
+      not, and now refuses it; the node gives the field an initial value.
+      A dtype of another width of the same kind is still stored as
+      returned.
     verification:
-      # A strict xfail: a change that makes the step entry points keep or
-      # refuse the layout is noticed.
       - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_step_entry_points_keep_the_shape_of_every_state_leaf"
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_a_step_that_changes_a_leafs_kind_of_dtype_or_the_fields_is_refused"
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_a_later_step_that_is_traced_again_is_compared_again"
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_step_of_a_graph_compiled_again_is_compared_again"
+      - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_comparison_is_made_once_per_trace_and_calls_no_update"
       - "tests/core/test_a_step_keeps_the_state_layout.py::test_the_scan_entry_points_refuse_a_step_that_changes_a_leafs_shape"
+      - "tests/fmi/test_a_sidecar_step_keeps_the_state_layout.py::test_a_sidecar_step_that_reshapes_a_leaf_is_refused_and_nothing_is_committed"
+      - "tests/cloud/multigpu/test_a_sharded_step_keeps_the_state_layout.py::test_a_node_beside_a_sharded_one_that_reshapes_its_state_is_refused"
       - "tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_value_of_a_rank_that_reshapes_the_state_at_the_first_step_is_a_400"
+      - "tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_node_the_door_never_saw_is_refused_where_the_graph_steps"
       - "tests/property/test_rest_requests_generated_from_the_schema.py::test_a_new_node_of_any_kind_is_refused_or_steps_with_its_layout_and_reloads"
+
   - anomaly_id: "MADD-ANO-221"
     title: "The Arnoldi breakdown test was 1e-5 of the product in every dtype: rho_spectral read 0.379 for 0.5 and spectral_error_bound 0.61x the true distance, spectral_usable=True"
     description: >

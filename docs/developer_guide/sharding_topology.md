@@ -253,12 +253,14 @@ What 0.4.0 added:
   integral can leave out the padding of a short shard's block;
 * refusals of a node declaring a Cartesian `halo_width()` and of a node
   whose cell count is not the layout's (both silently wrong before);
-* a domain integral carried in the state (a graph's second step, or an
-  initial value the node declares) is placed as the step returns it —
-  replicated once reduced, stacked along the mesh axis otherwise — rather
-  than partitioned, so such a node runs in a `GraphManager` (the stencil
-  wrapper had the same defect for a vector or per-shard integral, fixed the
-  same way);
+* a domain integral carried in the state (an initial value the node
+  declares, or a step's output handed back to the wrapper) is placed as
+  the step returns it — replicated once reduced, stacked along the mesh
+  axis otherwise — rather than partitioned, so such a node runs in a
+  `GraphManager` (the stencil wrapper had the same defect for a vector or
+  per-shard integral, fixed the same way).  In a graph the node gives the
+  integral an initial value in `initial_state()`: a step that adds a field
+  to the state is refused (`GraphManager.step`, as `run_scan`);
 * the session runner `benchmarks/multigpu/run_pod.py` (and its CPU
   `--dry-run`).
 

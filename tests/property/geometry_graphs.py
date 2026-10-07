@@ -44,6 +44,56 @@ port sums in the same order in both graphs.
 :func:`two_body` builds the graph the differential and gradient tests
 draw from: a grid-side body ``F`` and a point-side body ``P`` joined in
 both directions, in or out of a coupling group, at one rate or two.
+
+**The twins with the edge-mapped graph's interface reading**
+(:func:`transform_twin`, :func:`relay_twin`; their docstrings say what
+each holds equal) and **the faults later work is held to.**  Diagnostics
+that read a geometry (the interface norm as a criterion with a geometry
+edge; the bounds in that reading with the geometry term) do not exist in
+0.4.0.  The table lists the faults that work must be caught on, the
+instrument expected to catch each, and -- where the fault can be seeded
+on today's tree in an analogous static-mapping or solve-path form -- the
+signal measured when it was (scratch copies of ``src/``, jaxlib 0.11.0,
+CPU; the instruments are ``tests/property/test_interface_reading_twins.py``
+and, for the numerical reference, ``tests/property/coupling_reference.py``
+and ``tests/property/test_coupling_nonlinear_search.py``):
+
+==  =========================================  ==================================  ==========================================
+#   fault                                      instrument                          analogue today, and the measured signal
+==  =========================================  ==================================  ==========================================
+1   the geometry term dropped from the         the numerical reference: its        none (a static mapping has no geometry
+    reading's Jacobian                         Jacobian is ``jacfwd`` of the       term).  The reference's own sensitivity:
+                                               pass with the geometry field in     a radius reported 10% low fails the
+                                               the iterate (radius, bound and      per-push radius search; an error bound
+                                               gradient scores); the relay         halved, or a gradient bound a twentieth,
+                                               twin's ``rho_spectral``             fails a per-push seed (mutants R1 to R3).
+2   the geometry read at the wrong time        the relay twin (residual, pass      solve path: a group's source-anchored
+    level inside the reading                   count, ``rho_spectral``); the       geometry read from the pre-step state
+                                               time-level reference of             in place of the dict its value is read
+                                               ``test_geometry_time_levels.py``    from.  The relay twin's step-for-step
+                                               for the solve it must agree with    equality fails after two passes: a
+                                                                                   field 2.6e-4 apart, 5.4e-7 allowed, zero
+                                                                                   unmutated (mutant F2-F3).  A converged
+                                                                                   solve does not see it: at a fixed point
+                                                                                   the iterate and the pass agree.
+3   the geometry taken from the iterate        the relay twin, whose relay         the same seeded fault, which is the
+    instead of the pre-step state (or the      computes the mapped value from      reverse (the pre-step state where the
+    reverse)                                   the fields of one update; the       iterate was due): F2-F3.
+                                               numerical reference
+4   the geometry's own rounding left out of    the numerical reference's floor     not seeded.  The relay twin does not
+    the precision floor                        score (the exact residual of the    judge a floor: its own is 13% from the
+                                               returned state above the reported   edge-mapped graph's by construction
+                                               one, over the reported floor) on    (a field read as stored against a
+                                               cells with a float32 geometry       mapping the norm evaluates).
+5   the mapping dropped from the interface     both twins                          seeded (mutant F5): the transform twin's
+    reading                                                                        and the relay twin's equalities both
+                                                                                   fail on the per-push case (residuals
+                                                                                   8.8% apart, 1.2e-4 allowed).
+6   the reading's Jacobian-vector product      ``PassReference                     a reading with a term its tangent does
+    disagreeing with a finite difference       .finite_difference_gap`` (the       not see: gap 1e-3 or more where the
+    (a later run-time self-check)              check itself, for the pass or       honest reading's is under 1e-7
+                                               for any reading written in JAX)     (``test_the_reference_s_jacobian_is_...``).
+==  =========================================  ==================================  ==========================================
 """
 
 from __future__ import annotations
@@ -425,6 +475,173 @@ def inline_geometry(graph: GGraph) -> GGraph:
     return GGraph(nodes, edges, list(graph.groups))
 
 
+# ---------------------------------------------------------------------------
+# The twin with an identical interface reading
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _Relayed:
+    sf: str                     # the source field the edge read
+    out: str                    # the state field that holds the mapped value
+    mapping: Any
+    gfield: Optional[str]       # the source's own geometry field, or None (a static mapping)
+    leaves: tuple               # the mapping's weight leaves, held as node parameters
+
+
+class RelayedSourceNode(SimulationNode):
+    """A source node with the mappings of its outgoing edges inside it: the
+    relay of :func:`relay_twin`.
+
+    Same name, timestep and evaluation count as the node it wraps, the
+    same state and one more field per relayed edge: ``out =
+    mapping.apply(new[sf], weights, new[gfield])``, computed by ``update``
+    from the fields it has just produced (and by ``initial_state`` from
+    the initial ones), so in every state the graph holds -- and in every
+    iterate of a group, which is a state some pass returned -- ``out`` is
+    the mapped value of the ``sf`` beside it.  The mapping's weights are
+    parameters of this node (``"<out>_<leaf>"``), so they stay constants
+    of the step that a gradient or a per-step override can reach.
+    """
+
+    def __init__(self, inner: SimulationNode, relayed):
+        params = dict(inner.params)
+        for r in relayed:
+            weights = r.mapping.params_pytree()
+            for leaf in r.leaves:
+                params[f"{r.out}_{leaf}"] = jnp.asarray(weights[leaf])
+        super().__init__(inner.name, inner.delta_t, **params)
+        self._wrapped = inner
+        self._relayed = tuple(relayed)
+        self._outs = frozenset(r.out for r in relayed)
+
+    def _mapped(self, r: _Relayed, fields, p):
+        weights = {leaf: p[f"{r.out}_{leaf}"] for leaf in r.leaves} or None
+        if r.gfield is None:
+            return r.mapping.apply(fields[r.sf], weights)
+        return r.mapping.apply(fields[r.sf], weights, fields[r.gfield])
+
+    def initial_state(self):
+        state = dict(self._wrapped.initial_state())
+        for r in self._relayed:
+            assert r.sf in state, f"{self.name}.{r.sf} is not a state field (a flux is not relayed)"
+            state[r.out] = self._mapped(r, state, self.params)
+        return state
+
+    def param_specs(self):
+        return self._wrapped.param_specs()
+
+    def update_evaluations(self):
+        return self._wrapped.update_evaluations()
+
+    def boundary_input_spec(self):
+        return self._wrapped.boundary_input_spec()
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        inner = {k: v for k, v in state.items() if k not in self._outs}
+        new = dict(self._wrapped.update(inner, boundary_inputs, dt, params=params))
+        for r in self._relayed:
+            new[r.out] = self._mapped(r, new, p)
+        return new
+
+
+def relay_twin(graph: GGraph) -> GGraph:
+    """*graph* with every mapped edge's mapping moved into a relay on its
+    source, so that the twin's **interface reading is the edge-mapped
+    graph's**.
+
+    ``convergence_norm="interface"`` reads what each internal edge
+    delivers: for ``S.sf -> T.tf`` through mapping ``m`` and transform
+    ``t``, ``t(m(S.sf))``.  The node-inlined twin of
+    :func:`inline_geometry` moves ``m`` into the *target*, so its edge
+    delivers the raw ``S.sf`` and its interface norm is another norm: the
+    two graphs' diagnostics agree only as far as two norms of one solve
+    do.  Here the mapped value is a state field of the source,
+    ``S."<sf>_to_<T>_<tf>" = m(S.sf)``, and the edge is the plain edge
+    ``S."<sf>_to_<T>_<tf>" -> T.tf`` with the same transform and additive
+    flag in the same place of the edge order: it delivers ``t(m(S.sf))``,
+    the same reading entry for entry, with the mapping (and, for a source
+    anchor, its geometry) inside the relay.
+
+    The relay is fused with the source (:class:`RelayedSourceNode`) and is
+    not a node of its own: a separate relay in the group would be fed by
+    an internal edge ``S.sf -> relay`` that the interface norm reads too,
+    and outside the group it would sit in the group's cycle.
+
+    What the twin holds equal by construction, and what it does not:
+
+    * equal: every value a node reads, so the fixed point and every
+      iterate of an unaccelerated solve; the interface norm's reading, so
+      the residual, the pass count, the verdict, the spectrum taken on the
+      reading (``rho_spectral``, ``spectral_error_bound``) and the flags;
+    * not equal: anything that reads the members' *state*, which has the
+      relay's field in it here -- the ``"l2"`` and ``"mixed"`` norms, an
+      accelerator's secant vectors, the gradient bound's norm (the raw
+      source fields: ``S.sf`` there, the relay's field here) -- and the
+      float floor, which counts an inner product for a mapping the norm
+      evaluates and none for a field read as stored.
+
+    A geometry-dependent mapping is relayed where its geometry is its
+    source's (``anchor="source"``: the relay reads the geometry field
+    beside the value, both as the update has just produced them).  A
+    target-anchored geometry is refused: the relay would need the
+    target's geometry over one more internal edge, which the norm would
+    read.  A flux source field is refused too (it is not state).
+    """
+    edges: list = []
+    relayed: dict = {}
+    for e in graph.edges:
+        if e.mapping is None:
+            edges.append(e)
+            continue
+        gfield = None
+        if e.geometry is not None:
+            anchor, gfield = e.geometry
+            if anchor != "source":
+                raise NotImplementedError(
+                    f"{e}: a target-anchored geometry has no relay twin (the relay would read "
+                    f"the target's geometry over an internal edge of its own)")
+        out = f"{e.sf}_to_{e.dst}_{e.tf}"
+        leaves = tuple(sorted(e.mapping.params_pytree()))
+        relayed.setdefault(e.src, []).append(_Relayed(e.sf, out, e.mapping, gfield, leaves))
+        edges.append(GEdge(e.src, e.dst, out, e.tf, transform=e.transform, additive=e.additive))
+    nodes = [RelayedSourceNode(nd, relayed[nd.name]) if nd.name in relayed else nd
+             for nd in graph.nodes]
+    return GGraph(nodes, edges, list(graph.groups))
+
+
+def transform_twin(graph: GGraph) -> GGraph:
+    """*graph* with every *static* mapping written as its edge's transform:
+    the same nodes, the same state, plain edges, and on each formerly
+    mapped edge the transform ``v -> t(m(v))`` (the mapping with its own
+    weights, then the edge's transform ``t``).
+
+    The interface norm reads an edge through its mapping and then its
+    transform, so the twin's reading is the edge-mapped graph's and --
+    unlike :func:`relay_twin` -- so is its state.  A mapping that reads a
+    geometry cannot be written this way (a transform sees the value
+    only), which is what :func:`relay_twin` is for.  The weights are
+    constants of the transform here and parameters of the step there, so
+    the gradient bound, which probes every parameter, is the one number
+    the two graphs do not share.
+    """
+    edges = []
+    for e in graph.edges:
+        if e.mapping is None:
+            edges.append(e)
+            continue
+        assert e.geometry is None, f"{e}: a geometry-dependent mapping is not a transform"
+        then = resolve_transform(e.transform)
+
+        def through(v, _m=e.mapping, _t=then):
+            v = _m.apply(v, None)
+            return v if _t is None else _t(v)
+
+        edges.append(GEdge(e.src, e.dst, e.sf, e.tf, transform=through, additive=e.additive))
+    return GGraph(list(graph.nodes), edges, list(graph.groups))
+
+
 def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
     """A ``GraphManager`` of *graph*, compiled.
 
@@ -471,6 +688,13 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 # deleted: set ``DIAGNOSTICS_READ_GEOMETRY = True`` when a later phase makes
 # the diagnostics read the geometry, and the original comparisons and cases
 # run again.
+#
+# Waiting for that phase too: ``RELAY_INTERFACE_CASES`` (defined after
+# ``case``, below), the interface norm over source-anchored geometry edges,
+# whose relay twin (``relay_twin``) has the edge-mapped graph's interface
+# reading.  ``tests/property/test_interface_reading_twins.py`` asserts each
+# refused today and its relay twin reporting; with the switch set it
+# compares the two reports as it compares a static mapping's today.
 # =============================================================================
 
 #: Whether coupling diagnostics account for a moving geometry.
@@ -611,6 +835,24 @@ class Case:
 
 def case(label: str, *, group: Optional[dict] = None, **kw) -> Case:
     return Case(label, group=None if group is None else tuple(sorted(group.items())), **kw)
+
+
+#: PHASE 1 (the block of that name above): the cases whose interface
+#: diagnostics are held to their relay twin's once diagnostics read a
+#: geometry.  Source anchors on both edges (a target-anchored geometry has
+#: no relay twin), the geometry moving with the iterate, Gauss-Seidel (the
+#: relay doubles the scalars a Jacobi pass carries, past what the spectrum
+#: resolves).
+RELAY_INTERFACE_CASES = [
+    case("geometry edges, interface norm, three passes", adv=0.3, dtype="float64",
+         down="source", up="source",
+         group=dict(max_iterations=3, convergence_norm="interface", rtol=1e-6,
+                    diagnostics=True)),
+    case("multilinear geometry edges, interface norm, three passes", kind="multilinear",
+         adv=0.3, down="source", up="source",
+         group=dict(max_iterations=3, convergence_norm="interface", rtol=1e-6,
+                    diagnostics=True)),
+]
 
 
 def _grid_of(c: Case):

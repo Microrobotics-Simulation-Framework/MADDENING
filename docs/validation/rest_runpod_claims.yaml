@@ -2295,7 +2295,10 @@ claims:
     a configuration error found when the step is traced (an edge of mismatched
     shapes, constraints the step cannot use), and a run-time check in the step
     (equinox.error_if) raising at the first step, or in the sixth doubling
-    slice of a run after 32 steps were stored; a step of an edited graph
+    slice of a run after 32 steps were stored; a step that changes the layout
+    of the state (a node the graph was given in process whose scalar leaf
+    broadcasts, which the step stored before 0.4.0: MADD-ANO-220), refused by
+    the graph on /sim/step and /sim/run; a step of an edited graph
     whose compile refuses; a failure injected at every point of a step's
     body. Not claimed for simultaneous
     requests.
@@ -2303,6 +2306,7 @@ claims:
   tests:
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_graph_configured_so_it_cannot_step_is_a_400_naming_why
     - tests/api/test_runner_pacing_and_status.py::test_an_edge_the_graph_cannot_validate_is_a_400_on_every_route_that_steps
+    - tests/api/test_a_new_node_is_one_the_graph_can_step.py::test_a_node_the_door_never_saw_is_refused_where_the_graph_steps
     - tests/api/test_routes_answer_what_they_did.py::test_a_single_step_that_raises_is_a_400_and_stores_nothing
     - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_at_its_first_step_is_a_400_and_moves_nothing
     - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_part_way_says_how_many_steps_it_took

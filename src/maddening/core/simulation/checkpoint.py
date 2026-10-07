@@ -96,6 +96,16 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
     -------
     Path
         The resolved path of the written file (always ends in ``.npz``).
+
+    Notes
+    -----
+    ``_meta`` is saved as it is, with one exception: a coupling group
+    whose members' state was written to other values after its last step
+    (``set_node_state``) is saved with its ``iterations`` counter at 0,
+    so the loaded graph has no ``coupling_diagnostics()`` entry for it
+    until it steps.  The archive holds the written state, and the
+    report's float floor is measured on the state the step returned.
+    The step only writes that counter, so the restart is unchanged.
     """
     path = Path(path)
 
@@ -112,9 +122,16 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
     # Access the raw internal state dict directly.
     raw_state = graph_manager._state  # noqa: SLF001
     if _META_KEY in raw_state:
+        # A coupling group whose members were written after its last step
+        # is saved with no report: the archive holds the written state,
+        # which is not the state that step returned, and the report's
+        # float floor is measured on the returned state.
+        ended = graph_manager._report_slots_a_written_state_ends()  # noqa: SLF001
         for field_name, value in raw_state[_META_KEY].items():
             key = f"{_META_KEY}/{field_name}"
             arrays[key] = np.asarray(value)
+            if field_name in ended:
+                arrays[key] = np.zeros_like(arrays[key])
 
     # Differentiable graph parameters (node constants), so a calibrated
     # graph restores with the values it was calibrated to.

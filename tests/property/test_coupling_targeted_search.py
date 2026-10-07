@@ -86,6 +86,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import strategies as st
@@ -737,6 +738,46 @@ def test_every_score_holds_on_the_seed_shapes(seed):
     seen = observe(SEEDS[seed])
     over = {name: seen[name] for name in SEARCHES if seen[name] > THRESHOLD[name]}
     assert not over, f"{seed}: {over} ({seen['report']})"
+
+
+def _same_report(a: dict, b: dict) -> bool:
+    """Equal key for key, a NaN (a number not computed) equal to itself."""
+    def norm(d):
+        return {k: ("nan" if isinstance(v, float) and v != v else v) for k, v in d.items()}
+    return norm(a) == norm(b)
+
+
+@pytest.mark.parametrize("seed", sorted(SEEDS))
+def test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterwards(seed):
+    """Step, write the state, read the report: it is still the step's.
+
+    The scores above are of the report read right after the step.  The
+    floor under the bound is measured on the returned state at report
+    time, so a ``set_node_state`` in between used to give the same step
+    another bound (to 0.0 with its flag set, where every member was
+    written to zero: a field at exactly zero leaves the norm).
+    """
+    case = SEEDS[seed]
+    cell = CELLS[case.cell]
+    with precision(cell.dtype == "float64"):
+        built = _built(case.cell)
+        (step,) = ct.run(built, values_of(case), 1)
+        gm, key = built.gm, cell.topo.group_key(0)
+        first = dict(gm.coupling_diagnostics()[key])
+        assert _same_report(first, step.reports[0])
+        members = key.split("+")
+        returned = {name: gm.get_node_state(name) for name in members}
+        edits = {
+            "one member to zero": {members[0]: 0.0},
+            "every member to zero": dict.fromkeys(members, 0.0),
+            "every member a thousand times larger": dict.fromkeys(members, 1e3),
+            "put back": dict.fromkeys(members, 1.0),
+        }
+        for label, factors in edits.items():
+            for name, factor in factors.items():
+                gm.set_node_state(name, {f: v * jnp.asarray(factor, v.dtype)
+                                         for f, v in returned[name].items()})
+            assert _same_report(dict(gm.coupling_diagnostics()[key]), first), (seed, label)
 
 
 def _known(case: Case, score: str, reason: str):

@@ -536,6 +536,11 @@ def compile_counts(
     if scan_steps > 0:
         counts.scan_steps = int(scan_steps)
         saved_state = jax.tree.map(lambda x: x, gm._state)
+        # With the state goes what its last step left where the state has
+        # been written since (``GraphManager._keep_state_for_reports``):
+        # the run below drops it, and the caller's report would then be
+        # measured on the written state.
+        saved_as_reported = gm._state_as_reported
         try:
             # Populates ``_scan_cache``; ``scan_trace_count`` counts the
             # Python traces, one per XLA compile of a scan program.  It
@@ -555,6 +560,7 @@ def compile_counts(
             )
         finally:
             gm._state = saved_state
+            gm._state_as_reported = saved_as_reported
 
     return counts
 
@@ -659,6 +665,7 @@ def _one_iteration_variant(gm):
     def _cm():
         saved_groups = list(gm._coupling_groups)
         saved_state = jax.tree.map(lambda x: x, gm._state)
+        saved_as_reported = gm._state_as_reported
         saved_params = gm.params
         saved_step = gm._compiled_step
         try:
@@ -693,6 +700,7 @@ def _one_iteration_variant(gm):
             with quiet_warnings():
                 gm.compile()
             gm._state = saved_state
+            gm._state_as_reported = saved_as_reported
             gm.params = saved_params
             # ``compile`` rebuilt the step; the original object is fine
             # to keep for callers holding a reference (same graph).

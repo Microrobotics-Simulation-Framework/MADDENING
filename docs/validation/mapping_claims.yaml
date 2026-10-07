@@ -2061,7 +2061,19 @@ claims:
     position columns is up to 45% off; 1.3e-15 with still positions, 1.5e-15
     with target anchors, 3.5e-15 with one of each; 3.8e-7 and 4.8e-7 in
     float32. The pass reads a geometry from its own tracers, and the
-    products are taken of the pass.
+    products are taken of the pass. Under these two norms every list of
+    fields the estimate is built on is "every floating field of every
+    member", the positions among them: the iterate, the norm's weights, the
+    residual and the floor's resolution (the interface norm's reading is the
+    one list that leaves a position out, and is not used here; the
+    quasi-Newton interface set adds a source-anchored geometry by its own
+    rule). Slow, run once on each JAX lane: under Gauss-Seidel, where a
+    member updated before the holder reads the positions from the iterate,
+    rho_spectral is the reference's radius to 1e-9 on draws where the
+    Jacobian without its position columns is 30% and 45% off, and a product
+    without them in the estimator reads 0.397 for 0.274; where the sweep
+    updates the holder first no position is read from the iterate and the
+    reference's Jacobian has zero in every position column.
   domains:
     f32: 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     f64: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'

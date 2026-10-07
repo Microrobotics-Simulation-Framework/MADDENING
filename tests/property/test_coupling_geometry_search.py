@@ -18,9 +18,10 @@ to 1e-5 of the reference's on seeds where a product without the geometry
 would read 12% and 14% off; the self-check (MAP-045) passing on every
 draw with its margin, its arithmetic on a map whose tangent is half its
 derivative, and the report's reading of its slot.  **Slow:** the hunt
-over every cell of :data:`CELLS`, three seeds; a member whose tangent is
-half its derivative, end to end; a geometry held by a node outside the
-group.
+over every cell of :data:`CELLS`, three seeds; the radius seeds under
+Gauss-Seidel in float64, and a sweep whose Jacobian has no geometry
+column; a member whose tangent is half its derivative, end to end; a
+geometry held by a node outside the group.
 
 **Seeded faults** (``plans``-side mutant list; the table in
 ``tests/property/geometry_graphs.py`` names them): the geometry term
@@ -145,7 +146,7 @@ def test_the_reported_radius_has_the_geometry_term_in_it(seed):
 GS_CELLS = (Cell(("source", "source"), True, "float64", 0, 5),
             Cell(("target", "source"), True, "float64", 0, 5, order=("P", "F")))
 GS_SEARCH = gc.Search(GS_CELLS)
-GS_RADIUS_SEEDS = {"the-geometry-raises-the-radius": (Case(0, 7, 0.05, 0.1), 0.25),
+GS_RADIUS_SEEDS = {"the-geometry-raises-the-radius": (Case(0, 7, 0.3, 0.2), 0.25),
                    "the-geometry-lowers-the-radius": (Case(0, 8, 0.7, 0.2), 0.25)}
 
 

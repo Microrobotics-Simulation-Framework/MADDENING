@@ -468,3 +468,49 @@ def test_the_kept_state_holds_references_not_copies(graph):
     kept_state, _kept_meta = graph._state_as_reported
     for name, fields in before.items():
         assert kept_state[name] is fields
+
+
+def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker(
+        tmp_path):
+    """Experimental: a single-rate group whose pass resolves
+    ``multilinear_grid`` mappings reports its bounds (MAP-036), so the
+    invariant above is its too.  A write after the step (the positions
+    the mappings read among it) does not move the report; a checkpoint
+    saved after the write carries the marker, and the graph that loads it
+    withholds what rests on the float floor, with that reason and no
+    other, until the group steps."""
+    from tests.core import geometry_surface_graphs as G  # noqa: PLC0415
+
+    def report(gm):
+        return {k: ("nan" if isinstance(v, float) and v != v else v)
+                for k, v in gm.coupling_diagnostics()[G.GROUP].items()}
+
+    gm = G.graph(group=True)
+    gm.step()
+    first = report(gm)
+    assert "not_usable_reason" not in first and first["spectral_error_bound"] != "nan"
+    assert first["rho_spectral"] != "nan" and first["gradient_relative_error_bound"] != "nan"
+    slot = f"coupling_{G.GROUP}_geometry_gap"
+    gap = np.asarray(gm._state["_meta"][slot])
+    assert 0 <= float(gap) < 0.05
+    markers = dict(gm.get_node_state("markers"))
+    gm.set_node_state("markers", {"x": markers["x"] * 0, "pos": markers["pos"] + 0.2})
+    assert report(gm) == first
+    path = gm.save_state(tmp_path / "written.npz")
+    members = _archive_members(path)
+    assert [m for m in members if m.startswith("_reports/")] == [
+        f"_reports/{G.GROUP}/written_after_step"]
+    assert members[f"_meta/{slot}"].tobytes() == gap.tobytes()
+    gm.step()
+    want = report(gm)
+
+    gm.reset_state()
+    gm.load_state(path)
+    loaded = report(gm)
+    assert "written" in loaded["not_usable_reason"]
+    assert "geometry" not in loaded["not_usable_reason"]
+    for key, value in loaded.items():
+        if key != "not_usable_reason":
+            assert value == WITHHELD.get(key, first[key]), key
+    gm.step()
+    assert report(gm) == want and "not_usable_reason" not in want

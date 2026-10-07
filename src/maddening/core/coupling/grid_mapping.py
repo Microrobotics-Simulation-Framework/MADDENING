@@ -69,6 +69,7 @@ geometry.
 from __future__ import annotations
 
 import itertools
+import math
 from typing import Any, Optional
 
 import jax.numpy as jnp
@@ -266,6 +267,34 @@ class MultilinearGridMapping:
             index.append(flat)
             weight.append(jnp.where(finite, w, nan))
         return jnp.stack(index, axis=1), jnp.stack(weight, axis=1)
+
+    def _probe_step(self, geom):
+        """A small step of every position towards the middle of its
+        lattice cell, per coordinate: the direction the coupling
+        diagnostics' self-check moves a geometry along
+        (``_bounds._geometry_product_gap``).
+
+        ``sqrt(eps)`` of the spacing (at least two ``eps`` of the
+        coordinate, so that the step is not lost in it), signed so that no
+        point crosses a lattice plane: the stencil is one polynomial along
+        the whole step, and a finite difference over it is a derivative.
+        Zero for a non-finite coordinate.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        eps = float(jnp.finfo(T).eps)
+        steps = []
+        for a in range(self._d):
+            p = pow2_host_factor(self.spacing[a], T)
+            u = (cols[:, a] * jnp.asarray(p, T) - jnp.asarray(self.origin[a] * p, T)) / (
+                jnp.asarray(self.spacing[a] * p, T))
+            size = jnp.maximum(jnp.asarray(math.sqrt(eps) * self.spacing[a], T),
+                               2 * jnp.asarray(eps, T) * jnp.abs(cols[:, a]))
+            below_the_middle = (u - jnp.floor(u)) * 2 < 1
+            step = jnp.where(below_the_middle, size, -size)
+            steps.append(jnp.where(jnp.isfinite(cols[:, a]), step, jnp.zeros((), T)))
+        return jnp.stack(steps, axis=1).reshape(geom.shape)
 
     def _floating(self, field, what: str):
         field = jnp.asarray(field)

@@ -987,14 +987,52 @@ gradients through all of them.  IQN's automatic interface set includes a
 source-anchored geometry that is internal to the group, since it is part
 of the iterate.
 
-The **diagnostics do not**.  A coupling group whose pass resolves a
+The **diagnostics read it in one case**: a coupling group that does not
+sub-cycle, under `convergence_norm="l2"` or `"mixed"`, every
+geometry-dependent mapping of whose pass is a `multilinear_grid`.  The
+spectral estimate and the gradient bound are built from Jacobian-vector
+products of the group's pass, taken with respect to the members' whole
+floating state and to the constants of the pass.  A source-anchored
+geometry inside the group is part of that state and is read by the pass
+from the iterate, so the products carry the pass's dependence on the
+iterate through the positions; a target-anchored geometry is the
+member's pre-step state, a constant of the pass that the gradient bound
+probes like any other.  Such a group reports every bound and flag as any
+other group does.
+
+With `diagnostics=True` the step checks that claim on itself.  It moves
+every position the pass reads by `sqrt(eps)` of the lattice spacing
+towards the middle of its cell (no point crosses a lattice plane, so the
+stencil is one polynomial along the step), once where the positions are
+in the iterate and once where they are constants of the pass, and
+compares the product along that step with the difference of two
+evaluations of the pass, field by field:
+
+$$
+\mathrm{gap} = \max_f
+\frac{\lVert D\,(F(x+t) - F(x) - J t)\rVert_f}
+     {\max(\lVert D\,(F(x+t) - F(x))\rVert_f,\ \lVert D\,J t\rVert_f) + 32\,\lVert \mathrm{res}\rVert_f}
+$$
+
+with $D$ the norm's weights and $\mathrm{res}$ the residual's float
+resolution.  A product that does not see the geometry reads 1 on every
+field the positions move by more than 32 resolutions, an honest pass the
+finite difference's rounding (at most about 2/32).  Where the gap is
+above `GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
+withholds the bounds.  The check costs one product and one evaluation of
+the pass per direction, and exists only in the step of such a group with
+diagnostics on.
+
+**Everywhere else they do not.**  A coupling group whose pass resolves a
 geometry-dependent mapping (on an edge into a member, from inside the
-group or from outside) reports its solve, `iterations`,
-`total_iterations`, `residual` and `converged`, and withholds everything
-built on the float floor or on the contraction estimates: the bounds and
-estimates are NaN (`gradient_error_estimate` is `inf`), `ratio_usable`,
-`spectral_usable`, `gradient_bound_usable` and `precision_limited` are
-`False`, and the entry has a `not_usable_reason` string that says so.
+group or from outside) of another kind, or that sub-cycles, or that uses
+the interface norm, or whose step failed the check above, reports its
+solve, `iterations`, `total_iterations`, `residual` and `converged`, and
+withholds everything built on the float floor or on the contraction
+estimates: the bounds and estimates are NaN (`gradient_error_estimate`
+is `inf`), `ratio_usable`, `spectral_usable`, `gradient_bound_usable`
+and `precision_limited` are `False`, and the entry has a
+`not_usable_reason` string that says so.
 `convergence_norm="interface"` is refused at `compile()` for a group with
 a geometry-dependent mapping on an internal edge (the norm would leave
 the geometry out, and declare a group converged while its geometry still

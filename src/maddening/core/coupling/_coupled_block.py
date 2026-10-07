@@ -36,6 +36,8 @@ from maddening.core.coupling._group_layout import (
     _group_accel_fields,
     _group_dividers,
     _group_evaluations,
+    _geometry_diagnostics_refusal,
+    _geometry_holders,
     _group_pass_structure,
     _group_reads,
     _group_residual_dtype,
@@ -49,6 +51,7 @@ from maddening.core.coupling._group_layout import (
 )
 from maddening.core.coupling._bounds import (
     _analysis_dtype,
+    _geometry_product_gap,
     _gradient_error_bound_at,
     _interface_spectral_rate_at,
     _residual_resolution,
@@ -294,6 +297,18 @@ def _run_coupled_block_impl(
         coupled_bi_names_by_node.setdefault(
             edge.target_node, set()
         ).add(edge.target_field)
+
+    # The geometry fields the diagnostics' self-check moves (experimental;
+    # ``_geometry_product_gap``): those of the geometry-dependent mappings
+    # this group's pass resolves, where the report reads a geometry at all
+    # (``_geometry_diagnostics_refusal``).  Static, and empty for every
+    # group without such an edge and for every group without diagnostics:
+    # nothing below is traced for them.
+    geometry_checked = (
+        _geometry_holders(group, all_edges)
+        if group.diagnostics and group.solver == "ift"
+        and _geometry_diagnostics_refusal(group, nodes, all_edges) is None
+        else [])
 
     # The fields the acceleration flattens: IQN's interface (or
     # ``accelerated_fields``) set, and for ``"aitken"`` / ``"fixed"`` on
@@ -967,7 +982,7 @@ def _run_coupled_block_impl(
             # ``gradient_bound_usable=False``.
             if group.solver == "ift" or group.diagnostics:
                 nan = jnp.full((), jnp.nan, jnp.asarray(single_r).dtype)
-                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan), None
+                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan, nan), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -1383,6 +1398,70 @@ def _run_coupled_block_impl(
                     for source_dtype, v in parts])
                 return (scale * evaluations.astype(work)) * _residual_resolution(eps)
 
+            def _geometry_gap_at(x_sg, check_weights, resolution):
+                """The self-check of the pass's product along the geometry
+                (``_geometry_product_gap``), at the returned state.
+
+                Two directions at most.  One moves, in the iterate, every
+                geometry field a member holds: what a source-anchored
+                edge inside the group reads, and what a flux hook's
+                target-anchored edge reads.  The other moves the same
+                fields where they are constants of the pass: a member's
+                pre-step state (a target-anchored edge of ``update``) and
+                the state of a node outside the group (a source-anchored
+                edge into it).  Each step is the mapping's own
+                (``_probe_step``).  A geometry the pass must read from a
+                constant that the closure conversion did not hoist (a
+                step traced on concrete values) cannot be moved: the gap
+                is NaN, which the report reads as a failed check.
+                """
+                n = int(x0_full.shape[0])
+                positions = unflatten_coupled_state(
+                    np.arange(n, dtype=np.int32), template_img, group_node_names,
+                    fields=float_fields)
+                field_ids = np.zeros((n,), np.int32)
+                n_fields = 0
+                for nn in group_node_names:
+                    for fld in float_fields[nn]:
+                        field_ids[np.asarray(positions[nn][fld], np.int64).ravel()] = n_fields
+                        n_fields += 1
+                dx = jnp.zeros_like(x_sg)
+                moved_in_iterate = False
+                dconsts: list = [None] * len(consts)
+                located = True
+                for holder, fld, mapping in geometry_checked:
+                    if holder in group_node_set:
+                        if fld in float_fields[holder]:
+                            at = np.asarray(positions[holder][fld], np.int64)
+                            where = jnp.asarray(np.ravel(at), jnp.int32)
+                            step = mapping._probe_step(x_sg[where].reshape(at.shape))
+                            dx = dx.at[where].set(jnp.ravel(step).astype(dx.dtype))
+                            moved_in_iterate = True
+                        held = [initial_node_states[holder].get(fld)]
+                        # A member's pre-step positions are a constant
+                        # only a target-anchored edge needs.
+                        needed = any(
+                            e.geometry is not None and e.geometry == ("target", fld)
+                            and e.target_node == holder for e in all_edges)
+                    else:
+                        held = [tree.get(holder, {}).get(fld)
+                                for tree in (full_state, new_state, template_state)]
+                        needed = True
+                    ids = {id(v) for v in held if v is not None}
+                    found = [i for i, c in enumerate(consts) if id(c) in ids]
+                    for i in found:
+                        dconsts[i] = mapping._probe_step(consts[i])
+                    located = located and (bool(found) or not needed)
+                directions = []
+                if moved_in_iterate:
+                    directions.append((dx, [None] * len(consts)))
+                if any(t is not None for t in dconsts):
+                    directions.append((jnp.zeros_like(x_sg), dconsts))
+                gap = _geometry_product_gap(
+                    step_pure, x_sg, consts, directions, check_weights, resolution,
+                    field_ids, n_fields)
+                return gap if located else jnp.full_like(gap, jnp.nan)
+
             if accel_fields is not None:
                 # Positions of the accelerated (interface) fields in
                 # the full flat vector: flatten an index-valued state
@@ -1438,6 +1517,7 @@ def _run_coupled_block_impl(
             # triple, so it has the same gate and the same NaN.
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             pass_evals = jnp.full((), jnp.nan, x0_full.dtype)
+            geometry_gap = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
                 # How many evaluations' rounding the pass carries, with
                 # each same-pass read weighted by its measured relative
@@ -1520,6 +1600,9 @@ def _run_coupled_block_impl(
                         _reading_resolution(x_sg, read_scale, pass_evals),
                         _reading_reference, map_eps=map_eps,
                     )
+                if geometry_checked:
+                    geometry_gap = _geometry_gap_at(
+                        jax.lax.stop_gradient(x_star_full), spec_weights, resolution)
                 # The factor the report's bound applies, in the returned
                 # state's weights: the gradient bound above takes its own
                 # residual in those weights already, so only the stored
@@ -1547,11 +1630,12 @@ def _run_coupled_block_impl(
                            _with_nonfloat_fields_at(_embed_live(x_star_full)),
                            jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
-                            spec_amp, grad_bound, pass_evals), (vw if vw else None))
+                            spec_amp, grad_bound, pass_evals, geometry_gap),
+                    (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
-                           spec_resid, spec_amp, grad_bound, pass_evals),
+                           spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap),
              vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
@@ -1562,7 +1646,7 @@ def _run_coupled_block_impl(
             # through this step is trustworthy.  The spectral pair is
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
-                         spec_resid, spec_amp, grad_bound, pass_evals)
+                         spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -1943,7 +2027,7 @@ def _run_coupled_block_impl(
         diag_data = None
         if track_diag:
             nan = jnp.full((), jnp.nan, jnp.asarray(final_res).dtype)
-            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan)
+            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan, nan)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -2075,7 +2159,7 @@ def _run_coupled_block_impl(
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         (iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp,
-         grad_bound, pass_evals) = diag_data
+         grad_bound, pass_evals, geometry_gap) = diag_data
         # Written in the dtype ``compile()`` seeded the slot with, so the
         # scan carry keeps its type whatever the residual was computed
         # in (the seed is the promotion of the group's floating fields,
@@ -2162,6 +2246,12 @@ def _run_coupled_block_impl(
                     pass_evals, dtype=spec_dtype
                 ),
             }
+            if geometry_checked:
+                # The self-check of the pass's product along the geometry
+                # (experimental): only where the report reads one, so the
+                # carry of every other group is the one it always was.
+                result[_META_KEY][f"coupling_{group_key}_geometry_gap"] = jnp.asarray(
+                    geometry_gap, dtype=spec_dtype)
 
     # Store V/W matrices for IQN-IMVJ Jacobian reuse
     if group.acceleration == "iqn-imvj" and vw_data is not None:

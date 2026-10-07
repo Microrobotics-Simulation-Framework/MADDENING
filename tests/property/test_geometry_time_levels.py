@@ -201,7 +201,7 @@ def _refused_in_phase_1(name: str) -> bool:
         topo.internal(topo.edges[i]) for i in _anchors(topo, pattern).anchor)
 
 
-_GROUP_PER_PUSH = ("group, mixed anchors, interface norm" if _gg.DIAGNOSTICS_READ_GEOMETRY
+_GROUP_PER_PUSH = ("group, mixed anchors, interface norm" if _gg.INTERFACE_NORM_READS_GEOMETRY
                    else "group, linear predictor")
 _PER_PUSH = ("forward, source anchor", "ungrouped cycle, mixed anchors, built b, a",
              _GROUP_PER_PUSH,
@@ -305,7 +305,7 @@ def test_the_interface_norm_case_is_refused_at_compile(name):
 
 
 def test_exactly_the_interface_norm_case_is_refused_in_phase_1():
-    assert _gg.DIAGNOSTICS_READ_GEOMETRY or _REFUSED_CASES == [
+    assert _gg.INTERFACE_NORM_READS_GEOMETRY or _REFUSED_CASES == [
         "group, mixed anchors, interface norm"]
 
 

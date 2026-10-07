@@ -117,19 +117,34 @@ names the edge and says what to do.
 
 ## Limits in 0.4.0
 
-* **The solve path only.**  The step, the coupling passes and their
-  gradients read the geometry.  The coupling *diagnostics* do not: for a
-  coupling group that resolves a geometry-dependent mapping,
-  `coupling_diagnostics()` reports `iterations`, `total_iterations`,
-  `residual` and `converged`, and no bound or estimate.  Every bound is
-  NaN, every `*_usable` flag is `False`, and the entry's
-  `not_usable_reason` says why.  `coupling_report()` and
-  `print_coupling_report()` print that reason.  The internal `_meta`
-  entry of the state (which `GET /graph/state` returns) still holds what
-  the step computed for such a group; it is not a report and promises
-  nothing.
-* **No interface norm** for such a group: use `convergence_norm="l2"` or
-  `"mixed"`.
+* **Coupling diagnostics read a geometry in one case.**  The step, the
+  coupling passes and their gradients read the geometry everywhere.
+  `coupling_diagnostics()` reports the bounds of a group that resolves a
+  geometry-dependent mapping (`rho_spectral`, `spectral_error_bound`,
+  `gradient_relative_error_bound`, the estimates and the `*_usable`
+  flags, as for any other group) when all of these hold:
+  every such mapping is a `multilinear_grid`; the group's
+  `convergence_norm` is `"l2"` or `"mixed"`; the group does not
+  sub-cycle.  With `diagnostics=True` the step then also checks itself:
+  it compares its Jacobian-vector product along the positions with a
+  finite difference of the pass along the same direction, and where the
+  two differ by more than a quarter (`GEOMETRY_GAP_TOLERANCE`) the
+  report withholds the bounds.  That happens for a node whose derivative
+  is not the derivative of its value (a `stop_gradient` on an input, a
+  rounding), and on a step whose state is not finite.
+* **Everywhere else the report says so.**  For any other group that
+  resolves a geometry-dependent mapping (another mapping kind, a
+  sub-cycled group, the interface norm with a geometry edge entering
+  from outside), `coupling_diagnostics()` reports `iterations`,
+  `total_iterations`, `residual` and `converged`, and no bound or
+  estimate.  Every bound is NaN, every `*_usable` flag is `False`, and
+  the entry's `not_usable_reason` says which case it is.
+  `coupling_report()` and `print_coupling_report()` print that reason.
+  The internal `_meta` entry of the state (which `GET /graph/state`
+  returns) still holds what the step computed for such a group; it is
+  not a report and promises nothing.
+* **No interface norm** for a group with a geometry-dependent mapping on
+  an internal edge: use `convergence_norm="l2"` or `"mixed"`.
 * **No adaptive stepping** and **no sharded nodes** on a geometry edge.
 * **The geometry is a state field of the edge's own source or target.**
   To use positions another node holds, carry them in the source's or the

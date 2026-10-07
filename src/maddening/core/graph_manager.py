@@ -4340,21 +4340,20 @@ class GraphManager:
               applied: ``"converged"`` and the iteration counts are
               exactly what they were.
             - ``"spectral_usable"`` : bool — the bound above is finite
-              and the Arnoldi space had settled: the Arnoldi residual
-              ``h_{k+1,k}``, any direction the breakdown test
-              discarded as rounding, and the distance one more
-              Jacobian-vector product moves ``rho_spectral`` (the
-              ninth Krylov vector where the space was still growing;
-              where it was not, the product's disagreement with the
-              eight before it, which is rounding's) are each at most
-              5% of ``1 - rho_spectral``
+              and the Arnoldi space had settled: the Krylov space
+              closed within the eight steps, any direction the
+              breakdown test discarded as rounding is at most
+              5% of ``1 - rho_spectral``, and no rounding of the size
+              one more Jacobian-vector product measures can move the
+              radius by that much
               (:func:`~maddening.core.coupling.acceleration.spectral_rate_settled`).
               ``False`` where nothing was computed (see
               ``"rho_spectral"``), where the bound is ``inf``, for
-              a group with more independent interface scalars than the
-              eight Krylov steps resolve -- there ``"rho_spectral"``
-              is an estimate (from below only for a normal ``dF/dx``)
-              and the bound carries only the margin --
+              a group whose Krylov space is still growing at the cap
+              -- more than seven independent interface scalars, or
+              more than eight where they are the whole state; there
+              ``"rho_spectral"`` is an estimate (from below only for a
+              normal ``dF/dx``) and the bound carries only the margin --
               where the residual never entered the Krylov space
               (its outside fraction is reported as unresolved), and
               where the residual is at its float floor
@@ -4466,7 +4465,7 @@ class GraphManager:
               tangent through the group is not finite (that constant
               has no gradient to bound) and where the returned state is
               not finite.  Costs
-              ``11 + 4 k + 5 n_p`` Jacobian-vector products per group per
+              ``11 + 4 k + 5 n_p + 2 k n_p`` Jacobian-vector products per group per
               step beside the spectral bound's eight (plus one
               linearisation and ``k`` reverse-mode products where the
               state has more than ``k`` entries), ``k <= 8`` and ``n_p``

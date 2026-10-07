@@ -69,9 +69,12 @@ def _normal(seed):
 
 
 #: family -> (builder, the least number of the forty seeds it must call settled).
-#: Measured on this tree: 30, 40 and 40 (the tree before read 37, 40 and 40,
-#: with 8, 2 and 0 of them wrong by more than the margin).
-FAMILIES = {"hub": (_hub, 24), "ring": (_ring, 36), "normal": (_normal, 40)}
+#: Measured on this tree: 23, 40 and 40 (the tree before the breakdown
+#: rule read 37, 40 and 40, with 8, 2 and 0 of them wrong by more than the
+#: margin; with it and the sampled sensitivity alone, 30).  The hub family
+#: is float32 with fields 1e-4 to 1e-2 of the rest: the certificate over
+#: every perturbation of the measured size refuses more of it.
+FAMILIES = {"hub": (_hub, 18), "ring": (_ring, 36), "normal": (_normal, 40)}
 
 
 @functools.lru_cache(maxsize=None)
@@ -274,3 +277,19 @@ def test_the_products_rounding_is_the_coarsest_fields_not_the_analysis(monkeypat
     gm = _rotation(jnp.bfloat16, 9, diagnostics=True)
     gm.step()
     assert seen and all(e == float(jnp.finfo(jnp.bfloat16).eps) for e in seen), seen
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "MADD-ANO-230: a direction the breakdown test takes for rounding can carry the "
+    "dominant mode of a Jacobian far from normal; open, below the claimed domain"))
+def test_a_discarded_direction_does_not_hide_the_dominant_mode():
+    """Hub seed 373: weighted norm 700 beside a radius of 0.349, read 0.157, settled.
+
+    The second Krylov leftover, 2.4e-5, is under eight float32 roundings of
+    the largest product and is discarded; the Jacobian returns it with
+    its whole gain.
+    """
+    A, dtype = _hub(373)
+    true = float(max(abs(np.linalg.eigvals(A))))
+    rho, _res, _amp, ok = _estimate(A, dtype)
+    assert not ok or abs(rho - true) <= SPECTRAL_SETTLED_FRACTION * (1.0 - true), (rho, true)

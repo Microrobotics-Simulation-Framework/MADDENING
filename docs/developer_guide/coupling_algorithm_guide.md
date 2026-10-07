@@ -142,7 +142,7 @@ never run.
 | `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
 | `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true and no more than eight scalars cross the group's edges.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
 | `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
-| `spectral_usable` | the bound is finite and the Arnoldi space had settled: `h_{k+1,k}`, any direction the breakdown test discarded as rounding, and the distance one more Jacobian-vector product moves `rho_spectral` are each `≤ 0.05 (1 − rho_spectral)`.  False where nothing was computed, where rounding or a ninth Krylov vector moves the radius by more than that (a non-normal Jacobian), for a group with more than eight independent interface scalars, and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
+| `spectral_usable` | the bound is finite and the Arnoldi space had settled: the Krylov space closed within the eight steps, any direction the breakdown test discarded as rounding is `≤ 0.05 (1 − rho_spectral)`, and no rounding of the size one more Jacobian-vector product measures can move the radius by that much.  False where nothing was computed, where rounding can move the radius by more than that (a non-normal Jacobian), for a group with more than seven independent interface scalars (eight where they are the whole state), and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
 | `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
 | `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
 | `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group; clears `spectral_usable` only where a node's evaluation count is undeclared |
@@ -343,9 +343,11 @@ things come out of it: the Ritz spectral radius `rho_spectral`, the
 Arnoldi residual `h_{k+1,k}`, and the resolvent norm `‖(I − H)⁻¹‖₂` of
 the compressed Jacobian.  A coupling Jacobian's rank is at most the
 number of boundary scalars crossing the group's edges, so for a group
-with up to eight of them the Krylov space is the whole range, the
-non-zero spectrum is that of a matrix within rounding of the Jacobian and
-`h_{k+1,k}` is zero.  A new Krylov direction is taken for rounding only
+with up to seven of them (eight where they are the whole state: the
+space is grown from a start outside the range and has to hold it too)
+the Krylov space closes within the eight steps, the non-zero spectrum is
+that of a matrix within rounding of the Jacobian and `h_{k+1,k}` is
+zero.  A space still growing at the cap is never reported settled.  A new Krylov direction is taken for rounding only
 below eight units of the products' own rounding (`eps` of the group's
 dtype times the Jacobian's norm), never a fixed fraction of the product,
 and the estimate then spends a ninth product on a check of itself: along
@@ -551,7 +553,7 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `11 + 4k + 5 n_p` Jacobian-vector products per group per step
+the cost is `11 + 4k + 5 n_p + 2 k n_p` Jacobian-vector products per group per step
 (`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
 64 entries, one for a larger one) beside the spectral bound's eight, plus
 one linearisation and `k` reverse-mode products for the full resolvent

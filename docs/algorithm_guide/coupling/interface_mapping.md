@@ -890,7 +890,11 @@ $$
 
 Gather reproduces any field that is multilinear in the coordinates, at
 every point inside the hull of the lattice.  Scatter preserves the plain
-sum, $\sum_j g_j = \sum_p y_p$: it deposits *amounts*.  It divides by no
+sum, $\sum_j g_j = \sum_p y_p$, to the rounding of the geometry's dtype:
+it deposits *amounts*, and the weights of a point, computed in the
+geometry's dtype, sum to one only to that rounding (a float64 field
+scattered at a float32 geometry: 1.5e-11 relative over 20,000 points,
+where a float64 geometry gives 1e-16).  It divides by no
 cell volume and applies no quadrature weight; turning the result into a
 density belongs to a node or to the edge's `transform`.  `apply_T` of one
 mode is `apply` of the other at the same positions.
@@ -898,9 +902,10 @@ mode is `apply` of the other at the same positions.
 **Outside the grid.**  A point outside the hull is clamped to it,
 coordinate by coordinate ($\bar u$ above): gather extrapolates constantly,
 scatter deposits on the boundary, and the weights still sum to one.  A
-non-finite coordinate is not clamped: every weight of that point is NaN at
-flat index 0, so gather returns NaN for that point only and scatter puts
-NaN in the cells of index 0.
+non-finite coordinate is not clamped: every weight of that point is NaN,
+on the $2^d$ corners of the grid's first cell (index 0 or 1 on each axis;
+index 0 alone on an axis of one point), so gather returns NaN for that
+point only and scatter puts NaN in those corner cells and no other.
 
 **Derivative with respect to a position.**  Inside a cell,
 $\partial y_p / \partial x_{p,a}$ is the slope of the multilinear

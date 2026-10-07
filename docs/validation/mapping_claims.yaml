@@ -2061,7 +2061,8 @@ claims:
     The multilinear_grid kind's identities: the weights of a point sum to
     one; "Gather reproduces any field that is multilinear in the
     coordinates, at every point inside the hull of the lattice"; "Scatter
-    preserves the plain sum"; "apply_T of one mode is apply of the other at
+    preserves the plain sum ... to the rounding of the geometry's dtype";
+    "apply_T of one mode is apply of the other at
     the same positions"; the stencil and its weights are those of the
     guide's formulas; "the result has the field's dtype"; the shaped layout
     is the flat layout reshaped; a one-dimensional geometry may be a flat
@@ -2126,8 +2127,10 @@ claims:
     "A point outside the hull is clamped to it, coordinate by coordinate:
     gather extrapolates constantly, scatter deposits on the boundary, and
     the weights still sum to one. A non-finite coordinate is not clamped:
-    every weight of that point is NaN at flat index 0, so gather returns NaN
-    for that point only and scatter puts NaN in the cells of index 0."
+    every weight of that point is NaN, on the 2^d corners of the grid's
+    first cell (index 0 or 1 on each axis; index 0 alone on an axis of one
+    point), so gather returns NaN for that point only and scatter puts NaN
+    in those corner cells and no other."
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, multilinear_grid: gather and scatter on a uniform grid)'
     - src/maddening/core/coupling/grid_mapping.py (module docstring)
@@ -2140,7 +2143,8 @@ claims:
     the reference's result at the point's projection onto the hull; the
     result of the same call with the bad point's amount zeroed and its
     coordinate made finite, everywhere but at that point (gather) or at the
-    cells of index 0 (scatter).
+    corners of the first cell (scatter), which are exactly the cells
+    holding NaN.
   tests:
     - 'tests/core/test_multilinear_grid_kernel.py::test_a_point_outside_the_hull_is_its_projection_onto_the_hull'
     - 'tests/core/test_multilinear_grid_kernel.py::test_a_diverged_position_reads_nan_and_a_far_one_clamps'

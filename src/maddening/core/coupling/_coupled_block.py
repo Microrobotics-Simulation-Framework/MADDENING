@@ -586,8 +586,10 @@ def _run_coupled_block_impl(
                     g_field = edge.geometry[1]
                     # The dtype rules ``_edge_geom`` asks of every other
                     # read, asked of both ends of this one.
-                    g_prev = _traceable_geometry(edge, s_prev[edge.source_node][g_field])
-                    g_cur = _traceable_geometry(edge, s_cur[edge.source_node][g_field])
+                    g_prev = _traceable_geometry(
+                        edge, g_field, s_prev[edge.source_node][g_field])
+                    g_cur = _traceable_geometry(
+                        edge, g_field, s_cur[edge.source_node][g_field])
                     if use_quadratic_interp and s_prev_prev is not None:
                         g_pp = s_prev_prev[edge.source_node][g_field]
                         geom = (

@@ -197,13 +197,14 @@ def _edge_geom(edge: EdgeSpec, src_state, consumer_state):
         return None
     anchor, field = edge.geometry
     if anchor == "source":
-        return _traceable_geometry(edge, src_state[edge.source_node][field])
+        return _traceable_geometry(edge, field, src_state[edge.source_node][field])
     held: Any = consumer_state() if callable(consumer_state) else consumer_state
-    return _traceable_geometry(edge, held[field])
+    return _traceable_geometry(edge, field, held[field])
 
 
-def _traceable_geometry(edge: EdgeSpec, value):
-    """*value*, the geometry *edge* is about to read, or a refusal.
+def _traceable_geometry(edge: EdgeSpec, field: str, value):
+    """*value*, the geometry field *field* that *edge* is about to read, or
+    a refusal.
 
     The dtype rules ``validate()`` applies to a geometry field at
     ``compile()`` -- float32 or float64, and fine enough for the mapping
@@ -217,7 +218,7 @@ def _traceable_geometry(edge: EdgeSpec, value):
     dtype = getattr(value, "dtype", None)
     if str(dtype) not in _GEOMETRY_DTYPES:
         raise TypeError(
-            f"edge {edge.key}: its geometry field {edge.geometry[1]!r} now has dtype "
+            f"edge {edge.key}: its geometry field {field!r} now has dtype "
             f"{dtype} in the state being stepped; a geometry must be a float32 or "
             f"float64 array.  compile() checks the state it is given: a state write "
             f"made after it, or an update that returns another dtype, is checked here.")
@@ -228,7 +229,7 @@ def _traceable_geometry(edge: EdgeSpec, value):
         if errors:
             raise ValueError(
                 f"edge {edge.key}: {'; '.join(errors)}.  The geometry field "
-                f"{edge.geometry[1]!r} has dtype {dtype} in the state being stepped.  "
+                f"{field!r} has dtype {dtype} in the state being stepped.  "
                 f"compile() checks the state it is given: a state write made after it, "
                 f"or an update that returns another dtype, is checked here.")
     return value

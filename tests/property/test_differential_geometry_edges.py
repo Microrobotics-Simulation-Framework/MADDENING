@@ -260,9 +260,9 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile(c):
 
 
 def test_the_phase_1_refusals_are_the_interface_norm_cases_and_only_those():
-    assert gg.DIAGNOSTICS_READ_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
+    assert gg.INTERFACE_NORM_READS_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
     assert all(c.group is not None and c.down and c.up for c in REFUSED_IN_PHASE_1)
-    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.DIAGNOSTICS_READ_GEOMETRY
+    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.INTERFACE_NORM_READS_GEOMETRY
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +334,11 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         else:
             lo, hi = sorted((res_a, res_b))
             assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, res_a, res_b)
-        if not gg.DIAGNOSTICS_READ_GEOMETRY:
+        if gg.withheld(c) is not None:
             # PHASE 1 (see ``geometry_graphs``): beyond the solve's outcome,
-            # compared above, the edge-mapped group reports no bound and
-            # says why.  The comparison below is what a later phase restores.
-            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c))
+            # compared above, a group of another mapping kind and a
+            # sub-cycled one report no bound and say which they are.
+            gg.assert_not_diagnosed(ra, GEOMETRY_EDGE_KEYS(c), gg.withheld(c))
             continue
         # Everything else a report says: the same keys, the same verdicts,
         # and after the same number of passes the same numbers to within a
@@ -506,7 +506,7 @@ def test_a_report_s_float_floor_counts_a_source_anchored_geometry():
     c = case("floor", kind="multilinear", geom_dtype="float64", adv=0.3, **SOURCES,
              group=dict(max_iterations=80, convergence_norm="interface", rtol=1e-6,
                         diagnostics=True))
-    if not gg.DIAGNOSTICS_READ_GEOMETRY:
+    if not gg.INTERFACE_NORM_READS_GEOMETRY:
         # PHASE 1 (see ``geometry_graphs``): the interface norm over a
         # geometry edge is refused; the comparison below is a later phase's.
         with gg.x64(True):

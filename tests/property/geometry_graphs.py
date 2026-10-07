@@ -47,13 +47,16 @@ both directions, in or out of a coupling group, at one rate or two.
 
 **The twins with the edge-mapped graph's interface reading**
 (:func:`transform_twin`, :func:`relay_twin`; their docstrings say what
-each holds equal) and **the faults later work is held to.**  Diagnostics
-that read a geometry (the interface norm as a criterion with a geometry
-edge; the bounds in that reading with the geometry term) do not exist in
-0.4.0.  The table lists the faults that work must be caught on, the
-instrument expected to catch each, and -- where the fault can be seeded
-on today's tree in an analogous static-mapping or solve-path form -- the
-signal measured when it was (scratch copies of ``src/``, jaxlib 0.11.0,
+each holds equal) and **the faults later work is held to.**  The bounds
+of a single-rate ``multilinear_grid`` group under ``"l2"`` and ``"mixed"``
+read the geometry (``tests/property/test_coupling_geometry_search.py``
+holds them to the numerical reference and lists the faults seeded on
+them: 1, 2, 3 and 6 below are caught there per push).  The interface norm
+as a criterion with a geometry edge, and the bounds in that reading with
+the geometry term, do not exist in 0.4.0.  The table lists the faults
+that work must be caught on, the instrument expected to catch each, and
+-- where the fault can be seeded on today's tree in an analogous
+static-mapping or solve-path form -- the signal measured when it was (scratch copies of ``src/``, jaxlib 0.11.0,
 CPU; the instruments are ``tests/property/test_interface_reading_twins.py``
 and, for the numerical reference, ``tests/property/coupling_reference.py``
 and ``tests/property/test_coupling_nonlinear_search.py``):
@@ -671,25 +674,34 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 # =============================================================================
 # PHASE 1 OF GEOMETRY EDGES (0.4.0): THE ONE PLACE THIS HARNESS IS NARROWED
 #
-# The harness was written for diagnostics that read a moving geometry.  In
-# 0.4.0 they do not, by decision, and the library says so instead of
-# reporting numbers that leave the geometry out:
+# The harness was written for diagnostics that read a moving geometry.
 #
-# * a coupling group whose pass resolves a geometry-dependent mapping reports
-#   the solve's own outcome (``SOLVE_OUTCOME``) and nothing else: every bound
-#   NaN (the gradient estimate ``inf``), every ``*_usable`` flag False, and
-#   ``not_usable_reason`` saying why (:func:`assert_not_diagnosed`);
+# **What reads one now** (``DIAGNOSTICS_READ_GEOMETRY = True``): a
+# single-rate coupling group under ``convergence_norm="l2"`` or ``"mixed"``
+# whose geometry edges all carry the ``multilinear_grid`` kind reports
+# every bound and flag as any other group does, and the tests compare every
+# key of its report with the node-inlined twin's (:func:`withheld` returns
+# ``None`` for the case).
+#
+# **What still does not**, and what the library says instead of reporting
+# numbers that leave the geometry out:
+#
+# * a group with a geometry edge of another kind (``test_geom_matrix``
+#   here), or a sub-cycled one, reports the solve's own outcome
+#   (``SOLVE_OUTCOME``) and nothing else: every bound NaN (the gradient
+#   estimate ``inf``), every ``*_usable`` flag False, and
+#   ``not_usable_reason`` saying which of the two it is
+#   (:func:`withheld`, :func:`assert_not_diagnosed`);
 # * ``convergence_norm="interface"`` on a group with a geometry-dependent
 #   mapping on an internal edge is refused by ``compile()``
-#   (:func:`assert_interface_norm_refused`).
+#   (``INTERFACE_NORM_READS_GEOMETRY = False``,
+#   :func:`assert_interface_norm_refused`).
 #
-# The tests that compared those diagnostics with the node-inlined twin's, and
-# the cases that ran the interface norm, read this block.  Nothing was
-# deleted: set ``DIAGNOSTICS_READ_GEOMETRY = True`` when a later phase makes
-# the diagnostics read the geometry, and the original comparisons and cases
-# run again.
+# Nothing was deleted: set ``INTERFACE_NORM_READS_GEOMETRY = True`` when a
+# later stage makes the interface norm read the geometry, and the cases
+# that ran it run again.
 #
-# Waiting for that phase too: ``RELAY_INTERFACE_CASES`` (defined after
+# Waiting for that stage too: ``RELAY_INTERFACE_CASES`` (defined after
 # ``case``, below), the interface norm over source-anchored geometry edges,
 # whose relay twin (``relay_twin``) has the edge-mapped graph's interface
 # reading.  ``tests/property/test_interface_reading_twins.py`` asserts each
@@ -697,27 +709,49 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 # compares the two reports as it compares a static mapping's today.
 # =============================================================================
 
-#: Whether coupling diagnostics account for a moving geometry.
-DIAGNOSTICS_READ_GEOMETRY = False
-#: What a report still says about a group with a geometry edge.
+#: Whether coupling diagnostics account for a moving geometry at all (the
+#: ``multilinear_grid`` kind on a single-rate group under ``"l2"`` or
+#: ``"mixed"``: see :func:`withheld`).
+DIAGNOSTICS_READ_GEOMETRY = True
+#: Whether the interface norm reads a geometry (and compiles over one).
+INTERFACE_NORM_READS_GEOMETRY = False
+#: What a report still says about a group whose bounds are withheld.
 SOLVE_OUTCOME = ("iterations", "total_iterations", "residual", "converged")
 _NOT_USABLE = {"amplification": "nan", "error_estimate": "nan", "ratio_usable": False,
                "gradient_error_estimate": "inf", "rho_spectral": "nan",
                "spectral_error_bound": "nan", "spectral_usable": False,
                "gradient_relative_error_bound": "nan", "gradient_bound_usable": False,
                "precision_limited": False}
+#: What each reason for withholding says, beside the stem every one has.
+WHY = {"kind": "other than 'multilinear_grid'",
+       "sub-cycled": "in a sub-cycled group",
+       "norm": "under convergence_norm='interface'",
+       "self-check": "disagrees with a finite difference of the pass"}
 
 
 def interface_norm_refused(knobs) -> bool:
     """Whether a group with these knobs and a geometry-dependent mapping on
     an internal edge is refused at compile (phase 1)."""
-    return (not DIAGNOSTICS_READ_GEOMETRY and knobs is not None
+    return (not INTERFACE_NORM_READS_GEOMETRY and knobs is not None
             and dict(knobs).get("convergence_norm") == "interface")
 
 
-def assert_not_diagnosed(report, keys) -> None:
+def withheld(c: "Case") -> Optional[str]:
+    """Why the report of *c*'s group withholds its bounds (a key of
+    :data:`WHY`), or ``None`` where the diagnostics read its geometry."""
+    if not DIAGNOSTICS_READ_GEOMETRY:
+        return "kind"
+    if c.kind != "multilinear":
+        return "kind"
+    if c.dt_f != c.dt_p and dict(c.knobs or {}).get("subcycling"):
+        return "sub-cycled"
+    return None
+
+
+def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
     """*report* (one group of ``coupling_diagnostics()``) says the solve's
-    outcome, no bound, no usable flag, and why, naming the edges *keys*."""
+    outcome, no bound, no usable flag, and why, naming the edges *keys*;
+    *why* is the key of :data:`WHY` the reason must be."""
     assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason"}, sorted(report)
     for name, want in _NOT_USABLE.items():
         got = report[name]
@@ -732,6 +766,9 @@ def assert_not_diagnosed(report, keys) -> None:
     assert "do not read a moving geometry" in reason, reason
     for key in keys:
         assert key in reason, (key, reason)
+    if why is not None:
+        assert WHY[why] in reason, (why, reason)
+        assert not any(text in reason for name, text in WHY.items() if name != why), reason
     assert np.isfinite(report["residual"]) and int(report["iterations"]) >= 1, report
 
 

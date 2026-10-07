@@ -93,10 +93,12 @@ def _geometry_product_gap(step_pure, x_star, consts, directions, weights, resolu
         product = product.astype(work)
         miss = by_field(d * (difference - product))
         size = jnp.maximum(by_field(d * difference), by_field(d * product)) + noise
-        gap = jnp.where(size > 0, miss / jnp.where(size > 0, size, 1.0), 0.0)
-        # ``max`` drops a NaN on some backends' orderings; a gap that is
-        # not a number is the answer.
-        gap = jnp.where(jnp.all(jnp.isfinite(gap)), jnp.max(gap), jnp.nan)
+        # 0 / 0 (a field the geometry does not move, with no rounding
+        # allowed) is no gap; a size or a miss that is not a number is one
+        # that could not be evaluated, and ``max`` must not drop it.
+        gap = miss / jnp.where(size > 0, size, 1.0)
+        gap = jnp.where(jnp.all(jnp.isfinite(size)) & jnp.all(jnp.isfinite(gap)),
+                        jnp.max(gap), jnp.nan)
         worst = jnp.where(jnp.isnan(gap) | jnp.isnan(worst), jnp.nan, jnp.maximum(worst, gap))
     return worst
 

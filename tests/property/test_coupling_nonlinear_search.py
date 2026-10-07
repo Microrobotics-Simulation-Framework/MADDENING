@@ -549,30 +549,6 @@ def does_not_move_the_fixed_point(constant: str) -> bool:
     return leaf[0] in "cs" and leaf[1].isdigit()
 
 
-def leaves_float_range(cell: Cell, values: dict, ref: cr.PassReference) -> bool:
-    """Whether plain passes from the drawn start leave *cell*'s float
-    range before its cap, on a cell with a quasi-Newton acceleration.
-
-    Such an example is not stepped: under ``"iqn-ils"`` and ``"iqn-imvj"``
-    a group whose iterate becomes non-finite before the cap never returns
-    from ``step()`` (the finding pinned by
-    ``test_a_group_that_leaves_float_range_under_iqn_still_returns``), and
-    a search cannot score a call that does not return.  Every other
-    acceleration returns a non-finite state, which is scored as unusable.
-    *ref* is bound to *values*.
-    """
-    if not str(cell.knobs.get("acceleration", "none")).startswith("iqn"):
-        return False
-    x = ref.flat({m: {"x": values["nodes"][m]["x0"]} for m in cell.topo.names})
-    limit = math.sqrt(float(np.finfo(cell.dtype).max))
-    for _ in range(min(cell.cap, 60)):
-        with np.errstate(all="ignore"):
-            x = ref.apply(x)
-        if not np.all(np.isfinite(x)) or float(np.max(np.abs(x))) > limit:
-            return True
-    return False
-
-
 @functools.lru_cache(maxsize=4096)
 def observe(case: Case) -> dict:
     """One step of *case* and the scores of what it reported."""
@@ -581,18 +557,12 @@ def observe(case: Case) -> dict:
     values = values_of(case)
     built, twin, ref = _built(case.cell)
     ref = bound_reference(ref, values, twin)
-    if leaves_float_range(cell, values, ref):
-        # Not stepped (see ``leaves_float_range``): nothing is scored.
-        return dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, gradient_vanishing=0.0,
-                    floor=0.0,
-                    spectral_usable=False, gradient_usable=False, floor_reported=False,
-                    referenced=False, near=False, stepped=False, finite=False, report={})
     with precision(cell.dtype == "float64"):
         step = run_once(built, values)
         d = dict(step.reports[0])
         floor = linear._reported_floor(built.gm, topo.group_key(0), step.metas[0], d)   # noqa: SLF001
     out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, gradient_vanishing=0.0,
-               floor=0.0, spectral_usable=bool(d["spectral_usable"]),
+               floor=0.0, vanishing_scored=False, spectral_usable=bool(d["spectral_usable"]),
                gradient_usable=bool(d["gradient_bound_usable"]),
                floor_reported=math.isfinite(floor), referenced=False, near=False, stepped=True,
                finite=False,
@@ -651,9 +621,21 @@ def observe(case: Case) -> dict:
         bound = (float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
                  + ref.gradient_resolution(x, raw))
         names = ref.constant_names()
+        # CPL-093 is made for a constant the pass resolves: moving it by
+        # its own magnitude moves one pass by more than the residual's
+        # float floor.  Held here to ``RESOLVED_MARGIN`` floors (the two
+        # sides are two computations of one comparison).
+        response = ref.pass_responses(x, raw)
+        resolved = [not out["floor_reported"] or r > RESOLVED_MARGIN * floor for r in response]
+        out["report"]["constants_resolved"] = (sum(resolved), len(resolved))
         for score, vanishing in (("gradient", False), ("gradient_vanishing", True)):
+            mine = [does_not_move_the_fixed_point(n) is vanishing for n in names]
+            out["report"][f"{score}_constants"] = (
+                sum(m and r for m, r in zip(mine, resolved)), sum(mine))
             true, column = ref.gradient_error(x, fixed, raw, columns=[
-                does_not_move_the_fixed_point(n) is vanishing for n in names])
+                m and r for m, r in zip(mine, resolved)])
+            if vanishing:
+                out["vanishing_scored"] = column is not None
             out[score] = math.inf if math.isnan(bound) else true / bound
             out["report"].update({f"{score}_error": true, f"{score}_constant": (
                 None if column is None else ref.constant_names()[column])})
@@ -671,7 +653,10 @@ CURVES = (-2.0, 2.0)
 
 THRESHOLD = {**linear.THRESHOLD, "gradient_vanishing": linear.THRESHOLD["gradient"]}
 FLAG = {**linear.FLAG, "gradient_vanishing": "gradient_usable"}
-SEARCHES = linear.SEARCHES
+#: The linear search's four and the gradient bound over a nonlinearity's
+#: own constants (its centre and its curve), which the fixed point does
+#: not respond to: scored wherever the pass resolves one.
+SEARCHES = linear.SEARCHES + ("gradient_vanishing",)
 #: The least fraction of a hunt's examples with the flag set (measured:
 #: 0.64 to 1.00 by block and score; the linear search holds a half, and a
 #: hunt here climbs towards starts that diverge), and the least fraction of
@@ -679,6 +664,11 @@ SEARCHES = linear.SEARCHES
 #: a fixed point (measured: 0.93 to 1.00; a capped solve from a start a
 #: whole field away can return where Newton reaches none).
 USABLE_FLOOR = 0.25
+#: A constant is scored for the gradient bound where its pass response
+#: (``PassReference.pass_responses``) is above this many floors: the
+#: bound drops a probe at one floor, by its own float32 or float64
+#: arithmetic, and the reference measures the response in float64.
+RESOLVED_MARGIN = 2.0
 REFERENCED_FLOOR = 0.75
 
 
@@ -712,6 +702,7 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CL
                         referenced=sum(s["referenced"] for s in seen) / count,
                         near=sum(s["near"] for s in seen) / count,
                         stepped=sum(s["stepped"] for s in seen) / count,
+                        vanishing_scored=sum(s["vanishing_scored"] for s in seen) / count,
                         finite=sum(s["finite"] for s in seen) / count)
 
 
@@ -859,6 +850,13 @@ SEEDS = {
     "the-jacobian-a-fifth-from-the-fixed-point-s": (
         Case(0, linear.Case(0, 1, 1.0 / 3.0, False, 1.0, 0.0, 1.0, -1, 1.0, 0),
              21.544346900318832), "gradient", 0.05),
+    # Five Jacobi passes from a whole field away: the pass resolves six of
+    # the twelve centres and curves, the relative error of the gradient
+    # with respect to one is of order one (the fixed point does not
+    # respond to it), and the bound reads 1.27, the error 0.79 of it.
+    "a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point": (
+        Case(0, linear.Case(0, 1, 0.3, False, 1.0, 0.0, 1.0, 0, 1.0, 0), 1.0),
+        "gradient_vanishing", 0.5),
 }
 
 
@@ -896,6 +894,19 @@ def test_a_usable_gradient_bound_is_never_below_the_error_on_the_nonlinear_cell_
     _held("gradient", fractions)
 
 
+def test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push():
+    """A nonlinearity's centre and curve do not move the fixed point, so
+    the relative error of the gradient with respect to one is of order one
+    at any other iterate: the bound reads above it wherever the pass
+    resolves the constant, and leaves the constant out where it does not.
+    (This cell's twenty examples end within a float32 rounding of their
+    fixed points, where none is resolved; the seed
+    ``a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point``
+    holds one that is, and the slow hunt holds that some are.)"""
+    _report, fractions = search("gradient_vanishing")
+    _held("gradient_vanishing", fractions)
+
+
 def test_the_floor_covers_what_the_reported_residual_misses_on_the_nonlinear_cell_per_push():
     _report, fractions = search("floor")
     _held("floor", fractions)
@@ -918,6 +929,14 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_nonlinear_group(block, 
     assert fractions["usable"] >= USABLE_FLOOR, (
         f"{name}, block {block}: only {fractions['usable']:.2f} of the examples had the flag "
         f"set (floor {USABLE_FLOOR})")
+    # No floor on fractions["vanishing_scored"] here.  Whether the pass
+    # resolves a nonlinearity's own constant depends on where the float32
+    # iterate stops relative to its fixed point, and that is a matter of
+    # rounding: one block reads 0.17 to 0.57 with jaxlib 0.11.0 on the
+    # development machine and 0.0 on CI's runners (same seed, jaxlib 0.10.2
+    # and 0.11.2).  That the score is not empty is held per push, by the
+    # seed ``a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point``
+    # (test_every_score_holds_on_the_nonlinear_seed_shapes), which CI runs.
 
 
 def test_the_reference_s_jacobian_is_the_central_difference_of_its_pass():
@@ -955,46 +974,52 @@ def test_the_reference_s_jacobian_is_the_central_difference_of_its_pass():
 # What the search found
 # ---------------------------------------------------------------------------
 
-#: The findings of the hunt on this tree, each an example as drawn (the
-#: hunt does not shrink).  Strict: a fix turns each green.  ``EDGE``: at
-#: the edge of what the claim is made on, as the reason says; a ``CORE``
-#: finding would be inside it (the hunt found none).
-KNOWN = {
+#: The examples the hunt reached on the tree before the gradient bound
+#: left out a probe the pass does not resolve, as drawn (the hunt does not
+#: shrink).  On each the nonlinearity's own constants (a centre ``c``, a
+#: curve ``s``) are below the pass's float floor: the fixed point does not
+#: respond to one, and the returned iterate, a rounding away, by a
+#: rounding.  ``(case, the bound it read, the relative error it stood
+#: beside)``.
+UNRESOLVED = {
     # A two-member float32 ring with saturating gains, started on its
-    # fixed point: one pass, residual 0, precision_limited.  The curve
-    # ``s`` of a nonlinearity moves the fixed point by nothing (the
-    # derivative with respect to it is zero there) and the returned
-    # iterate, a float32 rounding away, by a little: relative error 2.7,
-    # ``gradient_relative_error_bound`` 1.4e-6 with the flag set.
-    "CPL-093-EDGE-a-constant-the-fixed-point-does-not-respond-to-at-a-stalled-start": (
-        Case(1, linear.Case(0, 0, 0.05, False, 1.0, 0.0, 1.0, 0, 0.0, 0), 1.0),
-        "gradient_vanishing",
-        "FINDING (EDGE, CPL-093): for a constant whose derivative is zero at the fixed point "
-        "the relative gradient error is of order one at any other iterate; at a start stalled "
-        "on its float floor the usable bound reads 1.4e-6"),
-    # The same constant on a float64 hub converged in four passes from a
-    # start a whole field away: the bound reads 1.09 for a relative error
-    # of 1.134 (4% short).
-    "CPL-093-EDGE-a-constant-the-fixed-point-does-not-respond-to-four-percent-short": (
-        Case(26, linear.Case(0, 2619, 0.05, False, 1.0, 0.0, 1.0, 3, 1.0, 3), 10.0),
-        "gradient_vanishing",
-        "FINDING (EDGE, CPL-093): for a constant whose derivative is zero at the fixed point "
-        "the usable bound reads 1.09 for a relative error of 1.13"),
+    # fixed point: one pass, residual 0, precision_limited.  The float32
+    # tangents of the centres and curves are exactly zero (never in the
+    # bound); in float64 at the returned iterate the curve's is 6e-26
+    # beside gradients of order one, a relative error of 2.7.
+    "a-ring-stalled-on-its-start": (
+        Case(1, linear.Case(0, 0, 0.05, False, 1.0, 0.0, 1.0, 0, 0.0, 0), 1.0), 1.4e-6, 2.7),
+    # A float64 hub converged in four passes from a start a whole field
+    # away: right-hand sides of 2e-33 to 5e-18 for the centres and curves
+    # beside ones of order one.  The bound read 1.09 (their probes') for a
+    # relative error of 1.134 on one of them; without them it is the
+    # gains', 5.3e-12.
+    "a-converged-hub": (
+        Case(26, linear.Case(0, 2619, 0.05, False, 1.0, 0.0, 1.0, 3, 1.0, 3), 10.0), 1.09, 1.134),
 }
 
 
-# Slow: each pin compiles its cell (a graph with diagnostics and a twin).
-# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_is_never_below_the_error_on_the_nonlinear_cell_per_push
+# Slow: each example compiles its cell (a graph with diagnostics and a twin).
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push
 @pytest.mark.slow
-@pytest.mark.parametrize("case,score", [
-    pytest.param(case, score, marks=pytest.mark.xfail(strict=True, reason=reason))
-    for case, score, reason in KNOWN.values()], ids=list(KNOWN))
-def test_a_known_defect_the_nonlinear_search_reached_is_fixed(case, score):
+@pytest.mark.parametrize("name", list(UNRESOLVED))
+def test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_bound(name):
+    """CPL-093 is a relative bound for a constant the pass resolves.  On
+    these examples none of the nonlinearity's own constants is, and the
+    usable bound is the other constants': far below one, and not below
+    their error."""
+    case, _read, _beside = UNRESOLVED[name]
     seen = observe(case)
-    assert seen["stepped"] and seen["referenced"], seen
-    assert seen[FLAG[score]], f"the flag is no longer set: {seen['report']}"
-    assert seen[score] <= THRESHOLD[score], (
-        f"{score} is {seen[score]!r}, over {THRESHOLD[score]!r}: {seen['report']}")
+    report = seen["report"]
+    assert seen["stepped"] and seen["referenced"] and seen["gradient_usable"], seen
+    resolved, total = report["gradient_vanishing_constants"]
+    assert total > 0 and resolved == 0, (
+        f"premise: {resolved} of the {total} constants of a nonlinearity are resolved: {report}")
+    scored, others = report["gradient_constants"]
+    assert scored == others > 0, report
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+    # units: a relative error; the hub read 1.09 with those probes in it.
+    assert report["gradient_relative_error_bound"] < 1e-5, report
 
 
 #: The example the hunt stopped on: the fan-out hub with products of two
@@ -1062,14 +1087,10 @@ def test_a_group_that_leaves_float_range_without_a_quasi_newton_acceleration_ret
 # Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_error_bound_reaches_the_distance_on_the_nonlinear_cell_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("acceleration", ["iqn-ils", "iqn-imvj"])
-@pytest.mark.xfail(strict=True, reason=(
-    "FINDING (EDGE, CPL-053/CPL-084): a group under acceleration='iqn-ils' or 'iqn-imvj' whose "
-    "iterate becomes non-finite before max_iterations never returns from step() (measured: no "
-    "return in 240 s; 0.05 s for a step of the same compiled graph that converges)"))
 def test_a_group_that_leaves_float_range_under_iqn_still_returns(acceleration):
     """``converged`` False "means ... the group hit max_iterations"
     (CPL-053) and ``residual`` is "inf on a non-finite state" (CPL-084):
-    both say the step returns.  With diagnostics on or off, under the l2
-    norm as under the mixed one; at a cap of 12, before the iterate is
-    non-finite, it returns."""
-    assert _steps_in_a_subprocess(acceleration, 30.0).startswith("RETURNED")
+    both say the step returns, and it runs to its cap as the unaccelerated
+    group does.  It did not return (no return in 240 s): the secant
+    least-squares handed LAPACK's SVD a matrix holding an ``inf``."""
+    assert _steps_in_a_subprocess(acceleration, 30.0) == "RETURNED 120 False"

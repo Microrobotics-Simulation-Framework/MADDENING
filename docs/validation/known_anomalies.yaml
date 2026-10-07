@@ -15636,3 +15636,124 @@ anomalies:
       needs a GPU run with the bound's parts printed.
     verification: []
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-233"
+    title: "A coupling group under IQN whose iterate left float range before its cap never returned from step()"
+    description: >
+      `acceleration="iqn-ils"` and `"iqn-imvj"` solve a least-squares
+      problem on the secant columns each pass, through an SVD
+      (`jnp.linalg.pinv`; `jnp.linalg.lstsq` in v0.3.0 and v0.3.1).  On the
+      pass where part of the iterate overflowed, the new column held `inf`
+      in those entries and finite numbers in the rest, and LAPACK's SVD does
+      not return on such a matrix: `step()` never returned, with no error
+      and one core busy.  Measured (CPU, jaxlib 0.11.0, each probe under a
+      wall-clock limit): a fan-out hub of four members with products of two
+      fields in float64, Jacobi, cap 120, started a whole field from its
+      fixed point -- no return in 240 s, where a converging step of the
+      same compiled graph takes 0.05 s; a pair whose first entry is `exp`
+      of itself beside three that contract -- no return in 25 s, float32
+      and float64, both IQN kinds, `solver="ift"` and `"fori"`.  The same
+      groups under `"none"` and `"aitken"` ran to the cap and reported
+      `converged=False`, `residual=inf`.  `jnp.linalg.svd` and `pinv`
+      alone: no return on 4 x 4 to 16 x 16 matrices with one `inf` entry or
+      one `inf` column, nor on one with a row and a column at `finfo.max`;
+      a NaN beside the `inf`, or every entry `inf`, returns.  At v0.3.0 and
+      v0.3.1 (`git archive` of each tag): `solver="ift"` with
+      `acceleration="iqn-imvj"` does not return on the `exp` pair in either
+      dtype; the default `solver="fori"` solved the normal equations by LU
+      and returns a NaN state.  v0.2.1 and earlier have no `solver="ift"`.
+      Resolved in 0.4.0: the secant matrix is replaced by zeros before the
+      factorisation wherever the sum of its squares is not finite, the
+      quasi-Newton step is then not taken (the Aitken fallback's is), and
+      the group runs to its cap and reports the state as not finite, as
+      the other accelerations do.  A finite matrix passes through
+      unchanged: 200 random finite calls of the update and 108 drawn
+      three-member rings stepped twice return the same bits before and
+      after.  The same guard stands in front of every other SVD of the
+      coupling analysis (the spectral amplification and the gradient
+      bound's operator norms).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Not silent: the call does not return and nothing wrong is reported.
+      `major` because a simulation that diverges is the case a caller's
+      own checks exist for, and none of them runs: no exception, no
+      report, a loop that stops.  `context_dependent` because it needs a
+      quasi-Newton acceleration (not the default) and an iterate that
+      overflows part of its entries before the cap.
+    affected_components:
+      - "maddening.core.coupling.acceleration.iqn_ils_update"
+      - "maddening.core.coupling.group.CouplingGroup.acceleration"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.x use `solver="fori"` (the default there) with a
+      quasi-Newton acceleration, or `acceleration="aitken"`; or run the
+      step under a wall-clock limit.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The guard is on the matrix handed to the SVD, measured on CPU with
+      jaxlib 0.11.0; other LAPACK-backed calls of the coupling analysis
+      (`qr`, `solve`, `inv`, `eigvals`) returned on every non-finite and
+      extreme finite matrix tried (288 and 576 cases a dtype) and are not
+      guarded, except `eigvals`, which already was.  A group that diverges
+      under IQN still spends its whole cap of passes.
+    verification:
+      - "tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_a_step_whose_iterate_leaves_float_range_under_iqn_returns"
+      - "tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_the_secant_update_returns_on_every_non_finite_input"
+      - "tests/core/test_coupling_iqn_returns_on_a_non_finite_iterate.py::test_no_svd_of_the_coupling_analysis_is_handed_a_matrix_that_is_not_finite"
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_group_that_leaves_float_range_under_iqn_still_returns"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-234"
+    title: "gradient_relative_error_bound read below the error, gradient_bound_usable=True, with a constant in it whose tangent is rounding: 1.09 for a relative error of 1.134"
+    description: >
+      The bound is the worst, over one probe per scalar constant, of a
+      bound on that probe's tangent error over the tangent's size.  For a
+      constant the fixed point does not respond to -- the centre or the
+      curve of a nonlinearity evaluated on its centre -- the tangent at the
+      returned iterate is what the iterate's last rounding, or a
+      cancellation inside the node's derivative, left of it, and a relative
+      error of it is of order one or undefined.  Measured (CPU, jaxlib
+      0.11.0): on a float64 fan-out hub of four members with saturating
+      gains, converged in four passes, the right-hand sides of those probes
+      were 2e-33 to 5e-18 beside ones of order one, the bound read 1.09 and
+      the relative error of the gradient with respect to one curve was
+      1.134 (absolute: 1.7e-34, beside gradients up to 3.5e3),
+      `gradient_bound_usable=True`.  On a float32 ring stalled on its start
+      the float32 tangents of those constants are exactly zero and were
+      never in the bound (1.4e-6); in float64 at the same iterate one is
+      6e-26 with a relative error of 2.7.  Found by the nonlinear coupling
+      search.  No release carries the gradient bound.  Resolved in 0.4.0:
+      a probe is in the bound where moving its constant by its own
+      magnitude moves one pass by more than the residual's float floor;
+      the docstring and
+      the claim say so.  The hub then reads 5.3e-12 for an error of
+      5.3e-12 over its gains.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`.  Not `critical`: the gradient concerned is
+      1e-34 beside others of 1e3, and a bound that reads above one already
+      says the relative error is not bounded.  `context_dependent` because
+      whether the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The rule is a magnitude: a gain so weak that its whole value moves
+      the pass by less than the floor is left out of the bound too,
+      although its tangent may be exact (on 108 drawn rings the bound moved
+      on two, 1.8e-2 to 2.5e-4 on one, and no flag changed).  Nothing the
+      bound measures tells that case from the cancelled one.  A constant
+      left out is not named in the report; one Jacobian-vector product of
+      the pass tells.
+    verification:
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_bound"
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_usable_gradient_bound_covers_a_nonlinearity_s_own_constants_per_push"
+    github_issue: null

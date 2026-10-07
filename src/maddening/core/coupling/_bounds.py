@@ -643,10 +643,12 @@ def _full_resolvent_norm_and_rows(U, M, make_transpose):
     the directions ``J`` reads at no further reverse-mode cost.  ``(None,
     None)`` without a transpose.
     """
+    from maddening.core.coupling.acceleration import _spectral_norm  # noqa: PLC0415
+
     n, k = U.shape
     eye_k = jnp.eye(k, dtype=M.dtype)
     if n <= k:
-        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2), jnp.eye(n, dtype=M.dtype)
+        return _spectral_norm(jnp.linalg.inv(eye_k - M)), jnp.eye(n, dtype=M.dtype)
     matvec_t = make_transpose()
     if matvec_t is None:
         return None, None
@@ -654,7 +656,7 @@ def _full_resolvent_norm_and_rows(U, M, make_transpose):
     P, _ = jnp.linalg.qr(jnp.concatenate([U, B.T], axis=1))
     T = jnp.eye(P.shape[1], dtype=M.dtype) + (P.T @ U) @ jnp.linalg.solve(eye_k - M, B @ P)
     R, _ = jnp.linalg.qr(B.T)
-    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype)), R
+    return jnp.maximum(_spectral_norm(T), jnp.ones((), M.dtype)), R
 
 
 def _kantorovich_root_and_miss(step, h):
@@ -678,6 +680,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                                arnoldi_residual, amplification, res):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        _spectral_norm,
         ift_gradient_error_bound,
         jacobian_range_basis,
         resolvent_apply,
@@ -928,7 +931,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         dG = jax.vmap(
             lambda row, ts: jax.vmap(lambda z: g_derivative(row, ts, z))(rows_g.T))(
                 jnp.arange(n_rows), t_s)
-        any_dir = jnp.linalg.norm(live[None, None, :] * dG, ord=2, axis=(-2, -1))
+        any_dir = _spectral_norm(live[None, None, :] * dG)
     # The undirected distance: the floor through the resolvent (the larger
     # of the Krylov factor the distance itself uses and the full norm),
     # or the whole distance at an unresolved iterate.
@@ -954,7 +957,33 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # A probe whose tangent could not be computed (non-finite) counts as
     # responding, so its NaN bound poisons the maximum; it used to drop
     # out silently where the tangent was NaN (``NaN > 0`` is False).
-    responds = jnp.logical_or(norm(t_s) > 0, jnp.logical_not(jnp.isfinite(norm(t_s))))
+    #
+    # **And only a probe the pass resolves.**  A relative error divides by
+    # the tangent's size, and a tangent that is rounding has none: where
+    # moving the constant by the probe's whole size (its own magnitude)
+    # moves one pass by no more than the pass's float resolution -- the
+    # floor the distance carries, in this norm -- the right-hand side can
+    # be what the iterate's last rounding, or a cancellation inside the
+    # node's own derivative, left of it, and so is the tangent solved from
+    # it.  That is the same statement as a zero tangent (the fixed point
+    # does not respond to the probe) made at the resolution it can be made
+    # at, and such a probe is not in the worst either.  It used to be: for
+    # the centre and the curve of a nonlinearity evaluated on its centre
+    # (a constant the fixed point does not respond to; right-hand sides of
+    # 2e-33 to 5e-18 beside ones of order one, float64) the bound read
+    # 1.09 for a relative error of 1.134 on a converged hub, usable.  The
+    # absolute error for such a constant is of the size of its tangent
+    # (1.7e-34 there, beside gradients of 3.5e3).  The rule is the
+    # magnitude's, so a weak constant whose tangent is exact is left out
+    # with the cancelled one: nothing measured here tells them apart (the
+    # tangent's sensitivity to a floor-sized change of the state read 1.6%
+    # for that curve).  A right-hand side that is not finite still counts
+    # (its NaN bound poisons the maximum).
+    rhs_size = norm(s * w)
+    resolved_probe = jnp.logical_or(rhs_size > floor, jnp.logical_not(jnp.isfinite(rhs_size)))
+    responds = jnp.logical_and(
+        jnp.logical_or(norm(t_s) > 0, jnp.logical_not(jnp.isfinite(norm(t_s)))),
+        resolved_probe)
     worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
     worst = jnp.where(jnp.any(responds), worst, nan)
 
@@ -1026,7 +1055,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         JR = jax.vmap(lambda xx: jax.vmap(lambda z: jac_at(xx, z))(rows.T))(points)
         JR = jax.lax.optimization_barrier(JR).astype(dtype)
         change = live * _framed_difference(JR[1], JR[0], s / lift)
-        op_change = jnp.linalg.norm(live * jax.vmap(resolve)(change), ord=2)
+        op_change = _spectral_norm(live * jax.vmap(resolve)(change))
         numerator = jnp.maximum(beta * jac_change, op_change * step)
     h = jnp.where(
         step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,

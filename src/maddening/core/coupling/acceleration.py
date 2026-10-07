@@ -973,6 +973,33 @@ def _spectral_radius_small(H, n_squarings: int = _GELFAND_SQUARINGS):
     return jnp.where(alive, jnp.exp(log_rho), jnp.zeros_like(log_rho))
 
 
+def _lapack_input(A):
+    """``(A, ok)``: *A*, or zeros where an SVD must not be handed it.
+
+    LAPACK's SVD drivers do not return on some matrices that hold an
+    ``inf``, or whose entries' squares leave the float range (measured on
+    CPU, jaxlib 0.11.0, float32 and float64, with a wall-clock limit:
+    ``jnp.linalg.svd`` and ``pinv`` of 4 x 4 to 16 x 16 matrices with one
+    ``inf`` entry or an ``inf`` column, and of one with a row and a column
+    at ``finfo.max``; a NaN beside the ``inf`` returns).  Under ``jit``
+    both sides of a ``where`` are computed, so a select *after* the
+    factorisation still runs it: the matrix is replaced *before* the call.
+    ``ok`` is that the sum of the squares is finite, per matrix (the last
+    two axes); a matrix that passes is returned unchanged, bit for bit.
+    """
+    A = jnp.asarray(A)
+    ok = jnp.isfinite(jnp.sum(A * A, axis=(-2, -1)))
+    return jnp.where(ok[..., None, None], A, jnp.zeros_like(A)), ok
+
+
+def _spectral_norm(A):
+    """``||A||_2`` per matrix (the last two axes), NaN where
+    :func:`_lapack_input` withholds the matrix (what the SVD of a
+    non-finite matrix returns where it returns)."""
+    safe, ok = _lapack_input(A)
+    return jnp.where(ok, jnp.linalg.norm(safe, ord=2, axis=(-2, -1)), jnp.nan)
+
+
 #: Backends on which ``jax.numpy.linalg.eigvals`` of a non-symmetric
 #: matrix lowers (the supported JAX range implements it on CPU and, by
 #: calling LAPACK on the host, on GPU).
@@ -1143,7 +1170,12 @@ def _compressed_spectrum(H, coefficients, column, extended):
     k = H.shape[1]
     Hk = H[:k, :k]
     rho = _spectral_radius(Hk)
-    sigma = jnp.linalg.svd(jnp.eye(k, dtype=Hk.dtype) - Hk, compute_uv=False)
+    # Never an SVD of a matrix that is not finite (``_lapack_input``): the
+    # zeros that stand in for one have no singular value above zero, so
+    # the amplification reads ``inf``, as it did where the driver returned
+    # (a NaN singular value is not above zero either).
+    shifted, _ = _lapack_input(jnp.eye(k, dtype=Hk.dtype) - Hk)
+    sigma = jnp.linalg.svd(shifted, compute_uv=False)
     sigma_min = sigma[-1]
     invertible = sigma_min > 0
     amplification = jnp.where(
@@ -2472,8 +2504,17 @@ def iqn_ils_update(
     # then rounded its secant step differently from the same group at
     # scale 1.  An exact power of two leaves every product of a matrix in
     # range as it was.
+    #
+    # The factorisation is never handed a matrix that is not finite
+    # (``_lapack_input``: LAPACK's SVD does not return on some that hold
+    # an ``inf``, so a group whose iterate left float range before its cap
+    # never returned from its step).  It is replaced by zeros before the
+    # call and the quasi-Newton step is then not taken (``is_valid``
+    # below), which is what a non-finite ``c`` already meant.  A finite
+    # matrix passes through unchanged.
     ls_pow2 = pow2_frame(V_masked, residual)
-    c = jnp.linalg.pinv(V_masked * ls_pow2, rtol=1e-6) @ (-(residual * ls_pow2))
+    ls_matrix, ls_finite = _lapack_input(V_masked * ls_pow2)
+    c = jnp.linalg.pinv(ls_matrix, rtol=1e-6) @ (-(residual * ls_pow2))
 
     # QN correction
     correction = W_masked @ c + residual
@@ -2504,7 +2545,8 @@ def iqn_ils_update(
     correction_norm = jnp.sqrt(jnp.sum((correction * pow2) ** 2))
     residual_norm = jnp.sqrt(jnp.sum((residual * pow2) ** 2))
     is_valid = (
-        jnp.all(jnp.isfinite(x_qn))
+        ls_finite
+        & jnp.all(jnp.isfinite(x_qn))
         & (correction_norm < 1e6 * residual_norm)
         & (new_n_cols > 0)
     )

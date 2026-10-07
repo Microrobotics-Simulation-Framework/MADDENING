@@ -3432,7 +3432,7 @@ class GraphManager:
 
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
-            force_forward_edges=None,
+            force_forward_edges=None, hold=None,
         ):
             """Resolve boundary inputs and update a single node.
 
@@ -3441,6 +3441,14 @@ class GraphManager:
             force_forward_edges : set or None
                 If provided, edges in this set are treated as forward
                 (use new_state) even if they are in back_edge_set.
+            hold : callable or None
+                Multi-rate only, for a node whose rate divider is above
+                one: maps the result of ``update`` to the state the node
+                holds after this base step (that result on a base step
+                the node fires on, its unchanged state on any other).
+                The flux hook is called on what it returns, so a reader
+                of a flux sees the flux of a state the graph holds, as a
+                reader of a state field does.
             """
             boundary_inputs: dict[str, Any] = {}
             # Static: whether an incoming edge reads a geometry from this
@@ -3495,6 +3503,13 @@ class GraphManager:
                 spec, new_state[node_name], boundary_inputs, spec.timestep,
                 node_params.nodes.get(node_name),
             )
+            if hold is not None:
+                # Before the flux hook, not after it: the hook used to be
+                # called on the result of ``update`` on every base step,
+                # so between a slow node's firings its readers received
+                # the flux of a state the step then threw away (and a
+                # geometry the node holds was read from that state).
+                new_node_state = hold(new_node_state)
 
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
@@ -3622,26 +3637,32 @@ class GraphManager:
             step_count = full_state[_graph_specs._META_KEY]["step_count"]
             new_state = {k: v for k, v in full_state.items()}
 
-            def _apply_multirate(node_name, updated, current_state):
+            def _held(node_name, current_state):
+                """What ``update``'s result becomes on this base step.
+
+                ``None`` for a node that fires on every base step.  For
+                a slower one, a selection between the result and the
+                state the node already holds, applied inside
+                ``_resolve_and_update_node`` before the flux hook.
+                """
                 rd = rate_dividers[node_name]
                 if rd == 1:
-                    return updated
+                    return None
                 should_run = (step_count % rd) == 0
-                return jax.tree.map(
+                held_state = current_state[node_name]
+                return lambda updated: jax.tree.map(
                     lambda new_val, old_val: jnp.where(should_run, new_val, old_val),
                     updated,
-                    current_state[node_name],
+                    held_state,
                 )
 
             if has_coupling:
                 for block in blocks:
                     if block[0] == "node":
                         node_name = block[1]
-                        updated = _resolve_and_update_node(
-                            node_name, new_state, full_state, external_inputs, node_params
-                        )
-                        new_state[node_name] = _apply_multirate(
-                            node_name, updated, new_state
+                        new_state[node_name] = _resolve_and_update_node(
+                            node_name, new_state, full_state, external_inputs, node_params,
+                            hold=_held(node_name, new_state),
                         )
                     else:
                         _, group, group_schedule = block
@@ -3692,11 +3713,9 @@ class GraphManager:
                             }
             else:
                 for node_name in schedule:
-                    updated = _resolve_and_update_node(
-                        node_name, new_state, full_state, external_inputs, node_params
-                    )
-                    new_state[node_name] = _apply_multirate(
-                        node_name, updated, new_state
+                    new_state[node_name] = _resolve_and_update_node(
+                        node_name, new_state, full_state, external_inputs, node_params,
+                        hold=_held(node_name, new_state),
                     )
 
             # Increment step counter (preserve diagnostic keys)

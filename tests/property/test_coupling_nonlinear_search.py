@@ -929,9 +929,14 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_nonlinear_group(block, 
     assert fractions["usable"] >= USABLE_FLOOR, (
         f"{name}, block {block}: only {fractions['usable']:.2f} of the examples had the flag "
         f"set (floor {USABLE_FLOOR})")
-    if name == "gradient_vanishing":
-        # Measured 0.17 to 0.57 by block: the score is not empty.
-        assert fractions["vanishing_scored"] > 0, fractions
+    # No floor on fractions["vanishing_scored"] here.  Whether the pass
+    # resolves a nonlinearity's own constant depends on where the float32
+    # iterate stops relative to its fixed point, and that is a matter of
+    # rounding: one block reads 0.17 to 0.57 with jaxlib 0.11.0 on the
+    # development machine and 0.0 on CI's runners (same seed, jaxlib 0.10.2
+    # and 0.11.2).  That the score is not empty is held per push, by the
+    # seed ``a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point``
+    # (test_every_score_holds_on_the_nonlinear_seed_shapes), which CI runs.
 
 
 def test_the_reference_s_jacobian_is_the_central_difference_of_its_pass():

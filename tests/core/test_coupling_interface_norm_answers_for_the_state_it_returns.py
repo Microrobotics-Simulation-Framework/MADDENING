@@ -516,6 +516,43 @@ def test_the_rule_costs_one_evaluation_of_the_pass_and_only_where_it_recomputes(
     assert counts[None] - counts["none"] == extra, counts
 
 
+@pytest.mark.parametrize("norm", ["interface", "mixed", "l2"])
+def test_an_identity_mapped_group_equals_its_unmapped_twin_within_the_residual(norm):
+    """A mapping that delivers its source unchanged cannot be told from one
+    that does not, so under the interface norm its source field is not
+    measured whole and is returned one plain pass on.  The unmapped twin's
+    every field is measured whole: it returns the iterate both loops
+    accept.  So the reports are equal to the bit, and the states within the
+    reported residual on what the edges deliver -- to the bit under the
+    norms that measure the state.
+
+    (A later stage, the compact-side reading of static mappings, reads a
+    mapping between fields of one size at its source: such a field is then
+    measured whole, and the two may be equal to the bit again.)
+    """
+    plain = [("A", "B", G, None), ("B", "A", 0.3 * G.T, None)]
+    mapped = [(src, dst, gain, np.eye(2)) for src, dst, gain, _how in plain]
+    group = dict(iteration_mode="jacobi", convergence_norm=norm, max_iterations=CONVERGES,
+                 **({"tolerance": RTOL} if norm == "l2" else {"rtol": RTOL}))
+    twin, report = _solve([A, B], plain, group)
+    state, through = _solve([A, B], mapped, group)
+    assert report["converged"] is True
+    assert (through["iterations"], through["converged"], float(through["residual"])) == (
+        report["iterations"], report["converged"], float(report["residual"]))
+    same = all(np.array_equal(state[n]["u"], twin[n]["u"]) for n in ("A", "B"))
+    if norm != "interface":
+        assert same
+        return
+    assert not same, "the mapped field was returned as the accepted iterate holds it"
+    after = _plain_pass([A, B], plain, twin, "jacobi")
+    for n in ("A", "B"):
+        np.testing.assert_allclose(state[n]["u"], after[n]["u"], rtol=32 * _eps(False))
+    terms = _residual_terms([A, B], plain, state, twin, RTOL)
+    moved = float(np.sqrt(sum(sq for sq, _n in terms.values())
+                          / sum(n for _sq, n in terms.values())))
+    assert moved <= float(report["residual"]) + 2e-3 + 16 * _eps(False) / RTOL, (moved, report)
+
+
 class _Root(_Lin):
     """``w <- sqrt(inp)``: not finite once an entry it reads is negative."""
 

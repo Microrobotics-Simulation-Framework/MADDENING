@@ -78,6 +78,16 @@ PINNED = {
         "bde2fed156e2", "ac2efee847bf", "01c5b7b9608b", "c239d9bfabf1", "c314227b657d", "aa5433ed3c0b",
         "93b8dd9924b6", "b4b8227fb9ac", "8d50a4e13d18", "66587d9c84a8", "26e35aea65b0", "0843a3bffddc",
     ),
+    # The linear search's cells of the returned-state score (the state a
+    # step returns under the interface norm, beside its report): named by
+    # index by the slow hunt's blocks and by the test of a reading that
+    # crosses zero.
+    "linear-returned": (
+        "d0058576b2c7", "9c1ded0b6a7a", "3f106935d556", "3641518af7d3", "02fa758cd4e4", "b778825fc19b",
+        "7c099daf432d", "d518ea3e027e", "035de05d9652", "fc9e73708288", "e1c03e076e36", "37143cc90043",
+        "b3a110a20f64", "87f700c28fb2", "f0aac2e43a07", "131163ba2745", "072a96b29d4c", "09ba4c4462ba",
+        "670185db8319", "dcd302b847cd", "654c8dc76eea",
+    ),
     "nonlinear": (
         "8e49c418d2d1", "bf58985620af", "f3110b07f131", "8ca3833a19d5", "df129a7b075c", "d2c8f50b84b9",
         "b4ec903a5fe2", "8201b83f5d80", "17533a05273d", "4d707e5d0473", "81b531b65d4c", "28c46d048b12",
@@ -87,7 +97,7 @@ PINNED = {
         "8beff3697817", "b7a7c8a24ee6", "f7f1f5578a8e", "700519c011f8", "b4a7705690d4", "3dbe2c0e4863",
         "07c83370b5b1", "c23df1c1d6e8", "b886f8f64b96", "0aab610e2a1f", "f72615efce40", "2426cb647dfb",
         "4cc3be5b814f", "36c94cd61198", "ebe7082625d9", "94c462e9802d", "93a6e3dc56fc", "a5c93eb1810d",
-        "64585479923a", "2600dc30271d", "6a480c5b3943", "ef332ebf0f69",
+        "64585479923a", "2600dc30271d", "6a480c5b3943", "ef332ebf0f69", "603fd00c5270",
     ),
     "geometry": (
         "5890ebd22583", "8aa7cc3c0029", "f98ee00d436f", "2862dc84fe5e", "e4854bef88e0", "39361471fd8f",
@@ -114,6 +124,7 @@ ADDED_SINCE_PINNED = {geometry.Cell: {"tolerance": 0.0}}
 def searches() -> dict:
     """``{search: its cells}``, read when asked (a test replaces a table)."""
     return {"linear": linear.CELLS, "linear-side": linear.SIDE_CELLS,
+            "linear-returned": linear.RETURNED_CELLS,
             "nonlinear": nonlinear.CELLS, "geometry": geometry.CELLS,
             "geometry-gauss-seidel": geometry.GS_CELLS,
             "geometry-plane": geometry.PLANE_CELLS}
@@ -191,7 +202,8 @@ def pins() -> dict:
     module-level case, and every case in a module-level table, of the three
     search modules."""
     out = {name: {} for name in PINNED}
-    sources = (("linear", linear, {linear.Case: "linear", linear.SideCase: "linear-side"}),
+    sources = (("linear", linear, {linear.Case: "linear", linear.SideCase: "linear-side",
+                                   linear.ReturnedCase: "linear-returned"}),
                ("nonlinear", nonlinear, {nonlinear.Case: "nonlinear"}),
                # A plane draw is a case of the geometry search's own cells
                # unless its table is in ``_OTHER_CELLS``.
@@ -250,6 +262,8 @@ def test_every_pinned_case_names_a_cell_that_is_pinned():
     should (so the message is not silently short), and no pin names an
     index past the cells."""
     found = pins()
+    # (No pinned case names a returned-state cell yet: "linear-returned" has none to count.)
+    assert set(found) == set(PINNED) and not found["linear-returned"], sorted(found)
     for search, least in (("linear", 15), ("linear-side", 2), ("nonlinear", 6), ("geometry", 2),
                           ("geometry-gauss-seidel", 2)):
         count = sum(len(v) for v in found[search].values())

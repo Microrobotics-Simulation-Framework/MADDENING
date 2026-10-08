@@ -58,8 +58,10 @@ and held to a floor in the slow profile):
    derivative taken at the returned iterate against the same dense solve
    at the fixed point, the worst over every scalar gain and every mapping
    weight the graph holds (:func:`gradient_constants`: every entry of a
-   matrix held dense, the pattern's entries of a sparse mapping), over
-   ``gradient_relative_error_bound``, where ``gradient_bound_usable``;
+   matrix held dense, the pattern's entries of a sparse mapping) that the
+   pass resolves (the row's condition: one whose whole value moves a pass
+   by more than :data:`RESOLVED_MARGIN` of the residual's float floors),
+   over ``gradient_relative_error_bound``, where ``gradient_bound_usable``;
 4. *floor* (CPL-097, CPL-100): how far the exact residual of the returned
    state is *above* the reported one, over the floor the report used --
    at a stalled iterate, whose reported residual is zero, the plateau
@@ -623,10 +625,26 @@ def gradient_constants(topo: ct.Topology, mapping_kind: str) -> list:
     return constants
 
 
-def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> list:
-    """``(relative error, constant)`` of ``d x* / d c`` taken at the
-    returned iterate, for every constant ``c`` of
-    :func:`gradient_constants` the fixed point depends on.
+#: A constant is scored for the gradient bound where its pass response
+#: (:func:`gradient_rows`) is above this many of the reported floors.
+#: CPL-093 is a bound for "a constant the pass resolves: moving it by its
+#: own magnitude moves one pass from x_k by more than the residual's float
+#: floor, in the bound's norm"; "a gain or forcing so weak that its whole
+#: value moves the pass by less than the floor is not in the bound, which
+#: says nothing of it".  The bound drops a probe at one floor, by its own
+#: float32 or float64 arithmetic, and the model measures the response in
+#: float64: two computations of one comparison, so the score is taken a
+#: factor clear of it.  The nonlinear and the geometry searches hold their
+#: reference's responses to the same margin.
+RESOLVED_MARGIN = 2.0  # units: floors
+
+
+def gradient_rows(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> list:
+    """``(constant, tangent, miss, response)`` for every constant ``c`` of
+    :func:`gradient_constants`: the size of ``d x* / d c`` taken at the
+    returned iterate, the size of its difference from the fixed point's,
+    and how far one pass from the returned iterate moves when ``c`` is
+    moved by its own magnitude.
 
     *mapping_kind*: how the graph that *model* describes holds its mapped
     edges (the cell's: a model is the dense one whatever the kind, and
@@ -638,8 +656,18 @@ def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind:
     ``dU`` (both linear in one gain or weight), and the fixed point's is
     the same at ``x*``.  In the norm the bound documents: the raw fields
     the group's norm reads, each over its magnitude at the returned state.
+
+    The response is the pass's own derivative ``(I - L)^{-1} (dL F(x) + dU
+    x)`` times the size ``gradient_relative_error_bound`` probes the
+    constant at -- its magnitude; a zero entry at the largest magnitude of
+    the gain or of the weights it belongs to, or at 1 where they are all
+    zero -- in the same norm and in the group's units (a root mean square
+    under the relative norms), which are the reported floor's.
     """
     topo = model.topo
+    assert set(topo.groups[0]) == set(topo.names), (
+        "a group with no outside reads: a gain that multiplies an outside value moves the "
+        "group's constant too, which neither size here carries")
     assert model.geometry is None, "a geometry-dependent mapping holds no weights"
     for i, e in enumerate(topo.edges):
         if e.mapped:
@@ -656,8 +684,9 @@ def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind:
     F = ct._solve(eye - L, U @ x + cg_)  # noqa: SLF001
     xs = ct._solve(eye - (L + U), cg_)  # noqa: SLF001
     resolvent = np.linalg.inv(np.asarray(eye - (L + U), np.float64))
-    S, w, _rtol, _rms = model.norm_parts(0, state, raw=True)
+    S, w, _rtol, rms = model.norm_parts(0, state, raw=True)
     WS = w[:, None] * S
+    count = math.sqrt(len(w)) if rms and len(w) else 1.0
 
     def moved(node=None, port=None, edge=None, entry=None):
         values = {"nodes": {m: dict(nv) for m, nv in model.values["nodes"].items()},
@@ -674,15 +703,58 @@ def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind:
         L1, U1 = other.group_pass(0)
         return L1 - L, U1 - U
 
-    errors = []
+    def probed_at(node=None, port=None, edge=None, entry=None) -> float:
+        """The size the bound's probe moves the constant by."""
+        if edge is None:
+            held = np.abs(np.asarray(model.values["nodes"][node]["G"][port], np.float64))
+            value, top = held[entry], np.max(held)
+        else:
+            H = np.abs(np.asarray(model.values["H"][edge], np.float64))
+            value, top = H[entry], np.max(H[ct.parameter_entries(topo, edge, mapping_kind)])
+        return float(value if value > 0 else (top if top > 0 else 1.0))
+
+    rows = []
     for c in gradient_constants(topo, mapping_kind):
         dL, dU = moved(**c)
         t_k = resolvent @ np.asarray(dL @ F + dU @ x, np.float64)
         miss = resolvent @ np.asarray(dL @ (F - xs) + dU @ (x - xs), np.float64)
-        size = float(np.linalg.norm(WS @ t_k))
-        if size > 0:
-            errors.append((float(np.linalg.norm(WS @ miss)) / size, c))
-    return errors
+        one_pass = np.asarray(ct._solve(eye - L, dL @ F + dU @ x), np.float64)  # noqa: SLF001
+        rows.append((c, float(np.linalg.norm(WS @ t_k)), float(np.linalg.norm(WS @ miss)),
+                     probed_at(**c) * float(np.linalg.norm(WS @ one_pass)) / count))
+    return rows
+
+
+def resolved_and_not(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str,
+                     floor: "float | None") -> tuple:
+    """``(resolved, left out)``: the ``(relative error, constant, response)``
+    of every constant of :func:`gradient_rows` the fixed point depends on,
+    split by CPL-093's condition.
+
+    *floor*: the residual's float floor the report used.  A constant is
+    one the pass resolves -- one ``gradient_relative_error_bound`` speaks
+    of -- where its response is above :data:`RESOLVED_MARGIN` floors.
+    ``None``: no floor was reported and nothing is left out.
+    """
+    least = -math.inf if floor is None else RESOLVED_MARGIN * floor
+    rows = [(miss / tangent, c, response)
+            for c, tangent, miss, response in gradient_rows(model, pre, state, mapping_kind)
+            if tangent > 0]
+    return [row for row in rows if row[2] > least], [row for row in rows if not row[2] > least]
+
+
+def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str, *,
+                    floor: "float | None" = None) -> list:
+    """``(relative error, constant)`` of ``d x* / d c`` taken at the
+    returned iterate (:func:`gradient_rows`), for every constant ``c`` of
+    :func:`gradient_constants` the fixed point depends on.
+
+    With *floor* (the residual's float floor the report used), only the
+    constants the pass resolves (:func:`resolved_and_not`).  Without,
+    every one: the oracle itself, which a second oracle is compared with
+    constant for constant.
+    """
+    resolved, _left_out = resolved_and_not(model, pre, state, mapping_kind, floor)
+    return [(error, c) for error, c, _response in resolved]
 
 
 def _gradient_error(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> float:
@@ -741,7 +813,7 @@ def observe(case: Case) -> dict:
     model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
     out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0, returned=0.0,
                spectral_usable=bool(d["spectral_usable"]),
-               gradient_usable=bool(d["gradient_bound_usable"]),
+               gradient_usable=bool(d["gradient_bound_usable"]), gradient_scored=False,
                floor_reported=math.isfinite(floor),
                report={k: d[k] for k in ("iterations", "converged", "residual", "rho_spectral",
                                          "spectral_error_bound", "spectral_usable",
@@ -784,17 +856,34 @@ def observe(case: Case) -> dict:
         out["report"]["distance"] = dist
 
     if out["gradient_usable"]:
-        true, constant = max(
-            gradient_errors(model, step.pre, step.state, cell.mapping_kind),
-            key=lambda error: error[0], default=(0.0, None))
+        # CPL-093 is made for "a constant the pass resolves: moving it by
+        # its own magnitude moves one pass from x_k by more than the
+        # residual's float floor, in the bound's norm"; a constant below
+        # that "is not in the bound, which says nothing of it".  So the
+        # score is the worst over the constants whose response is above
+        # ``RESOLVED_MARGIN`` floors, and what the others read is reported
+        # beside it (a weak gain's derivative can be several times off at
+        # an early exit with the flag set: outside the row, and no score).
+        scored, left_out = resolved_and_not(
+            model, step.pre, step.state, cell.mapping_kind,
+            floor if out["floor_reported"] else None)
+        true, constant, response = max(scored, key=lambda row: row[0],
+                                       default=(0.0, None, math.nan))
+        beyond, weak, weak_response = max(left_out, key=lambda row: row[0],
+                                          default=(0.0, None, math.nan))
         # The bound is on the error of stopping early.  The derivative it
         # is relative to is itself a float solve, good to no better than a
         # few ``eps``: an error below 64 of them (the allowance of the
         # domain check of CPL-093) is not one a gradient in this dtype has.
         bound = float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
         out["gradient"] = math.inf if math.isnan(bound) else true / bound
-        out["report"].update(gradient_error=true, gradient_constant=constant,
-                             gradient_allowed=bound)
+        out["gradient_scored"] = bool(scored)
+        out["report"].update(
+            gradient_error=true, gradient_constant=constant, gradient_allowed=bound,
+            gradient_response=response / floor if floor > 0 else math.inf,
+            gradient_constants=(len(scored), len(scored) + len(left_out)),
+            gradient_unresolved=dict(error=beyond, constant=weak,
+                                     response=weak_response / floor if floor > 0 else math.inf))
     return out
 
 
@@ -887,8 +976,12 @@ def scorer(name: str):
 
 
 def usable_fraction(name: str, strategy_cases) -> float:
-    seen = [observe(c)[FLAG[name]] for c in strategy_cases]
-    return sum(seen) / max(len(seen), 1)
+    """The fraction of the examples that put search *name* to a test: its
+    flag set and, for the gradient, a constant the pass resolves under it
+    (a score over no constant is 0 whatever the bound)."""
+    seen = [observe(c) for c in strategy_cases]
+    held = [bool(s[FLAG[name]]) and (name != "gradient" or s["gradient_scored"]) for s in seen]
+    return sum(held) / max(len(held), 1)
 
 
 def search(name: str, *, cells=PER_PUSH_CELLS, domain: Domain = CLAIMED, profile=None,
@@ -1149,6 +1242,291 @@ def test_a_known_defect_the_search_reached_is_fixed(case, score):
     assert seen[FLAG[score]], f"the flag is no longer set: {seen['report']}"
     assert seen[score] <= THRESHOLD[score], (
         f"{score} is {seen[score]!r}, over {THRESHOLD[score]!r}: {seen['report']}")
+
+
+# ---------------------------------------------------------------------------
+# What the hunt reached that the gradient bound does not speak of
+# ---------------------------------------------------------------------------
+
+_RING_8_IQN = Cell("ring-8", "float32", 4, 5)
+_SPARSE_RING_IQN = Cell("mapped", "float32", 4, 5, "sparse-ragged")
+#: The shrunk examples of two slow hunts on which the gradient score, then
+#: taken over every constant, read 4.12 and 1.28 with the flag set:
+#: ``(case, (node, port, column) of the gain entries that carried it)`` (a
+#: gain's entries of one column multiply one delivered value and share an
+#: error).  Neither is a wrong bound.
+#: CPL-093 is made for a constant the pass resolves, and on each the
+#: constant's whole value moves a pass by less than the residual's float
+#: floor, so ``gradient_relative_error_bound`` leaves its probe out and
+#: says nothing of it (with the rule taken out of the library the two
+#: bounds read 87.0 and 0.154, over both errors).  The same numbers on
+#: jaxlib 0.10.2, 0.11.0 and 0.11.2, against the closed form and against
+#: the numerical reference.
+UNRESOLVED = {
+    # A float32 ring of eight scalars under IQN-ILS and Jacobi, stopped at
+    # its cap of five passes, one field a hundredth of the others.  The
+    # gain that multiplies that field is 1.7e-3, and the field's rounding
+    # puts the floor at 520 ``eps``: the gain's whole value moves a pass by
+    # 0.04 floors.  Its derivative is 4.24 of itself from the fixed
+    # point's (the small field is still 130% of itself away) under a bound
+    # of 0.864; over the seven gains the pass resolves the worst is 0.038.
+    "a-weak-gain-on-a-small-field-at-an-early-exit": (
+        Case(CELLS.index(_RING_8_IQN), 7, 0.25, False, 0.01, 0.0, 1.0, 0, 0.1, 7), ("r0", 0, 0)),
+    # A float32 ring of sparse mapped edges, converged in one pass at its
+    # floor (``precision_limited``).  One delivered value is three terms of
+    # 0.02 to 0.05 that cancel to 2e-5, and the two gain entries that
+    # multiply it move a pass by 0.31 floors: 5.8e-4 off under a bound of
+    # 7.5e-5; over the 27 constants the pass resolves the worst is 3.7e-7.
+    "a-gain-on-a-delivered-value-that-cancels-at-the-floor": (
+        Case(CELLS.index(_SPARSE_RING_IQN), 2625, 0.25, True, 0.1, 0.0, 1.0, 0, 0.0, 0),
+        ("m1", 0, 0)),
+}
+
+
+#: The other side of the condition, on the sparse ring: a draw (one of
+#: 2000 uniform ones on that cell) whose worst constant the pass resolves
+#: by 4.8 floors -- inside the row, and scored.  A gain entry on a
+#: delivered value 8e-5 of its field, converged in one pass at the floor:
+#: 9.3e-5 off under a bound of 6.4e-3.  The entry above it in the same
+#: column (0.36 floors) carries the same error and is left out.  A bound
+#: that left out every probe below eight floors reads 5.5e-6 here, and
+#: this example is then 5.9 over the threshold: a score that could no
+#: longer fail on a weak constant would not notice.
+WEAK_BUT_RESOLVED = (
+    Case(CELLS.index(_SPARSE_RING_IQN), 33629, 0.08433501566929222, False, 1.0, 0.0, 1.0, -6,
+         0.0, 1),
+    ("m1", 0, (1, 1)), ("m1", 0, (0, 1)))
+#: The floor each example's step reported, in its group's norm (1 is the
+#: tolerance), on every jaxlib: what the oracle below, which compiles no
+#: graph, is given; the slow tests read the step's own.
+_REPORTED_FLOOR = {
+    "a-weak-gain-on-a-small-field-at-an-early-exit": 0.62,  # units: the group's norm
+    "a-gain-on-a-delivered-value-that-cancels-at-the-floor": 0.0155,  # units: the group's norm
+    # (one evaluation's: four float32 ``eps`` over the ``rtol`` of 1e-4)
+    "a-weak-constant-the-pass-still-resolves": 0.00477,  # units: the group's norm
+}
+#: The largest response, in floors, the example above is pinned to be
+#: resolved at: a probe dropped below this many is a wrong bound it shows.
+WEAK_RESPONSE = 8.0  # units: floors
+
+
+def _one_pass(model: ct.LinearModel, pre: dict, state: dict) -> np.ndarray:
+    """One pass of group 0 from *state*, in the model's stacking."""
+    members, _off, k = model._group_layout(0)  # noqa: SLF001
+    L, U = (np.asarray(a, np.float64) for a in model.group_pass(0))
+    c = np.asarray(model.group_constant(0, pre, state), np.float64)
+    x = np.concatenate([np.asarray(state[m]["x"], np.float64) for m in members])
+    return np.linalg.solve(np.eye(k) - L, U @ x + c)
+
+
+@pytest.mark.parametrize("schedule", ("jacobi", "gauss-seidel"))
+@pytest.mark.parametrize("name", sorted(UNRESOLVED))
+def test_the_gradient_score_is_taken_over_the_constants_the_pass_resolves(name, schedule):
+    """The oracle alone, on the two examples' numbers (no graph compiled).
+
+    A constant's response is the pass's own movement when the constant is
+    moved by the size the bound probes it at -- taken here a second way,
+    as the difference of two passes of two models -- and the score takes
+    the constants above ``RESOLVED_MARGIN`` floors: the weak one is left
+    out at the floor its step reported, every other is in, and with no
+    floor every one is (the oracle a second oracle is compared with)."""
+    case, where = UNRESOLVED[name]
+    cell = CELLS[case.cell]
+    topo, kind = cell.topo, cell.mapping_kind
+    values = values_of(case)
+    cfgs = [dict(cell.cfgs[0], iteration_mode=schedule)]
+    model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cfgs)
+    pre, state = _plain_passes(model, values, cell.cap)
+    rows = {_named(c): (tangent, miss, response)
+            for c, tangent, miss, response in gradient_rows(model, pre, state, kind)}
+    assert len(rows) == len(gradient_constants(topo, kind))
+
+    # The response, by differencing the pass itself.
+    S, w, _rtol, rms = model.norm_parts(0, state, raw=True)
+    assert rms and len(w), "the examples are under a relative norm"
+    here = _one_pass(model, pre, state)
+    for c in gradient_constants(topo, kind):
+        if "edge" in c:
+            held = np.abs(np.asarray(values["H"][c["edge"]], np.float64))
+            top = np.max(held[ct.parameter_entries(topo, c["edge"], kind)])
+        else:
+            held = np.abs(np.asarray(values["nodes"][c["node"]]["G"][c["port"]], np.float64))
+            top = np.max(held)
+        size = held[c["entry"]] if held[c["entry"]] > 0 else top
+        assert size > 0, "the examples hold no all-zero gain or mapping"
+        # units: relative -- large enough that the two passes' own float64
+        # rounding is 1e-8 of the difference of the weakest gain's.
+        step = 1e-3 * size
+        passes = []
+        for sign in (1.0, -1.0):
+            moved = {"nodes": {m: dict(nv) for m, nv in values["nodes"].items()},
+                     "H": dict(values["H"])}
+            if "edge" in c:
+                H = np.array(values["H"][c["edge"]], np.float64)
+                H[c["entry"]] += sign * step
+                moved["H"][c["edge"]] = H
+            else:
+                G = [np.array(g, np.float64) for g in values["nodes"][c["node"]]["G"]]
+                G[c["port"]][c["entry"]] += sign * step
+                moved["nodes"][c["node"]]["G"] = G
+            other = ct.LinearModel(topo, moved, dtype="float64", group_cfgs=cfgs, exact=True)
+            passes.append(_one_pass(other, pre, state))
+        differenced = (size / (2.0 * step)) * float(
+            np.linalg.norm(w * (S @ (passes[0] - passes[1])))) / math.sqrt(len(w))
+        # units: relative -- a central difference: exact under Jacobi (the
+        # pass is linear in a gain), to the step squared under Gauss-Seidel.
+        assert rows[_named(c)][2] == pytest.approx(differenced, rel=1e-4, abs=1e-12), c
+
+    floor = _REPORTED_FLOOR[name]
+    scored = {_named(c) for _error, c in gradient_errors(model, pre, state, kind, floor=floor)}
+    every = {_named(c) for _error, c in gradient_errors(model, pre, state, kind)}
+    assert every == {n for n, (tangent, _miss, _response) in rows.items() if tangent > 0}
+    left_out = every - scored
+    assert left_out and all((n[0], n[1], n[3][1]) == where for n in left_out), left_out
+    # units: floors -- the weak ones are well below one, the rest well above the margin.
+    assert all(rows[n][2] < 0.5 * floor for n in left_out), [rows[n][2] / floor for n in left_out]
+    assert all(rows[n][2] > 4.0 * RESOLVED_MARGIN * floor for n in scored)
+    # A zero entry is probed at its gain's largest magnitude.  On the
+    # mapped ring that is the entry above it, on the same delivered value:
+    # under Jacobi (each moves one entry of one field, and nothing reads
+    # it in the same pass) the two respond alike.
+    node, port, column = where
+    gain = np.abs(np.asarray(values["nodes"][node]["G"][port], np.float64))
+    zeros = [a for a in range(gain.shape[0]) if gain[a, column] == 0]
+    assert bool(zeros) is (topo is STRUCTURES["mapped"]), "the premise: the mapped example's zero"
+    if zeros and schedule == "jacobi":
+        top = int(np.argmax(gain[:, column]))
+        assert gain[top, column] == np.max(gain)
+        for a in zeros:
+            assert rows[(node, port, None, (a, column))][2] == pytest.approx(
+                rows[(node, port, None, (top, column))][2], rel=1e-12)
+    # The floor decides, and only it: none left out at no floor's worth,
+    # everything at a floor no constant reaches.
+    assert {_named(c) for _e, c in gradient_errors(model, pre, state, kind, floor=0.0)} == every
+    assert not gradient_errors(model, pre, state, kind,
+                               floor=max(r for _t, _m, r in rows.values()))
+
+
+def test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score():
+    """The oracle alone (no graph): above the margin a constant is scored,
+    however weak.  Of two gain entries on one delivered value, with one
+    relative error, the one that moves a pass by a few floors is in and
+    the one below a floor is out."""
+    case, kept, dropped = WEAK_BUT_RESOLVED
+    cell = CELLS[case.cell]
+    values = values_of(case)
+    model = ct.LinearModel(cell.topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    pre, state = _plain_passes(model, values, cell.cap)
+    floor = _REPORTED_FLOOR["a-weak-constant-the-pass-still-resolves"]
+    resolved, left_out = resolved_and_not(model, pre, state, cell.mapping_kind, floor)
+    inside = {_named(c)[:2] + (_named(c)[3],): (error, response / floor)
+              for error, c, response in resolved if "node" in c}
+    outside = {_named(c)[:2] + (_named(c)[3],): (error, response / floor)
+               for error, c, response in left_out if "node" in c}
+    assert kept in inside and dropped in outside, (sorted(inside), sorted(outside))
+    assert RESOLVED_MARGIN < inside[kept][1] < WEAK_RESPONSE, inside[kept]
+    assert outside[dropped][1] < 1.0, outside[dropped]
+    assert inside[kept][0] == pytest.approx(outside[dropped][0], rel=1e-9)
+    assert (inside[kept][0], kept) in {
+        (error, _named(c)[:2] + (_named(c)[3],))
+        for error, c in gradient_errors(model, pre, state, cell.mapping_kind, floor=floor)}
+
+
+#: A draw on a per-push cell (the mapped float32 ring under Gauss-Seidel,
+#: converged in one pass at its floor) with one gain entry at 0.12 floors
+#: and every other constant above four.
+ONE_LEFT_OUT = Case(2, 11617, 0.28553335772377364, False, 0.03438394706508214, 0.0, 1.0, 0,
+                    2.30771016601352e-08, 2)
+
+
+def test_the_gradient_score_of_a_step_is_taken_at_the_floor_its_report_used():
+    """A compiled step (a per-push cell): what the score took and what it
+    left out are what the condition gives at the reported floor, the
+    worst of each is what the report names, and one constant is left out
+    (without which the example would not tell a score that ignored the
+    floor from one that read it)."""
+    case = ONE_LEFT_OUT
+    cell = CELLS[case.cell]
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["gradient_usable"] and seen["floor_reported"] and seen["gradient_scored"], report
+    values = values_of(case)
+    with precision(cell.dtype == "float64"):
+        (step,) = ct.run(_built(case.cell), values, 1)
+    model = ct.LinearModel(cell.topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    floor = report["floor"]
+    resolved, left_out = resolved_and_not(model, step.pre, step.state, cell.mapping_kind, floor)
+    assert len(left_out) == 1 and len(resolved) > 16, (len(resolved), len(left_out))
+    assert report["gradient_constants"] == (len(resolved), len(resolved) + len(left_out))
+    # units: floors -- no constant near the margin: measured 0.12, and 4.5 for the weakest scored.
+    assert left_out[0][2] < 0.5 * floor, left_out[0][2] / floor
+    assert min(response for _e, _c, response in resolved) > 1.5 * RESOLVED_MARGIN * floor
+    worst = max(resolved, key=lambda row: row[0])
+    assert report["gradient_error"] == pytest.approx(worst[0], rel=1e-9)
+    assert report["gradient_constant"] == worst[1]
+    assert report["gradient_response"] == pytest.approx(worst[2] / floor, rel=1e-9)
+    assert report["gradient_unresolved"]["constant"] == left_out[0][1]
+    assert report["gradient_unresolved"]["error"] == pytest.approx(left_out[0][0], rel=1e-9)
+    assert seen["gradient"] == pytest.approx(worst[0] / report["gradient_allowed"], rel=1e-9)
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+
+
+# Slow: the sparse ring compiled with diagnostics (no per-push cell).
+# Per push: tests/property/test_coupling_targeted_search.py::test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score
+@pytest.mark.slow
+def test_a_weak_constant_the_pass_still_resolves_is_scored():
+    """The step itself: the worst constant scored is the weak one, a few
+    floors above the margin, and the bound covers it.  (With the probes
+    below eight floors taken out of the library's bound this fails at a
+    score of 5.9.)"""
+    case, kept, dropped = WEAK_BUT_RESOLVED
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["gradient_usable"] and seen["gradient_scored"], report
+    worst, weak = report["gradient_constant"], report["gradient_unresolved"]
+    assert (worst.get("node"), worst.get("port"), worst["entry"]) == kept, report
+    assert RESOLVED_MARGIN < report["gradient_response"] < WEAK_RESPONSE, report
+    assert (weak["constant"].get("node"), weak["constant"].get("port"),
+            weak["constant"]["entry"]) == dropped and weak["response"] < 1.0, report
+    assert weak["error"] == pytest.approx(report["gradient_error"], rel=1e-9), report
+    # Not a score of nothing: the error is far above what a float32
+    # derivative carries by itself, and inside the bound.
+    assert report["gradient_error"] > 256.0 * case.eps, report
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+    assert report["floor"] == pytest.approx(
+        _REPORTED_FLOOR["a-weak-constant-the-pass-still-resolves"], rel=0.02), report
+
+
+# Slow: the two cells compiled with diagnostics (neither is a per-push cell).
+# Per push: tests/property/test_coupling_targeted_search.py::test_the_gradient_score_is_taken_over_the_constants_the_pass_resolves
+@pytest.mark.slow
+@pytest.mark.parametrize("name", sorted(UNRESOLVED))
+def test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_score(name):
+    """CPL-093's condition, applied by the score as the bound applies it.
+
+    The constant that carried the old score is left out, below one floor
+    (so no margin between the two computations decides it), and what it
+    reads is still over the bound: the premise, without which the example
+    says nothing.  The constants the pass resolves are scored and hold."""
+    case, where = UNRESOLVED[name]
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["gradient_usable"] and seen["gradient_scored"], report
+    left_out = report["gradient_unresolved"]
+    worst = left_out["constant"]
+    assert (worst.get("node"), worst.get("port"), worst["entry"][1]) == where, report
+    # units: floors -- measured 0.042 and 0.31.
+    assert left_out["response"] < 0.5, report
+    assert left_out["error"] > THRESHOLD["gradient"] * report["gradient_allowed"], report
+    scored, every = report["gradient_constants"]
+    # The pass resolves all but a constant or two; the worst of them is
+    # resolved by a wide margin and inside the bound.
+    assert 0 < every - scored <= 2 and scored >= 7, report
+    assert report["gradient_response"] > 16.0 * RESOLVED_MARGIN, report
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+    assert all(seen[s] <= THRESHOLD[s] for s in THRESHOLD), report
+    # The floor the oracle-only test above is given is this step's.
+    assert report["floor"] == pytest.approx(_REPORTED_FLOOR[name], rel=0.02), report
 
 
 # =============================================================================

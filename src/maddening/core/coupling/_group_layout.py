@@ -680,8 +680,8 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
             stored = (
                 f"where a {dtype} position is stored to {resolution:.3g} spacings, a "
                 f"weight of the mapping moves by as much, and the delivered value by up "
-                f"to that fraction of its own magnitude (a field that varies by its own "
-                f"size across one cell)")
+                f"to that fraction of its own magnitude (the worst case: a field that "
+                f"varies by its own size across one cell; a smoother one is moved by less)")
             consequence = (
                 "Rounding alone can keep the delivered value from meeting the criterion "
                 "(the group then runs to max_iterations), and where it is met it says "

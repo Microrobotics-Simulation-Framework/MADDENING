@@ -337,10 +337,14 @@ ACCELERATIONS = {
     "iqn-ils": dict(acceleration="iqn-ils"),
     "iqn-imvj": dict(acceleration="iqn-imvj", jacobian_reuse=2),
 }
-#: Passes enough for every row to converge.
-CONVERGES = 40
+#: Passes enough for every row to converge (Jacobi relaxed at 0.5 on the
+#: mapped pair takes more than forty).
+CONVERGES = 120
 #: ``(case, schedule, solver, acceleration, cap)``: ``cap`` ``None`` lets
-#: the group converge, 3 stops it well short.
+#: the group converge; 3 stops the plain and the relaxed loops well short,
+#: and every per-push row with a cap (an accelerated Gauss-Seidel loop of
+#: these linear pairs can converge inside three passes, and is then one
+#: more converged row).
 GRID = tuple(itertools.product(tuple(CASES), ("jacobi", "gauss-seidel"), ("ift", "fori"),
                                ACCELERATIONS, (None, 3)))
 #: The rows run on every push: every case, schedule, solver, acceleration
@@ -383,8 +387,9 @@ def assert_the_return_rule(case, schedule, solver, acceleration, cap, *, x64=Fal
     assert (report["iterations"], report["converged"]) == (
         loop["iterations"], loop["converged"]), where
     assert float(report["residual"]) == float(loop["residual"]), where
-    assert report["converged"] is (cap is None), (where, report["iterations"])
-    if cap is not None:
+    if cap is None or (case, schedule, solver, acceleration, cap) in PER_PUSH:
+        assert report["converged"] is (cap is None), (where, report["iterations"])
+    if not report["converged"]:
         assert report["iterations"] == cap, where
 
     # 2. A field measured whole is the accepted iterate's, to the bit; every
@@ -403,7 +408,7 @@ def assert_the_return_rule(case, schedule, solver, acceleration, cap, *, x64=Fal
                 f"at the accepted iterate")
             moved = max(moved, float(np.max(np.abs(
                 value.astype(np.float64) - accepted[name][f]))) / scale)
-    if acceleration == "none" or cap is not None:
+    if acceleration == "none" or not report["converged"]:
         # (An accelerated solve of a linear group can stop on the fixed
         # point to rounding, where the pass changes nothing.)
         assert moved > 64 * eps, f"{where}: the rule changed nothing; the row tests nothing"

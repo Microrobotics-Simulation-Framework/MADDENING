@@ -131,6 +131,12 @@ SR = _SLOW_RULE
 TS = "docs/developer_guide/testing_standards.md"
 _LM = "test_fit_lm_through_ift_coupled_group_recovers_stiffness_from_nearby"
 _XF = "tests/core/test_cross_feature_edge_cases.py"
+#: The coupling searches' cells: a digest of each cell's configuration (no compile).
+CELLS_PINNED = ("tests/property/test_coupling_search_cells_are_pinned.py",)
+_NL = "tests/property/test_coupling_nonlinear_search.py"
+_LIN = "tests/property/test_coupling_targeted_search.py"
+_GEO = "tests/property/geometry_cells.py"
+_GS_L2 = '    dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="l2"),\n'
 
 # Lines reused by several allowlist mutants (an existing entry, and a real
 # parametrised test).
@@ -537,6 +543,24 @@ MUTANTS: tuple[Mutant, ...] = (
        "exempt the next slow test written there"),
     _M("W12", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_LM}():", SLOW_RULE,
        "the named witness skip-marked: it is collected and never runs"),
+    # --- L: the layout of the coupling searches' cells, tests/property/test_coupling_*_search.py
+    _M("L1", _NL, "                knob = ROTATED_KNOBS[(s + 3 * t + 2 * q) % len(ROTATED_KNOBS)]\n",
+       "                knob = (s + 3 * t + 2 * q) % len(linear.KNOBS)\n", CELLS_PINNED,
+       "the nonlinear search's cells rotated over the length of the linear search's KNOBS, which has "
+       "grown a row: 21 of its 43 cells become other configurations under pins whose comments "
+       "describe the old ones (2026-10-07: four slow tests red a day later, two pins passing on "
+       "configurations they do not describe)"),
+    _M("L2", _LIN, "KNOBS = (\n" + _GS_L2,
+       'KNOBS = (\n    dict(acceleration="aitken", iteration_mode="jacobi", convergence_norm="l2"),\n'
+       + _GS_L2, CELLS_PINNED,
+       "a row inserted at the head of the linear search's KNOBS: every cell of the linear and the "
+       "nonlinear search keeps its index and its knob number and runs under the row before"),
+    _M("L3", _GEO, "KNOBS = (\n" + _GS_L2
+       + '    dict(acceleration="none", iteration_mode="jacobi", convergence_norm="mixed"),\n',
+       'KNOBS = (\n    dict(acceleration="none", iteration_mode="jacobi", convergence_norm="mixed"),\n'
+       + _GS_L2, CELLS_PINNED,
+       "the first two rows of the geometry search's KNOBS exchanged: its cells keep their indices and "
+       "run the other schedule and norm, under the radius seeds pinned on them"),
     # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
     _M("K1", CPL, "    float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,\n",
        "    float32, a rate near 1. Not claimed for float64 (x64),\n", CLAIMS,

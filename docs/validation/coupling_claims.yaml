@@ -5856,7 +5856,13 @@ claims:
     predictor the pass count is that of the guess; after a checkpoint
     restart the report, the slot or its absence and the next step are the
     uninterrupted run's.  Under run_adaptive without the pass count (the
-    reported solve is its last half step's).  With a sharded member: two
+    reported solve is its last half step's), and the residual restated on
+    a graph stepped with the return rule switched off: the state returned
+    is the accepted iterate with the gather's source one plain pass on
+    (CPL-191) and does not determine it.  In the mixed-dtype domain the
+    twin's plain edge casts, so the twin recomputes the small field the
+    pair keeps: the pair's is compared with the iterate the twin accepted,
+    to the same bound.  With a sharded member: two
     ways through the dense kind.  The tie's cells are kept beside them.
   oracle: >-
     the residual of a plain edge over the prescribed reading, to the bit;

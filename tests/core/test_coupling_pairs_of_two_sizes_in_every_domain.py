@@ -46,14 +46,26 @@ the pass leaves them, the fast member's after its sub-steps); the pass
 count of a predictor's guess; the graph a checkpoint brings back -- the
 report, the floor's slot or its absence, and the next step.
 
-A state is compared with the reference only on the fields the norm reads
-at their source (the accepted iterate, whichever state a step returns for
-the other fields), and with the twin everywhere (the twin's step has the
-same rule).
+**The state a solve returns** under the interface norm is the iterate its
+loop accepted with every field the norm does not measure whole one plain
+pass on (the return rule; ``interface_side_graphs.measured_whole``).  The
+source of the edge that expands is read at its source, measured whole and
+kept; the source of the gather is recomputed.  So a state is compared with
+the reference only on the fields the norm reads at their source (the
+accepted iterate), and with the twin everywhere: the twin's step has the
+same rule and keeps the same field -- except in the mixed-dtype domain,
+where the twin's plain edge casts, its small field is read through a
+transform and recomputed, and the edge-mapped pair's is compared with the
+iterate the twin accepted (:func:`_kept_by_the_pair_alone`).  A residual
+that can only be restated from the state it is of (``run_adaptive``, whose
+last half step starts where the harness does not see) is read on a graph
+of its own, stepped with the return rule switched off
+(``coupled_graphs.accepted_iterate``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import math
 
@@ -64,6 +76,7 @@ import pytest
 from maddening.core.coupling.acceleration import PRECISION_FLOOR_ULPS
 from tests.core import coupling_domain_sizes as cs
 from tests.core import coupling_domains as cd
+from tests.property import coupled_graphs as cg
 from tests.property import interface_side_graphs as sg
 
 #: A predicted pass count is asserted where every estimate the reference's
@@ -318,12 +331,23 @@ def _draws(cell, count=None) -> list:
     return out
 
 
-def _run(cell, twin: bool = False, count=None) -> Run:
-    key = (cell, twin, count)
+def _run(cell, twin: bool = False, count=None, accepted: bool = False) -> Run:
+    """The cell's graph (or its twin's), built and stepped once per session.
+
+    *accepted*: a graph of its own, built and stepped with the interface
+    norm's return rule switched off (``coupled_graphs.accepted_iterate``),
+    so each solve returns the iterate its loop accepted -- the state its
+    report is of.  Not for a sequence, whose later steps start from the
+    states the earlier ones returned.
+    """
+    key = (cell, twin, count, accepted)
     if key in _RUNS:
         return _RUNS[key]
     d = cell.domain
-    with cd.entered(d):
+    assert not (accepted and _sequenced(cell)), cell
+    with contextlib.ExitStack() as stack:
+        asked = stack.enter_context(cg.accepted_iterate()) if accepted else None
+        stack.enter_context(cd.entered(d))
         draws = _draws(cell, count)
         if _sequenced(cell):
             refs = [cs.Stored(cell, draws[0], scale=move) for move in MOVES]
@@ -340,6 +364,8 @@ def _run(cell, twin: bool = False, count=None) -> Run:
         else:
             solves = cd.run(d, built.gm, params)
         cs.assert_sized(built, solves)
+    if accepted:
+        assert asked, "the step never asked the return rule: the patch is on the wrong name"
     _RUNS[key] = Run(built, refs, solves, straight, saved, loaded)
     return _RUNS[key]
 
@@ -415,16 +441,30 @@ def _check_reference(cell, count=None) -> None:
     d = cell.domain
     resolution = _resolution(cell)
     predicted, told_apart = 0, False
+    # run_adaptive: the iterate each reported solve accepted, on a graph of
+    # its own with the return rule switched off.
+    at_accepted = _run(cell, count=count, accepted=True).solves if d.adaptive else None
+    assert at_accepted is None or len(at_accepted) == len(run.solves)
     for k, (s, ref, start) in enumerate(zip(run.solves, run.refs, _starts(cell, run))):
         r = s.report
         x = cs.state_of(cell, s)
         where = f"{cell.id}, solve {k}"
+        reported = r["residual"]
         if start is None:
-            # run_adaptive: the residual of the state it returns, and the claim.
-            want = ref.in_tolerances(ref.residual(ref.one_pass(x), x, "compact"))
-            other = ref.in_tolerances(ref.residual(ref.one_pass(x), x, "delivered"))
+            # run_adaptive: the claim, of the state it returns; and the
+            # residual, which is of the iterate the loop accepted.  The
+            # returned state is that iterate with the gather's source one
+            # plain pass on and does not determine it, and the reference's
+            # own loop cannot be started where the last half step was.  So
+            # the residual is restated from the state a step returns with
+            # the return rule switched off, which is its accepted iterate.
             assert r["converged"] is True, (where, r)
             assert ref.distance(x, "compact") <= ref.K, (where, ref.distance(x), ref.K)
+            z = at_accepted[k]
+            assert z.report["converged"] is True, (where, z.report)
+            xz, reported = cs.state_of(cell, z), z.report["residual"]
+            want = ref.in_tolerances(ref.residual(ref.one_pass(xz), xz, "compact"))
+            other = ref.in_tolerances(ref.residual(ref.one_pass(xz), xz, "delivered"))
             iterate = None
         else:
             exit_ = ref.started_at(start).plain_exit("compact")
@@ -454,8 +494,8 @@ def _check_reference(cell, count=None) -> None:
                 assert distance <= ref.K, (
                     f"{where}: converged=True at {distance:.3f} tolerances from the fixed "
                     f"point in the compact readings; K = {ref.K:.3f}")
-        assert abs(r["residual"] - want) <= resolution, (
-            f"{where}: reported residual {r['residual']!r}; the compact readings give "
+        assert abs(reported - want) <= resolution, (
+            f"{where}: reported residual {reported!r}; the compact readings give "
             f"{want!r} (resolution {resolution:.2e}; read as delivered: {other!r})")
         told_apart |= abs(other - want) > 2.0 * resolution
         for name in _source_read(cell) if iterate is not None else ():
@@ -512,8 +552,37 @@ def _one_program(cell) -> bool:
     return cell.form == "sparse" or len(np.unique(touched)) == len(touched)
 
 
-def _same_solve(cell, mapped, twin, what: str) -> None:
+def _kept_by_the_pair_alone(cell, mapped: Run, twin: Run) -> tuple:
+    """The members whose field the edge-mapped pair returns as its accepted
+    iterate holds it, and its twin one plain pass on.
+
+    Under the interface norm a solve returns a field the norm measures
+    whole as the accepted iterate holds it and every other field one plain
+    pass on (``interface_side_graphs.measured_whole``, restated from each
+    graph's own edges).  The edge-mapped pair reads its small field at its
+    source, before the mapping and the cast: measured whole, kept.  The
+    twin reads it by a plain edge, which measures it whole too -- except
+    in the mixed-dtype domain, where that edge casts: the field is read
+    through a transform, and recomputed.  The large field is read through
+    the gather in both graphs and recomputed in both.
+    """
+    members = set(cell.names.values())
+    kept = set(sg.measured_whole(mapped.built.gm)) & members
+    kept_by_twin = set(sg.measured_whole(twin.built.gm)) & members
+    d = cell.domain
+    assert kept == {cell.names["p"]}, (cell.id, kept)
+    assert kept_by_twin == (set() if d.dtype_a != d.dtype_b else kept), (cell.id, kept_by_twin)
+    return tuple(sorted(kept - kept_by_twin))
+
+
+def _same_solve(cell, mapped, twin, what: str, twin_accepted=None, apart=()) -> None:
     """*mapped* (the edge-mapped graph's) is *twin*'s: the state, the report, ``_meta``.
+
+    A field in *apart* (:func:`_kept_by_the_pair_alone`) is the accepted
+    iterate's in the edge-mapped graph and one plain pass on in the twin:
+    it is compared with *twin_accepted*'s, the same solve of the twin
+    stepped with the return rule switched off -- the iterate the twin
+    accepted -- to the bound the two returned fields were held to.
 
     To the bit where the two steps are one program (:func:`_one_program`):
     the same passes on the same numbers, and the same values read.
@@ -538,15 +607,19 @@ def _same_solve(cell, mapped, twin, what: str) -> None:
     d = cell.domain
     exact = _one_program(cell)
     where = f"{cell.id}, {what}"
+    assert not (exact and apart), (where, apart)
     for name in ("a", "b"):
         xa, xb = mapped.x(name), twin.x(name)
+        of = "the twin's"
+        if name in apart:
+            xb, of = twin_accepted.x(name), "the iterate the twin accepted"
         if exact:
             assert cd.bitwise(xa, xb), f"{where}: {name}.x differs from the twin's"
         else:
             xa, xb = xa.astype(np.float64), xb.astype(np.float64)
             bound = 64.0 * _eps(d.coarsest) * np.max(np.abs(xb))
             assert np.max(np.abs(xa - xb)) <= bound, (
-                f"{where}: {name}.x is {np.max(np.abs(xa - xb)):.3e} from the twin's")
+                f"{where}: {name}.x is {np.max(np.abs(xa - xb)):.3e} from {of}")
     ra, rb = mapped.report, twin.report
     assert sorted(ra) == sorted(rb), (where, sorted(ra), sorted(rb))
     differ = {}
@@ -570,10 +643,14 @@ def _same_solve(cell, mapped, twin, what: str) -> None:
 def _check_twin(cell, count=None) -> None:
     """The edge-mapped pair reports what its marker-side twin reports."""
     mapped, twin = _run(cell, count=count), _run(cell, twin=True, count=count)
-    assert len(mapped.solves) == len(twin.solves) > 0
-    for k, (s, t) in enumerate(zip(mapped.solves, twin.solves)):
-        _same_solve(cell, s, t, f"solve {k}")
+    apart = _kept_by_the_pair_alone(cell, mapped, twin)
+    accepted = (_run(cell, twin=True, count=count, accepted=True).solves if apart
+                else [None] * len(twin.solves))
+    assert len(mapped.solves) == len(twin.solves) == len(accepted) > 0
+    for k, (s, t, z) in enumerate(zip(mapped.solves, twin.solves, accepted)):
+        _same_solve(cell, s, t, f"solve {k}", z, apart)
     if cell.domain.restart:
+        assert not apart, cell
         _same_solve(cell, mapped.saved, twin.saved, "the checkpointed graph")
         _same_solve(cell, mapped.loaded, twin.loaded, "the loaded graph")
 

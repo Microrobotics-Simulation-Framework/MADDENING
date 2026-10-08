@@ -102,13 +102,24 @@ ORACLE = (f"{_SEARCH}::test_the_gradient_constants_of_a_mapped_edge_are_the_weig
 #: (CPL-093's condition), on both sides of the margin (no graph compiled).
 RESOLVES = (f"{_SEARCH}::test_the_gradient_score_is_taken_over_the_constants_the_pass_resolves",
             f"{_SEARCH}::test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score")
+#: What the scores allow a floor whose norm reads a value an edge delivers
+#: by cancellation (MADD-ANO-247): the factor itself, and that it is 1
+#: where the norm reads the fields (no graph compiled).
+ALLOWANCE = (
+    f"{_SEARCH}::test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads",
+    f"{_SEARCH}::test_the_reading_allowance_is_one_where_the_norm_reads_the_fields")
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
 CI_ALL = DUR + SHARD + WF
 
+#: The searches' slow hunts are seeded: the helper's rules, and a scan of
+#: every module that names the slow profile (no compile).
+_HUNTS = "tests/property/test_targeted_search.py"
+
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN)
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
+               _HUNTS)
 
 
 @dataclass(frozen=True)
@@ -147,6 +158,9 @@ CELLS_PINNED = ("tests/property/test_coupling_search_cells_are_pinned.py",)
 _NL = "tests/property/test_coupling_nonlinear_search.py"
 _LIN = "tests/property/test_coupling_targeted_search.py"
 _GEO = "tests/property/geometry_cells.py"
+_HELPER = "tests/property/targeted_search.py"
+_SYSID = "tests/property/test_sysid_targeted_search.py"
+HUNTS_SEEDED = (f"{_HUNTS}::test_no_hunt_in_the_tree_is_written_without_a_seed",)
 _GS_L2 = '    dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="l2"),\n'
 
 # Lines reused by several allowlist mutants (an existing entry, and a real
@@ -585,6 +599,28 @@ MUTANTS: tuple[Mutant, ...] = (
        '    Cell("mapped", "float64", 0, 120, "quadratic"),\n', CELLS_PINNED,
        "the nonlinear search's appended float64 mapped ring moved off the interface norm: no float64 "
        "nonlinear cell is then observed with the returned-state check, and nothing says so"),
+    # --- H: the slow hunts' seeds, tests/property/targeted_search.py and the search modules
+    _M("H1", _LIN,
+       "    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(BLOCKS) + 1).seeded(\n"
+       '        HUNT_SEED["blocks"] + 10 * block + SEARCHES.index(name))\n',
+       "    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(BLOCKS) + 1)\n",
+       HUNTS_SEEDED,
+       "the linear search's block hunts with no seed, as they were until 2026-10-08: 28 hunts draw "
+       "fresh entropy on every slow-lane run, so one tree is green on one run and red on the next"),
+    _M("H2", _SYSID,
+       "profile=SLOW.seeded(4000 + list(SEARCHES).index(name)),\n                    label=name)\n",
+       "profile=SLOW, label=name)\n", HUNTS_SEEDED,
+       "the sysid search's hunt with no seed: the same, in the one search that is not a coupling one"),
+    _M("H3", _HELPER, '    if profile.seed is None:\n        raise ValueError(\n            "a random search runs',
+       '    if False:\n        raise ValueError(\n            "a random search runs',
+       (f"{_HUNTS}::test_a_random_search_with_no_seed_is_refused",),
+       "the helper running a random profile that has no seed: a hunt the scan does not read (a "
+       "profile handed over at run time) draws fresh entropy in the slow lane and nothing says so"),
+    _M("H4", _HELPER, '    raw = os.environ.get(ENTROPY_VARIABLE, "").strip()\n',
+       '    raw = os.environ.get(ENTROPY_VARIABLE, "fresh").strip()\n',
+       (f"{_HUNTS}::test_a_hunt_scores_the_same_examples_every_time",),
+       "the exploring switch read as set where CI leaves it unset: every hunt is written with a seed "
+       "and draws under fresh entropy all the same"),
     # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
     _M("K1", CPL, "    float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,\n",
        "    float32, a rate near 1. Not claimed for float64 (x64),\n", CLAIMS,
@@ -724,6 +760,20 @@ MUTANTS: tuple[Mutant, ...] = (
        "a constant's pass response taken per unit of the constant, not at the size the bound probes "
        "it at: a gain of 1e-3 reads a thousand times more resolved than it is, and is scored where "
        "the row says nothing"),
+    _M("O5", _SEARCH,
+       "            worst = max(worst, float(np.max(np.abs(B) @ np.abs(x))) / delivered)\n",
+       "            worst = max(worst, float(np.max(np.abs(B) @ np.abs(x))) / delivered * 1e3)\n",
+       ALLOWANCE,
+       "the search's allowance for a delivered value that cancels inside its edge taken a thousand "
+       "times what the row cancels by: every floor and every bound on a mapped interface cell is "
+       "excused, whatever the library reports there"),
+    _M("O6", _SEARCH,
+       "    for B, gamma in model.norm_fields(0):\n",
+       "    for B, gamma in ct.LinearModel(model.topo, model.values, dtype=model.dtype, "
+       "group_cfgs=[dict(model.cfgs[0], convergence_norm=\"interface\")]).norm_fields(0):\n",
+       ALLOWANCE,
+       "the allowance taken over every mapped edge whatever the norm reads: a differencing row a "
+       "member reads under the L2 norm is excused, and MADD-ANO-212's strict pins read as fixed"),
     # --- IP: a coupling group's edges are enumerated in one module only, -----
     # --- tests/core/test_interface_plan_is_the_only_enumeration.py -----------
     _M("IP1", "src/maddening/core/coupling/_group_layout.py",

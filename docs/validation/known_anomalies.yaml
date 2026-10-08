@@ -14406,7 +14406,9 @@ anomalies:
       whose relative rounding is the source's times the cancellation.
       Where such a read is of the same Gauss-Seidel pass the bound can
       read below the true distance with the flag set (MADD-ANO-212,
-      open).
+      open).  Where the interface norm itself reads such a value, the
+      floor is under the value's rounding under either schedule
+      (MADD-ANO-247, open).
     verification:
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution"
       - "tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_is_no_finer_than_the_field_it_was_computed_from"
@@ -14441,7 +14443,11 @@ anomalies:
       deliver.  Under `iteration_mode="jacobi"` the same pair stalls at
       the same state and its bound holds (37x): the two entries are
       separate coordinates of the iterate there, and the resolvent the
-      bound applies carries their cross gain.  Under Gauss-Seidel the same
+      bound applies carries their cross gain.  That is so where the norm
+      reads the fields, the L2 and the mixed norm; under the interface
+      norm, which reads the difference itself at the difference's own
+      magnitude, the Jacobi pair is not bounded either (0.031x at `L =
+      1000`: MADD-ANO-247).  Under Gauss-Seidel the same
       difference taken by a transform (`v[:1] - v[1:]`) or inside the
       reading node did not stall there in these runs -- XLA folded the
       difference into the producer's sum, and the pair converged to
@@ -14492,7 +14498,9 @@ anomalies:
       transform or a node that subtracts entries, or a `multilinear_grid`
       gather of a field that changes sign across a lattice cell), run the
       group under
-      `iteration_mode="jacobi"`, or have the producer hold the difference
+      `iteration_mode="jacobi"` with the L2 or the mixed norm (the
+      interface norm reads the difference itself: MADD-ANO-247), or have
+      the producer hold the difference
       as a field of its own so that it is stored at its own magnitude; and
       do not rely on `spectral_error_bound` where `precision_limited` is
       True for such a group.
@@ -16576,6 +16584,106 @@ anomalies:
     verification:
       - "tests/property/test_coupling_geometry_search.py::test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a_plane"
       - "tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-247"
+    title: "Under convergence_norm=\"interface\" the float floor of a value an edge delivers is taken at the delivered value's own magnitude: a group whose mapping differences two entries of one field stalls with the exact residual 5.7 (to 9445) floors above a reported 0.0 and spectral_error_bound at 0.25x (to 1.5e-4x) the true distance, spectral_usable=True, under Jacobi as under Gauss-Seidel"
+    description: >
+      Under `convergence_norm="interface"` the residual, its float floor
+      (`residual_precision_floor`, and the per-evaluation floor a step with
+      a mapped edge records as `coupling_<key>_reading_floor`) and the
+      spectral analysis read what each internal edge delivers.  The floor
+      is `PRECISION_FLOOR_ULPS` units of eps an entry in the norm's units,
+      where a delivered field is divided by its own largest entry: `eps *
+      max|delivered field|`.  `_reading_eps` takes the coarser of the
+      delivered value's dtype and its source's (MADD-ANO-211) and nothing
+      of the source's magnitude.  A delivered value is no finer than the
+      field it was computed from: a mapping row that differences two
+      entries near `L` delivers a value carrying the entries' rounding,
+      `eps * L`, which is `L / |difference|` of the floor's unit.  The
+      norm itself reads that value, so neither the schedule nor the
+      resolvent the bound applies carries the factor.  This is not
+      MADD-ANO-212, the count of a same-pass read under Gauss-Seidel: there
+      the exact residual stays within the floor and the bound is under the
+      distance (under the mixed norm 0.04 to 0.06 of a floor on the pair
+      below, with the bound at 0.44x and 0.054x); here the floor itself is
+      exceeded, and running the group under Jacobi does not help.
+      Measured on release/0.4.0 at fd5daf75 (CPU, the same digits on
+      jaxlib 0.10.2 and 0.11.2) on MADD-ANO-212's pair: float32, `A.u = [L
+      + t, L]`, an edge `A -> B` with the mapping matrix `[[1, -1]]`, `B.u
+      = 0.99 d + 0.01`, `convergence_norm="interface"`, `rtol=1e-9`,
+      `max_iterations=6000`, `diagnostics=True`.  Under
+      `iteration_mode="jacobi"` the group stalls at `residual=0.0` with
+      `precision_limited=True` and `spectral_usable=True`; at `L` = 0, 1,
+      10, 100, 1000 and 1e5 the exact residual of the state it returns is
+      0.044, 0.098, 0.71, 5.7, 45 and 9445 times the floor (0.056 of a
+      floor per unit of `L / |difference|`) and `spectral_error_bound` is
+      32, 11, 1.9, 0.25, 0.031 and 1.5e-4 times the true distance.  Under
+      Gauss-Seidel the residual figures are the same and the bound reads
+      46, 15, 2.7, 0.35, 0.044 and 2.1e-4.  Under the mixed norm, which
+      reads `A.u` at its own magnitude, the Jacobi pair is bounded at every
+      `L` (25 to 48 times the distance where the flag is set).
+      On the float64 relay cells of the targeted search whose gather has a
+      row `[1, -1, 0, ...]` on two entries up to 30 times their difference
+      (`side-2-8` under Jacobi and `side-3-6` under Gauss-Seidel, the
+      interface norm, 20 000 draws in the slow hunt's proportions, jaxlib
+      0.10.2): the delivered field's largest entry is 1/16 or less of the
+      terms its rows add on 2.6% of the draws and 1/40 or less on 0.4%;
+      the exact residual was over the reported one plus the floor on two
+      draws, both under Jacobi, by 2.0 and 2.8 times, and no bound was
+      under its distance.  With the row at 30 times the difference, a loop
+      gain of 0.05 and a start at the fixed point, 4 of 300 draws stalled
+      with the bound at 0.62x to 0.89x the distance, flag set.  How it was
+      found: the seeded slow hunt on those cells read, on one CI runner,
+      an exact residual of 1.105e-11 beside a reported 6.9e-13 and a floor
+      of 8.9e-12 (1.098 of what the floor allows; the bound held, 16 times
+      the distance), for a delivered field `[-0.53, 0.054]` taken of
+      entries at 13.0 and 13.6.  The same example reads 0.21 on another
+      CPU, on jaxlib 0.10.2 and 0.11.2 alike, and 0.12 there under another
+      BLAS kernel: its gains are scaled through LAPACK, whose kernels round
+      differently per CPU, and a ratio this close to one turns on the last
+      bit.  No release carried it: the floor, the bound and interface
+      mappings are new in 0.4.0's development.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`.  Not `critical`: it needs the interface norm,
+      an internal edge whose mapping or transform delivers a difference of
+      entries far larger than it, and a residual at its float floor; the
+      iteration itself is the float map's and is unaffected.
+      `context_dependent` because whether the bound gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Where an internal edge delivers a difference of entries of one field
+      (a gradient or jump operator as an interface mapping, a transform
+      that subtracts entries), run the group under `convergence_norm="l2"`
+      or `"mixed"` with `iteration_mode="jacobi"` (those norms read the
+      field at its own magnitude, and Jacobi is what MADD-ANO-212 needs),
+      or have the producer hold the difference as a field of its own so
+      that it is stored at its own magnitude; and do not rely on
+      `spectral_error_bound`, or on a residual of 0.0, where
+      `precision_limited` is True for such a group under the interface
+      norm.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, with MADD-ANO-212: the measured,
+      opt-in `diagnostics="rounding"` level estimates the pass's rounding
+      instead of counting it.  A counted fix floors each delivered entry at
+      the rounding it carries, the edge's mapping applied to magnitudes
+      (`|W| |x|` in place of `|W x|`), which a linear mapping kind can
+      supply and an arbitrary transform cannot.  Until then the floor of a
+      delivered value assumes it is of the size of the entries it was
+      computed from.
+    verification:
+      - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_whose_norm_reads_a_delivered_difference_is_bounded"
+      - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_norm_reads_the_fields"
+      - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_delivered_difference_cancels_nothing"
+      - "tests/property/test_coupling_targeted_search.py::test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-248"

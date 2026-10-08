@@ -90,7 +90,8 @@ d. **converged beside a lower loss**, on a second problem, whose residual
    to 1e-6, the loss 2.0e-5 where 1e-10 is 1e-6 of the elasticity away).
 
 Per push: each search, derandomised, at the house floor of examples.  Slow:
-the random hunt.  What the hunt found is pinned at the foot of the module.
+the hunt, under a seed of its own.  What the hunt found is pinned at the foot
+of the module.
 
 That the scores can fire was shown on the tree before the fixes they are
 for (``fa12c585``): (b) found the ``logit`` edge trap and (c) the leaf left
@@ -690,7 +691,10 @@ def test_no_wrong_fit_among_the_fixed_draws(name):
 @pytest.mark.parametrize("name", sorted(SEARCHES))
 def test_no_wrong_fit_found_by_the_search(name):
     score, strategy, threshold = SEARCHES[name]
-    targeted_search(strategy, score, threshold, profile=SLOW, label=name)
+    # Seeded, as every hunt is (``targeted_search.py``): 4000 + the search's
+    # place in ``SEARCHES``, which a search added at its end does not move.
+    targeted_search(strategy, score, threshold, profile=SLOW.seeded(4000 + list(SEARCHES).index(name)),
+                    label=name)
 
 
 # ---------------------------------------------------------------------------

@@ -15942,3 +15942,78 @@ anomalies:
       - "tests/core/test_geometry_edge_refusals.py::test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group"
       - "tests/core/test_geometry_edge_refusals.py::test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_called_directly"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-238"
+    title: "spectral_usable does not see a pass whose Jacobian one float32 rounding of a same-pass value moves: a float32 Gauss-Seidel group whose member multiplies two fields held in units of 1e6 apart read rho_spectral 0.324 for 0.0238, settled"
+    description: >
+      `rho_spectral` comes from Jacobian-vector products of the pass the
+      group runs, in the group's dtype.  Under Gauss-Seidel a member reads
+      values the same pass has just computed -- in float32, to a float32
+      rounding -- and the products linearise at those.  Where a member's
+      derivative depends on the difference between such a value and a
+      constant it nearly equals (the product of two fields' deviations
+      from stored centres, `u1 + s (u1 - c1)(u0 - c0)`, in a group at its
+      fixed point), that difference is rounding, and the derivative moves
+      by `s` times one rounding of `u0`.  With `u0` near 1e6 and `s` from
+      0.2 to 20 the weighted Jacobian moves by 2% to more than the whole
+      of it.  Measured (CPU, jaxlib 0.10.2, 0.11.0 and 0.11.2, the same
+      numbers): three float32 members of two entries, one in units of
+      1e6, started on the fixed point, one pass: `rho_spectral` 0.324
+      where the Jacobian at the returned state has radius 0.0238 (0.048
+      to 0.59 over the float32 values within two roundings of the exact
+      same-pass ones), with `spectral_usable=True` and
+      `precision_limited=True`; at a hundredth of the curvature 0.11014
+      for 0.11156, where CPL-087 says 1e-4 of the radius and its movement
+      under a rounding of the Jacobian.  The same with Aitken or no
+      acceleration, under each norm, at a cap of 5 or 120, and five
+      passes from a thousandth of a field away
+      (`precision_limited=False`); on a fan-out hub 3.7 allowances.
+      `rho_spectral` is, to six digits, the radius of the Jacobian at the
+      same-pass values the float32 pass forms: the estimate is right for
+      the pass it is given.  What is missing is a refusal: the flag's
+      certificate (MADD-ANO-229) perturbs the compressed matrix by the
+      measured rounding of a product and never moves the state the
+      products are taken at.  It needs float32 (1e-12 in float64),
+      Gauss-Seidel (under Jacobi the difference is of two floats of the
+      iterate, exact in either dtype), a member that multiplies two other
+      members' fields, and units 1e3 or more apart (nothing at 1e1).
+      `spectral_error_bound` held on every such example (at most 0.82 of
+      the distance), and so did the gradient bound for the gradient the
+      group computes.  The spectral keys are new in 0.4.0; no release
+      carries them.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported radius outside the margin its flag stands for is a
+      silent wrong result, never `minor`.  Not `critical`: reported, not
+      applied, and the error bound built on it held.  It needs a pass
+      whose derivative changes by more than the flag's margin when a
+      field moves by one float32 rounding -- dynamics float32 does not
+      resolve -- and is `context_dependent` as for the other spectral
+      entries.
+    affected_components:
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Run such a group in float64 or under Jacobi, or hold the two fields
+      a nonlinearity multiplies as deviations from their operating point,
+      in units within a decade of each other, rather than as absolute
+      values a factor of 1e3 or more apart.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  Suggested fix: in `_bounds._spectral_rate_at` and
+      `_bounds._interface_spectral_rate_at`, take the products on the
+      Krylov basis once more with the pass linearised one rounding of the
+      iterate away (`x (1 + eps s)` with random signs `s`, so that the
+      same-pass values are recomputed from it; or one second-order
+      product per basis vector along that displacement), add the
+      difference to the per-row rounding the certificate of MADD-ANO-229
+      is taken over, and withdraw the flag where it can move the radius
+      past the margin: eight more products where diagnostics are on.
+      The other resolution is a condition in CPL-087: a pass whose
+      Jacobian moves by less than the margin over one rounding of the
+      iterate in the group's dtype.
+    verification:
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_settled_radius_is_the_radius_where_a_same_pass_rounding_moves_the_jacobian"
+    github_issue: null

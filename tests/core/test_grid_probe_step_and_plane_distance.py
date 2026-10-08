@@ -15,6 +15,10 @@ things off the mapping besides its value (MAP-045, MAP-049):
 
 The statements, each on float32 and float64 where a dtype enters:
 
+0. a step taken *beside* a second set of positions that move with the
+   first (the positions a pass derives from a member's pre-step ones)
+   carries neither across a lattice plane: each coordinate steps towards
+   the middle of the cell of whichever is nearer to one (MADD-ANO-240);
 1. over the probe step the gather's finite difference is its
    Jacobian-vector product, for a point anywhere: mid-cell, on an interior
    lattice plane, on either face of the hull, a rounding inside or outside
@@ -130,6 +134,43 @@ def test_the_probe_step_moves_no_point_of_a_grid_of_several_axes_across_a_plane(
     assert np.all(np.asarray(step)[np.asarray(pos)[:, 0] == 0.0, 0] > 0)
     assert not np.any(np.asarray(mapping._probe_step(                  # noqa: SLF001
         jnp.asarray([[np.nan, 1.2]] * 9, jnp.float32)))[:, 0])
+
+
+def test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane():
+    """A pre-step position 0.32 of a cell above a plane, and the position
+    the pass builds from it and reads, a rounding under the next plane:
+    stepped upwards (towards the middle of the first one's cell) the
+    second crosses; beside it, the step is downwards, and the gather of
+    the derived position is one polynomial along it."""
+    mapping = _line(4)
+    held = jnp.asarray([[ORIGIN + 1.32 * SPACING], [ORIGIN + 0.7 * SPACING],
+                        [ORIGIN + 1.32 * SPACING], [ORIGIN + 2.0 * SPACING]], jnp.float32)
+    shift = jnp.asarray([[0.6799995 * SPACING], [0.0], [0.1 * SPACING], [0.31 * SPACING]],
+                        jnp.float32)
+    derived = held + shift           # 1.9999995, 0.7, 1.42, 2.31 spacings from the origin
+    alone = np.asarray(mapping._probe_step(held))[:, 0]                 # noqa: SLF001
+    beside = np.asarray(mapping._probe_step(held, beside=derived))[:, 0]  # noqa: SLF001
+    assert alone[0] > 0 and beside[0] < 0, "the derived position is the one beside a plane"
+    assert beside[1] == alone[1] < 0                      # the same place: the same step
+    assert beside[2] == alone[2] > 0                      # the held one is the nearer
+    assert beside[3] == alone[3] > 0                      # on a plane: into the cell above
+    assert np.all(np.abs(beside) == np.abs(alone))
+    field = jnp.asarray(FIELD, jnp.float32)
+
+    def gap(step):
+        realised = (held + step) - held
+        base, product = jax.jvp(lambda c: mapping.apply(field, geom=c + shift), (held,),
+                                (realised,))
+        difference = mapping.apply(field, geom=held + step + shift) - base
+        return float(jnp.max(jnp.abs(difference - product)) / jnp.max(jnp.abs(product)))
+
+    assert gap(mapping._probe_step(held, beside=derived)) <= 0.01      # noqa: SLF001
+    assert gap(mapping._probe_step(held)) > 0.25, (                     # noqa: SLF001
+        "premise: stepped for the held position alone, the derived one crosses")
+    # One-dimensional geometries and other dtypes of the second set.
+    flat = mapping._probe_step(held[:, 0], beside=np.asarray(derived, np.float64)[:, 0])  # noqa: SLF001
+    assert flat.shape == (4,) and flat.dtype == held.dtype
+    assert np.array_equal(np.asarray(flat), beside)
 
 
 def test_the_probe_step_is_sized_for_the_coarser_of_the_geometry_and_the_pass():

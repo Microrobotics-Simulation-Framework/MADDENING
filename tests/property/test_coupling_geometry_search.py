@@ -262,12 +262,19 @@ def _per_push_draws() -> list:
 
 
 def test_the_self_check_passes_on_every_per_push_draw_with_a_margin():
+    """No draw's report is withheld by the self-check.  (A draw far from
+    its fixed point can lose ``spectral_usable`` to the lattice-plane rule
+    of MAP-049 -- a cap reached with a bound that spans a lattice cell and
+    no certified linearisation -- which is another reason, and keeps the
+    numbers.)"""
     draws = _per_push_draws()
     assert len(draws) >= 20
     gaps = []
     for case in draws:
         seen = SEARCH.observe(case)
-        assert seen["reason"] is None, (case, seen["reason"])
+        assert seen["reason"] is None or "lattice plane" in seen["reason"], (
+            case, seen["reason"])
+        assert math.isfinite(seen["report"]["rho_spectral"]) or not seen["finite"], case
         if seen["finite"]:
             gaps.append(seen["report"]["geometry_gap"])
     assert len(gaps) >= 15 and max(gaps) <= HONEST_GAP, max(gaps)
@@ -508,8 +515,8 @@ def test_the_plane_limit_the_step_stores_is_its_definition():
         report = seen["report"]
         want = report["plane_limit_reference"]
         assert math.isfinite(want) and want >= 0.0
-        assert report["plane_limit"] == pytest.approx(want, rel=1e-3, abs=1e-6 * want), (
-            case, report)
+        assert report["plane_limit"] == pytest.approx(
+            want, rel=1e-3, abs=report["plane_limit_resolution"]), (case, report)
         # No flag on a bound the fixed point is outside twice of.
         assert seen["plane"] <= gc.THRESHOLD["plane"], (case, seen)
         assert seen["bound"] <= gc.THRESHOLD["bound"], (case, seen)
@@ -612,6 +619,28 @@ def test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check():
         assert math.isfinite(d["rho_spectral"]) and math.isfinite(d["spectral_error_bound"])
 
 
+# Slow: a compile of a Gauss-Seidel group with its diagnostics and of its twin.
+# Per push: tests/core/test_grid_probe_step_and_plane_distance.py::test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane
+@pytest.mark.slow
+def test_a_marker_whose_in_pass_position_is_a_rounding_from_a_plane_passes_the_self_check():
+    """MADD-ANO-240, the other way a step left the stencil's polynomial.
+    Under Gauss-Seidel a member swept after the holder of the positions
+    reads them as the pass has just built them, ``pos_pre + drift + ...``.
+    The self-check moved the pre-step positions towards the middle of
+    *their* cell; here that carried the in-pass position, 1e-6 of a
+    spacing under a lattice plane, across it, and an honest pass read a
+    gap of 0.54.  The plane hunt found it."""
+    cell = PLANE_CELLS[2]
+    assert cell.anchors == ("source", "source") and cell.order == ("F", "P")
+    assert gc.KNOBS[cell.knob]["iteration_mode"] == "gauss-seidel"
+    search = _PLANE_HUNTS.setdefault(2, gc.Search(PLANE_CELLS))
+    case = gc.PlaneCase(2, 6, 0.02, 0.02, which=6, plane=6, offset=-1e-06)
+    seen = search.observe(case)
+    assert seen["placed"] and seen["referenced"], seen
+    assert seen["report"]["geometry_gap"] <= HONEST_GAP, seen["report"]
+    assert seen["reason"] is None or "lattice plane" in seen["reason"], seen["reason"]
+
+
 class WidePositions(gc.GeoRelay):
     """Float32 values at float64 positions."""
 
@@ -666,7 +695,7 @@ def _sign_changing(mode: str) -> dict:
     assert gc.KNOBS[knob]["iteration_mode"] == mode and gc.KNOBS[knob]["convergence_norm"] == "l2"
     cell = Cell(("target", "source"), True, "float32", knob, 80, d=1, m=2, origin=0.0,
                 tolerance=1e-7)
-    amplitude = 3000.0
+    amplitude = 1000.0
     grid = amplitude * np.asarray([1.0, -1.0, 1.0, -1.0])
     markers = np.asarray([0.5, 1.5])
     values = {"F": {"x": grid, "g": 0.3,
@@ -684,11 +713,10 @@ def test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded():
     """The control of the case below: under Jacobi the read is of the
     iterate and the bound covers the stall."""
     seen = _sign_changing("jacobi")
-    assert seen["referenced"] and not seen["crossed"], seen
+    assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
     report = seen["report"]
-    assert report["spectral_error_bound"] > 0.0 and seen["scored"], seen
-    if seen["spectral_usable"]:
-        assert seen["near"] and seen["bound"] <= gc.THRESHOLD["bound"], seen
+    assert seen["spectral_usable"] and seen["reason"] is None, seen
+    assert report["spectral_error_bound"] >= report["distance"] > 0.0, report
 
 
 # Slow: a compile of a group with its diagnostics and of its twin.
@@ -703,16 +731,22 @@ def test_a_gauss_seidel_group_whose_gather_samples_a_sign_changing_field_is_boun
     """Every ``multilinear_grid`` gather is a same-pass read that
     differences entries of one field wherever the sampled field changes
     sign across a cell (a velocity near a stagnation point, a signed
-    distance near its zero level).  Measured with an amplitude of 3000 at
+    distance near its zero level).  Measured with an amplitude of 1000 at
     a tolerance of 1e-7: the group stalls at ``residual=0.0`` and the
-    bound reads 0.14x the true distance, usable."""
+    bound reads 3.0e-6 against a true distance of 5.3e-6, usable (0.57x;
+    the same digits on jaxlib 0.10.2, 0.11.0 and 0.11.2).  The search's
+    own bound score is not what is asked here: it allows a bound the
+    cancellation it measures inside an update, which is this defect's
+    size.  (At 1400 and above the self-check's finite difference is
+    rounding, its gap is over the tolerance and the report is withheld.)"""
     seen = _sign_changing("gauss-seidel")
     report = seen["report"]
     assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
-    assert report["precision_limited"] and seen["reason"] is None, seen
-    if seen["spectral_usable"] and seen["bound"] > gc.THRESHOLD["bound"]:
+    assert seen["spectral_usable"] and seen["reason"] is None, seen
+    if report["spectral_error_bound"] < report["distance"]:
         raise SameFieldCancellationInAGather(
-            f"the bound is 1/{seen['bound']:.3g} of the true distance, usable: {report}")
+            f"the bound is {report['spectral_error_bound'] / report['distance']:.3g} of the "
+            f"true distance, usable: {report}")
 
 
 #: The plane hunt's cells: where the pass reads positions from the
@@ -767,7 +801,7 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
         if "plane_limit" in report and math.isfinite(report["plane_limit_reference"]):
             assert report["plane_limit"] == pytest.approx(
                 report["plane_limit_reference"], rel=1e-3,
-                abs=1e-6 * report["plane_limit_reference"]), (case, report)
+                abs=report["plane_limit_resolution"]), (case, report)
         kind = "across" if seen["crossed"] else "same"
         counts[kind] += 1
         counts[f"{kind}_before"] += seen["usable_before"]
@@ -897,19 +931,23 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_group_with_a_geometry_e
         report, fractions = search.run(name, BLOCKS[block], profile=profile)
         print(f"{name}, block {block}, seed {seed}: worst {report.score:.4g}; {fractions}")
         _held(name, fractions)
-    fired = withheld = before = 0
+    fired = withheld = honest = before = 0
     for case, seen in search._seen.items():               # noqa: SLF001
         took = seen["usable_before"] and not seen["spectral_usable"]
         withheld += took
+        # ... of which the search's own standard holds the bound: scored
+        # (same lattice cells), near (h < 1) and under the threshold.
+        honest += took and seen["scored"] and seen["near_before"]
         before += seen["usable_before"]
-        fired += seen["reason"] is not None and not took
+        fired += seen["reason"] is not None and "lattice plane" not in seen["reason"]
         if seen["finite"] and "geometry_gap" in seen["report"]:
             dtype = CELLS[case.cell].dtype
             gap = seen["report"]["geometry_gap"]
             worst_gap[dtype] = max(worst_gap[dtype], gap if math.isfinite(gap) else math.inf)
     print(f"block {block}, seed {seed}: {len(search._seen)} examples, self-check fired on "  # noqa: SLF001
           f"{fired}, worst gap {worst_gap}; the lattice-plane rule withdrew {withheld} of "
-          f"{before} flags")
+          f"{before} flags, {honest} of them on a bound the reference holds (near, same "
+          f"cells)")
     assert fired == 0, f"the self-check fired on {fired} honest examples"
     for dtype, gap in worst_gap.items():
         assert gap <= limit[dtype], (dtype, gap)

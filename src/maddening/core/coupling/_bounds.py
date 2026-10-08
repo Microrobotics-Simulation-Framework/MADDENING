@@ -37,8 +37,9 @@ def _F_dispatch(step_pure, x, consts):
 #: (MAP-045): honest, a median of 6e-4 and at most 6e-3 in float32 and at
 #: most 3e-6 in float64; every geometry read under ``stop_gradient``,
 #: 0.31 to 0.98 in float32 and 1.0 in float64.  Not a clean separation in
-#: float32: a field that cancels three thousandfold inside a gather read
-#: 0.11 honestly, and a deposit weak enough to move the radius by 0.02
+#: float32: a gather of a field that changes sign across a cell read 0.09
+#: honestly at a thousandfold cancellation and 0.31, over the tolerance,
+#: at 1400-fold; and a deposit weak enough to move the radius by 0.02
 #: read 0.22 with the fault.
 GEOMETRY_GAP_TOLERANCE = 0.25  # units: relative gap
 #: How many of the residual's float resolutions the finite difference of

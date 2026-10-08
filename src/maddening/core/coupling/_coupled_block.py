@@ -48,6 +48,7 @@ from maddening.core.coupling._group_layout import (
     _state_measurable,
 )
 from maddening.core.coupling._bounds import (
+    _F_dispatch,
     _analysis_dtype,
     _geometry_plane_limit,
     _geometry_product_gap,
@@ -1392,7 +1393,14 @@ def _run_coupled_block_impl(
                 moved_in_iterate = False
                 dconsts: list = [None] * len(consts)
                 located = True
+                # The positions a pass builds from a member's pre-step
+                # ones and reads after that member's update are the
+                # pass's own output: a step of the pre-step positions
+                # moves them too, and must not carry them across a
+                # lattice plane either (MADD-ANO-240).
+                in_pass = _F_dispatch(step_pure, x_sg, consts)
                 for holder, fld, mapping in geometry_checked:
+                    beside = None
                     if holder in group_node_set:
                         if fld in float_fields[holder]:
                             at = np.asarray(positions[holder][fld], np.int64)
@@ -1401,6 +1409,7 @@ def _run_coupled_block_impl(
                                                        eps=coarsest_eps)
                             dx = dx.at[where].set(jnp.ravel(step).astype(dx.dtype))
                             moved_in_iterate = True
+                            beside = in_pass[where].reshape(at.shape)
                         held = [initial_node_states[holder].get(fld)]
                         # A member's pre-step positions are a constant
                         # only a target-anchored edge needs.
@@ -1412,7 +1421,10 @@ def _run_coupled_block_impl(
                     ids = {id(v) for v in held if v is not None}
                     found = [i for i, c in enumerate(consts) if id(c) in ids]
                     for i in found:
-                        dconsts[i] = mapping._probe_step(consts[i], eps=coarsest_eps)
+                        dconsts[i] = mapping._probe_step(
+                            consts[i], eps=coarsest_eps,
+                            beside=None if beside is None else beside.reshape(
+                                jnp.shape(consts[i])))
                     located = located and (bool(found) or not needed)
                 directions = []
                 if moved_in_iterate:

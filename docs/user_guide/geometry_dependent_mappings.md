@@ -131,8 +131,11 @@ names the edge and says what to do.
   two differ by more than a quarter (`GEOMETRY_GAP_TOLERANCE`) the
   report withholds the bounds.  An honest pass reads the finite
   difference's own error: about 6e-4 in float32 (at most 6e-3 on 236
-  drawn examples; 0.11 on a field that cancels three thousandfold inside
-  a gather) and under 3e-6 in float64.  The check fails for a node or
+  drawn examples) and under 3e-6 in float64.  A float32 gather of a field
+  that changes sign across a cell cancels digits, and the difference
+  loses them: 0.09 at a thousandfold cancellation, and over the tolerance
+  from about 1400-fold (0.31), where an honest report is withheld.  The
+  check fails for a node or
   a mapping whose derivative is not the derivative of its value (a
   `stop_gradient` on an input, a rounding, a branch on a position), and
   on a step where the two could not be compared (a state that is not

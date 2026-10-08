@@ -14450,7 +14450,11 @@ anomalies:
       `precision_limited=True` against a true distance of 2.13e-5 (0.14x);
       at `A = 1000`, `tolerance=1e-4`, `precision_limited=False`, 0.88x.
       Jacobi held in every row (37x to 290x), and `A = 10` held under
-      both.
+      both.  On the relay pair of the geometry search (the pinned case):
+      `A = 1000`, `tolerance=1e-7`, a bound of 3.0e-6 against a distance
+      of 5.3e-6 (0.57x), the same digits on jaxlib 0.10.2, 0.11.0 and
+      0.11.2; from `A = 1400` the geometry self-check's finite difference
+      is rounding and the report is withheld instead.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16100,9 +16104,18 @@ anomalies:
       NaN and a `not_usable_reason` naming "a member or a mapping whose
       derivative is not that of its value".  A marker 1e-3 inside, on the
       bottom face, on an interior plane or strictly outside passed.  A
-      wrong refusal, not a wrong number.  No release carried it.  Fixed in
+      second way the step left the stencil's polynomial, found by the
+      plane hunt this fix added: under Gauss-Seidel a member swept after
+      the holder of the positions reads them as the pass has just built
+      them (`pos_pre + drift + ...`), and the check moved the pre-step
+      positions towards the middle of *their* cell, which carried an
+      in-pass position 1e-6 of a spacing under a lattice plane across it
+      (`geometry_gap` 0.51 and 0.54 on two float32 draws).  A wrong
+      refusal, not a wrong number.  No release carried it.  Fixed in
       0.4.0: a point on the top face steps inwards, as one on the bottom
-      face does.
+      face does, and a pre-step position steps towards the middle of the
+      cell of whichever of it and the in-pass position is nearer to a
+      lattice plane.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -16121,6 +16134,8 @@ anomalies:
     verification:
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_finite_difference_over_the_probe_step_is_the_kernel_s_derivative"
       - "tests/property/test_coupling_geometry_search.py::test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane"
+      - "tests/property/test_coupling_geometry_search.py::test_a_marker_whose_in_pass_position_is_a_rounding_from_a_plane_passes_the_self_check"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-241"

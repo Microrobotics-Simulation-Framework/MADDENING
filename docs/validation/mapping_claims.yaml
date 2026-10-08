@@ -2527,7 +2527,9 @@ claims:
     for the same group without diagnostics; the step against the kernel's
     own derivative for a point mid-cell, on an interior plane, on either
     face of the hull, a rounding inside or outside either face and far
-    outside, and the pair with a marker on the top face (MADD-ANO-240);
+    outside, the pair with a marker on the top face, and a step taken
+    beside the positions a pass derives from a pre-step one
+    (MADD-ANO-240);
     mixed dtypes (float32 fields at float64 positions, MADD-ANO-241): the
     step's size and the gap of a toy pass. The steps compiled (jit) by
     the graph. The separation is measured, not guaranteed: on 351 draws
@@ -2536,8 +2538,10 @@ claims:
     stop_gradient 0.31 to 0.98 in float32 and 1.0 in float64; a wrong
     derivative of a term that moves a field by about 32 float resolutions
     or less is not seen (0.22, under the tolerance, on a deposit that
-    moved the spectral radius by 0.02), and an honest gather that cancels
-    three thousandfold read 0.11. Not claimed for float64 (x64) on every
+    moved the spectral radius by 0.02), and an honest float32 gather of
+    a field that changes sign across a cell read 0.09 at a thousandfold
+    cancellation and 0.31, over the tolerance, at 1400-fold (its report
+    is then withheld). Not claimed for float64 (x64) on every
     push (the slow hunt measures it), 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
     checkpoints or sharded graphs.
@@ -2554,6 +2558,7 @@ claims:
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_probe_step_is_sized_for_the_coarser_of_the_geometry_and_the_pass'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_step'
     - 'tests/property/test_coupling_geometry_search.py::test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane'
   status: verified
   notes: >-
     Slow, run once on each JAX lane: a compiled group of float32 fields

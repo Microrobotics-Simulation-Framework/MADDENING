@@ -1020,8 +1020,11 @@ field the positions move by much more than 32 resolutions, and less on a
 field they move by about that (the allowance is in the denominator: a
 term that weak is not compared).  An honest pass reads the finite
 difference's own error: on 351 drawn examples of six cells, a median of
-6e-4 and at most 6e-3 in float32, at most 3e-6 in float64 (0.11 in
-float32 on a field that cancels three thousandfold inside a gather).  A
+6e-4 and at most 6e-3 in float32, at most 3e-6 in float64.  A float32
+gather of a field that changes sign across a cell cancels digits the
+difference then lacks: 0.09 at a thousandfold cancellation, 0.31 at
+1400-fold and 0.40 at 3000-fold, so an honest report is withheld from
+about 1400-fold.  A
 pass whose every read of a geometry was under `stop_gradient` read 0.31
 to 0.98 in float32 on the same draws and 1.0 in float64; on a deposit
 weak enough that the geometry moved the spectral radius by 0.02 it read
@@ -1029,7 +1032,10 @@ weak enough that the geometry moved the spectral radius by 0.02 it read
 spacing at the coarsest floating dtype the pass evaluates in (a step
 sized for float64 positions is below what float32 fields resolve), and a
 point on the last lattice point of an axis steps inwards, as one on the
-first does: outside the hull the kernel clamps.  Where the gap is above
+first does: outside the hull the kernel clamps.  A member's pre-step
+position steps towards the middle of the cell of whichever of it and the
+position the pass builds from it is nearer to a lattice plane (a
+Gauss-Seidel sweep reads the second after the holder's update).  Where the gap is above
 `GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
 withholds the bounds, and says which of the two it was.  The check costs
 one product and one evaluation of the pass per direction, and exists

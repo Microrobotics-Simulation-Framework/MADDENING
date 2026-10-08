@@ -281,7 +281,20 @@ class MultilinearGridMapping:
                 jnp.asarray(self.spacing[a] * p, T)))
         return out
 
-    def _probe_step(self, geom, eps: Optional[float] = None):
+    def _kink_distance(self, u, a: int):
+        """How many spacings lattice coordinate *u* of axis *a* is from
+        the nearest place the stencil changes polynomial: a lattice plane
+        inside the hull, the face it is clamped to outside (``inf`` on an
+        axis of one point)."""
+        n = self.shape[a]
+        if n < 2:
+            return jnp.full(u.shape, jnp.inf, u.dtype)
+        top = jnp.asarray(n - 1, u.dtype)
+        fraction = u - jnp.floor(u)
+        inside = jnp.minimum(fraction, 1 - fraction)
+        return jnp.where(u < 0, -u, jnp.where(u > top, u - top, inside))
+
+    def _probe_step(self, geom, eps: Optional[float] = None, beside=None):
         """A small step of every position towards the middle of its
         lattice cell, per coordinate: the direction the coupling
         diagnostics' self-check moves a geometry along
@@ -301,19 +314,32 @@ class MultilinearGridMapping:
         fields read at float64 positions): the step is ``sqrt`` of the
         coarser of the two, since a step sized for the geometry alone is
         below what the fields it moves can resolve.
+
+        *beside* is a second set of positions, of *geom*'s shape, that
+        move with it: the positions a pass derives from a member's
+        pre-step ones and reads after the member's update (``pos_pre +
+        drift + ...``).  Each coordinate then steps towards the middle of
+        the cell of whichever of the two is nearer to a lattice plane, so
+        that neither crosses one.
         """
         geom = jnp.asarray(geom)
         cols = geom if geom.ndim == 2 else geom[:, None]
         T = cols.dtype
         own = float(jnp.finfo(T).eps)
         coarsest = own if eps is None else max(own, float(eps))
+        other = None if beside is None else self._lattice_coordinates(
+            jnp.asarray(beside).astype(T).reshape(cols.shape))
         steps = []
         for a, u in enumerate(self._lattice_coordinates(cols)):
             size = jnp.maximum(jnp.asarray(math.sqrt(coarsest) * self.spacing[a], T),
                                2 * jnp.asarray(own, T) * jnp.abs(cols[:, a]))
-            below_the_middle = (u - jnp.floor(u)) * 2 < 1
-            on_the_top_face = u == jnp.asarray(self.shape[a] - 1, T)
-            step = jnp.where(below_the_middle & ~on_the_top_face, size, -size)
+            top = jnp.asarray(self.shape[a] - 1, T)
+            upwards = ((u - jnp.floor(u)) * 2 < 1) & ~(u == top)
+            if other is not None:
+                v = other[a]
+                nearer = self._kink_distance(v, a) < self._kink_distance(u, a)
+                upwards = jnp.where(nearer, ((v - jnp.floor(v)) * 2 < 1) & ~(v == top), upwards)
+            step = jnp.where(upwards, size, -size)
             steps.append(jnp.where(jnp.isfinite(cols[:, a]), step, jnp.zeros((), T)))
         return jnp.stack(steps, axis=1).reshape(geom.shape)
 
@@ -336,15 +362,7 @@ class MultilinearGridMapping:
         T = cols.dtype
         out = []
         for a, u in enumerate(self._lattice_coordinates(cols)):
-            n = self.shape[a]
-            if n < 2:
-                distance = jnp.full(u.shape, jnp.inf, T)
-            else:
-                top = jnp.asarray(n - 1, T)
-                fraction = u - jnp.floor(u)
-                inside = jnp.minimum(fraction, 1 - fraction)
-                cells = jnp.where(u < 0, -u, jnp.where(u > top, u - top, inside))
-                distance = cells * jnp.asarray(self.spacing[a], T)
+            distance = self._kink_distance(u, a) * jnp.asarray(self.spacing[a], T)
             out.append(jnp.where(jnp.isfinite(cols[:, a]), distance, jnp.asarray(jnp.nan, T)))
         return jnp.stack(out, axis=1).reshape(geom.shape)
 

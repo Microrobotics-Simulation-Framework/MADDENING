@@ -439,6 +439,26 @@ def plane_limit_reference(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -
     return best / 2.0
 
 
+def plane_limit_resolution(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -> float:
+    """How far ``geometry_plane_limit`` moves when a position the pass
+    reads from the iterate moves by eight roundings of *cell*'s dtype (of
+    the coordinate, or of a spacing where that is larger): what the
+    stored limit of a point a few roundings from a plane is good to."""
+    origin, spacing, _shape = cell.grid
+    x = np.asarray(x, np.float64)
+    weights = norm.weights(x)
+    eps = float(np.finfo(cell.dtype).eps)
+    worst = 0.0
+    for name in sorted(set(cell.iterate_reads)):
+        k = [(n, f) for n, f, _s, _a, _b in ref.layout].index((name, "pos"))
+        _n, _f, _s, a, b = ref.layout[k]
+        for j in range(a, b):
+            moved = x.copy()
+            moved[j] += 8.0 * eps * max(abs(x[j]), spacing[(j - a) % cell.d])
+            worst = max(worst, norm.of_difference(moved, x, weights))
+    return worst / 2.0
+
+
 def without_plane_limit(gm: GraphManager) -> dict:
     """The report of *gm*'s last step with the lattice-plane criterion
     out of it (the slot read as ``inf``): what ``spectral_usable`` said
@@ -474,6 +494,7 @@ def observe(cell: Cell, case: Case, trio: tuple, *, values: Optional[dict] = Non
         before = without_plane_limit(gm)
     out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0, plane=0.0,
                plane_before=0.0, usable_before=bool(before["spectral_usable"]), crossed=False,
+               near_before=False,
                spectral_usable=bool(d["spectral_usable"]),
                gradient_usable=bool(d["gradient_bound_usable"]),
                floor_reported=math.isfinite(floor), referenced=False, near=False,
@@ -501,6 +522,7 @@ def observe(cell: Cell, case: Case, trio: tuple, *, values: Optional[dict] = Non
     norm = ref.norm(kind, cell.knobs.get("rtol", 1e-6))
     out["crossed"] = crossed(cell, ref, x, fixed.x)
     out["report"]["plane_limit_reference"] = plane_limit_reference(cell, ref, x, norm)
+    out["report"]["plane_limit_resolution"] = plane_limit_resolution(cell, ref, x, norm)
     if out["crossed"]:
         # The fixed point in another lattice cell than the iterate the
         # spectrum was taken at.  With the flag set the fixed point is
@@ -540,6 +562,15 @@ def observe(cell: Cell, case: Case, trio: tuple, *, values: Optional[dict] = Non
         weights[a:b] = 1.0 / top if top > 0 else 1.0
     linear.radius_scores(out, J, weights, float(d["rho_spectral"]), eps, case.seed)
 
+    if out["usable_before"] and not out["spectral_usable"]:
+        # A flag the lattice-plane rule took: whether the bound it was on
+        # is one the reference holds (recorded, not scored).
+        dist = ref.distance(x, fixed, norm)
+        h = ref.nonlinearity(x, fixed, norm)
+        bound = float(d["spectral_error_bound"]) * allowed
+        out["near_before"] = bool(h < 1.0 and bound > 0
+                                  and dist / (bound / (1.0 - h)) <= THRESHOLD["bound"])
+        out["report"].update(distance=dist, nonlinearity=h)
     if out["spectral_usable"]:
         dist = ref.distance(x, fixed, norm)
         h = ref.nonlinearity(x, fixed, norm)
@@ -631,7 +662,7 @@ def observe_plane(cell: Cell, case: PlaneCase, trio: tuple) -> dict:
     if values is None:
         return dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0,
                     plane=0.0, plane_before=0.0, usable_before=False, crossed=False,
-                    spectral_usable=False,
+                    near_before=False, spectral_usable=False,
                     gradient_usable=False, floor_reported=False, referenced=False,
                     near=False, scored=False, finite=False, placed=False, reason=None,
                     report={})

@@ -483,3 +483,33 @@ def test_a_diagnosed_edge_mapped_pair_reports_every_number_of_its_marker_side_tw
     assert mapped["converged"] and mapped["spectral_usable"] and twin["spectral_usable"]
     assert np.isfinite(mapped["spectral_error_bound"])
     _assert_same_report(mapped, twin, rel=1e-6)
+
+
+#: Both edges scatter: every mapped edge is read at its source, each field
+#: once, so the report's analysis is the state's own (no second spectrum on
+#: a reading) and the group records no floor.
+SCATTER_SETTLED = sg.Shape("scatter-only", 40, 4, "sparse", "gauss-seidel", "float64",
+                           diagnostics=True)
+
+
+# Slow: one more graph compiled with diagnostics.
+# Per push: tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_diagnosed_edge_mapped_pair_reports_every_number_of_its_marker_side_twin
+@pytest.mark.slow
+def test_a_usable_bound_of_a_group_read_wholly_at_its_sources_covers_the_distance():
+    """Under x64, a diagnosed pair whose two edges both scatter: the
+    spectral bound, taken in the state's weights on the fields the norm
+    reads at their source, is not below the distance to the exact fixed
+    point in those readings, and not loose by more than the loop's own
+    amplification allows."""
+    with precision(True):
+        built = sg.build(SCATTER_SETTLED)
+        assert SLOT not in _meta(built.gm)
+        ref = _stepped(SCATTER_SETTLED, built)
+        (report,) = built.gm.coupling_diagnostics().values()
+        state = {name: np.asarray(built.gm.get_node_state(name)["x"], np.float64)
+                 for name in ("p", "q")}
+    assert bool(report["converged"]) and bool(report["spectral_usable"]), dict(report)
+    distance = ref.distance(state, "compact")
+    bound = float(report["spectral_error_bound"])
+    assert 0.0 < distance <= bound * (1.0 + 1e-9), (distance, bound)
+    assert bound <= 2.0 * ref.K * float(report["residual"]), (bound, ref.K, dict(report))

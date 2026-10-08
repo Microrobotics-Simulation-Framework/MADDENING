@@ -625,13 +625,34 @@ def _reading_of(kind, H=None):
     """``(S, o)`` in float64: an edge of *kind* delivers ``S @ u + o``.
 
     For a mapped kind ``S`` is the transform's linear part times the
-    mapping matrix *H* as float32 holds it.
+    mapping matrix *H* as float32 holds it.  This is what the target
+    receives, and so the pass's map; what the interface norm reads on
+    the edge is :func:`_norm_reading_of`.
     """
     if kind in MAPPED:
         rows, after = MAPPED[kind]
         S_t, o = TRANSFORMS[after][1](rows)
         return S_t @ np.asarray(H, F32).astype(np.float64), o
     return TRANSFORMS[kind][1](N)
+
+
+def _read_at_its_source(kind) -> bool:
+    """Does the interface norm read an edge of *kind* at its source?  Where
+    its mapping delivers more entries than the ``N`` the source field
+    holds (``mapped-tall``, ``mapped-then-last``): the compact side.  The
+    mapping's sizes decide, whatever a transform then makes of what it
+    delivers."""
+    return kind in MAPPED and MAPPED[kind][0] > N
+
+
+def _norm_reading_of(kind, H=None):
+    """``(S, o)`` in float64: the interface norm reads ``S @ u + o`` on an
+    edge of *kind* -- the source field itself, before the mapping and the
+    transform, where the mapping delivers more entries than its source
+    holds; what the edge delivers otherwise."""
+    if _read_at_its_source(kind):
+        return np.eye(N), np.zeros(N)
+    return _reading_of(kind, H)
 
 
 def _mat_graph(ab, ba, *, mode="jacobi", acceleration="none", cap=3, own_weights=None):
@@ -688,9 +709,13 @@ def _exact_and_distance(gm, ab, ba, values):
     x_star = np.linalg.solve(np.eye(2 * N) - M, k)
     uA = np.asarray(gm.get_node_state("A")["u"], np.float64)
     uB = np.asarray(gm.get_node_state("B")["u"], np.float64)
+    # The distance is in what the norm reads, which is not what the edge
+    # delivers where its mapping expands.
+    R_ab, p_ab = _norm_reading_of(ab, values.get("H", {}).get("ab"))
+    R_ba, p_ba = _norm_reading_of(ba, values.get("H", {}).get("ba"))
     true = _rms_over_own_magnitude([
-        (S_ab @ uA + o_ab, S_ab @ x_star[:N] + o_ab),
-        (S_ba @ uB + o_ba, S_ba @ x_star[N:] + o_ba),
+        (R_ab @ uA + p_ab, R_ab @ x_star[:N] + p_ab),
+        (R_ba @ uB + p_ba, R_ba @ x_star[N:] + p_ba),
     ])
     return x_star, true
 
@@ -893,10 +918,12 @@ def test_an_identity_mapping_reads_the_bound_an_unmapped_edge_does(mode):
 
 def test_a_usable_bound_holds_on_a_mapped_pair():
     """A mapping on each edge and no transform anywhere: three entries
-    delivered from two on one edge, one from two on the other.
+    delivered from two on one edge (read at its source: the compact side),
+    one from two on the other (read as delivered).
 
-    With no transform in the group, only the mappings put the report on the
-    reading's analysis; on the source fields it is another norm's bound.
+    With no transform in the group, only the mapping read as delivered puts
+    the report on the reading's analysis; on the source fields it is
+    another norm's bound.
     One compiled structure, three drawn pairs (the matrices drawn with the
     gains and passed through ``params``); the audit fixtures hold a mapping
     before a transform, and the property below draws every structure.

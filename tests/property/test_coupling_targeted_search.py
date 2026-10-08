@@ -234,7 +234,9 @@ def _reads_a_recomputed_field(cell) -> bool:
     if cell.knobs.get("convergence_norm") != "interface":
         return False
     edges = [cell.topo.edges[i] for i in cell.topo.internal_edges(0)]
-    whole = {e.src for e in edges if not e.mapped and e.transform is None}
+    # A mapping read at its source measures its source whole
+    # (``ct.measured_whole``): the set the library's return rule keeps.
+    whole = ct.measured_whole(cell.topo, 0)
     return any(e.src not in whole for e in edges)
 
 

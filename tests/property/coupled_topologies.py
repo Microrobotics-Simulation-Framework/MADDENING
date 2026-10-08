@@ -1144,6 +1144,27 @@ def interface_side_of(topo: Topology, i: int, rule=None) -> str:
     return "source" if topo.node(e.dst).n > topo.node(e.src).n else "delivered"
 
 
+def measured_whole(topo: Topology, gi: int = 0, rule=None) -> set:
+    """The members of group *gi* whose ``x`` the interface norm measures whole.
+
+    The source of an internal edge whose reading *is* its source field:
+    an edge with no mapping and no transform, or -- under the side rule
+    (:func:`interface_side_of`; *rule* ``None`` is the library's,
+    :data:`INTERFACE_SIDE`) -- a mapped edge read at its source, whatever
+    transform it carries (a source reading is before the transform).  A
+    solve under that norm returns such a field as the iterate it accepted
+    holds it and every other member one plain pass on
+    (:meth:`LinearModel.recomputed`): the reading rule and the return rule
+    meet in this set, and every test-side statement of it asks here.
+    """
+    whole = set()
+    for i in topo.internal_edges(gi):
+        e = topo.edges[i]
+        if (not e.mapped and e.transform is None) or interface_side_of(topo, i, rule) == "source":
+            whole.add(e.src)
+    return whole
+
+
 # ---------------------------------------------------------------------------
 # The float64 reference
 # ---------------------------------------------------------------------------
@@ -1499,20 +1520,21 @@ class LinearModel:
         P (F(x) - x)``: ``x`` the iterate its loop accepted, which is the
         one its report is of; ``F`` one plain pass of the group; ``P`` the
         projector onto the fields the norm does not **measure whole** --
-        every member's ``x`` but those an internal edge delivers as it
-        is, with no mapping and no transform.  Empty under the other
-        norms, which measure every field.
+        every member's ``x`` but those an internal edge reads as they
+        are: delivered with no mapping and no transform, or read at the
+        source by a static mapping onto more entries
+        (:func:`measured_whole`).  Empty under the other norms, which
+        measure every field.
 
-        The set follows the library's reading rule (``edge._delivered``
-        applies a mapping and a transform and nothing else), whatever
-        ``interface_side`` this model restates.  A later stage that
-        reads a static mapping on its compact side makes that source
-        field measured whole, and this set must then follow it.
+        The set follows the library's reading rule
+        (:data:`INTERFACE_SIDE`), whatever ``interface_side`` this model
+        restates: a field the library's norm reads at its source is
+        measured whole and kept, and a model of the other rule is then a
+        model of another library on every count.
         """
         if self.cfgs[gi].get("convergence_norm", "l2") != "interface":
             return ()
-        edges = [self.topo.edges[i] for i in self.topo.internal_edges(gi)]
-        whole = {e.src for e in edges if not e.mapped and e.transform is None}
+        whole = measured_whole(self.topo, gi)
         return tuple(m for m in self.topo.groups[gi] if m not in whole)
 
     def _recomputed_projector(self, gi: int) -> np.ndarray:

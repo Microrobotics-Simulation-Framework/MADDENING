@@ -100,6 +100,33 @@ def offset_by(c: float):
     return _offset
 
 
+#: The side rule the library is held to (``coupled_topologies.INTERFACE_SIDE``
+#: says the same; this module restates the rule from sizes and imports no
+#: other reference).
+LIBRARY_RULE = "compact"
+
+
+def measured_whole(gm) -> tuple:
+    """The members whose field the interface norm of *gm*'s group measures whole.
+
+    A solve returns such a field as the iterate it accepted holds it, and
+    every other one plain pass on.  Restated from the edges' own sizes,
+    not from the library's plan: the source of an edge with no mapping
+    and no transform, or of a static mapping the rule reads at its source
+    (:func:`side_of`: onto more entries than its source holds) -- there
+    the reading is the source field itself, before the mapping and the
+    transform."""
+    whole = set()
+    for e in gm._edges:                                   # noqa: SLF001
+        if e.mapping is None:
+            if e.transform is None:
+                whole.add(e.source_node)
+        elif LIBRARY_RULE == "compact" and side_of(
+                int(e.mapping.n_source), int(e.mapping.n_target)) == "source":
+            whole.add(e.source_node)
+    return tuple(sorted(whole))
+
+
 def side_of(n_source: int, n_target: int, declared: Optional[str] = None) -> str:
     """Where the interface norm reads a mapped edge: ``"source"`` or ``"delivered"``.
 
@@ -529,11 +556,12 @@ class Reference:
 
     def returned(self, x: dict, whole=()) -> dict:
         """What a solve returns for the iterate *x* it accepted: a field the
-        interface norm measures whole (*whole*: read by an edge with no
-        mapping and no transform) as *x* holds it, every other as one plain
-        pass at *x* computes it.  Both edges of a :func:`build` graph carry a
-        mapping, so there it is ``F(x)``; in the marker-side twin ``p`` is
-        read by a plain edge."""
+        interface norm measures whole (*whole*, :func:`measured_whole`: read
+        by an edge with no mapping and no transform, or at its source by a
+        mapping onto more entries) as *x* holds it, every other as one plain
+        pass at *x* computes it.  In a :func:`build` graph the source of a
+        scatter is kept and the source of a gather or a tie is ``F(x)``'s;
+        in the marker-side twin ``p`` is read by a plain edge."""
         after = self.one_pass(x)
         return {name: x[name] if name in whole else after[name] for name in ("p", "q")}
 
@@ -691,8 +719,7 @@ def run(shape: Shape, draw: Draw, *, graph: Optional[Built] = None) -> dict:
         report = dict(report)
         state = {name: np.asarray(gm.get_node_state(name)["x"], np.float64)
                  for name in ("p", "q")}
-        whole = tuple(sorted({e.source_node for e in gm._edges  # noqa: SLF001
-                              if e.mapping is None and e.transform is None}))
+        whole = measured_whole(gm)
     converged = bool(report["converged"])
     distance = ref.distance(state, "compact")
     K = ref.K_returned(whole)

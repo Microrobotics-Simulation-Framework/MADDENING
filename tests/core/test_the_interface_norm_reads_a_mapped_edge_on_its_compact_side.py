@@ -37,6 +37,8 @@ What is held here, on the library's own functions and on compiled graphs
 
 from __future__ import annotations
 
+import dataclasses
+
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -292,8 +294,8 @@ def _meta(gm) -> dict:
     return gm._state["_meta"]  # noqa: SLF001
 
 
-def _stepped(shape, built):
-    ref = sg.Reference(shape, DRAW)
+def _stepped(shape, built, draw=DRAW):
+    ref = sg.Reference(shape, draw)
     gm = built.gm
     gm.reset_state()
     for name in ("p", "q"):
@@ -370,21 +372,70 @@ def test_a_group_owns_the_floor_slot_where_an_edge_is_read_through_its_mapping(g
         assert set(_meta(built.gm)) == graph["seeded"]
 
 
+#: A pass count is predicted only where every estimate the reference's
+#: loop compared was this far from its threshold, as a ratio (the margin
+#: ``test_coupling_interface_side.py`` holds its predictions to).
+EXIT_MARGIN = 1.05
+
+
+def _decided_draw(shape):
+    """:data:`DRAW`, or the next seed whose plain loop converges with every
+    estimate :data:`EXIT_MARGIN` from the threshold (chosen by the
+    reference's float64 arithmetic alone, so the same draw everywhere)."""
+    for seed in range(DRAW.seed, DRAW.seed + 40):
+        draw = dataclasses.replace(DRAW, seed=seed)
+        stop = sg.Reference(shape, draw).plain_exit("compact")
+        if stop["converged"] and stop["margin"] >= EXIT_MARGIN:
+            return draw
+    raise AssertionError(f"{shape}: no seed decides its exit with margin")
+
+
 def test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings(graph):
     """The claim, on each kind: converged, and the distance to the exact
-    fixed point in the compact readings is at most ``K`` tolerances.  (One
-    jitted step of the compiled graph; the float64 kinds run under x64.)"""
+    fixed point in the compact readings is at most ``K`` tolerances -- with
+    the two rules of this norm together: the report is of the iterate the
+    loop accepted, and the state returned is that iterate with every field
+    the norm does not measure whole one plain pass on, a field read at its
+    source being measured whole.  (One jitted step of the compiled graph;
+    the float64 kinds run under x64.)"""
     shape, built = graph["shape"], graph["built"]
     with precision(shape.dtype == "float64"):
-        ref = _stepped(shape, built)
+        ref = _stepped(shape, built, _decided_draw(shape))
         (report,) = built.gm.coupling_diagnostics().values()
         state = {name: np.asarray(built.gm.get_node_state(name)["x"], np.float64)
                  for name in ("p", "q")}
     assert bool(report["converged"])
-    assert 0.0 < ref.distance(state, "compact") <= ref.K
-    restated = ref.residual(ref.one_pass(state), state, "compact")
+    # Which fields the solve keeps follows the side each edge is read on:
+    # the source of an edge read at its source is measured whole.  Stated
+    # by kind, and held to the graph's own edges.
+    sides = GRAPHS[graph["kind"]][1]
+    whole = tuple(name for name, side in zip(("p", "q"), sides) if side == "source")
+    assert whole == sg.measured_whole(built.gm), (whole, sg.measured_whole(built.gm))
+    # The state returned is within K tolerances, K of that state (the
+    # accepted iterate with every field not measured whole one pass on).
+    assert 0.0 < ref.distance(state, "compact") <= ref.K_returned(whole)
+    # The report is of the iterate the loop accepted: the reference's own
+    # plain loop stops on it with this residual, and returns this state.
+    expected = ref.plain_exit("compact")
     tight = 1e-9 if shape.dtype == "float64" else 2e-3
-    assert abs(float(report["residual"]) - restated) <= tight * restated
+    assert expected["converged"] and expected["margin"] >= EXIT_MARGIN, expected["margin"]
+    assert int(report["iterations"]) == expected["iterations"]
+    assert abs(float(report["residual"]) - expected["residual"]) <= tight * expected["residual"]
+    close = 1e-9 if shape.dtype == "float64" else 2e-4
+    want = ref.returned(expected["state"], whole)
+    for name in ("p", "q"):
+        gap = float(np.max(np.abs(state[name] - want[name])))
+        assert gap <= close * float(np.max(np.abs(want[name]))), (name, gap, whole)
+    if shape.dtype == "float64" and whole == ("p",):
+        # The premise, on the kind that keeps one field and recomputes the
+        # other (float64: a converged pass moves a field by about a
+        # tolerance, which float32's allowance above does not resolve):
+        # the state is neither the accepted iterate nor one pass on whole.
+        for kept in (("p", "q"), ()):
+            other = ref.returned(expected["state"], kept)
+            assert any(float(np.max(np.abs(state[n] - other[n]))) > 1e3 * close * float(
+                np.max(np.abs(other[n]))) for n in ("p", "q")), (
+                f"the state is also the one that keeps {kept}: the comparison cannot tell")
 
 
 # ---------------------------------------------------------------------------

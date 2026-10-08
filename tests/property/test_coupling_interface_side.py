@@ -136,6 +136,8 @@ from tests.property.sysid_transform_grid import precision
 
 #: The rule this tree's library implements.
 RULE = ct.INTERFACE_SIDE
+assert sg.LIBRARY_RULE == RULE, (
+    "interface_side_graphs.measured_whole states the fields a solve keeps for another side rule")
 
 
 class Diluted(Exception):
@@ -376,6 +378,13 @@ def _exit_rows():
             yield pytest.param(shape, rule, id=f"{_id(shape)}-{rule}", marks=marks)
 
 
+#: The members a solve returns as its accepted iterate holds them, by the
+#: kind of the graph's two mapped edges (``p -> q`` then ``q -> p``): the
+#: source of each edge the norm reads at its source.  A tie (``m == n``)
+#: is read as delivered on both.
+KEPT = {"two-way": ("p",), "gather-only": (), "scatter-only": ("p", "q"), "tie": ()}
+
+
 def _assert_returned(shape, seen, want) -> None:
     """The state the step returned is *want*, to the rounding of its passes."""
     close = 1e-9 if shape.dtype == "float64" else 2e-4
@@ -408,7 +417,11 @@ def test_the_plain_loop_stops_where_the_reference_of_its_rule_does(shape, rule):
         f"the step took {seen['iterations']} passes; the plain loop under the {rule} "
         f"reading stops after {expected['iterations']} (margin {expected['margin']:.3g})")
     # ... and the state returned is that iterate with the fields the norm
-    # does not measure whole one plain pass on (both, behind two mappings).
+    # does not measure whole one plain pass on: the source of a gather or
+    # a tie.  The source of a scatter is read at its source, so measured
+    # whole and kept (the two rules together; stated here from the shape).
+    kind = "tie" if shape.n_large == shape.n_small else shape.kind
+    assert seen["whole"] == KEPT[kind], (shape, seen["whole"])
     _assert_returned(shape, seen, ref.returned(expected["state"], seen["whole"]))
 
 

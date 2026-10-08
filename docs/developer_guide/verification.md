@@ -867,10 +867,11 @@ Two of those rows say something the edge check alone does not.
 One more thing the example shows is where the diagnostics route stops.  The
 time study sweeps the two rods together; swept one after the other, which
 is the default, the same group reports a `spectral_error_bound` and
-`spectral_usable=False` -- its pass map is far from normal, where rounding
-leaves the spectral radius undetermined -- and `coupling_iteration_bound`
-returns `usable=False` with that flag.  The guard then takes the re-run
-route if it was given one, and is a `SKIP` if it was not.
+`spectral_usable=False` -- its pass map is far from normal, which is where
+the diagnostics decline to certify the spectral radius they measured -- and
+`coupling_iteration_bound` returns `usable=False` with that flag.  The
+guard then takes the re-run route if it was given one, and is a `SKIP` if
+it was not.
 
 Stability, for this construction: each rod keeps its own explicit limit
 (`dt * alpha / dx**2` below 1/2 on the finer rod; the example runs at 0.2)

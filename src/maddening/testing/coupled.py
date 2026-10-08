@@ -24,8 +24,8 @@ group iterates each step's exchange to a tolerance.  What is left of
 that iteration is an error of the *solver*, and a refinement ladder
 reads it as if it were an error of the *scheme*: a ladder run at a loose
 tolerance mixes the two and reports an order that belongs to neither
-(measured on two rods exchanging heat along their length, at
-``tolerance=1e-4``: pairwise orders 1.01, 1.13, 0.51 where the scheme's
+(measured on two rods, each heated by the other along its length, at
+``tolerance=1e-4``: pairwise orders 1.21, 1.03, 0.65 where the scheme's
 is 1.00).  Both functions therefore take a guard and refuse to report an
 order as verified without it.  The guard asks, at every level, that the
 iteration error is below ``iteration_factor`` of the discretisation

@@ -1428,6 +1428,75 @@ class LinearModel:
             k += self.topo.node(m).n
         return members, off, k
 
+    # -- the interface norm's return rule ------------------------------------------
+
+    def recomputed(self, gi: int) -> tuple:
+        """The members of group *gi* whose ``x`` its solve returns recomputed.
+
+        Under ``convergence_norm="interface"`` a solve returns ``y = x +
+        P (F(x) - x)``: ``x`` the iterate its loop accepted, which is the
+        one its report is of; ``F`` one plain pass of the group; ``P`` the
+        projector onto the fields the norm does not **measure whole** --
+        every member's ``x`` but those an internal edge delivers as it
+        is, with no mapping and no transform.  Empty under the other
+        norms, which measure every field.
+
+        The set follows the library's reading rule (``edge._delivered``
+        applies a mapping and a transform and nothing else), whatever
+        ``interface_side`` this model restates.  A later stage that
+        reads a static mapping on its compact side makes that source
+        field measured whole, and this set must then follow it.
+        """
+        if self.cfgs[gi].get("convergence_norm", "l2") != "interface":
+            return ()
+        edges = [self.topo.edges[i] for i in self.topo.internal_edges(gi)]
+        whole = {e.src for e in edges if not e.mapped and e.transform is None}
+        return tuple(m for m in self.topo.groups[gi] if m not in whole)
+
+    def _recomputed_projector(self, gi: int) -> np.ndarray:
+        """``P`` of :meth:`recomputed` over the members' stacked ``x``."""
+        _members, off, k = self._group_layout(gi)
+        p = np.zeros(k)
+        for m in self.recomputed(gi):
+            p[off[m]:off[m] + self.topo.node(m).n] = 1.0
+        return np.diag(p)
+
+    def returned_from(self, gi: int, pre: dict, state: dict, accepted: np.ndarray) -> np.ndarray:
+        """``x + P (F(x) - x)`` for the accepted iterate ``x`` (the members'
+        stacked ``x``), in float64: what the solve returns (:meth:`recomputed`).
+        *state* supplies what the group read from outside."""
+        _members, _off, k = self._group_layout(gi)
+        L, U = (np.asarray(a, np.float64) for a in self.group_pass(gi))
+        c = np.asarray(self.group_constant(gi, pre, state), np.float64)
+        x = np.asarray(accepted, np.float64)
+        P = self._recomputed_projector(gi)
+        return x + P @ (np.linalg.solve(np.eye(k) - L, U @ x + c) - x)
+
+    def readings_moved(self, gi: int, pre: dict, state: dict, accepted: np.ndarray) -> float:
+        """How far the readings of the returned state are from the accepted
+        iterate's, in the residual's own weights and count.
+
+        ``S y - S x = S P (F(x) - x)``: on an edge whose source field was
+        recomputed, the very term the residual of ``x`` holds for it; on
+        every other edge, zero.  So this is at most :meth:`residual_between`
+        of ``F(x)`` against ``x`` -- the reported residual -- and equal to it
+        where every field the norm reads was recomputed.
+        """
+        _members, _off, k = self._group_layout(gi)
+        L, U = (np.asarray(a, np.float64) for a in self.group_pass(gi))
+        c = np.asarray(self.group_constant(gi, pre, state), np.float64)
+        x = np.asarray(accepted, np.float64)
+        F = np.linalg.solve(np.eye(k) - L, U @ x + c)
+        y = x + self._recomputed_projector(gi) @ (F - x)
+        rtol_eff = float(self.cfgs[gi].get("rtol", 1e-6))
+        total, count = 0.0, 0
+        for B, _gamma in self.norm_fields(gi):
+            ref = max(float(np.max(np.abs(B @ F))), float(np.max(np.abs(B @ x)))) if B.shape[0] else 0.0
+            if ref > 0:
+                total += float(np.sum(((B @ y - B @ x) / (rtol_eff * ref)) ** 2))
+                count += B.shape[0]
+        return float(np.sqrt(total / max(count, 1)))
+
     def group_pass(self, gi: int):
         """``(L, U)``: the one-pass map ``y = L y + U x + c_g`` over the group's members.
 
@@ -1625,7 +1694,8 @@ class LinearModel:
             at += B.shape[0]
         return out
 
-    def group_report_consistency(self, gi: int, pre: dict, state: dict, residual: float):
+    def group_report_consistency(self, gi: int, pre: dict, state: dict, residual: float, *,
+                                 accepted: bool = False):
         """``(defect_norm, bound, detail)``: is the reported residual that of the returned state?
 
         With ``F`` the group's one-pass map (:meth:`group_pass`) and ``Phi``
@@ -1641,6 +1711,25 @@ class LinearModel:
         (``rtol max(|x|, |F(x)| + |eta|)``), ``epsilon`` the members'
         rounding (:meth:`rounding`).  Holds whatever the acceleration, the
         predictor and the solver did to reach the state, converged or not.
+
+        **Under the interface norm's return rule** (:meth:`recomputed`)
+        *state* is ``y = x + P r`` with ``r = F(x) - x`` at the accepted
+        iterate ``x``, and *residual* is that of ``x``.  Then ``y - Phi(y) =
+        -[(I - L) - (I - M) P] r`` exactly (``M = L + U``): the same bound
+        with that operator in place of ``I - L``, wherever a recomputed
+        field is read (``S P != 0``; elsewhere ``S (I - M) P = 0`` and
+        nothing changes).  The scale the residual divided a reading by is
+        no longer computable from *state* -- one of its two readings is
+        the accepted iterate's -- but it is within ``1 / (1 - rtol R
+        sqrt(N))`` of the returned state's own, each entry of ``S r``
+        being at most ``R sqrt(N)`` of it; past ``rtol R sqrt(N) = 1``
+        (a cap reached with the readings still moving by their own size)
+        there is no bound.  The members' rounding is counted twice, for
+        the pass that measured and the pass that recomputed.  ``y``'s
+        own residual is not the reported one, so ``residual_true`` is
+        ``None`` there: the equality is tested on the accepted iterate,
+        which a caller that holds it passes as *state* with
+        ``accepted=True`` (:func:`coupled_graphs.accepted_iterate`).
 
         ``S`` is the norm's own reading (:meth:`norm_fields`), which under
         ``"interface"`` is what each internal edge delivers.  Every member
@@ -1694,13 +1783,22 @@ class LinearModel:
                     float(np.max(np.abs(B @ F) + s_eta[rows] + read_F[rows])))
         read = read_x + read_F
         Splus = np.linalg.pinv(S)
-        A = (w[:, None] * S) @ (np.eye(k) - L) @ Splus @ np.diag(rho_up)
-        K_up = float(np.linalg.norm(A, 2))
         N = len(w)
         R2 = float(residual) * (np.sqrt(N) if rms else 1.0) * (1.0 + (N + 4) * self.eps)
-        A_read = np.abs((w[:, None] * S) @ (np.eye(k) - L) @ Splus)
-        bound = (K_up * R2 + float(np.linalg.norm(w * (absS @ eps_vec)))
-                 + float(np.linalg.norm(A_read @ read)))
+        P = np.zeros((k, k)) if accepted else self._recomputed_projector(gi)
+        moved = bool(np.any(S @ P))         # a recomputed field the norm reads
+        core, passes, bounded = np.eye(k) - L, 1.0, True
+        if moved:
+            core = core - (np.eye(k) - L - np.asarray(U, np.float64)) @ P
+            passes = 2.0
+            drift = rtol_eff * R2
+            bounded = drift < 1.0
+            rho_up = rho_up / (1.0 - drift) if bounded else np.zeros_like(rho_up)
+        A = (w[:, None] * S) @ core @ Splus @ np.diag(rho_up)
+        K_up = float(np.linalg.norm(A, 2)) if bounded else float("inf")
+        A_read = np.abs((w[:, None] * S) @ core @ Splus)
+        bound = (K_up * R2 + passes * float(np.linalg.norm(w * (absS @ eps_vec)))
+                 + passes * float(np.linalg.norm(A_read @ read))) if bounded else float("inf")
         dnorm = float(np.linalg.norm(w * (S @ d)))
         scale = np.sqrt(N) if rms else 1.0
         # The other direction: the reported residual *is* ``||F(x) - x||`` of
@@ -1728,9 +1826,11 @@ class LinearModel:
                  + (N + 4) * self.eps * max(float(residual), R_true))
         return dnorm / scale, bound / scale, dict(K_up=K_up, eps=float(np.max(eps_vec)),
                                                   residual=float(residual), d=d,
-                                                  residual_true=R_true, residual_tol=R_tol)
+                                                  residual_true=None if moved else R_true,
+                                                  residual_tol=R_tol)
 
-    def converged_distance(self, gi: int, pre: dict, state: dict, threshold: float):
+    def converged_distance(self, gi: int, pre: dict, state: dict, threshold: float, *,
+                           accepted: bool = False):
         """``(distance, tolerance)``: the returned state against the group's exact fixed point.
 
         ``x - x* = (I - M_g)^{-1} (x - Phi(x))`` exactly, and a converged
@@ -1748,7 +1848,8 @@ class LinearModel:
         N = len(w)
         scale = np.sqrt(N) if rms else 1.0
         dist = float(np.linalg.norm(w * (S @ np.asarray(x - xstar, np.float64)))) / scale
-        _dn, bound_at_thr, _det = self.group_report_consistency(gi, pre, state, threshold)
+        _dn, bound_at_thr, _det = self.group_report_consistency(gi, pre, state, threshold,
+                                                                accepted=accepted)
         Winv = np.where(w > 0, 1.0 / np.where(w > 0, w, 1.0), 0.0)
         kappa = float(np.linalg.norm(
             (w[:, None] * S)
@@ -1806,6 +1907,13 @@ class LinearModel:
                 scale[rows] = rtol_eff * max(float(np.max(np.abs(B @ x))),
                                              float(np.max(np.abs(B @ F))))
         T = S @ np.linalg.solve(np.eye(k) - (L + U), np.eye(k) - L) @ np.linalg.pinv(S)
+        # The return rule (:meth:`recomputed`): *state* is ``x + P r``, so
+        # its error is that of the accepted iterate plus ``P r``, and the
+        # bracket loses the residual's own term on the readings of a
+        # recomputed field: ``T - S P S^+``.  (``scale`` is taken from
+        # *state* and the pass at it, which is the residual's own to
+        # ``rtol`` times the residual; ``K`` is compared at a threshold.)
+        T = T - S @ model._recomputed_projector(gi) @ np.linalg.pinv(S)
         K = float(np.linalg.norm((w[:, None] * T) * scale[None, :], 2))
         return model.returned_weight_distance(gi, pre, state), K
 
@@ -1828,9 +1936,11 @@ class LinearModel:
         return float(np.sqrt(total / max(count, 1) if norm != "l2" else total))
 
     def pass_residual(self, gi: int, pre: dict, state: dict) -> float:
-        """``||F(x) - x||`` of the returned state in the group's norm under this
-        model's reading rule, in float64: what the step should report, to
-        the rounding of its own dtype."""
+        """``||F(x) - x||`` of *state* in the group's norm under this model's
+        reading rule, in float64: what the step reports, to the rounding
+        of its own dtype, **where *state* is the iterate its loop
+        accepted** -- the state it returns, unless the return rule
+        recomputed a field the norm reads (:meth:`recomputed`)."""
         members, _off, k = self._group_layout(gi)
         L, U = (np.asarray(a, np.float64) for a in self.group_pass(gi))
         c = np.asarray(self.group_constant(gi, pre, state), np.float64)
@@ -1849,6 +1959,8 @@ class LinearModel:
         by the library's own ``error_amplification`` -- the estimate rule
         is not what this restates; the reading is.  *state* supplies what
         the group read from outside.  No predictor, no sub-cycling.
+        ``state`` is the iterate the loop accepts and ``returned`` what
+        the solve returns for it (:meth:`returned_from`).
 
         ``margin`` is the least factor any deciding estimate was from the
         threshold: a predicted pass count holds where that is well above
@@ -1886,10 +1998,12 @@ class LinearModel:
                          else threshold / estimate)
             if estimate <= threshold:
                 return dict(iterations=i, residual=res, converged=True, state=split(x),
+                            returned=split(self.returned_from(gi, pre, state, x)),
                             margin=margin)
             x = y
         return dict(iterations=int(cap), residual=float("nan"), converged=False,
-                    state=split(x), margin=margin)
+                    state=split(x), returned=split(self.returned_from(gi, pre, state, x)),
+                    margin=margin)
 
     # -- the oracle ---------------------------------------------------------------
 
@@ -1902,8 +2016,16 @@ class LinearModel:
         return read
 
     def check_step(self, pre: dict, state: dict, reports: dict, *, thresholds=None,
-                   where: str = "") -> dict:
+                   where: str = "", accepted: bool = False) -> dict:
         """Assert the step from *pre* to *state* is the documented one; return measurements.
+
+        *state* is the state the step returned.  Under the interface norm
+        that is the iterate the report is of with some fields recomputed
+        (:meth:`recomputed`), and the group checks below are restated for
+        it (:meth:`group_report_consistency`).  ``accepted=True`` says
+        *state* is the accepted iterate itself, read with the return rule
+        switched off: the checks are then the plain ones, the equality of
+        the reported residual included.
 
         * every node outside the groups: its defect within its own rounding
           (the schedule's back edges, the edge kinds and the summation);
@@ -1935,11 +2057,16 @@ class LinearModel:
                 for m in members:
                     allowance[m] = None
                 continue
-            dnorm, bound, det = self.group_report_consistency(gi, pre, state, rep["residual"])
-            gap = abs(float(rep["residual"]) - det["residual_true"])
+            dnorm, bound, det = self.group_report_consistency(gi, pre, state, rep["residual"],
+                                                              accepted=accepted)
+            # (Where the solve recomputed a field the norm reads, the state
+            # is not the iterate the residual is of: ``residual_true`` is
+            # ``None`` and the equality is tested on the accepted iterate.)
+            gap = (0.0 if det["residual_true"] is None
+                   else abs(float(rep["residual"]) - det["residual_true"]))
             assert gap <= det["residual_tol"], (
                 f"{where}: group {gi} {members} reports residual {rep['residual']:.6e}, but "
-                f"||F(x) - x|| of the state it returned is {det['residual_true']:.6e} "
+                f"||F(x) - x|| of the state it returned is {det['residual_true']!r} "
                 f"(rounding allows {det['residual_tol']:.3e}; iterations="
                 f"{rep.get('iterations')}, converged={rep.get('converged')})")
             assert dnorm <= bound, (
@@ -1967,7 +2094,8 @@ class LinearModel:
                     allowance[m] = None
             entry = {"defect": dnorm, "bound": bound}
             if rep.get("converged") and thresholds is not None:
-                dist, tol = self.converged_distance(gi, pre, state, thresholds[gi])
+                dist, tol = self.converged_distance(gi, pre, state, thresholds[gi],
+                                                    accepted=accepted)
                 assert dist <= tol, (
                     f"{where}: group {gi} {members} reports converged at {dist:.4e} from its "
                     f"exact fixed point in its norm, beyond the {tol:.4e} its threshold "

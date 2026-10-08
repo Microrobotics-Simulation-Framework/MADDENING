@@ -20,13 +20,18 @@ with -- is what the tolerance bounds, member by member:
   between the returned iterate and its successor, and that move is the
   defect of a member the pass computes from the iterate (Jacobi), or the
   defect up to the moves of the members swept before it (Gauss-Seidel);
-* a field no internal edge reads is returned as a pass computes it at the
-  returned state, from readings within ``tau`` of the ones the verdict
-  compared, so its defect is at most its gains times that.
+* a field the interface norm does not measure whole -- read by no
+  internal edge (MADD-ANO-238), or only through a mapping, which may
+  deliver less than the field (MADD-ANO-239: the ``lossy-ring`` shape) --
+  is returned as one plain pass computes it at the accepted iterate, from
+  the readings the verdict compared, and the other members read it within
+  ``tau`` of those; so its defect is at most its gains times that.
 
-(A field edges read only through a mapping that loses part of it is the
-open MADD-ANO-239: the ``lossy-ring`` shape is held under the state norms
-and pinned under the interface norm.)
+**The return rule itself** (last section): on the exact model, for any
+iterate ``x``, the state ``x + P (F(x) - x)`` reads within the residual of
+``x`` of what ``x`` reads, and its defect is ``-[(I - L) - (I - M) P]`` of
+that residual; and the library returns that state for the iterate it
+accepted, beside a report that is the accepted iterate's.
 
 So for every member ``|defect| <= SLACK tau (|x| + sum_e |G_e| |reading_e|)``
 with ``tau`` the per-entry change the threshold allows (``tolerance`` under
@@ -60,6 +65,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from tests.conftest import EXAMPLES_COSTLY
+from tests.property import coupled_graphs as cg
 from tests.property import coupled_topologies as ct
 
 RTOL = 1e-4
@@ -107,13 +113,11 @@ TOPOLOGIES = _topologies()
 #: The mapped edges of ``lossy-ring`` deliver two entries of three.
 _DELIVERED = {"lossy-ring": 2}
 PER_PUSH = ("one-way-mapped", "cycle-tail", "lossy-ring")
-#: The cell MADD-ANO-239 lives in: not asked of the property, pinned below.
-_OPEN_CELL = ("lossy-ring", "interface")
 
 
 def _cells(names):
     return [(name, schedule, norm) for name in names for schedule in SCHEDULES
-            for norm in NORMS if (name, norm) != _OPEN_CELL]
+            for norm in NORMS]
 
 
 def _knobs(schedule, norm, solver="ift", **extra) -> dict:
@@ -255,16 +259,6 @@ def test_a_converged_group_is_at_its_fixed_point_per_push(name, schedule, norm, 
     _hold(name, schedule, norm, draws)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-239 (open): the part of a field its edges deliver only through a mapping is "
-    "measured by nothing, and under Jacobi it is a pass behind the readings"))
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
-@given(draws=_DRAWS)
-def test_a_converged_group_with_a_lossy_mapping_is_at_its_fixed_point_under_the_interface_norm(
-        draws):
-    _hold("lossy-ring", "jacobi", "interface", draws)
-
-
 @pytest.mark.parametrize("name,schedule,norm", _cells(PER_PUSH))
 def test_the_cells_converge_so_the_property_is_asked(name, schedule, norm):
     """A check that returns early on an unconverged group proves nothing:
@@ -297,7 +291,7 @@ _ACCELERATED = (
 )
 
 
-# Slow: 80 compiled cells.
+# Slow: 84 compiled cells.
 # Per push: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("solver", ["ift", "fori"])
@@ -308,14 +302,163 @@ def test_a_converged_group_is_at_its_fixed_point(name, schedule, norm, solver, d
     _hold(name, schedule, norm, draws, solver)
 
 
-# Slow: 36 compiled cells (``lossy-ring`` is MADD-ANO-239's).
+# Slow: 42 compiled cells.
 # Per push: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("extra", _ACCELERATED, ids=lambda e: dict(e)["acceleration"])
 @pytest.mark.parametrize("schedule", SCHEDULES)
-@pytest.mark.parametrize("name", sorted(set(TOPOLOGIES) - {"lossy-ring"}))
+@pytest.mark.parametrize("name", sorted(TOPOLOGIES))
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(draws=_DRAWS)
 def test_a_converged_accelerated_group_is_at_its_fixed_point_under_the_interface_norm(
         name, schedule, extra, draws):
     _hold(name, schedule, "interface", draws, extra=extra)
+
+
+# ---------------------------------------------------------------------------
+# The return rule: on the exact model, and the library against it
+# ---------------------------------------------------------------------------
+
+#: ``(members recomputed, of which the norm reads)`` under the interface norm.
+_RECOMPUTED = {
+    "one-way": (("b",), ()),
+    "one-way-mapped": (("a", "b"), ("a",)),
+    "chain": (("c",), ()),
+    "cycle-tail": (("c",), ()),
+    "tail-first": (("c",), ()),
+    "head-cycle": ((), ()),
+    "lossy-ring": (("a", "b"), ("a", "b")),
+}
+
+
+def _stacked(model, state) -> np.ndarray:
+    return np.concatenate([np.asarray(state[m]["x"], np.float64) for m in model.topo.groups[0]])
+
+
+def _interface_model(name, schedule, draws, built=None):
+    topo = TOPOLOGIES[name]
+    knobs = _knobs(schedule, "interface")
+    values = _values(topo, knobs, *draws)
+    model = ct.LinearModel(topo, values, group_cfgs=ct.group_cfgs_of([knobs]),
+                           **({} if built is None else {"node_order": built.node_order}))
+    return topo, knobs, values, model
+
+
+@pytest.mark.parametrize("schedule", SCHEDULES)
+@pytest.mark.parametrize("name", sorted(TOPOLOGIES))
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(draws=_DRAWS, passes=st.integers(0, 6))
+def test_on_the_exact_model_the_returned_state_reads_within_the_residual_of_its_iterate(
+        name, schedule, draws, passes):
+    """No graph.  For **any** iterate ``x`` of the plain loop -- accepted or
+    not -- and ``y = x + P (F(x) - x)``:
+
+    * the members named are the ones no plain internal edge reads;
+    * the readings of ``y`` are those of ``x`` moved by the residual's own
+      terms on the edges whose source was recomputed: within the residual,
+      equal to it where every field read was recomputed, unmoved where none
+      was;
+    * ``y - Phi(y) = -[(I - L) - (I - M) P] (F(x) - x)``.
+    """
+    topo, _knobs_, values, model = _interface_model(name, schedule, draws)
+    recomputed, read = _RECOMPUTED[name]
+    assert set(model.recomputed(0)) == set(recomputed)
+    pre = {nd.name: {"x": np.asarray(values["nodes"][nd.name]["x0"])} for nd in topo.nodes}
+    k = sum(nd.n for nd in topo.nodes)
+    L, U = (np.asarray(a, np.float64) for a in model.group_pass(0))
+    c = np.asarray(model.group_constant(0, pre, pre), np.float64)
+
+    def one_pass(v):
+        return np.linalg.solve(np.eye(k) - L, U @ v + c)
+
+    x = _stacked(model, pre)
+    for _ in range(passes):
+        x = one_pass(x)
+    F = one_pass(x)
+    y = model.returned_from(0, pre, pre, x)
+    residual = model.residual_between(0, F, x)
+    moved = model.readings_moved(0, pre, pre, x)
+    slack = 1e-9 * max(residual, 1.0)
+    assert moved <= residual + slack, (moved, residual)
+    members = topo.groups[0]
+    read_by_the_norm = {topo.edges[i].src for i in topo.internal_edges(0)}
+    if read_by_the_norm <= set(recomputed):
+        assert abs(moved - residual) <= slack, (moved, residual)
+    if not read:
+        assert moved == 0.0
+    P = model._recomputed_projector(0)      # noqa: SLF001
+    defect = y - ((L + U) @ y + c)
+    want = -((np.eye(k) - L) - (np.eye(k) - L - U) @ P) @ (F - x)
+    scale = max(float(np.max(np.abs(x))), float(np.max(np.abs(F))), 1.0)
+    assert np.max(np.abs(defect - want)) <= 1e-9 * scale, (members, defect, want)
+
+
+@functools.lru_cache(maxsize=None)
+def _built_at_the_accepted_iterate(name: str, schedule: str):
+    """The interface cell built and first stepped with the return rule
+    switched off (:func:`coupled_graphs.accepted_iterate`)."""
+    topo, knobs = TOPOLOGIES[name], _knobs(schedule, "interface")
+    with cg.accepted_iterate() as asked:
+        built = ct.build(topo, knobs)
+        ct.run(built, _values(topo, knobs, 0, 0.3, 1.0), 1)
+    assert asked, "the step never asked the return rule: the patch is on the wrong name"
+    return built
+
+
+def check_the_library_returns_the_models_state(name, schedule, draws) -> None:
+    topo, knobs, built = _built(name, schedule, "interface")
+    values = _values(topo, knobs, *draws)
+    model = ct.LinearModel(topo, values, node_order=built.node_order,
+                           group_cfgs=ct.group_cfgs_of([knobs]))
+    (step,) = ct.run(built, values, 1)
+    (loop,) = ct.run(_built_at_the_accepted_iterate(name, schedule), values, 1)
+    report, where = step.reports[0], f"{name} {schedule} {draws}"
+    # The rule moves no iterate, residual or pass count.
+    for key in ("iterations", "converged", "residual"):
+        assert report[key] == loop.reports[0][key], (where, key)
+    # The report is the accepted iterate's: the plain checks hold of it, the
+    # equality of the reported residual included.
+    model.check_step(loop.pre, loop.state, loop.reports, thresholds=[1.0], where=where,
+                     accepted=True)
+    # ... and the state returned is the model's for that iterate: a member
+    # an edge delivers whole to the bit, the others one pass on.
+    x = _stacked(model, loop.state)
+    want = model.returned_from(0, step.pre, step.pre, x)
+    got = _stacked(model, step.state)
+    eps, at = float(np.finfo(np.float32).eps), 0
+    for m in topo.groups[0]:
+        n = topo.node(m).n
+        if m not in model.recomputed(0):
+            assert np.array_equal(step.state[m]["x"], loop.state[m]["x"]), (where, m)
+        terms = np.max(np.abs(x)) + np.max(np.abs(want))
+        assert np.all(np.abs(got[at:at + n] - want[at:at + n]) <= ROUNDING_ULPS * eps * terms), (
+            where, m, got[at:at + n], want[at:at + n])
+        at += n
+    # The restated checks hold of the state returned.
+    model.check_step(step.pre, step.state, step.reports, thresholds=[1.0], where=where)
+    moved = model.readings_moved(0, step.pre, step.pre, x)
+    assert moved <= float(report["residual"]) * (1.0 + 2e-3) + 16 * eps / RTOL, (
+        f"{where}: the returned state's readings are {moved:.4g} from the accepted "
+        f"iterate's, beside a reported residual of {report['residual']!r}")
+
+
+@pytest.mark.parametrize("schedule", SCHEDULES)
+@pytest.mark.parametrize("name", PER_PUSH)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(draws=_DRAWS)
+def test_the_library_returns_the_models_state_for_the_iterate_it_accepted_per_push(
+        name, schedule, draws):
+    """Slow sibling: :func:`test_the_library_returns_the_models_state_for_the_iterate_it_accepted`."""
+    check_the_library_returns_the_models_state(name, schedule, draws)
+
+
+# Slow: 8 more compiled cells, each twice.
+# Per push: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_the_library_returns_the_models_state_for_the_iterate_it_accepted_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("schedule", SCHEDULES)
+@pytest.mark.parametrize("name", sorted(set(TOPOLOGIES) - set(PER_PUSH)))
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(draws=_DRAWS)
+def test_the_library_returns_the_models_state_for_the_iterate_it_accepted(
+        name, schedule, draws):
+    check_the_library_returns_the_models_state(name, schedule, draws)

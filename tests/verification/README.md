@@ -69,6 +69,12 @@ def test_my_node():
     )
 ```
 
+The battery draws every state field on its own, in a box.  If a field only
+means something under a constraint (a unit quaternion, positive populations,
+a counter used as an index), pass `constrain_state=` (a function applied to
+every draw) so the node is judged on states it is given; the guide's "Fields
+with constraints" section has the quaternion example.
+
 For the order of accuracy, declare it on the node and measure it:
 
 ```python

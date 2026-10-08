@@ -82,11 +82,13 @@ def _reads_mapping_weights(group, plan) -> bool:
     """Does *group*'s norm read a value that depends on interface-mapping weights?
 
     True under ``convergence_norm="interface"`` when an internal edge
-    whose source field is floating carries a mapping: that norm reads
-    what each internal edge delivers
+    whose source field is floating is read through its mapping: that
+    norm reads such an edge as it is delivered
     (:func:`~maddening.core.coupling.acceleration._interface_readings`),
-    and a mapped edge delivers its source field through weights that
-    live in ``params["mappings"]`` and may be overridden per step.  The
+    its source field through weights that live in ``params["mappings"]``
+    and may be overridden per step.  An edge the norm reads at its
+    source (a mapping onto more entries than its field holds) is the
+    stored field, whatever the weights, and does not count.  The
     float floor of such a group's residual therefore cannot be taken
     from the returned state alone, and the step records it
     (``coupling_<key>_reading_floor``).  Static, and shared by
@@ -102,17 +104,19 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     """Is the interface norm's reading the fields it reads, each of them once?
 
     ``coupling_residual_interface`` sums over a group's internal *edges*:
-    what each one delivers, over its own magnitude.  The state's weights
-    (``_norm_weights`` in the step) give each read *field* its own
-    magnitude's weight once.  The two are one norm exactly when every
-    internal edge with a floating source field delivers that field as it
-    is -- no mapping, no transform -- and no field is read by more than
-    one of them.  Then the report's spectral analysis is taken in the
+    what the norm reads on each one, over its own magnitude.  The state's
+    weights (``_norm_weights`` in the step) give each read *field* its own
+    magnitude's weight once.  The two are one norm exactly when the
+    reading of every internal edge with a floating source field is that
+    field as it is -- an edge with no mapping and no transform, or one
+    the norm reads at its source (a mapping onto more entries than the
+    field holds) -- and no field is read by more than one of them.  Then
+    the report's spectral analysis is taken in the
     state's weights (``_spectral_rate_at``); otherwise on the reading
     (``_interface_spectral_rate_at``):
 
-    * a mapping or a transform changes what an entry is and which
-      magnitude it is divided by;
+    * a mapping or a transform the reading goes through changes what an
+      entry is and which magnitude it is divided by;
     * a field that ``k`` internal edges read is counted ``k`` times by
       the norm and once by the state's weights.  On a star whose hub's
       field every leaf reads, the residual of the edges times the
@@ -123,8 +127,8 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     Static: *interface_edges* are the group's internal edges (its plan,
     or a bare sequence of edges) and *float_fields* its floating fields
     by node, so a group keeps one analysis for the life of its compiled
-    step.  Whether an edge delivers its field as it is follows from the
-    side the norm reads it on (``InterfaceEdge.reads_source_as_is``).
+    step.  Whether an edge's reading is its field as it is follows from
+    the side the norm reads it on (``InterfaceEdge.reads_source_as_is``).
     """
     read = set()
     for record in _interface_plan.interface_records(interface_edges):

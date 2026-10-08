@@ -23,22 +23,26 @@ reconciled here; the differences are pinned by
 * a field that two internal edges read is two readings to the norm
   (:func:`interface_records`) and one field to the accelerator and to
   the spectrum's weights;
-* the norm, its floor in the step and the spectral reading sum the edges
-  in the canonical order (:attr:`InterfacePlan.internal`); the report's
-  fallback floor sums them as they were declared
-  (:meth:`InterfacePlan.declared_edges`);
 * whether a source field is floating is decided on the state a plan is
   built from (:attr:`InterfaceEdge.source_kind`), except by the norm's
   reading, which decides it on the first state it is handed
   (``acceleration._interface_readings``).
 
 **The side an edge is read on** (:attr:`InterfaceEdge.norm_side`) is set
-in one place, :func:`_norm_side`, and is ``"delivered"`` for every edge:
-the interface norm reads what the edge hands its target.  What follows
-from the side -- the value read (:meth:`InterfaceEdge.reading`) and
-whether that value is the source field itself
-(:attr:`InterfaceEdge.reads_source_as_is`) -- branches on that field and
-on nothing else.
+in one place, :func:`_norm_side`: the interface norm reads a mapped edge
+on its *compact* side.  An edge whose static mapping delivers more
+entries than the field it reads holds (a scatter: 30 marker forces onto
+a grid) is read at its ``"source"``, the field itself, before the
+mapping and so before the transform; every other edge -- a mapping onto
+fewer entries, **a tie**, no mapping -- is read as ``"delivered"``, what
+the edge hands its target.  What follows from the side branches on that
+field and on nothing else: the value read
+(:meth:`InterfaceEdge.reading`), whether that value is the source field
+itself (:attr:`InterfaceEdge.reads_source_as_is`) and whether it depends
+on the mapping's weights (:attr:`InterfaceEdge.reads_through_mapping`).
+The side is a function of the edge's mapping alone (the sizes it
+declares, which ``add_edge`` holds its two ends to), so every plan of a
+group, and a bare edge described on its own, decide it alike.
 
 The exact model and the numerical reference of the test suite
 (``tests/property/coupled_topologies.py``, ``coupling_reference.py``) are
@@ -84,8 +88,11 @@ INTERNAL = "internal"
 INBOUND = "inbound"
 OUTBOUND = "outbound"
 
-#: The side of an edge the interface norm reads (:attr:`InterfaceEdge.norm_side`).
+#: The side of an edge the interface norm reads (:attr:`InterfaceEdge.norm_side`):
+#: what the edge hands its target (the source field through the mapping,
+#: then the transform), or the source field itself, before both.
 DELIVERED = "delivered"
+SOURCE = "source"
 
 
 def is_internal(edge, members) -> bool:
@@ -183,15 +190,68 @@ def _mapping_form(mapping) -> str:
     return STATIC_OTHER
 
 
+def _mapping_leads(mapping) -> tuple:
+    """``(source lead, target lead)`` of *mapping*: the leading axes of the
+    field it reads and of the field it delivers.
+
+    What the mapping declares, the sizes ``add_edge`` holds the edge's two
+    ends to: ``field_shapes()`` where it has one, else ``(n_source,)`` and
+    ``(n_target,)`` (a mapping acts on axis 0; any further axes pass
+    through, so they do not enter a comparison of the two sides).
+    """
+    shapes = getattr(mapping, "field_shapes", None)
+    if shapes is not None:
+        source_lead, target_lead = shapes()
+        return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
+    try:
+        return ((int(mapping.n_source),), (int(mapping.n_target),))
+    except AttributeError:
+        raise TypeError(
+            f"mapping {mapping!r} declares neither n_source and n_target nor "
+            f"field_shapes(): the interface norm cannot tell which side of it is "
+            f"the compact one") from None
+
+
+def _entries(lead) -> int:
+    """How many entries (per trailing component) a field of leading axes *lead* holds."""
+    count = 1
+    for n in lead:
+        count *= n
+    return count
+
+
 def _norm_side(edge) -> str:
     """The side of *edge* the interface norm reads.
 
-    **The one place this is decided.**  ``"delivered"`` for every edge:
-    the norm reads what the edge hands its target, its source field
-    through the mapping and then the transform.
+    **The one place this is decided.**  The compact side:
+
+    * ``"source"`` for an edge whose static mapping delivers **more**
+      entries than the field it reads holds: the norm reads the source
+      field itself, before the mapping, and so before the transform
+      (the step applies the mapping, then the transform).  Read as
+      delivered, such an edge put every entry of its large target into
+      the norm's one RMS, of which a few change: a converged group's
+      small field was 23 to 459 tolerances from its fixed point at 1e3
+      to 1e6 target entries
+      (``benchmarks/results/interface_norm_dilution``);
+    * ``"delivered"`` for every other edge: a mapping onto fewer entries,
+      **a tie**, and an edge with no mapping.
+
+    A function of the edge's mapping alone -- the sizes it declares
+    (:func:`_mapping_leads`), never the shape of its weights (a sparse
+    layout's ``(rows, k)`` says nothing of the two sides) and never a
+    state -- so the plans built by ``validate()``, by ``compile()`` and
+    at trace, and a bare edge described for the report, cannot differ.
+
+    A geometry-dependent mapping stays ``"delivered"``: ``compile()``
+    refuses one inside a group under the interface norm
+    (``_geometry_edge_coupling_errors``), so nothing reads it.
     """
-    del edge
-    return DELIVERED
+    mapping = edge.mapping
+    if mapping is None or getattr(mapping, "needs_geometry", False):
+        return DELIVERED
+    source_lead, target_lead = _mapping_leads(mapping)
+    return SOURCE if _entries(target_lead) > _entries(source_lead) else DELIVERED
 
 
 @dataclass(frozen=True, eq=False)
@@ -233,7 +293,9 @@ class InterfaceEdge:
     has_transform : bool
         Whether the edge applies a transform after the mapping.
     norm_side : str
-        The side the interface norm reads the edge on: ``"delivered"``.
+        The side the interface norm reads the edge on (:func:`_norm_side`):
+        ``"source"`` where a static mapping delivers more entries than the
+        field it reads holds, ``"delivered"`` otherwise.
     """
 
     edge: Any
@@ -255,11 +317,28 @@ class InterfaceEdge:
 
         On the delivered side: *value* through the mapping, with the
         weights in *mappings* (``params["mappings"]``, ``None`` for the
-        mapping's own), then the transform -- the step's edge rule.
-        Read by ``acceleration._interface_readings``.
+        mapping's own), then the transform -- the step's edge rule.  On
+        the source side: *value* itself, through neither.  Read by
+        ``acceleration._interface_readings`` (the residual, its float
+        floor and its eps, and the spectral analysis's reading).
+
+        The source side was decided on the sizes the mapping declares; a
+        *value* that does not have them is refused rather than read on a
+        side its own size would not have chosen.
         """
         if self.norm_side == DELIVERED:
             return _delivered(self.edge, value, mappings)
+        if self.norm_side == SOURCE:
+            source_lead, _target_lead = _mapping_leads(self.mapping)
+            shape = tuple(int(n) for n in jnp.shape(value))
+            have = shape[:len(source_lead)]
+            if have != source_lead and not (source_lead == (1,) and shape == ()):
+                raise ValueError(
+                    f"edge {self.key!r}: the interface norm reads this edge at its "
+                    f"source because its mapping declares a field of leading axes "
+                    f"{source_lead} delivered onto more entries, but the field read "
+                    f"has shape {shape}")
+            return value
         raise ValueError(
             f"edge {self.key!r}: the interface norm has no reading on side "
             f"{self.norm_side!r}")
@@ -268,11 +347,27 @@ class InterfaceEdge:
     def reads_source_as_is(self) -> bool:
         """Is the norm's reading of this edge its source field, unchanged?
 
-        On the delivered side: an edge with no mapping and no transform.
-        Read by ``_group_layout._reading_is_the_fields``.
+        On the source side: always.  On the delivered side: an edge with
+        no mapping and no transform.  Read by
+        ``_group_layout._reading_is_the_fields`` (which spectral analysis
+        the report takes).
         """
+        if self.norm_side == SOURCE:
+            return True
         return (self.norm_side == DELIVERED and self.mapping is None
                 and not self.has_transform)
+
+    @property
+    def reads_through_mapping(self) -> bool:
+        """Does the norm's reading of this edge go through its mapping, and
+        so depend on the weights the step ran with?
+
+        On the delivered side, where the edge carries a mapping.  Never on
+        the source side: the value is read before the mapping.  Read by
+        :meth:`InterfacePlan.norm_reads_mapping_weights` and
+        :meth:`InterfacePlan.mapped_keys`.
+        """
+        return self.norm_side == DELIVERED and self.mapping is not None
 
     @property
     def read_from_state(self) -> bool:
@@ -357,16 +452,25 @@ class InterfacePlan:
     def declared_edges(self) -> tuple:
         """The internal edges (``EdgeSpec``), in the order they were declared.
 
-        Read by ``compile()`` for the report's fallback float floor
-        (``_committed_floor_inputs``, which ``coupling_diagnostics``
-        hands ``residual_precision_floor``) and by the step for the
-        pass's evaluation count (``_group_evaluations``).
+        Read by the step for the pass's evaluation count
+        (``_group_evaluations``, which asks only who reads whom).
 
-        **Differs from** :attr:`internal`: the residual and the floor
-        the step records sum the edges in the canonical order, the
-        report's fallback floor in this one.
+        **Differs from** :meth:`norm_edges`, the order every sum of the
+        norm is taken in.
         """
         return tuple(r.edge for r in self._declared(INTERNAL))
+
+    def norm_edges(self) -> tuple:
+        """The internal edges (``EdgeSpec``), in the canonical order.
+
+        Read by ``compile()`` for the report's fallback float floor
+        (``_committed_floor_inputs``, which ``coupling_diagnostics``
+        hands ``residual_precision_floor``): the edges of
+        :attr:`internal`, so the fallback sums them in the order the
+        residual, the floor the step records and the spectral reading
+        do.
+        """
+        return tuple(r.edge for r in self.internal)
 
     def member_reads(self) -> dict:
         """``{member: members it reads through an internal edge}``, itself included.
@@ -438,22 +542,26 @@ class InterfacePlan:
         return {nn: tuple(sorted(fs)) for nn, fs in ifields.items()} if ifields else None
 
     def norm_reads_mapping_weights(self) -> bool:
-        """Does an internal edge with a floating source carry a mapping?
+        """Is an internal edge with a floating source read through its mapping?
 
         Read by ``_group_layout._reads_mapping_weights``: under the
         interface norm such a group's float floor depends on the mapping
-        weights the step ran with, so the step records it.
+        weights the step ran with, so the step records it.  An edge read
+        at its source (:attr:`InterfaceEdge.reads_through_mapping`) does
+        not count: its reading is the stored field, whatever the weights.
         """
-        return any(rec.mapping is not None and rec.source_kind == FLOATING
+        return any(rec.reads_through_mapping and rec.source_kind == FLOATING
                    for rec in self.internal)
 
     def mapped_keys(self) -> tuple:
-        """The keys of the internal edges that carry a mapping, in the canonical order.
+        """The keys of the internal edges the norm reads through a mapping,
+        in the canonical order.
 
         Read by the step for the mapping weights its reports are taken
-        with (``report_mappings``).
+        with (``report_mappings``).  An edge read at its source is not
+        here: no report reads its weights.
         """
-        return tuple(rec.key for rec in self.internal if rec.mapping is not None)
+        return tuple(rec.key for rec in self.internal if rec.reads_through_mapping)
 
     # -- fluxes -----------------------------------------------------------
 
@@ -590,9 +698,11 @@ def interface_records(interface_edges, state=None) -> tuple:
     A group's plan gives its internal edges in the canonical order.  A
     bare sequence of edges (a direct call of
     ``coupling_residual_interface`` or ``residual_precision_floor``, and
-    the report's fallback floor) is read in the order given, each edge
-    described in *state* (without the nodes, so a source that is not a
-    state field is ``"absent"``).
+    the report's fallback floor, which is handed the plan's own order:
+    :meth:`InterfacePlan.norm_edges`) is read in the order given, each
+    edge described in *state* (without the nodes, so a source that is
+    not a state field is ``"absent"``).  The side each is read on is the
+    edge's own (:func:`_norm_side`), the same here as in a plan.
 
     Read by ``acceleration._interface_readings`` (the residual, its
     float floor and the spectral analysis's reading) and by

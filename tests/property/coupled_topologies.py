@@ -157,14 +157,15 @@ SPARSE_KINDS = MAPPING_KINDS[1:]
 LOCAL_KINDS = ("matrix-local", "sparse-local")
 
 #: Where ``convergence_norm="interface"`` reads a mapped internal edge, as
-#: **this tree's library** does it: ``"delivered"`` (every edge at the
-#: value it delivers).  The decision of 2026-10-07 is ``"compact"``: a
-#: mapping whose target is larger than its source is read at its source
-#: value, before the mapping and the transform; a tie and a smaller target
-#: at the delivered value (:meth:`LinearModel.interface_side_of`).  The
-#: library change makes this one line ``"compact"``; every reference that
-#: does not name a rule follows it.
-INTERFACE_SIDE = "delivered"
+#: **this tree's library** does it: ``"compact"`` (the decision of
+#: 2026-10-07).  A mapping whose target is larger than its source is read
+#: at its source value, before the mapping and the transform; a tie and a
+#: smaller target at the delivered value
+#: (:meth:`LinearModel.interface_side_of`).  ``"delivered"`` is the rule
+#: the library had before (every edge at the value it delivers): every
+#: reference that does not name a rule follows this line, and the
+#: comparisons under the other rule must fail wherever the two differ.
+INTERFACE_SIDE = "compact"
 
 #: The reference's working precision.  The defects it measures are of the
 #: order of the graph's own rounding, so it computes them in a precision

@@ -402,11 +402,17 @@ def coupling_residual_mixed(
 def _interface_readings(interface_edges, *states, mappings=None):
     """What ``convergence_norm="interface"`` reads on each internal edge, at each of *states*.
 
-    **The one definition of how an interface edge is read: as the step
-    delivers it.**  The edge's source field, through the edge's interface
-    mapping and then its transform (:func:`maddening.core.edge._delivered`,
-    the function the step's boundary resolution calls), with the mapping
-    weights the step ran with.  A view of the group's description
+    **The one definition of how an interface edge is read: on its compact
+    side.**  As the step delivers it -- the edge's source field, through
+    the edge's interface mapping and then its transform
+    (:func:`maddening.core.edge._delivered`, the function the step's
+    boundary resolution calls), with the mapping weights the step ran
+    with -- except where a static mapping delivers more entries than the
+    source field holds: that edge is read at its source, the field itself
+    before the mapping and the transform, so a few values scattered onto
+    a large field are judged as the few values they are.  A mapping onto
+    fewer entries, a tie and an unmapped edge are read as delivered.  A
+    view of the group's description
     (``core/coupling/_interface_plan.py``): which edges, in what order
     (``interface_records``) and on which side each is read
     (``InterfaceEdge.reading``) are its; *interface_edges* is a group's
@@ -415,15 +421,14 @@ def _interface_readings(interface_edges, *states, mappings=None):
     (:func:`residual_precision_floor`) and the spectral analysis the
     report's bound is taken on (``_reading_values`` in
     ``core/coupling/_coupled_block.py``) all iterate this generator, so they
-    cannot disagree about what the norm measures, and none of them can
-    measure a value the consuming node never sees.
+    cannot disagree about what the norm measures or on which side.
 
     Yields ``(edge, source_dtype, value, ...)`` in the order of
-    *interface_edges*: one delivered value per state, and the dtype of
-    the source field at the first.  The first state decides which edges
-    are read: an edge whose source field is not floating there (a
-    counter, a flag, a key) carries no norm, and neither does one that
-    delivers no entries.  Later states are read at the same edges and
+    *interface_edges*: one reading per state, and the dtype of the source
+    field at the first.  The first state decides which edges are read: an
+    edge whose source field is not floating there (a counter, a flag, a
+    key) carries no norm, and neither does one whose reading has no
+    entries.  Later states are read at the same edges and
     need not hold the fields the first one skips.
 
     ``mappings`` is the ``"mappings"`` section of the graph parameter
@@ -446,7 +451,12 @@ def _interface_readings(interface_edges, *states, mappings=None):
 
 
 def _reading_eps(source_dtype, value) -> float:
-    """The float resolution of one delivered value: the coarser of its own dtype's and its source's.
+    """The float resolution of one reading: the coarser of its own dtype's and its source's.
+
+    *value* is what the norm reads on the edge
+    (``InterfaceEdge.reading``).  Read at its source it is the stored
+    field, at that field's own eps: the dtype a mapping or a transform
+    would have delivered does not enter.  Read as delivered:
 
     A delivered value is no finer than the field it was computed from.
     Under ``jax_enable_x64`` a float64 mapping matrix applied to a
@@ -483,8 +493,12 @@ def coupling_residual_interface(
     iterations: for each intra-group edge, **the value the edge
     delivers** -- its source field through the edge's interface mapping
     and then its transform, exactly as the step hands it to the target
-    (:func:`_interface_readings`).  Only the fields that appear on
-    intra-group edges are compared.  The scaling is the one
+    -- or, for an edge whose mapping delivers more entries than its
+    source field holds, **the source field itself**, before the mapping
+    and the transform (:func:`_interface_readings`: each mapped edge is
+    read on its compact side; a tie is read as delivered).  Only the
+    fields that appear on intra-group edges are compared.  The scaling
+    is the one
     :func:`coupling_residual_mixed` documents: relative to the
     quantity's own magnitude, with ``atol`` as a dead band rather than
     as a floor under the scale.
@@ -515,8 +529,8 @@ def coupling_residual_interface(
     Returns
     -------
     jnp.ndarray
-        Scalar RMS error norm.  Converged when <= 1.0.  Each delivered
-        value is measured in at least float32 (see :func:`_widened`).
+        Scalar RMS error norm.  Converged when <= 1.0.  Each reading
+        is measured in at least float32 (see :func:`_widened`).
 
     Notes
     -----
@@ -1703,8 +1717,8 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         The group's dead band and relative tolerance (``rtol`` is not
         read by the L2 norm, whose threshold is ``tolerance``).
     interface_edges : iterable of EdgeSpec
-        The group's internal edges (read under ``"interface"``, each as
-        the value it delivers: :func:`_interface_readings`).
+        The group's internal edges (read under ``"interface"``, each on
+        its compact side: :func:`_interface_readings`).
     mappings : dict, optional
         The ``"mappings"`` section of the graph parameter pytree the
         step ran with, for the internal edges that carry an interface

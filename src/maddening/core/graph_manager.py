@@ -2761,8 +2761,9 @@ class GraphManager:
                     if _group_layout._reads_mapping_weights(g, interface_plans[key]):
                         # The residual's float floor per evaluation, which
                         # the step measures where the interface norm reads
-                        # a mapped edge (its delivered value depends on the
-                        # weights the step ran with); NaN reads as "not
+                        # an edge through its mapping (the delivered value
+                        # depends on the weights the step ran with; an edge
+                        # read at its source does not); NaN reads as "not
                         # measured".  Same condition as the write in
                         # ``_run_coupled_block_impl``.
                         meta[f"coupling_{key}_reading_floor"] = jnp.array(
@@ -3128,12 +3129,12 @@ class GraphManager:
         }
         # What the report's float floor rests on, as the step was built:
         # each group's structural evaluation count, whether every member
-        # declared it, and its internal edges as they were declared
-        # (``coupling_diagnostics``; ``InterfacePlan.declared_edges``).
+        # declared it, and its internal edges in the order its norm sums
+        # them (``coupling_diagnostics``; ``InterfacePlan.norm_edges``).
         self._committed_floor_inputs = {
             "+".join(sorted(g.nodes)): (
                 *_group_layout._group_evaluations(g, self._nodes, self._schedule, self._edges),
-                interface_plans["+".join(sorted(g.nodes))].declared_edges())
+                interface_plans["+".join(sorted(g.nodes))].norm_edges())
             for g in self._coupling_groups
         }
         self._committed_geometry_edges = {
@@ -5033,10 +5034,12 @@ class GraphManager:
                     # A member removed since the step: its state, which the
                     # floor is measured on, is gone, and so is this report.
                     continue
-                # Where the group's norm reads a mapped edge, what that edge
-                # delivers depends on the mapping weights the step ran with
-                # (``params["mappings"]``, which a caller may override for
-                # one step), so the step measured the floor per evaluation
+                # Where the group's norm reads an edge through its mapping
+                # (as delivered; an edge read at its source is the stored
+                # field), what that edge delivers depends on the mapping
+                # weights the step ran with (``params["mappings"]``, which
+                # a caller may override for one step), so the step measured
+                # the floor per evaluation
                 # itself (``reading_floor``) and the count multiplies it in
                 # the slot's own dtype, as the function does.  A slot that
                 # is absent or was never written (a state this build's

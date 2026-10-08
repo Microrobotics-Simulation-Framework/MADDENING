@@ -28,9 +28,18 @@ def _F_dispatch(step_pure, x, consts):
 #: direction (:func:`_geometry_product_gap`) at which
 #: ``coupling_diagnostics()`` still reports the bounds of a group with a
 #: geometry edge.  Experimental.  A product that does not see the geometry
-#: at all reads a gap of 1 on every field the geometry moves, one that
+#: at all reads a gap of 1 on every field the geometry moves by much more
+#: than :data:`_GEOMETRY_GAP_RESOLUTIONS` resolutions (less on a field it
+#: moves by about that: the allowance is in the denominator), one that
 #: sees half of it 0.5; an honest pass reads the finite difference's own
-#: error, a few ``sqrt(eps)`` of the geometry's dtype.
+#: error, a few ``sqrt(eps)`` of the coarsest dtype the pass evaluates in.
+#: Measured on 351 drawn examples of six cells of the geometry search
+#: (MAP-045): honest, a median of 6e-4 and at most 6e-3 in float32 and at
+#: most 3e-6 in float64; every geometry read under ``stop_gradient``,
+#: 0.31 to 0.98 in float32 and 1.0 in float64.  Not a clean separation in
+#: float32: a field that cancels three thousandfold inside a gather read
+#: 0.11 honestly, and a deposit weak enough to move the radius by 0.02
+#: read 0.22 with the fault.
 GEOMETRY_GAP_TOLERANCE = 0.25  # units: relative gap
 #: How many of the residual's float resolutions the finite difference of
 #: :func:`_geometry_product_gap` is allowed as rounding, per field: a

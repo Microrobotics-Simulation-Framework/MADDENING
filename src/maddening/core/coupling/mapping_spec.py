@@ -1317,6 +1317,64 @@ def build_mapping(spec: MappingSpec, resolve_points: Callable[[dict], Any]):
     return mapping
 
 
+def _registered_class_problem(entry: _MappingKind, mapping: Any) -> Optional[tuple]:
+    """``(exception type, text)`` if *mapping*'s class is not one the kind
+    *entry* can be rebuilt as, else ``None``.
+
+    What a config's loader asks of the object a registered factory
+    returns, as far as the object alone answers it: the members of the
+    ``Mapping`` protocol, ``kind`` equal to the registered kind, and
+    ``needs_geometry`` as the kind was registered.  *text* completes "the
+    factory returned ..." and "the mapping is ...".  One rule for the
+    three places a mapping of a registered kind is taken in or written
+    out (``add_edge``, :func:`check_mapping_serialisable`,
+    :func:`build_mapping`): the config one of them writes is one the
+    others accept (MADD-ANO-242).
+    """
+    from maddening.core.coupling.mapping import Mapping  # noqa: PLC0415
+
+    if not isinstance(mapping, Mapping):
+        members = sorted(getattr(Mapping, "__protocol_attrs__", ()))
+        lacking = [m for m in members if not hasattr(mapping, m)]
+        return TypeError, (
+            f"{type(mapping).__name__}, which is not a Mapping: it "
+            f"lacks {lacking} of the protocol's members {members}")
+    if mapping.kind != entry.kind:
+        return ValueError, (
+            f"a mapping whose kind is {mapping.kind!r}; a mapping of "
+            f"a registered kind is written to a config under its own kind, so it "
+            f"must be {entry.kind!r}")
+    reads_geometry = bool(getattr(mapping, "needs_geometry", False))
+    if reads_geometry != entry.needs_geometry:
+        return ValueError, (
+            f"a mapping whose needs_geometry is "
+            f"{reads_geometry}, but the kind was registered with "
+            f"needs_geometry={entry.needs_geometry}; a kind's mappings either all read "
+            f"a moving geometry or none does")
+    return None
+
+
+def _registered_mapping_problem(mapping: Any) -> Optional[tuple]:
+    """``(exception type, text)`` if *mapping* carries the spec of a kind
+    registered with ``register_mapping`` and is not an object that kind
+    can be rebuilt as; ``None`` otherwise.
+
+    ``None`` for a mapping of a built-in kind (the stock factories return
+    what their spec says by construction) and for one that carries no
+    :class:`MappingSpec` (it is written to no config, which
+    :func:`check_mapping_serialisable` says).  Asked by
+    ``GraphManager.add_edge``, so that an edge whose config
+    ``GraphManager.from_dict`` would refuse is refused when it is added.
+    """
+    spec = getattr(mapping, "spec", None)
+    if not isinstance(spec, MappingSpec):
+        return None
+    entry = _lookup(spec.kind)
+    if entry is None or entry.builtin:
+        return None
+    return _registered_class_problem(entry, mapping)
+
+
 def _check_registered_result(entry: _MappingKind, spec: MappingSpec, mapping: Any) -> None:
     """Refuse what a registered factory returned for ``spec`` unless it is
     the mapping ``spec`` describes.
@@ -1330,25 +1388,15 @@ def _check_registered_result(entry: _MappingKind, spec: MappingSpec, mapping: An
     different recipe than the one that was read.
     """
     from maddening.core.coupling.mapping import (  # noqa: PLC0415
-        Mapping,
         _params_contract_problem,
     )
 
     who = (f"the factory registered for mapping kind {entry.kind!r} "
            f"({_qualified(entry.factory)})")
-    if not isinstance(mapping, Mapping):
-        members = sorted(getattr(Mapping, "__protocol_attrs__", ()))
-        lacking = [m for m in members if not hasattr(mapping, m)]
-        raise TypeError(
-            f"{who} returned {type(mapping).__name__}, which is not a Mapping: it "
-            f"lacks {lacking} of the protocol's members {members}"
-        )
-    if mapping.kind != entry.kind:
-        raise ValueError(
-            f"{who} returned a mapping whose kind is {mapping.kind!r}; a mapping of "
-            f"a registered kind is written to a config under its own kind, so it "
-            f"must be {entry.kind!r}"
-        )
+    unfit = _registered_class_problem(entry, mapping)
+    if unfit is not None:
+        error, text = unfit
+        raise error(f"{who} returned {text}")
     built = getattr(mapping, "spec", None)
     if not isinstance(built, MappingSpec) or built.kind != entry.kind:
         found = (f"a MappingSpec of kind {built.kind!r}" if isinstance(built, MappingSpec)
@@ -1474,7 +1522,17 @@ def check_mapping_serialisable(mapping: Any, *, edge_key: str = "",
         # One from a registered factory is whatever class that factory
         # returned, and what its edge writes is read back here: a config
         # that reloads as another recipe, or not at all, is refused now
-        # rather than found at the next load.
+        # rather than found at the next load.  The loader asks the object
+        # the factory returns for the protocol's members and for its kind
+        # (``_check_registered_result``); the same factory is called
+        # then, so an object that lacks them now is refused now.
+        unfit = _registered_class_problem(entry, mapping)
+        if unfit is not None:
+            raise ValueError(
+                f"mapping {mapping!r}{where} cannot be serialised: it is {unfit[1]}.  "
+                f"GraphManager.from_dict and load_graph_from_usd refuse what the "
+                f"factory of kind {entry.kind!r} returns unless it is a Mapping of "
+                f"that kind, so the config would not load")
         try:
             read_back: Any = MappingSpec.from_dict(_mapping_config_dict(mapping))
         except (ValueError, TypeError) as exc:

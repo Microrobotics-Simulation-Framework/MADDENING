@@ -526,7 +526,8 @@ def test_the_kind_lookup_has_no_import_machinery_to_reach(module):
             "import maddening.core.coupling.sparse_mapping",
         ],
         mapping_spec: [
-            "from maddening.core.coupling.mapping import Mapping, _params_contract_problem",
+            "from maddening.core.coupling.mapping import Mapping",
+            "from maddening.core.coupling.mapping import _params_contract_problem",
         ],
     }[module]
 
@@ -1712,6 +1713,133 @@ def test_what_a_registered_factory_returns_is_held_to_the_spec_it_was_built_from
         assert gm.edges == []
 
 
+class _NoMode:
+    """``_Bare`` without the protocol's ``mode``."""
+
+    kind = "returns"
+    n_source = n_target = 3
+
+    def __init__(self, spec):
+        self.spec = spec
+
+    def params_pytree(self):
+        return {"H": jnp.eye(3, dtype=jnp.float32)}
+
+    def apply(self, field, weights=None, geom=None):
+        return field
+
+    def apply_T(self, field, weights=None, geom=None):
+        return field
+
+    def __repr__(self):
+        return "_NoMode()"
+
+
+def _no_transpose(spec):
+    mapping = _NoTranspose()
+    mapping.spec = spec
+    return mapping
+
+
+#: Objects a kind cannot be rebuilt as, each carrying the kind's own spec:
+#: ``(what the factory returns, the error, its text)``.  The text is the
+#: loader's, word for word (``_BAD_RETURNS``).
+_UNFIT_CLASSES = {
+    "an object without mode": (_NoMode, TypeError, r"it lacks \['mode'\]"),
+    "an object without apply_T": (_no_transpose, TypeError, r"it lacks \['apply_T'\]"),
+    "a mapping of another kind": (lambda spec: _Bare(spec=spec, kind="other"), ValueError,
+                                  "a mapping whose kind is 'other'"),
+    "a mapping that says it reads a geometry": (
+        lambda spec: _Bare(spec=spec, needs_geometry=True), ValueError,
+        "a mapping whose needs_geometry is True"),
+}
+_RETURNS = dict(arrays=("source_points", "target_points"), hyperparameters={"scale": float},
+                references={"source_points": "source_ref", "target_points": "target_ref"})
+
+
+@pytest.mark.parametrize("case", sorted(_UNFIT_CLASSES))
+def test_an_object_its_kind_cannot_be_rebuilt_as_is_refused_at_every_door(case):
+    """MADD-ANO-242.  One rule at each place a mapping of a registered
+    kind is taken in or its recipe written out.  ``add_edge`` refuses the
+    object, so no graph holds it; a graph that holds it all the same (the
+    edge placed without ``add_edge``) is not written by ``to_dict()``,
+    which used to write a config ``from_dict()`` then refused; and the
+    loader refuses it as it did.  A checkpoint, a REST state write and an
+    FMU state archive carry a mapping's weights and never its recipe: they
+    are read into a graph whose edges came through one of these doors."""
+    from maddening.core.edge import EdgeSpec  # noqa: PLC0415
+
+    what, error, message = _UNFIT_CLASSES[case]
+    points = np.array([0.0, 0.5, 1.0])
+    with temporary_kind("returns", _returns(lambda spec, s, t: what(spec)), **_RETURNS) as make:
+        unfit = make(points, points, scale=1.5)
+        gm = GraphManager()
+        gm.add_node(Vec("a", 1.0, n=3))
+        gm.add_node(Vec("b", 1.0, n=3))
+        with pytest.raises(error, match=message) as refused:
+            gm.add_edge("a", "b", "v", "inp", mapping=unfit)
+        assert "a.v -> b.inp" in str(refused.value) and "from_dict" in str(refused.value)
+        assert gm.edges == []
+        # The writer, of a graph that holds the object anyway.
+        gm._edges.append(EdgeSpec("a", "b", "v", "inp", mapping=unfit))    # noqa: SLF001
+        with pytest.raises(ValueError, match=message) as unwritten:
+            gm.to_dict()
+        assert "cannot be serialised" in str(unwritten.value)
+        assert "a.v->b.inp" in str(unwritten.value)
+        with pytest.raises(ValueError, match=message):
+            mapping_spec.check_mapping_serialisable(unfit)
+        # The loader, of the config such an edge would have written.
+        written = {**unfit.spec.to_dict(), "shape": [3, 3]}
+        with pytest.raises(MappingRebuildError, match=message) as unloaded:
+            _load(written)
+        assert isinstance(unloaded.value.__cause__, error)
+
+
+def test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as():
+    """The second writer of a mapping's recipe asks the same question."""
+    pytest.importorskip("pxr", reason="the USD writer needs usd-core")
+    from pxr import Usd  # noqa: PLC0415
+
+    from maddening.core.edge import EdgeSpec  # noqa: PLC0415
+    from maddening.usd.serialization import save_graph_to_usd  # noqa: PLC0415
+
+    points = np.array([0.0, 0.5, 1.0])
+    for case in sorted(_UNFIT_CLASSES):
+        what, _error, message = _UNFIT_CLASSES[case]
+        with temporary_kind("returns", _returns(lambda spec, s, t, what=what: what(spec)),
+                            **_RETURNS) as make:
+            gm = GraphManager()
+            gm.add_node(Vec("a", 1.0, n=3))
+            gm.add_node(Vec("b", 1.0, n=3))
+            gm._edges.append(EdgeSpec("a", "b", "v", "inp",                # noqa: SLF001
+                                      mapping=make(points, points, scale=1.5)))
+            with pytest.raises(ValueError, match=message):
+                save_graph_to_usd(gm, Usd.Stage.CreateInMemory())
+
+
+def test_a_registered_class_with_every_member_passes_every_door():
+    """The control: the same kind returning a whole ``Mapping`` is added,
+    written, loaded and written again as the same recipe."""
+    points = np.array([0.0, 0.5, 1.0])
+    with temporary_kind("returns", _returns(lambda spec, s, t: _Bare(spec=spec)),
+                        **_RETURNS) as make:
+        gm = GraphManager()
+        gm.add_node(Vec("a", 1.0, n=3))
+        gm.add_node(Vec("b", 1.0, n=3))
+        gm.add_edge("a", "b", "v", "inp", mapping=make(points, points, scale=1.5))
+        config = json.loads(json.dumps(gm.to_dict()))
+        again = GraphManager.from_dict(config, REGISTRY)
+        assert json.loads(json.dumps(again.to_dict()))["edges"] == config["edges"]
+    # A mapping with no spec is not of a registered kind: the edge is
+    # taken, and the writer says it cannot be written.
+    gm = GraphManager()
+    gm.add_node(Vec("a", 1.0, n=3))
+    gm.add_node(Vec("b", 1.0, n=3))
+    gm.add_edge("a", "b", "v", "inp", mapping=_NoTranspose())
+    with pytest.raises(ValueError, match="carries no MappingSpec"):
+        gm.to_dict()
+
+
 def test_a_registered_factory_returning_the_mapping_its_spec_describes_is_accepted():
     """The control for the table above: the same factory, returning what
     it should, rebuilds -- so each refusal is of the one thing changed."""
@@ -2263,23 +2391,34 @@ def test_a_registered_mapping_whose_description_is_not_its_spec_is_refused_at_wr
     assert gm.to_dict(strict_mappings=False)["edges"][0]["mapping"]["power"] == 9.0
 
 
-@pytest.mark.parametrize("built, message", [
+@pytest.mark.parametrize("built, message, at_add_edge", [
     (lambda spec: StaticLinearMapping(jnp.eye(3), spec=spec),
-     "does not read back at all.*mapping kind 'matrix' has no hyper-parameter"),
+     "a mapping whose kind is 'matrix'.*must be 'linear_1d'", True),
     (lambda spec: StaticLinearMapping(jnp.eye(3), kind=SELECTION, spec=spec),
-     "does not read back at all.*mapping kind 'selection' has no hyper-parameter"),
+     "a mapping whose kind is 'selection'.*must be 'linear_1d'", True),
     (lambda spec: StaticLinearMapping(jnp.eye(3), kind=LINEAR_1D, spec=spec,
                                       meta={"stiffness": 2.0}),
-     r"does not read back at all.*no hyper-parameter\(s\) \['stiffness'\]"),
+     r"does not read back at all.*no hyper-parameter\(s\) \['stiffness'\]", False),
 ], ids=["the default kind", "another registered kind",
         "a description key that is no hyper-parameter"])
 def test_a_static_linear_mapping_of_a_registered_kind_must_describe_its_own_spec(
-        built, message):
+        built, message, at_add_edge):
     """A third party's short way is the built-in class, whose description
     is its spec *plus* its ``kind`` and ``meta``; left at the default kind
-    it would be written as a ``matrix`` and rebuilt by the wrong factory."""
+    it would be written as a ``matrix`` and rebuilt by the wrong factory.
+    A kind that is not the spec's is refused where the edge is added, as
+    the loader refuses it, and by the writer for a graph that holds one;
+    a description the spec does not read back from, by the writer."""
+    from maddening.core.edge import EdgeSpec  # noqa: PLC0415
+
     spec = KINDS[LINEAR_1D].build([0.0, 0.5, 1.0], [0.0, 0.5, 1.0]).spec
-    gm = _vectors(built(spec))
+    if at_add_edge:
+        with pytest.raises(ValueError, match=message):
+            _vectors(built(spec))
+        gm = _vectors(None)
+        gm._edges[:] = [EdgeSpec("a", "b", "v", "inp", mapping=built(spec))]   # noqa: SLF001
+    else:
+        gm = _vectors(built(spec))
     with pytest.raises(ValueError, match=message):
         gm.to_dict()
 

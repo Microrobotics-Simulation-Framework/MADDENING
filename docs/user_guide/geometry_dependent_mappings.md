@@ -129,9 +129,46 @@ names the edge and says what to do.
   it compares its Jacobian-vector product along the positions with a
   finite difference of the pass along the same direction, and where the
   two differ by more than a quarter (`GEOMETRY_GAP_TOLERANCE`) the
-  report withholds the bounds.  That happens for a node whose derivative
-  is not the derivative of its value (a `stop_gradient` on an input, a
-  rounding), and on a step whose state is not finite.
+  report withholds the bounds.  An honest pass reads the finite
+  difference's own error: about 6e-4 in float32 (at most 6e-3 on 236
+  drawn examples; 0.11 on a field that cancels three thousandfold inside
+  a gather) and under 3e-6 in float64.  The check fails for a node or
+  a mapping whose derivative is not the derivative of its value (a
+  `stop_gradient` on an input, a rounding, a branch on a position), and
+  on a step where the two could not be compared (a state that is not
+  finite, or a geometry the pass reads from a constant the step could not
+  move); `not_usable_reason` says which of the two it was.  It compares
+  nothing in a field the positions move by less than 32 float resolutions
+  of the residual, so a wrong derivative of a term that weak is not seen:
+  a pass whose product saw no geometry at all read 0.31 to 0.98 in
+  float32 on those draws and 1.0 in float64, and 0.22, under the
+  tolerance, on a deposit so weak that the term moved the spectral radius
+  by 0.02.
+* **Across a lattice plane the flags are withdrawn and the numbers
+  kept.**  A multilinear stencil is one polynomial of the positions
+  inside a lattice cell and another in the next, so the pass's Jacobian
+  jumps where a position crosses a lattice plane, or a face of the
+  grid's hull (outside it the kernel clamps).  `rho_spectral`,
+  `spectral_error_bound` and `gradient_relative_error_bound` are the
+  linearisation at the returned iterate: they describe the pass in the
+  lattice cells its positions are in *there*.  Where a position the pass
+  reads from the iterate is within twice `spectral_error_bound` of a
+  lattice plane, the bound stands only if the step certified its
+  linearisation across the Newton step to the fixed point (the
+  Newton-Kantorovich check behind `gradient_relative_error_bound`, which
+  is then finite).  Otherwise `spectral_usable` and
+  `gradient_bound_usable` are `False`, the numbers are reported as
+  computed, and `not_usable_reason` names the case: the fixed point may
+  be in the next cell, where the pass contracts at another rate.
+  Measured on a marker whose fixed point was 2e-4 of a spacing past a
+  plane: a radius of 0.28 before the plane and 0.97 after it, and a
+  bound 0.13 times the true distance on a converged solve.  The
+  positions concerned are a member's source-anchored geometry and the
+  target-anchored geometry of a member that computes fluxes; a position
+  that is a constant of the pass (a target-anchored geometry read by
+  `update`, a node outside the group) does not move between the iterate
+  and the fixed point and withdraws nothing.  A tighter tolerance
+  usually brings the returned iterate into the fixed point's cell.
 * **Everywhere else the report says so.**  For any other group that
   resolves a geometry-dependent mapping (another mapping kind, a
   sub-cycled group, the interface norm with a geometry edge entering

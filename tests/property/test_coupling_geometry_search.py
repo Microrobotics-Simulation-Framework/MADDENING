@@ -651,6 +651,70 @@ def test_float32_fields_at_float64_positions_pass_the_self_check(anchors):
             assert math.isfinite(d["rho_spectral"])
 
 
+class SameFieldCancellationInAGather(AssertionError):
+    """MADD-ANO-212, through the reference kind: a usable bound under the
+    true distance of a Gauss-Seidel group whose gather samples a field
+    that changes sign across a lattice cell."""
+
+
+def _sign_changing(mode: str) -> dict:
+    """A float32 grid field alternating ``+A, -A`` and two markers in the
+    middle of a cell each: every sample is the difference of two numbers
+    ``A / 2`` large, which the gather rounds at ``eps A / 2`` and the
+    floor's count of evaluations does not see."""
+    knob = {"gauss-seidel": 0, "jacobi": 3}[mode]
+    assert gc.KNOBS[knob]["iteration_mode"] == mode and gc.KNOBS[knob]["convergence_norm"] == "l2"
+    cell = Cell(("target", "source"), True, "float32", knob, 80, d=1, m=2, origin=0.0,
+                tolerance=1e-7)
+    amplitude = 3000.0
+    grid = amplitude * np.asarray([1.0, -1.0, 1.0, -1.0])
+    markers = np.asarray([0.5, 1.5])
+    values = {"F": {"x": grid, "g": 0.3,
+                    "c": (0.5 - gc.ALPHA) * grid + np.asarray([0.2, 0.1, 0.4, 0.3])},
+              "P": {"x": markers, "g": 0.4, "c": (0.5 - gc.ALPHA) * markers,
+                    "pos": np.asarray([[0.25], [0.75]]), "drift": np.zeros((2, 1)),
+                    "Q": 0.0002 * np.eye(2)}}
+    return gc.observe(cell, Case(0, 0, 0.0, 0.0), gc.built(cell), values=values, across=True)
+
+
+# Slow: a compile of a group with its diagnostics and of its twin, twice.
+# Per push: tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded
+@pytest.mark.slow
+def test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded():
+    """The control of the case below: under Jacobi the read is of the
+    iterate and the bound covers the stall."""
+    seen = _sign_changing("jacobi")
+    assert seen["referenced"] and not seen["crossed"], seen
+    report = seen["report"]
+    assert report["spectral_error_bound"] > 0.0 and seen["scored"], seen
+    if seen["spectral_usable"]:
+        assert seen["near"] and seen["bound"] <= gc.THRESHOLD["bound"], seen
+
+
+# Slow: a compile of a group with its diagnostics and of its twin.
+# Per push: tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, raises=SameFieldCancellationInAGather, reason=(
+    "MADD-ANO-212: the floor's gain of a same-pass read is measured along the source's "
+    "own state, which a gather of a field that changes sign across a cell cancels, so a "
+    "Gauss-Seidel group stalled behind such a gather reports a usable bound below the "
+    "true distance; open, deferred to 0.5.0"))
+def test_a_gauss_seidel_group_whose_gather_samples_a_sign_changing_field_is_bounded():
+    """Every ``multilinear_grid`` gather is a same-pass read that
+    differences entries of one field wherever the sampled field changes
+    sign across a cell (a velocity near a stagnation point, a signed
+    distance near its zero level).  Measured with an amplitude of 3000 at
+    a tolerance of 1e-7: the group stalls at ``residual=0.0`` and the
+    bound reads 0.14x the true distance, usable."""
+    seen = _sign_changing("gauss-seidel")
+    report = seen["report"]
+    assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
+    assert report["precision_limited"] and seen["reason"] is None, seen
+    if seen["spectral_usable"] and seen["bound"] > gc.THRESHOLD["bound"]:
+        raise SameFieldCancellationInAGather(
+            f"the bound is 1/{seen['bound']:.3g} of the true distance, usable: {report}")
+
+
 #: The plane hunt's cells: where the pass reads positions from the
 #: iterate, each anchoring, schedule, norm, dtype and dimension, at a
 #: tolerance that stops an iterate a plane away from its fixed point; and

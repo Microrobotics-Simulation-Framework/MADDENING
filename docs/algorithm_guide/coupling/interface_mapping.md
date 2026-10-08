@@ -1016,12 +1016,61 @@ $$
 
 with $D$ the norm's weights and $\mathrm{res}$ the residual's float
 resolution.  A product that does not see the geometry reads 1 on every
-field the positions move by more than 32 resolutions, an honest pass the
-finite difference's rounding (at most about 2/32).  Where the gap is
-above `GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
-withholds the bounds.  The check costs one product and one evaluation of
-the pass per direction, and exists only in the step of such a group with
-diagnostics on.
+field the positions move by much more than 32 resolutions, and less on a
+field they move by about that (the allowance is in the denominator: a
+term that weak is not compared).  An honest pass reads the finite
+difference's own error: on 351 drawn examples of six cells, a median of
+6e-4 and at most 6e-3 in float32, at most 3e-6 in float64 (0.11 in
+float32 on a field that cancels three thousandfold inside a gather).  A
+pass whose every read of a geometry was under `stop_gradient` read 0.31
+to 0.98 in float32 on the same draws and 1.0 in float64; on a deposit
+weak enough that the geometry moved the spectral radius by 0.02 it read
+0.22, under the tolerance.  The step is `sqrt(eps)` of the
+spacing at the coarsest floating dtype the pass evaluates in (a step
+sized for float64 positions is below what float32 fields resolve), and a
+point on the last lattice point of an axis steps inwards, as one on the
+first does: outside the hull the kernel clamps.  Where the gap is above
+`GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
+withholds the bounds, and says which of the two it was.  The check costs
+one product and one evaluation of the pass per direction, and exists
+only in the step of such a group with diagnostics on.
+
+**Across a lattice plane.**  The stencil is piecewise polynomial in the
+positions, so the pass $F$ is piecewise smooth in the iterate wherever it
+reads positions from the iterate, and its Jacobian jumps where one of
+them crosses a lattice plane (the faces of the hull included).  The
+spectral estimate is the linearisation at the returned iterate $x_k$, and
+says nothing of the next cell.  The step therefore stores, with
+`diagnostics=True`,
+
+$$
+\mathrm{limit} = \frac{u}{2}\,\min_j D_j\, d_j ,
+$$
+
+over the entries $j$ of every position field the pass reads from the
+iterate or from the state the same pass has built: $d_j$ the distance
+from $x_{k,j}$ to the nearest lattice plane of the mapping that reads it
+(to the face it is clamped to, outside the hull; zero where the pass
+itself moves the position further than that), $D_j$ the norm's weight
+and $u$ its constant (1 under `"l2"`, $1/(\mathrm{rtol}\sqrt{n})$ under
+`"mixed"`), so that the limit is in the units of `spectral_error_bound`.
+Where the bound $B \le \mathrm{limit}$, no fixed point within $2B$ has a
+position across a plane: $2B$ is the radius of the Newton-Kantorovich
+ball at the largest nonlinearity the theorem admits, the polynomial
+piece at $x_k$ has its fixed point inside it, that fixed point's
+positions are in the cells of $x_k$'s, and so it is a fixed point of
+$F$.  Where $B > \mathrm{limit}$ a plane is within reach, and the flag is
+kept only where the step certified the linearisation across it: the
+gradient bound's Newton-Kantorovich check takes the Jacobian at $x_k$ and
+at the Newton point $x_k + \delta$, on whichever side of a plane that
+is, and `gradient_relative_error_bound` is finite only where
+$\lVert (I - J(x_k))^{-1} (J(x_k + \delta) - J(x_k)) \rVert < 1/2$.
+Without that, `spectral_usable` and `gradient_bound_usable` are `False`
+and the numbers stay.  A position that is a constant of the pass is not
+in the minimum.  Neither test alone would do: the distance alone
+withdraws the flag of nearly every step of a group with many points (one
+of them is always near a plane), and the check alone withdraws it
+wherever a smooth nonlinearity fails Kantorovich far from any plane.
 
 **Everywhere else they do not.**  A coupling group whose pass resolves a
 geometry-dependent mapping (on an edge into a member, from inside the

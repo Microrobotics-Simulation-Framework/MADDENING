@@ -386,7 +386,13 @@ its `spectral_usable`, `gradient_bound_usable` and `precision_limited` as `False
 every such mapping is a `multilinear_grid`, the norm is `"l2"` or `"mixed"` and the group does not
 sub-cycle.  Otherwise, and on a step whose self-check of the geometry term failed, its entry has
 `iterations`, `total_iterations`, `residual` and `converged`, every bound NaN, every `*_usable`
-flag `False`, and a `not_usable_reason` that says which case it is.
+flag `False`, and a `not_usable_reason` that says which case it is.  One more case keeps its
+numbers: where a position the pass reads from the iterate is within twice `spectral_error_bound`
+of a lattice plane of the grid and the step did not certify its linearisation across the Newton
+step (`gradient_relative_error_bound` is not finite), `spectral_usable` and
+`gradient_bound_usable` are `False` and the reason says so.  The spectrum is taken at the
+returned iterate, and across a lattice plane the stencil is another polynomial: the fixed point
+may be in a cell where the pass contracts at another rate.
 
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in

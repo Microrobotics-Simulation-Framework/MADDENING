@@ -1115,6 +1115,35 @@ def group_in_larger_loop(topo: Topology, gi: int) -> bool:
     return sum(1 for n in topo.names if comp[n] == cid) > len(members)
 
 
+def interface_side_of(topo: Topology, i: int, rule=None) -> str:
+    """``"source"`` or ``"delivered"``: where the interface norm reads edge *i* of *topo*.
+
+    The one statement of the rule on the test side: the linear model
+    (:meth:`LinearModel.interface_side_of`) and every reference that
+    writes the norm's reading down itself (the nonlinear search's
+    ``edge_fields``) ask it here, so that no restatement can keep an
+    older rule.  *rule* is :data:`INTERFACE_SIDE` where ``None``.
+
+    Under ``"delivered"`` every edge is read at the value it delivers.
+    Under ``"compact"`` a mapped edge whose target is *larger* than its
+    source is read at its source value; a mapped edge onto a smaller
+    target, **a tie (equal sizes)** and every unmapped edge are read as
+    delivered.  A dict names the side of the edges whose mapping declares
+    one; the rest follow ``"compact"``.  The sizes are the ones the edge
+    was built with: a mapping's side is structure, like its sparsity
+    pattern.
+    """
+    e = topo.edges[i]
+    rule = INTERFACE_SIDE if rule is None else rule
+    if not e.mapped or rule == "delivered":
+        return "delivered"
+    if isinstance(rule, dict) and i in rule:
+        assert rule[i] in ("source", "delivered"), rule
+        return rule[i]
+    assert rule == "compact" or isinstance(rule, dict), rule
+    return "source" if topo.node(e.dst).n > topo.node(e.src).n else "delivered"
+
+
 # ---------------------------------------------------------------------------
 # The float64 reference
 # ---------------------------------------------------------------------------
@@ -1536,25 +1565,9 @@ class LinearModel:
         return {m: x[off[m]:off[m] + self.topo.node(m).n] for m in members}
 
     def interface_side_of(self, i: int) -> str:
-        """``"source"`` or ``"delivered"``: where the interface norm reads edge *i*.
-
-        The rule (``interface_side``): under ``"delivered"`` every edge is
-        read at the value it delivers.  Under ``"compact"`` a mapped edge
-        whose target is *larger* than its source is read at its source
-        value; a mapped edge onto a smaller target, **a tie (equal
-        sizes)** and every unmapped edge are read as delivered.  A dict
-        names the side of the edges whose mapping declares one; the rest
-        follow ``"compact"``.  The sizes are the ones the edge was built
-        with: a mapping's side is structure, like its sparsity pattern.
-        """
-        e = self.topo.edges[i]
-        rule = self.interface_side
-        if not e.mapped or rule == "delivered":
-            return "delivered"
-        if isinstance(rule, dict) and i in rule:
-            assert rule[i] in ("source", "delivered"), rule
-            return rule[i]
-        return "source" if self.topo.node(e.dst).n > self.topo.node(e.src).n else "delivered"
+        """``"source"`` or ``"delivered"``: where the interface norm reads
+        edge *i* under this model's rule (:func:`interface_side_of`)."""
+        return interface_side_of(self.topo, i, self.interface_side)
 
     def norm_fields(self, gi: int, *, raw: bool = False) -> list:
         """The fields group *gi*'s norm reads: ``[(B, gamma), ...]``.

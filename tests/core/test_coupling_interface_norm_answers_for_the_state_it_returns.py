@@ -516,6 +516,53 @@ def test_the_rule_costs_one_evaluation_of_the_pass_and_only_where_it_recomputes(
     assert counts[None] - counts["none"] == extra, counts
 
 
+class _Root(_Lin):
+    """``w <- sqrt(inp)``: not finite once an entry it reads is negative."""
+
+    def update(self, state, boundary_inputs, dt):
+        out = super().update(state, boundary_inputs, dt)
+        (inp,) = boundary_inputs.values()
+        return {**out, "w": jnp.sqrt(inp)}
+
+
+def _root_pair(solver, **group):
+    """``A -> B`` under Jacobi: the pre-step ``A`` is ``[4, 4]`` and the step
+    takes it to ``[3, -1]``.  The loop accepts its first iterate, whose
+    ``B.w`` is the root of the pre-step ``A`` -- finite -- on readings that
+    do not move; the pass at that iterate takes the root of ``-1``."""
+    gm = GraphManager()
+    gm.add_node(_Lin("A", 2, {}, 0.5, [1.0, -3.0], [4.0, 4.0], np.float32, False))
+    gm.add_node(_Root("B", 2, {"p0": (G, K)}, 0.0, [0.25, 0.5], [-3.0, 5.0], np.float32, True))
+    gm.add_edge("A", "B", "u", "p0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.add_coupling_group(["A", "B"], iteration_mode="jacobi", convergence_norm="interface",
+                              rtol=RTOL, solver=solver, diagnostics=solver == "fori", **group)
+        gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+def test_a_recomputed_field_that_is_not_finite_is_in_the_verdict(solver):
+    """The verdict on a non-finite state covers every floating field of the
+    state returned: a recomputed one is not the accepted iterate's, and the
+    residual never saw it."""
+    gm = _root_pair(solver)
+    gm.step()
+    (report,) = gm.coupling_diagnostics().values()
+    w = np.asarray(gm.get_node_state("B")["w"])
+    assert np.isfinite(w[0]) and np.isnan(w[1]), w
+    assert np.all(np.isfinite(np.asarray(gm.get_node_state("A")["u"])))
+    assert report["converged"] is False and report["residual"] == float("inf"), report
+
+
+def test_strict_convergence_names_a_recomputed_field_that_is_not_finite():
+    gm = _root_pair("ift", strict_convergence=True)
+    with pytest.raises(Exception, match="state is non-finite"):
+        gm.step()
+        jax.block_until_ready(gm.get_node_state("B")["w"])
+
+
 # ---------------------------------------------------------------------------
 # A field no internal edge reads
 # ---------------------------------------------------------------------------

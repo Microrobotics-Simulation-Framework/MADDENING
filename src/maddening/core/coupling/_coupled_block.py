@@ -941,10 +941,44 @@ def _run_coupled_block_impl(
                 # the scaled change of the readings over this pass), and
                 # the report describes this iterate.  Differentiated: at
                 # a fixed point this is the field's own derivative.
-                s_fresh = one_pass(s_full)
-                for nn, fields in refreshed_fields.items():
-                    out[nn] = {**out[nn], **{f: s_fresh[nn][f] for f in fields}}
+                #
+                # In its own ``lax.cond`` branch, so XLA compiles the pass
+                # by itself: outside one, its arithmetic was rewritten
+                # with whatever else read the iterate, and
+                # ``diagnostics=True`` under ``"fori"`` moved a
+                # recomputed field by an ulp.  The predicate is the
+                # iterate's own finiteness: a diverged iterate is
+                # returned as the loop left it, since a pass at a
+                # non-finite state computes nothing to prefer to it.
+                def _recomputed(s):
+                    s_fresh = one_pass(s)
+                    return {nn: {f: s_fresh[nn][f] for f in fields}
+                            for nn, fields in refreshed_fields.items()}
+
+                def _as_accepted(s):
+                    return {nn: {f: s[nn][f] for f in fields}
+                            for nn, fields in refreshed_fields.items()}
+
+                picked = jax.lax.cond(
+                    _group_state_finite(s_full, group_node_names),
+                    _recomputed, _as_accepted, s_full)
+                for nn, fields in picked.items():
+                    out[nn] = {**out[nn], **fields}
             return out
+
+        def _recomputed_finite(s_returned):
+            """Is every recomputed field of *s_returned* finite?
+
+            The verdict on a non-finite state is taken over every floating
+            field of the state the step returns.  The solvers take it on
+            the iterate they accept; a recomputed field is not that
+            iterate's, and a pass at a finite iterate can still leave one
+            non-finite (a field no edge reads, computed from a reading
+            that crossed out of its domain), which the residual never saw.
+            """
+            return functools.reduce(jnp.logical_and, [
+                jnp.all(jnp.isfinite(s_returned[nn][f]))
+                for nn, fields in refreshed_fields.items() for f in fields])
 
         if max_iters <= 1:
             # ``max_iterations=1`` is a legitimate "one staggered pass,
@@ -1650,9 +1684,22 @@ def _run_coupled_block_impl(
             # ``_embed`` restores the non-floating fields from the first
             # pass; they are recomputed at the returned floating state
             # (``_with_nonfloat_fields_at``, the rule both solvers share).
-            final = _merge(template_state,
-                           _with_nonfloat_fields_at(_embed_live(x_star_full)),
-                           jnp.array(False))
+            returned = _with_nonfloat_fields_at(_embed_live(x_star_full))
+            if refreshed_fields:
+                # The verdict, over the recomputed fields too
+                # (``_recomputed_finite``): the report reads ``inf``, and
+                # ``strict_convergence`` names a non-finite state.
+                recomputed_ok = _recomputed_finite(returned)
+                final_res, final_amp = _non_finite_reads_as_diverged(
+                    recomputed_ok, final_res, final_amp)
+                if group.strict_convergence:
+                    nn0, (f0, *_rest) = next(iter(refreshed_fields.items()))
+                    returned[nn0] = {**returned[nn0], f0: _strict_check(
+                        returned[nn0][f0],
+                        jnp.where(recomputed_ok, jnp.zeros_like(final_res),
+                                  jnp.full_like(final_res, jnp.inf)),
+                        recomputed_ok)}
+            final = _merge(template_state, returned, jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
                             spec_amp, grad_bound, pass_evals, geometry_gap),
                     (vw if vw else None))
@@ -2039,6 +2086,11 @@ def _run_coupled_block_impl(
         # they came from preceded the returned iterate, which under an
         # acceleration is not that pass's output.
         final_state = _with_nonfloat_fields_at(final_state)
+        if refreshed_fields and group.diagnostics:
+            # ... and the verdict over the recomputed fields
+            # (``_recomputed_finite``), as the ift path takes it.
+            final_res, final_amp = _non_finite_reads_as_diverged(
+                _recomputed_finite(final_state), final_res, final_amp)
 
         # Merge coupled nodes back into the full state
         r = {k: v for k, v in new_state_inner.items()}

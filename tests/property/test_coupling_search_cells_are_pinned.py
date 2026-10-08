@@ -28,6 +28,14 @@ on that cell, each re-derived on the new configuration.  A search lays its
 cells out over tuples frozen for the purpose (``ROTATED_KNOBS``), never
 over the length of a table another module can grow.
 
+**Adding a field to a cell's class:** give it a default at which every
+cell there is stays the configuration it was, and name the field and that
+value in :data:`ADDED_SINCE_PINNED`.  At that value the field is left out
+of the digest, so the digests pinned before the field existed still hold
+those cells, unreplaced; at any other value it is in the digest like every
+other field.  What the field decides for the group is in the digest either
+way, through the configuration ``add_coupling_group`` receives.
+
 ``python -m tests.property.test_coupling_search_cells_are_pinned`` prints
 the digests of the tree it runs on.
 """
@@ -70,6 +78,16 @@ PINNED = {
         "bde2fed156e2", "ac2efee847bf", "01c5b7b9608b", "c239d9bfabf1", "c314227b657d", "aa5433ed3c0b",
         "93b8dd9924b6", "b4b8227fb9ac", "8d50a4e13d18", "66587d9c84a8", "26e35aea65b0", "0843a3bffddc",
     ),
+    # The linear search's cells of the returned-state score (the state a
+    # step returns under the interface norm, beside its report): named by
+    # index by the slow hunt's blocks and by the test of a reading that
+    # crosses zero.
+    "linear-returned": (
+        "d0058576b2c7", "9c1ded0b6a7a", "3f106935d556", "3641518af7d3", "02fa758cd4e4", "b778825fc19b",
+        "7c099daf432d", "d518ea3e027e", "035de05d9652", "fc9e73708288", "e1c03e076e36", "37143cc90043",
+        "b3a110a20f64", "87f700c28fb2", "f0aac2e43a07", "131163ba2745", "072a96b29d4c", "09ba4c4462ba",
+        "670185db8319", "dcd302b847cd", "654c8dc76eea",
+    ),
     "nonlinear": (
         "8e49c418d2d1", "bf58985620af", "f3110b07f131", "8ca3833a19d5", "df129a7b075c", "d2c8f50b84b9",
         "b4ec903a5fe2", "8201b83f5d80", "17533a05273d", "4d707e5d0473", "81b531b65d4c", "28c46d048b12",
@@ -79,7 +97,7 @@ PINNED = {
         "8beff3697817", "b7a7c8a24ee6", "f7f1f5578a8e", "700519c011f8", "b4a7705690d4", "3dbe2c0e4863",
         "07c83370b5b1", "c23df1c1d6e8", "b886f8f64b96", "0aab610e2a1f", "f72615efce40", "2426cb647dfb",
         "4cc3be5b814f", "36c94cd61198", "ebe7082625d9", "94c462e9802d", "93a6e3dc56fc", "a5c93eb1810d",
-        "64585479923a", "2600dc30271d", "6a480c5b3943", "ef332ebf0f69",
+        "64585479923a", "2600dc30271d", "6a480c5b3943", "ef332ebf0f69", "603fd00c5270",
     ),
     "geometry": (
         "5890ebd22583", "8aa7cc3c0029", "f98ee00d436f", "2862dc84fe5e", "e4854bef88e0", "39361471fd8f",
@@ -90,14 +108,26 @@ PINNED = {
     "geometry-gauss-seidel": (
         "a706422d1e57", "3397ffc920f5",
     ),
+    "geometry-plane": (
+        "e7c3bf2c372b", "d6593c68e37e", "b6b80d84bf42", "26904b3f0c1a", "582f6f14f89d", "6dae87b28fab",
+        "3bed1f83b716", "fca27d3445eb",
+    ),
 }
+
+#: ``{a cell's class: {a field it gained after its search was pinned: the
+#: value at which a cell is the configuration it was before}}``.  The
+#: geometry cells gained ``tolerance`` with the plane cells: zero is "the
+#: linear search's tolerance", which is what every earlier cell ran at.
+ADDED_SINCE_PINNED = {geometry.Cell: {"tolerance": 0.0}}
 
 
 def searches() -> dict:
     """``{search: its cells}``, read when asked (a test replaces a table)."""
     return {"linear": linear.CELLS, "linear-side": linear.SIDE_CELLS,
+            "linear-returned": linear.RETURNED_CELLS,
             "nonlinear": nonlinear.CELLS, "geometry": geometry.CELLS,
-            "geometry-gauss-seidel": geometry.GS_CELLS}
+            "geometry-gauss-seidel": geometry.GS_CELLS,
+            "geometry-plane": geometry.PLANE_CELLS}
 
 
 def plain(value):
@@ -121,8 +151,13 @@ def fields_of(cell) -> dict:
     """Everything *cell* bakes into its compiled graph: its own fields, the
     group's configuration as ``add_coupling_group`` receives it (the row of
     ``KNOBS`` resolved, not its index), the structure, and where a cell has
-    them the nonlinearity of each member and the lattice."""
-    out = {"cell": plain(cell), "knobs": plain(cell.knobs)}
+    them the nonlinearity of each member and the lattice.  A field of
+    :data:`ADDED_SINCE_PINNED` is left out at the value named there."""
+    own = plain(cell)
+    for name, as_before in ADDED_SINCE_PINNED.get(type(cell), {}).items():
+        if type(own[name]) is type(as_before) and own[name] == as_before:
+            del own[name]
+    out = {"cell": own, "knobs": plain(cell.knobs)}
     topo = getattr(cell, "topo", None)
     if topo is not None:
         out["structure"] = plain(topo)
@@ -167,9 +202,13 @@ def pins() -> dict:
     module-level case, and every case in a module-level table, of the three
     search modules."""
     out = {name: {} for name in PINNED}
-    sources = (("linear", linear, {linear.Case: "linear", linear.SideCase: "linear-side"}),
+    sources = (("linear", linear, {linear.Case: "linear", linear.SideCase: "linear-side",
+                                   linear.ReturnedCase: "linear-returned"}),
                ("nonlinear", nonlinear, {nonlinear.Case: "nonlinear"}),
-               ("geometry", geometry, {geometry.Case: "geometry"}))
+               # A plane draw is a case of the geometry search's own cells
+               # unless its table is in ``_OTHER_CELLS``.
+               ("geometry", geometry, {geometry.Case: "geometry",
+                                       geometry.gc.PlaneCase: "geometry"}))
     for module_name, module, kinds in sources:
         for name, value in vars(module).items():
             entries = (value.items() if isinstance(value, dict) else [(None, value)])
@@ -223,6 +262,8 @@ def test_every_pinned_case_names_a_cell_that_is_pinned():
     should (so the message is not silently short), and no pin names an
     index past the cells."""
     found = pins()
+    # (No pinned case names a returned-state cell yet: "linear-returned" has none to count.)
+    assert set(found) == set(PINNED) and not found["linear-returned"], sorted(found)
     for search, least in (("linear", 15), ("linear-side", 2), ("nonlinear", 6), ("geometry", 2),
                           ("geometry-gauss-seidel", 2)):
         count = sum(len(v) for v in found[search].values())
@@ -233,6 +274,7 @@ def test_every_pinned_case_names_a_cell_that_is_pinned():
     assert any("FIXED['MADD-ANO-226" in label for label in found["linear"][53])
     assert any("KNOWN['MADD-ANO-212-the-floor']" in label for label in found["linear"][2])
     assert any("KNOWN_SIDE" in label for label in found["linear-side"][1])
+    assert "geometry PINNED_PLANES" in found["geometry"][0]
 
 
 def _rotated_over(rows: int) -> tuple:
@@ -313,6 +355,15 @@ def test_a_digest_reads_everything_a_cell_bakes_in(monkeypatch):
     # A geometry cell's lattice and a field no digest could read.
     cell = geometry.CELLS[0]
     assert digest(dataclasses.replace(cell, origin=40.0)) != digest(cell)
+    # A field a cell's class gained after the pins: out of the digest at
+    # the value that leaves a cell what it was, in it at any other (and in
+    # the configuration the group receives either way).
+    assert ADDED_SINCE_PINNED[type(cell)] == {"tolerance": 0.0} and cell.tolerance == 0.0
+    assert "tolerance" not in fields_of(cell)["cell"]
+    stopped_early = fields_of(dataclasses.replace(cell, tolerance=1e-3))
+    assert stopped_early["cell"]["tolerance"] == 1e-3
+    assert stopped_early["knobs"] != fields_of(cell)["knobs"]
+    assert all(c.tolerance for c in geometry.PLANE_CELLS)
     with pytest.raises(TypeError, match="cannot read"):
         plain({"a": object()})
 

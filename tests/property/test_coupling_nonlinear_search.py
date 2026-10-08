@@ -98,11 +98,13 @@ from typing import Optional
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import hypothesis
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import strategies as st
+from hypothesis.errors import NoSuchExample
 from jax.flatten_util import ravel_pytree
 
 from maddening.core.coupling.mapping import matrix_mapping
@@ -266,6 +268,16 @@ def against_the_closed_form(case: linear.Case) -> dict:
     # takes the same constants (a sparse edge has none outside its pattern).
     grad, grad_exact = ref.gradient_error(x, fixed, raw)[0], linear._gradient_error(   # noqa: SLF001
         model, step.pre, step.state, cell.mapping_kind)
+    # What CPL-093's condition is read from (a constant is in the bound
+    # where its whole value moves a pass by more than the floor): the pass
+    # response of every constant the closed form takes, against the
+    # reference's of the same constant.
+    theirs = dict(zip(ref.constant_names(), ref.pass_responses(x, raw)))
+    names = reference_names(built_twin)
+    responses = [(mine, theirs[names[linear._named(c)]])                # noqa: SLF001
+                 for c, _tangent, _miss, mine in linear.gradient_rows(
+                     model, step.pre, step.state, cell.mapping_kind)]
+    assert len(responses) == len(names) > 0, (len(responses), len(names))
     scale = max(float(np.max(np.abs(x_star))), np.finfo(np.float64).tiny)
     # A relative norm divides a field by ``rtol`` times its size: one float64
     # rounding of a field is this much of the norm's unit.
@@ -279,8 +291,42 @@ def against_the_closed_form(case: linear.Case) -> dict:
         distance=abs(dist - dist_exact), distance_exact=dist_exact, norm_unit=unit,
         residual=abs(ref.residual(x, norm) - detail["residual_true"]),
         residual_exact=detail["residual_true"],
-        gradient=abs(grad - grad_exact), gradient_exact=grad_exact)
+        gradient=abs(grad - grad_exact), gradient_exact=grad_exact,
+        response=max(abs(mine - other) / max(other, np.finfo(np.float64).tiny)
+                     for mine, other in responses),
+        responses=len(responses))
     return out
+
+
+def reference_names(built: ct.Built) -> dict:
+    """``{(node, port, edge, entry): the reference's name}`` for every
+    constant the closed form's gradient score takes on *built*'s graph
+    (``linear.gradient_constants``): a gain entry is ``node.G<port>[flat
+    index]``, a mapping weight ``mapping:<edge key>.<leaf>[flat index]``,
+    the index of a sparse edge's weight being its slot's."""
+    topo = built.topo
+    names = {}
+    for m in topo.groups[0]:
+        nd = topo.node(m)
+        for j in range(nd.ports):
+            for a in range(nd.n):
+                for b in range(nd.n):
+                    names[(m, j, None, (a, b))] = f"{m}.G{j}[{a * nd.n + b}]"
+    params = built.gm.params.get("mappings", {})
+    for i, key in built.mapping_keys.items():
+        (leaf, _held), = params[key].items()
+        if i in built.slots:
+            slots = built.slots[i]
+            where = zip(slots.target.ravel(), slots.source.ravel(), slots.valid.ravel())
+            for at, (a, b, valid) in enumerate(where):
+                if valid:
+                    names[(None, None, i, (int(a), int(b)))] = f"mapping:{key}.{leaf}[{at}]"
+        else:
+            n_src = topo.node(topo.edges[i].src).n
+            for a in range(topo.node(topo.edges[i].dst).n):
+                for b in range(n_src):
+                    names[(None, None, i, (a, b))] = f"mapping:{key}.{leaf}[{a * n_src + b}]"
+    return names
 
 
 #: What "to float64 rounding" allows each difference, as measured over
@@ -290,9 +336,11 @@ def against_the_closed_form(case: linear.Case) -> dict:
 #: norm; the Jacobian in ``eps`` of its largest entry; the radius absolute;
 #: the distance and the residual in the norm's own rounding unit ``eps /
 #: rtol`` times the resolvent's norm (a relative norm divides a field by
-#: ``rtol`` times its size); the gradient error absolute beside one.
+#: ``rtol`` times its size); the gradient error absolute beside one; a
+#: constant's pass response relative to itself (one product of the pass's
+#: derivative, with no solve through the resolvent).
 ALLOWED = dict(fixed_point=2.0 ** 10, jacobian=2.0 ** 6, radius=2.0 ** 10 * EPS64,
-               distance=2.0 ** 12, residual=2.0 ** 12, gradient=1e-9)
+               distance=2.0 ** 12, residual=2.0 ** 12, gradient=1e-9, response=1e-9)
 
 
 def closed_form_misses(seen: dict) -> dict:
@@ -310,7 +358,8 @@ def closed_form_misses(seen: dict) -> dict:
             unit + EPS64 * seen["distance_exact"])),
         residual=seen["residual"] / (ALLOWED["residual"] * (
             unit + EPS64 * seen["residual_exact"])),
-        gradient=seen["gradient"] / (ALLOWED["gradient"] * max(seen["gradient_exact"], 1.0)))
+        gradient=seen["gradient"] / (ALLOWED["gradient"] * max(seen["gradient_exact"], 1.0)),
+        response=seen["response"] / ALLOWED["response"])
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +510,39 @@ class Cell:
                 return True
         return False
 
+    @property
+    def sweeps_a_term_of_second_order(self) -> bool:
+        """Whether a member with a quadratic term or a product reads, in
+        float32 under Gauss-Seidel, a field this pass has just computed.
+
+        Such a member's derivative is ``1 + 2 s_j (u_j - c_j)`` (the
+        quadratic term; a product on a single port is the same) or ``1 +
+        s_j (u_j' - c_j')``, with ``s_j = curve / max|c_j|``: where the
+        value it reads moves by one rounding of its field the derivative
+        moves by ``2 curve eps``, 2.4e-5 at the curve of a hundred the
+        search draws.  Under Gauss-Seidel that value is what this pass has
+        just computed -- in float32, rounded as its member's update rounds
+        it, which is tens of roundings of the field where the update
+        cancels -- and the float64 twin holds another number there.  The
+        pass the group runs and its twin then have other Jacobians at one
+        state, by parts in ten thousand at that curve whatever the units,
+        and the twin is no reference for CPL-087's second statement
+        ("within 1e-4 of the radius"): MADD-ANO-239 below the flag's
+        margin, measured on :data:`ITS_OWN_JACOBIAN`.  The ``"radius"``
+        score is drawn with the curve on such a cell within
+        :data:`SWEPT_CURVE`.
+        A saturating gain's derivative is flat at its centre (7e-7 of the
+        radius at any curve), and under Jacobi the value read is a float
+        of the iterate, or through a mapping a few products of it (5e-5
+        at a curve of a hundred)."""
+        if self.dtype != "float32" or self.knobs["iteration_mode"] != "gauss-seidel":
+            return False
+        topo = self.topo
+        sweep = ct.gauss_seidel_order(topo, 0, topo.names)
+        return any(self.kind_of(e.dst) in ("quadratic", "product")
+                   and sweep.index(e.src) < sweep.index(e.dst)
+                   for e in (topo.edges[i] for i in topo.internal_edges(0)))
+
 
 #: The rows of ``linear.KNOBS`` and the caps the rotation below takes,
 #: FROZEN: the seven rows and two caps the linear search held when these
@@ -529,6 +611,13 @@ APPENDED = (
     Cell("pair-3", "float32", _JACOBI_INTERFACE, 120, "product"),
     Cell("ring-5", "float64", _JACOBI_INTERFACE, 5, "quadratic"),
     Cell("ring-2", "float64", _JACOBI_INTERFACE, 120, "product"),
+    # What cell 34 was by accident, and no cell since: the mapped ring with
+    # a quadratic term in float64, Aitken under Gauss-Seidel, the interface
+    # norm, a cap of 120.  Its group returns a field its norm reads
+    # recomputed (:func:`reads_a_recomputed_field`), so it is the float64
+    # cell on which the state a user gets is checked beside the hunt (the
+    # two others that are, are float32).
+    Cell("mapped", "float64", 2, 120, "quadratic"),
 )
 CELLS = ROTATED + APPENDED
 PER_PUSH_CELLS = tuple(range(len(_FIRST)))
@@ -619,7 +708,7 @@ def own_sensitivities(index: int, values: dict, x: np.ndarray, ref: cr.PassRefer
         params = params_for(twin, values)
         pre = twin.gm._state                              # noqa: SLF001
         theta, restore = ravel_pytree(ref._constants_of(params))   # noqa: SLF001
-        if not compiled:
+        if "both" not in compiled:
             step, ext = twin.gm._raw_step_fn, twin.gm._default_external_inputs()   # noqa: SLF001
 
             def moved(theta_, x_, pre_, params_):
@@ -645,6 +734,34 @@ def own_sensitivities(index: int, values: dict, x: np.ndarray, ref: cr.PassRefer
         assert np.max(np.abs(np.asarray(value, np.float64)[a:b] - exact[a:b])) <= (
             2.0 ** 10 * float(np.finfo(np.float32).eps) * size), (cell, _n)
     return np.asarray(tangents, np.float64)
+
+
+def own_radius(index: int, values: dict, x: np.ndarray, ref: cr.PassReference) -> float:
+    """The spectral radius of ``dP/dx`` at iterate *x* through the pass of
+    float32 cell *index* as the cell's own dtype evaluates it (forward
+    mode through :func:`_own_twin`): the Jacobian the group's own
+    Jacobian-vector products are of, where ``ref.jacobian`` is the float64
+    twin's."""
+    cell = CELLS[index]
+    twin, compiled = _own_twin(index)
+    p0, p1, count = (f"coupling_{cell.topo.group_key(0)}_pred_{s}" for s in ("0", "1", "count"))
+    with precision(False):
+        ct.set_initial(twin, values)
+        params = params_for(twin, values)
+        pre = twin.gm._state                              # noqa: SLF001
+        if "jacobian" not in compiled:
+            step, ext = twin.gm._raw_step_fn, twin.gm._default_external_inputs()   # noqa: SLF001
+
+            def moved(x_, pre_, params_):
+                meta = {**pre_["_meta"], p0: x_, p1: x_,
+                        count: jnp.asarray(2, pre_["_meta"][count].dtype)}
+                after = step({**pre_, "_meta": meta}, ext, params_)
+                return jnp.concatenate([jnp.ravel(after[n][f])
+                                        for n, f, _s, _a, _b in ref.layout])
+
+            compiled["jacobian"] = jax.jit(jax.jacfwd(moved))
+        jacobian = compiled["jacobian"](jnp.asarray(x, jnp.float32), pre, params)
+    return cr.radius(np.asarray(jacobian, np.float64))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -990,7 +1107,7 @@ USABLE_FLOOR = 0.25
 #: (``PassReference.pass_responses``) is above this many floors: the
 #: bound drops a probe at one floor, by its own float32 or float64
 #: arithmetic, and the reference measures the response in float64.
-RESOLVED_MARGIN = 2.0
+RESOLVED_MARGIN = linear.RESOLVED_MARGIN
 REFERENCED_FLOOR = 0.75
 
 
@@ -1005,6 +1122,23 @@ REFERENCED_FLOOR = 0.75
 SWEPT_PRODUCT_DECADES = 1
 #: The scores of CPL-087, which MADD-ANO-239 is about.
 RADIUS_SCORES = ("radius", "radius_strict")
+#: The largest curve the ``"radius"`` score is drawn at on a cell whose
+#: float32 sweep hands a same-pass value to a term of second order
+#: (:attr:`Cell.sweeps_a_term_of_second_order`).  Measured on 100 random
+#: draws a cell (jaxlib 0.11.2; three such cells on the mapped ring and
+#: three on rings with no mapping): the radius of the float32 pass's own
+#: Jacobian is up to 5e-4 of itself from the float64 twin's at a curve of
+#: 100, 5e-5 at 10 and 5e-6 at 1 -- as the curve, the same at a change of
+#: units of 0, 1, 3 and 6 decades -- where CPL-087's second statement is
+#: 1e-4 of the radius.  The score read 0.23 at most at a curve of 10; at
+#: 100 it read 2.3 on a ring with no mapping and 1.53 on the draw a hunt
+#: over one cell stopped on (:data:`ITS_OWN_JACOBIAN`).  Within a decade,
+#: as the units are (:data:`SWEPT_PRODUCT_DECADES`).
+SWEPT_CURVE = 10.0
+#: The score of CPL-087's second statement, the one held to that curve:
+#: ``"radius_strict"`` is the flag's margin, hundreds of times wider, and
+#: is drawn at every curve.
+ROUNDING_SCORES = ("radius",)
 
 
 def within_the_units_a_swept_product_is_claimed_for(case: "Case") -> "Case":
@@ -1018,16 +1152,36 @@ def within_the_units_a_swept_product_is_claimed_for(case: "Case") -> "Case":
         case.base, unit=int(math.copysign(SWEPT_PRODUCT_DECADES, unit))))
 
 
+def within_the_curve_a_float32_sweep_resolves(case: "Case") -> "Case":
+    """*case* with its curve within :data:`SWEPT_CURVE` where its cell
+    sweeps a term of second order in float32; any other case unchanged."""
+    if case.curve <= SWEPT_CURVE or not CELLS[case.cell].sweeps_a_term_of_second_order:
+        return case
+    return dataclasses.replace(case, curve=SWEPT_CURVE)
+
+
+def held_for(name: str) -> dict:
+    """What search *name* holds its draws to, as the keywords of
+    :func:`cases`: one statement for every hunt -- over a block, over one
+    cell, per push -- because each draws through :func:`search`."""
+    return dict(swept_units_held=name in RADIUS_SCORES, swept_curve_held=name in ROUNDING_SCORES)
+
+
 def cases(cells=ALL_CELLS, domain: linear.Domain = linear.CLAIMED, curves=CURVES, *,
-          swept_units_held: bool = False):
+          swept_units_held: bool = False, swept_curve_held: bool = False):
     """Draw a :class:`Case` on one of *cells*: the linear search's numbers
     within *domain* and a curve.  *swept_units_held*: with the change of
     units held within :data:`SWEPT_PRODUCT_DECADES` on a cell that sweeps
-    a product of two members' fields (the same draws otherwise)."""
+    a product of two members' fields; *swept_curve_held*: with the curve
+    held within :data:`SWEPT_CURVE` on a cell that sweeps a term of second
+    order (the same draws otherwise)."""
     drawn = st.builds(Case, cell=st.sampled_from(tuple(cells)), base=linear.cases((0,), domain),
                       curve=st.floats(*curves).map(lambda x: 10.0 ** x))
-    return (drawn.map(within_the_units_a_swept_product_is_claimed_for) if swept_units_held
-            else drawn)
+    if swept_units_held:
+        drawn = drawn.map(within_the_units_a_swept_product_is_claimed_for)
+    if swept_curve_held:
+        drawn = drawn.map(within_the_curve_a_float32_sweep_resolves)
+    return drawn
 
 
 def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CLAIMED,
@@ -1045,7 +1199,7 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CL
         seen = observe(case)
         return seen[name], seen["report"]
 
-    report = targeted_search(cases(cells, domain, swept_units_held=name in RADIUS_SCORES), score,
+    report = targeted_search(cases(cells, domain, **held_for(name)), score,
                              THRESHOLD[name], profile=profile, label=name, fail=fail)
     seen = [observe(c) for c in drawn]
     if fail and drawn:
@@ -1854,12 +2008,134 @@ def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
                 assert held is case, (index, unit)
 
 
+#: MADD-ANO-239 below the flag's margin: the draw a hunt over ONE cell
+#: stopped on (example 84 of the ``"radius"`` hunt on this cell; CI's slow
+#: lane and this machine, jaxlib 0.10.2 and 0.11.2, the same numbers).  The
+#: mapped ring, every member the square of what it reads (a product on one
+#: port) at a curve of 100, Aitken under Gauss-Seidel, started on its fixed
+#: point with ``m0`` in units of 1e3: ``rho_spectral`` 0.40421399, the
+#: radius of the float32 pass's own Jacobian 0.40421399 (2e-8 apart), the
+#: float64 twin's at the same iterate 0.40429755 -- 2.07e-4 of the radius,
+#: 1.53 of what CPL-087's second statement allows and 0.3% of the flag's
+#: margin.  No two fields are multiplied and the units do not carry it:
+#: the same draw read 0.26 to 0.58 at a change of units of 0, 1, -1, -3
+#: and 6 decades, and 0.46, 0.16 and 0.03 at a curve of 30, 10 and 1.  The
+#: release branch before the interface norm read this ring's mapping at
+#: its source scored it 1.531.
+ITS_OWN_JACOBIAN = Case(
+    CELLS.index(Cell("mapped", "float32", 2, 120, "product")),
+    linear.Case(0, 176, 0.7380400982270426, False, 0.08163409308575974, 0.0, 1.0, 3, 0.0, 2),
+    100.0)
+
+
+def test_the_radius_score_is_drawn_at_a_curve_a_float32_sweep_resolves():
+    """CPL-087's second statement ("within 1e-4 of the radius ...") is
+    scored against the float64 twin, which is a reference for it where a
+    float32 rounding of a same-pass value leaves the Jacobian standing:
+    the ``"radius"`` score is drawn with the curve within
+    :data:`SWEPT_CURVE` on every cell whose float32 sweep hands such a
+    value to a term of second order, and on no other; every other score
+    is drawn at every curve.  One statement for the hunts over a block,
+    over one cell and per push (:func:`held_for`).  No compile."""
+    swept = [i for i, c in enumerate(CELLS) if c.sweeps_a_term_of_second_order]
+    for i, c in enumerate(CELLS):
+        kinds = {c.kind_of(name) for name in c.topo.names}
+        # On every structure here a Gauss-Seidel sweep hands some later
+        # member a value of this pass, so the dtype, the sweep and the
+        # kinds decide it.
+        assert (i in swept) == (c.dtype == "float32"
+                                and c.knobs["iteration_mode"] == "gauss-seidel"
+                                and not kinds.isdisjoint(("quadratic", "product"))), (i, c)
+    # Found by what they are: the draw's cell (one field squared); the two
+    # that multiply two members' fields (their units are held as well);
+    # rings with no mapping; and no cell of saturating gains.
+    assert ITS_OWN_JACOBIAN.cell in swept
+    assert not CELLS[ITS_OWN_JACOBIAN.cell].sweeps_a_product_of_two_members
+    assert {_SWEPT_PRODUCT, _ANOTHER_TANGENT_IN_FLOAT32.cell} <= set(swept)
+    assert any(not any(e.mapped for e in CELLS[i].topo.edges) for i in swept)
+    assert not any(CELLS[i].kind == "saturating" for i in swept)
+    # Which member reads which decides it, not the kinds alone: on ``tri``
+    # with the three nonlinearities in turn the saturating ``a`` is swept
+    # first, and the quadratic ``b`` reads it from this pass.
+    swept_knob = linear.KNOBS.index(dict(acceleration="aitken", iteration_mode="gauss-seidel",
+                                         convergence_norm="interface"))
+    assert Cell("tri", "float32", swept_knob, 5, "each").sweeps_a_term_of_second_order
+    assert not Cell("tri", "float64", swept_knob, 5, "each").sweeps_a_term_of_second_order
+    assert not Cell("tri", "float32", _JACOBI_INTERFACE, 5, "each").sweeps_a_term_of_second_order
+
+    top = 10.0 ** CURVES[1]
+    assert SWEPT_CURVE < top, "the rule would hold nothing"
+    for index in ALL_CELLS:
+        for curve in (10.0 ** CURVES[0], 1.0, SWEPT_CURVE, 2.0 * SWEPT_CURVE, top):
+            case = Case(index, _PROBE, curve)
+            held = within_the_curve_a_float32_sweep_resolves(case)
+            if index in swept and curve > SWEPT_CURVE:
+                assert held.curve == SWEPT_CURVE, (index, curve)
+                assert dataclasses.replace(held, curve=curve) == case
+            else:
+                assert held is case, (index, curve)
+
+    assert {name: held_for(name) for name in SEARCHES + ("radius_strict",)} == {
+        **{name: dict(swept_units_held=False, swept_curve_held=False) for name in SEARCHES},
+        "radius": dict(swept_units_held=True, swept_curve_held=True),
+        "radius_strict": dict(swept_units_held=True, swept_curve_held=False)}
+
+    # The strategy a hunt on that cell draws from.
+    def above(case: Case) -> bool:
+        return case.curve > SWEPT_CURVE
+
+    cell = ITS_OWN_JACOBIAN.cell
+    same_draws = hypothesis.settings(database=None, derandomize=True)
+    for name in ("bound", "radius_strict"):
+        assert above(hypothesis.find(cases((cell,), **held_for(name)), above, settings=same_draws))
+    with pytest.raises(NoSuchExample):
+        hypothesis.find(cases((cell,), **held_for("radius")), above, settings=same_draws)
+
+
+# Slow: the cell's graph with its diagnostics, its x64 twin and its float32 twin compiled.
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_the_radius_score_is_drawn_at_a_curve_a_float32_sweep_resolves
+@pytest.mark.slow
+def test_a_radius_settled_in_a_float32_sweep_is_the_radius_of_the_pass_s_own_jacobian():
+    """Why the curve is held (:data:`SWEPT_CURVE`), on the draw a hunt
+    stopped on.  ``rho_spectral`` is the radius of the Jacobian the float32
+    pass has, to a part in a million; the float64 twin's Jacobian at the
+    same iterate is another matrix by more than the 1e-4 of CPL-087's
+    second statement, and by a hundredth of the flag's margin and less
+    (its first statement holds).  Drawn as the hunt now draws it, the
+    twin is a reference again and the score holds."""
+    case = ITS_OWN_JACOBIAN
+    cell = CELLS[case.cell]
+    assert cell.sweeps_a_term_of_second_order and case.curve > SWEPT_CURVE
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["stepped"] and seen["referenced"] and seen["spectral_usable"], seen
+    values = values_of(case)
+    built, twin, ref = _built(case.cell)
+    ref = bound_reference(ref, values, twin)
+    with precision(False):
+        x = ref.flat(one_step(built, cell, values).state)
+    true = report["rho_true"]
+    assert cr.radius(ref.jacobian(x)) == true, "the iterate the report is of"
+    own, reported = own_radius(case.cell, values, x, ref), float(report["rho_spectral"])
+    # units: relative to the radius -- measured 2e-8.
+    assert abs(reported - own) <= 1e-6 * own, (reported, own, true)
+    # units: relative to the radius -- CPL-087's second statement; measured 2.07e-4.
+    assert abs(own - true) > 1e-4 * true, (reported, own, true)
+    # units: a fraction of the flag's margin -- measured 0.0028.
+    assert seen["radius_strict"] <= 0.01 * THRESHOLD["radius_strict"], report
+    held = within_the_curve_a_float32_sweep_resolves(case)
+    assert held.curve == SWEPT_CURVE and dataclasses.replace(held, curve=case.curve) == case
+    again = observe(held)
+    assert again["stepped"] and again["referenced"] and again["spectral_usable"], again
+    assert again["radius"] <= THRESHOLD["radius"], again["report"]
+
+
 # ---------------------------------------------------------------------------
 # The cells observed at the accepted iterate
 # ---------------------------------------------------------------------------
 
 
-def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_mapping():
+def test_the_cells_observed_at_the_accepted_iterate_are_the_three_read_through_a_mapping():
     """Which cells are stepped with the return rule off, with the state a
     user gets checked beside them (:func:`returned_score`), is decided by
     what a cell is (:func:`reads_a_recomputed_field`) and not by its index.
@@ -1868,14 +2144,18 @@ def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_m
     nothing.  (On the layout a rotation over eight rows left by accident
     they were cells 33 and 34.)  Held here, each cell found by what it is:
     the mapped ring under the interface norm, once in the rotation (Aitken
-    under Gauss-Seidel, a cap of 120) and once appended (Jacobi, stopped
-    after five passes).  No compile."""
+    under Gauss-Seidel, a cap of 120, float32) and twice appended (Jacobi,
+    stopped after five passes, float32; and the accident's cell 34, Aitken
+    under Gauss-Seidel with a cap of 120 in float64, so that the check is
+    made in both dtypes).  No compile."""
     observed = tuple(i for i in ALL_CELLS if reads_a_recomputed_field(CELLS[i]))
     assert observed == (
         CELLS.index(Cell("mapped", "float32", 2, 120, "product")),
-        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"))), observed
-    rotated, appended = observed
-    assert rotated < len(ROTATED) <= appended
+        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic")),
+        CELLS.index(Cell("mapped", "float64", 2, 120, "quadratic"))), observed
+    rotated, appended, in_float64 = observed
+    assert rotated < len(ROTATED) <= appended < in_float64 == len(CELLS) - 1
+    assert {CELLS[i].dtype for i in observed} == {"float32", "float64"}
     for index in observed:
         knobs = CELLS[index].knobs
         assert knobs["convergence_norm"] == "interface" and knobs["solver"] == "ift", knobs

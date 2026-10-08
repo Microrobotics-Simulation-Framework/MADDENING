@@ -14448,6 +14448,30 @@ anomalies:
       float32 resolution of `t` -- which nothing guarantees.  No release carried it: the floor, the gain measurement and
       interface mappings are new in 0.4.0's development.  Found while
       probing what the floor counts for a value a mapped edge delivers.
+      A second manifestation, through the reference geometry-dependent
+      kind: a `multilinear_grid` gather is such a read wherever the
+      sampled field changes sign across a lattice cell (a velocity near a
+      stagnation point, a signed distance near its zero level), because a
+      sample between a `+A` and a `-A` lattice value is a difference of
+      two numbers `A / 2` large.  Measured (float32, the L2 norm,
+      Gauss-Seidel, a grid field alternating `+A, -A` with two markers at
+      mid-cell): at `A = 3000`, `tolerance=1e-7`, `residual=0.0`,
+      `spectral_error_bound=2.97e-6`, `spectral_usable=True`,
+      `precision_limited=True` against a true distance of 2.13e-5 (0.14x);
+      at `A = 1000`, `tolerance=1e-4`, `precision_limited=False`, 0.88x.
+      Jacobi held in every row (37x to 290x), and `A = 10` held under
+      both.  On the relay pair of the geometry search, 126 amplitudes
+      from 10 to 1e5 at `tolerance=1e-7` (the same digits on jaxlib
+      0.10.2, 0.11.0 and 0.11.2; `spectral_usable=True` at every one
+      before the geometry self-check is asked): the bound is 1.29 times
+      the distance or more up to `A = 420`, and under it, reported, in
+      three bands: 0.87x at `A` = 430 to 510, 0.57x at 860 to 1020
+      (3.0e-6 against 5.3e-6 at 1000) and 0.15x to 0.11x at 2200 to
+      2700.  Between and above those bands (1030 to 2000, and from 3000
+      on, where the bound falls to 0.006x at 5e4) the self-check's
+      finite difference is rounding, its gap is over the tolerance of
+      0.25 and the report is withheld instead.  At `tolerance=1e-4` the
+      bands are 860 to 1020 (0.86x) and 2700 (0.11x).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -14465,7 +14489,9 @@ anomalies:
     workaround: >
       Where a member reads a difference of entries of one field of another
       member (a gradient or jump operator as an interface mapping, a
-      transform or a node that subtracts entries), run the group under
+      transform or a node that subtracts entries, or a `multilinear_grid`
+      gather of a field that changes sign across a lattice cell), run the
+      group under
       `iteration_mode="jacobi"`, or have the producer hold the difference
       as a field of its own so that it is stored at its own magnitude; and
       do not rely on `spectral_error_bound` where `precision_limited` is
@@ -14480,6 +14506,10 @@ anomalies:
     verification:
       - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded"
       - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded"
+      - "tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_whose_gather_samples_a_sign_changing_field_is_bounded"
+      - "tests/property/test_coupling_geometry_search.py::test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded"
+      - "tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_behind_a_strongly_cancelling_gather_reports_no_bound"
+      - "tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded"
     github_issue: null
   - anomaly_id: "MADD-ANO-213"
     title: "Under the interface norm a field read by several internal edges was counted once per edge by the residual and once by the spectral analysis: on a star spectral_error_bound read 0.26 to 0.73 of the true distance, spectral_usable=True"
@@ -16056,6 +16086,22 @@ anomalies:
       Gauss-Seidel (under Jacobi the difference is of two floats of the
       iterate, exact in either dtype), a member that multiplies two other
       members' fields, and units 1e3 or more apart (nothing at 1e1).
+      That is where it passes the flag's margin.  Below the margin it
+      needs neither the two fields nor the units: a float32 Gauss-Seidel
+      member with a quadratic term or a product of curvature 100 over
+      the size of the field it reads has a derivative one rounding of a
+      same-pass value moves by 2.4e-5, and the float32 pass's Jacobian
+      has a radius up to 5e-4 of itself from the exact one at the
+      returned state (5e-5 at a curvature of 10; the same at a change of
+      units of 0, 1, 3 and 6 decades, with and without a mapping; 100
+      random draws on each of six cells, jaxlib 0.11.2).  `rho_spectral`
+      is the float32 pass's to 2e-8 there, and CPL-087's second
+      statement (1e-4 of the radius and its movement under a rounding of
+      the Jacobian) read 1.53 of its allowance on a mapped ring of three
+      (0.404214 for 0.404298; jaxlib 0.10.2 and 0.11.2, CI and one
+      development machine, the same numbers) and 2.3 on a ring with no
+      mapping, with 0.3% of the flag's margin used: the first statement
+      held.
       `spectral_error_bound` held on every such example (at most 0.82 of
       the distance), and so did the gradient bound for the gradient the
       group computes.  The spectral keys are new in 0.4.0; no release
@@ -16097,6 +16143,7 @@ anomalies:
       work that holds each coupling flag to a stated domain.
     verification:
       - "tests/property/test_coupling_nonlinear_search.py::test_a_settled_radius_is_the_radius_where_a_same_pass_rounding_moves_the_jacobian"
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_radius_settled_in_a_float32_sweep_is_the_radius_of_the_pass_s_own_jacobian"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-240"
@@ -16247,3 +16294,285 @@ anomalies:
       - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes"
       - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push"
       - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_the_library_returns_the_models_state_for_the_iterate_it_accepted_per_push"
+
+  - anomaly_id: "MADD-ANO-242"
+    title: "spectral_error_bound of a group with a multilinear_grid edge read 0.13x the true distance with spectral_usable=True when a marker's fixed point lay across a lattice plane from the returned iterate"
+    description: >
+      A `multilinear_grid` mapping is one polynomial of the positions it
+      reads inside a lattice cell and another in the next, so the pass of a
+      coupling group that reads positions from the iterate has a Jacobian
+      that jumps where a position crosses a lattice plane (or a face of the
+      grid's hull, outside which the kernel clamps).  `rho_spectral`,
+      `spectral_error_bound` and `gradient_relative_error_bound` are the
+      linearisation at the returned iterate, and `spectral_usable` asked
+      only for a finite bound and a settled Krylov space.  Where the solve
+      stopped with a marker on one side of a plane and its fixed point on
+      the other, the bound was the distance to the fixed point of another
+      polynomial.  Measured on the 0.4.0 development tree (CPU, jaxlib
+      0.11.0), the documented diagnosed case (one grid, one marker, a
+      target-anchored gather and a source-anchored scatter, `solver="ift"`,
+      `diagnostics=True`): Gauss-Seidel, the L2 norm, `tolerance=1e-4`,
+      float64: `converged=True`, `rho_spectral=0.2833`,
+      `spectral_error_bound=3.6e-5`, `spectral_usable=True` and no
+      `not_usable_reason`, against a true distance of 2.75e-4 (0.13x; 0.16x
+      in float32) and a spectral radius of 0.972 in the fixed point's cell.
+      The mixed norm read 0.45x and a Jacobi case 0.69x; at
+      `tolerance=3e-5` the iterate was in the fixed point's cell and the
+      bound held.  The geometry self-check passed (it moves each point
+      towards the middle of its own cell).  The property search that holds
+      these bounds to a float64 reference did not score an example whose
+      fixed point was in another lattice cell than the returned iterate,
+      so nothing held the flag there.  `gradient_relative_error_bound` was
+      already `inf` in every such row (its Newton-Kantorovich check takes
+      the Jacobian at the Newton point).  No release carried it: the
+      geometry-dependent tier and its diagnostics are new in 0.4.0's
+      development.  Fixed in 0.4.0: with `diagnostics=True` the step stores
+      the largest bound at which no position the pass reads from the
+      iterate is within twice the bound of a lattice plane
+      (`geometry_plane_limit`); where `spectral_error_bound` exceeds it and
+      the step did not certify its linearisation across the Newton step
+      (`gradient_relative_error_bound` not finite), the report sets
+      `spectral_usable` and `gradient_bound_usable` to `False`, keeps every
+      number, and says why in `not_usable_reason`.  A position that is a
+      constant of the pass withdraws nothing.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs a geometry-dependent
+      mapping read from the iterate (an experimental tier), diagnostics on,
+      and an iterate stopped a lattice plane away from its fixed point; the
+      iteration and `converged` were unaffected.  `context_dependent`
+      because whether the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: tighten the group's tolerance until the reported bound is
+      small against the distance of every marker to its nearest lattice
+      plane, or read `gradient_relative_error_bound`, which is `inf` there.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The rule keeps the flag where no plane is within twice the bound, on
+      the argument that the polynomial piece at the iterate has its fixed
+      point within the Newton-Kantorovich ball; a smooth nonlinearity
+      strong enough to put that fixed point beyond twice the bound is the
+      condition `spectral_error_bound` documents for every nonlinear group,
+      not a new one.  Where a plane is within reach it relies on the
+      gradient bound's Kantorovich check, which measures the Jacobian's
+      change between the iterate and the Newton point and is an estimate of
+      the Lipschitz constant, not a proof.  Only the `multilinear_grid`
+      kind is diagnosed; a registered kind of one's own reports no bound.
+    verification:
+      - "tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane"
+      - "tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-243"
+    title: "A marker exactly on the last lattice point of an axis failed the geometry self-check on an honest pass: every bound of the group withheld, with a reason blaming a member's derivative"
+    description: >
+      With `diagnostics=True` the step of a group with a `multilinear_grid`
+      edge compares its Jacobian-vector product along the positions with a
+      finite difference of the pass over a small step of every position
+      towards the middle of its lattice cell (`_probe_step`).  A point
+      exactly on the last lattice point of an axis has a cell fraction of
+      zero and was stepped upwards, out of the hull, where the kernel
+      clamps: the finite difference was zero while the product was the
+      documented interior one-sided derivative.  Measured on the 0.4.0
+      development tree (float32, lattice points at 0, 0.5, 1.0, 1.5, one of
+      two markers at exactly 1.5, the L2 norm, both iteration modes):
+      `geometry_gap` 0.61 to 0.76 against a tolerance of 0.25, every bound
+      NaN and a `not_usable_reason` naming "a member or a mapping whose
+      derivative is not that of its value".  A marker 1e-3 inside, on the
+      bottom face, on an interior plane or strictly outside passed.  A
+      second way the step left the stencil's polynomial, found by the
+      plane hunt this fix added: under Gauss-Seidel a member swept after
+      the holder of the positions reads them as the pass has just built
+      them (`pos_pre + drift + ...`), and the check moved the pre-step
+      positions towards the middle of *their* cell, which carried an
+      in-pass position 1e-6 of a spacing under a lattice plane across it
+      (`geometry_gap` 0.51 and 0.54 on two float32 draws).  A wrong
+      refusal, not a wrong number.  No release carried it.  Fixed in
+      0.4.0: a point on the top face steps inwards, as one on the bottom
+      face does, and a pre-step position steps towards the middle of the
+      cell of whichever of it and the in-pass position is nearer to a
+      lattice plane.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The report withheld bounds it could have given and said so, with a
+      reason; no wrong value was reported.  The harm is a misleading
+      reason for markers initialised on the grid's own boundary nodes.
+    affected_components:
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: keep markers off the last lattice point of an axis.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    verification:
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_finite_difference_over_the_probe_step_is_the_kernel_s_derivative"
+      - "tests/property/test_coupling_geometry_search.py::test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane"
+      - "tests/property/test_coupling_geometry_search.py::test_a_marker_whose_in_pass_position_is_a_rounding_from_a_plane_passes_the_self_check"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-244"
+    title: "Float32 fields read at float64 positions always failed the geometry self-check: every bound of the group withheld, with a reason blaming a member's derivative"
+    description: >
+      The self-check's step of a position was `sqrt(eps)` of the lattice
+      spacing in the *positions'* dtype: 7e-9 of a spacing for a float64
+      geometry.  A float32 field read through the mapping cannot resolve a
+      change that small, so the finite difference of the pass was rounding
+      while the Jacobian-vector product was not, and the two were compared
+      in the float64 position field at float64 resolution.  Measured on the
+      0.4.0 development tree under `jax_enable_x64` (a grid and markers in
+      float32 with the markers' positions in float64): `geometry_gap` 0.27
+      to 1.0 in four of four runs, every bound NaN, and the reason for a
+      derivative that is not that of its value.  A wrong refusal, not a
+      wrong number.  No release carried it.  Fixed in 0.4.0: the step is
+      `sqrt` of the coarser of the geometry's rounding and that of the
+      coarsest floating field the pass evaluates in, and a gap that is not
+      a number (a check that compared nothing) has a reason of its own.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The report withheld bounds it could have given and said so; no wrong
+      value was reported.
+    affected_components:
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: hold the positions in the fields' dtype.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    verification:
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_probe_step_is_sized_for_the_coarser_of_the_geometry_and_the_pass"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_step"
+      - "tests/property/test_coupling_geometry_search.py::test_float32_fields_at_float64_positions_pass_the_self_check"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-245"
+    title: "A mapping of a registered kind short of a Mapping protocol member, or carrying another kind, was accepted by add_edge and written by to_dict(), and from_dict() then refused that config"
+    description: >
+      What a factory registered with `register_mapping` returns is checked
+      when a config is loaded: the object must have the members of the
+      `Mapping` protocol and `kind` equal to the registered kind
+      (`MappingRebuildError` otherwise).  `add_edge` asked only for
+      `apply`, `params_pytree`, the sizes and the weight table's contract,
+      and the writers (`to_dict()`, `save_graph_to_usd`) read back the
+      spec alone.  So an object without `mode`, without `apply_T`, or
+      whose `kind` attribute was another name was added, compiled, stepped
+      and written, and the config it wrote was refused at the next load,
+      possibly on another machine.  Measured on the 0.4.0 development tree
+      with three such classes; the same class with the member added
+      round-trips.  Loud, at load.  No release carried it: the registry is
+      new in 0.4.0's development.  Fixed in 0.4.0: one rule
+      (`_registered_class_problem`: the protocol's members, the kind, and
+      `needs_geometry` as registered) is asked where the edge is added, by
+      both writers and by the loader.  A checkpoint, a REST state write and
+      an FMU state archive carry a mapping's weights and not its recipe,
+      and are read into a graph whose edges came through those doors.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the load raised an error naming the edge, the kind and what
+      was missing; nothing wrong was computed.  The harm is a saved config
+      that cannot be loaded, found late.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_edge"
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.core.coupling.mapping_spec.check_mapping_serialisable"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: give a mapping class of a registered kind every member of
+      the `Mapping` protocol and `kind` equal to the kind it is registered
+      under, and load a config back once after writing it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    verification:
+      - "tests/core/test_mapping_registry.py::test_an_object_its_kind_cannot_be_rebuilt_as_is_refused_at_every_door"
+      - "tests/usd/test_usd_mapping_spec.py::test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as"
+      - "tests/core/test_mapping_registry.py::test_a_registered_class_with_every_member_passes_every_door"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-246"
+    title: "The geometry self-check can withhold the honest report of a float32 Gauss-Seidel group in which a member reads a position that another member has just built, when that position is within about 2e-5 of a spacing of a lattice plane"
+    description: >
+      With `diagnostics=True` the step of a group with a `multilinear_grid`
+      edge compares its Jacobian-vector product along the positions with a
+      finite difference of the pass over a step of `sqrt(eps)` of a spacing
+      (`_bounds._geometry_product_gap`), and the report withholds every
+      bound where the two differ by more than `GEOMETRY_GAP_TOLERANCE`
+      (0.25).  The step is chosen so that no position it moves crosses a
+      lattice plane, the positions a sweep builds from a pre-step one
+      included (MADD-ANO-243).  It does not choose how a position moves
+      that a member builds *from its mapped input* and another member
+      reads in the same Gauss-Seidel sweep (a source-anchored geometry
+      whose holder is swept before its reader): the step of the positions
+      in the iterate changes that input, and the built position follows by
+      about the holder's pull times the step, 5e-5 of a spacing in the
+      measured cells.  Where it is nearer than that to a lattice plane it
+      crosses, the difference straddles two polynomials of the stencil and
+      is no derivative.  Measured on the 0.4.0 development tree on the
+      plane hunt's two float32 cells of this kind (both anchors at the
+      source, the grid swept first; fixed points placed 1e-6 to 1e-2 of a
+      spacing from a plane): of 2829 honest examples on jaxlib 0.11.0, 1489
+      of them within 2e-5 of a spacing of their plane, 47 read a gap over
+      0.05, 13 over 0.1, 2 over 0.2 and one 0.59; one draw of the hunt reads 0.26 on jaxlib
+      0.10.2 and 0.29 on 0.11.2, over the tolerance, so its bounds are NaN
+      with a `not_usable_reason`.  With the check taken out of the report
+      every one of those examples had `spectral_usable=True` on a bound the
+      float64 reference holds.  A thousand plane draws further than 2e-5
+      of a spacing from their plane read 4.4e-3 at most, the six other
+      cells of the hunt 6.4e-3 at most, and float64 is not affected (its
+      step is 1.5e-8 of a spacing).  A wrong refusal, not a wrong number,
+      and the reason names it: a gap over the tolerance is reported as
+      either a derivative that is not the value's or a finite difference
+      that could not be formed.  It is also why the tolerance is not
+      lower: at 0.05 the check would catch a product that misses the
+      geometry term of a weak deposit (0.22) and would withhold 7 to 9 of
+      the 4,450 honest examples of the geometry search's hunts, all of this
+      kind.  No release carried it: the self-check is new in 0.4.0's
+      development.  Found by measuring the gap on every example of the
+      plane hunt.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The report withholds bounds it could have given and says so, with a
+      reason that names this case; no wrong value is reported, and the
+      step's state is the same with diagnostics off.
+    affected_components:
+      - "maddening.core.coupling._bounds._geometry_product_gap"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      A report withheld for this reason is withheld for the step where a
+      position sat beside a plane: read the next step's.  Where the bounds
+      are needed on every step, run the group under
+      `iteration_mode="jacobi"` or in float64 (`jax_enable_x64`), neither
+      of which is affected.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  The check cannot tell a finite difference across a
+      lattice plane from a product that is not the derivative, so no
+      tolerance separates the two: honest examples of this kind read up to
+      0.59 and a product that missed a weak geometry term 0.22.  A fix
+      needs the step to keep every position the pass reads on its side of
+      a plane, the ones a member builds from its input included, or to
+      recognise a difference that crossed one.
+    verification:
+      - "tests/property/test_coupling_geometry_search.py::test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a_plane"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance"
+    github_issue: null

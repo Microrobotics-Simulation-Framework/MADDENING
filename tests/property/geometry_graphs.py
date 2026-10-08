@@ -787,7 +787,8 @@ _NOT_USABLE = {"amplification": "nan", "error_estimate": "nan", "ratio_usable": 
 WHY = {"kind": "other than 'multilinear_grid'",
        "sub-cycled": "in a sub-cycled group",
        "norm": "under convergence_norm='interface'",
-       "self-check": "disagrees with a finite difference of the pass"}
+       "self-check": "disagrees with a finite difference of the pass",
+       "self-check-unevaluated": "could not be compared with a finite difference of the pass"}
 
 
 def interface_norm_refused(knobs) -> bool:

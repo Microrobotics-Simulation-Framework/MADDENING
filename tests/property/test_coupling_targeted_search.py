@@ -56,9 +56,10 @@ and held to a floor in the slow profile):
    ``rho_spectral`` as an upper estimate, so none is scored;
 3. *gradient bound* (CPL-093): the true relative error of the implicit
    derivative taken at the returned iterate against the same dense solve
-   at the fixed point, the worst over every scalar gain and mapping
-   weight, over ``gradient_relative_error_bound``, where
-   ``gradient_bound_usable``;
+   at the fixed point, the worst over every scalar gain and every mapping
+   weight the graph holds (:func:`gradient_constants`: every entry of a
+   matrix held dense, the pattern's entries of a sparse mapping), over
+   ``gradient_relative_error_bound``, where ``gradient_bound_usable``;
 4. *floor* (CPL-097, CPL-100): how far the exact residual of the returned
    state is *above* the reported one, over the floor the report used --
    at a stalled iterate, whose reported residual is zero, the plateau
@@ -418,9 +419,43 @@ def _radius_allowance(A: np.ndarray, rho: float, eps: float, seed: int) -> float
     return 1e-4 * rho + 16.0 * moved
 
 
-def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
-    """The worst relative error of ``d x* / d c`` taken at the returned
-    iterate, over every scalar gain and mapping weight ``c`` of the group.
+def gradient_constants(topo: ct.Topology, mapping_kind: str) -> list:
+    """The scalar constants the gradient score is taken over: what a graph
+    of *topo* built under *mapping_kind* holds as parameters of its group.
+
+    Every entry of every gain of every member, and of each mapped edge the
+    entries :func:`~tests.property.coupled_topologies.parameter_entries`
+    names: every entry of a matrix held dense, the pattern's entries of a
+    sparse one.  An entry outside a sparse pattern is structure -- the
+    graph has no weight there, no user can ask for a derivative with
+    respect to one and ``gradient_relative_error_bound`` says nothing of
+    it -- so it is no constant; an entry of the pattern is one whatever
+    its drawn weight.  Each as the keyword arguments that name it:
+    ``node, port, entry`` or ``edge, entry``.
+    """
+    constants = []
+    for m in topo.groups[0]:
+        nd = topo.node(m)
+        assert not nd.three_arg, (
+            f"{m} reads its gains when the step is traced: the graph holds no parameter there")
+        for j in range(nd.ports):
+            constants += [dict(node=m, port=j, entry=(a, b))
+                          for a in range(nd.n) for b in range(nd.n)]
+    for i, e in enumerate(topo.edges):
+        if e.mapped:
+            held = ct.parameter_entries(topo, i, mapping_kind)
+            constants += [dict(edge=i, entry=(int(a), int(b))) for a, b in zip(*np.nonzero(held))]
+    return constants
+
+
+def gradient_errors(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> list:
+    """``(relative error, constant)`` of ``d x* / d c`` taken at the
+    returned iterate, for every constant ``c`` of
+    :func:`gradient_constants` the fixed point depends on.
+
+    *mapping_kind*: how the graph that *model* describes holds its mapped
+    edges (the cell's: a model is the dense one whatever the kind, and
+    cannot say).
 
     With the pass ``F(x) = (I - L)^{-1} (U x + c_g)`` and ``M = L + U``,
     the implicit derivative at an iterate ``x`` is ``(I - M)^{-1} (dL F(x)
@@ -430,6 +465,14 @@ def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
     the group's norm reads, each over its magnitude at the returned state.
     """
     topo = model.topo
+    assert model.geometry is None, "a geometry-dependent mapping holds no weights"
+    for i, e in enumerate(topo.edges):
+        if e.mapped:
+            # The model is the graph's only where its matrix is zero
+            # wherever the graph holds nothing.
+            outside = ~ct.parameter_entries(topo, i, mapping_kind)
+            assert not np.any(np.asarray(model.values["H"][i])[outside]), (
+                f"edge {i}: the model's matrix is not one a {mapping_kind!r} edge holds")
     members, off, k = model._group_layout(0)  # noqa: SLF001
     L, U = model.group_pass(0)
     cg_ = model.group_constant(0, pre, state)
@@ -456,27 +499,22 @@ def _gradient_error(model: ct.LinearModel, pre: dict, state: dict) -> float:
         L1, U1 = other.group_pass(0)
         return L1 - L, U1 - U
 
-    constants = []
-    for m in members:
-        nd = topo.node(m)
-        for j in range(nd.ports):
-            constants += [dict(node=m, port=j, entry=(a, b))
-                          for a in range(nd.n) for b in range(nd.n)]
-    for i, e in enumerate(topo.edges):
-        if e.mapped:
-            H = np.asarray(model.values["H"][i])
-            pattern = np.ones(H.shape, bool)
-            constants += [dict(edge=i, entry=(a, b)) for a in range(H.shape[0])
-                          for b in range(H.shape[1]) if pattern[a, b]]
-    worst = 0.0
-    for c in constants:
+    errors = []
+    for c in gradient_constants(topo, mapping_kind):
         dL, dU = moved(**c)
         t_k = resolvent @ np.asarray(dL @ F + dU @ x, np.float64)
         miss = resolvent @ np.asarray(dL @ (F - xs) + dU @ (x - xs), np.float64)
         size = float(np.linalg.norm(WS @ t_k))
         if size > 0:
-            worst = max(worst, float(np.linalg.norm(WS @ miss)) / size)
-    return worst
+            errors.append((float(np.linalg.norm(WS @ miss)) / size, c))
+    return errors
+
+
+def _gradient_error(model: ct.LinearModel, pre: dict, state: dict, mapping_kind: str) -> float:
+    """The worst of :func:`gradient_errors`: over every scalar gain and
+    every mapping weight the graph holds."""
+    return max((error for error, _c in gradient_errors(model, pre, state, mapping_kind)),
+               default=0.0)
 
 
 def radius_scores(out: dict, J: np.ndarray, wv: np.ndarray, rho_reported: float, eps: float,
@@ -564,14 +602,17 @@ def observe(case: Case) -> dict:
         out["report"]["distance"] = dist
 
     if out["gradient_usable"]:
-        true = _gradient_error(model, step.pre, step.state)
+        true, constant = max(
+            gradient_errors(model, step.pre, step.state, cell.mapping_kind),
+            key=lambda error: error[0], default=(0.0, None))
         # The bound is on the error of stopping early.  The derivative it
         # is relative to is itself a float solve, good to no better than a
         # few ``eps``: an error below 64 of them (the allowance of the
         # domain check of CPL-093) is not one a gradient in this dtype has.
         bound = float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
         out["gradient"] = math.inf if math.isnan(bound) else true / bound
-        out["report"]["gradient_error"] = true
+        out["report"].update(gradient_error=true, gradient_constant=constant,
+                             gradient_allowed=bound)
     return out
 
 
@@ -976,13 +1017,6 @@ SIDE_DIAGNOSED = (
     Cell("side-hub", "float32", 6, 120, "sparse-local"),
 )
 SIDE_DIAGNOSED_CELLS = tuple(range(len(CELLS), len(CELLS) + len(SIDE_DIAGNOSED)))
-#: The gradient score differentiates with respect to *every* entry of a
-#: mapping's matrix (:func:`_gradient_error`); a sparse mapping has no
-#: constant outside its pattern, and a local pattern is mostly outside (the
-#: score reads 2.6 on entries that do not exist), so that search takes the
-#: cells that hold their matrix dense.
-SIDE_DIAGNOSED_DENSE = tuple(i for i, c in zip(SIDE_DIAGNOSED_CELLS, SIDE_DIAGNOSED)
-                             if c.mapping_kind.startswith("matrix"))
 #: Float64 cells with a dense gather for the widened draw below: a mapping
 #: row that differences two entries of a large source field
 #: (``Domain.cancel``).  There the delivered value and the source field are
@@ -1182,8 +1216,7 @@ def test_a_known_side_defect_the_search_reached_is_fixed(case):
 @pytest.mark.parametrize("name", SEARCHES)
 def test_the_reported_numbers_hold_on_cells_with_a_mapping_between_sizes(name):
     profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4)
-    cells = SIDE_DIAGNOSED_DENSE if name == "gradient" else SIDE_DIAGNOSED_CELLS
-    report, usable = search(name, cells=cells, profile=profile)
+    report, usable = search(name, cells=SIDE_DIAGNOSED_CELLS, profile=profile)
     print(f"{name}, side cells: worst {report}; usable fraction {usable:.2f}")
     assert usable > 0, f"{name}: no example had the flag set"
 
@@ -1198,3 +1231,235 @@ def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(
                             profile=profile)
     print(f"{name}, cancelling side cells: worst {report}; usable fraction {usable:.2f}")
     assert usable > 0, f"{name}: no example had the flag set"
+
+
+# =============================================================================
+# THE GRADIENT SCORE'S CONSTANTS ON A SPARSE EDGE
+# =============================================================================
+#
+# The gradient score is the worst over "every scalar gain and mapping
+# weight".  Which entries of a mapped edge's matrix are weights depends on
+# how the graph holds it (:func:`gradient_constants`), and a score taken
+# over entries the graph does not hold is a wrong score with the flag set.
+# The enumeration was every entry of the matrix whatever the edge: on the
+# example below it read 2.62 (jaxlib 0.11.0; 2.58 on 0.10.2 and 0.11.2),
+# all of it from entries outside a local pattern (0.53 over the gains and
+# the pattern's eight weights).  The same matrices held dense score 0.48,
+# and rightly over every entry: there each is a weight and
+# ``gradient_relative_error_bound`` covers it (5.6e-3, against 1.0e-3 on
+# the sparse graph).
+#
+# Which patterns can show it: the relative error of the derivative with
+# respect to a weight is that of the source entry it reads, whatever its
+# row (the weight moves the pass along one fixed direction, by that
+# entry).  So the entries outside a pattern change the worst only in a
+# column that holds none -- a source entry the mapping never reads.  A
+# local gather has such columns (the example reads two of eight cells); a
+# ragged pattern has a full row and none, so its scores are the same
+# numbers under either enumeration.
+
+_LOCAL_SPARSE = Cell("side-2-8-r", "float64", 6, 5, "sparse-local")
+#: The example: two markers and eight cells, four of each edge's sixteen
+#: entries in its pattern, stopped after five passes at a loop gain of 0.5.
+OUTSIDE_THE_PATTERN = Case(CELLS.index(_LOCAL_SPARSE), 1, 0.5, False, 1.0, 0.0, 1.0, 0, 1.0, 0)
+#: One cell per sparse kind whose pattern leaves entries out.
+_SPARSE_SHAPES = {
+    "sparse-local": _LOCAL_SPARSE,
+    "sparse-ragged": Cell("mapped", "float64", 0, 5, "sparse-ragged"),
+    "sparse-scatter": Cell("mapped", "float64", 0, 5, "sparse-scatter"),
+}
+#: The mapping kinds under which an edge holds fewer weights than its
+#: matrix has entries, on the structures below.
+_HOLDS_A_PATTERN = ("sparse-ragged", "sparse-scatter", "sparse-local")
+
+
+def _named(constant: dict) -> tuple:
+    return (constant.get("node"), constant.get("port"), constant.get("edge"), constant["entry"])
+
+
+def _outside(topo: ct.Topology, mapping_kind: str) -> set:
+    """``(edge, entry)`` of every matrix entry outside its edge's pattern."""
+    return {(i, (int(a), int(b))) for i, e in enumerate(topo.edges) if e.mapped
+            for a, b in zip(*np.nonzero(~ct.mapping_pattern(topo, i, mapping_kind)))}
+
+
+def _plain_passes(model: ct.LinearModel, values: dict, count: int) -> tuple:
+    """``(pre, state)`` after *count* plain passes of group 0 from the drawn
+    start: an iterate away from the fixed point, with no graph compiled."""
+    topo = model.topo
+    assert set(topo.groups[0]) == set(topo.names), "a group with no outside reads"
+    members, off, k = model._group_layout(0)  # noqa: SLF001
+    pre = {m: {"x": np.asarray(values["nodes"][m]["x0"], np.float64)} for m in members}
+    L, U = (np.asarray(a, np.float64) for a in model.group_pass(0))
+    c = np.asarray(model.group_constant(0, pre, pre), np.float64)
+    x = np.concatenate([pre[m]["x"] for m in members])
+    for _ in range(count):
+        x = np.linalg.solve(np.eye(k) - L, U @ x + c)
+    return pre, {m: {"x": x[off[m]:off[m] + topo.node(m).n]} for m in members}
+
+
+@pytest.mark.parametrize("kind", ct.MAPPING_KINDS + ct.LOCAL_KINDS)
+def test_the_gradient_constants_of_a_mapped_edge_are_the_weights_its_build_holds(kind):
+    """Read off the build, not restated: a sparse edge's weights are the
+    valid slots ``ct.build`` lays out for it (where ``ct.params_for``
+    writes a matrix into the graph), a dense edge's are its whole matrix.
+    No graph is compiled."""
+    fewer = 0
+    for name in ("mapped", "side-2-8-r", "side-hub", "side-4-4"):
+        topo = STRUCTURES[name]
+        built = ct.build(topo, Cell(name, "float32", 0, 5).knobs, compile=False,
+                         mapping_kind=kind)
+        constants = gradient_constants(topo, kind)
+        assert len({_named(c) for c in constants}) == len(constants), "a constant named twice"
+        mapped = [i for i, e in enumerate(topo.edges) if e.mapped]
+        assert mapped and {c["edge"] for c in constants if "edge" in c} == set(mapped)
+        for i in mapped:
+            e = topo.edges[i]
+            every = {(a, b) for a in range(topo.node(e.dst).n) for b in range(topo.node(e.src).n)}
+            if i in built.slots:
+                slots = built.slots[i]
+                held = {(int(a), int(b))
+                        for a, b in zip(slots.target[slots.valid], slots.source[slots.valid])}
+            else:
+                held = every
+            scored = {c["entry"] for c in constants if c.get("edge") == i}
+            assert scored == held, (
+                f"{name}, edge {i} under {kind!r}: the score differentiates {sorted(scored - held)} "
+                f"which the graph does not hold and leaves out {sorted(held - scored)} which it does")
+            fewer += held < every
+    # The premise: the kinds that hold a pattern hold fewer weights than
+    # entries somewhere, and no other kind does.
+    assert (fewer > 0) is (kind in _HOLDS_A_PATTERN), (kind, fewer)
+
+
+@pytest.mark.parametrize("kind", sorted(_SPARSE_SHAPES))
+def test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern(kind):
+    """One matrix and one iterate, enumerated as a sparse edge and as a
+    dense edge hold them (no graph: the oracle alone).  The sparse errors
+    are the dense ones constant for constant, without the entries outside
+    the pattern; a pattern entry whose weight is zero is still a constant;
+    and a dense *local* matrix, zero outside its pattern, is differentiated
+    in every entry.  On the local example the entries a sparse edge does
+    not hold carry five times the error of those it does: a bound that is
+    tight for the graph's constants reads far over on them."""
+    cell = _SPARSE_SHAPES[kind]
+    topo = cell.topo
+    values = values_of(OUTSIDE_THE_PATTERN, cell)
+    model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    pre, state = _plain_passes(model, values, cell.cap)
+    as_sparse = {_named(c): error for error, c in gradient_errors(model, pre, state, kind)}
+    as_dense = {_named(c): error for error, c in gradient_errors(model, pre, state, "matrix")}
+    outside = {(None, None, edge, entry) for edge, entry in _outside(topo, kind)}
+    assert outside and as_sparse
+    left_out = set(as_dense) - set(as_sparse)
+    assert left_out and left_out <= outside, "the premise: the fixed point moves with them"
+    assert not set(as_sparse) & outside
+    assert as_sparse == {name: error for name, error in as_dense.items() if name not in outside}
+    # A weight's error is its source entry's: every entry of a column has
+    # one error, so only a column no weight reads can raise the worst.
+    patterns = {i: ct.mapping_pattern(topo, i, kind) for i, e in enumerate(topo.edges) if e.mapped}
+    for i in patterns:
+        columns: dict = {}
+        for (_node, _port, at, (_row, column)), error in as_dense.items():
+            if at == i:
+                columns.setdefault(column, []).append(error)
+        assert all(max(errors) - min(errors) <= 1e-9 * max(errors) for errors in columns.values())
+    unread = {(i, int(b)) for i, pattern in patterns.items()
+              for b in np.nonzero(~pattern.any(axis=0))[0]}
+    assert bool(unread) is (kind == "sparse-local")
+    if not unread:
+        # (To rounding: two rows of a column differ in the last place.)
+        assert max(as_dense.values()) <= max(as_sparse.values()) * (1.0 + 1e-9)
+
+    # A weight at zero is still a weight: the pattern says so, not the values.
+    edge = next(i for i, e in enumerate(topo.edges) if e.mapped)
+    entry = tuple(int(v) for v in np.argwhere(ct.mapping_pattern(topo, edge, kind))[0])
+    zeroed = {**values, "H": {**values["H"], edge: np.array(values["H"][edge])}}
+    zeroed["H"][edge][entry] = 0.0
+    at_zero = ct.LinearModel(topo, zeroed, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    assert (None, None, edge, entry) in {
+        _named(c) for _error, c in gradient_errors(at_zero, *_plain_passes(
+            at_zero, zeroed, cell.cap), kind)}
+
+    if kind == "sparse-local":
+        # The same matrices held dense: every entry, the zeros included.
+        local = {_named(c): error
+                 for error, c in gradient_errors(model, pre, state, "matrix-local")}
+        assert local == as_dense
+        beyond = max(as_dense, key=as_dense.get)
+        assert beyond in outside and (beyond[2], beyond[3][1]) in unread
+        assert as_dense[beyond] > 4.0 * max(as_sparse.values()), (
+            as_dense[beyond], max(as_sparse.values()))
+
+
+def test_the_gradient_oracle_refuses_a_matrix_a_sparse_edge_cannot_hold():
+    """A model whose matrix is non-zero outside the pattern is not the
+    model of a sparse graph: scoring it as one would be a third reading."""
+    cell = dataclasses.replace(_LOCAL_SPARSE, mapping_kind="matrix")
+    values = values_of(OUTSIDE_THE_PATTERN, cell)
+    model = ct.LinearModel(cell.topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    pre, state = _plain_passes(model, values, cell.cap)
+    assert gradient_errors(model, pre, state, "matrix")
+    with pytest.raises(AssertionError, match="is not one a 'sparse-local' edge holds"):
+        gradient_errors(model, pre, state, "sparse-local")
+
+
+def test_the_gradient_constants_refuse_a_member_whose_gains_are_read_at_trace_time():
+    """A three-argument member's gains are baked into the compiled step:
+    like an entry outside a pattern, nothing the graph holds as a parameter."""
+    b = ct.TopologyBuilder()
+    b.node("a", 2)
+    b.node("b", 2, three_arg=True)
+    b.edge("a", "b")
+    b.edge("b", "a")
+    b.group("a", "b")
+    with pytest.raises(AssertionError, match="reads its gains when the step is traced"):
+        gradient_constants(b.build(), "matrix")
+
+
+# Slow: the sparse cell and its dense twin compiled with diagnostics.
+# Per push: tests/property/test_coupling_targeted_search.py::test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern
+@pytest.mark.slow
+def test_the_gradient_score_of_a_sparse_edge_is_taken_over_its_pattern():
+    """The step itself, on the example the old enumeration read 2.62 on.
+
+    The score holds and its worst constant is one the graph holds; the
+    entries outside the pattern would have carried it past the threshold;
+    and the same matrices held dense are scored over every entry, which
+    the library's own bound allows for (it is the larger of the two)."""
+    case = OUTSIDE_THE_PATTERN
+    cell = CELLS[case.cell]
+    topo, kind = cell.topo, cell.mapping_kind
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["gradient_usable"], report
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+    values = values_of(case)
+    with precision(cell.dtype == "float64"):
+        (step,) = ct.run(_built(case.cell), values, 1)
+    model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    outside = _outside(topo, kind)
+    worst, constant = max(gradient_errors(model, step.pre, step.state, kind),
+                          key=lambda error: error[0])
+    assert worst == pytest.approx(report["gradient_error"], rel=1e-9)
+    assert constant == report["gradient_constant"]
+    assert (constant.get("edge"), constant["entry"]) not in outside
+    beyond, where = max(gradient_errors(model, step.pre, step.state, "matrix"),
+                        key=lambda error: error[0])
+    assert (where.get("edge"), where["entry"]) in outside
+    # units: a score; measured 2.58 on jaxlib 0.10.2 and 0.11.2, 2.62 on 0.11.0.
+    assert beyond / report["gradient_allowed"] > 1.5 * THRESHOLD["gradient"], (
+        beyond, report["gradient_allowed"])
+
+    dense = dataclasses.replace(case, cell=CELLS.index(
+        dataclasses.replace(cell, mapping_kind="matrix-local")))
+    held_dense = observe(dense)
+    assert held_dense["gradient_usable"], held_dense["report"]
+    assert held_dense["gradient"] <= THRESHOLD["gradient"], held_dense["report"]
+    at = held_dense["report"]["gradient_constant"]
+    # Every entry of the dense matrix is scored: the worst is a zero the
+    # sparse edge does not hold, at the error the sparse score left out.
+    assert (at.get("edge"), at["entry"]) in outside
+    assert held_dense["report"]["gradient_error"] == pytest.approx(beyond, rel=1e-6)
+    assert (held_dense["report"]["gradient_relative_error_bound"]
+            > 2.0 * report["gradient_relative_error_bound"])

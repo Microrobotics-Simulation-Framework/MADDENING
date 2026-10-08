@@ -83,6 +83,8 @@ CC = (_COMPILE_CACHE,)
 SLOW_RULE = (_SLOW_RULE,)
 _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
+_PLAN_SCAN = "tests/core/test_interface_plan_is_the_only_enumeration.py"
+PLAN_SCAN = (_PLAN_SCAN,)
 #: The witness rule alone (no collection of the tree), and its self-tests.
 WITNESS = (f"{_CLAIMS}::test_every_tested_domain_cites_a_test_that_names_its_domain",)
 SERVER_WORDS = (f"{_CLAIMS}::test_the_witness_rule_reads_the_server_vocabulary",)
@@ -91,13 +93,18 @@ CPL = "docs/validation/coupling_claims.yaml"
 RST = "docs/validation/rest_runpod_claims.yaml"
 SYS = "docs/validation/sysid_fmu_claims.yaml"
 MAP = "docs/validation/mapping_claims.yaml"
+#: The coupling search's gradient oracle: what it enumerates against what a
+#: build holds, then against the dense enumeration (neither compiles a graph).
+_SEARCH = "tests/property/test_coupling_targeted_search.py"
+ORACLE = (f"{_SEARCH}::test_the_gradient_constants_of_a_mapped_edge_are_the_weights_its_build_holds",
+          f"{_SEARCH}::test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern")
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
 CI_ALL = DUR + SHARD + WF
 
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE)
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN)
 
 
 @dataclass(frozen=True)
@@ -677,6 +684,39 @@ MUTANTS: tuple[Mutant, ...] = (
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
        CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "
        "guard's source reader with what pytest collects from tests/usd"),
+    # --- O: a search's oracle, tests/property/test_coupling_targeted_search.py ---
+    _M("O1", _SEARCH, "            held = ct.parameter_entries(topo, i, mapping_kind)\n",
+       "            held = np.ones_like(ct.parameter_entries(topo, i, mapping_kind))\n", ORACLE,
+       "the coupling search's gradient score taken over every entry of a mapped edge's matrix: on a "
+       "sparse mapping it differentiates entries outside the pattern, which the graph does not hold "
+       "(a score of 2.6 with the flag set, from constants that do not exist)"),
+    # --- IP: a coupling group's edges are enumerated in one module only, -----
+    # --- tests/core/test_interface_plan_is_the_only_enumeration.py -----------
+    _M("IP1", "src/maddening/core/coupling/_group_layout.py",
+       '    return group.convergence_norm == "interface" and plan.norm_reads_mapping_weights()\n',
+       '    return group.convergence_norm == "interface" and any(\n'
+       "        e.mapping is not None and e.source_field for e in plan.declared_edges())\n",
+       PLAN_SCAN, "a second enumeration of what the interface norm reads, in the layout module"),
+    _M("IP2", "src/maddening/core/coupling/_coupled_block.py",
+       "                read = plan.source_fields()\n",
+       "                read = {(e.source_node, e.source_field) for e in plan.declared_edges()}\n",
+       PLAN_SCAN, "the spectrum's weights looping over the edges themselves again"),
+    _M("IP3", _PLAN_SCAN,
+       'EDGE_ATTRIBUTES = ("source_node", "target_node", "source_field", "target_field", "geometry")',
+       'EDGE_ATTRIBUTES = ("source_field", "target_field")',
+       PLAN_SCAN, "a loop that tests only the edges' nodes, or reads their geometry"),
+    _M("IP4", _PLAN_SCAN,
+       '           if not where.startswith(f"{DESCRIPTION}::") and where not in allowed]',
+       '           if not where.startswith("core/coupling/") and where not in allowed]',
+       PLAN_SCAN, "any enumeration written in the coupling package: the whole package exempt"),
+    _M("IP5", _PLAN_SCAN,
+       '    return [*sorted((SRC / "core" / "coupling").glob("*.py")), SRC / "core" / "graph_manager.py"]',
+       '    return sorted((SRC / "core" / "coupling").glob("*.py"))',
+       PLAN_SCAN, "an enumeration written in graph_manager.py, which the scan no longer reads"),
+    _M("IP6", _PLAN_SCAN,
+       "            for where in sorted(allowed) if where not in found]",
+       "            for where in sorted(allowed) if False]",
+       PLAN_SCAN, "an allowance that outlives its function, inherited by the next one of that name"),
 )
 
 

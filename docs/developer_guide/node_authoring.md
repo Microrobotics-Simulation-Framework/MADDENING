@@ -266,6 +266,10 @@ def test_your_analytical_comparison():
 - Verify finiteness, structure preservation, determinism for random inputs
 - Test conservation laws and energy dissipation where applicable
 - See the [Verification Guide](verification.md) for the full checklist
+- A verified node is the first of three levels: the edges it is coupled through
+  (`verify_mapping`) and the coupled graph (`verify_graph_order`) have checks of
+  their own, in [Verifying a coupled model in three
+  levels](verification.md#verifying-a-coupled-model-in-three-levels)
 
 <!-- snippet: no-run, reason: pseudo-code: your_node and bounds={...} are placeholders -->
 ```python

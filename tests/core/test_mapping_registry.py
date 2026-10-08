@@ -1795,26 +1795,10 @@ def test_an_object_its_kind_cannot_be_rebuilt_as_is_refused_at_every_door(case):
         assert isinstance(unloaded.value.__cause__, error)
 
 
-def test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as():
-    """The second writer of a mapping's recipe asks the same question."""
-    pytest.importorskip("pxr", reason="the USD writer needs usd-core")
-    from pxr import Usd  # noqa: PLC0415
-
-    from maddening.core.edge import EdgeSpec  # noqa: PLC0415
-    from maddening.usd.serialization import save_graph_to_usd  # noqa: PLC0415
-
-    points = np.array([0.0, 0.5, 1.0])
-    for case in sorted(_UNFIT_CLASSES):
-        what, _error, message = _UNFIT_CLASSES[case]
-        with temporary_kind("returns", _returns(lambda spec, s, t, what=what: what(spec)),
-                            **_RETURNS) as make:
-            gm = GraphManager()
-            gm.add_node(Vec("a", 1.0, n=3))
-            gm.add_node(Vec("b", 1.0, n=3))
-            gm._edges.append(EdgeSpec("a", "b", "v", "inp",                # noqa: SLF001
-                                      mapping=make(points, points, scale=1.5)))
-            with pytest.raises(ValueError, match=message):
-                save_graph_to_usd(gm, Usd.Stage.CreateInMemory())
+# The second writer of a mapping's recipe, ``save_graph_to_usd``, is asked the
+# same question with these classes in ``tests/usd/test_usd_mapping_spec.py``
+# (``test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as``):
+# the job that installs ``usd-core`` runs that directory.
 
 
 def test_a_registered_class_with_every_member_passes_every_door():

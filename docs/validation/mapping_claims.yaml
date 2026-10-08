@@ -2507,7 +2507,10 @@ claims:
     evaluates in", "and a point on the last lattice point of an axis steps
     inwards". "Where the gap is above GEOMETRY_GAP_TOLERANCE (0.25) or
     cannot be evaluated, the report withholds the bounds, and says which of
-    the two it was", with a not_usable_reason that gives the gap. "The check
+    the two it was", with a not_usable_reason that gives the gap. "A gap
+    above the tolerance is reported as either a derivative that is not the
+    value's or a finite difference that could not be formed: the check does
+    not tell those apart." "The check
     costs one product and
     one evaluation of the pass per direction, and exists only in the step of
     such a group with diagnostics on."
@@ -2520,8 +2523,10 @@ claims:
   conditions: >-
     the arithmetic on a two-field float32 map whose tangent is all, half
     and none of its derivative, a field moved by less than the rounding
-    allowed, and a non-finite state; the report's reading of the slot at the
-    tolerance, above it and at NaN, on the float32 pair of MAP-036; the gap
+    allowed, a missed term that moves a field by nine resolutions (0.22),
+    and a non-finite state; the report's reading of the slot under the
+    tolerance, above it (both readings of a gap named) and at NaN (neither
+    named), on the float32 pair of MAP-036; the gap
     on every per-push draw of that pair (at most a fifth of the tolerance:
     measured 3.1e-3 at most over 240 draws of it); the slot absent, and the report unchanged,
     for the same group without diagnostics; the step against the kernel's
@@ -2532,16 +2537,26 @@ claims:
     (MADD-ANO-240);
     mixed dtypes (float32 fields at float64 positions, MADD-ANO-241): the
     step's size and the gap of a toy pass. The steps compiled (jit) by
-    the graph. The separation is measured, not guaranteed: on 351 draws
-    of six cells an honest pass read at most 6e-3 in float32 and 3e-6 in
-    float64, and a pass whose every read of a geometry was under
-    stop_gradient 0.31 to 0.98 in float32 and 1.0 in float64; a wrong
-    derivative of a term that moves a field by about 32 float resolutions
-    or less is not seen (0.22, under the tolerance, on a deposit that
-    moved the spectral radius by 0.02), and an honest float32 gather of
-    a field that changes sign across a cell read 0.09 at a thousandfold
-    cancellation and 0.31, over the tolerance, at 1400-fold (its report
-    is then withheld). Not claimed for float64 (x64) on every
+    the graph. The separation is measured, not guaranteed, on jaxlib
+    0.10.2, 0.11.0 and 0.11.2. Honest: at most 5.7e-3 in float32 and
+    4.3e-6 in float64 on 350 draws of six cells, at most 9.5e-3 on 3,200
+    examples of the hunts away from a lattice plane. Every read of a
+    geometry under stop_gradient: 0.305 to 0.98 in float32 and 1.0 in
+    float64 on 353 draws, all withheld. THREE LIMITS. (1) A wrong
+    derivative of a term that moves a field by fewer than about 11 float
+    resolutions is not seen: the source-anchored reads under
+    stop_gradient on a deposit that moves the grid's field by nine read
+    0.22, under the tolerance, and the report stood on a radius of 0.003
+    against 0.025. (2) An honest float32 pass that reads a position it
+    built in the same Gauss-Seidel sweep, within about 2e-5 of a spacing
+    of a lattice plane, can read a gap of any size and be withheld: of
+    2829 plane draws of two such cells (1489 that near) 47 read over
+    0.05, 13 over 0.1, 2 over 0.2 and one 0.59 (jaxlib 0.11.0); one draw of the plane hunt reads 0.26 and 0.29
+    on 0.10.2 and 0.11.2 (MADD-ANO-243, open). (3) An honest float32
+    Gauss-Seidel pass behind a gather of a field alternating +A, -A
+    around a sample of order one reads under 0.09 up to A = 1020 and 0.25
+    to 0.75 beyond, except 0.14 at A = 2200 to 2700 (MADD-ANO-212; over
+    the tolerance its report is withheld). Not claimed for float64 (x64) on every
     push (the slow hunt measures it), 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
     checkpoints or sharded graphs.
@@ -2561,7 +2576,15 @@ claims:
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane'
   status: verified
   notes: >-
-    Slow, run once on each JAX lane: a compiled group of float32 fields
+    The tolerance stays at 0.25: at 0.05 the check would catch limit (1)'s
+    deposit and withhold 7 to 9 of the 4,450 honest examples of the hunts
+    (all of limit (2)), where it withholds none or one.
+    Slow, run once on each JAX lane: the three limits (the weak deposit
+    with the fault seeded in the pass's read of the geometry; the plane
+    hunt, which holds every gap over a fifth of the tolerance to a cell
+    that reads a position it built, within 1e-4 of a spacing of a plane,
+    and to one example in ten; the sign-changing gather at ten
+    amplitudes); a compiled group of float32 fields
     at float64 positions passes the check with the positions read from
     the iterate and from the pre-step state; a member whose tangent in its mapped
     input is half its derivative reads a gap of 0.4 to 0.6 with the

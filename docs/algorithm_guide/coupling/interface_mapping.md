@@ -1018,17 +1018,30 @@ with $D$ the norm's weights and $\mathrm{res}$ the residual's float
 resolution.  A product that does not see the geometry reads 1 on every
 field the positions move by much more than 32 resolutions, and less on a
 field they move by about that (the allowance is in the denominator: a
-term that weak is not compared).  An honest pass reads the finite
-difference's own error: on 351 drawn examples of six cells, a median of
-6e-4 and at most 6e-3 in float32, at most 3e-6 in float64.  A float32
-gather of a field that changes sign across a cell cancels digits the
-difference then lacks: 0.09 at a thousandfold cancellation, 0.31 at
-1400-fold and 0.40 at 3000-fold, so an honest report is withheld from
-about 1400-fold.  A
-pass whose every read of a geometry was under `stop_gradient` read 0.31
-to 0.98 in float32 on the same draws and 1.0 in float64; on a deposit
-weak enough that the geometry moved the spectral radius by 0.02 it read
-0.22, under the tolerance.  The step is `sqrt(eps)` of the
+term that moves a field by $G$ reads $G / (G + 32\,\mathrm{res})$, under
+the tolerance below about 11 resolutions).  An honest pass reads the finite
+difference's own error.  Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2:
+
+| the pass | draws | gap |
+|---|---|---|
+| honest, six cells of the geometry search | 350 | float32: median 6e-4, at most 5.7e-3; float64: at most 4.3e-6 |
+| honest, the search's hunts away from a lattice plane | 3,200 | at most 9.5e-3 |
+| every read of a geometry under `stop_gradient`, the six cells | 353 | float32: 0.305 to 0.98; float64: 1.0 |
+| the source-anchored reads under `stop_gradient`, a deposit that moves the grid's field by nine resolutions | 1 | 0.22, under the tolerance: the radius reported was 0.003 against 0.025 |
+| honest float32, a position built and read in one Gauss-Seidel sweep, placed 1e-6 to 1e-2 of a spacing from a lattice plane (1489 within 2e-5) | 2829 | 47 over 0.05, 13 over 0.1, 2 over 0.2, one 0.59 (MADD-ANO-243) |
+| honest float32, Gauss-Seidel behind a gather of a field alternating $\pm A$ around a sample of order one | 126 | under 0.09 up to $A = 1020$; 0.25 to 0.75 beyond, but 0.14 at $A$ = 2200 to 2700 (MADD-ANO-212) |
+
+The separation is therefore measured and not clean.  The step of the
+positions in the iterate moves a position that another member builds in
+the same sweep through that member's mapped input, in a direction the
+step does not choose; beside a lattice plane it crosses, and the
+difference straddles two polynomials.  A gather that cancels digits
+hands a small field the rounding of a large one, which the allowance,
+taken in the small field's resolution, does not cover.  At a tolerance
+of 0.05 the check would catch the weak deposit and withhold 7 to 9 of
+the 4,450 honest examples of the hunts, all beside a plane, where 0.25
+withholds none or one; the reason of a withheld report names both
+readings of a gap.  The step is `sqrt(eps)` of the
 spacing at the coarsest floating dtype the pass evaluates in (a step
 sized for float64 positions is below what float32 fields resolve), and a
 point on the last lattice point of an axis steps inwards, as one on the
@@ -1037,7 +1050,10 @@ position steps towards the middle of the cell of whichever of it and the
 position the pass builds from it is nearer to a lattice plane (a
 Gauss-Seidel sweep reads the second after the holder's update).  Where the gap is above
 `GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
-withholds the bounds, and says which of the two it was.  The check costs
+withholds the bounds, and says which of the two it was.  A gap above the
+tolerance is reported as either a derivative that is not the value's or
+a finite difference that could not be formed: the check does not tell
+those apart.  The check costs
 one product and one evaluation of the pass per direction, and exists
 only in the step of such a group with diagnostics on.
 

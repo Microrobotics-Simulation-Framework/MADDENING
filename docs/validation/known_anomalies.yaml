@@ -14450,11 +14450,18 @@ anomalies:
       `precision_limited=True` against a true distance of 2.13e-5 (0.14x);
       at `A = 1000`, `tolerance=1e-4`, `precision_limited=False`, 0.88x.
       Jacobi held in every row (37x to 290x), and `A = 10` held under
-      both.  On the relay pair of the geometry search (the pinned case):
-      `A = 1000`, `tolerance=1e-7`, a bound of 3.0e-6 against a distance
-      of 5.3e-6 (0.57x), the same digits on jaxlib 0.10.2, 0.11.0 and
-      0.11.2; from `A = 1400` the geometry self-check's finite difference
-      is rounding and the report is withheld instead.
+      both.  On the relay pair of the geometry search, 126 amplitudes
+      from 10 to 1e5 at `tolerance=1e-7` (the same digits on jaxlib
+      0.10.2, 0.11.0 and 0.11.2; `spectral_usable=True` at every one
+      before the geometry self-check is asked): the bound is 1.29 times
+      the distance or more up to `A = 420`, and under it, reported, in
+      three bands: 0.87x at `A` = 430 to 510, 0.57x at 860 to 1020
+      (3.0e-6 against 5.3e-6 at 1000) and 0.15x to 0.11x at 2200 to
+      2700.  Between and above those bands (1030 to 2000, and from 3000
+      on, where the bound falls to 0.006x at 5e4) the self-check's
+      finite difference is rounding, its gap is over the tolerance of
+      0.25 and the report is withheld instead.  At `tolerance=1e-4` the
+      bands are 860 to 1020 (0.86x) and 2700 (0.11x).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -14491,6 +14498,8 @@ anomalies:
       - "tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded"
       - "tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_whose_gather_samples_a_sign_changing_field_is_bounded"
       - "tests/property/test_coupling_geometry_search.py::test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded"
+      - "tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_behind_a_strongly_cancelling_gather_reports_no_bound"
+      - "tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded"
     github_issue: null
   - anomaly_id: "MADD-ANO-213"
     title: "Under the interface norm a field read by several internal edges was counted once per edge by the residual and once by the spectral analysis: on a star spectral_error_bound read 0.26 to 0.73 of the true distance, spectral_usable=True"
@@ -16216,6 +16225,76 @@ anomalies:
     resolution_version: "0.4.0"
     verification:
       - "tests/core/test_mapping_registry.py::test_an_object_its_kind_cannot_be_rebuilt_as_is_refused_at_every_door"
-      - "tests/core/test_mapping_registry.py::test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as"
+      - "tests/usd/test_usd_mapping_spec.py::test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as"
       - "tests/core/test_mapping_registry.py::test_a_registered_class_with_every_member_passes_every_door"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-243"
+    title: "The geometry self-check can withhold the honest report of a float32 Gauss-Seidel group in which a member reads a position that another member has just built, when that position is within about 2e-5 of a spacing of a lattice plane"
+    description: >
+      With `diagnostics=True` the step of a group with a `multilinear_grid`
+      edge compares its Jacobian-vector product along the positions with a
+      finite difference of the pass over a step of `sqrt(eps)` of a spacing
+      (`_bounds._geometry_product_gap`), and the report withholds every
+      bound where the two differ by more than `GEOMETRY_GAP_TOLERANCE`
+      (0.25).  The step is chosen so that no position it moves crosses a
+      lattice plane, the positions a sweep builds from a pre-step one
+      included (MADD-ANO-240).  It does not choose how a position moves
+      that a member builds *from its mapped input* and another member
+      reads in the same Gauss-Seidel sweep (a source-anchored geometry
+      whose holder is swept before its reader): the step of the positions
+      in the iterate changes that input, and the built position follows by
+      about the holder's pull times the step, 5e-5 of a spacing in the
+      measured cells.  Where it is nearer than that to a lattice plane it
+      crosses, the difference straddles two polynomials of the stencil and
+      is no derivative.  Measured on the 0.4.0 development tree on the
+      plane hunt's two float32 cells of this kind (both anchors at the
+      source, the grid swept first; fixed points placed 1e-6 to 1e-2 of a
+      spacing from a plane): of 2829 honest examples on jaxlib 0.11.0, 1489
+      of them within 2e-5 of a spacing of their plane, 47 read a gap over
+      0.05, 13 over 0.1, 2 over 0.2 and one 0.59; one draw of the hunt reads 0.26 on jaxlib
+      0.10.2 and 0.29 on 0.11.2, over the tolerance, so its bounds are NaN
+      with a `not_usable_reason`.  With the check taken out of the report
+      every one of those examples had `spectral_usable=True` on a bound the
+      float64 reference holds.  A thousand plane draws further than 2e-5
+      of a spacing from their plane read 4.4e-3 at most, the six other
+      cells of the hunt 6.4e-3 at most, and float64 is not affected (its
+      step is 1.5e-8 of a spacing).  A wrong refusal, not a wrong number,
+      and the reason names it: a gap over the tolerance is reported as
+      either a derivative that is not the value's or a finite difference
+      that could not be formed.  It is also why the tolerance is not
+      lower: at 0.05 the check would catch a product that misses the
+      geometry term of a weak deposit (0.22) and would withhold 7 to 9 of
+      the 4,450 honest examples of the geometry search's hunts, all of this
+      kind.  No release carried it: the self-check is new in 0.4.0's
+      development.  Found by measuring the gap on every example of the
+      plane hunt.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The report withholds bounds it could have given and says so, with a
+      reason that names this case; no wrong value is reported, and the
+      step's state is the same with diagnostics off.
+    affected_components:
+      - "maddening.core.coupling._bounds._geometry_product_gap"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      A report withheld for this reason is withheld for the step where a
+      position sat beside a plane: read the next step's.  Where the bounds
+      are needed on every step, run the group under
+      `iteration_mode="jacobi"` or in float64 (`jax_enable_x64`), neither
+      of which is affected.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  The check cannot tell a finite difference across a
+      lattice plane from a product that is not the derivative, so no
+      tolerance separates the two: honest examples of this kind read up to
+      0.59 and a product that missed a weak geometry term 0.22.  A fix
+      needs the step to keep every position the pass reads on its side of
+      a plane, the ones a member builds from its input included, or to
+      recognise a difference that crossed one.
+    verification:
+      - "tests/property/test_coupling_geometry_search.py::test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a_plane"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance"
     github_issue: null

@@ -130,23 +130,44 @@ names the edge and says what to do.
   finite difference of the pass along the same direction, and where the
   two differ by more than a quarter (`GEOMETRY_GAP_TOLERANCE`) the
   report withholds the bounds.  An honest pass reads the finite
-  difference's own error: about 6e-4 in float32 (at most 6e-3 on 236
-  drawn examples) and under 3e-6 in float64.  A float32 gather of a field
-  that changes sign across a cell cancels digits, and the difference
-  loses them: 0.09 at a thousandfold cancellation, and over the tolerance
-  from about 1400-fold (0.31), where an honest report is withheld.  The
-  check fails for a node or
-  a mapping whose derivative is not the derivative of its value (a
-  `stop_gradient` on an input, a rounding, a branch on a position), and
-  on a step where the two could not be compared (a state that is not
-  finite, or a geometry the pass reads from a constant the step could not
-  move); `not_usable_reason` says which of the two it was.  It compares
-  nothing in a field the positions move by less than 32 float resolutions
-  of the residual, so a wrong derivative of a term that weak is not seen:
-  a pass whose product saw no geometry at all read 0.31 to 0.98 in
-  float32 on those draws and 1.0 in float64, and 0.22, under the
-  tolerance, on a deposit so weak that the term moved the spectral radius
-  by 0.02.
+  difference's own error: about 6e-4 in float32 (at most 6e-3 on 235
+  drawn examples of six cells, and at most 1e-2 on three thousand more
+  away from a lattice plane) and under 5e-6 in float64.  The check fails
+  for a node or a mapping whose derivative is not the derivative of its
+  value (a `stop_gradient` on an input, a rounding, a branch on a
+  position): a pass whose product saw no geometry at all read 0.31 to
+  0.98 in float32 on those draws and 1.0 in float64.  It is a coarse
+  check, and it has three measured limits:
+
+  - **A wrong derivative of a weak term is not seen.**  A term the
+    product misses reads `G / (G + 32 res)`, where the term moves a field
+    by `G` and `res` is the field's float resolution: 0.22, under the
+    tolerance, on a deposit so weak that it moved the grid's field by
+    nine resolutions.  The spectral radius reported there was 0.003
+    against 0.025.
+  - **An honest float32 report can be withheld beside a lattice plane.**
+    Where a member reads, in the same Gauss-Seidel sweep, positions that
+    another member has just built, and one of them is within about 2e-5
+    of a spacing of a lattice plane, the check's step carries it across
+    the plane and the difference is not a derivative.  Of 2829 drawn
+    examples of two such groups, 1489 of them that near a plane, 47 read
+    over 0.05, two over 0.2 and one 0.59; of a thousand further from a
+    plane none read over 5e-3 (MADD-ANO-243).
+  - **An honest float32 report is withheld behind a strongly cancelling
+    gather.**  A Gauss-Seidel group whose gather samples a field that
+    changes sign across a cell reads 0.25 to 0.75 once the lattice
+    values are about a thousand times the sample (one band at 0.14
+    passes).  The bound is too low there anyway (MADD-ANO-212).
+
+  `not_usable_reason` therefore names both readings of a gap over the
+  tolerance, a derivative that is not the value's and a finite
+  difference that could not be formed: one number does not tell them
+  apart.  A step where the two could not be compared at all (a state
+  that is not finite, or a geometry the pass reads from a constant the
+  step could not move) has a reason of its own.  The tolerance is not
+  lower because of the second limit: at 0.05 the check would catch the
+  weak deposit and would withhold 7 to 9 of the 4,450 honest examples of
+  the test suite's searches, where it now withholds none or one.
 * **Across a lattice plane the flags are withdrawn and the numbers
   kept.**  A multilinear stencil is one polynomial of the positions
   inside a lattice cell and another in the next, so the pass's Jacobian

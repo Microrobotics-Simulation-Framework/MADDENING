@@ -218,7 +218,7 @@ def test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_s
         honest = _mixed_gap(float(np.finfo(np.float32).eps))
         premise = _mixed_gap(None)
     assert honest <= 0.02, honest
-    assert premise > _bounds.GEOMETRY_GAP_TOLERANCE / 5.0, (
+    assert premise > _bounds.GEOMETRY_GAP_TOLERANCE, (
         f"premise: the geometry's own step is resolved here (gap {premise:.3g})")
 
 

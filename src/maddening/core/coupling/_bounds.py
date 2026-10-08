@@ -27,20 +27,48 @@ def _F_dispatch(step_pure, x, consts):
 #: along a geometry and a finite difference of the pass along the same
 #: direction (:func:`_geometry_product_gap`) at which
 #: ``coupling_diagnostics()`` still reports the bounds of a group with a
-#: geometry edge.  Experimental.  A product that does not see the geometry
-#: at all reads a gap of 1 on every field the geometry moves by much more
-#: than :data:`_GEOMETRY_GAP_RESOLUTIONS` resolutions (less on a field it
-#: moves by about that: the allowance is in the denominator), one that
-#: sees half of it 0.5; an honest pass reads the finite difference's own
-#: error, a few ``sqrt(eps)`` of the coarsest dtype the pass evaluates in.
-#: Measured on 351 drawn examples of six cells of the geometry search
-#: (MAP-045): honest, a median of 6e-4 and at most 6e-3 in float32 and at
-#: most 3e-6 in float64; every geometry read under ``stop_gradient``,
-#: 0.31 to 0.98 in float32 and 1.0 in float64.  Not a clean separation in
-#: float32: a gather of a field that changes sign across a cell read 0.09
-#: honestly at a thousandfold cancellation and 0.31, over the tolerance,
-#: at 1400-fold; and a deposit weak enough to move the radius by 0.02
-#: read 0.22 with the fault.
+#: geometry edge.  Experimental.  A product that misses a term which
+#: moves a field by ``G`` reads ``G / (G + c res)`` on that field (``res``
+#: the field's float resolution, ``c``
+#: :data:`_GEOMETRY_GAP_RESOLUTIONS`): 1 where the term is strong, and
+#: under this tolerance where it moves the field by fewer than about 11
+#: resolutions.  One that sees half of a strong term reads 0.5.  An
+#: honest pass reads the finite difference's own error, a few
+#: ``sqrt(eps)`` of the coarsest dtype the pass evaluates in.
+#:
+#: Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2 (MAP-045):
+#:
+#: * honest, 350 drawn examples of six cells of the geometry search: a
+#:   median of 6e-4 and at most 5.7e-3 in float32, at most 4.3e-6 in
+#:   float64; the search's hunts away from a lattice plane (2171
+#:   examples, and a thousand plane draws further than 2e-5 of a spacing
+#:   from their plane): at most 9.5e-3;
+#: * every geometry read under ``stop_gradient``, the same six cells: 0.305
+#:   to 0.98 in float32 and 1.0 in float64, all 353 withheld;
+#: * the source-anchored reads alone under ``stop_gradient``, on a deposit
+#:   that moves the grid's field by nine resolutions (and the spectral
+#:   radius from 0.025 to 0.003): 0.22, under this tolerance.
+#:
+#: It is not lower, to catch that, because honest float32 passes of two
+#: kinds read as much and more, and their reports would be withheld:
+#:
+#: * a pass that reads a position it built in the same sweep
+#:   (Gauss-Seidel, a source-anchored geometry whose holder is swept
+#:   first) with that position within about 2e-5 of a spacing of a
+#:   lattice plane.  The step moves it across the plane through its
+#:   holder's mapped input.  Of 2829 plane draws of two such cells on
+#:   jaxlib 0.11.0 (1489 within 2e-5), 47 read over 0.05, 13 over 0.1, 2
+#:   over 0.2 and one 0.59; one draw of the plane hunt reads 0.26 and
+#:   0.29 on 0.10.2 and 0.11.2 (MADD-ANO-243);
+#: * a Gauss-Seidel pass behind a gather of a field that changes sign
+#:   across a cell: 0.025 to 0.087 where the lattice values are up to a
+#:   thousand times the sample, 0.14 to 0.75 beyond (MADD-ANO-212, whose
+#:   bound is wrong there, so that withholding is no loss).
+#:
+#: At 0.05 the self-check would withhold 7 to 9 of the 4,450 honest
+#: examples of the search's hunts (all of the first kind) where it now
+#: withholds none or one.  The reason of a withheld report names both
+#: readings of a gap.
 GEOMETRY_GAP_TOLERANCE = 0.25  # units: relative gap
 #: How many of the residual's float resolutions the finite difference of
 #: :func:`_geometry_product_gap` is allowed as rounding, per field: a

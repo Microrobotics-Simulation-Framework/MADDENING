@@ -326,6 +326,7 @@ class MultilinearGridMapping:
         cols = geom if geom.ndim == 2 else geom[:, None]
         T = cols.dtype
         own = float(jnp.finfo(T).eps)
+        # units: relative rounding, the coarser of the positions' dtype and the pass's
         coarsest = own if eps is None else max(own, float(eps))
         other = None if beside is None else self._lattice_coordinates(
             jnp.asarray(beside).astype(T).reshape(cols.shape))

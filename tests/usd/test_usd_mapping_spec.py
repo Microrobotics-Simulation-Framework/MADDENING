@@ -352,3 +352,25 @@ def test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused():
     with pytest.raises(MappingRebuildError,
                        match="unknown mapping kind 'passing_through'"):
         load_graph_from_usd(stage)
+
+
+def test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as():
+    """The second writer of a mapping's recipe asks the same question as
+    ``to_dict()`` (MADD-ANO-242): the classes are the registry tests'."""
+    from maddening.core.edge import EdgeSpec  # noqa: PLC0415
+    from tests.core import test_mapping_registry as registry  # noqa: PLC0415
+
+    points = np.array([0.0, 0.5, 1.0])
+    assert len(registry._UNFIT_CLASSES) >= 4                               # noqa: SLF001
+    for case in sorted(registry._UNFIT_CLASSES):                           # noqa: SLF001
+        what, _error, message = registry._UNFIT_CLASSES[case]              # noqa: SLF001
+        with temporary_kind("returns",
+                            registry._returns(lambda spec, s, t, what=what: what(spec)),  # noqa: SLF001
+                            **registry._RETURNS) as make:                  # noqa: SLF001
+            gm = GraphManager()
+            gm.add_node(registry.Vec("a", 1.0, n=3))
+            gm.add_node(registry.Vec("b", 1.0, n=3))
+            gm._edges.append(EdgeSpec("a", "b", "v", "inp",                # noqa: SLF001
+                                      mapping=make(points, points, scale=1.5)))
+            with pytest.raises(ValueError, match=message):
+                save_graph_to_usd(gm, Usd.Stage.CreateInMemory())

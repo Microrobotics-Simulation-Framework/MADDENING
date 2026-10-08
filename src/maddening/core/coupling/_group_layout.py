@@ -275,10 +275,27 @@ _GEOMETRY_SUBCYCLED_WHY = (
     "in a sub-cycled group (members {members} take several sub-steps per pass, and the "
     "geometry of each sub-step is not followed)"
 )
+#: The check's gap over its tolerance.  One number does not say which of
+#: two things it measured, so the reason names both: a product that is
+#: not the derivative, and a finite difference that is not one either.
+#: Three honest passes read a gap (``GEOMETRY_GAP_TOLERANCE`` has the
+#: measurements): a position the pass builds and then reads in the same
+#: sweep within the check's step of a plane of the lattice (the step
+#: moves it through the mapped input, across the plane); a field whose
+#: update passes through a much larger one in the same sweep (a gather
+#: of a field that changes sign across a lattice cell, read under
+#: Gauss-Seidel, rounds at the larger field's resolution, and the
+#: allowance of ``_bounds._GEOMETRY_GAP_RESOLUTIONS`` is in the smaller
+#: one's); a field in a coarser dtype than the step was sized for.
 _GEOMETRY_SELF_CHECK_WHY = (
     "where the pass's Jacobian-vector product along the geometry disagrees with a finite "
     "difference of the pass along the same direction (relative gap {gap:.3g}, allowed "
-    "{allowed:.3g}: a member or a mapping whose derivative is not that of its value)"
+    "{allowed:.3g}: either a member or a mapping whose derivative is not that of its value, "
+    "or a finite difference that could not be formed at this state -- a position the pass "
+    "builds and then reads in the same sweep lies within the check's step of a plane of "
+    "the lattice, or a mapped sample cancels digits, as a gather of a field that changes "
+    "sign across a lattice cell does, or a field in a coarser dtype does not resolve the "
+    "step; the check does not tell these apart)"
 )
 #: The same check where it produced no number: nothing was compared, so
 #: nothing is said about any member's derivative.
@@ -344,8 +361,9 @@ def _geometry_diagnostics_refusal(group, nodes, plan) -> Optional[str]:
 
 def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
     """The reason of a report whose step failed its geometry self-check:
-    a gap over *allowed* (the product is not the derivative), or a gap
-    that is not a number (the two could not be compared)."""
+    a gap over *allowed* (the product is not the derivative, or the
+    finite difference is rounding: the two read alike), or a gap that is
+    not a number (the two could not be compared)."""
     why = _GEOMETRY_SELF_CHECK_WHY if gap == gap else _GEOMETRY_SELF_CHECK_UNEVALUATED_WHY
     return _GEOMETRY_DIAGNOSTICS_REASON.format(
         keys=list(keys), why=why.format(gap=gap, allowed=allowed))

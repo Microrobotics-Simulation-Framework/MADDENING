@@ -533,6 +533,18 @@ band's excluded fields are outside it; and it reads `inf` where
 reports what the code checked — a finite bound and a settled space — and
 not linearity, which nothing checks.
 
+It is also the distance to *that step's* fixed point, and a run is many
+steps: each starts from the state the one before returned, so their
+iteration errors can add, and what bounds a trajectory's iteration error
+is the sum of the bound over its steps (where the step does not itself
+amplify a perturbation), not the bound of the last one
+(`maddening.testing.coupled.coupling_iteration_bound` uses the last step's
+times the number of steps).  Measured on the two-rod example of
+[the verification guide](verification.md): refining the timestep at
+`tolerance=1e-4`, a first-order scheme read pairwise orders of 1.211,
+1.029 and 0.645 while the last step's bound was 1.9% of the error at the
+finest level.
+
 ### `gradient_relative_error_bound`: the gradient, not the solve
 
 The IFT adjoint solves `(I − dF/dx)ᵀ λ = ∂L/∂x` at the iterate the

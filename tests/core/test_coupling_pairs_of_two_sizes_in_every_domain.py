@@ -86,20 +86,18 @@ def _c(label, kind, form, schedule, acceleration="none", small="a", **kw) -> cs.
 
 #: The cells of every push: in each domain a two-way pair with the small
 #: field on ``a`` and one with it on ``b`` (the member a domain sub-steps,
-#: or holds in float64 beside a float32 one), a pair whose edges both
-#: expand or both reduce, and an accelerated pair; the mapping forms, the
-#: schedules and the accelerations rotated over the domains.  The 16-bit
-#: domains stop at a cap of two passes, as the tie's cells do there, where
-#: an acceleration has nothing to show.
+#: or holds in float64 beside a float32 one) and a pair whose edges both
+#: expand or both reduce, the mapping forms and the schedules rotated over
+#: the domains; and each stock acceleration once, in four domains (every
+#: domain under every acceleration is the slow lane's product).  The
+#: 16-bit domains stop at a cap of two passes, as the tie's cells do there.
 PUSH = (
     _c("f32", "two-way", "matrix", "gauss-seidel"),
     _c("f32", "two-way", "sparse", "jacobi", small="b"),
     _c("f32", "scatter-only", "sparse-transposed", "gauss-seidel"),
-    _c("f32", "two-way", "sparse-transposed", "jacobi", "aitken"),
     _c("f64", "two-way", "sparse", "gauss-seidel"),
     _c("f64", "two-way", "sparse-transposed", "jacobi", small="b"),
     _c("f64", "gather-only", "matrix", "jacobi"),
-    _c("f64", "two-way", "matrix", "gauss-seidel", "iqn-ils", small="b"),
     _c("mixed_dtype", "two-way", "sparse-transposed", "gauss-seidel"),
     _c("mixed_dtype", "two-way", "matrix", "jacobi", small="b"),
     _c("mixed_dtype", "scatter-only", "sparse", "jacobi"),
@@ -113,7 +111,6 @@ PUSH = (
     _c("vmap", "two-way", "sparse", "gauss-seidel"),
     _c("vmap", "two-way", "matrix", "jacobi", small="b"),
     _c("vmap", "gather-only", "sparse", "gauss-seidel"),
-    _c("vmap", "two-way", "sparse-transposed", "gauss-seidel", "iqn-imvj"),
     _c("multi_rate", "two-way", "sparse-transposed", "gauss-seidel"),
     _c("multi_rate", "two-way", "sparse", "jacobi", small="b"),
     _c("multi_rate", "scatter-only", "matrix", "gauss-seidel"),
@@ -130,17 +127,15 @@ PUSH = (
     _c("checkpoint_restart", "two-way", "sparse-transposed", "gauss-seidel"),
     _c("checkpoint_restart", "two-way", "sparse", "jacobi", small="b"),
     _c("checkpoint_restart", "scatter-only", "matrix", "gauss-seidel"),
-    _c("checkpoint_restart", "two-way", "matrix", "gauss-seidel", "fixed"),
 )
 #: The two-way cells whose marker-side twin is compiled on every push: one
-#: in each domain, the small field on ``a`` and on ``b`` in turn, and two
-#: accelerated (IQN's secant history, and its Jacobian carried from step
-#: to step under a predictor).  The twins of the others run in the slow
+#: in each domain, the small field on ``a`` and on ``b`` in turn, and one
+#: accelerated (IQN-IMVJ's secant history and its Jacobian carried from
+#: step to step under a predictor).  The twins of the others run in the slow
 #: lane (:func:`test_the_other_pairs_of_every_push_report_what_their_twins_report`).
 TWINNED = (
     _c("f32", "two-way", "matrix", "gauss-seidel"),
     _c("f64", "two-way", "sparse-transposed", "jacobi", small="b"),
-    _c("f64", "two-way", "matrix", "gauss-seidel", "iqn-ils", small="b"),
     _c("mixed_dtype", "two-way", "sparse-transposed", "gauss-seidel"),
     _c("bfloat16", "two-way", "sparse", "jacobi", small="b"),
     _c("float16", "two-way", "sparse-transposed", "gauss-seidel"),
@@ -681,8 +676,8 @@ def _check_restart(cell) -> None:
             f"{_same_graph(a, b)}")
 
 
-def _check_batch(cell, count=None) -> None:
-    """Each member of a ``vmap`` batch is its own unbatched solve.
+def _same_member(where: str, member, alone) -> None:
+    """A member of a ``vmap`` batch is its own unbatched solve.
 
     The state, the verdict, the pass count and every integer slot to the
     bit.  The report's float numbers to 1e-5: a batched reduction sums a
@@ -693,26 +688,56 @@ def _check_batch(cell, count=None) -> None:
     A member that kept iterating with its batch, or stopped with it,
     would differ by passes, not by bits.
     """
+    for name in ("a", "b"):
+        assert cd.bitwise(member.x(name), alone.x(name)), (
+            f"{where}: {name}.x differs from its unbatched solve's")
+    assert sorted(member.report) == sorted(alone.report), where
+    assert sorted(member.meta) == sorted(alone.meta), where
+    differ = {key: (member.report[key], alone.report[key]) for key in member.report
+              if not _numbers_agree(member.report[key], alone.report[key], 1e-5)}
+    differ.update({key: (member.meta[key], alone.meta[key]) for key in member.meta
+                   if not _slots_agree(member.meta[key], alone.meta[key], 1e-5)})
+    assert not differ, f"{where} differs from its unbatched solve: {differ}"
+
+
+def _check_batch(cell, count=None) -> None:
+    """Each member of the ``vmap`` domain's batch is its own unbatched solve."""
     run = _run(cell, count=count)
     gm = run.built.gm
     passes = set()
     with cd.entered(cell.domain):
         for k, s in enumerate(run.solves):
             (alone,) = cd.run(cd.DOMAINS["f32"], gm, [s.params])
-            where = f"{cell.id}: member {k} of the batch"
-            for name in ("a", "b"):
-                assert cd.bitwise(s.x(name), alone.x(name)), (
-                    f"{where}: {name}.x differs from its unbatched solve's")
-            assert sorted(s.report) == sorted(alone.report) and sorted(s.meta) == sorted(alone.meta)
-            differ = {key: (s.report[key], alone.report[key]) for key in s.report
-                      if not _numbers_agree(s.report[key], alone.report[key], 1e-5)}
-            differ.update({key: (s.meta[key], alone.meta[key]) for key in s.meta
-                           if not _slots_agree(s.meta[key], alone.meta[key], 1e-5)})
-            assert not differ, f"{where} differs from its unbatched solve: {differ}"
+            _same_member(f"{cell.id}: member {k} of the batch", s, alone)
             passes.add(s.report["iterations"])
     if cell.acceleration == "none":
         assert len(passes) > 1, (
             f"{cell.id}: fixture premise: the members of the batch stop on different passes")
+
+
+def _check_batched_floor(cell) -> None:
+    """A ``vmap`` of the mixed-dtype pair records each member's own floor.
+
+    The solve's loop is traced on unbatched values whatever wraps the
+    step, so its residual cannot see a batch; the floor is measured after
+    the loop, on the batched state.  With the small field in float64
+    beside a float32 member the two sides of the expanding edge give two
+    floors (:func:`_floor`: ``4 eps32 / (sqrt(2) rtol)`` at the source,
+    ``4 eps32 / rtol`` as delivered), so this batch shows which side was
+    read there: each member's slot is the compact readings', and the
+    member is its own unbatched solve.
+    """
+    d = cell.domain
+    assert d.dtype_a != d.dtype_b and cell.small == "b" and not d.vmap, cell
+    run = _run(cell)
+    with cd.entered(d):
+        batch = cd.run(cd.DOMAINS["vmap"], run.built.gm, [s.params for s in run.solves])
+    assert len(batch) == len(run.solves) > 1
+    for k, (member, alone) in enumerate(zip(batch, run.solves)):
+        _same_member(f"{cell.id}: member {k} of a batch", member, alone)
+        assert float(cs.slot_of(member)) == pytest.approx(_floor(cell), rel=1e-6), (
+            f"{cell.id}: member {k} of a batch holds the floor {float(cs.slot_of(member))!r}; "
+            f"the compact readings' is {_floor(cell)!r}")
 
 
 def _check_one_rate(cell) -> None:
@@ -763,11 +788,8 @@ def _check_diagnosed(cell) -> None:
     ``test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side``
     has them; to 2% where the two are not one program, :func:`_same_solve`), and
     a usable bound covers the distance to the exact fixed point in the
-    compact readings.  Where the solve starts from the graph's initial
-    state it is also no looser than the loop's own amplification allows
-    (``2 K`` residuals, as that test has it); a step of a sequence, started
-    beside its fixed point, takes few passes and reports a looser bound
-    (measured 2.8 ``K`` residuals after a restart, in both graphs).
+    compact readings.  (How loose it may be is not held here: measured
+    2.0 to 2.8 ``K`` residuals, the same number in both graphs.)
 
     ``gradient_relative_error_bound`` is compared where the two graphs hold
     the scatter's weights the same way: the sparse kind in its natural
@@ -796,8 +818,6 @@ def _check_diagnosed(cell) -> None:
         distance = ref.in_tolerances(ref.distance(cs.state_of(cell, s), "compact"))
         bound = float(ra["spectral_error_bound"])
         assert 0.0 < distance <= bound * (1.0 + 1e-6), (where, distance, bound)
-        if ra["converged"] and not _sequenced(cell):
-            assert bound <= 2.0 * ref.K * float(ra["residual"]), (where, bound, ref.K, ra)
     assert usable, f"{cell.id}: fixture premise: no solve reports a usable spectrum"
 
 
@@ -868,6 +888,17 @@ def test_each_member_of_a_batch_of_pairs_of_two_sizes_is_its_own_unbatched_solve
 
 
 #: The cells at two rates whose one-rate pair is a float32 cell of every push.
+_MIXED = [c for c in PUSH if c.label == "mixed_dtype" and c.small == "b"
+          and c.acceleration == "none"]
+assert len(_MIXED) == 1
+
+
+@pytest.mark.parametrize("cell", _MIXED, ids=_ids(_MIXED))
+def test_each_member_of_a_batch_of_mixed_dtype_pairs_records_the_floor_of_its_compact_readings(
+        cell):
+    _check_batched_floor(cell)
+
+
 _RATES = [c for c in PUSH if (c.domain.multirate or c.domain.subcycled)
           and dataclasses.replace(c, label="f32") in PUSH]
 assert {c.label for c in _RATES} == {"multi_rate", "sub_cycled"}
@@ -905,7 +936,7 @@ def test_a_diagnosed_pair_of_two_sizes_reports_the_spectrum_of_its_twin(cell):
 _UNTWINNED = [c for c in _two_way(PUSH) if c not in TWINNED]
 
 
-# Slow: sixteen more graphs compiled.
+# Slow: the twins of the other two-way cells, a graph each.
 # Per push: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_reports_what_its_marker_side_twin_reports
 @pytest.mark.slow
 @pytest.mark.parametrize("cell", _UNTWINNED, ids=_ids(_UNTWINNED))

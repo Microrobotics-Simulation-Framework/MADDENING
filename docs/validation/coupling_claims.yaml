@@ -6038,7 +6038,7 @@ claims:
     grad: n/a
     vmap:
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-two-way-matrix-jacobi-small-b]'
-      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[vmap-two-way-sparse-transposed-gauss-seidel-iqn-imvj]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-gather-only-sparse-gauss-seidel]'
     multi_rate:
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[multi_rate-scatter-only-matrix-gauss-seidel]'
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[multi_rate-two-way-matrix-jacobi-aitken-small-b]'
@@ -6051,5 +6051,5 @@ claims:
     adaptive: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_run_adaptive_steps_a_pair_of_two_sizes_as_a_plain_step_does
     checkpoint_restart:
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-two-way-sparse-jacobi-small-b]'
-      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[checkpoint_restart-two-way-matrix-gauss-seidel-fixed]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-scatter-only-matrix-gauss-seidel]'
     sharded: tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member

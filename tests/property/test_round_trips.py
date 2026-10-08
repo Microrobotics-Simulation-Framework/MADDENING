@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import get_type_hints
 
 import pytest
-from hypothesis import given, note
+from hypothesis import given, note, settings
 from hypothesis import strategies as st
 
 from maddening.core.coupling.group import CouplingGroup, _literal_options
@@ -44,6 +44,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
 
+from tests.conftest import EXAMPLES_COSTLY
 from tests.property.invariants import (
     assert_leaf_tree_identical,
     assert_param_specs_identical,
@@ -174,6 +175,11 @@ def test_a_config_round_trip_preserves_a_mapped_edge_and_its_weights(recipe):
                             what="trajectory")
 
 
+# Twenty-odd seconds at the profile's fifty examples on a CI runner, nearly all of it
+# building each drawn graph twice (it tripped the per-test time gate three times on
+# 2026-10-07/08 at 20.2 to 21.9 s).  The property is structural -- a field the loader
+# drops -- and every other test of this file builds the same recipes at the full count.
+@settings(max_examples=EXAMPLES_COSTLY)
 @given(recipe=graph_recipes())
 def test_to_dict_is_idempotent_through_from_dict(recipe):
     """``to_dict(from_dict(to_dict(g))) == to_dict(g)``.  A field that

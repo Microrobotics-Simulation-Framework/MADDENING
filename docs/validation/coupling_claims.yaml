@@ -3352,8 +3352,9 @@ claims:
     slope one rounding of a same-pass value moves by 2.4e-5, and
     the float32 pass's Jacobian then has a radius up to 5e-4 of itself
     from the one exact arithmetic gives at the returned state (5e-5 at a
-    curvature of 10, 5e-6 at 1; the same at any units, with and without
-    a mapping; 7e-7 under saturating gains; 5e-5 under Jacobi through a
+    curvature of 10, 5e-6 at 1; no larger at a change of units of six
+    decades than at one, with and without a mapping; 7e-7 under
+    saturating gains; 5e-5 under Jacobi through a
     mapping).  rho_spectral is the float32 pass's to 2e-8 there.
     Measured on a mapped ring of three whose members square what they
     read: 0.404214 for 0.404298, 1.53 of statement (2)'s allowance and

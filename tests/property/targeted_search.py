@@ -138,16 +138,19 @@ class Report:
     #: the seed is the profile's own).
     seed: Optional[int] = None
     entropy: Optional[int] = None
+    #: A fingerprint of the examples in the order they were scored: two
+    #: runs that drew the same examples print the same one.
+    drawn: str = ""
 
     @property
-    def drawn(self) -> str:
-        """A fingerprint of every score in the order scored: two runs that
-        drew the same examples and scored them alike print the same one."""
+    def scored(self) -> str:
+        """A fingerprint of the scores in the same order: the same in two
+        runs that also scored every example alike, to the last digit."""
         return hashlib.sha256(repr(self.scores).encode()).hexdigest()[:12]
 
     def __str__(self) -> str:
         return (f"score {self.score!r} for {self.example!r} ({self.details}); "
-                f"{self.examples} examples scored (fingerprint {self.drawn})"
+                f"{self.examples} examples scored (drawn {self.drawn}, scores {self.scored})"
                 + ("" if self.found_after is None
                    else f", the first over the threshold was example {self.found_after}"))
 
@@ -189,6 +192,7 @@ def targeted_search(strategy, score: Callable[[Any], tuple], threshold: float, *
                              f"(for {example!r}: {details})")
         report.examples += 1
         report.scores.append(value)
+        report.drawn = hashlib.sha256(f"{report.drawn}{example!r}".encode()).hexdigest()[:12]
         hypothesis.target(min(value, sys.float_info.max), label=label)
         if value > threshold:
             if report.found_after is None:

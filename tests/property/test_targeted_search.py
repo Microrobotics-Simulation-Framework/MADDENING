@@ -115,9 +115,20 @@ def test_a_hunt_scores_the_same_examples_every_time(seeded):
     """The slow lane's verdict on a tree: the hunt's own seed, no entropy."""
     first, again, other = _hunt(7), _hunt(7), _hunt(8)
     assert (first.seed, first.entropy) == (7, None)
-    assert first.scores == again.scores and first.drawn == again.drawn
+    assert first.scores == again.scores
+    assert (first.drawn, first.scored) == (again.drawn, again.scored)
     assert len(set(first.scores)) > 1 and first.scores != other.scores
-    assert f"fingerprint {first.drawn}" in str(first)
+    assert first.drawn != other.drawn and first.scored != other.scored
+    assert f"(drawn {first.drawn}, scores {first.scored})" in str(first)
+
+
+def test_the_two_fingerprints_tell_the_draws_from_the_scores(seeded):
+    """Two flat scores give the search nothing to climb, so it draws the
+    same examples under both: ``drawn`` agrees and ``scored`` does not."""
+    one, two = (targeted_search(_PAIRS, lambda pair, flat=flat: (flat, None), 2000.0,
+                                profile=_HUNT.seeded(7)) for flat in (1.0, 2.0))
+    assert one.examples == two.examples == _HUNT.max_examples
+    assert one.drawn == two.drawn and one.scored != two.scored
 
 
 @pytest.mark.parametrize("switch", [None, "fresh", str(_ENTROPY)])
@@ -154,14 +165,15 @@ def test_an_exploring_run_draws_other_examples_and_its_entropy_replays_it(monkey
     fresh = _hunt(7)
     monkeypatch.delenv(ENTROPY_VARIABLE)
     own = _hunt(7)
-    assert own.entropy is None and own.scores != fresh.scores
+    assert own.entropy is None and own.scores != fresh.scores and own.drawn != fresh.drawn
     # The replay: the printed integer in place of ``fresh`` (no draw of
     # entropy: one would be another integer).
     monkeypatch.setattr(helper.secrets, "randbits", lambda bits: pytest.fail("a replay draws nothing"))
     monkeypatch.setenv(ENTROPY_VARIABLE, str(_ENTROPY))
     replayed = _hunt(7)
     assert (replayed.seed, replayed.entropy) == (fresh.seed, _ENTROPY)
-    assert replayed.scores == fresh.scores and replayed.drawn == fresh.drawn
+    assert replayed.scores == fresh.scores
+    assert (replayed.drawn, replayed.scored) == (fresh.drawn, fresh.scored)
 
 
 def test_fresh_entropy_is_drawn_from_the_operating_system_once_a_process(monkeypatch):

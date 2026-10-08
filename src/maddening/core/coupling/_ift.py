@@ -279,6 +279,11 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
             f"'gmres', 'bicgstab', 'dense'."
         )
     n = rhs.shape[0]
+    if n == 0:
+        # A fixed-point vector with no entries (every floating field of the
+        # group has none): a system with no unknowns, whose solution is the
+        # right-hand side.  (The Krylov path scales by ``max|rhs|``.)
+        return rhs
     # A bfloat16 or float16 group's solve runs in float32 and its answer is
     # cast back (MADD-ANO-161): LAPACK has no 16-bit kernels, so the dense
     # path's LU and lineax's QR raised, and every jax.grad / jax.jvp through

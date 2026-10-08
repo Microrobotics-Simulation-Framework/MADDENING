@@ -89,6 +89,22 @@ def test_a_zero_or_non_finite_input_is_framed_by_one(mode):
         assert np.all(np.asarray(f) == 1.0), (mode, bad, f)
 
 
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+def test_an_input_with_no_entries_is_framed_by_one_and_frames_nothing(dtype):
+    """An array with no entries has no largest one (an accelerator whose
+    fields have none, the weights of a group no member of which holds one):
+    the frame is 1, in the array's dtype, and beside arrays that have
+    entries it changes nothing."""
+    none = jnp.zeros((0,), dtype)
+    for mode in ("common", "lift"):
+        f = pow2_frame(none, mode=mode)
+        assert f.shape == () and f.dtype == dtype and float(f) == 1.0, (mode, f)
+    assert pow2_frame(none, none, mode="entrywise").shape == (0,)
+    some = jnp.asarray([3.0, -0.1], dtype)
+    assert float(pow2_frame(none, some)) == float(pow2_frame(some)) == 0.25
+    assert float(pow2_frame(some, jnp.zeros((0, 2), dtype))) == 0.25
+
+
 def test_the_frame_itself_is_a_normal_number_at_both_ends_of_the_range():
     info = jnp.finfo(jnp.float32)
     for v in (float(info.max), 1e-40, 1e-45):      # top of the range, two subnormals

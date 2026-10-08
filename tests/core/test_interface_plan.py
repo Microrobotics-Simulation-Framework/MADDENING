@@ -6,6 +6,10 @@ shape of edge a group can hold.  The second half pins each place where
 two views of it *differ*.  Those differences are today's behaviour, kept
 on purpose and reconciled one at a time elsewhere; a view that quietly
 started returning what its neighbour returns would fail here.
+
+The side the interface norm reads an edge on is part of the description:
+the compact side, decided in one function from the sizes the edge's
+mapping declares.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from maddening.core.coupling.acceleration import (
     coupling_residual_interface,
 )
 from maddening.core.coupling.mapping import matrix_mapping
-from maddening.core.coupling.sparse_mapping import sparse_matrix_mapping
+from maddening.core.coupling.sparse_mapping import StaticSparseMapping, sparse_matrix_mapping
 from maddening.core.edge import EdgeSpec, _delivered
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
@@ -53,9 +57,24 @@ class _Geometry:
 
 
 class _Custom:
-    """Stands for a registered kind's own static mapping class."""
+    """Stands for a registered kind's own static mapping class: what the
+    plan asks of one is its kind and the two sizes it declares."""
 
     kind = "custom"
+
+    def __init__(self, n_source=2, n_target=2):
+        self.n_source, self.n_target = n_source, n_target
+
+
+class _Shaped(_Custom):
+    """A static mapping that declares its fields' leading axes."""
+
+    def __init__(self, source_lead, target_lead):
+        super().__init__(int(np.prod(source_lead)), int(np.prod(target_lead)))
+        self._leads = (tuple(source_lead), tuple(target_lead))
+
+    def field_shapes(self):
+        return self._leads
 
 
 def _double(v):
@@ -63,6 +82,8 @@ def _double(v):
 
 
 DENSE = matrix_mapping(np.eye(2, dtype=np.float32))
+#: A dense mapping onto more entries than it reads (2 -> 3).
+WIDE_DENSE = matrix_mapping(np.ones((3, 2), np.float32))
 SPARSE = sparse_matrix_mapping(np.array([[0], [1]]), np.ones((2, 1), np.float32), n_source=2)
 GEOM = _Geometry()
 
@@ -167,7 +188,8 @@ def test_the_internal_edges_are_held_in_the_order_the_norm_sums_them():
 
 
 def test_the_side_the_norm_reads_is_one_field_that_the_reading_branches_on(monkeypatch):
-    """Delivered, for every edge; and the reading is the step's edge rule."""
+    """Delivered, for every edge of the table (its mappings are ties); and
+    the delivered reading is the step's edge rule."""
     plan = _plan()
     assert {r.norm_side for r in (*plan.internal, *plan.crossing)} == {ip.DELIVERED}
     calls = []
@@ -190,6 +212,135 @@ def test_the_side_the_norm_reads_is_one_field_that_the_reading_branches_on(monke
     as_is = {r.key for r in plan.internal if r.reads_source_as_is}
     assert as_is == {"b.x->a.u0", "a.q->b.u2", "a.n->c.u2", "c.x->a.u1", "c.z->b.u5",
                      "c.gone->b.u6"}, "no mapping and no transform"
+    # The other side: the source value itself, through neither the mapping
+    # nor the transform, and with no call of the edge rule.
+    expanding = ip._edge_record(EdgeSpec("a", "b", "x", "u0", mapping=WIDE_DENSE,
+                                         transform=_double), STATE)
+    assert expanding.norm_side == ip.SOURCE
+    del calls[:]
+    assert expanding.reading(x, {"a.x->b.u0": WIDE_DENSE.params_pytree()}) is x
+    assert calls == []
+    assert expanding.reads_source_as_is and not expanding.reads_through_mapping
+    assert by_key["a.x->b.u0"].reads_through_mapping, "a tie is read through its mapping"
+    assert not by_key["b.x->a.u0"].reads_through_mapping, "no mapping to read through"
+
+
+def _sparse(n_source, n_target, layout):
+    """A sparse mapping of those sizes with one weight per row of its layout."""
+    if layout == "gather":
+        return sparse_matrix_mapping(np.zeros((n_target, 1), np.int32),
+                                     np.ones((n_target, 1), np.float32), n_source=n_source)
+    return StaticSparseMapping(np.zeros((n_source, 1), np.int32),
+                               jnp.ones((n_source, 1), F32), n_source=n_source,
+                               n_target=n_target, counts=np.ones(n_source, np.int64),
+                               layout="scatter")
+
+
+#: ``(form, how to build a mapping of (n_source, n_target))``: the dense
+#: kind, the sparse kind in either layout (its weights are ``(n_target, k)``
+#: in one and ``(n_source, k)`` in the other), a registered kind's own
+#: class, and one that declares its fields' leading axes.
+SIDE_FORMS = {
+    "dense": lambda n, m: matrix_mapping(np.ones((m, n), np.float32)),
+    "sparse-gather": lambda n, m: _sparse(n, m, "gather"),
+    "sparse-scatter": lambda n, m: _sparse(n, m, "scatter"),
+    "registered": lambda n, m: _Custom(n, m),
+    "shaped": lambda n, m: _Shaped((n,), (m,)),
+}
+
+
+@pytest.mark.parametrize("form", sorted(SIDE_FORMS))
+@pytest.mark.parametrize("n_source,n_target,side", [
+    (2, 3, "source"), (2, 600, "source"), (3, 2, "delivered"), (600, 2, "delivered"),
+    (2, 2, "delivered"), (1, 1, "delivered")])
+@pytest.mark.parametrize("transform", [None, _double])
+def test_a_static_mapping_onto_more_entries_is_read_at_its_source_and_a_tie_as_delivered(
+        form, n_source, n_target, side, transform):
+    """The rule, on every static form: more entries delivered than the field
+    holds is ``"source"``; fewer, **and a tie**, ``"delivered"``.  Decided by
+    the sizes the mapping declares, whatever its weights' shape and whatever
+    else the edge carries."""
+    mapping = SIDE_FORMS[form](n_source, n_target)
+    edge = EdgeSpec("a", "b", "x", "u0", mapping=mapping, transform=transform)
+    assert ip._norm_side(edge) == side
+    record = ip._edge_record(edge)
+    assert record.norm_side == side
+    assert record.reads_source_as_is == (side == "source")
+    assert record.reads_through_mapping == (side == "delivered")
+    assert record.has_transform == (transform is not None)
+    if side == "source":
+        value = jnp.arange(n_source, dtype=F32)
+        assert record.reading(value) is value, "before the mapping and the transform"
+
+
+def test_the_side_counts_entries_where_a_mapping_declares_its_fields_leading_axes():
+    """``field_shapes()`` replaces the two sizes: the entries are the
+    products of the leading axes."""
+    for source_lead, target_lead, side in (((2, 3), (7,), "source"), ((2, 3), (6,), "delivered"),
+                                           ((7,), (2, 3), "delivered"), ((5,), (2, 3), "source")):
+        edge = EdgeSpec("a", "b", "x", "u0", mapping=_Shaped(source_lead, target_lead))
+        assert ip._norm_side(edge) == side, (source_lead, target_lead)
+    record = ip._edge_record(EdgeSpec("a", "b", "x", "u0", mapping=_Shaped((2, 3), (7,))))
+    grid = jnp.ones((2, 3, 4), F32)
+    assert record.reading(grid) is grid, "further axes pass through"
+
+
+def test_the_side_is_the_edges_own_wherever_it_is_described():
+    """One function of the edge: a plan built from any state or order, a
+    plan built without a state, and a bare edge described for the report
+    all read each edge on the same side."""
+    edges = (EdgeSpec("a", "b", "x", "u0", mapping=WIDE_DENSE),
+             EdgeSpec("b", "a", "y", "u0", mapping=_sparse(2, 3, "gather")),
+             EdgeSpec("b", "a", "x", "u1", mapping=matrix_mapping(np.ones((1, 2), np.float32))),
+             EdgeSpec("a", "b", "x", "u1", mapping=DENSE),
+             EdgeSpec("b", "a", "x", "u2"))
+    want = ["source", "source", "delivered", "delivered", "delivered"]
+    sides = lambda records: [r.norm_side for r in sorted(records, key=lambda r: edges.index(r.edge))]  # noqa: E731
+    wide = {"a": {"x": np.ones(2, np.float64)}, "b": {"x": jnp.ones(2, F32), "y": jnp.ones(2, F32)}}
+    for order in (("a", "b"), ("b", "a")):
+        for state in (STATE, wide, None):
+            plan = ip.interface_plan(frozenset("ab"), edges, order, state, NODES)
+            assert sides(plan.internal) == want, (order, state is None)
+    assert sides(ip.interface_records(list(edges), STATE)) == want
+    assert sides(ip.interface_records(list(edges))) == want
+
+
+def test_a_geometry_mapping_is_left_on_the_delivered_side():
+    """Not decided here: ``compile()`` refuses a geometry edge inside a
+    group under the interface norm, so no norm reads the record."""
+    for anchor in ("source", "target"):
+        record = ip._edge_record(EdgeSpec("a", "b", "x", "u0", mapping=GEOM,
+                                          geometry=(anchor, "g")))
+        assert (record.mapping_form, record.norm_side) == ("needs_geometry", "delivered")
+    plan = _pair(EdgeSpec("a", "b", "x", "u0", mapping=GEOM, geometry=("source", "g")),
+                 EdgeSpec("b", "a", "x", "u0"))
+    assert _keys(plan.geometry_edges()) == ["a.x->b.u0"]
+    (error,) = layout._geometry_edge_coupling_errors(
+        types.SimpleNamespace(convergence_norm="interface", nodes=frozenset("ab")), plan)
+    assert error.startswith("ERROR:")
+
+
+def test_a_static_mapping_that_declares_no_sizes_cannot_be_placed():
+    """``add_edge`` refuses such a mapping; a bare edge that carries one is
+    refused here rather than read on a side nobody chose."""
+    class _Sizeless:
+        kind = "custom"
+
+    with pytest.raises(TypeError, match="cannot tell which side of it is the compact one"):
+        ip._edge_record(EdgeSpec("a", "b", "x", "u0", mapping=_Sizeless()))
+
+
+def test_a_source_side_reading_refuses_a_field_of_another_size_than_the_mapping_declares():
+    """The side was decided on the declared sizes: a field that does not have
+    them is refused, not read on a side its own size would not have chosen."""
+    record = ip._edge_record(EdgeSpec("a", "b", "x", "u0", mapping=WIDE_DENSE))
+    with pytest.raises(ValueError, match=r"leading axes \(2,\).*has shape \(5,\)"):
+        record.reading(jnp.ones(5, F32))
+    np.testing.assert_array_equal(record.reading(jnp.ones((2, 4), F32)), jnp.ones((2, 4), F32))
+    # A scalar stands for a field of one entry, as ``add_edge`` reads it.
+    one = ip._edge_record(EdgeSpec("a", "b", "x", "u0",
+                                   mapping=matrix_mapping(np.ones((3, 1), np.float32))))
+    assert one.norm_side == ip.SOURCE and float(one.reading(jnp.float32(2.0))) == 2.0
 
 
 def test_a_bare_sequence_of_edges_is_read_in_the_order_given_from_the_state_handed():
@@ -214,10 +365,18 @@ def test_the_three_derivations_the_later_stages_need_are_one_line_each():
                 if jnp.issubdtype(v.dtype, jnp.floating)}
     unread = floating - plan.source_fields()
     assert unread == {("a", "g")}
-    compact = {r.key: ((r.source, r.anchor) if r.mapping_form != ip.NO_MAPPING else r.key)
+    # (ii) with "reads a geometry" standing in for the geometry stage's
+    # rule; the static rule is the record's own side.
+    compact = {r.key: ((r.source, r.anchor) if r.anchor is not None else r.key)
                for r in plan.internal if r.source_kind == ip.FLOATING}
     assert compact["a.x->b.u4"] == (("a", "x"), ("source", "g"))
     assert compact["b.x->a.u0"] == "b.x->a.u0"
+    # (i) under the compact rule: a field an expanding mapping reads is
+    # measured whole, like one a plain edge reads.
+    pair = _pair(EdgeSpec("a", "b", "x", "u0", mapping=WIDE_DENSE),
+                 EdgeSpec("b", "a", "x", "u0", mapping=DENSE), EdgeSpec("b", "a", "y", "u1"))
+    assert {r.source for r in pair.internal
+            if r.source_kind == ip.FLOATING and r.reads_source_as_is} == {("a", "x"), ("b", "y")}
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +469,9 @@ def test_an_edge_that_delivers_no_entries_is_a_field_and_not_a_reading():
     assert plan.iqn_fields() == {"b": ("x",), "c": ("z",)}
 
 
-def test_only_a_mapped_edge_with_a_floating_source_makes_the_floor_depend_on_weights():
+def test_only_an_edge_read_through_its_mapping_makes_the_floor_depend_on_weights():
+    """A floating source, a mapping, and the delivered side: an edge the
+    norm reads at its source is the stored field, whatever the weights."""
     back = EdgeSpec("b", "a", "x", "u0")
     interface = types.SimpleNamespace(convergence_norm="interface")
     mixed = types.SimpleNamespace(convergence_norm="mixed")
@@ -323,6 +484,20 @@ def test_only_a_mapped_edge_with_a_floating_source_makes_the_floor_depend_on_wei
     # An inbound mapped edge is not the group's interface.
     inbound = _pair(EdgeSpec("o", "b", "x", "u0", mapping=DENSE), back)
     assert not inbound.norm_reads_mapping_weights() and inbound.mapped_keys() == ()
+    # Read at its source: no weights in the reading, no slot, no key.
+    scatter = EdgeSpec("a", "b", "x", "u0", mapping=WIDE_DENSE)
+    expanding = _pair(scatter, back)
+    assert not expanding.norm_reads_mapping_weights() and expanding.mapped_keys() == ()
+    assert not layout._reads_mapping_weights(interface, expanding)
+    assert layout._reading_is_the_fields(expanding, {"a": ("x",), "b": ("x",)})
+    # One edge of each side: the group reads the weights of the gather alone.
+    gather = EdgeSpec("b", "a", "x", "u0", mapping=matrix_mapping(np.ones((1, 2), np.float32)))
+    two_way = _pair(scatter, gather)
+    assert two_way.norm_reads_mapping_weights() and two_way.mapped_keys() == ("b.x->a.u0",)
+    assert not layout._reading_is_the_fields(two_way, {"a": ("x",), "b": ("x",)})
+    # A field read at its source by two edges is still read twice.
+    twice = _pair(scatter, EdgeSpec("a", "b", "x", "u1", mapping=WIDE_DENSE), back)
+    assert not layout._reading_is_the_fields(twice, {"a": ("x",), "b": ("x",)})
 
 
 def test_the_geometry_views_differ_in_whether_an_inbound_edge_counts():
@@ -393,10 +568,10 @@ class _Relay(SimulationNode):
         return {"x": (p["b"] + p["g"] * boundary_inputs["u0"]).astype(F32)}
 
 
-def test_the_reports_fallback_floor_reads_the_edges_as_declared():
-    """The residual sums a group's edges in the canonical order.  The report's
-    fallback floor is handed them as they were declared
-    (``_committed_floor_inputs``), which is another order here."""
+def test_the_reports_fallback_floor_reads_the_edges_in_the_order_the_norm_sums_them():
+    """The residual sums a group's edges in the canonical order, and the
+    report's fallback floor is handed them in that order
+    (``_committed_floor_inputs``), which is not the declared one here."""
     gm = GraphManager()
     gm.add_node(_Relay("a", 0.5, 1.0))
     gm.add_node(_Relay("b", 0.5, 0.0))
@@ -405,9 +580,10 @@ def test_the_reports_fallback_floor_reads_the_edges_as_declared():
     gm.add_coupling_group(["a", "b"], convergence_norm="interface", rtol=1e-6)
     gm.compile()
     _evaluations, _declared, internal = gm._committed_floor_inputs["a+b"]   # noqa: SLF001
-    assert [e.key for e in internal] == ["b.x->a.u0", "a.x->b.u0"]
+    assert [e.key for e in internal] == ["a.x->b.u0", "b.x->a.u0"]
     plan = ip.interface_plan(frozenset("ab"), gm._edges, gm.schedule,       # noqa: SLF001
                              gm._state, gm._nodes)                          # noqa: SLF001
     assert list(gm.schedule) == ["a", "b"]
     assert _keys(plan.internal) == ["a.x->b.u0", "b.x->a.u0"]
-    assert internal == plan.declared_edges()
+    assert internal == plan.norm_edges() == tuple(r.edge for r in plan.internal)
+    assert [e.key for e in plan.declared_edges()] == ["b.x->a.u0", "a.x->b.u0"]

@@ -282,8 +282,10 @@ def _edge(source, field="x", transform=None, mapping=None):
 
 def test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is():
     """The static rule: the state's weights are the interface norm's exactly
-    when every internal edge delivers its floating source field unchanged
-    and no field is read twice."""
+    when the norm's reading of every internal edge is its floating source
+    field unchanged -- no transform, and no mapping but one read at its
+    source (onto more entries than the field holds) -- and no field is
+    read twice."""
     is_fields = layout_mod._reading_is_the_fields                            # noqa: SLF001
     floats = {"a": ("x", "y"), "b": ("x",), "c": ("x",)}
     assert is_fields([], floats)
@@ -295,7 +297,19 @@ def test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is():
     assert not is_fields([_edge("b"), _edge("a"), _edge("c"), _edge("a")], floats), (
         "read twice, the two reads apart")
     assert not is_fields([_edge("a", transform=lambda v: v), _edge("b")], floats), "a transform"
-    assert not is_fields([_edge("a", mapping=object()), _edge("b")], floats), "a mapping"
+    sized = lambda n_source, n_target: types.SimpleNamespace(  # noqa: E731
+        n_source=n_source, n_target=n_target)
+    assert not is_fields([_edge("a", mapping=sized(4, 2)), _edge("b")], floats), "a gather"
+    assert not is_fields([_edge("a", mapping=sized(2, 2)), _edge("b")], floats), "a tie"
+    # A mapping onto more entries is read at its source: the field as it is,
+    # whatever transform follows the mapping -- once per edge, as any field.
+    assert is_fields([_edge("a", mapping=sized(2, 4)), _edge("b")], floats), "a scatter"
+    assert is_fields([_edge("a", mapping=sized(2, 4), transform=lambda v: v), _edge("b")],
+                     floats), "a scatter, then a transform"
+    assert not is_fields([_edge("a", mapping=sized(2, 4)), _edge("a"), _edge("b")], floats), (
+        "read twice, once at the source of a scatter")
+    with pytest.raises(TypeError, match="cannot tell which side"):
+        is_fields([_edge("a", mapping=object()), _edge("b")], floats)
     # A field the norm does not read (not floating) is in neither count.
     assert is_fields([_edge("a", "n"), _edge("a", "n"), _edge("b")], floats)
     assert is_fields([_edge("a", "n", transform=lambda v: v), _edge("b")], floats)

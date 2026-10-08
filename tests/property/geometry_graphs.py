@@ -754,28 +754,42 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 #   ``not_usable_reason`` saying which of the two it is
 #   (:func:`withheld`, :func:`assert_not_diagnosed`);
 # * ``convergence_norm="interface"`` on a group with a geometry-dependent
-#   mapping on an internal edge is refused by ``compile()``
-#   (``INTERFACE_NORM_READS_GEOMETRY = False``,
-#   :func:`assert_interface_norm_refused`).
+#   mapping on an internal edge **solves and reports its criterion** for
+#   the ``multilinear_grid`` kind in a group that does not sub-cycle
+#   (``INTERFACE_NORM_KINDS``; the instruments of that reading are
+#   ``tests/property/geometry_interface_graphs.py`` and its test module),
+#   and its report withholds every bound with the norm named
+#   (:func:`withheld` returns ``"norm"``; ``INTERFACE_BOUNDS_READ_GEOMETRY
+#   = False``).  For another kind (``test_geom_matrix`` here) and for a
+#   sub-cycled group it is still refused by ``compile()``
+#   (:func:`interface_norm_refused`, :func:`assert_interface_norm_refused`).
 #
-# Nothing was deleted: set ``INTERFACE_NORM_READS_GEOMETRY = True`` when a
-# later stage makes the interface norm read the geometry, and the cases
-# that ran it run again.
-#
-# Waiting for that stage too: ``RELAY_INTERFACE_CASES`` (defined after
-# ``case``, below), the interface norm over source-anchored geometry edges,
-# whose relay twin (``relay_twin``) has the edge-mapped graph's interface
-# reading.  ``tests/property/test_interface_reading_twins.py`` asserts each
-# refused today and its relay twin reporting; with the switch set it
-# compares the two reports as it compares a static mapping's today.
+# **What the norm reads on a geometry edge** (the decision of 2026-10-07):
+# a gather as delivered; a scatter at its inputs, the source value and --
+# for a source anchor -- the positions in units of the grid spacing.  The
+# relay twin (``relay_twin``) moves a mapping onto the *delivered* side of
+# the reading, so it states the rule for a gather and not for a scatter;
+# the node-inlined twin carries the raw source and weighs a geometry by
+# its own magnitude, so it states it for neither.  ``RELAY_INTERFACE_CASES``
+# (defined after ``case``, below) wait for the stage that reports bounds
+# under this norm: ``tests/property/test_interface_reading_twins.py``
+# asserts what each does today.
 # =============================================================================
 
 #: Whether coupling diagnostics account for a moving geometry at all (the
 #: ``multilinear_grid`` kind on a single-rate group under ``"l2"`` or
 #: ``"mixed"``: see :func:`withheld`).
 DIAGNOSTICS_READ_GEOMETRY = True
-#: Whether the interface norm reads a geometry (and compiles over one).
-INTERFACE_NORM_READS_GEOMETRY = False
+#: The flavours of this harness whose geometry the interface norm's
+#: criterion reads (the library's ``multilinear_grid`` kind), in a group
+#: that does not sub-cycle.
+INTERFACE_NORM_KINDS = ("multilinear",)
+#: Whether the *bounds* of a group under the interface norm read a
+#: geometry (a later stage: its report withholds them today).
+INTERFACE_BOUNDS_READ_GEOMETRY = False
+#: What each refusal of the interface norm over a geometry edge says.
+REFUSED = {"kind": "only for the 'multilinear_grid' kind",
+           "sub-cycled": "in a sub-cycled group"}
 #: What a report still says about a group whose bounds are withheld.
 SOLVE_OUTCOME = ("iterations", "total_iterations", "residual", "converged")
 _NOT_USABLE = {"amplification": "nan", "error_estimate": "nan", "ratio_usable": False,
@@ -790,11 +804,25 @@ WHY = {"kind": "other than 'multilinear_grid'",
        "self-check": "disagrees with a finite difference of the pass"}
 
 
-def interface_norm_refused(knobs) -> bool:
-    """Whether a group with these knobs and a geometry-dependent mapping on
-    an internal edge is refused at compile (phase 1)."""
-    return (not INTERFACE_NORM_READS_GEOMETRY and knobs is not None
-            and dict(knobs).get("convergence_norm") == "interface")
+def interface_norm_refused(knobs, kind: str = "geom_matrix",
+                           sub_cycled: bool = False) -> Optional[str]:
+    """Why a group with these knobs and a geometry-dependent mapping of
+    flavour *kind* on an internal edge is refused at compile (a key of
+    :data:`REFUSED`), or ``None`` where it compiles: the interface norm
+    reads the geometry of the ``multilinear_grid`` kind in a group that
+    does not sub-cycle."""
+    if knobs is None or dict(knobs).get("convergence_norm") != "interface":
+        return None
+    if kind not in INTERFACE_NORM_KINDS:
+        return "kind"
+    return "sub-cycled" if sub_cycled else None
+
+
+def refused(c: "Case") -> Optional[str]:
+    """:func:`interface_norm_refused` of a two-body case."""
+    knobs = c.knobs or {}
+    return interface_norm_refused(
+        c.knobs, c.kind, bool(c.dt_f != c.dt_p and knobs.get("subcycling")))
 
 
 def withheld(c: "Case") -> Optional[str]:
@@ -806,6 +834,8 @@ def withheld(c: "Case") -> Optional[str]:
         return "kind"
     if c.dt_f != c.dt_p and dict(c.knobs or {}).get("subcycling"):
         return "sub-cycled"
+    if dict(c.knobs or {}).get("convergence_norm") == "interface":
+        return None if INTERFACE_BOUNDS_READ_GEOMETRY else "norm"
     return None
 
 
@@ -833,19 +863,21 @@ def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
     assert np.isfinite(report["residual"]) and int(report["iterations"]) >= 1, report
 
 
-def assert_interface_norm_refused(make, keys) -> None:
+def assert_interface_norm_refused(make, keys, why: str = "kind") -> None:
     """``make()`` builds and compiles a graph whose group uses the interface
-    norm over the geometry edges *keys*: a ``RuntimeError`` from ``compile()``
-    naming each edge and the norms that work."""
+    norm over the geometry edges *keys* in a setting the norm does not read
+    (*why*, a key of :data:`REFUSED`): a ``RuntimeError`` from ``compile()``
+    naming each edge, the reason and the norms that work."""
     import pytest  # noqa: PLC0415
 
-    with pytest.raises(RuntimeError) as refused:
+    with pytest.raises(RuntimeError) as refusal:
         make()
-    message = str(refused.value)
+    message = str(refusal.value)
     for phrase in ("convergence_norm='interface'", "geometry-dependent mapping",
-                   "does not read a moving geometry in 0.4.0",
+                   REFUSED[why], "in 0.4.0",
                    "Use convergence_norm='mixed' or 'l2'", *keys):
         assert phrase in message, (phrase, message)
+    assert not any(text in message for name, text in REFUSED.items() if name != why), message
 
 
 # ---------------------------------------------------------------------------

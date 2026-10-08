@@ -348,18 +348,25 @@ def test_the_relay_twin_of_a_moving_source_anchored_geometry_steps_as_the_edge_m
 
 @pytest.mark.parametrize("c", gg.RELAY_INTERFACE_CASES, ids=repr)
 def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_builds(c):
-    """PHASE 1 (see ``geometry_graphs``), per push: the interface norm over
-    a geometry edge is refused at compile, and the relay twin -- plain
-    edges only -- is accepted.  Slow sibling:
+    """Per push (see ``geometry_graphs``): the interface norm over a geometry
+    edge of the ``test_geom_matrix`` kind is refused at compile; over the
+    ``multilinear_grid`` kind it solves, and its report withholds the
+    bounds with the norm named.  The relay twin -- plain edges only -- is
+    accepted either way.  Slow sibling:
     :func:`test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin`."""
     with gg.x64(c.needs_x64):
         keys = [e.key for e in gg.build(gg.two_body(c), compile=False).edges
                 if e.geometry is not None]
         assert len(keys) == 2, keys
-        if gg.INTERFACE_NORM_READS_GEOMETRY:
-            gg.build(gg.two_body(c))        # accepted, once diagnostics read a geometry
+        if gg.refused(c):
+            gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)), keys,
+                                             gg.refused(c))
         else:
-            gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)), keys)
+            # The ``multilinear_grid`` kind: the criterion reads its
+            # geometry, and the report withholds the bounds.
+            edge = gg.build(gg.two_body(c))
+            edge.step()
+            gg.assert_not_diagnosed(edge.coupling_diagnostics()[KEY], keys, "norm")
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
     assert all(e.geometry is None and e.mapping is None for e in twin.edges)
 
@@ -376,7 +383,7 @@ def test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin(c):
     the static cases."""
     with gg.x64(c.needs_x64):
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
-        if not gg.INTERFACE_NORM_READS_GEOMETRY:
+        if not gg.INTERFACE_BOUNDS_READ_GEOMETRY:
             twin.step()
             report = twin.coupling_diagnostics()[KEY]
             assert bool(report["spectral_usable"]) and np.isfinite(

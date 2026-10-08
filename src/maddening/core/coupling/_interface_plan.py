@@ -547,6 +547,8 @@ class InterfaceEdge:
         by ``_group_layout._reading_is_the_fields`` (which spectral
         analysis the report takes).
         """
+        if self.norm_side not in (DELIVERED, SOURCE):
+            return False
         parts = self.parts
         return (len(parts) == 1 and parts[0].whole and parts[0].field == self.source
                 and parts[0].unit == OWN_MAGNITUDE)

@@ -4,22 +4,28 @@ The first half drives :func:`verify_graph_order` and
 :func:`verify_graph_gci` with closed-form ladders, to pin what each
 outcome of the guard does to the result.  The second half is the worked
 example of the verification guide, on real graphs: two rods on the same
-interval that exchange heat along their whole length,
+interval, each heated along its whole length in proportion to the
+other's temperature,
 
-    dTa/dt = alpha Ta'' + k (Tb - Ta),    dTb/dt = alpha Tb'' + k (Ta - Tb),
+    dTa/dt = alpha Ta'' + k Tb,    dTb/dt = alpha Tb'' + k Ta,
 
 insulated at both ends.  With ``Ta(x, 0) = 1 + cos(pi x)`` and
-``Tb(x, 0) = 0`` the sum and the difference of the two decouple, and
+``Tb(x, 0) = 0`` the solution is that of one rod alone,
+``u = 1 + cos(pi x) exp(-alpha pi^2 t)``, shared between the two:
 
-    Ta + Tb = 1 + cos(pi x) exp(-alpha pi^2 t),
-    Ta - Tb = exp(-2 k t) + cos(pi x) exp(-(alpha pi^2 + 2 k) t).
+    Ta = cosh(k t) u,    Tb = sinh(k t) u.
 
-Each rod is a ``HeatNode``; the exchange is four additive edges into the
-rods' ``heat_source`` (each rod's own temperature times ``-k``, the
-other's times ``k``).  On matching grids the cross edges are plain; on
-non-matching grids they carry a shipped mapping, which is where the edge
-level and the coupled level meet: the degree the mapping reproduces
-bounds the order the coupled model can show.
+Each rod is a ``HeatNode``; the coupling is two edges, each rod's
+temperature times ``k`` into the other's ``heat_source``.  On matching
+grids the edges are plain; on non-matching grids they carry a shipped
+mapping, which is where the edge level and the coupled level meet: the
+degree the mapping reproduces bounds the order the coupled model can
+show.
+
+No edge runs from a rod to itself, which is why the model is not the
+exchange ``k (Tb - Ta)``: the term in a rod's own temperature would have
+to be such an edge, and the time level one is read at is no documented
+part of an edge.
 
 Precision: the studies run under ``jax_enable_x64`` (see
 ``test_mms_order.py`` for why a ladder needs it); a ``HeatNode``'s state
@@ -280,10 +286,10 @@ def test_the_default_factor_keeps_the_order_inside_the_band():
 
 
 # ---------------------------------------------------------------------------
-# The worked example: two rods exchanging heat along their length
+# The worked example: two rods, each heated by the other along its length
 # ---------------------------------------------------------------------------
 
-ALPHA, EXCHANGE, T_END = 0.1, 1.0, 0.5
+ALPHA, FEED, T_END = 0.1, 1.0, 0.5
 FOURIER = 0.2  # units: dt * alpha / dx**2 on the finer rod, below its limit of 1/2
 
 
@@ -318,12 +324,8 @@ def run(n_a, n_b, steps, *, mapping=None, group=None):
     gm = GraphManager()
     gm.add_node(HeatNode("a", dt, n_cells=n_a, thermal_diffusivity=ALPHA))
     gm.add_node(HeatNode("b", dt, n_cells=n_b, thermal_diffusivity=ALPHA))
-    for rod in ("a", "b"):
-        gm.add_edge(rod, rod, "temperature", "heat_source", transform=_times(-EXCHANGE),
-                    additive=True)
     for source, target, n_from, n_to in (("a", "b", n_a, n_b), ("b", "a", n_b, n_a)):
-        gm.add_edge(source, target, "temperature", "heat_source",
-                    transform=_times(EXCHANGE), additive=True,
+        gm.add_edge(source, target, "temperature", "heat_source", transform=_times(FEED),
                     mapping=None if mapping is None else MAPPINGS[mapping](n_from, n_to))
     if group is not None:
         gm.add_coupling_group(["a", "b"], **group)
@@ -339,10 +341,8 @@ def run(n_a, n_b, steps, *, mapping=None, group=None):
 def exact(x, rate=ALPHA * np.pi ** 2):
     """``(Ta, Tb)`` at ``T_END``; *rate* is ``alpha`` times the eigenvalue
     of ``cos(pi x)`` (the continuous operator's, unless given)."""
-    total = 1.0 + np.cos(np.pi * x) * math.exp(-rate * T_END)
-    difference = math.exp(-2 * EXCHANGE * T_END) + np.cos(np.pi * x) * math.exp(
-        -(rate + 2 * EXCHANGE) * T_END)
-    return 0.5 * (total + difference), 0.5 * (total - difference)
+    alone = 1.0 + np.cos(np.pi * x) * math.exp(-rate * T_END)
+    return math.cosh(FEED * T_END) * alone, math.sinh(FEED * T_END) * alone
 
 
 def relative_error(gm, n_a, n_b, rate=ALPHA * np.pi ** 2):
@@ -381,8 +381,21 @@ RATE_ON_GRID = ALPHA * 4 * N_TIME ** 2 * math.sin(math.pi / (2 * N_TIME)) ** 2
 TIME_LEVELS = (50, 100, 200, 400)
 
 
-def time_error(steps, tolerance, **more):
-    gm = run(N_TIME, N_TIME, steps, group=_group(tolerance, **more))
+def _read_group(tolerance):
+    """A group whose diagnostics report a usable bound for this pair.
+
+    The rods are swept together (``"jacobi"``): each reads the other's
+    last iterate, so the pass map of the symmetric pair is symmetric and
+    the spectral bound over its 32 interface values is settled.  Under
+    the default sweep, one rod after the other, the pass map is far from
+    normal and the diagnostics do not call their bound usable
+    (``test_a_group_that_does_not_call_its_bound_usable_is_guarded_by_the_rerun``).
+    """
+    return _group(tolerance, solver="ift", diagnostics=True, iteration_mode="jacobi")
+
+
+def time_error(steps, tolerance):
+    gm = run(N_TIME, N_TIME, steps, group=_read_group(tolerance))
     return relative_error(gm, N_TIME, N_TIME, RATE_ON_GRID), gm
 
 
@@ -413,10 +426,13 @@ def test_non_matching_grids_converge_at_the_order_the_mapping_allows(float64, ma
 
 def test_the_diagnostics_route_reads_a_real_group_and_refuses_one_with_no_bound(float64):
     steps = 50
-    gm = run(N_TIME, N_TIME, steps, group=_group(1e-8, solver="ift", diagnostics=True))
+    gm = run(N_TIME, N_TIME, steps, group=_read_group(1e-8))
     found = coupling_iteration_bound(gm, steps=steps)
     assert found.usable and found.groups == ("a+b",), found
-    assert 0.0 < found.per_step < 1e-6 and found.accumulated == steps * found.per_step
+    # The number is the report's own, passed on as it stands and counted
+    # once for every step: no value of it is pinned here.
+    reported = float(gm.coupling_report()[0]["spectral_error_bound"])
+    assert found.per_step == reported > 0.0 and found.accumulated == steps * reported
     assert found.accumulated < DEFAULT_ITERATION_ERROR_FACTOR * relative_error(
         gm, N_TIME, N_TIME, RATE_ON_GRID)
     plain = run(N_TIME, N_TIME, steps, group=_group(1e-8, solver="fori"))
@@ -451,7 +467,7 @@ def test_the_exchange_is_first_order_in_time_and_the_diagnostics_guard_it(float6
     the step (MADD-ANO-014)."""
     @functools.lru_cache(maxsize=None)
     def level(steps):
-        return time_error(steps, 1e-8, solver="ift", diagnostics=True)
+        return time_error(steps, 1e-8)
 
     result = verify_graph_order(
         axis=TIME, levels=TIME_LEVELS, expected=1.0,
@@ -465,18 +481,20 @@ def test_the_exchange_is_first_order_in_time_and_the_diagnostics_guard_it(float6
 # Per push: tests/verification/test_coupled_order.py::test_a_bound_that_is_not_far_below_the_error_fails_as_inconclusive and tests/verification/test_coupled_order.py::test_an_unusable_bound_falls_through_to_the_rerun_and_to_a_skip_without_one
 @pytest.mark.slow
 def test_a_loose_tolerance_is_caught_by_both_routes_before_it_is_read_as_an_order(float64):
-    """At ``tolerance=1e-4`` the group stops after one pass on the fine
-    levels and two on the coarse ones, so the ladder mixes two schemes.
-    The last step's bound is a few percent of the error at every level --
-    it is the bound times the number of steps that is not small."""
+    """At ``tolerance=1e-4`` the group stops after one pass on most steps
+    of the fine levels and takes two on the coarse ones, so the ladder
+    mixes two schemes.  At the finest level the last step's bound, read
+    alone, is inside the guard's own factor -- it is the bound times the
+    number of steps that is not small."""
     @functools.lru_cache(maxsize=None)
     def level(steps, tolerance=1e-4):
-        return time_error(steps, tolerance, solver="ift", diagnostics=True)
+        return time_error(steps, tolerance)
 
     errors = [level(steps)[0] for steps in TIME_LEVELS]
     last_step = [coupling_iteration_bound(level(steps)[1], steps=steps).per_step
                  for steps in TIME_LEVELS]
-    assert all(b < 0.1 * e for b, e in zip(last_step, errors)), (last_step, errors)
+    assert last_step[-1] < DEFAULT_ITERATION_ERROR_FACTOR * errors[-1], (last_step, errors)
+    assert TIME_LEVELS[-1] * last_step[-1] > errors[-1], (last_step, errors)
     by_diagnostics = verify_graph_order(
         axis=TIME, levels=TIME_LEVELS, expected=1.0,
         error_at=lambda steps: level(steps)[0],
@@ -489,6 +507,35 @@ def test_a_loose_tolerance_is_caught_by_both_routes_before_it_is_read_as_an_orde
         tightened_error_at=lambda steps: level(steps, 1e-8)[0])
     assert by_rerun.failed and "not far below" in by_rerun.detail
     assert "level(s)" in by_rerun.detail and "400" in by_rerun.detail.split("level(s)")[1][:40]
+
+
+# Per push: tests/verification/test_coupled_order.py::test_an_unusable_bound_falls_through_to_the_rerun_and_to_a_skip_without_one and tests/verification/test_coupled_order.py::test_the_bound_is_the_last_steps_times_the_steps_and_the_worst_group_decides
+@pytest.mark.slow
+def test_a_group_that_does_not_call_its_bound_usable_is_guarded_by_the_rerun(float64):
+    """The same pair under the default sweep (one rod, then the other).
+    Its diagnostics report a number and do not call it usable, so the
+    helper refuses it with the report's flag, and a study that offers
+    both routes is guarded by the re-run."""
+    @functools.lru_cache(maxsize=None)
+    def level(steps, tolerance=1e-8):
+        gm = run(N_TIME, N_TIME, steps,
+                 group=_group(tolerance, solver="ift", diagnostics=True))
+        return relative_error(gm, N_TIME, N_TIME, RATE_ON_GRID), gm
+
+    levels = TIME_LEVELS[:3]
+    for steps in levels:
+        row = level(steps)[1].coupling_report()[0]
+        found = coupling_iteration_bound(level(steps)[1], steps=steps)
+        assert not row["spectral_usable"] and math.isfinite(row["spectral_error_bound"]), row
+        assert not found.usable and math.isnan(found.accumulated)
+        assert "spectral_usable=False" in found.reason
+    kw = dict(axis=TIME, levels=levels, expected=1.0, error_at=lambda steps: level(steps)[0],
+              iteration_bound_at=lambda steps: coupling_iteration_bound(level(steps)[1],
+                                                                        steps=steps))
+    alone = verify_graph_order(**kw)
+    assert alone.skipped and "spectral_usable=False" in alone.detail
+    guarded = verify_graph_order(tightened_error_at=lambda steps: level(steps, 1e-10)[0], **kw)
+    assert guarded.status == "PASS" and "re-run" in guarded.detail, guarded.detail
 
 
 # Per push: tests/verification/test_coupled_order.py::test_a_grid_convergence_study_is_guarded_on_the_differences_it_reads

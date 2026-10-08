@@ -32,19 +32,17 @@ from maddening.core._graph_specs import (
     _node_fluxes,
     _node_update,
 )
+from maddening.core.coupling._interface_plan import interface_plan
 from maddening.core.coupling._group_layout import (
     _group_accel_fields,
     _group_dividers,
     _fields_the_interface_norm_misses,
     _group_evaluations,
     _geometry_diagnostics_refusal,
-    _geometry_holders,
     _group_pass_structure,
-    _group_reads,
     _group_residual_dtype,
     _group_state_finite,
     _group_waveform_sweeps,
-    _interface_edge_order,
     _non_finite_reads_as_diverged,
     _reading_is_the_fields,
     _reads_mapping_weights,
@@ -260,17 +258,12 @@ def _run_coupled_block_impl(
     use_acceleration = group.acceleration != "none"
     use_jacobi = group.iteration_mode == "jacobi"
 
-    # Edges internal to this group are forced forward
-    group_internal = set()
-    group_internal_list = []
-    for edge in all_edges:
-        if edge.source_node in group.nodes and edge.target_node in group.nodes:
-            group_internal.add(edge)
-            group_internal_list.append(edge)
-    # The interface norm sums over these edges, so it reads them in an
-    # order the group fixes, not the order of the ``add_edge`` calls.
-    interface_edges_in_order = _interface_edge_order(
-        group_internal_list, group_node_names)
+    # The group's edges, described once (``_interface_plan``): everything
+    # below that asks which edges are internal, what one delivers or which
+    # fields are read asks this.  Edges internal to the group are forced
+    # forward; the interface norm sums over them in an order the group
+    # fixes (``plan.internal``), not the order of the ``add_edge`` calls.
+    plan = interface_plan(group.nodes, all_edges, group_node_names, new_state, nodes)
     # The mapping weights this step runs with (``params["mappings"]``,
     # baked or traced as the step has them): what ``_resolve_boundary``
     # hands ``_apply_edge``, and so what every reading of an interface
@@ -278,7 +271,7 @@ def _run_coupled_block_impl(
     step_mappings = node_params.mappings if node_params is not None else None
     # Whether the interface norm's reading depends on those weights
     # (static).  Such a group's float floor is recorded by the step.
-    reads_mapping_weights = _reads_mapping_weights(group, all_edges, new_state)
+    reads_mapping_weights = _reads_mapping_weights(group, plan)
     # The same weights for what *reports on* the returned state rather
     # than taking part in the map -- the spectral analysis's reading and
     # the recorded floor: read as the step has them, and differentiated
@@ -287,17 +280,12 @@ def _run_coupled_block_impl(
     # interface norm reads an edge, so only it builds them.
     report_mappings = (
         None if step_mappings is None or not use_interface_norm else {
-            e.key: jax.tree.map(jax.lax.stop_gradient, step_mappings[e.key])
-            for e in interface_edges_in_order
-            if e.mapping is not None and e.key in step_mappings})
+            key: jax.tree.map(jax.lax.stop_gradient, step_mappings[key])
+            for key in plan.mapped_keys() if key in step_mappings})
 
     # Precompute which boundary inputs come from coupling (intra-group) edges
     # per target node -- only these get interface correction
-    coupled_bi_names_by_node: dict[str, set] = {}
-    for edge in group_internal_list:
-        coupled_bi_names_by_node.setdefault(
-            edge.target_node, set()
-        ).add(edge.target_field)
+    coupled_bi_names_by_node = plan.coupled_inputs()
 
     # The geometry fields the diagnostics' self-check moves (experimental;
     # ``_geometry_product_gap``): those of the geometry-dependent mappings
@@ -306,9 +294,9 @@ def _run_coupled_block_impl(
     # group without such an edge and for every group without diagnostics:
     # nothing below is traced for them.
     geometry_checked = (
-        _geometry_holders(group, all_edges)
+        plan.geometry_holders()
         if group.diagnostics and group.solver == "ift"
-        and _geometry_diagnostics_refusal(group, nodes, all_edges) is None
+        and _geometry_diagnostics_refusal(group, nodes, plan) is None
         else [])
 
     # The fields the acceleration flattens: IQN's interface (or
@@ -319,36 +307,15 @@ def _run_coupled_block_impl(
     # ``"aitken"`` / ``"fixed"`` on its own floating vector and reads
     # this only for IQN's index map, so it stays ``None`` there.
     if group.acceleration in ("iqn-ils", "iqn-imvj") or group.solver == "fori":
-        accel_fields = _group_accel_fields(group, group_internal_list, new_state)
+        accel_fields = _group_accel_fields(group, plan, new_state)
     else:
         accel_fields = None
 
-    # Detect which nodes produce flux fields
-    from maddening.core.node import SimulationNode as _SimBase
-    flux_producing_nodes = set()
-    for nn in group_node_names:
-        node_obj = nodes[nn].node
-        if type(node_obj).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
-            flux_producing_nodes.add(nn)
-    # Also check nodes outside the group that feed edges into the group
-    for edge in all_edges:
-        src_nn = edge.source_node
-        if edge.target_node in group_node_set and src_nn not in group_node_set:
-            if src_nn in nodes:
-                node_obj = nodes[src_nn].node
-                if type(node_obj).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
-                    flux_producing_nodes.add(src_nn)
-
-    # Check if any edge references a flux field (not in state)
-    has_flux_edges = False
-    for edge in all_edges:
-        if edge.target_node in group_node_set or edge.source_node in group_node_set:
-            src_nn = edge.source_node
-            if src_nn in nodes:
-                src_fields = set(new_state.get(src_nn, {}).keys())
-                if edge.source_field not in src_fields and src_nn in flux_producing_nodes:
-                    has_flux_edges = True
-                    break
+    # The members that produce flux fields, and whether any edge with an
+    # end in the group carries a flux (a source that is not in the state,
+    # of a node that defines ``compute_boundary_fluxes``).
+    flux_producing_nodes = plan.flux_members
+    has_flux_edges = plan.resolves_a_flux()
 
     # How many sweeps the Jacobi pass seeds producers' fluxes in: two
     # when a producer in the group reads a flux (it needs another
@@ -356,17 +323,9 @@ def _run_coupled_block_impl(
     # ``one_pass_jacobi``), one otherwise.  Static, so a group that
     # never needed the second sweep compiles to the program it always
     # did.  ``one_pass_gs`` always takes two.
-    def _edge_reads_a_flux(edge):
-        src_nn = edge.source_node
-        return (src_nn in flux_producing_nodes
-                and edge.source_field not in new_state.get(src_nn, {}))
-
     jacobi_flux_sweeps = (
         (False, True)
-        if has_flux_edges and any(
-            _edge_reads_a_flux(edge)
-            for nn in group_node_names if nn in flux_producing_nodes
-            for edge in edges_by_target[nn])
+        if has_flux_edges and plan.flux_producer_reads_a_flux()
         else (True,)
     )
 
@@ -489,7 +448,7 @@ def _run_coupled_block_impl(
         """
         boundary_inputs: dict[str, Any] = {}
         for edge in edges_by_target[nn]:
-            if edge in back_edge_set and edge not in group_internal:
+            if edge in back_edge_set and not plan.is_internal(edge):
                 src_state = full_state
             else:
                 src_state = s
@@ -517,10 +476,10 @@ def _run_coupled_block_impl(
     # How many evaluations one pass rounds like, for the float floor the
     # diagnostics compare against (see ``_group_evaluations``).
     pass_evaluations, _declared = _group_evaluations(
-        group, nodes, group_node_names, group_internal_list)
+        group, nodes, group_node_names, plan.declared_edges())
     gs_order, gs_own, gs_same_pass, _ = _group_pass_structure(
-        group, nodes, group_node_names, group_internal_list)
-    gs_reads = _group_reads(group, group_internal_list)
+        group, nodes, group_node_names, plan.declared_edges())
+    gs_reads = plan.member_reads()
 
     def _read_gain(s_star, src, dst):
         """Measured relative gain of ``dst``'s update in its read of ``src``.
@@ -585,11 +544,11 @@ def _run_coupled_block_impl(
         boundary_inputs: dict[str, Any] = {}
         for edge in edges_by_target[nn]:
             geom = None
-            if edge in back_edge_set and edge not in group_internal:
+            if edge in back_edge_set and not plan.is_internal(edge):
                 src_state = full_state
                 value = _resolve_value(edge, src_state, flux_s)
                 geom = _edge_geom(edge, src_state, consumer)
-            elif edge in group_internal:
+            elif plan.is_internal(edge):
                 if edge.geometry is None:
                     pass
                 elif edge.geometry[0] != "source":
@@ -796,7 +755,7 @@ def _run_coupled_block_impl(
                 # Each internal edge as the step delivers it: through its
                 # mapping, with this step's weights, then its transform.
                 return coupling_residual_interface(
-                    s_new, s_old, interface_edges_in_order,
+                    s_new, s_old, plan,
                     group.atol, group.rtol, mappings=step_mappings,
                 ).astype(res_dtype)
             if use_mixed_norm:
@@ -906,7 +865,7 @@ def _run_coupled_block_impl(
         # complements within what the norm does not measure.  Empty for
         # every other group, whose compiled step is the one it was.
         refreshed_fields = _fields_the_interface_norm_misses(
-            group, interface_edges_in_order, group_node_names, state_after_first)
+            group, plan, group_node_names, state_after_first)
 
         def _with_nonfloat_fields_at(s_full):
             """*s_full* with the group's non-floating fields recomputed at it.
@@ -1217,11 +1176,11 @@ def _run_coupled_block_impl(
             # gives there, so the fixed point is the consistent one.
             # Static: without such an edge the map is the one it always
             # was.
-            live_nonfloat = sorted({
-                (e.source_node, e.source_field) for e in group_internal_list
-                if e.source_field in template_state.get(e.source_node, {})
-                and e.source_field not in float_fields.get(e.source_node, ())
-            })
+            live_nonfloat = sorted(
+                (nn, fld) for nn, fld in plan.source_fields()
+                if fld in template_state.get(nn, {})
+                and fld not in float_fields.get(nn, ())
+            )
 
             def _embed_live(x_full):
                 s = _embed(x_full)
@@ -1298,7 +1257,7 @@ def _run_coupled_block_impl(
 
             def _read_fields(s_star):
                 """``(node, field, value)`` for every field the norm reads."""
-                read = {(e.source_node, e.source_field) for e in group_internal_list}
+                read = plan.source_fields()
                 for nn in group_node_names:
                     for fld in float_fields[nn]:
                         if use_interface_norm and (nn, fld) not in read:
@@ -1389,7 +1348,7 @@ def _run_coupled_block_impl(
             # (``_reading_is_the_fields``): every other group keeps the
             # analysis it had.
             transformed_reading = use_interface_norm and not _reading_is_the_fields(
-                interface_edges_in_order, float_fields)
+                plan, float_fields)
             def _reading_parts(s_star):
                 """The interface norm's reading at ``s_star``, as ``(source dtype,
                 value)`` per edge: what each internal edge delivers, in the order
@@ -1397,7 +1356,7 @@ def _run_coupled_block_impl(
                 (``_interface_readings``, which both iterate)."""
                 return [(source_dtype, jnp.asarray(v))
                         for _e, source_dtype, v in _interface_readings(
-                            interface_edges_in_order, s_star, mappings=report_mappings)]
+                            plan, s_star, mappings=report_mappings)]
 
             def _reading_values(s_star):
                 """The delivered values alone."""
@@ -1501,9 +1460,7 @@ def _run_coupled_block_impl(
                         held = [initial_node_states[holder].get(fld)]
                         # A member's pre-step positions are a constant
                         # only a target-anchored edge needs.
-                        needed = any(
-                            e.geometry is not None and e.geometry == ("target", fld)
-                            and e.target_node == holder for e in all_edges)
+                        needed = plan.reads_own_geometry(holder, fld)
                     else:
                         held = [tree.get(holder, {}).get(fld)
                                 for tree in (full_state, new_state, template_state)]
@@ -2277,7 +2234,7 @@ def _run_coupled_block_impl(
             floor_meta[f"coupling_{group_key}_reading_floor"] = jnp.asarray(
                 residual_precision_floor(
                     {nn: result[nn] for nn in group_node_names}, group_node_names,
-                    "interface", group.atol, group.rtol, interface_edges_in_order,
+                    "interface", group.atol, group.rtol, plan,
                     evaluations=1.0, mappings=report_mappings,
                 ), dtype=res_dtype)
         result.setdefault(_META_KEY, {})

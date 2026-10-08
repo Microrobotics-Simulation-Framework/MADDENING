@@ -81,7 +81,9 @@ from maddening.core.schedule import (
 # ``graph_manager._helper`` reference fails instead of naming a copy that
 # nothing reads.
 from maddening.core import _adaptive_scan, _graph_specs, _param_probes
-from maddening.core.coupling import _bounds, _coupled_block, _group_layout, _reports
+from maddening.core.coupling import (
+    _bounds, _coupled_block, _group_layout, _interface_plan, _reports,
+)
 # Public names defined with the machinery that uses them stay importable from here.
 from maddening.core.coupling._bounds import GRADIENT_PROBE_ENTRY_LIMIT as GRADIENT_PROBE_ENTRY_LIMIT
 
@@ -2445,10 +2447,12 @@ class GraphManager:
                 )
             elif len(group_timesteps) > 1:
                 issues.extend(_group_layout._subcycling_ratio_errors(group, self._nodes))
+            plan = _interface_plan.interface_plan(
+                group.nodes, self._edges, sorted(group.nodes), self._state, self._nodes)
             issues.extend(_group_layout._flux_edge_coupling_errors(
-                group, self._nodes, self._edges, self._state,
+                group, self._nodes, plan, self._state,
             ))
-            issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._edges))
+            issues.extend(_group_layout._geometry_edge_coupling_errors(group, plan))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
 
@@ -2526,8 +2530,7 @@ class GraphManager:
             group=group,
             nodes={name: spec.node for name, spec in members.items()},
             timesteps={name: spec.timestep for name, spec in members.items()},
-            edges=[e for e in self._edges
-                   if e.source_node in members and e.target_node in members],
+            edges=_interface_plan.internal_edges(self._edges, members),
             feeds=dict(feeds),
             live_params=dict((self.params or {}).get("nodes") or {}),
         )
@@ -2606,6 +2609,14 @@ class GraphManager:
         for warning_text in _group_layout._staggered_across_components(
                 schedule, self._edges, self._coupling_groups, back_edges):
             warnings.warn(warning_text, UserWarning, stacklevel=2)
+        # Each group's edges, described once (``_interface_plan``): what the
+        # seeding of its slots below and its reports rest on.
+        interface_plans = {
+            "+".join(sorted(g.nodes)): _interface_plan.interface_plan(
+                g.nodes, self._edges, [n for n in schedule if n in g.nodes],
+                self._state, self._nodes)
+            for g in self._coupling_groups
+        }
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,
@@ -2747,7 +2758,7 @@ class GraphManager:
                     meta[f"coupling_{key}_amplification"] = jnp.array(
                         0.0, dtype=res_dtype
                     )
-                    if _group_layout._reads_mapping_weights(g, self._edges, self._state):
+                    if _group_layout._reads_mapping_weights(g, interface_plans[key]):
                         # The residual's float floor per evaluation, which
                         # the step measures where the interface norm reads
                         # a mapped edge (its delivered value depends on the
@@ -2789,9 +2800,9 @@ class GraphManager:
                         meta[f"coupling_{key}_pass_evaluations"] = jnp.array(
                             jnp.nan, dtype=spec_dtype
                         )
-                        if (_group_layout._group_geometry_edges(g, self._edges)
+                        if (interface_plans[key].resolved_geometry_edges()
                                 and _group_layout._geometry_diagnostics_refusal(
-                                    g, self._nodes, self._edges) is None):
+                                    g, self._nodes, interface_plans[key]) is None):
                             # The self-check of the pass's product along
                             # a geometry (experimental): written by the
                             # step under the same condition.
@@ -2806,7 +2817,7 @@ class GraphManager:
                     # The same field set the step flattens (floating
                     # fields only), or the warm start's length would not
                     # match the vector it seeds.
-                    af = _group_layout._group_accel_fields(g, self._edges, self._state)
+                    af = _group_layout._group_accel_fields(g, interface_plans[key], self._state)
                     flat0 = flatten_coupled_state(
                         self._state, list(g.nodes), fields=af
                     )
@@ -3117,24 +3128,23 @@ class GraphManager:
         }
         # What the report's float floor rests on, as the step was built:
         # each group's structural evaluation count, whether every member
-        # declared it, and its internal edges (``coupling_diagnostics``).
+        # declared it, and its internal edges as they were declared
+        # (``coupling_diagnostics``; ``InterfacePlan.declared_edges``).
         self._committed_floor_inputs = {
             "+".join(sorted(g.nodes)): (
                 *_group_layout._group_evaluations(g, self._nodes, self._schedule, self._edges),
-                tuple(e for e in self._edges
-                      if e.source_node in g.nodes and e.target_node in g.nodes))
+                interface_plans["+".join(sorted(g.nodes))].declared_edges())
             for g in self._coupling_groups
         }
         self._committed_geometry_edges = {
-            "+".join(sorted(g.nodes)): tuple(
-                e.key for e in _group_layout._group_geometry_edges(g, self._edges))
-            for g in self._coupling_groups
+            key: tuple(r.key for r in plan.resolved_geometry_edges())
+            for key, plan in interface_plans.items()
         }
         # Why each such group's report withholds its bounds whatever the
         # step measures (``None``: the diagnostics read its geometry).
         self._committed_geometry_refusals = {
             "+".join(sorted(g.nodes)): _group_layout._geometry_diagnostics_refusal(
-                g, self._nodes, self._edges)
+                g, self._nodes, interface_plans["+".join(sorted(g.nodes))])
             for g in self._coupling_groups
         }
         # Count Python-level traces of the step: a robust, JAX-version-
@@ -3401,14 +3411,6 @@ class GraphManager:
                     blocks.append(("coupled", group, group_schedule))
             else:
                 blocks.append(("node", node_name))
-
-        # Identify edges within each coupling group (these become
-        # forward edges during iteration, not back-edges)
-        coupled_internal_edges: set[EdgeSpec] = set()
-        for group in coupling_groups:
-            for edge in self._edges:
-                if edge.source_node in group.nodes and edge.target_node in group.nodes:
-                    coupled_internal_edges.add(edge)
 
         # Pre-index edges by target node -- O(E) setup, O(degree) per node
         edges_by_target: dict[str, list[EdgeSpec]] = defaultdict(list)
@@ -5843,12 +5845,6 @@ class GraphManager:
 
         has_external = set(ext_by_target.keys())
         has_coupling = bool(coupling_groups)
-
-        coupled_internal_edges: set[EdgeSpec] = set()
-        for group in coupling_groups:
-            for edge in self._edges:
-                if edge.source_node in group.nodes and edge.target_node in group.nodes:
-                    coupled_internal_edges.add(edge)
 
         params_snapshot = self.params
 

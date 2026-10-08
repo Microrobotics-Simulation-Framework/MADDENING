@@ -32,6 +32,7 @@ HELPER_MODULES = (
     "maddening.core.coupling._fixed_point",
     "maddening.core.coupling._group_layout",
     "maddening.core.coupling._ift",
+    "maddening.core.coupling._interface_plan",
     "maddening.core.coupling._reports",
 )
 

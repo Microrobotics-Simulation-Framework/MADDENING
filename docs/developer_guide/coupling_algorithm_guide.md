@@ -424,7 +424,10 @@ with) and then its transform, exactly what the step hands the target --
 over its own magnitude.  One function gives every reader that value
 (`_interface_readings` in `core/coupling/acceleration.py`, built on the
 step's own edge rule): the residual, its float floor, this analysis and
-the report.  A mapping or a transform changes the weights -- an offset (a
+the report.  Which edges are a group's interface, in what order, and on
+which side each is read are described once, in
+`core/coupling/_interface_plan.py`, and every reader of the edges takes a
+view of that description.  A mapping or a transform changes the weights -- an offset (a
 unit conversion's 273.15) divides a change by a far larger magnitude, a
 selection (`"extract_last"`, or a mapping that delivers one entry of a
 field) by the selected entry's rather than the

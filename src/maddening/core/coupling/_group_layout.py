@@ -13,49 +13,9 @@ from typing import Optional
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core.coupling import _interface_plan
 from maddening.core.coupling.acceleration import float_fields_of
 from maddening.core.coupling.group import CouplingGroup
-
-
-def _interface_edge_order(edges, member_order) -> list:
-    """A coupling group's internal *edges* in the order its interface norm sums them.
-
-    By the source's place in *member_order* (the group's sweep), then the
-    source field, the target's place, the target field and the ordinal:
-    the order the L2 and mixed norms sum the members in, so the interface
-    norm, like them, depends neither on the order of the ``add_edge``
-    calls nor on the nodes' names.  Edges with the same endpoints (an
-    additive pair with different transforms) keep their relative order.
-    """
-    place = {nn: i for i, nn in enumerate(member_order)}
-    last = len(place)
-    return sorted(edges, key=lambda e: (place.get(e.source_node, last), e.source_field,
-                                        place.get(e.target_node, last), e.target_field,
-                                        e.ordinal))
-
-
-def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
-    """Per-node state fields to accelerate for a coupling group.
-
-    The fields the group's internal edges *read* from each producer.  An
-    edge whose ``source_field`` is not a state field (a boundary flux
-    from ``compute_boundary_fluxes``) is a function of the producer's
-    state, so the producer's whole state stands in for it.  ``None``
-    when no internal edge exists (accelerate everything).
-    """
-    ifields: dict[str, set] = {}
-    for edge in edges:
-        if edge.source_node in group_nodes and edge.target_node in group_nodes:
-            fields = state.get(edge.source_node, {})
-            if edge.source_field in fields:
-                ifields.setdefault(edge.source_node, set()).add(edge.source_field)
-            else:
-                ifields.setdefault(edge.source_node, set()).update(fields.keys())
-            if edge.geometry is not None and edge.geometry[0] == "source":
-                # A geometry the edge reads from its producer is read
-                # from the iterate too, as a second edge would read it.
-                ifields.setdefault(edge.source_node, set()).add(edge.geometry[1])
-    return {nn: tuple(sorted(fs)) for nn, fs in ifields.items()} if ifields else None
 
 
 def _floating_accel_fields(fields, state, group_nodes) -> Optional[dict]:
@@ -97,11 +57,12 @@ def _floating_accel_fields(fields, state, group_nodes) -> Optional[dict]:
     return kept if kept else {nn: fs for nn, fs in floats.items() if fs}
 
 
-def _group_accel_fields(group, edges, state) -> Optional[dict]:
+def _group_accel_fields(group, plan, state) -> Optional[dict]:
     """The fields ``group``'s acceleration flattens; ``None`` for all of them.
 
     The quasi-Newton accelerations read ``accelerated_fields`` (or the
-    interface fields the group's internal edges read); ``"aitken"`` and
+    interface fields the group's internal edges read:
+    ``InterfacePlan.iqn_fields`` of the group's *plan*); ``"aitken"`` and
     ``"fixed"`` relax the whole group.  Either way only floating fields
     enter (:func:`_floating_accel_fields`).  Shared by the step builder
     and by ``compile()``'s IQN-IMVJ warm-start seeding, which must agree
@@ -109,7 +70,7 @@ def _group_accel_fields(group, edges, state) -> Optional[dict]:
     """
     if group.acceleration in ("iqn-ils", "iqn-imvj"):
         chosen = (group.accelerated_fields if group.accelerated_fields is not None
-                  else _interface_state_fields(edges, group.nodes, state))
+                  else plan.iqn_fields())
     elif group.acceleration in ("aitken", "fixed"):
         chosen = None
     else:
@@ -117,7 +78,7 @@ def _group_accel_fields(group, edges, state) -> Optional[dict]:
     return _floating_accel_fields(chosen, state, group.nodes)
 
 
-def _reads_mapping_weights(group, edges, state) -> bool:
+def _reads_mapping_weights(group, plan) -> bool:
     """Does *group*'s norm read a value that depends on interface-mapping weights?
 
     True under ``convergence_norm="interface"`` when an internal edge
@@ -131,17 +92,10 @@ def _reads_mapping_weights(group, edges, state) -> bool:
     (``coupling_<key>_reading_floor``).  Static, and shared by
     ``compile()``'s seeding, the step's write and ``reset_state()``, so
     the three agree on which groups own the slot; every other group's
-    ``_meta`` and compiled step are what they were.
+    ``_meta`` and compiled step are what they were.  *plan* is the
+    group's description (``InterfacePlan.norm_reads_mapping_weights``).
     """
-    if group.convergence_norm != "interface":
-        return False
-    for e in edges:
-        if (e.mapping is not None
-                and e.source_node in group.nodes and e.target_node in group.nodes):
-            value = state.get(e.source_node, {}).get(e.source_field)
-            if value is not None and jnp.issubdtype(jnp.asarray(value).dtype, jnp.floating):
-                return True
-    return False
+    return group.convergence_norm == "interface" and plan.norm_reads_mapping_weights()
 
 
 def _reading_is_the_fields(interface_edges, float_fields) -> bool:
@@ -166,19 +120,22 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
       with ``spectral_usable=True`` (2 to 16 leaves, Jacobi, float64;
       MADD-ANO-213).
 
-    Static: *interface_edges* are the group's internal edges and
-    *float_fields* its floating fields by node, so a group keeps one
-    analysis for the life of its compiled step.
+    Static: *interface_edges* are the group's internal edges (its plan,
+    or a bare sequence of edges) and *float_fields* its floating fields
+    by node, so a group keeps one analysis for the life of its compiled
+    step.  Whether an edge delivers its field as it is follows from the
+    side the norm reads it on (``InterfaceEdge.reads_source_as_is``).
     """
     read = set()
-    for e in interface_edges:
-        if e.source_field not in float_fields.get(e.source_node, ()):
+    for record in _interface_plan.interface_records(interface_edges):
+        node, field = record.source
+        if field not in float_fields.get(node, ()):
             continue
-        if e.transform is not None or e.mapping is not None:
+        if not record.reads_source_as_is:
             return False
-        if (e.source_node, e.source_field) in read:
+        if record.source in read:
             return False
-        read.add((e.source_node, e.source_field))
+        read.add(record.source)
     return True
 
 
@@ -190,9 +147,10 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     and nothing else.  The members of the iterate it accepts were computed
     from the readings of the iterate *before* it, which the exit does not
     compare with anything.  So the norm answers only for a field it
-    **measures whole**: the source field of an internal edge that delivers
-    it as it is, with no mapping and no transform
-    (:func:`maddening.core.edge._delivered` applies nothing else).  Every
+    **measures whole**: the source field of an internal edge whose
+    reading *is* that field (``InterfaceEdge.reads_source_as_is``: on the
+    delivered side, an edge with no mapping and no transform, since
+    :func:`maddening.core.edge._delivered` applies nothing else).  Every
     other floating field could be returned from a pass before the readings
     the verdict was taken on, with ``converged=True``:
 
@@ -216,14 +174,25 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     ``{}`` for every other norm, and for an interface group whose every
     floating field is measured whole: such a group keeps its compiled
     step and is not charged the pass.  Static.  **The one place the set
-    is defined**: it must follow the norm's own reading rule, so that a
-    field the norm does measure whole is never recomputed.
+    is defined**, and a derivation over the group's description:
+    *interface_edges* is its plan (or a bare sequence of edges), and
+    which edge reads its source field as it is is the plan's answer, on
+    the side the norm reads that edge.  So a field the norm does measure
+    whole is never recomputed, whichever side that is.
+
+    Which fields are floating is decided on *state* alone (the step
+    hands the first pass's, the state its non-floating fields are named
+    on), as the norm's reading decides it on the state it is handed
+    (``acceleration._interface_readings``) and not on a record's
+    ``source_kind``, which is of the state the plan was built from.  The
+    two agree wherever a pass keeps each field's dtype kind.
     """
     if group.convergence_norm != "interface":
         return {}
     floats = float_fields_of(state, list(schedule))
-    whole = {(e.source_node, e.source_field) for e in interface_edges
-             if e.mapping is None and e.transform is None}
+    whole = {record.source
+             for record in _interface_plan.interface_records(interface_edges)
+             if record.reads_source_as_is}
     missed = {nn: tuple(f for f in floats[nn] if (nn, f) not in whole)
               for nn in schedule}
     return {nn: fields for nn, fields in missed.items() if fields}
@@ -338,12 +307,6 @@ def _subcycling_ratio_errors(group, nodes) -> list[str]:
     return errors
 
 
-def _group_geometry_edges(group, edges) -> list:
-    """The edges with a geometry-dependent mapping that *group*'s pass
-    resolves: every one into a member, from inside the group or outside."""
-    return [e for e in edges if e.geometry is not None and e.target_node in group.nodes]
-
-
 #: The mapping kind whose moving geometry the coupling diagnostics read.
 _DIAGNOSED_GEOMETRY_KIND = "multilinear_grid"
 #: The convergence norms a group with a geometry edge is diagnosed under:
@@ -378,7 +341,7 @@ _GEOMETRY_SELF_CHECK_WHY = (
 )
 
 
-def _geometry_diagnostics_refusal(group, nodes, edges) -> Optional[str]:
+def _geometry_diagnostics_refusal(group, nodes, plan) -> Optional[str]:
     """Why *group*'s report withholds its bounds on account of a geometry
     edge, whatever the step measures; ``None`` for a group without one and
     for a group the diagnostics read the geometry of.
@@ -389,18 +352,18 @@ def _geometry_diagnostics_refusal(group, nodes, edges) -> Optional[str]:
     its own Jacobian-vector product along the geometry
     (``_bounds._geometry_product_gap``), and the report withholds the
     bounds where that check fails
-    (:func:`_geometry_self_check_reason`).
+    (:func:`_geometry_self_check_reason`).  *plan* is the group's
+    description: the edges are ``InterfacePlan.resolved_geometry_edges``.
     """
-    geometry = _group_geometry_edges(group, edges)
+    geometry = plan.resolved_geometry_edges()
     if not geometry:
         return None
-    keys = [e.key for e in geometry]
-    others = [e for e in geometry
-              if getattr(e.mapping, "kind", None) != _DIAGNOSED_GEOMETRY_KIND]
+    keys = [r.key for r in geometry]
+    others = [r for r in geometry if r.mapping_kind != _DIAGNOSED_GEOMETRY_KIND]
     if others:
         why = _GEOMETRY_KIND_WHY.format(
-            others=[e.key for e in others],
-            kinds=sorted({str(getattr(e.mapping, "kind", None)) for e in others}))
+            others=[r.key for r in others],
+            kinds=sorted({str(r.mapping_kind) for r in others}))
     elif group.convergence_norm not in _DIAGNOSED_GEOMETRY_NORMS:
         why = _GEOMETRY_NORM_WHY.format(norm=group.convergence_norm)
     elif _group_dividers(group, nodes):
@@ -418,18 +381,6 @@ def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
         keys=list(keys), why=_GEOMETRY_SELF_CHECK_WHY.format(gap=gap, allowed=allowed))
 
 
-def _geometry_holders(group, edges) -> list:
-    """``[(node, field, mapping)]``: each geometry field *group*'s pass
-    reads, once, with the first mapping that reads it (the step of the
-    self-check is taken on that mapping's lattice)."""
-    seen: dict = {}
-    for e in _group_geometry_edges(group, edges):
-        anchor, field = e.geometry
-        holder = e.source_node if anchor == "source" else e.target_node
-        seen.setdefault((holder, field), e.mapping)
-    return [(node, field, mapping) for (node, field), mapping in seen.items()]
-
-
 _WRITTEN_BEFORE_SAVE_REASON = (
     "this report was loaded from a checkpoint saved after the group's state had been "
     "written (set_node_state) since its last step; the state that step returned, which "
@@ -439,7 +390,7 @@ _WRITTEN_BEFORE_SAVE_REASON = (
 )
 
 
-def _geometry_edge_coupling_errors(group, edges) -> list[str]:
+def _geometry_edge_coupling_errors(group, plan) -> list[str]:
     """``ERROR:`` issues for a group setting a geometry-dependent mapping
     cannot serve (experimental; empty for every other group).
 
@@ -447,25 +398,24 @@ def _geometry_edge_coupling_errors(group, edges) -> list[str]:
     iterates, of what each internal edge delivers from its source field.
     For an edge whose mapping reads a geometry that reading needs the
     geometry of each iterate too, which the norm does not read in 0.4.0:
-    refused, naming the norms that measure the state instead.
+    refused, naming the norms that measure the state instead.  *plan* is
+    the group's description (``InterfacePlan.geometry_edges``).
     """
     if group.convergence_norm != "interface":
         return []
     names = sorted(group.nodes)
     return [
         f"ERROR: coupling group {names} uses convergence_norm='interface', which "
-        f"measures the values the group's internal edges carry, but edge {e.key!r} "
+        f"measures the values the group's internal edges carry, but edge {r.key!r} "
         f"carries its value through a geometry-dependent mapping (geometry "
-        f"{e.geometry[0]}.{e.geometry[1]}), and the norm does not read a moving "
+        f"{r.anchor[0]}.{r.anchor[1]}), and the norm does not read a moving "
         f"geometry in 0.4.0.  Use convergence_norm='mixed' or 'l2', which measure "
         f"the members' state, the geometry included."
-        for e in edges
-        if e.geometry is not None
-        and e.source_node in group.nodes and e.target_node in group.nodes
+        for r in plan.geometry_edges()
     ]
 
 
-def _flux_edge_coupling_errors(group, nodes, edges, state) -> list[str]:
+def _flux_edge_coupling_errors(group, nodes, plan, state) -> list[str]:
     """``ERROR:`` issues for group-internal flux edges the group cannot read.
 
     A flux edge carries a value ``compute_boundary_fluxes`` returns, which
@@ -483,37 +433,34 @@ def _flux_edge_coupling_errors(group, nodes, edges, state) -> list[str]:
 
     Refused here, naming the setting that does work.  (Validation has
     already checked that a source field missing from the state is one of
-    the producer's fluxes.)
+    the producer's fluxes.)  *plan* is the group's description, built
+    from *state* (``InterfacePlan.flux_edges``).
     """
     names = sorted(group.nodes)
     if not all(n in nodes and n in state for n in names):
         return []
-    flux_edges = [
-        e for e in edges
-        if e.source_node in group.nodes and e.target_node in group.nodes
-        and e.source_field not in state[e.source_node]
-    ]
+    flux_edges = plan.flux_edges()
     errors = []
-    for e in flux_edges:
+    for r in flux_edges:
         if group.convergence_norm == "interface":
             errors.append(
                 f"ERROR: coupling group {names} uses convergence_norm="
                 f"'interface', which measures the values the group's internal "
-                f"edges carry, but edge {e.key!r} carries the boundary flux "
-                f"{e.source_field!r}, which {e.source_node!r} computes in "
+                f"edges carry, but edge {r.key!r} carries the boundary flux "
+                f"{r.source[1]!r}, which {r.source[0]!r} computes in "
                 "compute_boundary_fluxes and does not hold in its state, so "
                 "the norm cannot read it.  Use convergence_norm='mixed' or "
                 "'l2', which measure the state the flux is computed from."
             )
     dividers = _group_dividers(group, nodes) or {}
     if group.boundary_interpolation != "constant":
-        for e in flux_edges:
-            if dividers.get(e.target_node, 1) > 1:
+        for r in flux_edges:
+            if dividers.get(r.target[0], 1) > 1:
                 errors.append(
-                    f"ERROR: coupling group {names}: node {e.target_node!r} is "
-                    f"sub-cycled ({dividers[e.target_node]} sub-steps per pass) "
-                    f"and reads the boundary flux {e.source_field!r} of "
-                    f"{e.source_node!r} through edge {e.key!r}.  "
+                    f"ERROR: coupling group {names}: node {r.target[0]!r} is "
+                    f"sub-cycled ({dividers[r.target[0]]} sub-steps per pass) "
+                    f"and reads the boundary flux {r.source[1]!r} of "
+                    f"{r.source[0]!r} through edge {r.key!r}.  "
                     f"boundary_interpolation={group.boundary_interpolation!r} "
                     "interpolates an input between the pass's incoming "
                     "iterate and the in-pass state, and a flux is computed "
@@ -611,8 +558,8 @@ def _loop_through_outside_nodes(schedule, edges, groups, back_edges):
             staggered = sorted(
                 f"{e.source_node}.{e.source_field} -> {e.target_node}.{e.target_field}"
                 for e in back_edges
-                if e.source_node in component and e.target_node in component
-                and not (e.source_node in g.nodes and e.target_node in g.nodes))
+                if _interface_plan.is_internal(e, component)
+                and not _interface_plan.is_internal(e, g.nodes))
             texts.append(
                 f"coupling group {sorted(g.nodes)} is part of a larger feedback loop "
                 f"through {outside}, which the group does not iterate: that loop is "
@@ -773,21 +720,10 @@ def _group_pass_structure(group, nodes, schedule, edges):
     order = [nn for nn in schedule if nn in group.nodes]
     order += sorted(nn for nn in group.nodes if nn not in order)
     position = {nn: i for i, nn in enumerate(order)}
-    same_pass: dict[str, set] = {nn: set() for nn in order}
-    for edge in edges:
-        src, dst = edge.source_node, edge.target_node
-        if src in position and dst in position and position[src] < position[dst]:
-            same_pass[dst].add(src)
+    reads = _interface_plan.member_reads(edges, position)
+    same_pass: dict[str, set] = {
+        nn: {src for src in reads[nn] if position[src] < position[nn]} for nn in order}
     return order, own, same_pass, declared
-
-
-def _group_reads(group, edges):
-    """``{member: members it reads through a group-internal edge}``, itself included."""
-    reads: dict[str, set] = {nn: set() for nn in group.nodes}
-    for edge in edges:
-        if edge.source_node in group.nodes and edge.target_node in group.nodes:
-            reads[edge.target_node].add(edge.source_node)
-    return reads
 
 
 def _group_residual_dtype(state, node_names):

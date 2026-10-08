@@ -50,7 +50,7 @@ jobs:
         # two pins is exactly the kind CI's shorter lane would miss.
         python-version: ["3.12"]
         jax-version: ["0.10.2", "0.11.2"]
-        # Six runners per lane, split by test file (tests/_sharding.py):
+        # Eight runners per lane, split by test file (tests/_sharding.py):
         # one pytest process per runner, so per-test times stay the
         # uncontended numbers the time budget is judged on.  Unlike ci.yml,
         # which splits by the hash of the path, this lane deals its files
@@ -58,7 +58,7 @@ jobs:
         # tests/slow_lane_weights.json): by hash, one shard of four held
         # nearly half of the lane and ran into the timeout.  The
         # timeout/OOM classification below applies per shard.
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
 
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +103,7 @@ jobs:
           MADDENING_TEST_JAX_TIMING: "1"
           # This job's share of the suite (tests/_sharding.py), dealt by
           # measured time.
-          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted"
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/8:weighted"
         run: |
           # Wrap pytest with GNU ``timeout`` so we exit with code 124
           # on time-out (instead of GitHub killing the job with a
@@ -139,13 +139,13 @@ jobs:
           python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
             --fail-over 0 --cache-mode off \
             --no-removable \
-            --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }}, shard ${{ matrix.shard }} of 6)"
+            --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }}, shard ${{ matrix.shard }} of 8)"
 
       - name: Upload test durations
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: slow-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6
+          name: slow-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of8
           path: test-results-shard${{ matrix.shard }}.xml
           retention-days: 90
           if-no-files-found: warn
@@ -186,7 +186,7 @@ jobs:
 
             let title, body;
             if (isTimeout) {
-              title = `slow-tests: timeout on Python ${py} / JAX ${jaxv} / shard ${shard}/6 @ ${sha}`;
+              title = `slow-tests: timeout on Python ${py} / JAX ${jaxv} / shard ${shard}/8 @ ${sha}`;
               body = [
                 `The slow-tests workflow hit the 175-minute wrapper timeout`,
                 `(the job-level \`timeout-minutes\` is 180; the inner \`timeout 175m\`,`,
@@ -204,7 +204,7 @@ jobs:
                 `   \`timeout 175m\` (keep ~5 min headroom between them).`,
               ];
             } else if (isOom) {
-              title = `slow-tests: out-of-memory on Python ${py} / JAX ${jaxv} / shard ${shard}/6 @ ${sha}`;
+              title = `slow-tests: out-of-memory on Python ${py} / JAX ${jaxv} / shard ${shard}/8 @ ${sha}`;
               body = [
                 `The slow-tests workflow was killed by the OS while running pytest`,
                 `(exit ${code}, SIGKILL — the Linux OOM-killer signature; killed after ${Math.round(elapsed / 60)} min,`,
@@ -220,7 +220,7 @@ jobs:
                 `2. **Move it to a larger runner** if the scale is essential.`,
               ];
             } else if (isAbort) {
-              title = `slow-tests: abort (SIGABRT) on Python ${py} / JAX ${jaxv} / shard ${shard}/6 @ ${sha}`;
+              title = `slow-tests: abort (SIGABRT) on Python ${py} / JAX ${jaxv} / shard ${shard}/8 @ ${sha}`;
               body = [
                 `The slow-tests workflow's pytest process aborted (exit ${code}, SIGABRT)`,
                 `after ${Math.round(elapsed / 60)} min.  An abort is out-of-memory, or a native`,

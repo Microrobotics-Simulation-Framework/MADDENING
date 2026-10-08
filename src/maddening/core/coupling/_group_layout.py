@@ -561,53 +561,77 @@ def _geometry_edge_coupling_errors(group, nodes, plan) -> list[str]:
     return errors
 
 
-#: The float floor of a positions part, taken by itself, at which
-#: ``compile()`` warns: the threshold the interface criterion compares the
-#: residual with.  At or above it the rounding the floor counts for those
-#: positions is, entry for entry, the tolerance asked of them or more.
+#: What the rounding of stored positions puts into the float floor of one
+#: part of an interface reading, taken by itself, at which ``compile()``
+#: warns: the threshold the interface criterion compares the residual
+#: with.  At or above it the rounding the floor counts for those
+#: positions is, entry for entry, the tolerance asked of the part or more.
 _POSITIONS_FLOOR_WARNED = 1.0  # units: tolerances (the residual's units under the interface norm)
 
 
 def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
-    """``UserWarning`` texts for positions the interface norm reads that
-    their dtype cannot resolve to the group's tolerance (experimental;
-    empty for every other group).
+    """``UserWarning`` texts for positions an interface reading rests on
+    that their dtype cannot resolve to the group's tolerance
+    (experimental; empty for every other group).
 
-    ``convergence_norm="interface"`` reads the positions of a
-    geometry-dependent mapping read at its source and anchored there in
-    units of the mapping kind's length scale, and asks that they change
-    by less than ``rtol`` lengths (``InterfaceEdge.parts``).  A position
-    ``u`` lengths from zero is stored to ``eps * |u|`` lengths, and the
-    float floor of the residual
+    Under ``convergence_norm="interface"`` the stored positions of a
+    geometry-dependent mapping enter the reading of an edge in one of two
+    ways (``InterfaceEdge.parts``):
+
+    * **as a part of their own**, in units of the mapping kind's length
+      scale, where the mapping is read at its source and anchored there
+      (a scatter): the criterion asks that they change by less than
+      ``rtol`` lengths;
+    * **through the value the edge delivers**, where the mapping is read
+      as delivered (a gather, a tie; either anchor): the value is
+      computed at those positions, and the criterion asks that it change
+      by less than ``rtol`` of its own magnitude.
+
+    A position ``u`` lengths from zero is stored to ``eps * |u|``
+    lengths.  That is the rounding of a positions part entry for entry;
+    and it moves a kernel weight by as much, so a delivered value by up
+    to that fraction of its own magnitude (the worst case: a field that
+    varies by its own size across one length).  The float floor of the
+    residual
     (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`)
     counts ``PRECISION_FLOOR_ULPS`` of those per evaluation of the pass
-    for every entry of that part.  **Warned: a part for which that count
-    reaches the tolerance**,
+    for every entry of either part.  **Warned: a part for which that
+    count reaches the tolerance**,
 
         ``PRECISION_FLOOR_ULPS * evaluations * eps * max|u| >= rtol``,
 
-    which is where the floor of the part by itself reaches the
-    criterion's threshold
-    (``acceleration._positions_floors``, the floor's own arithmetic).
+    which is where what the positions put into the floor of the part by
+    itself reaches the criterion's threshold
+    (``acceleration._positions_floors``, the floor's own arithmetic:
+    the whole floor of a positions part, and of a delivered value
+    wherever the positions' rounding is coarser than the value's own).
     So a group that is not warned has a floor the positions leave below
     its threshold (pooled with the other entries the norm reads they
     contribute at most the largest part's), and one that is warned has
-    position entries whose counted rounding is the tolerance asked of
-    them or more, and a floor of at least that times the root of their
-    share of the entries the norm reads: the loop can run to its cap on
-    rounding alone.
+    entries whose counted rounding is the tolerance asked of them or
+    more, and a floor of at least that times the root of their share of
+    the entries the norm reads: the loop can run to its cap on rounding
+    alone.
+
+    A mapping read at its source and anchored at its **target** is not
+    asked: its reading is the source field alone (the positions are the
+    pre-step state, a constant of the solve), and the floor counts no
+    position for it.  A delivered value at a target anchor is asked at
+    the target's positions in *state*: what a step started from it reads.
 
     A warning, never a refusal, and it changes no number: where the
     positions settle to the bit the group converges as before.
-    Measured on two float32 pairs at ``rtol=1e-4`` against the same
-    pairs in float64 (jaxlib 0.11.0, CPU): the same passes up to 2 and
-    6 times the threshold, more passes from 3 and 10 times, and one of
-    the two at its cap at 24 times.  Below the threshold the positions
-    still enter the floor: the two pairs stop at residuals of 0.25 and
-    0.48 tolerances, which is at or under their floors at 0.44 and 0.87
-    of the threshold (and above them at 0.15 and 0.30), so a residual
-    can be at its floor without this warning; what the warning marks is
-    where the positions' rounding by itself reaches the tolerance.
+    Measured on two float32 pairs with a scatter at ``rtol=1e-4``
+    against the same pairs in float64 (jaxlib 0.11.0, CPU): the same
+    passes up to 2 and 6 times the threshold, more passes from 3 and 10
+    times, and one of the two at its cap at 24 times.  Below the
+    threshold the positions still enter the floor: the two pairs stop at
+    residuals of 0.25 and 0.48 tolerances, which is at or under their
+    floors at 0.44 and 0.87 of the threshold (and above them at 0.15 and
+    0.30), so a residual can be at its floor without this warning; what
+    the warning marks is where the positions' rounding by itself reaches
+    the tolerance.  For a delivered value the count is a worst case: a
+    field that varies little across a cell is moved by less.
 
     Asked of the state ``compile()`` sees; positions written afterwards
     (``set_node_state``) are not asked again until the next
@@ -621,18 +645,47 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     rtol = float(group.rtol)
     count = PRECISION_FLOOR_ULPS * float(evaluations)
     out = []
-    for reading, resolution, floor in _positions_floors(plan, state, rtol, evaluations):
+    for reading, holder, held, resolution, floor in _positions_floors(
+            plan, state, rtol, evaluations):
         if not floor >= _POSITIONS_FLOOR_WARNED:
             continue            # resolved (or not a number: the criterion's own failure)
-        edge, dtype = reading[0], np.dtype(reading[1])
-        positions = np.abs(np.asarray(reading[2], np.float64))
+        edge, dtype = reading[0], np.dtype(held.dtype)
+        positions = np.abs(np.asarray(held, np.float64))
         if not np.all(np.isfinite(positions)):
             continue            # a non-finite position fails the criterion by itself
         columns = positions.reshape(positions.shape[0], -1)
         axis = int(np.argmax(np.max(columns, axis=0)))
         spacing = _interface_plan._kernel_lengths(edge.mapping)[axis]
         eps = float(np.finfo(dtype).eps)
-        node, field = reading.part.field
+        node, field = holder
+        key = getattr(edge, "key", None)
+        if reading.part.unit == _interface_plan.KERNEL_LENGTH:
+            # The positions are a part of the reading.
+            subject = (
+                f"the {dtype} positions {node}.{field} read on edge {key!r} cannot be "
+                f"resolved to this tolerance. The norm measures them in grid spacings and "
+                f"asks that they change by less than rtol of one.")
+            stored = f"where a {dtype} position is stored to {resolution:.3g} spacings"
+            consequence = (
+                "Rounding alone can keep these positions from meeting the criterion (the "
+                "group then runs to max_iterations), and where it is met it says little "
+                "of them.")
+        else:
+            # The reading is a value computed at the positions.
+            subject = (
+                f"the {dtype} positions {node}.{field} that the value on edge {key!r} is "
+                f"delivered at cannot be resolved to this tolerance. The norm reads what "
+                f"the edge delivers, a value its mapping computes at those positions, and "
+                f"asks that it change by less than rtol of its own magnitude.")
+            stored = (
+                f"where a {dtype} position is stored to {resolution:.3g} spacings, a "
+                f"weight of the mapping moves by as much, and the delivered value by up "
+                f"to that fraction of its own magnitude (a field that varies by its own "
+                f"size across one cell)")
+            consequence = (
+                "Rounding alone can keep the delivered value from meeting the criterion "
+                "(the group then runs to max_iterations), and where it is met it says "
+                "little of the value's last digits.")
         remedies = [
             f"use coordinates local to the grid (a {dtype} position within "
             f"{rtol / (count * eps):.3g} spacings of zero resolves this tolerance)",
@@ -644,17 +697,13 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
                 f"its weights in the geometry's dtype and casts them to the field's, so the "
                 f"other fields can stay as they are)"))
         out.append(
-            f"coupling group {names} (convergence_norm='interface', rtol={rtol:g}): the "
-            f"{dtype} positions {node}.{field} read on edge {getattr(edge, 'key', None)!r} "
-            f"cannot be resolved to this tolerance. The norm measures them in grid spacings "
-            f"and asks that they change by less than rtol of one. They reach "
+            f"coupling group {names} (convergence_norm='interface', rtol={rtol:g}): "
+            f"{subject} They reach "
             f"{float(np.max(columns)):.6g} spacings from zero (axis {axis}, spacing "
-            f"{spacing:g}), where a {dtype} position is stored to {resolution:.3g} spacings; "
+            f"{spacing:g}), {stored}; "
             f"the residual's float floor counts {count:g} of those per pass "
             f"(PRECISION_FLOOR_ULPS times {float(evaluations):g} evaluation(s)), which is "
-            f"{floor:.3g} times the tolerance. Rounding alone can keep these positions "
-            f"from meeting the criterion (the group then runs to max_iterations), and where "
-            f"it is met it says little of them. "
+            f"{floor:.3g} times the tolerance. {consequence} "
             f"Remedies: " + "; or ".join(remedies) + "."
         )
     return out

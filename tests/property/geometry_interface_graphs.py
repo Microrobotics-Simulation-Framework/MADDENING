@@ -456,14 +456,44 @@ def positions_floor(positions, spacing, dtype: str, rtol: float = RTOL) -> float
     farthest coordinate as *dtype* holds it (``eps |u|`` spacings, ``u``
     its distance from zero in the spacing of its own axis) over ``rtol``.
 
-    The rule of ``compile()``'s advisory, restated: it warns of a part
-    where this times :data:`EVALUATIONS` is one or more (the criterion's
-    threshold): the rounding counted for such a position is then the
-    tolerance asked of it, or more.
+    The rule of ``compile()``'s advisory, restated: it warns of an edge
+    whose reading rests on those positions (:func:`positions_behind`: a
+    part that is positions, or a value delivered at them) where this
+    times :data:`EVALUATIONS` is one or more (the criterion's threshold):
+    the rounding counted for them is then the tolerance asked of the
+    part, or more.
     """
     held = np.asarray(np.asarray(positions, np.dtype(dtype)), np.float64)
     reach = float(np.max(np.abs(held / np.asarray(spacing, np.float64))))
     return 4.0 * float(np.finfo(np.dtype(dtype)).eps) * reach / rtol
+
+
+#: How stored positions enter the reading of an edge: as a part of their
+#: own (read in grid spacings), or through the value the edge delivers
+#: (computed at them).
+PART, DELIVERED_AT = "part", "delivered-at"
+
+
+def positions_behind(shape: Shape) -> dict:
+    """``{edge key: (node that stores them, how)}``: the edges of *shape*'s
+    pair whose reading rests on stored positions.
+
+    The rule of ``compile()``'s advisory about what it asks of, restated:
+    a scatter is read at its source, and anchored there its positions are
+    a part of the reading (:data:`PART`; anchored at its target they are
+    the pre-step state and no part: no entry); a gather is read as
+    delivered, a value computed at the positions its anchor names -- its
+    source's own, or its target's (:data:`DELIVERED_AT`).  For each entry
+    the float floor counts :func:`positions_floor` of those positions.
+    """
+    out = {}
+    for (src, dst), way, anchor in zip(EDGES, WAYS[shape.kind], shape.anchors):
+        key = f"{src}.x->{dst}.u"
+        if way == "gather":
+            out[key] = (src if anchor == "source" else dst, DELIVERED_AT)
+        elif anchor == "source":
+            out[key] = (src, PART)
+    return out
 
 
 def measured_whole(shape: Shape) -> tuple:

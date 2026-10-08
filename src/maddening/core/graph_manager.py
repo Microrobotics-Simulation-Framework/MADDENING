@@ -2634,8 +2634,9 @@ class GraphManager:
                 self._state, self._nodes)
             for g in self._coupling_groups
         }
-        # Positions the interface norm reads in grid spacings, held in a
-        # dtype that cannot resolve the group's tolerance where they are
+        # Positions an interface reading rests on (read in grid spacings,
+        # or what a delivered value is computed at), held in a dtype that
+        # cannot resolve the group's tolerance where they are
         # (experimental; a float32 coordinate far from zero).  A warning:
         # the step is built as it would be without it.  On the count the
         # report's floor is committed with below; a group under another

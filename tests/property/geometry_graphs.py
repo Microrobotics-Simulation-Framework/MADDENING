@@ -1070,43 +1070,71 @@ def two_body(c: Case) -> GGraph:
 POSITIONS_ADVISORY = "cannot be resolved to this tolerance"
 
 
-def positions_advisory_owed(c: Case) -> bool:
-    """Does ``compile()`` owe the edge-mapped graph of *c* that advisory?
+def positions_advisories_owed(c: Case) -> dict:
+    """``{edge key: body that stores the positions}``: the advisories
+    ``compile()`` owes the edge-mapped graph of *c*.
 
     Restated from the case, not read from the library.  Under the
-    interface norm the up edge of a ``multilinear`` case (four points
-    scattered onto more cells) is read at its source, and anchored there
-    its positions are read in grid spacings.  The advisory is owed where
-    four roundings of the farthest coordinate per evaluation of the pass
+    interface norm, in a ``multilinear`` case:
+
+    * the up edge (four points scattered onto more cells) is read at its
+      source, and anchored there its positions are read in grid spacings
+      (anchored at its target they are no part of the reading: nothing
+      is owed);
+    * the down edge (the cells gathered at four points) is read as
+      delivered: a value computed at the positions of the body its anchor
+      names (:func:`holder`), either anchor.
+
+    An advisory is owed for such an edge where four roundings of the
+    farthest coordinate of those positions per evaluation of the pass
     (each body declares one: two for the pair under Gauss-Seidel, one
     under Jacobi) are ``rtol`` of a spacing or more -- the rule of
     ``geometry_interface_graphs.positions_floor``.
     """
     knobs = dict(c.knobs or {})
     if (c.kind != "multilinear" or knobs.get("convergence_norm") != "interface"
-            or c.up != "source" or refused(c)):
-        return False
+            or refused(c)):
+        return {}
     dtype = np.dtype(c.geom_dtype or c.dtype)
-    held = np.asarray(np.asarray(geometry_fields(c)["P"]["pos"], dtype), np.float64)
-    reach = float(np.max(np.abs(held / np.asarray(_grid_of(c)[1]))))
     evaluations = 1.0 if knobs.get("iteration_mode", "gauss-seidel") == "jacobi" else 2.0
-    return 4.0 * evaluations * float(np.finfo(dtype).eps) * reach >= float(knobs["rtol"])
+    owed = {}
+    for edge, key, asked in (("down", "F.x->P.u", c.down is not None),
+                             ("up", "P.x->F.u", c.up == "source")):
+        if not asked:
+            continue
+        body = holder(c, edge)
+        held = np.asarray(np.asarray(geometry_fields(c)[body]["pos"], dtype), np.float64)
+        reach = float(np.max(np.abs(held / np.asarray(_grid_of(c)[1]))))
+        if 4.0 * evaluations * float(np.finfo(dtype).eps) * reach >= float(knobs["rtol"]):
+            owed[key] = body
+    return owed
+
+
+def positions_advisory_owed(c: Case) -> bool:
+    """Does ``compile()`` owe the edge-mapped graph of *c* an advisory
+    about unresolved positions (:func:`positions_advisories_owed`)?"""
+    return bool(positions_advisories_owed(c))
 
 
 def build_edge_mapped(c: Case) -> GraphManager:
     """:func:`build` of :func:`two_body` of *c*, holding ``compile()`` to
-    its advisory about unresolved positions: said once, of the up edge and
-    its source's positions, where :func:`positions_advisory_owed`, and not
-    at all where it is not.  Any other warning stays what it was."""
+    its advisories about unresolved positions: said once for each edge
+    :func:`positions_advisories_owed` names, of that edge and of the
+    positions of the body that stores them, and for no other edge.  Any
+    other warning stays what it was."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.filterwarnings("always", f".*{POSITIONS_ADVISORY}", UserWarning)
         gm = build(two_body(c))
-    said = [str(w.message) for w in caught]
-    if not positions_advisory_owed(c):
-        assert not said, said
-        return gm
-    (text,) = said
-    assert POSITIONS_ADVISORY in text and "'P.x->F.u'" in text and "positions P.pos" in text, text
+    owed = positions_advisories_owed(c)
+    said = {}
+    for text in (str(w.message) for w in caught):
+        assert POSITIONS_ADVISORY in text, text
+        (key,) = [k for k in ("F.x->P.u", "P.x->F.u") if repr(k) in text]
+        assert key not in said, (key, text)
+        said[key] = text
+    assert sorted(said) == sorted(owed), (sorted(said), owed)
+    for key, body in owed.items():
+        assert f"positions {body}.pos" in said[key], said[key]
     return gm
 
 

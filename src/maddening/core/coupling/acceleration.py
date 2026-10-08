@@ -537,8 +537,7 @@ def _part_resolution(reading, state_index: int = 0):
     value = jnp.asarray(values[state_index])
     positions = reading.positions[state_index]
     if reading.part.unit == KERNEL_LENGTH:
-        return float(jnp.finfo(value.dtype).eps) * jax.lax.stop_gradient(
-            jnp.max(jnp.abs(value)))
+        return _positions_resolution(value)
     if positions is None:
         return _reading_eps(source_dtype, value)
     positions = jnp.asarray(positions)
@@ -547,11 +546,27 @@ def _part_resolution(reading, state_index: int = 0):
     # as it stands, the positions' is the resolution of a value computed
     # from positions of that dtype, over the value's own magnitude, like
     # the value's own eps it is compared with; times the positions' size
-    # in the kind's lengths (below) it is their stored rounding in
-    # lengths, which is what moves a kernel weight.
+    # in the kind's lengths (``_positions_resolution``) it is their
+    # stored rounding in lengths, which is what moves a kernel weight.
     static = max(_reading_eps(source_dtype, value), eps_geometry)
-    reach = jax.lax.stop_gradient(jnp.max(jnp.abs(positions)))
-    return jnp.maximum(static, eps_geometry * reach)
+    return jnp.maximum(static, _positions_resolution(positions))
+
+
+def _positions_resolution(positions):
+    """The rounding *positions* are stored with, in the lengths they are given in.
+
+    ``eps`` of their dtype times their largest magnitude: a position
+    ``u`` lengths from zero is stored to ``eps * |u|`` lengths.  The one
+    term through which stored positions enter the float floor
+    (:func:`_part_resolution`): the whole resolution of a part that is
+    positions, and what a value delivered through a geometry-dependent
+    mapping is no finer than.  ``compile()``'s advisory about positions
+    a dtype cannot resolve (:func:`_positions_floors`) is this number
+    and no other.  Traced where the positions are, with no derivative.
+    """
+    positions = jnp.asarray(positions)
+    return float(jnp.finfo(positions.dtype).eps) * jax.lax.stop_gradient(
+        jnp.max(jnp.abs(positions)))
 
 
 def _reading_eps(source_dtype, value) -> float:
@@ -1930,39 +1945,64 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
 
 
 def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 1.0) -> list:
-    """``[(reading, resolution, floor), ...]``: the float floor of each
-    positions part of an interface reading at *state*, taken by itself.
+    """``[(reading, holder, positions, resolution, floor), ...]``: what
+    the rounding of stored positions puts into the float floor of an
+    interface reading at *state*, part by part.
 
-    One entry per part the norm reads in a mapping kind's length scale
-    (``InterfaceEdge.parts``: the positions of a geometry-dependent
-    mapping read at its source and anchored there).  ``resolution`` is
-    what :func:`residual_precision_floor` counts for every entry of that
-    part (:func:`_part_resolution`: ``eps`` of the positions' dtype
-    times their largest magnitude in lengths), and ``floor`` is the
-    value that function returns for a reading that is this part alone:
+    One entry per part whose floor counts that rounding
+    (:func:`_part_resolution`), on the edges that carry a
+    geometry-dependent mapping:
+
+    * a part that **is** positions, in the mapping kind's length scale
+      (``InterfaceEdge.parts``: a mapping read at its source and anchored
+      there);
+    * a value **delivered** through such a mapping (a gather, a tie),
+      which is computed at stored positions: the iterate's own for a
+      source anchor, the target's pre-step ones for a target anchor
+      (here *state* itself: what a step started from it would hold).
+
+    ``positions`` are those positions in lengths, ``holder`` the
+    ``(node, field)`` they are stored in, and ``resolution`` is
+    :func:`_positions_resolution` of them: the whole resolution
+    :func:`residual_precision_floor` counts for every entry of a
+    positions part, and for a delivered value the term it takes the
+    larger of with the value's own ``eps``.  ``floor`` is
     ``PRECISION_FLOOR_ULPS * evaluations * resolution / rtol``, in the
-    units the residual is reported in (tolerances).  Pooled with the
-    other entries the norm reads, the positions put at most the largest
-    of these into a group's floor, and at least each one times the root
-    of its part's share of the entries.
+    units the residual is reported in (tolerances): the value
+    :func:`residual_precision_floor` returns for a reading that is a
+    positions part alone, and a lower bound of the one it returns for a
+    delivered part alone (equal wherever the positions' rounding is the
+    coarser, which from one length out it is for a geometry no wider
+    than the value).  Pooled with the other entries the norm reads, the
+    positions put at most the largest of these into a group's floor, and
+    at least each one times the root of its part's share of the entries.
 
-    On the host, from a concrete state: Python floats.  Only the edges
-    that carry such a part are read, and such an edge is read at its
-    source, so no mapping is applied.  Read by
+    A geometry-dependent mapping read at its source and anchored at its
+    target has no entry: its reading is the source field alone, and the
+    floor counts no position for it.
+
+    On the host, from a concrete state: Python floats.  Read through
+    :func:`_interface_readings`, the generator the floor itself iterates,
+    so an edge or a part the floor skips (a source that is not floating,
+    a value with no entries) is skipped here.  Read by
     ``_group_layout._unresolved_position_warnings`` (``compile()``'s
     advisory).
     """
-    with_positions = [
-        record.edge for record in interface_records(interface_edges, state)
-        if any(part.unit == KERNEL_LENGTH for part in record.parts)]
     floors = []
-    for reading in _interface_readings(with_positions, state):
-        if reading.part.unit != KERNEL_LENGTH:
+    for record in interface_records(interface_edges, state):
+        if record.anchor is None or not record.read_from_state:
             continue
-        resolution = float(_part_resolution(reading))
-        floors.append((
-            reading, resolution,
-            PRECISION_FLOOR_ULPS * float(evaluations) * resolution / float(rtol)))
+        side, field = record.anchor
+        holder = ((record.source if side == "source" else record.target)[0], field)
+        for reading in _interface_readings([record.edge], state, pre_step=state):
+            positions = (reading[2] if reading.part.unit == KERNEL_LENGTH
+                         else reading.positions[0])
+            if positions is None:
+                continue        # a value the floor counts no position for
+            resolution = float(_positions_resolution(positions))
+            floors.append((
+                reading, holder, positions, resolution,
+                PRECISION_FLOOR_ULPS * float(evaluations) * resolution / float(rtol)))
     return floors
 
 

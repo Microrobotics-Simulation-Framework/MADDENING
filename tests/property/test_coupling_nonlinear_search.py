@@ -94,6 +94,7 @@ import functools
 import math
 import os
 import warnings
+from typing import Optional
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -204,7 +205,7 @@ def against_the_closed_form(case: linear.Case) -> dict:
     topo = cell.topo
     values = linear.values_of(case)
     with precision(cell.dtype == "float64"):
-        (step,) = ct.run(linear._built(case.cell), values, 1)   # noqa: SLF001
+        (step,) = linear._one_step(case.cell, values)   # noqa: SLF001
     out = dict(finite=all(np.all(np.isfinite(s["x"])) for s in step.state.values()))
     if not out["finite"]:
         return out
@@ -225,7 +226,11 @@ def against_the_closed_form(case: linear.Case) -> dict:
     resolvent = float(np.linalg.norm(np.linalg.inv(np.eye(ref.size) - J_exact), 2))
     dist, dist_exact = ref.distance(x, fixed, norm), model.returned_weight_distance(
         0, step.pre, step.state)
-    _dn, _b, detail = model.group_report_consistency(0, step.pre, step.state, 0.0)
+    # (``_one_step`` reads a cell whose norm reads a recomputed field at the
+    # accepted iterate: the state is then that iterate, and the model is told.)
+    _dn, _b, detail = model.group_report_consistency(
+        0, step.pre, step.state, 0.0,
+        accepted=linear._reads_a_recomputed_field(cell))   # noqa: SLF001
     # The reference differentiates the twin's own parameter tree; the
     # closed form is told how the cell holds its mapped edges, so that it
     # takes the same constants (a sparse edge has none outside its pattern).
@@ -739,6 +744,95 @@ def run_once(built: ct.Built, values: dict) -> ct.Step:
                    {0: cg.group_meta(gm, key)})
 
 
+def reads_a_recomputed_field(cell: Cell) -> bool:
+    """Does *cell*'s group return a field its norm reads recomputed (the
+    linear search's ``_reads_a_recomputed_field``: the interface norm over
+    an edge with a mapping or a transform)?  Its report is then of the
+    iterate the loop accepted and not of the state returned, and every
+    score below is of the report -- the residual's reading, the Jacobian
+    "at the returned iterate", the distance the bound covers."""
+    return linear._reads_a_recomputed_field(cell)   # noqa: SLF001
+
+
+def one_step(built: ct.Built, cell: Cell, values: dict) -> ct.Step:
+    """One step of *cell* from the drawn start; at the accepted iterate
+    (the return rule switched off) where :func:`reads_a_recomputed_field`."""
+    if not reads_a_recomputed_field(cell):
+        return run_once(built, values)
+    with cg.accepted_iterate() as asked:
+        step = run_once(built, values)
+    # Asked at the trace: the first step of this compiled graph.
+    assert asked or getattr(built, "traced_at_the_accepted_iterate", False), (
+        "the step never asked the return rule: the patch is on the wrong name")
+    built.traced_at_the_accepted_iterate = True
+    return step
+
+
+@functools.lru_cache(maxsize=2)
+def _returned_twin(index: int) -> ct.Built:
+    """Cell *index* compiled again, to be stepped with the return rule on."""
+    cell = CELLS[index]
+    with precision(cell.dtype == "float64"):
+        return build(cell, cell.knobs, cell.dtype)
+
+
+def returned_score(case: "Case", values: dict, accepted: ct.Step, ref: cr.PassReference,
+                   fixed: cr.FixedPoint, norm: cr.Norm, *, rounds: float,
+                   reach: Optional[float]) -> tuple:
+    """``(score, details)``: what the state a user gets holds to, on a cell
+    observed at the accepted iterate (the linear search's
+    ``returned_scores``, against the numerical reference).
+
+    The same values stepped on a twin graph with the return rule on give
+    the state ``y`` a user reads.  Asserted: its report's pass count,
+    verdict and residual are the accepted iterate's, and a field measured
+    whole is that iterate's to the bit.  Scored, at most 1 where it holds:
+
+    * ``y`` reads within the reported residual of what the accepted
+      iterate ``x`` reads, in the residual's weights (at it exactly where
+      every field read was recomputed);
+    * where *reach* is given -- the distance the report allows ``x``, the
+      bound over ``1 - h`` -- the distance of ``y`` to the fixed point in
+      the norm at ``y`` is at most ``(reach + residual) / (1 - rtol
+      residual sqrt(N))``, ``N`` the entries the norm pools.
+
+    *rounds*: the float floor one more evaluation of the pass is allowed.
+    """
+    cell = CELLS[case.cell]
+    topo = cell.topo
+    with precision(cell.dtype == "float64"):
+        step = run_once(_returned_twin(case.cell), values)
+    d, theirs = step.reports[0], accepted.reports[0]
+    for key in ("iterations", "converged", "residual"):
+        assert d[key] == theirs[key] or (d[key] != d[key] and theirs[key] != theirs[key]), (
+            f"{cell}: the return rule moved the report's {key}: {theirs[key]!r} at the accepted "
+            f"iterate, {d[key]!r} beside the state returned")
+    model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    recomputed = set(model.recomputed(0))
+    for m in topo.groups[0]:
+        if m not in recomputed:
+            assert np.array_equal(step.state[m]["x"], accepted.state[m]["x"]), (cell, m)
+    details = {}
+    if not all(np.all(np.isfinite(s["x"])) for s in step.state.values()):
+        return 0.0, details
+    x, y = ref.flat(accepted.state), ref.flat(step.state)
+    residual = float(d["residual"])
+    moved = norm.of_difference(y, x, norm.weights(y, also=x))
+    read = {topo.edges[i].src for i in topo.internal_edges(0)}
+    gap = abs(moved - residual) if read <= recomputed else max(0.0, moved - residual)
+    score = gap / max(residual * 2.0 ** 8 * case.eps + rounds, 1e-300)
+    details.update(moved=moved, off_readings=score)
+    drift = norm.rtol * residual * math.sqrt(sum(np.size(f) for f in norm.fields(y)))
+    if reach is not None and drift < 1.0:
+        dist = ref.distance(y, fixed, norm)
+        allowed = (reach + residual + rounds) / (1.0 - drift)
+        off_bound = (math.inf if math.isnan(allowed) else
+                     dist / allowed if allowed > 0 else (math.inf if dist > 0 else 0.0))
+        score = max(score, off_bound)
+        details.update(distance=dist, drift=drift, off_bound=off_bound)
+    return score, details
+
+
 def does_not_move_the_fixed_point(constant: str) -> bool:
     """Whether *constant* (``node.leaf[i]``, as the reference names it) is
     a nonlinearity's centre ``c<j>`` or curve ``s<j>``: at the fixed point
@@ -757,11 +851,12 @@ def observe(case: Case) -> dict:
     built, twin, ref = _built(case.cell)
     ref = bound_reference(ref, values, twin)
     with precision(cell.dtype == "float64"):
-        step = run_once(built, values)
+        step = one_step(built, cell, values)
         d = dict(step.reports[0])
         floor = linear._reported_floor(built.gm, topo.group_key(0), step.metas[0], d)   # noqa: SLF001
     out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, gradient_vanishing=0.0,
-               floor=0.0, vanishing_scored=False, spectral_usable=bool(d["spectral_usable"]),
+               floor=0.0, returned=0.0, vanishing_scored=False,
+               spectral_usable=bool(d["spectral_usable"]),
                gradient_usable=bool(d["gradient_bound_usable"]),
                floor_reported=math.isfinite(floor), referenced=False, near=False, stepped=True,
                finite=False,
@@ -802,6 +897,7 @@ def observe(case: Case) -> dict:
     linear.radius_scores(out, J, state_weights(ref, x), float(d["rho_spectral"]), case.eps,
                          case.base.seed)
 
+    reach = None
     if out["spectral_usable"]:
         dist = ref.distance(x, fixed, norm)
         h = ref.nonlinearity(x, fixed, norm)
@@ -815,6 +911,12 @@ def observe(case: Case) -> dict:
             reach = bound / (1.0 - h)
             out["bound"] = (math.inf if math.isnan(bound) else
                             dist / reach if reach > 0 else (math.inf if dist > 0 else 0.0))
+
+    if reads_a_recomputed_field(cell) and out["floor_reported"]:
+        # The scores here are of the report, read at the accepted iterate.
+        # Beside them: what the same step returns to a user.
+        out["returned"], out["report"]["returned"] = returned_score(
+            case, values, step, ref, fixed, norm, rounds=cancels * floor, reach=reach)
 
     if out["gradient_usable"]:
         bound = (float(d["gradient_relative_error_bound"]) * allowed + 64.0 * case.eps
@@ -957,6 +1059,13 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CL
     report = targeted_search(cases(cells, domain, swept_units_held=name in RADIUS_SCORES), score,
                              THRESHOLD[name], profile=profile, label=name, fail=fail)
     seen = [observe(c) for c in drawn]
+    if fail and drawn:
+        # Every example on a cell observed at the accepted iterate was also
+        # stepped as a user steps it (:func:`returned_score`).
+        worst = max(drawn, key=lambda c: observe(c)["returned"])
+        assert observe(worst)["returned"] <= linear.RETURNED_THRESHOLD, (
+            f"{name}: the state the step returned is {observe(worst)['returned']:.6g} times "
+            f"what its report allows, for {worst}: {observe(worst)['report']}")
     count = max(len(seen), 1)
     return report, dict(usable=sum(s[FLAG[name]] for s in seen) / count,
                         referenced=sum(s["referenced"] for s in seen) / count,
@@ -1539,3 +1648,32 @@ def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
                     held.base, unit=unit)) == case
             else:
                 assert held is case, (index, unit)
+
+
+# ---------------------------------------------------------------------------
+# The cells observed at the accepted iterate
+# ---------------------------------------------------------------------------
+
+
+def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_mapping():
+    """Which cells are stepped with the return rule off, with the state a
+    user gets checked beside them (:func:`returned_score`), is decided by
+    what a cell is (:func:`reads_a_recomputed_field`) and not by its index.
+    A change of layout therefore moves that treatment without a word -- to
+    other cells, or to none, and the check beside the hunt then tests
+    nothing.  (On the layout a rotation over eight rows left by accident
+    they were cells 33 and 34.)  Held here, each cell found by what it is:
+    the mapped ring under the interface norm, once in the rotation (Aitken
+    under Gauss-Seidel, a cap of 120) and once appended (Jacobi, stopped
+    after five passes).  No compile."""
+    observed = tuple(i for i in ALL_CELLS if reads_a_recomputed_field(CELLS[i]))
+    assert observed == (
+        CELLS.index(Cell("mapped", "float32", 2, 120, "product")),
+        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"))), observed
+    rotated, appended = observed
+    assert rotated < len(ROTATED) <= appended
+    for index in observed:
+        knobs = CELLS[index].knobs
+        assert knobs["convergence_norm"] == "interface" and knobs["solver"] == "ift", knobs
+        # In one block of the slow hunt, whose search asserts the score.
+        assert sum(index in block for block in BLOCKS) == 1, index

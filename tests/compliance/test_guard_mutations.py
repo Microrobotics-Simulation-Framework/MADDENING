@@ -98,6 +98,10 @@ MAP = "docs/validation/mapping_claims.yaml"
 _SEARCH = "tests/property/test_coupling_targeted_search.py"
 ORACLE = (f"{_SEARCH}::test_the_gradient_constants_of_a_mapped_edge_are_the_weights_its_build_holds",
           f"{_SEARCH}::test_the_gradient_errors_of_a_sparse_edge_are_the_dense_edges_on_its_pattern")
+#: Which of those constants the score takes: the ones the pass resolves
+#: (CPL-093's condition), on both sides of the margin (no graph compiled).
+RESOLVES = (f"{_SEARCH}::test_the_gradient_score_is_taken_over_the_constants_the_pass_resolves",
+            f"{_SEARCH}::test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score")
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -568,6 +572,19 @@ MUTANTS: tuple[Mutant, ...] = (
        + _GS_L2, CELLS_PINNED,
        "the first two rows of the geometry search's KNOBS exchanged: its cells keep their indices and "
        "run the other schedule and norm, under the radius seeds pinned on them"),
+    _M("L4", _LIN, '    dict(acceleration="none"), dict(acceleration="aitken"),\n'
+       '    dict(acceleration="fixed", relaxation=0.7), dict(acceleration="iqn-ils"),\n'
+       '    dict(acceleration="iqn-imvj", jacobian_reuse=2))\n',
+       '    dict(acceleration="aitken"), dict(acceleration="none"),\n'
+       '    dict(acceleration="fixed", relaxation=0.7), dict(acceleration="iqn-ils"),\n'
+       '    dict(acceleration="iqn-imvj", jacobian_reuse=2))\n', CELLS_PINNED,
+       "the first two accelerations of the linear search's returned-state cells exchanged: the cells "
+       "keep their indices, and the per-push cell and the zero-crossing test (cell 0) run under "
+       "Aitken where their comments say no acceleration"),
+    _M("L5", _NL, '    Cell("mapped", "float64", 2, 120, "quadratic"),\n',
+       '    Cell("mapped", "float64", 0, 120, "quadratic"),\n', CELLS_PINNED,
+       "the nonlinear search's appended float64 mapped ring moved off the interface norm: no float64 "
+       "nonlinear cell is then observed with the returned-state check, and nothing says so"),
     # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
     _M("K1", CPL, "    float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,\n",
        "    float32, a rate near 1. Not claimed for float64 (x64),\n", CLAIMS,
@@ -690,6 +707,23 @@ MUTANTS: tuple[Mutant, ...] = (
        "the coupling search's gradient score taken over every entry of a mapped edge's matrix: on a "
        "sparse mapping it differentiates entries outside the pattern, which the graph does not hold "
        "(a score of 2.6 with the flag set, from constants that do not exist)"),
+    _M("O2", _SEARCH,
+       "    return [row for row in rows if row[2] > least], [row for row in rows if not row[2] > least]\n",
+       "    return list(rows), []\n", RESOLVES,
+       "the coupling search's gradient score taken over every constant, also one whose whole value "
+       "moves a pass by less than the residual's float floor: CPL-093 says nothing of such a constant "
+       "and the bound leaves its probe out (a score of 4.12 with the flag set, from a gain the row "
+       "does not cover)"),
+    _M("O3", _SEARCH, "RESOLVED_MARGIN = 2.0  # units: floors\n",
+       "RESOLVED_MARGIN = 8.0  # units: floors\n", RESOLVES,
+       "the search's margin for a constant the pass resolves raised to eight floors: a weak constant "
+       "the bound must cover leaves the score, and a bound that dropped its probe would pass"),
+    _M("O4", _SEARCH,
+       "                     probed_at(**c) * float(np.linalg.norm(WS @ one_pass)) / count))\n",
+       "                     float(np.linalg.norm(WS @ one_pass)) / count))\n", RESOLVES,
+       "a constant's pass response taken per unit of the constant, not at the size the bound probes "
+       "it at: a gain of 1e-3 reads a thousand times more resolved than it is, and is scored where "
+       "the row says nothing"),
     # --- IP: a coupling group's edges are enumerated in one module only, -----
     # --- tests/core/test_interface_plan_is_the_only_enumeration.py -----------
     _M("IP1", "src/maddening/core/coupling/_group_layout.py",

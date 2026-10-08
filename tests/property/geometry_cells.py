@@ -365,8 +365,9 @@ def _cancellation(cell: Cell, values: dict, pre: dict, state: dict) -> float:
 
 
 #: A constant is scored for the gradient bound where its pass response is
-#: above this many floors (the nonlinear search's ``RESOLVED_MARGIN``).
-RESOLVED_MARGIN = 2.0
+#: above this many floors (the linear search's ``RESOLVED_MARGIN``, which
+#: the nonlinear search reads too).
+RESOLVED_MARGIN = linear.RESOLVED_MARGIN
 
 
 def observe(cell: Cell, case: Case, trio: tuple) -> dict:

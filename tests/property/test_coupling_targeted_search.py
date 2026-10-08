@@ -75,8 +75,9 @@ is not allowed for (MADD-ANO-212).
 
 Per push: each search on :data:`PER_PUSH_CELLS`, derandomised, at the
 house floor of examples, over the domain the claims are made on and
-this tree holds (:data:`CLAIMED`).  Slow: the random hunt over every
-cell.  What the widened domains reach is pinned at the foot of the
+this tree holds (:data:`CLAIMED`).  Slow: the hunt over every cell,
+each hunt under a seed of its own (:data:`HUNT_SEED`), so one tree gets
+one verdict.  What the widened domains reach is pinned at the foot of the
 module as strict xfails naming the finding each is.
 """
 
@@ -108,6 +109,17 @@ from tests.property.targeted_search import PER_PUSH, SLOW, targeted_search
 #: seconds), and at 20 examples a search did not find a resolvent factor
 #: halved; at 150 it does.
 EVERY_PUSH = dataclasses.replace(PER_PUSH, max_examples=150)
+
+#: The slow hunts' seeds, a base a hunt: the slow lane draws the same
+#: examples on the same tree every time (``MADDENING_SEARCH_ENTROPY=fresh``
+#: is how a hunt explores; ``targeted_search.py``).  The block hunts add
+#: ten times the block and the search's place in ``SEARCHES``, so no two
+#: score one set of examples; the nonlinear search's hunts are 1000 +
+#: block and the geometry search's 2000 to 2002 + 10 block.  A new hunt
+#: takes a base no other has, and a base is never renumbered: its hunt
+#: would draw other examples under the pins that record what it found.
+HUNT_SEED = {"blocks": 3000, "side": 3100, "side-awaiting": 3110, "diagnosed": 3200,
+             "cancelling": 3300, "returned": 3400}
 
 STRUCTURES = ct.search_topologies()
 
@@ -1045,15 +1057,16 @@ _WITNESS = {
 }
 
 
-# Slow: 800 random examples a search over every cell (seven blocks of
-# nine or ten cells, 115 examples each),
+# Slow: 800 examples a search over every cell (seven blocks of
+# nine or ten cells, 115 examples each, every hunt under its own seed),
 # each cell a compile; the blocks outermost, so the four searches share a
 # block's compiled graphs.
 # Per push: tests/property/test_coupling_targeted_search.py::test_a_usable_error_bound_is_never_below_the_distance_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("block,name", [(b, n) for b in range(len(BLOCKS)) for n in SEARCHES])
 def test_the_hunt_finds_no_number_on_the_wrong_side(block, name):
-    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(BLOCKS) + 1)
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(BLOCKS) + 1).seeded(
+        HUNT_SEED["blocks"] + 10 * block + SEARCHES.index(name))
     report, usable = search(name, cells=BLOCKS[block], profile=profile)
     print(f"{name}, block {block}: worst {report}; usable fraction {usable:.2f}")
     assert usable >= USABLE_FLOOR, (
@@ -1737,11 +1750,11 @@ def test_a_converged_interface_quantity_is_within_K_tolerances_per_push():
     assert converged > 0.5, f"only {converged:.2f} of the examples converged"
 
 
-# Slow: every claimed cell, 800 random examples.
+# Slow: every claimed cell, 800 examples under the hunt's seed.
 # Per push: tests/property/test_coupling_targeted_search.py::test_a_converged_interface_quantity_is_within_K_tolerances_per_push
 @pytest.mark.slow
 def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances():
-    report, converged = search_side(SIDE_CLAIMED, SLOW)
+    report, converged = search_side(SIDE_CLAIMED, SLOW.seeded(HUNT_SEED["side"]))
     print(f"side, {len(SIDE_CLAIMED)} cells: worst {report}; converged fraction {converged:.2f}")
     assert converged >= USABLE_FLOOR
 
@@ -1755,7 +1768,8 @@ def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances():
 @pytest.mark.xfail(AWAITING_THE_SIDE_RULE, strict=True, raises=AssertionError,
                    reason=SIDE_DECISION)
 def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances_on_a_larger_target():
-    search_side(SIDE_AWAITING, dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4))
+    search_side(SIDE_AWAITING, dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4).seeded(
+        HUNT_SEED["side-awaiting"]))
 
 
 def _known_side(case: SideCase):
@@ -1787,7 +1801,8 @@ def test_a_known_side_defect_the_search_reached_is_fixed(case):
 @pytest.mark.slow
 @pytest.mark.parametrize("name", SEARCHES)
 def test_the_reported_numbers_hold_on_cells_with_a_mapping_between_sizes(name):
-    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4)
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4).seeded(
+        HUNT_SEED["diagnosed"] + SEARCHES.index(name))
     report, usable = search(name, cells=SIDE_DIAGNOSED_CELLS, profile=profile)
     print(f"{name}, side cells: worst {report}; usable fraction {usable:.2f}")
     assert usable > 0, f"{name}: no example had the flag set"
@@ -1798,7 +1813,8 @@ def test_the_reported_numbers_hold_on_cells_with_a_mapping_between_sizes(name):
 @pytest.mark.slow
 @pytest.mark.parametrize("name", ("bound", "floor"))
 def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(name):
-    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4)
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4).seeded(
+        HUNT_SEED["cancelling"] + SEARCHES.index(name))
     report, usable = search(name, cells=SIDE_CANCELLING_CELLS, domain=SIDE_CANCEL,
                             profile=profile)
     print(f"{name}, cancelling side cells: worst {report}; usable fraction {usable:.2f}")
@@ -2252,12 +2268,15 @@ def test_a_recomputed_reading_near_zero_needs_the_drift_of_its_own_magnitude():
     assert seen["returned"] <= RETURNED_THRESHOLD, (seen["returned"], report)
 
 
-# Slow: 21 cells, each compiled twice; 800 random examples over the blocks.
+# Slow: 21 cells, each compiled twice; 800 examples over the blocks, each
+# block under its own seed.
 # Per push: tests/property/test_coupling_targeted_search.py::test_the_state_returned_under_the_interface_norm_holds_to_its_report_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("block", range(len(RETURNED_BLOCKS)))
 def test_the_hunt_finds_no_returned_state_outside_its_report(block):
-    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(RETURNED_BLOCKS) + 1)
+    profile = dataclasses.replace(
+        SLOW, max_examples=SLOW.max_examples // len(RETURNED_BLOCKS) + 1).seeded(
+            HUNT_SEED["returned"] + block)
     report, seen = search_returned(RETURNED_BLOCKS[block], profile)
     print(f"returned, block {block}: worst {report}; {seen}")
     assert seen["bounded"] >= USABLE_FLOOR, (

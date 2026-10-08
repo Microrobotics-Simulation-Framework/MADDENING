@@ -147,6 +147,12 @@ CELLS_PINNED = ("tests/property/test_coupling_search_cells_are_pinned.py",)
 _NL = "tests/property/test_coupling_nonlinear_search.py"
 _LIN = "tests/property/test_coupling_targeted_search.py"
 _GEO = "tests/property/geometry_cells.py"
+#: The searches' slow hunts are seeded: the helper's rules, and a scan of
+#: every module that names the slow profile (no compile).
+_HUNTS = "tests/property/test_targeted_search.py"
+_HELPER = "tests/property/targeted_search.py"
+_SYSID = "tests/property/test_sysid_targeted_search.py"
+HUNTS_SEEDED = (f"{_HUNTS}::test_no_hunt_in_the_tree_is_written_without_a_seed",)
 _GS_L2 = '    dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="l2"),\n'
 
 # Lines reused by several allowlist mutants (an existing entry, and a real
@@ -585,6 +591,28 @@ MUTANTS: tuple[Mutant, ...] = (
        '    Cell("mapped", "float64", 0, 120, "quadratic"),\n', CELLS_PINNED,
        "the nonlinear search's appended float64 mapped ring moved off the interface norm: no float64 "
        "nonlinear cell is then observed with the returned-state check, and nothing says so"),
+    # --- H: the slow hunts' seeds, tests/property/targeted_search.py and the search modules
+    _M("H1", _LIN,
+       "    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(BLOCKS) + 1).seeded(\n"
+       '        HUNT_SEED["blocks"] + 10 * block + SEARCHES.index(name))\n',
+       "    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(BLOCKS) + 1)\n",
+       HUNTS_SEEDED,
+       "the linear search's block hunts with no seed, as they were until 2026-10-08: 28 hunts draw "
+       "fresh entropy on every slow-lane run, so one tree is green on one run and red on the next"),
+    _M("H2", _SYSID,
+       "profile=SLOW.seeded(4000 + list(SEARCHES).index(name)),\n                    label=name)\n",
+       "profile=SLOW, label=name)\n", HUNTS_SEEDED,
+       "the sysid search's hunt with no seed: the same, in the one search that is not a coupling one"),
+    _M("H3", _HELPER, '    if profile.seed is None:\n        raise ValueError(\n            "a random search runs',
+       '    if False:\n        raise ValueError(\n            "a random search runs',
+       (f"{_HUNTS}::test_a_random_search_with_no_seed_is_refused",),
+       "the helper running a random profile that has no seed: a hunt the scan does not read (a "
+       "profile handed over at run time) draws fresh entropy in the slow lane and nothing says so"),
+    _M("H4", _HELPER, '    raw = os.environ.get(ENTROPY_VARIABLE, "").strip()\n',
+       '    raw = os.environ.get(ENTROPY_VARIABLE, "fresh").strip()\n',
+       (f"{_HUNTS}::test_a_hunt_scores_the_same_examples_every_time",),
+       "the exploring switch read as set where CI leaves it unset: every hunt is written with a seed "
+       "and draws under fresh entropy all the same"),
     # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
     _M("K1", CPL, "    float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,\n",
        "    float32, a rate near 1. Not claimed for float64 (x64),\n", CLAIMS,

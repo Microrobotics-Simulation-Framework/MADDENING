@@ -3349,7 +3349,7 @@ claims:
     is of a pass whose Jacobian such a rounding leaves standing to its
     1e-4.  A float32 Gauss-Seidel member with a quadratic term or a
     product, of curvature 100 over the size of the field it reads, has a
-    derivative one rounding of a same-pass value moves by 2.4e-5, and
+    slope one rounding of a same-pass value moves by 2.4e-5, and
     the float32 pass's Jacobian then has a radius up to 5e-4 of itself
     from the one exact arithmetic gives at the returned state (5e-5 at a
     curvature of 10, 5e-6 at 1; the same at any units, with and without

@@ -284,6 +284,33 @@ def test_the_gradient_through_the_diagnosed_step_is_its_twins(cell):
     _assert_reports_what_its_twin_does(cell)
 
 
+class _Seen(Exception):
+    """Raised by the recorder below with the value it was handed."""
+
+
+@pytest.mark.parametrize("none_dtype", [None, "float32", "float16", "bfloat16"])
+def test_the_rounding_allowed_to_the_products_is_that_of_the_fields_with_entries(
+        monkeypatch, none_dtype):
+    """The report's Arnoldi iteration allows its Jacobian-vector products
+    the ``eps`` of the coarsest dtype the pass evaluates in (``map_eps``).
+    Nothing is evaluated in the dtype of a field with no entries: beside
+    float32 members a 16-bit one leaves it at float32's, where it would be
+    8192 (float16) or 65 536 (bfloat16) times coarser.  The twin comparison
+    cannot see this on a group whose Krylov space has no direction between
+    the two noise levels, so the value handed over is read directly, at the
+    module that hands it (the step's trace stops there)."""
+    from maddening.core.coupling import _coupled_block  # noqa: PLC0415
+
+    def record(*_args, map_eps=None, **_kwargs):
+        raise _Seen(map_eps)
+
+    monkeypatch.setattr(_coupled_block, "_spectral_rate_at", record)
+    with pytest.raises(_Seen) as seen:
+        eg.build("unread", _knobs("mixed", "ift", True, "none", "gauss-seidel"),
+                 empty=none_dtype is not None, none_dtype=none_dtype).step()
+    assert seen.value.args[0] == float(jnp.finfo(jnp.float32).eps)
+
+
 # ---------------------------------------------------------------------------
 # The exceptions
 # ---------------------------------------------------------------------------

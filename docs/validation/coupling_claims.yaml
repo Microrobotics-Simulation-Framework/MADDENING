@@ -3299,7 +3299,16 @@ claims:
     within 1e-5 of the radius of the float64 reference's dense Jacobian
     on float32 draws where the Jacobian without its position columns has
     a radius 12% and 14% off, and both statements above are scored
-    against that reference.
+    against that reference.  Not claimed (MADD-ANO-239, open): a pass
+    whose Jacobian one rounding of the iterate in the group's dtype, or
+    of a value a Gauss-Seidel pass has just computed, moves by more than
+    the flag's margin.  Measured where a float32 Gauss-Seidel member
+    multiplies two other members' fields held in units 1e3 or more
+    apart: rho_spectral is then the radius of the Jacobian the float32
+    pass has (0.324 where exact arithmetic gives 0.0238), the flag stays
+    set, and spectral_error_bound held in every measured case.  The
+    nonlinear search holds such a cell's units within a decade for the
+    two radius scores and pins the case as a strict xfail.
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
@@ -3728,7 +3737,11 @@ claims:
     include the positions a target-anchored edge reads from a member's
     pre-step state, and the bound is held against the float64 reference's
     implicit derivative for every constant of the members the pass
-    resolves.
+    resolves.  The gradient bounded is the one the group computes, in
+    its own dtype: a constant whose tangent the group's float32 pass
+    rounds to exactly zero is outside the row, whatever a float64 twin's
+    response to it (the nonlinear search scores a centre or a curve
+    only where the float32 pass resolves it and the twin agrees).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'

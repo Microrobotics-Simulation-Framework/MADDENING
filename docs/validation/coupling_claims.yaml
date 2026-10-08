@@ -3299,7 +3299,11 @@ claims:
     within 1e-5 of the radius of the float64 reference's dense Jacobian
     on float32 draws where the Jacobian without its position columns has
     a radius 12% and 14% off, and both statements above are scored
-    against that reference.
+    against that reference.  It is the radius in the lattice cells the
+    returned iterate's positions are in: the pass's Jacobian is another
+    in the next cell (0.28 at the iterate against 0.97 at a fixed point
+    2e-4 of a spacing past a plane, measured), which spectral_usable
+    covers at run time (MAP-049).
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
@@ -3382,7 +3386,15 @@ claims:
     reference's fixed point with the factor 1 / (1 - h) of the nonlinear
     search, h the reference's measure of how far the Jacobian moves
     between the returned iterate and the fixed point, on examples whose
-    points stay in one lattice cell between the two.
+    points stay in one lattice cell between the two.  Across a lattice
+    plane the stencil is another polynomial and the flag is checked at
+    run time (MAP-049; MADD-ANO-239): where a position the pass reads
+    from the iterate is within twice the bound of a lattice plane and
+    the step did not certify its linearisation across the Newton step,
+    spectral_usable is False; on plane draws (a fixed point 1e-6 to 1e-2
+    of a spacing from a plane or a face of the hull) a fixed point in
+    another cell than the returned iterate is within twice the bound
+    wherever the flag is set, with no allowance for h.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3970,7 +3982,15 @@ claims:
     members' state's, each position field at its own dtype's eps, with
     the measured gain of a read through the gather or the scatter in the
     evaluation count; the exact residual of the returned float32 state is
-    held to the reported one plus the floor against the float64 reference.
+    held to the reported one plus the floor against the float64 reference
+    on the draws of the geometry search, whose fields are of one sign
+    scale across a cell.  A gather that samples a field changing sign
+    across a lattice cell under Gauss-Seidel is outside it: the sample is
+    a difference of two entries of one field, the gain measured along
+    the source's own state does not see its cancellation, and the bound
+    read 0.14x the true distance with the flag set at an amplitude of
+    3000 (MADD-ANO-212, open; pinned as a strict xfail in the slow lane).
+    Jacobi holds there.
   oracle: closed form.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'

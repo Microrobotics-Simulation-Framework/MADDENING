@@ -2042,7 +2042,8 @@ claims:
     pairs under every stock acceleration, both schedules, the l2 and the
     mixed norm, one- and two-dimensional lattices, origins up to forty
     spacings from zero, on examples whose points stay in one lattice cell
-    between the returned iterate and the fixed point; every report key
+    between the returned iterate and the fixed point (across a lattice
+    plane the flag is the run-time rule of MAP-049); every report key
     equal to the node-inlined twin's on every single-rate multilinear
     group case of the harness, a predictor among them; the report under a
     state write and a checkpoint saved after one (save_state, load_state),
@@ -2500,10 +2501,14 @@ claims:
     of the pass, and compares the product along that step with the
     difference of two evaluations of the pass, field by field". "A product
     that does not see the geometry reads 1 on every field the positions move
-    by more than 32 resolutions, an honest pass the finite difference's
-    rounding". "Where the gap is above GEOMETRY_GAP_TOLERANCE (0.25) or
-    cannot be evaluated, the report withholds the bounds", with a
-    not_usable_reason that gives the gap. "The check costs one product and
+    by much more than 32 resolutions, and less on a field they move by about
+    that", "An honest pass reads the finite difference's own error". "The
+    step is sqrt(eps) of the spacing at the coarsest floating dtype the pass
+    evaluates in", "and a point on the last lattice point of an axis steps
+    inwards". "Where the gap is above GEOMETRY_GAP_TOLERANCE (0.25) or
+    cannot be evaluated, the report withholds the bounds, and says which of
+    the two it was", with a not_usable_reason that gives the gap. "The check
+    costs one product and
     one evaluation of the pass per direction, and exists only in the step of
     such a group with diagnostics on."
   sources:
@@ -2519,11 +2524,23 @@ claims:
     tolerance, above it and at NaN, on the float32 pair of MAP-036; the gap
     on every per-push draw of that pair (at most a fifth of the tolerance:
     measured 3.1e-3 at most over 240 draws of it); the slot absent, and the report unchanged,
-    for the same group without diagnostics. The steps compiled (jit) by
-    the graph. Not claimed for float64 (x64) on every push (the slow hunt
-    measures it), mixed dtypes, 16-bit dtypes, gradients, vmap, multi-rate
-    graphs, sub-cycled groups, predictors, run_adaptive, checkpoints or
-    sharded graphs.
+    for the same group without diagnostics; the step against the kernel's
+    own derivative for a point mid-cell, on an interior plane, on either
+    face of the hull, a rounding inside or outside either face and far
+    outside, and the pair with a marker on the top face (MADD-ANO-240);
+    mixed dtypes (float32 fields at float64 positions, MADD-ANO-241): the
+    step's size and the gap of a toy pass. The steps compiled (jit) by
+    the graph. The separation is measured, not guaranteed: on 351 draws
+    of six cells an honest pass read at most 6e-3 in float32 and 3e-6 in
+    float64, and a pass whose every read of a geometry was under
+    stop_gradient 0.31 to 0.98 in float32 and 1.0 in float64; a wrong
+    derivative of a term that moves a field by about 32 float resolutions
+    or less is not seen (0.22, under the tolerance, on a deposit that
+    moved the spectral radius by 0.02), and an honest gather that cancels
+    three thousandfold read 0.11. Not claimed for float64 (x64) on every
+    push (the slow hunt measures it), 16-bit dtypes, gradients, vmap,
+    multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
+    checkpoints or sharded graphs.
   oracle: >-
     the share of the derivative a constructed product does not see (0, a
     half, one); the documented tolerance; the float64 reference's scores on
@@ -2533,9 +2550,15 @@ claims:
     - 'tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance'
     - 'tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin'
     - 'tests/property/test_coupling_geometry_search.py::test_the_self_check_is_traced_only_with_diagnostics_on_a_geometry_group'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_finite_difference_over_the_probe_step_is_the_kernel_s_derivative'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_probe_step_is_sized_for_the_coarser_of_the_geometry_and_the_pass'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_step'
+    - 'tests/property/test_coupling_geometry_search.py::test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check'
   status: verified
   notes: >-
-    Slow, run once on each JAX lane: a member whose tangent in its mapped
+    Slow, run once on each JAX lane: a compiled group of float32 fields
+    at float64 positions passes the check with the positions read from
+    the iterate and from the pre-step state; a member whose tangent in its mapped
     input is half its derivative reads a gap of 0.4 to 0.6 with the
     positions read from the iterate and with them read from the pre-step
     state, and its report is withheld; a geometry held by a node outside
@@ -2545,7 +2568,7 @@ claims:
   domains:
     f32: 'tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin'
     f64: narrowed
-    mixed_dtype: narrowed
+    mixed_dtype: 'tests/core/test_grid_probe_step_and_plane_distance.py::test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_step'
     16bit: narrowed
     jit: 'tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin'
     grad: narrowed
@@ -2683,6 +2706,102 @@ claims:
     mixed_dtype: narrowed
     16bit: narrowed
     jit: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+- id: MAP-049
+  area: geometry-dependent mapping diagnostics
+  claim: >-
+    Across a lattice plane: "Where a position the pass reads from the
+    iterate is within twice spectral_error_bound of a lattice plane, the
+    bound stands only if the step certified its linearisation across the
+    Newton step to the fixed point (the Newton-Kantorovich check behind
+    gradient_relative_error_bound, which is then finite). Otherwise
+    spectral_usable and gradient_bound_usable are False, the numbers are
+    reported as computed, and not_usable_reason names the case". "A position
+    that is a constant of the pass (a target-anchored geometry read by
+    update, a node outside the group) does not move between the iterate and
+    the fixed point and withdraws nothing." The step stores "limit = (u / 2)
+    min_j D_j d_j" over the entries of every position field the pass reads
+    from the iterate, the faces of the hull counted as planes, in the units
+    of spectral_error_bound. coupling_report() prints the reason beside
+    spectral_usable=False.
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
+    - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
+    - 'src/maddening/core/coupling/_bounds.py::_geometry_plane_limit'
+    - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_REACH'
+    - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_distance'
+    - 'src/maddening/core/coupling/_interface_plan.py::InterfacePlan.geometry_iterate_reads'
+    - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
+    - 'src/maddening/core/inspection.py::_coupling_flags'
+  conditions: >-
+    solver="ift" with diagnostics=True, a single-rate group of
+    multilinear_grid edges under the l2 or the mixed norm (MAP-036). On
+    every push: the audited float32 pair (one marker, Gauss-Seidel, the l2
+    norm, tolerance 1e-4) whose solve converges before a lattice plane with
+    its fixed point 2e-4 of a spacing past it, where the flag was set on a
+    bound under half the distance and is withdrawn with the numbers kept,
+    and the same graph with the fixed point mid-cell, which keeps its flag
+    and its bound; the stored limit against its definition (the distance
+    to the nearest plane in the reference's norm, halved) on eight pinned
+    plane draws of the float32 Jacobi pair under the mixed norm, either
+    face of the hull and a point outside it among them; no flag on a fixed
+    point beyond twice the bound on the house floor of drawn plane draws
+    of that pair; the report's reading of the two slots (at the limit,
+    over it with a finite gradient bound, over it without one, a limit
+    that is not a number, the self-check's failure first); the plane
+    distance and the limit's arithmetic on a toy pass; which positions
+    are listed (a source-anchored internal edge, a target-anchored edge
+    into a member that computes fluxes) and which are not. The steps
+    compiled (jit) by the graph. The rule is a run-time criterion and not
+    a proof: where no plane is within twice the bound it rests on the
+    polynomial piece at the iterate having its fixed point within the
+    Newton-Kantorovich ball (a smooth nonlinearity that fails this is the
+    condition CPL-088 states for every nonlinear group), and where one is
+    it rests on the gradient bound's measured Jacobian change across the
+    Newton step. Not claimed for float64 (x64) on every push (the slow
+    plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,
+    multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
+    checkpoints or sharded graphs, nor for a mapping kind other than
+    multilinear_grid (MAP-046: no bound is reported).
+  oracle: >-
+    the numerical float64 reference (the pass map of an x64 twin, its
+    fixed point by Newton): the lattice cell of every position at the
+    returned iterate and at the fixed point, the distance between the two
+    in the report's norm against twice the bound, and the limit computed
+    from the returned state by its definition; the documented reading of
+    the slots.
+  tests:
+    - 'tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition'
+    - 'tests/property/test_coupling_geometry_search.py::test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_per_push'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_distance_is_to_the_nearest_plane_inside_and_to_the_face_outside'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_zero_where_the_pass_moves_a_position_across'
+    - 'tests/core/test_interface_plan.py::test_the_positions_a_pass_reads_from_the_iterate_are_listed_once_per_mapping'
+  status: verified
+  notes: >-
+    Slow, run once on each JAX lane: the plane hunt over eight cells (each
+    anchoring, both schedules, both norms, float32 and float64, one and
+    two axes, an origin forty spacings from zero) asserts the three
+    scores of a plane draw and the stored limit on every example, and
+    prints how many examples had the fixed point across a plane, how many
+    of those were flagged before the rule and are now, and how many
+    same-cell examples lost their flag; the cell whose positions are all
+    constants of the pass must lose none.
+  domains:
+    f32: 'tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane'
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane'
     grad: narrowed
     vmap: narrowed
     multi_rate: narrowed

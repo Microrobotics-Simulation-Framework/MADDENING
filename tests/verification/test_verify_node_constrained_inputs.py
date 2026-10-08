@@ -634,6 +634,18 @@ def test_a_strategy_that_raises_while_generating_is_refused_not_reported_as_a_fa
     assert isinstance(caught.value.__cause__, RuntimeError)
 
 
+@pytest.mark.parametrize("option, message", [
+    ("state_strategy", "state_strategy must yield the dict of fields the node is given, got tuple"),
+    ("boundary_strategy", "boundary_strategy must yield the dict of fields the node is given, got tuple"),
+])
+def test_a_strategy_that_does_not_yield_a_dict_is_refused(option, message):
+    node = Located("l", 0.01)
+    kwargs = {"state_strategy": located_states(), option: st.just((0.5, 4))}
+    with pytest.raises(ValueError, match=message):
+        verify_node(node, checks=["finite"], **kwargs, **KW)
+    assert not node.seen
+
+
 def test_a_strategy_that_rejects_examples_is_not_a_refusal():
     """``assume`` inside a supplied strategy, or inside a map, is
     Hypothesis's own control flow: the example is discarded, nothing is

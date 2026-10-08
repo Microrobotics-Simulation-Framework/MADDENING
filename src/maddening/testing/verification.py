@@ -125,9 +125,11 @@ class _Refused(BaseException):
     the node failed elsewhere too.  A refusal says nothing about the node
     and is none of that.  Inside the battery it therefore travels as a
     ``BaseException``, which ends the run at the first refused draw, and
-    :func:`_run` turns it into the ``ValueError`` the caller gets.  A
-    caller drawing from :meth:`_Inputs.strategy` in their own ``@given``
-    test gets the ``ValueError`` directly, as that test's failure.
+    :func:`_run` turns it into the ``ValueError`` the caller gets.  (When
+    the run was not derandomised, Hypothesis prints its one-line seed hint
+    for a run that ends this way.)  A caller drawing from
+    :meth:`_Inputs.strategy` in their own ``@given`` test gets the
+    ``ValueError`` directly, as that test's failure.
     """
 
 
@@ -196,11 +198,11 @@ def _as_given(
     """``strategy``'s own examples, untouched.  An exception it raises while
     generating one is refused (``refused`` is raised) rather than reported
     as the node's failure, with the previous example as its
-    "counterexample"."""
+    "counterexample"; so is an example that is not a dict of fields."""
     @st.composite
     def drawn(draw):
         try:
-            return draw(strategy)
+            example = draw(strategy)
         except HypothesisException:  # rejection and the engine's control flow
             raise
         except Exception as exc:
@@ -208,6 +210,12 @@ def _as_given(
                 f"{option} raised {type(exc).__name__} while generating an "
                 f"example: {exc}"
             ) from exc
+        if not isinstance(example, dict):
+            raise refused(
+                f"{option} must yield the dict of fields the node is given, "
+                f"got {type(example).__name__}"
+            )
+        return example
     return drawn()
 
 

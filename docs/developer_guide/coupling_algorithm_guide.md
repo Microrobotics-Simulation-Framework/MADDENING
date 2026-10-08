@@ -1375,7 +1375,8 @@ the iterate it accepted, whose unmeasured fields came from the pass
 a long way off.  A step now returns those fields as one plain pass
 computes them at the accepted iterate, and the ten rows agree with plain
 Gauss-Seidel within the test's interface allowance at the fixtures' own
-`rtol`, with the auto-detected set unchanged: the
+`rtol`, with the auto-detected set unchanged (9.9e-06 to 2.2e-03 from
+it after 25 steps, where they were 2.6e-02 to 2.25): the
 `_KNOWN_DISAGREEMENTS` list is empty.  **The figures in the paragraph
 above and in the next section are those of the recorded sweep, taken
 before that change; the sweep has not been recorded again.**  The advice

@@ -634,9 +634,9 @@ anomalies:
       every field it does not measure whole from a pass before the
       readings it stopped on.  A solve now returns those fields as one
       plain pass computes them at the accepted iterate; all ten rows agree
-      with plain iteration within the sweep's interface allowance at the
-      same iteration counts, with the auto-detected set unchanged, and the
-      list is empty.  What remains of this gap: under the interface norm
+      with plain iteration within 2.2e-03 (9.9e-06 to 2.2e-03 after 25
+      steps, jaxlib 0.11.0, against 2.6e-02 to 2.25), with the
+      auto-detected set unchanged, and the list is empty.  What remains of this gap: under the interface norm
       error_estimate and the spectral bound are still statements about
       the interface alone.
       Two further mechanisms, measured on the 0.4.0 release audit
@@ -15989,8 +15989,9 @@ anomalies:
       schedule computes it at the accepted iterate, whatever the schedule,
       the acceleration, the solver and the verdict.  Iterates, residuals
       and pass counts are unchanged, and the ten rows agree with plain
-      iteration within the sweep's allowance.  The same rule covers a field
-      read only through a mapping or a transform: MADD-ANO-239.
+      iteration within 2.2e-03 (9.9e-06 to 2.2e-03 after 25 steps, jaxlib
+      0.11.0).  The same rule covers a field read only through a mapping or
+      a transform: MADD-ANO-239.
     severity: major
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

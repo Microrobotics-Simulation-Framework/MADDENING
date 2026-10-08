@@ -122,7 +122,8 @@ def _cells(names):
 
 def _knobs(schedule, norm, solver="ift", **extra) -> dict:
     knobs = dict(acceleration="none", iteration_mode=schedule, convergence_norm=norm,
-                 max_iterations=400, solver=solver, diagnostics=True, **extra)
+                 max_iterations=400, solver=solver, diagnostics=True)
+    knobs.update(extra)
     knobs["tolerance" if norm == "l2" else "rtol"] = RTOL
     return knobs
 
@@ -408,7 +409,12 @@ def _built_at_the_accepted_iterate(name: str, schedule: str):
 def check_the_library_returns_the_models_state(name, schedule, draws) -> None:
     topo, knobs, built = _built(name, schedule, "interface")
     values = _values(topo, knobs, *draws)
-    model = ct.LinearModel(topo, values, node_order=built.node_order,
+    # The sweep is the graph's own (``gm.schedule``).  The model's
+    # restatement of it from the ``add_node`` order differs where a one-way
+    # tail is added before the cycle it hangs off (``tail-first``: the
+    # library sweeps the tail last, reading this pass's value) -- which no
+    # oracle read before, the tail being a field the norm does not measure.
+    model = ct.LinearModel(topo, values, node_order=tuple(built.gm.schedule),
                            group_cfgs=ct.group_cfgs_of([knobs]))
     (step,) = ct.run(built, values, 1)
     (loop,) = ct.run(_built_at_the_accepted_iterate(name, schedule), values, 1)

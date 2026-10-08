@@ -1016,12 +1016,83 @@ $$
 
 with $D$ the norm's weights and $\mathrm{res}$ the residual's float
 resolution.  A product that does not see the geometry reads 1 on every
-field the positions move by more than 32 resolutions, an honest pass the
-finite difference's rounding (at most about 2/32).  Where the gap is
-above `GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
-withholds the bounds.  The check costs one product and one evaluation of
-the pass per direction, and exists only in the step of such a group with
-diagnostics on.
+field the positions move by much more than 32 resolutions, and less on a
+field they move by about that (the allowance is in the denominator: a
+term that moves a field by $G$ reads $G / (G + 32\,\mathrm{res})$, under
+the tolerance below about 11 resolutions).  An honest pass reads the finite
+difference's own error.  Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2:
+
+| the pass | draws | gap |
+|---|---|---|
+| honest, six cells of the geometry search | 350 | float32: median 6e-4, at most 5.7e-3; float64: at most 4.3e-6 |
+| honest, the search's hunts away from a lattice plane | 3,200 | at most 9.5e-3 |
+| every read of a geometry under `stop_gradient`, the six cells | 353 | float32: 0.305 to 0.98; float64: 1.0 |
+| the source-anchored reads under `stop_gradient`, a deposit that moves the grid's field by nine resolutions | 1 | 0.22, under the tolerance: the radius reported was 0.003 against 0.025 |
+| honest float32, a position built and read in one Gauss-Seidel sweep, placed 1e-6 to 1e-2 of a spacing from a lattice plane (1489 within 2e-5) | 2829 | 47 over 0.05, 13 over 0.1, 2 over 0.2, one 0.59 (MADD-ANO-246) |
+| honest float32, Gauss-Seidel behind a gather of a field alternating $\pm A$ around a sample of order one | 126 | under 0.09 up to $A = 1020$; 0.25 to 0.75 beyond, but 0.14 at $A$ = 2200 to 2700 (MADD-ANO-212) |
+
+The separation is therefore measured and not clean.  The step of the
+positions in the iterate moves a position that another member builds in
+the same sweep through that member's mapped input, in a direction the
+step does not choose; beside a lattice plane it crosses, and the
+difference straddles two polynomials.  A gather that cancels digits
+hands a small field the rounding of a large one, which the allowance,
+taken in the small field's resolution, does not cover.  At a tolerance
+of 0.05 the check would catch the weak deposit and withhold 7 to 9 of
+the 4,450 honest examples of the hunts, all beside a plane, where 0.25
+withholds none or one; the reason of a withheld report names both
+readings of a gap.  The step is `sqrt(eps)` of the
+spacing at the coarsest floating dtype the pass evaluates in (a step
+sized for float64 positions is below what float32 fields resolve), and a
+point on the last lattice point of an axis steps inwards, as one on the
+first does: outside the hull the kernel clamps.  A member's pre-step
+position steps towards the middle of the cell of whichever of it and the
+position the pass builds from it is nearer to a lattice plane (a
+Gauss-Seidel sweep reads the second after the holder's update).  Where the gap is above
+`GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
+withholds the bounds, and says which of the two it was.  A gap above the
+tolerance is reported as either a derivative that is not the value's or
+a finite difference that could not be formed: the check does not tell
+those apart.  The check costs
+one product and one evaluation of the pass per direction, and exists
+only in the step of such a group with diagnostics on.
+
+**Across a lattice plane.**  The stencil is piecewise polynomial in the
+positions, so the pass $F$ is piecewise smooth in the iterate wherever it
+reads positions from the iterate, and its Jacobian jumps where one of
+them crosses a lattice plane (the faces of the hull included).  The
+spectral estimate is the linearisation at the returned iterate $x_k$, and
+says nothing of the next cell.  The step therefore stores, with
+`diagnostics=True`,
+
+$$
+\mathrm{limit} = \frac{u}{2}\,\min_j D_j\, d_j ,
+$$
+
+over the entries $j$ of every position field the pass reads from the
+iterate or from the state the same pass has built: $d_j$ the distance
+from $x_{k,j}$ to the nearest lattice plane of the mapping that reads it
+(to the face it is clamped to, outside the hull; zero where the pass
+itself moves the position further than that), $D_j$ the norm's weight
+and $u$ its constant (1 under `"l2"`, $1/(\mathrm{rtol}\sqrt{n})$ under
+`"mixed"`), so that the limit is in the units of `spectral_error_bound`.
+Where the bound $B \le \mathrm{limit}$, no fixed point within $2B$ has a
+position across a plane: $2B$ is the radius of the Newton-Kantorovich
+ball at the largest nonlinearity the theorem admits, the polynomial
+piece at $x_k$ has its fixed point inside it, that fixed point's
+positions are in the cells of $x_k$'s, and so it is a fixed point of
+$F$.  Where $B > \mathrm{limit}$ a plane is within reach, and the flag is
+kept only where the step certified the linearisation across it: the
+gradient bound's Newton-Kantorovich check takes the Jacobian at $x_k$ and
+at the Newton point $x_k + \delta$, on whichever side of a plane that
+is, and `gradient_relative_error_bound` is finite only where
+$\lVert (I - J(x_k))^{-1} (J(x_k + \delta) - J(x_k)) \rVert < 1/2$.
+Without that, `spectral_usable` and `gradient_bound_usable` are `False`
+and the numbers stay.  A position that is a constant of the pass is not
+in the minimum.  Neither test alone would do: the distance alone
+withdraws the flag of nearly every step of a group with many points (one
+of them is always near a plane), and the check alone withdraws it
+wherever a smooth nonlinearity fails Kantorovich far from any plane.
 
 **Everywhere else they do not.**  A coupling group whose pass resolves a
 geometry-dependent mapping (on an edge into a member, from inside the

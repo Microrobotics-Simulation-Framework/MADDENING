@@ -54,6 +54,7 @@ from maddening.core.coupling._bounds import (
     _analysis_dtype,
     _geometry_plane_limit,
     _geometry_product_gap,
+    _gradient_error_bound_and_plane_margin_at,
     _gradient_error_bound_at,
     _interface_spectral_rate_at,
     _residual_resolution,
@@ -1675,10 +1676,9 @@ def _run_coupled_block_impl(
                     # ball around the iterate: whether the fixed point is
                     # in the iterate's polynomial piece, for the
                     # gradient's flag (``_kantorovich_ball_plane_margin``).
-                    grad_bound, plane_margin = _gradient_error_bound_at(
+                    grad_bound, plane_margin = _gradient_error_bound_and_plane_margin_at(
                         step_pure, x_star_full, consts, weights,
-                        rho_spec, spec_resid, spec_amp, resolution=resolution,
-                        plane_readers=ball_readers,
+                        rho_spec, spec_resid, spec_amp, resolution, ball_readers,
                     )
                     plane_margin = plane_margin.astype(x0_full.dtype)
                 else:

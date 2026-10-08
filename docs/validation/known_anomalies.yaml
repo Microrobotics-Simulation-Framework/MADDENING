@@ -16088,8 +16088,19 @@ anomalies:
       members' fields, and units 1e3 or more apart (nothing at 1e1).
       `spectral_error_bound` held on every such example (at most 0.82 of
       the distance), and so did the gradient bound for the gradient the
-      group computes.  The spectral keys are new in 0.4.0; no release
-      carries them.
+      group computes.  The same through a geometry: a float32 Gauss-Seidel
+      group with a `multilinear_grid` edge whose sweep reads a position
+      another member has just built, a fraction of a float resolution from
+      a lattice plane (0.33 in the audited case, at a lattice origin forty
+      spacings from zero), evaluates the stencil of the cell rounding
+      picks, exact arithmetic the other's: `rho_spectral` read 0.0077
+      against 0.1412 with `spectral_usable=True`, and 13 to 22% of
+      `1 - rho` off in seven examples of an independent audit.  Since
+      MADD-ANO-247 a position within eight float resolutions of a plane
+      counts as on it and `gradient_bound_usable` is withdrawn there;
+      `spectral_usable` is withdrawn only where the step did not certify
+      its linearisation, so that radius is still flagged.  The spectral
+      keys are new in 0.4.0; no release carries them.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16519,8 +16530,15 @@ anomalies:
       every one of those examples had `spectral_usable=True` on a bound the
       float64 reference holds.  A thousand plane draws further than 2e-5
       of a spacing from their plane read 4.4e-3 at most, the six other
-      cells of the hunt 6.4e-3 at most, and float64 is not affected (its
-      step is 1.5e-8 of a spacing).  A wrong refusal, not a wrong number,
+      cells of the hunt 6.4e-3 at most.  The reach is the check's own step,
+      `sqrt(eps)` of a spacing (3.45e-4 in float32, 1.5e-8 in float64), not
+      the 2e-5 those draws happened to be placed within, and neither
+      float64 nor Jacobi is exempt: an independent audit with fixed points
+      at every distance from a plane had 180 honest reports withheld in
+      65,714, each with a position the pass reads within that step of a
+      plane (up to 2.9e-4 of a spacing in float32, 6.8e-9 in float64): 44
+      float32 and 134 float64 Gauss-Seidel, and one weakly coupled Jacobi
+      group in each dtype.  A wrong refusal, not a wrong number,
       and the reason names it: a gap over the tolerance is reported as
       either a derivative that is not the value's or a finite difference
       that could not be formed.  It is also why the tolerance is not
@@ -16558,4 +16576,168 @@ anomalies:
     verification:
       - "tests/property/test_coupling_geometry_search.py::test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a_plane"
       - "tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-247"
+    title: "gradient_bound_usable=True on a gradient_relative_error_bound 15 to 70,000 times under the true error, for a group with a multilinear_grid edge whose fixed point lay just past a lattice plane that the Newton point stopped short of"
+    description: >
+      `gradient_relative_error_bound` is the bound of a smooth pass: its
+      Newton-Kantorovich check takes the pass's Jacobian at the returned
+      iterate and at the Newton point, and the report kept
+      `gradient_bound_usable` (and, with a lattice plane within twice
+      `spectral_error_bound`, both flags: the rule of MADD-ANO-242)
+      wherever that check read `h < 1/2`.  A `multilinear_grid` mapping is
+      another polynomial of the positions across a lattice plane, and two
+      Jacobians say nothing of a plane neither point is beyond.  Where the
+      fixed point lay past a plane by less than the Newton step's
+      second-order miss, the Newton point was still in the iterate's cell:
+      both Jacobians were that cell's, `h` read near zero, the bound was
+      "certified", and the gradient of the fixed point is the next cell's.
+      Measured by an independent audit on the 0.4.0 development tree (CPU,
+      jaxlib 0.11.0; one grid, one marker, a target-anchored gather and a
+      source-anchored scatter, `solver="ift"`, `diagnostics=True`, every
+      solve `converged=True`): float32, Gauss-Seidel, the L2 norm,
+      `tolerance=0.03`, the fixed point 3.6e-5 of a spacing past the plane:
+      a bound of 0.059 for an error of 0.90 (15x); float64, Jacobi, L2,
+      `tolerance=1e-5`, 1.0e-12 of a spacing past: 2.0e-5 for 1.50
+      (74,000x); float64, Jacobi, the mixed norm, `rtol=0.03`, Aitken:
+      0.060 for 1.17 (20x).  The library disagreed with itself by the same
+      factors (`jax.jacfwd` of one step at the report's tolerance against a
+      tight one).  On the audit's scan of fixed points at every distance
+      from a plane, 872 of 3,773 resolved reports with the fixed point in
+      another cell had the flag on a bound that did not hold, in 21 of 30
+      cells (every anchoring, both schedules, both norms, both dtypes), and
+      43 more where a Gauss-Seidel sweep read a position it had built in
+      another cell than the fixed point's.  The same held at the float
+      resolution: a float32 iterate 4.7 float resolutions before a plane
+      with its fixed point 0.7 past it kept both flags on a bound 25x under
+      the error (the kernel decides the cell from a rounded quotient).
+      `spectral_error_bound` held throughout (within twice the bound across
+      a plane), and so did `rho_spectral` off a plane.  No release carried
+      it: the geometry-dependent tier and its diagnostics are new in
+      0.4.0's development.  Fixed in 0.4.0: `gradient_bound_usable` no
+      longer stands on what the check reads.  The step stores how many
+      radii of the Newton-Kantorovich ball around the returned iterate the
+      nearest lattice plane of a position the pass reads is away
+      (`geometry_plane_margin`: entry by entry, the Newton step's own move
+      plus one more Newton step and the float floor, with a position within
+      eight float resolutions of a plane taken as on it), and the flag
+      stands only where that is over one: the iterate, the Newton point and
+      the fixed point are then in one lattice cell, where the pass is one
+      polynomial.  Otherwise `gradient_bound_usable` is `False` alone, the
+      number is kept, and `not_usable_reason` names the ball.  The same
+      window makes the distance of MADD-ANO-242's rule zero on a plane.
+      On the audit's scan the 872 and the 43 are 0, no `spectral_usable`
+      changed and no returned state moved.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs a geometry-dependent
+      mapping read from the iterate (an experimental tier), diagnostics on,
+      and a fixed point within the Newton step's second-order miss of a
+      lattice plane; the iteration, `converged` and the gradient itself
+      were unaffected.  `context_dependent` because whether the bound
+      gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling._bounds._gradient_error_bound_at"
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: do not gate on `gradient_bound_usable` for a group with a
+      geometry edge read from the iterate unless every position is further
+      from its nearest lattice plane than twice `spectral_error_bound`, in
+      the units of the position.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The rule is an argument with five assumptions, stated beside the code
+      (`_bounds._kantorovich_ball_plane_margin`): the kernel is one
+      polynomial between lattice planes; no member has a kink of its own in
+      the ball; Newton-Kantorovich holds for the polynomial piece with some
+      `h <= 1/2` (the radius does not use the measured `h`, but that the
+      true one is under one half is the smooth bound's own condition, not
+      proved by the step); the float floor is the residual's resolution
+      through the resolvent and eight float resolutions of the lattice at a
+      plane; the norm bounds an entry only where its weight is not zero.
+      It withdraws honest reports beside a plane, by design: a group
+      converged to a few hundredths of a lattice spacing loses the
+      gradient's flag on most steps (75% of the honest flagged reports of
+      the audit's scan, which places every fixed point beside a plane), and
+      a marker on a lattice plane that the pass reads from the iterate
+      loses it on every step.  `rho_spectral` at a position a fraction of a
+      float resolution from a plane is still the float pass's cell's
+      (MADD-ANO-239).  Only the `multilinear_grid` kind is diagnosed.
+    verification:
+      - "tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference"
+      - "tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error"
+      - "tests/property/test_coupling_plane_sides.py::test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_position_within_eight_float_resolutions_of_a_plane_is_on_it"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-248"
+    title: "POST /graph/edges and POST /graph/nodes answered 201 to a body carrying a key the route does not apply (additive, transform, mapping, geometry; a misspelt params) and built another graph than the one asked for"
+    description: >
+      The request models of the two routes named the keys they read and
+      ignored every other.  `POST /graph/edges` reads `source_node`,
+      `target_node`, `source_field` and `target_field` and calls
+      `GraphManager.add_edge` with those four; `add_edge` also takes
+      `transform`, `additive`, `source_units` and `target_units` (every
+      release) and, since 0.4.0's development, `mapping` and `geometry`.
+      A body carrying `"additive": true` was answered 201 and added a
+      plain edge that overwrites its target field instead of adding to it;
+      one carrying a `mapping` and a `geometry` (as `GET /graph` writes
+      them) was answered 201 and added an unmapped edge, and the graph
+      stepped to other values than the one built with `add_edge(mapping=...)`
+      (measured: a reversed field).  A misspelt key was a 201 too.
+      `POST /graph/nodes` has an optional `params`, so a body with
+      `parameters`, or with a constructor argument written beside `type`,
+      was answered 201 and the node built from its defaults (measured on
+      every tag from 0.1.0 to 0.3.1: `{"parameters": {"stiffness": 500}}`
+      gave a spring of stiffness 100, and `"additive": true` an edge with
+      `additive=False`).  Nothing in the reply said a key had been dropped.
+      Present in every release with the REST server (0.1.0 to 0.3.1).
+      Changed in 0.4.0: both models refuse a key they do not apply with a
+      422 whose detail names it (`extra_forbidden`), and nothing is added.
+      The other request models (`DELETE /graph/edges`, `PUT /graph/state`,
+      `PUT /graph/params`, `POST /surrogate/train`) still ignore an unknown
+      key: a test pins that as the state of a sweep, for the maintainer to
+      decide.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A 201 on a graph other than the one the body described is a silent
+      wrong result: the simulation runs, with an edge that overwrites where
+      it should add, or without a mapping.  Not `critical`: `GET /graph`
+      shows the edge as it was added, and a client that reads it back sees
+      the difference.  `context_dependent` because what the graph drives
+      is the deployment's.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On an affected release, send only the four edge keys, or `type`,
+      `name`, `timestep` and `params`, and read the graph back with
+      `GET /graph` after a write.  An additive, transformed or mapped edge
+      cannot be added over REST in any release: add it in-process with
+      `GraphManager.add_edge` before the server starts.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A client that sent extra keys to either route, relying on their being
+      ignored, now gets a 422 and must drop them.  The four request models
+      that still ignore unknown keys have no optional key a dropped one
+      could have been, except `POST /surrogate/train` (experimental), whose
+      misspelt hyperparameter trains with the default.
+    verification:
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_an_edge_request_with_a_key_the_route_does_not_apply_is_refused_and_adds_nothing"
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_a_node_request_with_a_key_the_route_does_not_apply_is_refused_and_adds_nothing"
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_every_key_the_library_s_door_takes_is_applied_or_refused_by_the_route"
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_the_other_request_models_drop_a_key_they_do_not_know_and_apply_the_rest"
     github_issue: null

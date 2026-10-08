@@ -603,7 +603,7 @@ def projection_1d_mapping(
     passed as float64 under ``jax_enable_x64`` (as :func:`rbf_mapping`'s
     are).  They were float32 in an x64 graph too, so a row summed to one
     and the integral was preserved to float32 rounding only, about 3e-8
-    (MADD-ANO-253).
+   .
     """
     from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
 

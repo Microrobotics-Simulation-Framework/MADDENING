@@ -1035,6 +1035,7 @@ difference's own error.  Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2:
 | every read of a geometry under `stop_gradient`, the six cells | 353 | float32: 0.305 to 0.98; float64: 1.0 |
 | the source-anchored reads under `stop_gradient`, a deposit that moves the grid's field by nine resolutions | 1 | 0.22, under the tolerance: the radius reported was 0.003 against 0.025 |
 | honest float32, a position built and read in one Gauss-Seidel sweep, placed 1e-6 to 1e-2 of a spacing from a lattice plane (1489 within 2e-5) | 2829 | 47 over 0.05, 13 over 0.1, 2 over 0.2, one 0.59 (MADD-ANO-246) |
+| honest, an audit's hunts with the fixed point at every distance from a lattice plane, float32 and float64 | 65,714 | 180 withheld, each with a position the pass reads within the check's step of a plane (`sqrt(eps)` of a spacing: up to 2.9e-4 in float32, 6.8e-9 in float64); 45 float32, 135 float64, two under Jacobi (MADD-ANO-246) |
 | honest float32, Gauss-Seidel behind a gather of a field alternating $\pm A$ around a sample of order one | 126 | under 0.09 up to $A = 1020$; 0.25 to 0.75 beyond, but 0.14 at $A$ = 2200 to 2700 (MADD-ANO-212) |
 
 The separation is therefore measured and not clean.  The step of the
@@ -1099,6 +1100,73 @@ in the minimum.  Neither test alone would do: the distance alone
 withdraws the flag of nearly every step of a group with many points (one
 of them is always near a plane), and the check alone withdraws it
 wherever a smooth nonlinearity fails Kantorovich far from any plane.
+
+**The gradient's flag needs no plane in the ball.**  That check takes the
+Jacobian at two points, $x_k$ and the Newton point $x_N = x_k + \delta$,
+and two Jacobians say nothing of a plane neither point is beyond: with
+the fixed point just past a plane that $x_N$ stops short of, both are one
+cell's, $h$ reads near zero, and the gradient of the fixed point is the
+next cell's (a bound 15 to 70,000 times under the error, flagged;
+MADD-ANO-247).  `gradient_bound_usable` therefore does not stand on what
+the check reads.  The step stores, with $\eta = \lVert D\delta \rVert_2$
+in the gradient bound's norm,
+
+$$
+\mathrm{margin} = \min_j \frac{D_j\,(d_j - w_j)_+}{D_j\lvert\delta_j\rvert + \eta + 2f} ,
+$$
+
+over the same entries $j$: $d_j$ the distance from $x_{k,j}$ to the
+nearest lattice plane, $w_j$ eight float resolutions of the position
+(below), $f$ the residual's float resolution through the resolvent, and
+$d_j$ taken as zero where the position the pass *builds* at $x_k$ or at
+$x_N$ (what a Gauss-Seidel sweep reads after its holder's update) is not
+strictly inside the cell of $x_{k,j}$.  The flag stands only where
+$\mathrm{margin} > 1$.  The argument, with its assumptions:
+
+1. *the kernel*: between two positions with no lattice plane and no face
+   of the hull between them the mapping is one polynomial of the
+   positions;
+2. *the members*: away from those planes the pass is smooth (no member's
+   `update` has a kink of its own inside the ball);
+3. *the smooth theory*: for the polynomial piece $p$ that the pass is at
+   $x_k$, taken as a map of the whole space, Newton-Kantorovich holds
+   with some $h \le 1/2$ (the step measures $h$ on the secant and the
+   bound is `inf` at $1/2$ or more), so $p$ has a fixed point $x_p$ with
+   $\lVert D(x_p - x_N) \rVert_2 \le t^* - \eta \le \eta$, whatever $h$ is
+   under one half: the radius does not use the measured value;
+4. *the floats*: the measured residual is the exact pass's to within its
+   float resolution, which the resolvent carries into the Newton point
+   and into $\eta$ ($2f$), and a position within eight float resolutions
+   of a plane is on it;
+5. *the norm*: $\lVert Dv \rVert_2 \le R$ bounds entry $j$ by $R/D_j$
+   where $D_j > 0$, and an entry the norm does not read ($D_j = 0$)
+   counts as on a plane.
+
+Where $\mathrm{margin} > 1$, entry $j$ of $x_N$ is $\lvert\delta_j\rvert$
+from $x_{k,j}$ and entry $j$ of $x_p$ within $(\eta + 2f)/D_j$ of that, so
+every position of $x_N$ and of $x_p$ is in the cell $x_k$'s is in; the
+positions the pass builds at $x_k$ and at $x_N$ are in it by the two
+evaluations, and at $x_p$ they are $x_p$'s own.  The pass is therefore $p$
+at the three points, $x_p$ is a fixed point of the pass, both Jacobians
+the bound takes and the one it bounds are $p$'s, and the bound is the
+smooth one.  No point is sampled to speak for a plane it is not at.
+Where $\mathrm{margin} \le 1$ the flag is withdrawn whatever $h$ reads,
+the number stays, and `spectral_usable` is the rule's above (the distance
+bound was held against the reference within $2B$ across a plane).  This
+costs honest reports beside a plane, by design: a solve converged to a
+few hundredths of a spacing has most of its points in reach of one.
+
+**On a plane.**  A position within eight float resolutions of a lattice
+plane has distance zero in both rules: `eps` of its dtype times the
+largest coordinate of the lattice's axis, or the position's own
+magnitude (or its offset's from the lattice origin) where that is
+larger.  The kernel decides the cell from the rounded quotient of that
+offset by the spacing, and a position a member builds is the rounding of
+the terms it was built from: one moved to 2e-9 from a face at zero, from
+0.1, is in float32 the rounding of a sum of order 0.1, and the float64
+reference has it 1e-8 on the other side.  So the scale is the lattice's.
+The gradient's flag is withdrawn there; `rho_spectral` remains the
+radius of the cell the float pass evaluated (MADD-ANO-239).
 
 **Everywhere else they do not.**  A coupling group whose pass resolves a
 geometry-dependent mapping (on an edge into a member, from inside the

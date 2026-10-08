@@ -271,7 +271,7 @@ def test_the_projection_weights_follow_the_boundaries_dtype_under_x64():
     float64 boundaries in an x64 process, float32 from float32 ones and
     with x64 off.  They were float32 in an x64 graph, where a row summed
     to one and the integral was preserved to float32 rounding only
-    (2.98e-8 and 3.7e-9 on these grids, MADD-ANO-253)."""
+    (2.98e-8 and 3.7e-9 on these grids)."""
     rng = np.random.default_rng(12)
     source = np.concatenate([[0.0], np.cumsum(rng.uniform(0.1, 1.0, 23))])
     target = np.linspace(0.0, source[-1], 8)                # covers the source grid exactly

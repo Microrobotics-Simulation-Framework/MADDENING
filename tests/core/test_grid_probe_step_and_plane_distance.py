@@ -369,7 +369,7 @@ def test_the_plane_limit_is_not_a_number_where_it_cannot_be_evaluated():
 
 # ---------------------------------------------------------------------------
 # A position within a few float resolutions of a plane is on it
-# (``_bounds.GEOMETRY_PLANE_ULPS``, ``_plane_resolution``; MADD-ANO-251)
+# (``_bounds.GEOMETRY_PLANE_ULPS``, ``_plane_resolution``; MADD-ANO-247)
 # ---------------------------------------------------------------------------
 
 #: Lattices whose plane the position sits beside: at a position of order
@@ -458,7 +458,7 @@ def test_the_window_is_taken_at_the_position_the_pass_builds_too():
 
 # ---------------------------------------------------------------------------
 # The lattice-plane margin of the Kantorovich ball around the iterate
-# (``_bounds._kantorovich_ball_plane_margin``; MADD-ANO-251)
+# (``_bounds._kantorovich_ball_plane_margin``; MADD-ANO-247)
 # ---------------------------------------------------------------------------
 
 
@@ -552,7 +552,7 @@ def test_the_ball_margin_is_not_a_number_where_it_cannot_be_evaluated():
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor(dtype):
-    """``_gradient_error_bound_at`` with the readers: on an affine pass the
+    """``_gradient_error_bound_and_plane_margin_at``: on an affine pass the
     Newton step is the distance to the fixed point, and the stored margin
     is the weighted plane distance over the entry's own move plus ``eta +
     floor``, the floor between nothing and two more ``eta`` -- and without
@@ -579,8 +579,8 @@ def test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor(dtype
         # A resolution the float64 case can see: a twentieth of the residual.
         resolution = jnp.full((2,), 0.05 * (1.0 - gain) * offset / 0.82, T)
         alone = _bounds._gradient_error_bound_at(*args, resolution=resolution)   # noqa: SLF001
-        bound, margin = _bounds._gradient_error_bound_at(                        # noqa: SLF001
-            *args, resolution=resolution, plane_readers=readers)
+        bound, margin = _bounds._gradient_error_bound_and_plane_margin_at(       # noqa: SLF001
+            *args, resolution, readers)
         assert np.ndim(alone) == 0 and float(bound) == pytest.approx(float(alone), rel=1e-5)
         w = np.asarray(weights, np.float64)
         delta = np.asarray([fixed[0], fixed[1]]) - np.asarray(x_k, np.float64)

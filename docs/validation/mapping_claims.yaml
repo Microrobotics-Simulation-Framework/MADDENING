@@ -652,8 +652,13 @@ claims:
     each grid pair both ways round: random, nested, identical, sharing
     boundaries, overlapping partly and not at all, touching, a single cell,
     float32 and integer boundaries, an offset of 1e9, cells of 1e-200,
-    adjacent floats.  With x64 off and on: the weights are float32 either
-    way, as the dense kinds' are.  The builders run once, on the host.
+    adjacent floats.  With x64 off the weights are float32.  With it on,
+    the nearest-neighbour weights (ones) are float32 still, and the
+    projection's follow the boundaries' dtype as rbf_mapping's do: float64
+    from float64 boundaries (the dense factory's H bit for bit, the
+    overlap formula in float64, a row summing to one and the integral
+    preserved to float64 rounding), float32 from float32 ones.  The
+    builders run once, on the host.
   oracle: >-
     the dense factory's H from the same arrays: dtype, shape and every byte
     of the rows scattered into a zero matrix; for the projection also the
@@ -664,6 +669,7 @@ claims:
     - tests/core/test_sparse_mapping_builders.py::test_the_sparse_projection_is_the_dense_double_loop_bit_for_bit
     - tests/core/test_sparse_mapping_builders.py::test_the_grids_cover_empty_rows_shared_boundaries_and_padding
     - tests/core/test_sparse_mapping_builders.py::test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are
+    - tests/core/test_sparse_mapping_builders.py::test_the_projection_weights_follow_the_boundaries_dtype_under_x64
     - tests/core/test_sparse_mapping_builders.py::test_the_three_builders_at_a_hundred_thousand_points_in_a_capped_process
   status: verified
   domains:
@@ -2043,7 +2049,15 @@ claims:
     mixed norm, one- and two-dimensional lattices, origins up to forty
     spacings from zero, on examples whose points stay in one lattice cell
     between the returned iterate and the fixed point (across a lattice
-    plane the flag is the run-time rule of MAP-049); every report key
+    plane the flag is the run-time rule of MAP-049; gradient_bound_usable
+    stands only with no lattice plane inside the Newton-Kantorovich ball
+    around the returned iterate, MAP-049 and MADD-ANO-247, so beside a
+    plane it is withdrawn from honest reports too; and a position within
+    eight float resolutions of a plane, eps of its dtype times the largest
+    coordinate of the lattice's axis, counts as on it: at an origin forty
+    spacings from zero with a spacing of 0.5 that window is 3.8e-5 of a
+    spacing in float32, and a fixed point nearer a plane than that cannot
+    be told from one on it); every report key
     equal to the node-inlined twin's on every single-rate multilinear
     group case of the harness, a predictor among them; the report under a
     state write and a checkpoint saved after one (save_state, load_state),
@@ -2547,10 +2561,16 @@ claims:
     resolutions is not seen: the source-anchored reads under
     stop_gradient on a deposit that moves the grid's field by nine read
     0.22, under the tolerance, and the report stood on a radius of 0.003
-    against 0.025. (2) An honest float32 pass that reads a position it
-    built in the same Gauss-Seidel sweep, within about 2e-5 of a spacing
-    of a lattice plane, can read a gap of any size and be withheld: of
-    2829 plane draws of two such cells (1489 that near) 47 read over
+    against 0.025. (2) An honest pass that reads a position built in the
+    same sweep, within the check's own step of a lattice plane (sqrt(eps)
+    of a spacing: 3.45e-4 in float32, 1.5e-8 in float64), can read a gap
+    of any size and be withheld; neither float64 nor Jacobi is exempt (an
+    independent audit with fixed points at every distance from a plane:
+    180 honest reports withheld in 65,714, each within that step, up to
+    2.9e-4 of a spacing in float32 and 6.8e-9 in float64; 44 float32 and
+    134 float64 Gauss-Seidel, one weakly coupled Jacobi group in each
+    dtype). Of
+    2829 float32 plane draws of two such cells (1489 within 2e-5) 47 read over
     0.05, 13 over 0.1, 2 over 0.2 and one 0.59 (jaxlib 0.11.0); one draw of the plane hunt reads 0.26 and 0.29
     on 0.10.2 and 0.11.2 (MADD-ANO-246, open). (3) An honest float32
     Gauss-Seidel pass behind a gather of a field alternating +A, -A
@@ -2759,11 +2779,29 @@ claims:
     from the iterate, the faces of the hull counted as planes, in the units
     of spectral_error_bound. coupling_report() prints the reason beside
     spectral_usable=False.
+    The gradient's flag: "gradient_bound_usable needs more: no lattice plane
+    inside the Newton-Kantorovich ball around the returned iterate". The
+    step stores "margin = min_j D_j (d_j - w_j)_+ / (D_j |delta_j| + eta + 2
+    f)" over the same entries (the Newton step's own move of the entry, one
+    more Newton step and the float floor; d_j zero where a position the
+    pass builds at the iterate or at the Newton point is not strictly
+    inside the iterate's cell), and the flag stands only where it is over
+    one, whatever the Newton-Kantorovich check read; otherwise
+    "gradient_bound_usable is False alone: the number is reported as
+    computed, spectral_usable is the rule's above, and not_usable_reason
+    names the ball", which coupling_report() prints beside
+    gradient_bound_usable=False. "A position within eight float
+    resolutions of a lattice plane is on it, for both rules": eps of its
+    dtype times the largest coordinate of the lattice's axis, or the
+    position's own magnitude where that is larger.
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
     - 'src/maddening/core/coupling/_bounds.py::_geometry_plane_limit'
     - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_REACH'
+    - 'src/maddening/core/coupling/_bounds.py::_kantorovich_ball_plane_margin'
+    - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_ULPS'
+    - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_resolution'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_distance'
     - 'src/maddening/core/coupling/_interface_plan.py::InterfacePlan.geometry_iterate_reads'
     - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
@@ -2792,8 +2830,54 @@ claims:
     polynomial piece at the iterate having its fixed point within the
     Newton-Kantorovich ball (a smooth nonlinearity that fails this is the
     condition CPL-088 states for every nonlinear group), and where one is
-    it rests on the gradient bound's measured Jacobian change across the
-    Newton step. Not claimed for float64 (x64) on every push (the slow
+    it rests, FOR spectral_usable ONLY, on the gradient bound's measured
+    Jacobian change across the Newton step (held against an independent
+    reference within twice the bound across a plane on 54,482 scanned
+    reports). THE GRADIENT'S FLAG (MADD-ANO-247) is still a run-time
+    criterion, and an argument with five stated assumptions
+    (_kantorovich_ball_plane_margin): the kernel is one polynomial between
+    planes; no member has a kink of its own in the ball; Newton-Kantorovich
+    holds for the polynomial piece with some h <= 1/2 (the radius does not
+    use the measured h; that the true one is under one half is the smooth
+    bound's own condition, CPL-093, and is not proved by the step); the
+    float floor is the residual's resolution through the resolvent and
+    eight float resolutions at a plane; the norm bounds an entry only
+    where its weight is not zero. On every push, against a NumPy reference
+    of the pass that does not import the library's kernel
+    (tests/property/plane_sides.py), with the fixed point PLACED at a
+    chosen signed distance from a plane by bisection of a marker's initial
+    position: a pinned table of 16 drawn rows on four structures (float32
+    Gauss-Seidel l2 at tolerance 0.03; float64 Jacobi l2 at 1e-5; float64
+    Jacobi mixed at rtol 0.03 with Aitken; float32 Jacobi mixed with every
+    position a constant of the pass) covering the four combinations of
+    sides (which of the returned iterate and the Newton point are in the
+    fixed point's lattice cells), a row whose flag stands, a row with a
+    plane in the ball and all three in one cell (an honest report
+    withdrawn), a row within three float resolutions of a plane, and the
+    three audited cases of MADD-ANO-247 (bounds 15x to 70,000x under the
+    error, now unflagged); in every row every number whose flag is set is
+    scored (rho_spectral, spectral_error_bound, the gradient bound) and the
+    gradient's flag is the pinned one; with positions constant of the
+    pass, a plane between the iterate's position and the fixed point's
+    withdraws nothing and the margin is inf. The margin's arithmetic on a
+    toy pass (weights, the entry's own move, the window through the ball,
+    a built position leaving the cell at either point, an entry the norm
+    does not read, NaN) and the radius the step takes on an affine pass
+    (the entry's move plus between one and three Newton steps: the floor
+    is in it), float32 and float64; the plane window at 0.3, 1 and 5 float
+    resolutions (zero) and at 50 (kept), float32 and float64, at a lattice
+    of order one, at an origin forty spacings from zero and at a plane on
+    zero of a lattice whose origin is far from it; the report's reading of
+    the margin slot (over one, at one, under, NaN, absent). THE PRICE,
+    measured on an audit's scan that places every fixed point beside a
+    plane (tolerances 1e-5 to 0.1; 54,482 reports, jaxlib 0.11.0): of
+    28,382 honest reports (the fixed point in the iterate's cell) with the
+    gradient flag before, 6,979 keep it (75% lose it); 3,695 to 363 on a
+    hunt that places a plane between the iterate and the fixed point;
+    1,698 to 926 on pairs whose positions are read from the iterate and
+    do not move; 752 to 752 with every position a constant of the pass.
+    No spectral_usable changed and no returned state moved. Not claimed
+    for float64 (x64) on every push for the limit (the slow
     plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
     checkpoints or sharded graphs, nor for a mapping kind other than
@@ -2814,9 +2898,27 @@ claims:
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_zero_where_the_pass_moves_a_position_across'
     - 'tests/core/test_interface_plan.py::test_the_positions_a_pass_reads_from_the_iterate_are_listed_once_per_mapping'
+    - 'tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited_cases'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error'
+    - 'tests/property/test_coupling_geometry_search.py::test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_reads_only_the_positions_that_move_with_the_iterate'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_zero_where_a_position_the_pass_builds_leaves_the_cell'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_not_a_number_where_it_cannot_be_evaluated'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_position_within_eight_float_resolutions_of_a_plane_is_on_it'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_window_is_taken_at_the_position_the_pass_builds_too'
   status: verified
   notes: >-
-    Slow, run once on each JAX lane: the plane hunt over eight cells (each
+    Slow, run once on each JAX lane: the sweep of the table (every
+    anchoring, both schedules, both norms, float32 and float64: 32 cells,
+    six placed pairs each at twelve signed distances from four float
+    resolutions to a tenth of a spacing) scores every flagged number of
+    every example and prints the realised table; the two audited cases of a
+    position within a rounding of a plane (the iterate 4.7 float
+    resolutions before a plane and the fixed point 0.7 past it: the
+    gradient bound was 25x under the error, flagged). The plane hunt over eight cells (each
     anchoring, both schedules, both norms, float32 and float64, one and
     two axes, an origin forty spacings from zero) asserts the three
     scores of a plane draw and the stored limit on every example, and

@@ -1,7 +1,7 @@
 """The lattice-plane table of a group with a geometry edge: every reported
 number whose flag is set, against an independent reference, with the
 returned iterate, the Newton point and the fixed point on every combination
-of sides of a lattice plane (MADD-ANO-251, MAP-049, CPL-093).
+of sides of a lattice plane (MADD-ANO-247, MAP-049, CPL-093).
 
 ``gradient_relative_error_bound`` is the smooth theory's bound: it takes the
 pass's Jacobian at the returned iterate and at the Newton point.  A
@@ -155,10 +155,11 @@ def _check_rows(structure: str) -> None:
             if not row["on_a_plane"]:
                 # Away from the float resolution the row does not depend on
                 # a rounding (the drawn rows are pinned at least two
-                # hundred resolutions off; the audited ones are the audit's).
+                # hundred resolutions off; the audited ones are the audit's,
+                # and the rows of constant positions thirty).
                 assert where["row"] == row["row"], told
                 assert where["nearest_resolutions"] > (
-                    10 if structure.startswith("audited") else 100), told
+                    100 if ps.moving(cfg) and not structure.startswith("audited") else 10), told
             assert ps.wrong_numbers(cfg, x, c, report, where) == [], told
             assert bool(report["gradient_bound_usable"]) == row["gradient_bound_usable"], told
             assert bool(report["spectral_usable"]) == row["spectral_usable"], told
@@ -198,7 +199,7 @@ def test_the_audited_positions_within_a_rounding_of_a_plane_lose_the_gradient_fl
 
 
 def test_the_audited_bounds_were_flagged_and_far_under_the_error():
-    """The three audited rows of MADD-ANO-251 as the audit recorded them:
+    """The three audited rows of MADD-ANO-247 as the audit recorded them:
     the reference's gradient error is 15 to 70,000 times the bound the
     report still carries, the fixed point is across a plane the Newton point
     is short of, and the flag is what changed."""

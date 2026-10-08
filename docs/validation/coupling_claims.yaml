@@ -3450,7 +3450,12 @@ claims:
     plane draws (a fixed point 1e-6 to 1e-2 of a spacing from a plane or a
     face of the hull) a fixed point in another cell than the returned
     iterate is within twice the bound wherever the flag is set, with no
-    allowance for h.
+    allowance for h.  A position within eight float resolutions of a
+    lattice plane (eps of its dtype times the largest coordinate of the
+    lattice's axis) counts as on it: its distance is zero, and a fixed
+    point placed nearer a plane than that is not told from one on it
+    (MADD-ANO-247; rho_spectral there is the float pass's cell's,
+    MADD-ANO-239).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3794,6 +3799,16 @@ claims:
     floor) is not in the bound, which says nothing of it; it read 1.09 for
     a relative error of 1.134 with those probes in it (MADD-ANO-234,
     resolved).
+    BESIDE A LATTICE PLANE (a group with a geometry edge read from the
+    iterate; MAP-049, MADD-ANO-247): the Newton-Kantorovich check takes
+    the Jacobian at the iterate and at the Newton point and cannot see a
+    plane beyond both, so gradient_bound_usable additionally needs no
+    lattice plane inside the Newton-Kantorovich ball around the returned
+    iterate (the step's geometry_plane_margin over one); otherwise the
+    flag is False whatever the bound reads, and the bound says nothing of
+    the gradient of a fixed point in another lattice cell (it read 15x to
+    70,000x under the error with the flag set).  Honest reports beside a
+    plane lose the flag by this rule.
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the constants probed
     include the positions a target-anchored edge reads from a member's
@@ -3819,6 +3834,7 @@ claims:
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
+    - 'tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference'
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
     - tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed_at_one_cap
     - tests/core/test_coupling_gradient_error_bound.py::test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap

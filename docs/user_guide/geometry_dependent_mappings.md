@@ -145,14 +145,21 @@ names the edge and says what to do.
     tolerance, on a deposit so weak that it moved the grid's field by
     nine resolutions.  The spectral radius reported there was 0.003
     against 0.025.
-  - **An honest float32 report can be withheld beside a lattice plane.**
-    Where a member reads, in the same Gauss-Seidel sweep, positions that
-    another member has just built, and one of them is within about 2e-5
-    of a spacing of a lattice plane, the check's step carries it across
+  - **An honest report can be withheld beside a lattice plane.**
+    Where a member reads, in the same sweep, positions that another
+    member has just built, and one of them is within the check's own
+    step of a lattice plane -- `sqrt(eps)` of a spacing: 3.45e-4 in
+    float32, 1.5e-8 in float64 -- the check's step carries it across
     the plane and the difference is not a derivative.  Of 2829 drawn
-    examples of two such groups, 1489 of them that near a plane, 47 read
-    over 0.05, two over 0.2 and one 0.59; of a thousand further from a
-    plane none read over 5e-3 (MADD-ANO-246).
+    float32 examples of two such Gauss-Seidel groups (1489 within 2e-5
+    of a spacing of a plane), 47 read over 0.05, two over 0.2 and one
+    0.59; of a thousand further than 2e-5 from a plane none read over
+    5e-3.  An independent audit that placed fixed points at every
+    distance from a plane had 180 honest reports withheld in 65,714,
+    each with a position the pass reads within that step of a plane (up
+    to 2.9e-4 of a spacing in float32, 6.8e-9 in float64): 45 in
+    float32 and 135 in float64, two of them weakly coupled Jacobi groups
+    (MADD-ANO-246).
   - **An honest float32 report is withheld behind a strongly cancelling
     gather.**  A Gauss-Seidel group whose gather samples a field that
     changes sign across a cell reads 0.25 to 0.75 once the lattice
@@ -193,6 +200,53 @@ names the edge and says what to do.
   `update`, a node outside the group) does not move between the iterate
   and the fixed point and withdraws nothing.  A tighter tolerance
   usually brings the returned iterate into the fixed point's cell.
+* **`gradient_bound_usable` needs more: no lattice plane inside the
+  Newton-Kantorovich ball around the returned iterate.**
+  `gradient_relative_error_bound` is the bound of a smooth pass.  It
+  takes the pass's Jacobian at the returned iterate and at the Newton
+  point; with the fixed point just past a plane that the Newton point
+  stops short of, both are one cell's, the check reads no change, and
+  the gradient of the fixed point is the next cell's.  The bound read 15
+  to 70,000 times under the true error with its flag set (MADD-ANO-247).
+  So the flag does not stand on what that check reads.  It stands only
+  where every position the pass reads from the iterate is further from
+  its nearest lattice plane than the fixed point can be from it: the
+  Newton step's own move of that position, plus one more Newton step
+  and the float floor in the group's norm.  The iterate, the Newton
+  point and the fixed point are then in one lattice cell, where the pass
+  is one polynomial and the bound is the smooth one.  Otherwise
+  `gradient_bound_usable` is `False` alone: the number is reported as
+  computed, `spectral_usable` is the rule's above, and
+  `not_usable_reason` names the ball.  **This withdraws honest
+  reports**, and is meant to: a wrong number with its flag set is the
+  worse outcome.  The ball is as wide as the solve is loose, so a group
+  converged to a few hundredths of a lattice spacing loses the
+  gradient's flag on most steps, and one with a marker on a lattice
+  plane that the pass reads from the iterate loses it on every step,
+  whether the marker moves or not.  Measured on honest reports (the
+  fixed point in the iterate's cell) that had the flag: 75% lost it on
+  an audit's scan that places every fixed point beside a plane at
+  tolerances of 1e-5 to 0.1, 45% on pairs whose positions the pass
+  reads from the iterate and that do not move, and none where every
+  position is a constant of the pass.
+  A tighter tolerance shrinks the ball.
+* **A position within eight float resolutions of a lattice plane is on
+  it**, for both rules: its distance is zero.  The resolution is `eps`
+  of the position's dtype times the largest coordinate of the lattice's
+  axis, or the position's own magnitude where that is larger (in
+  float32 on a lattice out to 20 with a spacing of 0.25: 9.5e-6 of a
+  spacing, so the window is 7.6e-5 of one).  The kernel decides the
+  cell from a rounded quotient and a member builds a position with a
+  rounding of its own, so nearer than that the cell the floats
+  evaluated is not the value's to say: an iterate 4.7 resolutions before
+  a plane with its fixed point 0.7 past it kept both flags on a gradient
+  bound 25 times under the error.  The gradient's flag is withdrawn
+  there.  `spectral_usable` is not, where the step certified its
+  linearisation: `rho_spectral` is then the radius of the cell the
+  float pass evaluated, which for a position a fraction of a resolution
+  from a plane can be the other cell's than exact arithmetic's (13 to
+  22% of `1 - rho` apart in seven audited float32 Gauss-Seidel examples;
+  MADD-ANO-239, open).
 * **Everywhere else the report says so.**  For any other group that
   resolves a geometry-dependent mapping (another mapping kind, a
   sub-cycled group, the interface norm with a geometry edge entering
@@ -214,7 +268,8 @@ names the edge and says what to do.
   a coupling group.  If its components are not affine coordinates (a
   quaternion, a wrapped angle), set `boundary_interpolation="constant"`.
 * `POST /graph/edges` cannot create a mapped edge, so it cannot create one
-  with a geometry; `GET /graph` shows the key.
+  with a geometry: a body with a `mapping` or a `geometry` key is refused
+  (422, the key named) and no edge is added; `GET /graph` shows the key.
 * One kind ships, `multilinear_grid`.  Your own kind registers with
   `register_mapping(..., needs_geometry=True)` and declares
   `needs_geometry = True` and `geometry_shape`; see the `Mapping`

@@ -29,13 +29,13 @@ the returned iterate ``x_k``, the Newton point ``x_N`` (the other point the
 Newton-Kantorovich check takes a Jacobian at) and the fixed point ``x*``.
 Relative to the fixed point's lattice cells the other two are each in them
 or not: four rows.  ``k!=*`` with ``N=*`` is the case of MADD-ANO-242 (the
-check sees the plane), ``k!=*`` with ``N!=*`` the case of MADD-ANO-251 (it
+check sees the plane), ``k!=*`` with ``N!=*`` the case of MADD-ANO-247 (it
 cannot), ``k=*`` with ``N!=*`` a Newton point that overshoots a plane the
 other two are short of.  The positions the pass *builds* at the iterate
 (what a Gauss-Seidel sweep reads after its holder's update) are a fourth
 point, reported beside the row.
 
-Lifted from the reproducers of the audit that found MADD-ANO-251
+Lifted from the reproducers of the audit that found MADD-ANO-247
 (``benchmarks/results/audit_040_p4_17/mapping/repro_reference.py`` and
 ``repro_scan_plane_distance.py``).
 """
@@ -720,7 +720,7 @@ def wrong_numbers(cfg: Cfg, x, c, rep, where: dict) -> list:
       worst resolved constant, within ``gradient_relative_error_bound``;
       and never set unless the iterate, the Newton point, the positions the
       pass builds and the fixed point are in one lattice cell, off every
-      plane (MADD-ANO-251).
+      plane (MADD-ANO-247).
     """
     sc = score(cfg, x, c, rep)
     bad = []

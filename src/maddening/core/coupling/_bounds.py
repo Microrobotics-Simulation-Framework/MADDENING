@@ -54,12 +54,17 @@ def _F_dispatch(step_pure, x, consts):
 #:
 #: * a pass that reads a position it built in the same sweep
 #:   (Gauss-Seidel, a source-anchored geometry whose holder is swept
-#:   first) with that position within about 2e-5 of a spacing of a
-#:   lattice plane.  The step moves it across the plane through its
-#:   holder's mapped input.  Of 2829 plane draws of two such cells on
-#:   jaxlib 0.11.0 (1489 within 2e-5), 47 read over 0.05, 13 over 0.1, 2
-#:   over 0.2 and one 0.59; one draw of the plane hunt reads 0.26 and
-#:   0.29 on 0.10.2 and 0.11.2 (MADD-ANO-246);
+#:   first) with that position within the check's own step of a lattice
+#:   plane: ``sqrt(eps)`` of a spacing, 3.45e-4 in float32 and 1.5e-8 in
+#:   float64.  The step moves it across the plane through its holder's
+#:   mapped input.  Of 2829 float32 plane draws of two such cells on
+#:   jaxlib 0.11.0 (1489 within 2e-5 of a spacing), 47 read over 0.05, 13
+#:   over 0.1, 2 over 0.2 and one 0.59; one draw of the plane hunt reads
+#:   0.26 and 0.29 on 0.10.2 and 0.11.2.  An independent audit with fixed
+#:   points at every distance from a plane: 180 honest reports withheld
+#:   in 65,714, each with a position the pass reads within that step (up
+#:   to 2.9e-4 of a spacing in float32, 6.8e-9 in float64); 45 float32,
+#:   135 float64, two of them weakly coupled Jacobi groups (MADD-ANO-246);
 #: * a Gauss-Seidel pass behind a gather of a field that changes sign
 #:   across a cell: 0.025 to 0.087 where the lattice values are up to a
 #:   thousand times the sample, 0.14 to 0.75 beyond (MADD-ANO-212, whose
@@ -158,7 +163,7 @@ GEOMETRY_PLANE_REACH = 2.0  # units: spectral_error_bound
 #: evaluated is not decided by the position's value there: an iterate 4.7
 #: resolutions before a plane with its fixed point 0.7 past it kept both
 #: flags on a gradient bound 25x under the reference's error
-#: (MADD-ANO-251).  The resolution is the mapping's
+#: (MADD-ANO-247).  The resolution is the mapping's
 #: (``_plane_resolution``): ``eps`` of the position's dtype times the
 #: largest coordinate magnitude of the lattice's axis, or the position's
 #: own where that is larger.
@@ -713,8 +718,7 @@ def _probe_plan(consts, probed):
 
 
 def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
-                             arnoldi_residual, amplification, resolution=None,
-                             plane_readers=None):
+                             arnoldi_residual, amplification, resolution=None):
     """A bound on the relative error of the IFT tangent at the returned iterate.
 
     The IFT rule (:func:`_ift_solve_jvp`) solves
@@ -801,14 +805,44 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     residual's float resolution per entry, as :func:`_spectral_rate_at`
     takes it.
 
-    With *plane_readers* (experimental: a group whose pass reads a moving
-    geometry; the ``readers`` of :func:`_geometry_plane_limit`, at least
-    one) the return is the pair ``(bound, margin)``, ``margin`` the
-    lattice-plane margin of the Newton-Kantorovich ball around the iterate
-    (:func:`_kantorovich_ball_plane_margin`): one more evaluation of the
-    pass.  Without it nothing of that is traced and the return is the
-    bound alone.
+    :func:`_gradient_error_bound_and_plane_margin_at` is this bound with
+    the lattice-plane margin of a group whose pass reads a moving
+    geometry beside it; nothing of the margin is traced here.
     """
+    return _gradient_error_bound_and_margin(
+        step_pure, x_star, consts, weights, rho, arnoldi_residual, amplification,
+        resolution, ())[0]
+
+
+def _gradient_error_bound_and_plane_margin_at(step_pure, x_star, consts, weights, rho,
+                                              arnoldi_residual, amplification, resolution,
+                                              plane_readers):
+    """``(bound, margin)``: :func:`_gradient_error_bound_at` and the
+    lattice-plane margin of the Newton-Kantorovich ball around the iterate
+    (:func:`_kantorovich_ball_plane_margin`), for a group whose pass reads
+    a moving geometry (experimental).
+
+    *plane_readers* are the ``readers`` of :func:`_geometry_plane_limit`,
+    at least one.  One more evaluation of the pass than the bound alone;
+    both in the bound's own branch, so the margin is the bound's Newton
+    step and floor and not a second measurement of them.
+    """
+    readers = tuple(plane_readers)
+    if not readers:
+        raise ValueError("the lattice-plane margin needs at least one reader")
+    bound, margin = _gradient_error_bound_and_margin(
+        step_pure, x_star, consts, weights, rho, arnoldi_residual, amplification,
+        resolution, readers)
+    if margin is None:
+        raise AssertionError("no margin was computed for a group with readers")
+    return bound, margin
+
+
+def _gradient_error_bound_and_margin(step_pure, x_star, consts, weights, rho,
+                                     arnoldi_residual, amplification, resolution, readers):
+    """``(bound, margin)`` of the two functions above; ``margin`` is
+    ``None`` with no *readers*, and the traced program is then the
+    bound's alone."""
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(jnp.asarray(c)) for c in consts)
     # In at least float32, as ``_spectral_rate_at`` (``_analysis_dtype``).
@@ -822,13 +856,12 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
         i for i, c in enumerate(consts_sg)
         if jnp.issubdtype(c.dtype, jnp.floating) and c.size > 0
     ]
-    readers = tuple(plane_readers) if plane_readers else ()
     nothing = (nan, nan) if readers else nan
     if not probed or x_sg.size == 0:
         # Nothing the fixed point can respond to, or a fixed-point vector
         # with no entries (every floating field of the group has none):
         # no gradient, no error.
-        return nothing
+        return (nan, nan) if readers else (nan, None)
 
     def bound(operands):
         return _gradient_error_bound_body(step_pure, probed, *operands, readers=readers)
@@ -844,10 +877,11 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     # must not move the answer it diagnoses.  A non-finite state has no
     # gradient bound to compute, which is what makes the predicate a
     # runtime one.
-    return jax.lax.cond(
+    out = jax.lax.cond(
         jnp.all(jnp.isfinite(x_sg)), bound, lambda _operands: nothing,
         (x_sg, consts_sg, d, rho, arnoldi_residual, amplification, res),
     )
+    return (out[0], out[1]) if readers else (out, None)
 
 
 def _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype):
@@ -951,7 +985,7 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     short of, both are one cell's, the check reads no change (``h`` near
     0), and the gradient of the fixed point is the other cell's.  The
     bound was 15 to 70,000 times under the reference's error with its
-    flag set (MADD-ANO-251).  So the flag does not stand on what the
+    flag set (MADD-ANO-247).  So the flag does not stand on what the
     check reads; it stands where no plane is in the ball at all.
 
     **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``,

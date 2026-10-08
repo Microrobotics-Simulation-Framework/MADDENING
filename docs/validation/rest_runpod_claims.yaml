@@ -2711,7 +2711,10 @@ claims:
 - id: REST-068
   area: structure
   claim: >-
-    POST /graph/edges checks "that the nodes and the source field exist"
+    POST /graph/edges takes "these four keys and no other. A body with any
+    other key, transform, additive, mapping or geometry among them, is a
+    422 that names the key and adds nothing" (it was a 201 on a plain
+    edge: MADD-ANO-248), and checks "that the nodes and the source field exist"
     (404 for a missing node, 400 for a missing field or flux); DELETE
     /graph/edges removes every edge with those endpoints and fields, and is
     a 404 "when the graph has none (it used to answer 200 and change
@@ -2722,12 +2725,25 @@ claims:
     no wider claim is made about pathological names.
   sources:
     - src/maddening/api/server.py:2914 (add_edge)
+    - 'src/maddening/api/server.py::AddEdgeRequest'
+    - 'src/maddening/api/server.py::AddNodeRequest'
     - src/maddening/api/server.py:2946 (remove_edge)
     - docs/release_notes/v0.4.0.md:4597 (Checkpoint paths name a file inside the root)
     - src/maddening/api/README.md:284 (A request that is refused, or that fails, changes nothing)
     - src/maddening/api/README.md:132 (Who the server is for, and what it defends against)
   conditions: >-
-    missing nodes, a missing source field, an edge that does not exist. The
+    missing nodes, a missing source field, an edge that does not exist.
+    Every argument of GraphManager.add_edge the route does not pass
+    (transform, additive, source_units, target_units, mapping, geometry)
+    and two keys that are nobody's, one at a time: a 422 whose detail
+    names the key (extra_forbidden), no edge, and a step equal to the
+    graph's without one; the plain body a 201 that changes the step; the
+    table of keys held to add_edge's signature. POST /graph/nodes alike
+    (params is optional, so a misspelt params or a constructor argument
+    beside type built the node from its defaults: now a 422). The other
+    request models (DELETE /graph/edges, PUT /graph/state, PUT
+    /graph/params, POST /surrogate/train) ignore an unknown key and apply
+    the rest, pinned as the state of a sweep and not as a promise. The
     target field is not asked whether the target node declares it (a node
     may read an input it does not declare, and GraphManager.validate passes
     one): an undeclared target field is a 201 and the graph is reported,
@@ -2739,6 +2755,11 @@ claims:
   oracle: status codes and the graph's edges.
   tests:
     - tests/api/test_graph_endpoint_validation.py::test_add_edge_checks_nodes_and_fields
+    - tests/api/test_a_request_key_the_route_does_not_apply.py::test_an_edge_request_with_a_key_the_route_does_not_apply_is_refused_and_adds_nothing
+    - tests/api/test_a_request_key_the_route_does_not_apply.py::test_an_edge_request_of_the_four_keys_is_taken_and_changes_the_step
+    - tests/api/test_a_request_key_the_route_does_not_apply.py::test_every_key_the_library_s_door_takes_is_applied_or_refused_by_the_route
+    - tests/api/test_a_request_key_the_route_does_not_apply.py::test_a_node_request_with_a_key_the_route_does_not_apply_is_refused_and_adds_nothing
+    - tests/api/test_a_request_key_the_route_does_not_apply.py::test_the_other_request_models_drop_a_key_they_do_not_know_and_apply_the_rest
     - tests/api/test_runner_stop_and_stride.py::test_deleting_an_edge_that_does_not_exist_is_a_404
     - tests/api/test_api.py::TestGraphEndpoints::test_add_edge
     - tests/property/test_stateful_api.py::test_edge_from_a_boundary_flux_is_accepted_and_steps

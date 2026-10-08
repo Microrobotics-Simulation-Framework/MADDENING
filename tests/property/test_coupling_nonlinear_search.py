@@ -1341,6 +1341,42 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_nonlinear_group(block, 
     # (test_every_score_holds_on_the_nonlinear_seed_shapes), which CI runs.
 
 
+#: The least fraction of the finite examples with a reference in a hunt
+#: over ONE cell read at a source (measured: 0.76 to 1.00 by cell, score
+#: and jaxlib 0.10.2 / 0.11.0 / 0.11.2; the capped Jacobi cell's strict
+#: radius search climbs towards starts Newton reaches no fixed point from,
+#: and a hunt over one cell has no other cell's examples to dilute that).
+SOURCE_REFERENCED_FLOOR = 0.5
+
+
+# Slow: 115 random examples a search on each cell whose group reads a
+# mapping at its source (two cells: seconds a search, their graphs compiled
+# once).
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_the_search_reads_an_edge_where_the_linear_model_does
+@pytest.mark.slow
+@pytest.mark.parametrize("cell,name", [(i, n) for i in cells_read_at_a_source()
+                                       for n in SEARCHES + ("radius_strict",)])
+def test_the_hunt_over_a_cell_whose_mapping_is_read_at_its_source(cell, name):
+    """Each score hunted on one such cell alone.
+
+    The block hunts above spread 115 examples over seven to nine cells
+    and climb towards the worst score of any of them, so a cell can go
+    undrawn: on the appended block the floor search drew the capped Jacobi
+    cell (:data:`SOURCE_CELL`) not once and the bound search once (jaxlib
+    0.11.0), and neither a library nor a reference that read the other
+    side of its mapping failed either (both seeded).  Here every example
+    is on the cell: a library reading that mapping as delivered scores 105
+    floors and 1.08 of the bound on :data:`SOURCE_CELL`."""
+    assert cell in cells_read_at_a_source()
+    profile = dataclasses.replace(SLOW, max_examples=115).seeded(2000 + cell, shrink=False)
+    report, fractions = search(name, cells=(cell,), profile=profile)
+    print(f"{name}, cell {cell}: worst {report}; {fractions}")
+    assert fractions["referenced"] >= SOURCE_REFERENCED_FLOOR * fractions["finite"], fractions
+    assert fractions["usable"] >= USABLE_FLOOR, (
+        f"{name}, cell {cell}: only {fractions['usable']:.2f} of the examples had the flag set "
+        f"(floor {USABLE_FLOOR})")
+
+
 def test_the_reference_s_jacobian_is_the_central_difference_of_its_pass():
     """The dense Jacobian against a central difference of the pass map, on
     the per-push nonlinear cell away from its fixed point, and the same

@@ -79,7 +79,7 @@ def _group_accel_fields(group, plan, state) -> Optional[dict]:
 
 
 def _reads_mapping_weights(group, plan) -> bool:
-    """Does *group*'s norm read a value that depends on interface-mapping weights?
+    """Does *group*'s norm read a value the state a solve returns does not determine?
 
     True under ``convergence_norm="interface"`` when an internal edge
     whose source field is floating is read through its mapping: that
@@ -88,16 +88,51 @@ def _reads_mapping_weights(group, plan) -> bool:
     its source field through weights that live in ``params["mappings"]``
     and may be overridden per step.  An edge the norm reads at its
     source (a mapping onto more entries than its field holds) is the
-    stored field, whatever the weights, and does not count.  The
+    stored field, whatever the weights, and does not count.  True also
+    where an edge is read as delivered through a geometry-dependent
+    mapping anchored at its **target**: the reading is taken at the
+    target's pre-step geometry, which the returned state does not hold
+    (such a mapping has no weights; one anchored at its source is read
+    at the returned state's own geometry and does not count).  The
     float floor of such a group's residual therefore cannot be taken
     from the returned state alone, and the step records it
     (``coupling_<key>_reading_floor``).  Static, and shared by
     ``compile()``'s seeding, the step's write and ``reset_state()``, so
     the three agree on which groups own the slot; every other group's
     ``_meta`` and compiled step are what they were.  *plan* is the
-    group's description (``InterfacePlan.norm_reads_mapping_weights``).
+    group's description (``InterfacePlan.norm_reads_beyond_the_state``).
     """
-    return group.convergence_norm == "interface" and plan.norm_reads_mapping_weights()
+    return group.convergence_norm == "interface" and plan.norm_reads_beyond_the_state()
+
+
+def _floor_needs_the_step(group, interface_edges) -> bool:
+    """Can the float floor of *group*'s residual be measured only by the
+    step that solved it, whatever weights the graph holds?
+
+    True under ``convergence_norm="interface"`` where an internal edge
+    is read as delivered at its target's pre-step geometry
+    (``InterfaceEdge.reads_pre_step_geometry``): outside the step that
+    state is gone.  The report's fallback floor
+    (``coupling_diagnostics``, for a state whose ``reading_floor`` slot
+    was never written) then has nothing to measure on and says so,
+    where a group that reads mapping weights falls back to the graph's
+    own.  *interface_edges* is the group's plan, or the bare edges the
+    report keeps (``InterfacePlan.norm_edges``).
+    """
+    return group.convergence_norm == "interface" and any(
+        record.reads_pre_step_geometry
+        for record in _interface_plan.interface_records(interface_edges))
+
+
+#: Why a report built on the float floor is withheld where the floor
+#: could only have been measured by the step (:func:`_floor_needs_the_step`).
+_FLOOR_NEEDS_THE_STEP_REASON = (
+    "the float floor of this group's residual reads what an internal edge delivers at "
+    "its target's pre-step geometry, which only the step that solved the group holds, "
+    "and this state carries no floor recorded by a step (it was not produced by one of "
+    "this graph's steps, or the recorded value is not finite); spectral_error_bound, "
+    "precision_limited and the *_usable flags are not reported until the group steps."
+)
 
 
 def _reading_is_the_fields(interface_edges, float_fields) -> bool:
@@ -157,8 +192,9 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     **measures whole**: the source field of an internal edge that delivers
     it as it is, with no mapping and no transform
     (:func:`maddening.core.edge._delivered` applies nothing else) -- an
-    edge whose reading *is* its source field, which the group's plan
-    answers (``InterfaceEdge.reads_source_as_is``).  Every
+    edge whose reading *is* its source field -- and every other field a
+    part of a reading holds entry for entry, which the group's plan
+    answers (``InterfaceEdge.measured_whole``).  Every
     other floating field could be returned from a pass before the readings
     the verdict was taken on, with ``converged=True``:
 
@@ -173,7 +209,12 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     its compact side, at the source (``_interface_plan._norm_side``): the
     reading is the source field itself, before the mapping and the
     transform, so that field is measured whole and kept, like one a plain
-    edge reads.
+    edge reads.  A geometry-dependent mapping read at its source
+    (experimental) is read at its inputs: its source field, and the
+    positions a source anchor takes from the iterate, each over a
+    constant length -- both are measured whole and kept.  A geometry its
+    target holds is the pre-step state, not a reading, and that field is
+    recomputed like any other.
 
     The return rule (``_with_nonfloat_fields_at`` in the step): a field
     measured whole keeps the accepted iterate's value, bit for bit; every
@@ -204,9 +245,9 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     if group.convergence_norm != "interface":
         return {}
     floats = float_fields_of(state, list(schedule))
-    whole = {record.source
+    whole = {field
              for record in _interface_plan.interface_records(interface_edges)
-             if record.reads_source_as_is}
+             for field in record.measured_whole}
     missed = {nn: tuple(f for f in floats[nn] if (nn, f) not in whole)
               for nn in schedule}
     return {nn: fields for nn, fields in missed.items() if fields}
@@ -340,8 +381,9 @@ _GEOMETRY_KIND_WHY = (
     "{kinds})"
 )
 _GEOMETRY_NORM_WHY = (
-    "under convergence_norm={norm!r} (they do under 'l2' and 'mixed', which measure the "
-    "members' state, the geometry included)"
+    "under convergence_norm={norm!r} (the solve's own criterion reads it there, but the "
+    "analysis of that reading behind the bounds is not in this stage of 0.4.0; they do "
+    "under 'l2' and 'mixed', which measure the members' state, the geometry included)"
 )
 _GEOMETRY_SUBCYCLED_WHY = (
     "in a sub-cycled group (members {members} take several sub-steps per pass, and the "
@@ -404,29 +446,60 @@ _WRITTEN_BEFORE_SAVE_REASON = (
 )
 
 
-def _geometry_edge_coupling_errors(group, plan) -> list[str]:
+#: The mapping kind whose moving geometry ``convergence_norm="interface"``
+#: reads: the one that declares the length scale a position is measured in.
+_INTERFACE_NORM_GEOMETRY_KIND = "multilinear_grid"
+
+
+def _geometry_edge_coupling_errors(group, nodes, plan) -> list[str]:
     """``ERROR:`` issues for a group setting a geometry-dependent mapping
     cannot serve (experimental; empty for every other group).
 
     ``convergence_norm="interface"`` measures the change, between
-    iterates, of what each internal edge delivers from its source field.
-    For an edge whose mapping reads a geometry that reading needs the
-    geometry of each iterate too, which the norm does not read in 0.4.0:
-    refused, naming the norms that measure the state instead.  *plan* is
-    the group's description (``InterfacePlan.geometry_edges``).
+    iterates, of what the norm reads on each internal edge.  For an edge
+    whose mapping reads a geometry that reading needs the geometry too
+    (``InterfaceEdge.parts``), and the norm reads it for the
+    ``multilinear_grid`` kind in a group that does not sub-cycle.  Two
+    settings are refused, each naming the norms that measure the state
+    instead:
+
+    * a geometry-dependent mapping of **another kind** on an internal
+      edge: a position is measured in units of the kind's own length
+      scale, and only ``multilinear_grid`` declares one in 0.4.0;
+    * a **sub-cycled** group with such an edge: the reading is one value
+      per pass (the end-of-pass iterate, at the pre-step target
+      geometry), which is not what a member that takes several sub-steps
+      per pass was handed.
+
+    *plan* is the group's description (``InterfacePlan.geometry_edges``).
     """
     if group.convergence_norm != "interface":
         return []
     names = sorted(group.nodes)
-    return [
-        f"ERROR: coupling group {names} uses convergence_norm='interface', which "
-        f"measures the values the group's internal edges carry, but edge {r.key!r} "
-        f"carries its value through a geometry-dependent mapping (geometry "
-        f"{r.anchor[0]}.{r.anchor[1]}), and the norm does not read a moving "
-        f"geometry in 0.4.0.  Use convergence_norm='mixed' or 'l2', which measure "
-        f"the members' state, the geometry included."
-        for r in plan.geometry_edges()
-    ]
+    stem = (
+        "ERROR: coupling group {names} uses convergence_norm='interface', which "
+        "measures the values the group's internal edges carry, but edge {key!r} "
+        "carries its value through a geometry-dependent mapping (geometry "
+        "{side}.{field}), {why}.  Use convergence_norm='mixed' or 'l2', which "
+        "measure the members' state, the geometry included."
+    )
+    dividers = _group_dividers(group, nodes) or {}
+    sub_cycled = sorted(nn for nn, d in dividers.items() if d > 1)
+    errors = []
+    for r in plan.geometry_edges():
+        if r.mapping_kind != _INTERFACE_NORM_GEOMETRY_KIND:
+            why = (f"of kind {str(r.mapping_kind)!r}, and the norm reads a moving geometry "
+                   f"only for the {_INTERFACE_NORM_GEOMETRY_KIND!r} kind in 0.4.0 (a "
+                   f"position is measured in units of the kind's own length scale)")
+        elif sub_cycled:
+            why = (f"and the group sub-cycles (members {sub_cycled} take several sub-steps "
+                   f"per pass): the norm does not read a moving geometry in a sub-cycled "
+                   f"group in 0.4.0")
+        else:
+            continue
+        errors.append(stem.format(names=names, key=r.key, side=r.anchor[0],
+                                  field=r.anchor[1], why=why))
+    return errors
 
 
 def _flux_edge_coupling_errors(group, nodes, plan, state) -> list[str]:

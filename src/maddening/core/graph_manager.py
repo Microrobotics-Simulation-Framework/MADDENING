@@ -2452,7 +2452,7 @@ class GraphManager:
             issues.extend(_group_layout._flux_edge_coupling_errors(
                 group, self._nodes, plan, self._state,
             ))
-            issues.extend(_group_layout._geometry_edge_coupling_errors(group, plan))
+            issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._nodes, plan))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
 
@@ -5070,9 +5070,18 @@ class GraphManager:
                 # step did not produce) falls back to the graph's own
                 # weights, which is what a ``params=None`` step runs with.
                 measured_floor = meta.get(f"coupling_{key}_reading_floor")
+                floor_unserved = False
                 if measured_floor is not None and np.isfinite(np.asarray(measured_floor)):
                     unit = np.asarray(measured_floor)
                     floor = float(unit * np.asarray(evaluations, unit.dtype))
+                elif _group_layout._floor_needs_the_step(group, internal_edges):
+                    # An edge read as delivered at its target's pre-step
+                    # geometry (experimental): outside the step that state
+                    # is gone, so there is nothing to fall back to.  Not
+                    # reported, with the reason, rather than measured on
+                    # a state the reading was not taken at.
+                    floor = float("nan")
+                    floor_unserved = True
                 else:
                     # On the state the step left, not on whatever has been
                     # written to it since (``_keep_state_for_reports``).
@@ -5140,6 +5149,14 @@ class GraphManager:
                         "gradient_bound_usable": False,
                         "precision_limited": False,
                         "not_usable_reason": _group_layout._WRITTEN_BEFORE_SAVE_REASON,
+                    })
+                if floor_unserved:
+                    result[key].update({
+                        "spectral_error_bound": float("nan"),
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "precision_limited": False,
+                        "not_usable_reason": _group_layout._FLOOR_NEEDS_THE_STEP_REASON,
                     })
                 geometry_keys = self._committed_geometry_edges.get(key, ())
                 geometry_reason = (self._committed_geometry_refusals.get(key)

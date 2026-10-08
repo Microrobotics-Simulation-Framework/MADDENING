@@ -33,8 +33,9 @@ sparse layouts, under Gauss-Seidel and Jacobi, plain and accelerated.
 * the marker-side twin: the same pair with the scatter applied inside the
   large member and a plain edge carrying the small field, whose norm reads
   the compact side by construction.  The state, every key of the report
-  and every ``_meta`` slot, to the bit (in the mixed-dtype domain to
-  float32 rounding, for the reason :func:`_same_solve` gives);
+  and every ``_meta`` slot, to the bit wherever the two steps are one
+  program (every cell of every push outside the mixed-dtype domain), and
+  to rounding elsewhere, for the reasons :func:`_same_solve` gives;
 * the float floor from the dtypes and sizes of the two readings.
 
 **What each domain adds** is asserted where it is: a member of a batch
@@ -266,24 +267,60 @@ def _sequenced(cell) -> bool:
     return cell.domain.predictor or cell.domain.restart
 
 
+#: The steps of a sequence whose pass count must be predicted, at least.
+PREDICTED_STEPS = 2
+
+
+def _chain_margins(cell, draw) -> list:
+    """The margins of a sequence's steps on the reference's own chain: each
+    step started where the reference's last one stopped (through the
+    predictor's guess where the domain has one).  The graph's steps start
+    from its own states, which are these to rounding; the margins of the
+    steps the domain checks (a restart's: those after the checkpoint)."""
+    states, margins = [], []
+    for k, move in enumerate(MOVES):
+        ref = cs.Stored(cell, draw, scale=move)
+        before = states[-1] if states else ref.start
+        start = _guess(k, states, before) if cell.domain.predictor else before
+        exit_ = ref.started_at(start).plain_exit("compact")
+        states.append(exit_["state"])
+        margins.append(exit_["margin"])
+    return margins[2:] if cell.domain.restart else margins
+
+
+def _decided(cell, draw) -> bool:
+    """Is *draw*'s exit decided with margin (in the reference's own float64
+    arithmetic: the same answer on every platform)?  From the graph's
+    initial state; and, for a sequence, on :data:`PREDICTED_STEPS` of the
+    steps the domain checks, with a little to spare for the graph's own
+    rounding of the states they start from."""
+    if cell.sixteen or cell.acceleration != "none":
+        return True
+    if cs.Stored(cell, draw).plain_exit("compact")["margin"] < EXIT_MARGIN:
+        return False
+    if not _sequenced(cell):
+        return True
+    spare = 1.01 * EXIT_MARGIN
+    return sum(m >= spare for m in _chain_margins(cell, draw)) >= PREDICTED_STEPS
+
+
 def _draws(cell, count=None) -> list:
     """The cell's scenarios: for each loop gain the first seed whose exit
-    under the compact rule is decided with margin, in the reference's own
-    float64 arithmetic (the same seeds on every platform).  A sequence runs
-    the first; *count* asks for more scenarios than :data:`GAINS` has."""
+    under the compact rule is decided with margin (:func:`_decided`).  A
+    sequence runs the first; *count* asks for more scenarios than
+    :data:`GAINS` has."""
     gains = GAINS if count is None else [GAINS[i % len(GAINS)] for i in range(count)]
+    gains = gains[:1] if _sequenced(cell) else gains
     out, seed = [], 0
     for gain, sign in gains:
         while True:
             draw = sg.Draw(seed, gain, sign)
             seed += 1
-            if cell.sixteen or cell.acceleration != "none":
+            if _decided(cell, draw):
                 break
-            if cs.Stored(cell, draw).plain_exit("compact")["margin"] >= EXIT_MARGIN:
-                break
-            assert seed < 40 * len(gains), f"{cell.id}: no seed decides its exit with margin"
+            assert seed < 60 * len(gains), f"{cell.id}: no seed decides its exit with margin"
         out.append(draw)
-    return out[:1] if _sequenced(cell) else out
+    return out
 
 
 def _run(cell, twin: bool = False, count=None) -> Run:
@@ -322,22 +359,42 @@ def _eps(dtype) -> float:
 
 
 def _resolution(cell) -> float:
-    """What a reported residual resolves, in tolerances: each entry's change
-    carries a rounding of a few eps of its field's magnitude, ``eps / rtol``
-    in the norm's units whatever the change.  Two of those, at the coarsest
-    member's eps (the bound the tie's cells of this battery use)."""
-    return 2.0 * _eps(cell.domain.coarsest) / cell.rtol
+    """What a reported residual resolves, in tolerances: ``4 eps / rtol`` at
+    the coarsest member's eps.
+
+    Each of the two values a reading differences is the rounded result of
+    a few operations (a gather's two products and their sum, a gain, a
+    bias): up to two eps of its magnitude, so their difference carries up
+    to four, ``4 eps / rtol`` in the norm's units whatever the change.
+    That is the float floor the library documents for one evaluation
+    (``PRECISION_FLOOR_ULPS``).  Measured: 2.5 ``eps / rtol`` on one
+    float32 scenario in forty (the residual reads 0.1730 where the same
+    graph in float64 and the reference read 0.1700), 0.6 on the others.
+    """
+    return 4.0 * _eps(cell.domain.coarsest) / cell.rtol
+
+
+def _guess(k: int, returned: list, before: dict) -> dict:
+    """The iterate step *k* of a sequence starts from under
+    ``predictor="quadratic"``, as the group documents it, from the states
+    the earlier steps *returned*: none until two are stored (the state
+    *before* the step), linear ``2 x_n - x_{n-1}`` with two, quadratic
+    ``3 x_n - 3 x_{n-1} + x_{n-2}`` from the fourth step on."""
+    if k < 2:
+        return before
+    if k == 2:
+        return {n: 2.0 * returned[1][n] - returned[0][n] for n in ("p", "q")}
+    return {n: 3.0 * returned[k - 1][n] - 3.0 * returned[k - 2][n] + returned[k - 3][n]
+            for n in ("p", "q")}
 
 
 def _starts(cell, run: Run) -> list:
     """The iterate each solve's loop started from, as the reference names it.
 
-    The state before the step; under a predictor the guess the group
-    documents, from the states the earlier steps returned: none before two
-    are stored (and at the second step: the count is 1), linear ``2 x_n -
-    x_{n-1}`` with two, quadratic ``3 x_n - 3 x_{n-1} + x_{n-2}`` from the
-    third on.  ``None`` under ``run_adaptive``, whose reported solve is its
-    last half step's, started where the harness does not see.
+    The state before the step, or a predictor's guess (:func:`_guess`)
+    from the states the earlier steps returned.  ``None`` under
+    ``run_adaptive``, whose reported solve is its last half step's,
+    started where the harness does not see.
     """
     if cell.domain.adaptive:
         return [None] * len(run.solves)
@@ -345,16 +402,7 @@ def _starts(cell, run: Run) -> list:
     if not cell.domain.predictor:
         return before
     returned = [cs.state_of(cell, s) for s in run.solves]
-    starts = []
-    for k in range(len(run.solves)):
-        if k < 2:
-            starts.append(before[k])
-        elif k == 2:
-            starts.append({n: 2.0 * returned[1][n] - returned[0][n] for n in ("p", "q")})
-        else:
-            starts.append({n: 3.0 * returned[k - 1][n] - 3.0 * returned[k - 2][n]
-                           + returned[k - 3][n] for n in ("p", "q")})
-    return starts
+    return [_guess(k, returned, before[k]) for k in range(len(run.solves))]
 
 
 def _source_read(cell) -> tuple:
@@ -414,7 +462,7 @@ def _check_reference(cell, count=None) -> None:
         assert abs(r["residual"] - want) <= resolution, (
             f"{where}: reported residual {r['residual']!r}; the compact readings give "
             f"{want!r} (resolution {resolution:.2e}; read as delivered: {other!r})")
-        told_apart |= abs(other - want) > 4.0 * resolution
+        told_apart |= abs(other - want) > 2.0 * resolution
         for name in _source_read(cell) if iterate is not None else ():
             # A field the norm reads whole is the accepted iterate.  The
             # passes are evaluated in the members' dtypes, each value of
@@ -431,9 +479,8 @@ def _check_reference(cell, count=None) -> None:
             f"compact one does, to the residual's resolution")
     if not (cell.sixteen or d.adaptive):
         # Every scenario started from the graph's initial state was chosen
-        # with margin; a sequence's later steps start where the earlier
-        # ones left them, and at least one of them is decided with margin.
-        need = 1 if _sequenced(cell) else len(run.solves)
+        # with margin; so were some of a sequence's steps (``_decided``).
+        need = PREDICTED_STEPS if _sequenced(cell) else len(run.solves)
         assert predicted >= need, f"{cell.id}: {predicted} pass counts predicted, of {need}"
 
 
@@ -446,54 +493,76 @@ def _numbers_agree(a, b, rel: float) -> bool:
     return rel > 0.0 and abs(a - b) <= rel * max(abs(a), abs(b))
 
 
+def _one_program(cell) -> bool:
+    """Do the edge-mapped pair and its twin evaluate the same numbers in the
+    same order?
+
+    Not in the mixed-dtype domain (:func:`_same_solve`).  Elsewhere: where
+    the scatter is held in its natural layout (the mapping and the twin's
+    node are the same scatter-add), or no cell of the large field takes
+    the contributions of two markers (every sum the scatter makes has one
+    term, in any order: the cells of every push).  A dense matrix or the
+    other layout sums two markers' contributions to one cell in an order
+    of its own, and the passes then differ in the last bit.
+    """
+    if cell.domain.dtype_a != cell.domain.dtype_b:
+        return False
+    cells = sg.edges_of(cell.shape)[0].cells
+    touched = np.concatenate([cells, cells + 1])
+    return cell.form == "sparse" or len(np.unique(touched)) == len(touched)
+
+
 def _same_solve(cell, mapped, twin, what: str) -> None:
     """*mapped* (the edge-mapped graph's) is *twin*'s: the state, the report, ``_meta``.
 
-    To the bit: the two steps evaluate the same passes on the same numbers
-    and read the same values.  **Not in the mixed-dtype domain**, where
-    they are not one program: the twin's plain edge casts the small field
-    to the large member's dtype and the norm reads the cast value (a
-    float32 field widened to float64 and squared there; a float64 field
-    rounded to float32, at float32's eps), while the edge-mapped graph
-    reads the stored field itself; and with the small field in float64 the
-    twin scatters its float32 rounding where the mapping scatters the
-    float64 value and rounds the sum.  There: the verdict and the pass
-    count the same, the state to float32 rounding, the residual to its
-    resolution, the numbers derived from residual ratios to 2% (as
-    ``test_coupling_interface_side.TWIN_RTOL`` has for float32), and the
-    floor's slot only where the small field is the float32 one (the twin's
-    cast reading of a float64 field is counted at float32's eps:
-    :func:`_floor` states the edge-mapped graph's).
+    To the bit where the two steps are one program (:func:`_one_program`):
+    the same passes on the same numbers, and the same values read.
+
+    Otherwise to rounding: the verdict and the pass count the same, the
+    state to 64 eps of the coarser member, the residual and the estimates
+    made of it to the residual's resolution or 2% (the numbers derived
+    from residual ratios: ``test_coupling_interface_side.TWIN_RTOL`` has 2%
+    for float32).  **The mixed-dtype domain is never one program**: the
+    twin's plain edge casts the small field to the large member's dtype
+    and the norm reads the cast value (a float32 field widened to float64
+    and squared there; a float64 field rounded to float32, whose changes
+    below float32's resolution it does not see), while the edge-mapped
+    graph reads the stored field itself; and with the small field in
+    float64 the twin scatters its float32 rounding where the mapping
+    scatters the float64 value and rounds the sum.  The floor's slot is
+    compared wherever both graphs count the same eps: not with the small
+    field in float64 beside a float32 member, where the twin's cast
+    reading is counted at float32's eps (:func:`_floor` states the
+    edge-mapped graph's).
     """
-    mixed = cell.domain.dtype_a != cell.domain.dtype_b
+    d = cell.domain
+    exact = _one_program(cell)
     where = f"{cell.id}, {what}"
     for name in ("a", "b"):
         xa, xb = mapped.x(name), twin.x(name)
-        if not mixed:
+        if exact:
             assert cd.bitwise(xa, xb), f"{where}: {name}.x differs from the twin's"
         else:
             xa, xb = xa.astype(np.float64), xb.astype(np.float64)
-            bound = 64.0 * _eps(jnp.float32) * np.max(np.abs(xb))
+            bound = 64.0 * _eps(d.coarsest) * np.max(np.abs(xb))
             assert np.max(np.abs(xa - xb)) <= bound, (
                 f"{where}: {name}.x is {np.max(np.abs(xa - xb)):.3e} from the twin's")
     ra, rb = mapped.report, twin.report
     assert sorted(ra) == sorted(rb), (where, sorted(ra), sorted(rb))
     differ = {}
     for key in ra:
-        if not mixed:
-            same = _numbers_agree(ra[key], rb[key], 0.0)
-        elif key == "residual":
+        same = _numbers_agree(ra[key], rb[key], 0.0 if exact else 2e-2)
+        if not same and not exact and key in ("residual", "error_estimate",
+                                              "gradient_error_estimate"):
             same = abs(float(ra[key]) - float(rb[key])) <= _resolution(cell)
-        else:
-            same = _numbers_agree(ra[key], rb[key], 2e-2)
         if not same:
             differ[key] = (ra[key], rb[key])
     assert not differ, f"{where}: (edge-mapped, twin) {differ}"
     assert sorted(mapped.meta) == sorted(twin.meta), (where, sorted(mapped.meta))
-    if not mixed:
+    if exact:
         slots = [key for key in mapped.meta if not cd.bitwise(mapped.meta[key], twin.meta[key])]
         assert not slots, f"{where}: _meta slots differ from the twin's: {slots}"
-    elif cell.small == "a":
+    elif d.dtype_a == d.dtype_b or cell.small == "a":
         assert cd.bitwise(cs.slot_of(mapped), cs.slot_of(twin)), (
             where, cs.slot_of(mapped), cs.slot_of(twin))
 
@@ -560,6 +629,20 @@ def _check_slot(cell, count=None) -> None:
             f"floor is {_floor(cell)!r}")
 
 
+def _slots_agree(a, b, rel: float) -> bool:
+    """Two ``_meta`` slots: a floating one to *rel* of its largest entry
+    (NaN beside NaN), any other to the bit."""
+    a, b = np.asarray(a), np.asarray(b)
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if a.dtype.kind != "f" and a.dtype.kind != "V":
+        return cd.bitwise(a, b)
+    a, b = a.astype(np.float64), b.astype(np.float64)
+    scale = max(float(np.max(np.abs(np.nan_to_num(a)), initial=0.0)),
+                float(np.max(np.abs(np.nan_to_num(b)), initial=0.0)))
+    return bool(np.all((np.isnan(a) & np.isnan(b)) | (a == b) | (np.abs(a - b) <= rel * scale)))
+
+
 def _same_graph(a, b) -> list:
     """What differs between two snapshots of one graph: members, report, ``_meta``."""
     out = [f"{n}.x" for n in ("a", "b") if not cd.bitwise(a.x(n), b.x(n))]
@@ -594,16 +677,33 @@ def _check_restart(cell) -> None:
 
 
 def _check_batch(cell, count=None) -> None:
-    """Each member of a ``vmap`` batch is its own unbatched solve, to the bit."""
+    """Each member of a ``vmap`` batch is its own unbatched solve.
+
+    The state, the verdict, the pass count and every integer slot to the
+    bit.  The report's float numbers to 1e-5: a batched reduction sums a
+    reading's squares in another order than the unbatched one, so a
+    residual of an earlier pass can differ in its last bit and the
+    amplification made of three of them with it (measured 5e-7 with
+    twenty values a reading; the cells of every push agree to the bit).
+    A member that kept iterating with its batch, or stopped with it,
+    would differ by passes, not by bits.
+    """
     run = _run(cell, count=count)
     gm = run.built.gm
     passes = set()
     with cd.entered(cell.domain):
         for k, s in enumerate(run.solves):
             (alone,) = cd.run(cd.DOMAINS["f32"], gm, [s.params])
-            assert not _same_graph(s, alone), (
-                f"{cell.id}: member {k} of the batch differs from its unbatched solve: "
-                f"{_same_graph(s, alone)}")
+            where = f"{cell.id}: member {k} of the batch"
+            for name in ("a", "b"):
+                assert cd.bitwise(s.x(name), alone.x(name)), (
+                    f"{where}: {name}.x differs from its unbatched solve's")
+            assert sorted(s.report) == sorted(alone.report) and sorted(s.meta) == sorted(alone.meta)
+            differ = {key: (s.report[key], alone.report[key]) for key in s.report
+                      if not _numbers_agree(s.report[key], alone.report[key], 1e-5)}
+            differ.update({key: (s.meta[key], alone.meta[key]) for key in s.meta
+                           if not _slots_agree(s.meta[key], alone.meta[key], 1e-5)})
+            assert not differ, f"{where} differs from its unbatched solve: {differ}"
             passes.add(s.report["iterations"])
     if cell.acceleration == "none":
         assert len(passes) > 1, (
@@ -656,10 +756,13 @@ def _check_diagnosed(cell) -> None:
     The twin's report holds the same spectral radius and the same bound
     (to the rounding of two analyses of one problem, as
     ``test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side``
-    has them; to 2% in the mixed-dtype domain, :func:`_same_solve`), and
+    has them; to 2% where the two are not one program, :func:`_same_solve`), and
     a usable bound covers the distance to the exact fixed point in the
-    compact readings without being looser than the loop's own
-    amplification allows.
+    compact readings.  Where the solve starts from the graph's initial
+    state it is also no looser than the loop's own amplification allows
+    (``2 K`` residuals, as that test has it); a step of a sequence, started
+    beside its fixed point, takes few passes and reports a looser bound
+    (measured 2.8 ``K`` residuals after a restart, in both graphs).
 
     ``gradient_relative_error_bound`` is compared where the two graphs hold
     the scatter's weights the same way: the sparse kind in its natural
@@ -673,7 +776,6 @@ def _check_diagnosed(cell) -> None:
     That is the probe plan's, on either side of the norm.
     """
     mapped, twin = _run(cell), _run(cell, twin=True)
-    mixed = cell.domain.dtype_a != cell.domain.dtype_b
     skipped = () if cell.form == "sparse" else ("gradient_relative_error_bound",)
     usable = 0
     for k, (s, t, ref) in enumerate(zip(mapped.solves, twin.solves, mapped.refs)):
@@ -681,7 +783,7 @@ def _check_diagnosed(cell) -> None:
         where = f"{cell.id}, solve {k}"
         assert ra["converged"] is not cell.sixteen, (where, ra)
         differ = {key: (ra[key], rb[key]) for key in ra if key not in skipped
-                  and not _numbers_agree(ra[key], rb[key], 2e-2 if mixed else 1e-6)}
+                  and not _numbers_agree(ra[key], rb[key], 1e-6 if _one_program(cell) else 2e-2)}
         assert sorted(ra) == sorted(rb) and not differ, f"{where}: (edge-mapped, twin) {differ}"
         if not ra["spectral_usable"]:
             continue
@@ -689,7 +791,7 @@ def _check_diagnosed(cell) -> None:
         distance = ref.in_tolerances(ref.distance(cs.state_of(cell, s), "compact"))
         bound = float(ra["spectral_error_bound"])
         assert 0.0 < distance <= bound * (1.0 + 1e-6), (where, distance, bound)
-        if ra["converged"]:
+        if ra["converged"] and not _sequenced(cell):
             assert bound <= 2.0 * ref.K * float(ra["residual"]), (where, bound, ref.K, ra)
     assert usable, f"{cell.id}: fixture premise: no solve reports a usable spectrum"
 

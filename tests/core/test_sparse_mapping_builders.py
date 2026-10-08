@@ -266,6 +266,49 @@ def test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are():
             _same_matrix(sparse, nearest_neighbor_mapping(src, tgt, mode=mode))
 
 
+def test_the_projection_weights_follow_the_boundaries_dtype_under_x64():
+    """Both projection factories, as ``rbf_mapping``: float64 weights from
+    float64 boundaries in an x64 process, float32 from float32 ones and
+    with x64 off.  They were float32 in an x64 graph, where a row summed
+    to one and the integral was preserved to float32 rounding only
+    (2.98e-8 and 3.7e-9 on these grids, MADD-ANO-253)."""
+    rng = np.random.default_rng(12)
+    source = np.concatenate([[0.0], np.cumsum(rng.uniform(0.1, 1.0, 23))])
+    target = np.linspace(0.0, source[-1], 8)                # covers the source grid exactly
+    field64 = rng.uniform(-2.0, 2.0, 23)
+    widths_s, widths_t = np.diff(source), np.diff(target)
+    # The reference: the overlap formula, in float64, on the host.
+    ref = np.zeros((7, 23))
+    for i in range(7):
+        for j in range(23):
+            ref[i, j] = max(0.0, min(target[i + 1], source[j + 1]) - max(target[i], source[j])
+                            ) / widths_t[i]
+    eps = np.finfo(np.float64).eps
+    with x64(True):
+        dense = projection_1d_mapping(source, target)
+        sparse = sparse_projection_1d_mapping(source, target)
+        assert dense.H.dtype == jnp.float64 and sparse.weights.dtype == jnp.float64
+        _same_matrix(sparse, dense)
+        np.testing.assert_array_equal(np.asarray(dense.H), ref)
+        assert np.max(np.abs(np.asarray(dense.H).sum(axis=1) - 1.0)) <= 8 * eps
+        field = jnp.asarray(field64)
+        for mapping in (dense, sparse):
+            out = np.asarray(jax.jit(mapping.apply)(field))
+            assert out.dtype == np.float64
+            np.testing.assert_allclose(out, ref @ field64, rtol=0, atol=64 * eps)
+            integral, want = float(widths_t @ out), float(widths_s @ field64)
+            assert abs(integral - want) <= 64 * eps * float(widths_s @ np.abs(field64))
+        # float32 boundaries are a float32 mapping in an x64 process too.
+        dense32 = projection_1d_mapping(source.astype(np.float32), target.astype(np.float32))
+        sparse32 = sparse_projection_1d_mapping(source.astype(np.float32),
+                                                target.astype(np.float32))
+        assert dense32.H.dtype == jnp.float32 and sparse32.weights.dtype == jnp.float32
+        _same_matrix(sparse32, dense32)
+    # With x64 off the weights are float32 whatever was passed.
+    assert projection_1d_mapping(source, target).H.dtype == jnp.float32
+    assert sparse_projection_1d_mapping(source, target).weights.dtype == jnp.float32
+
+
 def test_conservative_nearest_neighbour_preserves_the_total_in_both_forms():
     """Every source adds to exactly one target: the column sums of the
     operator are one, and the total of a mapped field is the total of the

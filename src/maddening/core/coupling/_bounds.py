@@ -160,7 +160,8 @@ GEOMETRY_PLANE_REACH = 2.0  # units: spectral_error_bound
 #: flags on a gradient bound 25x under the reference's error
 #: (MADD-ANO-251).  The resolution is the mapping's
 #: (``_plane_resolution``): ``eps`` of the position's dtype times the
-#: larger of the position and its offset from the lattice origin.
+#: largest coordinate magnitude of the lattice's axis, or the position's
+#: own where that is larger.
 GEOMETRY_PLANE_ULPS = 8.0  # units: float resolutions of the position
 
 
@@ -934,7 +935,7 @@ def _kantorovich_root_and_miss(step, h):
     return root, jnp.where(h > 0, step * (2.0 * h) / ((1.0 + root) * (1.0 + root)), 0.0)
 
 
-def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius):
+def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, radius):
     """How many times the radius of the Newton-Kantorovich ball around the
     returned iterate the nearest lattice plane of a position the pass reads
     is away (experimental): over one, the iterate, the Newton point and the
@@ -953,9 +954,9 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius)
     flag set (MADD-ANO-251).  So the flag does not stand on what the
     check reads; it stands where no plane is in the ball at all.
 
-    **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``
-    and *radius* ``= GEOMETRY_PLANE_REACH * eta + floor``
-    (:func:`_gradient_error_bound_body` forms it), under these
+    **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``,
+    *moved* ``= |D delta|`` entry by entry and *radius* ``= eta + floor``
+    (:func:`_gradient_error_bound_body` forms them), under these
     assumptions:
 
     1. *The kernel.*  Between two positions with no lattice plane and no
@@ -970,13 +971,17 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius)
        holds with a constant ``h = beta L eta <= 1/2`` (the step measures
        ``h`` on the secant from ``x_k`` to ``x_N`` and the bound is
        ``inf`` where it reads 1/2 or more).  Then ``p`` has a fixed point
-       ``x_p`` with ``||D (x_p - x_k)||_2 <= t* <= 2 eta``, whatever
-       ``h`` is under one half: the radius does not use the measured
-       value.
+       ``x_p`` within ``t* <= 2 eta`` of ``x_k`` and within ``t* - eta <=
+       eta`` of the Newton point, ``||D (x_p - x_N)||_2 <= eta``,
+       whatever ``h`` is under one half: the radius does not use the
+       measured value (:data:`GEOMETRY_PLANE_REACH`, two, is ``t* /
+       eta`` at its largest: one step to the Newton point, one more
+       around it).
     4. *The floats.*  The measured residual is the exact pass's to within
-       its float resolution, which the resolvent carries into ``floor``;
-       and a position within :data:`GEOMETRY_PLANE_ULPS` float
-       resolutions of a plane is on it (:func:`_reader_plane_distance`).
+       its float resolution, which the resolvent carries into the Newton
+       step and into ``eta``, once each (``floor`` is twice that); and a
+       position within :data:`GEOMETRY_PLANE_ULPS` float resolutions of a
+       plane is on it (:func:`_reader_plane_distance`).
     5. *The norm.*  ``||D v||_2 <= R`` bounds entry ``j`` by ``R / D_j``
        where ``D_j > 0``, and bounds nothing where ``D_j = 0`` (an entry
        the norm does not read counts as on a plane).
@@ -991,10 +996,12 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius)
     inside that cell (it is further than ``d_j`` from ``x_k[j]``, or on a
     plane):
 
-        ``margin = min_j (D_j d_j) / radius``.
+        ``margin = min_j (D_j d_j) / (moved_j + radius)``.
 
-    Where ``margin > 1``: by 5 every position of every state in the ball
-    is in the cell ``x_k``'s is in, ``x_N`` and ``x_p`` among them (3, 4);
+    Where ``margin > 1``: entry ``j`` of the Newton point is ``|delta_j|``
+    from ``x_k[j]``, and by 3, 4 and 5 entry ``j`` of ``x_p`` is within
+    ``radius / D_j`` of that, so every position of ``x_N`` and of ``x_p``
+    is in the cell ``x_k``'s is in;
     the positions the pass builds at ``x_k`` and at ``x_N`` are in it by
     the two evaluations, and at ``x_p`` they are ``x_p``'s own; so by 1
     and 2 the pass *is* ``p`` at the three points, ``x_p`` is a fixed
@@ -1005,8 +1012,8 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius)
     not at: the ball is covered by a distance, and the two evaluations
     answer only for themselves.
 
-    Returns a scalar in the weights' dtype: ``inf`` at a zero radius off
-    every plane, NaN where a position or the radius is not a number.
+    Returns a scalar in the weights' dtype: ``inf`` with no reader, NaN
+    where a position, a move or the radius is not a number.
     """
     work = weights.dtype
     zero = jnp.zeros((), work)
@@ -1022,11 +1029,14 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius)
             unknown = unknown | jnp.isnan(on_a_plane)
             distance = jnp.where(inside, distance, zero)
         distance = jnp.where(unknown, jnp.full((), jnp.nan, work), distance)
-        nearest = jnp.minimum(nearest, jnp.min(distance * weights[at]))
-    return jnp.where(
-        jnp.isnan(nearest) | jnp.isnan(radius), jnp.full((), jnp.nan, work),
-        jnp.where(radius > 0, nearest / jnp.where(radius > 0, radius, 1.0),
-                  jnp.where(nearest > 0, jnp.inf, jnp.nan)))
+        reach = moved[at].astype(work) + radius
+        # ``0 / 0`` (on a plane, with nothing to reach it by) is no margin.
+        ratio = (distance * weights[at]) / jnp.where(reach > 0, reach, 1.0)
+        ratio = jnp.where(reach > 0, ratio, jnp.where(distance * weights[at] > 0, jnp.inf, 0.0))
+        ratio = jnp.where(jnp.isnan(distance) | jnp.isnan(reach), jnp.nan, ratio)
+        nearest = jnp.where(jnp.any(jnp.isnan(ratio)) | jnp.isnan(nearest), jnp.nan,
+                            jnp.minimum(nearest, jnp.min(ratio)))
+    return nearest
 
 
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
@@ -1466,13 +1476,18 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # argument).  The check above compares the Jacobian at ``x_k`` and at
     # the Newton point and cannot see a lattice plane beyond both, so the
     # gradient's flag stands only where no plane is in the Kantorovich
-    # ball around ``x_k``: ``GEOMETRY_PLANE_REACH`` Newton steps (``t* <=
-    # 2 eta`` at any ``h <= 1/2``: not the measured ``h``), plus the part
-    # of the distance that has no direction (the residual's rounding
-    # through the resolvent).  At an iterate whose residual is not above
-    # its floor the step is a stand-in and the whole distance has none.
-    # One more evaluation of the pass, at the Newton point.
+    # ball around ``x_k`` (``t* <= 2 eta`` at any ``h <= 1/2``: not the
+    # measured ``h``), entry by entry: the Newton step's own move of the
+    # entry, and one more step ``eta`` around the Newton point
+    # (``GEOMETRY_PLANE_REACH`` steps in all where the entry carries the
+    # whole step).  Plus the part of the distance that has no direction,
+    # the residual's rounding through the resolvent: once in the Newton
+    # point and once in ``eta``.  At an iterate whose residual is not
+    # above its floor the step is a stand-in and the whole distance has
+    # no direction.  One more evaluation of the pass, at the Newton point.
     f_newton = _F_dispatch(step_pure, points[1], consts_sg)
-    radius = GEOMETRY_PLANE_REACH * jnp.where(resolved, step, distance) + undirected
-    margin = _kantorovich_ball_plane_margin(readers, x_sg, f_k[0], f_newton, d, radius)
+    radius = (GEOMETRY_PLANE_REACH - 1.0) * jnp.where(resolved, step, distance) + (
+        GEOMETRY_PLANE_REACH * undirected)
+    margin = _kantorovich_ball_plane_margin(
+        readers, x_sg, f_k[0], f_newton, d, jnp.abs(live * delta_s), radius)
     return jnp.where(captured, worst, nan), jnp.where(captured, margin, nan)

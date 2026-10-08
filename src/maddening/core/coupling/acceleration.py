@@ -543,6 +543,12 @@ def _part_resolution(reading, state_index: int = 0):
         return _reading_eps(source_dtype, value)
     positions = jnp.asarray(positions)
     eps_geometry = float(jnp.finfo(positions.dtype).eps)
+    # units: dimensionless -- each eps is relative to a magnitude.  Taken
+    # as it stands, the positions' is the resolution of a value computed
+    # from positions of that dtype, over the value's own magnitude, like
+    # the value's own eps it is compared with; times the positions' size
+    # in the kind's lengths (below) it is their stored rounding in
+    # lengths, which is what moves a kernel weight.
     static = max(_reading_eps(source_dtype, value), eps_geometry)
     reach = jax.lax.stop_gradient(jnp.max(jnp.abs(positions)))
     return jnp.maximum(static, eps_geometry * reach)

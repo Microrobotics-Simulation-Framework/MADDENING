@@ -209,6 +209,41 @@ def _built(index: int) -> ct.Built:
         return ct.build(cell.topo, cell.knobs, dtype=cell.dtype, mapping_kind=cell.mapping_kind)
 
 
+def _reads_a_recomputed_field(cell) -> bool:
+    """Does *cell*'s group return a field its norm reads recomputed?
+
+    Under ``convergence_norm="interface"`` a solve returns the iterate it
+    accepted with every field no plain internal edge reads one plain pass
+    on (CPL-191).  Where such a field is read -- through a mapping or a
+    transform -- the state returned is not the iterate the report is of,
+    and every score here is a statement about the report.  Such a cell is
+    observed **at the accepted iterate**, by stepping its graph with the
+    return rule switched off (:func:`_one_step`): the scores, their
+    allowances and the seeded faults they catch are then the ones they
+    were, with nothing loosened.  What the solve returns for that iterate
+    has its own tests (``test_converged_groups_are_at_their_fixed_point``).
+    """
+    if cell.knobs.get("convergence_norm") != "interface":
+        return False
+    edges = [cell.topo.edges[i] for i in cell.topo.internal_edges(0)]
+    whole = {e.src for e in edges if not e.mapped and e.transform is None}
+    return any(e.src not in whole for e in edges)
+
+
+def _one_step(index: int, values: dict):
+    """One step of cell *index* (:func:`_reads_a_recomputed_field`)."""
+    built = _built(index)
+    if not _reads_a_recomputed_field(CELLS[index]):
+        return ct.run(built, values, 1)
+    with cg.accepted_iterate() as asked:
+        out = ct.run(built, values, 1)
+    # Asked at the trace: the first step of this compiled graph.
+    assert asked or getattr(built, "traced_at_the_accepted_iterate", False), (
+        "the step never asked the return rule: the patch is on the wrong name")
+    built.traced_at_the_accepted_iterate = True
+    return out
+
+
 @dataclasses.dataclass(frozen=True)
 class Case:
     """One drawn problem on one cell."""
@@ -515,7 +550,7 @@ def observe(case: Case) -> dict:
     values = values_of(case)
     with precision(cell.dtype == "float64"):
         built = _built(case.cell)
-        (step,) = ct.run(built, values, 1)
+        (step,) = _one_step(case.cell, values)
         d = dict(step.reports[0])
         floor = _reported_floor(built.gm, topo.group_key(0), step.metas[0], d)
     model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
@@ -538,7 +573,8 @@ def observe(case: Case) -> dict:
     out["report"].update(floor=floor, cancellation=cancels)
 
     if out["floor_reported"]:
-        _dn, _b, detail = model.group_report_consistency(0, step.pre, step.state, residual)
+        _dn, _b, detail = model.group_report_consistency(
+            0, step.pre, step.state, residual, accepted=_reads_a_recomputed_field(cell))
         above = detail["residual_true"] - residual * (1.0 + 2.0 ** 8 * case.eps)
         out["floor"] = max(0.0, above) / max(cancels * floor, 1e-300)
         out["report"]["residual_true"] = detail["residual_true"]
@@ -772,7 +808,7 @@ def test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterw
     cell = CELLS[case.cell]
     with precision(cell.dtype == "float64"):
         built = _built(case.cell)
-        (step,) = ct.run(built, values_of(case), 1)
+        (step,) = _one_step(case.cell, values_of(case))
         gm, key = built.gm, cell.topo.group_key(0)
         first = dict(gm.coupling_diagnostics()[key])
         assert _same_report(first, step.reports[0])

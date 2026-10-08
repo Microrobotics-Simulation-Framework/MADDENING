@@ -122,6 +122,13 @@ KNOBS = (
          convergence_norm="l2"),
     dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="interface"),
 )
+#: The rows above that :func:`_cells` rotates over, FROZEN at the seven the
+#: cells were laid out with.  A row added to :data:`KNOBS` (anywhere) must
+#: not move a cell a pin names by its index: a new configuration gets cells
+#: of its own, appended after every cell there is
+#: (``test_coupling_search_cells_are_pinned.py`` holds each cell's
+#: configuration per push).
+ROTATED_KNOBS = (0, 1, 2, 3, 4, 5, 6)
 #: A cap that stops the solve early and one that lets it converge or stall.
 CAPS = (5, 120)
 #: The ``"l2"`` tolerance per dtype (the default in float32; float64 is
@@ -169,7 +176,7 @@ def _cells() -> tuple:
     for s, (name, kind) in enumerate(shapes):
         for t, dtype in enumerate(("float32", "float64")):
             for j in range(3):
-                knob = (s + 3 * t + 2 * j) % len(KNOBS)
+                knob = ROTATED_KNOBS[(s + 3 * t + 2 * j) % len(ROTATED_KNOBS)]
                 out.append(Cell(name, dtype, knob, CAPS[(s + t + j) % 2], kind))
     return tuple(dict.fromkeys(out))
 
@@ -208,6 +215,183 @@ def _built(index: int) -> ct.Built:
     cell = CELLS[index]
     with precision(cell.dtype == "float64"):
         return ct.build(cell.topo, cell.knobs, dtype=cell.dtype, mapping_kind=cell.mapping_kind)
+
+
+def _reads_a_recomputed_field(cell) -> bool:
+    """Does *cell*'s group return a field its norm reads recomputed?
+
+    Under ``convergence_norm="interface"`` a solve returns the iterate it
+    accepted with every field no plain internal edge reads one plain pass
+    on (CPL-191).  Where such a field is read -- through a mapping or a
+    transform -- the state returned is not the iterate the report is of,
+    and every score here is a statement about the report.  Such a cell is
+    observed **at the accepted iterate**, by stepping its graph with the
+    return rule switched off (:func:`_one_step`): the scores, their
+    allowances and the seeded faults they catch are then the ones they
+    were, with nothing loosened.  What the solve returns for that iterate
+    has its own tests (``test_converged_groups_are_at_their_fixed_point``).
+    """
+    if cell.knobs.get("convergence_norm") != "interface":
+        return False
+    edges = [cell.topo.edges[i] for i in cell.topo.internal_edges(0)]
+    # A mapping read at its source measures its source whole
+    # (``ct.measured_whole``): the set the library's return rule keeps.
+    whole = ct.measured_whole(cell.topo, 0)
+    return any(e.src not in whole for e in edges)
+
+
+def _at_the_accepted_iterate(built: ct.Built, values: dict):
+    """One step of *built* with the return rule switched off: the iterate
+    the loop accepted, beside the report that is of it."""
+    with cg.accepted_iterate() as asked:
+        out = ct.run(built, values, 1)
+    # Asked at the trace: the first step of this compiled graph.
+    assert asked or getattr(built, "traced_at_the_accepted_iterate", False), (
+        "the step never asked the return rule: the patch is on the wrong name")
+    built.traced_at_the_accepted_iterate = True
+    return out
+
+
+def _one_step(index: int, values: dict):
+    """One step of cell *index* (:func:`_reads_a_recomputed_field`)."""
+    built = _built(index)
+    if not _reads_a_recomputed_field(CELLS[index]):
+        return ct.run(built, values, 1)
+    return _at_the_accepted_iterate(built, values)
+
+
+@functools.lru_cache(maxsize=max(len(b) for b in BLOCKS) + 1)
+def _returned_twin(cell) -> ct.Built:
+    """*cell*'s graph compiled again and stepped as a user steps it: the
+    return rule on.  (A graph first stepped at the accepted iterate was
+    traced with the rule off and keeps that step.)"""
+    with precision(cell.dtype == "float64"):
+        return ct.build(cell.topo, cell.knobs, dtype=cell.dtype, mapping_kind=cell.mapping_kind)
+
+
+def _stacked(topo: ct.Topology, state: dict) -> np.ndarray:
+    return np.concatenate([np.asarray(state[m]["x"], np.float64) for m in topo.groups[0]])
+
+
+#: How many of the model's per-entry rounding bounds a recomputed field may
+#: be from the exact pass at the accepted iterate (the bound is of one
+#: pass; the accepted iterate is read from a second compiled graph).
+PASS_ROUNDINGS = 4.0
+
+
+def returned_scores(cell, values: dict, accepted: ct.Step) -> dict:
+    """What the state a user gets holds to, beside a report of the accepted iterate.
+
+    *accepted* is one step of *cell* at the accepted iterate ``x``
+    (:func:`_at_the_accepted_iterate`).  The same values are stepped
+    again on a twin graph with the return rule on, which gives the state
+    ``y`` a user reads and the report they read beside it.  Asserted,
+    because the rule says so with no tolerance: the report's pass count,
+    verdict and residual are the accepted iterate's, and a field the norm
+    measures whole is that iterate's to the bit.  Scored (``"returned"``,
+    the largest of three, each at most 1 where it holds):
+
+    * *the pass*: every recomputed field is one plain pass at ``x``, to
+      :data:`PASS_ROUNDINGS` of the pass's own rounding
+      (``LinearModel.exact_pass`` and ``pass_rounding``);
+    * *the readings*: ``y`` reads within the reported residual of what
+      ``x`` reads, in the residual's own weights and count -- and at the
+      residual exactly where every field the norm reads was recomputed
+      (each such edge moved by its own term of the residual);
+    * *the bound on the state returned* (CPL-088), where
+      ``spectral_usable``: the distance of ``y`` to the exact fixed
+      point, in the group's norm **at** ``y``, is at most ``(bound +
+      residual) / (1 - rtol residual sqrt(N))``, ``N`` the entries the
+      norm pools.  The bound is of ``x`` in ``x``'s weights; the readings
+      of ``y`` are within the residual of those of ``x``; and a reading's
+      own magnitude, which the norm divides by, moved by at most ``rtol
+      residual sqrt(N)`` of itself between the two (each entry of the
+      residual's reading is at most that).  Past ``rtol residual sqrt(N)
+      = 1`` -- a cap reached with a reading still moving by its own size
+      -- nothing is claimed.
+
+    The float floor is allowed as the other scores allow it: one more
+    evaluation of the pass rounds once more.  ``without_the_drift`` and
+    ``without_the_residual`` are the third score with that factor, or
+    that term, left out: measurements of whether a draw needs them.
+    """
+    topo = cell.topo
+    with precision(cell.dtype == "float64"):
+        twin = _returned_twin(cell)
+        (step,) = ct.run(twin, values, 1)
+        d = dict(step.reports[0])
+        floor = _reported_floor(twin.gm, topo.group_key(0), step.metas[0], d)
+    theirs = accepted.reports[0]
+    for key in ("iterations", "converged", "residual"):
+        assert d[key] == theirs[key] or (d[key] != d[key] and theirs[key] != theirs[key]), (
+            f"{cell}: the return rule moved the report's {key}: {theirs[key]!r} at the accepted "
+            f"iterate, {d[key]!r} beside the state returned")
+    out = dict(returned=0.0, without_the_drift=0.0, without_the_residual=0.0, bounded=False,
+               moved=0.0, returned_report={k: d[k] for k in ("iterations", "converged", "residual",
+                                                              "spectral_error_bound",
+                                                              "spectral_usable")})
+    members = topo.groups[0]
+    if not all(np.all(np.isfinite(accepted.state[m]["x"])) for m in members):
+        # A diverged iterate is returned as the loop left it.
+        for m in members:
+            assert np.array_equal(step.state[m]["x"], accepted.state[m]["x"], equal_nan=True), (
+                cell, m)
+        return out
+    model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    recomputed = set(model.recomputed(0))
+    for m in members:
+        if m not in recomputed:
+            assert np.array_equal(step.state[m]["x"], accepted.state[m]["x"]), (
+                f"{cell}: {m!r} is measured whole and was not returned as the accepted "
+                f"iterate holds it")
+    residual = float(d["residual"])
+    if (not all(np.all(np.isfinite(step.state[m]["x"])) for m in members)
+            or not math.isfinite(residual) or not math.isfinite(floor)):
+        return out
+    eps = float(np.finfo(cell.dtype).eps)
+    x, y = _stacked(topo, accepted.state), _stacked(topo, step.state)
+    cancels = _cancellation(model, step.pre, step.state)
+    rounds = cancels * floor
+
+    # The pass: a recomputed field is ``F(x)``'s (the exact pass in the
+    # reference's extended precision: a float64 graph's rounding is the
+    # rounding of a float64 closed form).
+    want = model.exact_pass(0, accepted.pre, accepted.state)
+    exact = np.concatenate([np.asarray(np.asarray(step.state[m]["x"]), ct.LD) for m in members])
+    eta = model.pass_rounding(0, accepted.pre, accepted.state)
+    projector = np.diag(model._recomputed_projector(0)) > 0     # noqa: SLF001
+    off_pass = float(np.max(np.abs(np.asarray(exact - want, np.float64))[projector] / np.maximum(
+        PASS_ROUNDINGS * eta[projector], 1e-300), initial=0.0))
+
+    # The readings: within the residual of the accepted iterate's.
+    moved = model.residual_between(0, y, x)
+    read = {topo.edges[i].src for i in topo.internal_edges(0)}
+    gap = abs(moved - residual) if read <= recomputed else max(0.0, moved - residual)
+    off_readings = gap / max(residual * 2.0 ** 8 * eps + rounds, 1e-300)
+    out.update(moved=moved, returned=max(off_pass, off_readings))
+    out["returned_report"].update(moved=moved, off_pass=off_pass, off_readings=off_readings,
+                                  floor=floor, cancellation=cancels)
+
+    # CPL-088, of the state returned.
+    drift = float(cell.cfgs[0].get("rtol", 1e-6)) * residual * math.sqrt(
+        len(model.norm_parts(0, step.state)[1]))
+    out["returned_report"]["drift"] = drift
+    if d["spectral_usable"] and drift < 1.0:
+        allowed = (residual + rounds) / (residual + floor) if residual + floor > 0 else 1.0
+        bound = float(d["spectral_error_bound"]) * allowed
+        dist = model.returned_weight_distance(0, step.pre, step.state)
+
+        def over(reach):
+            return (math.inf if math.isnan(reach) else
+                    dist / reach if reach > 0 else (math.inf if dist > 0 else 0.0))
+
+        out["bounded"] = True
+        out["without_the_drift"] = over(bound + residual + rounds)
+        out["without_the_residual"] = over((bound + rounds) / (1.0 - drift))
+        off_bound = over((bound + residual + rounds) / (1.0 - drift))
+        out["returned"] = max(out["returned"], off_bound)
+        out["returned_report"].update(distance=dist, off_bound=off_bound)
+    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -553,11 +737,11 @@ def observe(case: Case) -> dict:
     values = values_of(case)
     with precision(cell.dtype == "float64"):
         built = _built(case.cell)
-        (step,) = ct.run(built, values, 1)
+        (step,) = _one_step(case.cell, values)
         d = dict(step.reports[0])
         floor = _reported_floor(built.gm, topo.group_key(0), step.metas[0], d)
     model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
-    out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0,
+    out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0, returned=0.0,
                spectral_usable=bool(d["spectral_usable"]),
                gradient_usable=bool(d["gradient_bound_usable"]),
                floor_reported=math.isfinite(floor),
@@ -565,6 +749,12 @@ def observe(case: Case) -> dict:
                                          "spectral_error_bound", "spectral_usable",
                                          "gradient_relative_error_bound",
                                          "gradient_bound_usable", "precision_limited")})
+    if _reads_a_recomputed_field(cell):
+        # The scores below are of the report, read at the accepted iterate.
+        # Beside them: what the same step returns to a user.
+        seen = returned_scores(cell, values, step)
+        out["returned"] = seen["returned"]
+        out["report"]["returned"] = seen["returned_report"]
     finite = all(np.all(np.isfinite(s["x"])) for s in step.state.values())
     if not finite or not math.isfinite(d["residual"]):
         return out
@@ -576,7 +766,8 @@ def observe(case: Case) -> dict:
     out["report"].update(floor=floor, cancellation=cancels)
 
     if out["floor_reported"]:
-        _dn, _b, detail = model.group_report_consistency(0, step.pre, step.state, residual)
+        _dn, _b, detail = model.group_report_consistency(
+            0, step.pre, step.state, residual, accepted=_reads_a_recomputed_field(cell))
         above = detail["residual_true"] - residual * (1.0 + 2.0 ** 8 * case.eps)
         out["floor"] = max(0.0, above) / max(cancels * floor, 1e-300)
         out["report"]["residual_true"] = detail["residual_true"]
@@ -668,6 +859,10 @@ THRESHOLD = {"bound": 1.0 + 2.0 ** 10 * float(np.finfo(np.float32).eps),
              "radius_strict": 1.0,
              "gradient": 1.0 + 2.0 ** 10 * float(np.finfo(np.float32).eps),
              "floor": 1.0}
+#: The state a step returns under the interface norm (:func:`returned_scores`):
+#: a bound again, with the bound score's allowance.  Not one of
+#: :data:`THRESHOLD`'s, whose order seeds the four searches.
+RETURNED_THRESHOLD = THRESHOLD["bound"]
 FLAG = {"bound": "spectral_usable", "radius": "spectral_usable",
         "radius_strict": "spectral_usable",
         "gradient": "gradient_usable", "floor": "floor_reported"}
@@ -715,6 +910,14 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: Domain = CLAIMED, profile
 
     report = targeted_search(cases(cells, domain), score, THRESHOLD[name], profile=profile,
                              label=name, fail=fail)
+    if fail and drawn:
+        # Every example on a cell observed at the accepted iterate was also
+        # stepped as a user steps it (:func:`returned_scores`).
+        worst = max(drawn, key=lambda c: observe(c)["returned"])
+        seen = observe(worst)
+        assert seen["returned"] <= RETURNED_THRESHOLD, (
+            f"{name}: the state the step returned is {seen['returned']:.6g} times what its "
+            f"report allows, for {worst}: {seen['report']}")
     return report, usable_fraction(name, drawn)
 
 
@@ -813,7 +1016,7 @@ def test_a_report_on_a_seed_shape_does_not_move_when_the_state_is_written_afterw
     cell = CELLS[case.cell]
     with precision(cell.dtype == "float64"):
         built = _built(case.cell)
-        (step,) = ct.run(built, values_of(case), 1)
+        (step,) = _one_step(case.cell, values_of(case))
         gm, key = built.gm, cell.topo.group_key(0)
         first = dict(gm.coupling_diagnostics()[key])
         assert _same_report(first, step.reports[0])
@@ -1428,7 +1631,9 @@ def test_the_gradient_score_of_a_sparse_edge_is_taken_over_its_pattern():
     assert seen["gradient"] <= THRESHOLD["gradient"], report
     values = values_of(case)
     with precision(cell.dtype == "float64"):
-        (step,) = ct.run(_built(case.cell), values, 1)
+        # The state the report is of, as :func:`observe` read it: the cell
+        # is an interface one read through a mapping, so the accepted iterate.
+        (step,) = _one_step(case.cell, values)
     model = ct.LinearModel(topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
     outside = _outside(topo, kind)
     worst, constant = max(gradient_errors(model, step.pre, step.state, kind),
@@ -1455,3 +1660,228 @@ def test_the_gradient_score_of_a_sparse_edge_is_taken_over_its_pattern():
     assert held_dense["report"]["gradient_error"] == pytest.approx(beyond, rel=1e-6)
     assert (held_dense["report"]["gradient_relative_error_bound"]
             > 2.0 * report["gradient_relative_error_bound"])
+
+
+# ---------------------------------------------------------------------------
+# The state a step returns under the interface norm (CPL-191, CPL-088)
+# ---------------------------------------------------------------------------
+#
+# Under ``convergence_norm="interface"`` a solve returns the iterate it
+# accepted with every field the norm does not measure whole one plain pass
+# on, beside a report of the accepted iterate.  The four searches above
+# observe such a cell at the accepted iterate, since their scores are of
+# the report; every example they draw there is also stepped with the rule
+# on (:func:`returned_scores`, asserted in :func:`search`).  This section
+# hunts that score itself, on cells made for it: a group that holds a
+# field measured whole, one read only through a mapping and one read only
+# through a transform, under both schedules, every stock acceleration and
+# both dtypes.
+
+
+def _mixed(n: int) -> ct.Topology:
+    """A ring ``a -> b -> c -> a`` of fields of *n* entries: ``a`` read as
+    it is (measured whole), ``b`` only through a mapping, ``c`` only
+    through a transform."""
+    b = ct.TopologyBuilder()
+    b.node("a", n, alpha=0.5)
+    b.node("b", n, alpha=0.0)
+    b.node("c", n, alpha=-0.25)
+    b.edge("a", "b")
+    b.edge("b", "c", mapped=True)
+    b.edge("c", "a", transform="negate")
+    b.group("a", "b", "c")
+    return b.build(f"mixed-{n}")
+
+
+RETURNED_STRUCTURES = {"mixed-1": _mixed(1), "mixed-2": _mixed(2)}
+_RETURNED_ACCELERATIONS = (
+    dict(acceleration="none"), dict(acceleration="aitken"),
+    dict(acceleration="fixed", relaxation=0.7), dict(acceleration="iqn-ils"),
+    dict(acceleration="iqn-imvj", jacobian_reuse=2))
+
+
+@dataclasses.dataclass(frozen=True)
+class ReturnedCell:
+    """One compiled graph of the returned-state score (and its twin)."""
+
+    structure: str
+    dtype: str
+    schedule: str
+    acceleration: int
+    cap: int
+    mapping_kind: str = "matrix"
+
+    @property
+    def topo(self) -> ct.Topology:
+        return RETURNED_STRUCTURES[self.structure]
+
+    @property
+    def knobs(self) -> dict:
+        return cg.live_knobs(dict(
+            _RETURNED_ACCELERATIONS[self.acceleration], iteration_mode=self.schedule,
+            convergence_norm="interface", rtol=RTOL, solver="ift", diagnostics=True,
+            max_iterations=self.cap))
+
+    @property
+    def cfgs(self) -> list:
+        return ct.group_cfgs_of([self.knobs])
+
+
+def _returned_cells() -> tuple:
+    """``mixed-2`` under every acceleration, schedule and dtype, the cap
+    rotated over them."""
+    out = []
+    for a in range(len(_RETURNED_ACCELERATIONS)):
+        for j, schedule in enumerate(("jacobi", "gauss-seidel")):
+            for t, dtype in enumerate(("float64", "float32")):
+                out.append(ReturnedCell("mixed-2", dtype, schedule, a, CAPS[(a + j + t) % 2]))
+    return tuple(out)
+
+
+#: The per-push cell: three scalars under Jacobi in float64, stopped after
+#: five passes (a cap reached with a large residual, where the state
+#: returned is furthest from the iterate its report is of).  One cell: it
+#: compiles twice.
+_RETURNED_FIRST = (ReturnedCell("mixed-1", "float64", "jacobi", 0, 5),)
+RETURNED_CELLS = _RETURNED_FIRST + _returned_cells()
+assert all(_reads_a_recomputed_field(c) for c in RETURNED_CELLS)
+RETURNED_PER_PUSH = tuple(range(len(_RETURNED_FIRST)))
+#: The slow hunt's blocks: a cell and its twin are two compiled graphs.
+RETURNED_BLOCKS = tuple(tuple(range(len(RETURNED_CELLS)))[k::7] for k in range(7))
+
+
+@functools.lru_cache(maxsize=max(len(b) for b in RETURNED_BLOCKS) + 1)
+def _accepted_twin(cell: ReturnedCell) -> ct.Built:
+    with precision(cell.dtype == "float64"):
+        return ct.build(cell.topo, cell.knobs, dtype=cell.dtype, mapping_kind=cell.mapping_kind)
+
+
+@dataclasses.dataclass(frozen=True)
+class ReturnedCase:
+    """The numbers of *base* (its ``cell`` is not read) on a cell of
+    :data:`RETURNED_CELLS`."""
+
+    cell: int
+    base: Case
+
+
+def _returned(cell: ReturnedCell, values: dict) -> dict:
+    with precision(cell.dtype == "float64"):
+        (accepted,) = _at_the_accepted_iterate(_accepted_twin(cell), values)
+    return returned_scores(cell, values, accepted)
+
+
+@functools.lru_cache(maxsize=4096)
+def observe_returned(case: ReturnedCase) -> dict:
+    cell = RETURNED_CELLS[case.cell]
+    return _returned(cell, values_of(case.base, cell))
+
+
+def returned_cases(cells=RETURNED_PER_PUSH):
+    return st.builds(ReturnedCase, cell=st.sampled_from(tuple(cells)), base=cases((0,), CLAIMED))
+
+
+def search_returned(cells, profile, *, fail: bool = True):
+    """Hunt the returned-state score over *cells*; ``(report, measurements)``.
+
+    The measurements, over the examples drawn: the fraction on which the
+    bound was claimed of the state returned, the largest move of the
+    readings, and the worst of the score with the weights' drift, or the
+    residual, left out of the bound (:func:`returned_scores`)."""
+    drawn = []
+
+    def score(case: ReturnedCase):
+        drawn.append(case)
+        seen = observe_returned(case)
+        return seen["returned"], (seen["returned_report"],)
+
+    report = targeted_search(returned_cases(cells), score, RETURNED_THRESHOLD, profile=profile,
+                             label="returned", fail=fail)
+    seen = [observe_returned(c) for c in drawn]
+    return report, dict(
+        bounded=sum(s["bounded"] for s in seen) / max(len(seen), 1),
+        moved=max((s["moved"] for s in seen), default=0.0),
+        without_the_drift=max((s["without_the_drift"] for s in seen), default=0.0),
+        without_the_residual=max((s["without_the_residual"] for s in seen), default=0.0))
+
+
+def test_the_state_returned_under_the_interface_norm_holds_to_its_report_per_push():
+    """Slow sibling: :func:`test_the_hunt_finds_no_returned_state_outside_its_report`."""
+    _report, seen = search_returned(RETURNED_PER_PUSH, EVERY_PUSH.seeded(len(THRESHOLD) + 1))
+    assert seen["bounded"] > 0.5, f"the bound was claimed on only {seen['bounded']:.2f}"
+    assert seen["moved"] > 1.0, (
+        "no example's readings moved by a tolerance: the twin never recomputed a field, and "
+        "the score tested nothing")
+
+
+def _near_zero_values(cell: ReturnedCell, scale: float) -> dict:
+    """Unit gains of a half round ``mixed-1``, the fixed point at ``(10,
+    -0.5, 10)`` and a start *scale* from it in every field."""
+    topo = cell.topo
+    target = {"a": np.array([10.0]), "b": np.array([-0.5]), "c": np.array([10.0])}
+    values = {"nodes": {m: {"G": [np.array([[0.5]])], "b": np.zeros(1), "x0": target[m] + scale}
+                        for m in topo.names},
+              "H": {i: np.ones((1, 1)) for i, e in enumerate(topo.edges) if e.mapped}}
+    ct.place_group_fixed_point(topo, values, 0, target, group_cfgs=cell.cfgs)
+    dt = np.dtype(cell.dtype)
+    for m in topo.names:
+        values["nodes"][m] = {"G": [np.asarray(G, dt) for G in values["nodes"][m]["G"]],
+                              "b": np.asarray(values["nodes"][m]["b"], dt),
+                              "x0": np.asarray(values["nodes"][m]["x0"], dt)}
+    values["H"] = {i: np.asarray(H, dt) for i, H in values["H"].items()}
+    values["target"] = target
+    return values
+
+
+def test_a_recomputed_reading_near_zero_needs_the_drift_of_its_own_magnitude():
+    """The bound of the state returned is not "the bound plus the residual".
+
+    The norm divides a reading by its own magnitude.  At a cap, a field
+    the solve returns recomputed can sit near zero where the accepted
+    iterate's was of order one: its reading is then divided by far less
+    than the bound's and the residual's were.  Here ``b`` -- read only
+    through a mapping -- is returned at a fiftieth of its fixed point's
+    size: the distance in the returned state's own norm is more than
+    twice ``bound + residual``, with ``spectral_usable``, and within
+    ``(bound + residual) / (1 - rtol residual sqrt(N))``.
+
+    The start is found in two steps, the error at a cap being linear in
+    the start's offset: one step at offset 1 gives how far ``b`` is
+    accepted, and returned, from its fixed point per unit of offset.  Of
+    the two offsets that return it at a fiftieth of that size, the one
+    that leaves the accepted value on the same side of zero is taken (on
+    the other the reading moves by more than its own size, and nothing
+    is claimed).
+    """
+    cell = RETURNED_CELLS[0]
+    values = _near_zero_values(cell, 1.0)
+    with precision(True):
+        (unit,) = ct.run(_returned_twin(cell), values, 1)
+        (loop,) = _at_the_accepted_iterate(_accepted_twin(cell), values)
+    assert unit.reports[0]["iterations"] == cell.cap and not unit.reports[0]["converged"]
+    target = float(values["target"]["b"][0])
+    returned_per_unit = float(unit.state["b"]["x"][0]) - target
+    accepted_per_unit = float(loop.state["b"]["x"][0]) - target
+    scales = [(side * 0.02 * abs(target) - target) / returned_per_unit for side in (1.0, -1.0)]
+    (scale,) = [k for k, side in zip(scales, (1.0, -1.0))
+                if side * (target + k * accepted_per_unit) > 0]
+    seen = _returned(cell, _near_zero_values(cell, scale))
+    report = seen["returned_report"]
+    assert report["iterations"] == cell.cap and not report["converged"], report
+    assert seen["bounded"] and 0.9 < report["drift"] < 1.0, report
+    assert seen["without_the_drift"] > 2.0, (
+        f"the returned state is within its bound plus its residual "
+        f"({seen['without_the_drift']:.3g} of it): the case no longer shows the drift, {report}")
+    assert seen["returned"] <= RETURNED_THRESHOLD, (seen["returned"], report)
+
+
+# Slow: 21 cells, each compiled twice; 800 random examples over the blocks.
+# Per push: tests/property/test_coupling_targeted_search.py::test_the_state_returned_under_the_interface_norm_holds_to_its_report_per_push
+@pytest.mark.slow
+@pytest.mark.parametrize("block", range(len(RETURNED_BLOCKS)))
+def test_the_hunt_finds_no_returned_state_outside_its_report(block):
+    profile = dataclasses.replace(SLOW, max_examples=SLOW.max_examples // len(RETURNED_BLOCKS) + 1)
+    report, seen = search_returned(RETURNED_BLOCKS[block], profile)
+    print(f"returned, block {block}: worst {report}; {seen}")
+    assert seen["bounded"] >= USABLE_FLOOR, (
+        f"block {block}: the bound was claimed on only {seen['bounded']:.2f} of the examples")

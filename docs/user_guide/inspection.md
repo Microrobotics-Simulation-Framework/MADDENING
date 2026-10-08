@@ -350,6 +350,15 @@ prints the report for a converged group and a capped one, and shows
 `strict_convergence=True` raising instead of reporting.  `diagnostics=True` on a `solver="ift"`
 group fills `rho_spectral` and `spectral_error_bound`.
 
+**What the report is of under `convergence_norm="interface"`.**  `iterations`, `residual`,
+`converged` and the bounds describe the iterate the loop accepted.  The step returns that iterate
+with every floating field the norm does not measure whole -- one no internal edge reads, or one
+read only through a mapping or a transform -- recomputed by one plain pass at it.  The state you
+read is therefore within the reported residual of the reported iterate on what the edges deliver,
+and is not itself an iterate of the loop; its own residual can be a few times the reported one.
+See "What a converged step returns under each norm" in
+[the algorithm guide](../developer_guide/coupling_algorithm_guide.md).
+
 **What a node declares for `spectral_usable` at the float floor.**  A group whose residual is at
 its float floor (`precision_limited=True`: any converged float32 group at the default tolerance)
 reports `spectral_usable=False`, and so `gradient_bound_usable=False`, unless every node in it
@@ -360,7 +369,12 @@ return how many sequential sub-steps one `update` takes (`1` for a single explic
 relay, `N` for a loop of `N` sub-steps), and read
 [the algorithm guide](../developer_guide/coupling_algorithm_guide.md) for what the count assumes;
 a float32 group with a field under a hundredth of what drives it should be run in float64 before
-its flag is relied on (MADD-ANO-230).
+its flag is relied on (MADD-ANO-230).  The same holds for a float32 Gauss-Seidel group in which a
+node multiplies two other nodes' fields held in units a factor of 1e3 or more apart: one float32
+rounding of such a field can move the pass's derivative by more than the flag's margin, and
+`rho_spectral` then describes the float32 pass, not the equations (0.324 for 0.0238 in the measured
+case, with `spectral_usable=True`; the error bound still held).  Run it in float64 or under Jacobi,
+or hold the multiplied fields as deviations in comparable units (MADD-ANO-239).
 
 **What `diagnostics=True` costs.**  It is opt-in per group, and the work is done in every step of
 that group.  Beside the solve, the step runs 9 Jacobian-vector products for the spectrum (18 under

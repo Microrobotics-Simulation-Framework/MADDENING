@@ -100,6 +100,33 @@ def offset_by(c: float):
     return _offset
 
 
+#: The side rule the library is held to (``coupled_topologies.INTERFACE_SIDE``
+#: says the same; this module restates the rule from sizes and imports no
+#: other reference).
+LIBRARY_RULE = "compact"
+
+
+def measured_whole(gm) -> tuple:
+    """The members whose field the interface norm of *gm*'s group measures whole.
+
+    A solve returns such a field as the iterate it accepted holds it, and
+    every other one plain pass on.  Restated from the edges' own sizes,
+    not from the library's plan: the source of an edge with no mapping
+    and no transform, or of a static mapping the rule reads at its source
+    (:func:`side_of`: onto more entries than its source holds) -- there
+    the reading is the source field itself, before the mapping and the
+    transform."""
+    whole = set()
+    for e in gm._edges:                                   # noqa: SLF001
+        if e.mapping is None:
+            if e.transform is None:
+                whole.add(e.source_node)
+        elif LIBRARY_RULE == "compact" and side_of(
+                int(e.mapping.n_source), int(e.mapping.n_target)) == "source":
+            whole.add(e.source_node)
+    return tuple(sorted(whole))
+
+
 def side_of(n_source: int, n_target: int, declared: Optional[str] = None) -> str:
     """Where the interface norm reads a mapped edge: ``"source"`` or ``"delivered"``.
 
@@ -527,6 +554,34 @@ class Reference:
         M = np.linalg.solve(np.eye(len(c)) - A, np.eye(len(c)) - L)
         return float(np.linalg.norm(d[:, None] * M / d[None, :], 2))
 
+    def returned(self, x: dict, whole=()) -> dict:
+        """What a solve returns for the iterate *x* it accepted: a field the
+        interface norm measures whole (*whole*, :func:`measured_whole`: read
+        by an edge with no mapping and no transform, or at its source by a
+        mapping onto more entries) as *x* holds it, every other as one plain
+        pass at *x* computes it.  In a :func:`build` graph the source of a
+        scatter is kept and the source of a gather or a tie is ``F(x)``'s;
+        in the marker-side twin ``p`` is read by a plain edge."""
+        after = self.one_pass(x)
+        return {name: x[name] if name in whole else after[name] for name in ("p", "q")}
+
+    def K_returned(self, whole=()) -> float:
+        """:attr:`K` for the state :meth:`returned`: its error is the accepted
+        iterate's plus the pass's own step on the recomputed fields, so on
+        the compact readings the bracket loses the identity on the readings
+        of a recomputed source."""
+        A, L, c, _to_state, off = self.compact
+        z = np.linalg.solve(np.eye(len(c)) - A, c)
+        d = np.empty(len(c))
+        d[:off[1]] = 1.0 / np.max(np.abs(z[:off[1]]))
+        d[off[1]:] = 1.0 / np.max(np.abs(z[off[1]:]))
+        P = np.zeros(len(c))
+        for i, e in enumerate(self.edges):
+            if e.src not in whole:
+                P[off[i]:(off[i + 1] if i + 1 < len(off) else len(c))] = 1.0
+        M = np.linalg.solve(np.eye(len(c)) - A, np.eye(len(c)) - L) - np.diag(P)
+        return float(np.linalg.norm(d[:, None] * M / d[None, :], 2))
+
     def distance(self, x: dict, rule: str = "compact") -> float:
         """The distance of *x* to the fixed point in the norm of *rule*, over the tolerance:
         each reading's error over ``rtol`` times its magnitude at *x*, pooled RMS."""
@@ -645,7 +700,12 @@ def run(shape: Shape, draw: Draw, *, graph: Optional[Built] = None) -> dict:
 
     ``excess`` is the claim's score: the distance to the fixed point in
     the compact readings over ``K`` times the tolerance, where the group
-    reports ``converged`` (0.0 where it does not).
+    reports ``converged`` (0.0 where it does not).  ``K`` is the constant
+    of the state a solve *returns* (:meth:`Reference.K_returned`): the
+    iterate it accepted with the fields in no ``whole`` member one pass
+    on.  The report's residual is the accepted iterate's, which the
+    returned state does not determine: a caller compares it with the
+    reference's own loop (:meth:`Reference.plain_exit`).
     """
     ref = Reference(shape, draw)
     with precision(shape.dtype == "float64"):
@@ -659,12 +719,12 @@ def run(shape: Shape, draw: Draw, *, graph: Optional[Built] = None) -> dict:
         report = dict(report)
         state = {name: np.asarray(gm.get_node_state(name)["x"], np.float64)
                  for name in ("p", "q")}
+        whole = measured_whole(gm)
     converged = bool(report["converged"])
     distance = ref.distance(state, "compact")
+    K = ref.K_returned(whole)
     return dict(
-        reference=ref, state=state, report=report, converged=converged,
+        reference=ref, state=state, report=report, converged=converged, whole=whole,
         iterations=int(report["iterations"]), residual=float(report["residual"]),
-        K=ref.K, distance=distance, marker_error=ref.marker_error(state),
-        excess=distance / ref.K if converged else 0.0,
-        residual_compact=ref.residual(ref.one_pass(state), state, "compact"),
-        residual_delivered=ref.residual(ref.one_pass(state), state, "delivered"))
+        K=K, distance=distance, marker_error=ref.marker_error(state),
+        excess=distance / K if converged else 0.0)

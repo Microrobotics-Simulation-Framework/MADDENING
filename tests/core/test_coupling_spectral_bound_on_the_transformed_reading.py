@@ -407,11 +407,29 @@ def _assert_the_bound_holds_in(domain, mode, fixture="extract-last", settled=Tru
     ], rtol)
     assert true > 0, (dict(d), true)                               # the fixture premise
     if not settled:
-        # The dtype's rounding does not determine the radius (see the
-        # caller): the flag is withdrawn, and the number is still no
-        # smaller than the distance.
-        assert not d["spectral_usable"], (dict(d), true)
+        # The dtype's rounding does not determine the radius to the flag's
+        # margin (see the caller), and the number is still no smaller than
+        # the distance.  Whether the flag is withdrawn is the rounding
+        # certificate's verdict on the rounding it MEASURES, and a 16-bit
+        # dtype's rounding is the processor's: half-precision arithmetic is
+        # native on some and goes through float32 on others.  float16 under
+        # Gauss-Seidel reads refused on most machines and usable on some
+        # (two of fourteen CI runners on 2026-10-08, one on each jaxlib;
+        # refused on a workstation at 1, 2, 4 and 8 threads).  So the
+        # verdict is not pinned; what it stands for is: where the flag is
+        # set, the radius read is within the flag's margin of the pair's
+        # (5% of 1 - rho, CPL-087; the pair's loop gain in closed form,
+        # its square root under Jacobi) and the bound is over the distance.
         assert d["spectral_error_bound"] >= true, (dict(d), true)
+        if d["spectral_usable"]:
+            gain = abs(float(gB[0] * (tn(gA + cA) - t0)))
+            rho = gain if mode == "gauss-seidel" else math.sqrt(gain)
+            read = float(d["rho_spectral"])
+            assert abs(read - rho) <= 0.05 * (1.0 - read), (
+                f"spectral_usable is set on a radius outside its margin: read {read!r}, "
+                f"the pair's {rho!r} ({domain}, {mode}, {fixture}); bound "
+                f"{float(d['spectral_error_bound'])!r}, distance {true!r}")
+            _assert_bound_holds(d, true, (domain, mode, fixture))
         return
     assert d["spectral_usable"], (dict(d), true)
     _assert_bound_holds(d, true, (domain, mode, fixture))
@@ -454,7 +472,10 @@ def test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_swe
       the Arnoldi relation by 1.2e-4 in the row a gain of 66 multiplies,
       which can move a radius of 0.5 by 0.09 against a margin of 0.025:
       the rounding certificate refuses it.  The radius read is right
-      (0.5008) and the bound covers the distance 72 times over.
+      (0.5008) and the bound covers the distance 72 times over.  That
+      refusal is the certificate's verdict on one machine's half-precision
+      rounding and is not asserted (``_assert_the_bound_holds_in``): on a
+      machine whose rounding is finer the flag is set, on the same radius.
     """
     settled = domain == "f64"
     _assert_the_bound_holds_in(domain, mode, fixture, settled=settled)

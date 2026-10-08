@@ -95,6 +95,65 @@ reading state that is not on an edge — start from `"l2"` or `"mixed"`
 and move to `"interface"` only after measuring your own graph's
 `fixed_point_agreement`.
 
+**What a converged step returns under each norm.**  The loop stops on
+an iterate `x` whose residual `||F(x) - x||` met the criterion, `F`
+being one plain pass of the group's schedule.  Under `"l2"` and
+`"mixed"` the residual is over every floating field, and the step
+returns `x`.  Under `"interface"` the residual is over what the internal
+edges deliver, and the members of `x` were computed from the readings of
+the iterate before it, which nothing compares.  So the step returns
+
+* a field the norm **measures whole** -- the source field of an internal
+  edge that delivers it as it is, with no mapping and no transform -- as
+  `x` holds it, bit for bit;
+* **every other floating field of every member** -- read by no internal
+  edge, or only through a mapping or a transform -- as `F(x)` holds it:
+  one more evaluation of the pass, at `x`.
+
+A static mapping onto more entries than its source holds is read at its
+source (the compact-side rule, below): that reading is the source field
+itself, so the field is measured whole and kept, like one a plain edge
+reads.  A field read only through a gather, a tie or a transform is
+recomputed.
+
+One rule, whatever the schedule, the acceleration, the solver and the
+verdict (`max_iterations=1` returns its one pass as it is).  Until 0.4.0
+the step returned `x` as it was, and a one-way pair under Jacobi came
+back with its target computed from the pre-step source, `converged=True`
+at `iterations=1` (MADD-ANO-240, MADD-ANO-241).  What the rule costs:
+
+* **The report is of `x`, not of the state returned.**  `iterations`,
+  `residual`, `converged` and the bounds are the ones the loop measured.
+  The returned state's readings differ from those of `x` only on the
+  edges whose source field was recomputed, by that edge's own term of
+  the residual, so they are within the reported residual of them.  Its
+  own residual is another number: up to 4.5 times the reported one in
+  the measured draws, and above the threshold beside `converged=True` in
+  1 of 48.  `spectral_error_bound` carries over to the state returned
+  as `(bound + residual) / (1 - rtol * residual * sqrt(N))` in the norm
+  taken *at* that state, `N` the entries the norm pools: a converged
+  solve's denominator is one to within `rtol * sqrt(N)`, while at a cap
+  a recomputed reading returned near zero is divided by far less than
+  the bound's was (4.5 times `bound + residual` in the pinned case), and
+  past `rtol * residual * sqrt(N) = 1` nothing is claimed.  The
+  gradient bound carries over as it is: under `solver="ift"` every
+  returned field, recomputed or kept, has the implicit derivative of
+  `x`.
+* **A recomputed field is sometimes less accurate than `x`'s.**  27 of
+  375 recomputed fields were further from the fixed point by more than
+  1.25 times (linear relay groups, float32), one of them ending above a
+  tolerance, never by more than about one tolerance in a converged
+  solve; about three times as often where the plain pass expands (an
+  accelerated loop of gain above one).
+* **An identity mapping is still a mapping.**  A group whose edge
+  carries one recomputes that field and equals its unmapped twin within
+  the residual, no longer to the bit (it does under `"l2"` and
+  `"mixed"`).
+
+A field the interface norm does not measure still meets no criterion of
+its own: it is one pass from readings that did.  Where every field has
+to meet the tolerance itself, use `"mixed"` or `"l2"`.
+
 Three settings that are nearly always right and are not in the table:
 
 * **Leave `relaxation` alone under Gauss-Seidel.** Not one Gauss-Seidel
@@ -480,6 +539,13 @@ its compact readings (`A` the pass's stationary map, `L` its same-pass
 part, `D` dividing each reading by its own magnitude): the identity the
 bound above rests on, applied to a residual at its threshold.  `K` is
 about `1 / (1 − gain)` for a normal loop and does not see `N`.
+That is the iterate the loop accepted, which the report is of.  The state
+a solve returns is that iterate with every field the norm does not
+measure whole one plain pass on (the return rule above; CPL-191): a
+source field read at its source is measured whole and kept, the source of
+a gather or a tie is recomputed, and the state returned is within `K'`
+tolerances, `K' = ‖D [(I − A)⁻¹ (I − L) − P] D⁻¹‖₂` with `P` selecting the
+readings of a recomputed source (`K' = K` where both edges scatter).
 
 In either reading `1/(1 − rho)` is the resolvent's norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a
@@ -1364,7 +1430,10 @@ costs **32–42x** the plain step for no saving at all under the
 interface norm (1.60–1.65 passes either way), and 31–42x under L2 for
 at most one pass (2.0–2.9 against 2.95).
 
-Third, and this one is an accuracy caveat rather than a cost one:
+Third, and this one was an accuracy caveat rather than a cost one, **now
+closed for the state a step returns** (MADD-ANO-240, MADD-ANO-241; see
+"What a converged step returns under each norm" above).  As first
+recorded:
 **do not pair the auto-detected `accelerated_fields` with
 `convergence_norm="interface"`.**  Both are the edge source fields (the
 criterion reads them as the edges deliver them, through any transform
@@ -1388,6 +1457,21 @@ can still exit, and over generated graphs that is measurable at
 `"mixed"`);
 `benchmarks/results/retire_known_disagreements/REPORT.md` has the
 numbers, and `MADD-ANO-005` carries it as residual risk.
+
+The mechanism was not the accelerated set.  The interface norm returned
+the iterate it accepted, whose unmeasured fields came from the pass
+*before* the readings it stopped on; an accelerator only made that pass
+a long way off.  A step now returns those fields as one plain pass
+computes them at the accepted iterate, and the ten rows agree with plain
+Gauss-Seidel within the test's interface allowance at the fixtures' own
+`rtol`, with the auto-detected set unchanged (9.9e-06 to 2.2e-03 from
+it after 25 steps, where they were 2.6e-02 to 2.25): the
+`_KNOWN_DISAGREEMENTS` list is empty.  **The figures in the paragraph
+above and in the next section are those of the recorded sweep, taken
+before that change; the sweep has not been recorded again.**  The advice
+to prefer `"l2"` or `"mixed"` where the answer matters stands for the
+reason that remains: the interface norm holds no field it does not read
+to a criterion.
 
 ## Do all these configurations agree?
 
@@ -1633,7 +1717,8 @@ that matter more than any timing:
   `heterogeneous` is a factor of eighty.  The rows that do *not* reach
   the common fixed point are listed in `_KNOWN_DISAGREEMENTS` with the
   defect that explains each, and the test fails if a listed row starts
-  agreeing, so the list cannot outlive its defect;
+  agreeing, so the list cannot outlive its defect (it is empty since the
+  interface norm's return rule, MADD-ANO-240);
 * Gauss-Seidel on a ring is order-dependent and Jacobi is not — the test
   first checks that rotating the build really does rotate the schedule,
   so it cannot pass vacuously;

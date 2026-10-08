@@ -15,6 +15,7 @@ import numpy as np
 from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    _has_entries,
     _interface_readings,
     _reading_eps,
     float_fields_of,
@@ -36,6 +37,7 @@ from maddening.core.coupling._interface_plan import interface_plan
 from maddening.core.coupling._group_layout import (
     _group_accel_fields,
     _group_dividers,
+    _fields_the_interface_norm_misses,
     _group_evaluations,
     _geometry_diagnostics_refusal,
     _group_pass_structure,
@@ -528,6 +530,8 @@ def _run_coupled_block_impl(
         out, d_out = jax.jvp(dst_of, (primal,), (primal,))
         gain = jnp.float32(0.0)
         for f, v in out.items():
+            if not _has_entries(v):
+                continue        # no entries: no gain (``_has_entries``)
             ref = jnp.max(jnp.abs(v)).astype(jnp.float32)
             change = jnp.max(jnp.abs(d_out[f])).astype(jnp.float32)
             gain = jnp.maximum(gain, jnp.where(ref > 0, change / jnp.where(ref > 0, ref, 1.0), 0.0))
@@ -858,6 +862,16 @@ def _run_coupled_block_impl(
             for nn in group_node_names
         }
 
+        # Static: the floating fields the interface norm does not measure
+        # whole (read by no internal edge, or only through a mapping or a
+        # transform).  The solve returns them as one plain pass computes
+        # them at the iterate it accepts.  Floating-ness is decided on the
+        # state ``nonfloat_fields`` is decided on, so the two sets are
+        # complements within what the norm does not measure.  Empty for
+        # every other group, whose compiled step is the one it was.
+        refreshed_fields = _fields_the_interface_norm_misses(
+            group, plan, group_node_names, state_after_first)
+
         def _with_nonfloat_fields_at(s_full):
             """*s_full* with the group's non-floating fields recomputed at it.
 
@@ -868,20 +882,70 @@ def _run_coupled_block_impl(
             from this pass has a derivative, and the floating state's --
             the IFT rule's, or the unrolled loop's -- is untouched.
             """
-            if not any(nonfloat_fields.values()):
+            if not any(nonfloat_fields.values()) and not refreshed_fields:
                 return s_full
-            frozen = jax.tree.map(
-                lambda v: (jax.lax.stop_gradient(v)
-                           if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
-                s_full,
-            )
-            s_leaves = one_pass(frozen)
             out = dict(s_full)
-            for nn in group_node_names:
-                if nonfloat_fields[nn]:
-                    out[nn] = {**s_full[nn],
-                               **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
+            if any(nonfloat_fields.values()):
+                frozen = jax.tree.map(
+                    lambda v: (jax.lax.stop_gradient(v)
+                               if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
+                    s_full,
+                )
+                s_leaves = one_pass(frozen)
+                for nn in group_node_names:
+                    if nonfloat_fields[nn]:
+                        out[nn] = {**s_full[nn],
+                                   **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
+            if refreshed_fields:
+                # The floating fields the interface norm does not measure
+                # whole (``_fields_the_interface_norm_misses``), by the
+                # same rule: as one plain pass computes them at this
+                # iterate, from the readings its verdict was taken on.  A
+                # field read through a mapping or a transform is among
+                # them, so the state returned is not an iterate of the
+                # loop: its readings are within the reported residual of
+                # this iterate's, in the group's norm (the residual *is*
+                # the scaled change of the readings over this pass), and
+                # the report describes this iterate.  Differentiated: at
+                # a fixed point this is the field's own derivative.
+                #
+                # In its own ``lax.cond`` branch, so XLA compiles the pass
+                # by itself: outside one, its arithmetic was rewritten
+                # with whatever else read the iterate, and
+                # ``diagnostics=True`` under ``"fori"`` moved a
+                # recomputed field by an ulp.  The predicate is the
+                # iterate's own finiteness: a diverged iterate is
+                # returned as the loop left it, since a pass at a
+                # non-finite state computes nothing to prefer to it.
+                def _recomputed(s):
+                    s_fresh = one_pass(s)
+                    return {nn: {f: s_fresh[nn][f] for f in fields}
+                            for nn, fields in refreshed_fields.items()}
+
+                def _as_accepted(s):
+                    return {nn: {f: s[nn][f] for f in fields}
+                            for nn, fields in refreshed_fields.items()}
+
+                picked = jax.lax.cond(
+                    _group_state_finite(s_full, group_node_names),
+                    _recomputed, _as_accepted, s_full)
+                for nn, fields in picked.items():
+                    out[nn] = {**out[nn], **fields}
             return out
+
+        def _recomputed_finite(s_returned):
+            """Is every recomputed field of *s_returned* finite?
+
+            The verdict on a non-finite state is taken over every floating
+            field of the state the step returns.  The solvers take it on
+            the iterate they accept; a recomputed field is not that
+            iterate's, and a pass at a finite iterate can still leave one
+            non-finite (a field no edge reads, computed from a reading
+            that crossed out of its domain), which the residual never saw.
+            """
+            return functools.reduce(jnp.logical_and, [
+                jnp.all(jnp.isfinite(s_returned[nn][f]))
+                for nn, fields in refreshed_fields.items() for f in fields])
 
         if max_iters <= 1:
             # ``max_iterations=1`` is a legitimate "one staggered pass,
@@ -1067,6 +1131,16 @@ def _run_coupled_block_impl(
                 )
                 for nn in group_node_names
             }
+            # Those of them that hold entries (``_has_entries``).  A field
+            # with no entries stays in the fixed-point vector, to which it
+            # adds nothing, and out of every reduction the report takes
+            # over the group's fields: it has no magnitude to weigh, no
+            # rounding to count, and an edge that reads it delivers nothing
+            # for the norm to read.
+            entry_fields = {
+                nn: tuple(f for f in float_fields[nn] if _has_entries(template_state[nn][f]))
+                for nn in group_node_names
+            }
 
             # ``jax.closure_convert`` hoists every tracer ``_step_flat``
             # touches into the custom_jvp's constants.  An *integer or
@@ -1197,10 +1271,14 @@ def _run_coupled_block_impl(
                     lambda _xx: jnp.asarray(pass_evaluations, jnp.float32), x_full)
 
             def _read_fields(s_star):
-                """``(node, field, value)`` for every field the norm reads."""
+                """``(node, field, value)`` for every field the norm reads.
+
+                Not a field with no entries (``entry_fields``): it has no
+                magnitude, so it gets no weight and cannot set their scale.
+                """
                 read = plan.source_fields()
                 for nn in group_node_names:
-                    for fld in float_fields[nn]:
+                    for fld in entry_fields[nn]:
                         if use_interface_norm and (nn, fld) not in read:
                             continue
                         yield nn, fld, jnp.asarray(s_star[nn][fld])
@@ -1232,11 +1310,15 @@ def _run_coupled_block_impl(
                 return jnp.where(top, 16.0, 1.0).astype(x_full.dtype)
 
             def _field_magnitudes(x_full):
-                """At each entry of the flat state, its field's ``max|v|``."""
+                """At each entry of the flat state, its field's ``max|v|``.
+
+                A field with no entries has none to hold one (``_has_entries``).
+                """
                 s_star = _embed(x_full)
                 m = {nn: {fld: jnp.broadcast_to(
                     jnp.max(jnp.abs(jnp.asarray(s_star[nn][fld]))),
                     jnp.shape(s_star[nn][fld])).astype(jnp.asarray(s_star[nn][fld]).dtype)
+                    if _has_entries(s_star[nn][fld]) else s_star[nn][fld]
                     for fld in float_fields[nn]}
                     for nn in group_node_names}
                 return _flatten_full({**s_star, **m})
@@ -1292,8 +1374,10 @@ def _run_coupled_block_impl(
             # (``_reading_is_the_fields``): every other group -- one whose
             # mapped edges are all read at their source among them -- keeps
             # the analysis in the state's weights.
+            # (An edge whose source field has no entries is not read, so it
+            # cannot make the reading another norm: ``entry_fields``.)
             transformed_reading = use_interface_norm and not _reading_is_the_fields(
-                plan, float_fields)
+                plan, entry_fields)
             def _reading_parts(s_star):
                 """The interface norm's reading at ``s_star``, as ``(source dtype,
                 value)`` per edge: what the norm reads on each internal edge
@@ -1516,11 +1600,12 @@ def _run_coupled_block_impl(
                     for nn in group_node_names
                 }))
                 # The rounding of the map's Jacobian-vector products: ``eps``
-                # of the coarsest field the pass evaluates in (static).
+                # of the coarsest field the pass evaluates in (static).  A
+                # field with no entries is not evaluated in.
                 map_eps = max(
                     float(jnp.finfo(template_state[nn][fld].dtype).eps)
-                    for nn in group_node_names for fld in float_fields[nn]
-                ) if any(float_fields[nn] for nn in group_node_names) else None
+                    for nn in group_node_names for fld in entry_fields[nn]
+                ) if any(entry_fields[nn] for nn in group_node_names) else None
                 if transformed_reading:
                     # The gradient bound's triple, in the state's weights,
                     # which its own norms are taken in.
@@ -1591,9 +1676,22 @@ def _run_coupled_block_impl(
             # ``_embed`` restores the non-floating fields from the first
             # pass; they are recomputed at the returned floating state
             # (``_with_nonfloat_fields_at``, the rule both solvers share).
-            final = _merge(template_state,
-                           _with_nonfloat_fields_at(_embed_live(x_star_full)),
-                           jnp.array(False))
+            returned = _with_nonfloat_fields_at(_embed_live(x_star_full))
+            if refreshed_fields:
+                # The verdict, over the recomputed fields too
+                # (``_recomputed_finite``): the report reads ``inf``, and
+                # ``strict_convergence`` names a non-finite state.
+                recomputed_ok = _recomputed_finite(returned)
+                final_res, final_amp = _non_finite_reads_as_diverged(
+                    recomputed_ok, final_res, final_amp)
+                if group.strict_convergence:
+                    nn0, (f0, *_rest) = next(iter(refreshed_fields.items()))
+                    returned[nn0] = {**returned[nn0], f0: _strict_check(
+                        returned[nn0][f0],
+                        jnp.where(recomputed_ok, jnp.zeros_like(final_res),
+                                  jnp.full_like(final_res, jnp.inf)),
+                        recomputed_ok)}
+            final = _merge(template_state, returned, jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
                             spec_amp, grad_bound, pass_evals, geometry_gap),
                     (vw if vw else None))
@@ -1980,6 +2078,11 @@ def _run_coupled_block_impl(
         # they came from preceded the returned iterate, which under an
         # acceleration is not that pass's output.
         final_state = _with_nonfloat_fields_at(final_state)
+        if refreshed_fields and group.diagnostics:
+            # ... and the verdict over the recomputed fields
+            # (``_recomputed_finite``), as the ift path takes it.
+            final_res, final_amp = _non_finite_reads_as_diverged(
+                _recomputed_finite(final_state), final_res, final_amp)
 
         # Merge coupled nodes back into the full state
         r = {k: v for k, v in new_state_inner.items()}

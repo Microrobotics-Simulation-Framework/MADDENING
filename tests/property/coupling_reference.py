@@ -351,14 +351,18 @@ class PassReference:
             return np.asarray(self._jit_sens(jnp.asarray(x, jnp.float64), theta, self._pre,
                                              self._params))
 
-    def pass_responses(self, x, norm: Norm) -> np.ndarray:
+    def pass_responses(self, x, norm: Norm, *, sensitivities=None) -> np.ndarray:
         """How far one pass from iterate *x* moves, in *norm* at *x*'s
         weights, when each scalar constant is moved by its own magnitude
         (a zero entry by its constant's largest magnitude, or by 1 for an
         all-zero constant): the size ``gradient_relative_error_bound``
         probes a constant at, and the quantity it compares with the
         residual's float floor to say whether the pass resolves the
-        constant at all.  One entry per column of :meth:`sensitivities`."""
+        constant at all.  One entry per column of :meth:`sensitivities`.
+
+        *sensitivities*: another ``dP/dc`` to take the responses of, with
+        the same columns (the tangents of the pass as the graph under
+        test evaluates it in its own dtype, where that is not float64)."""
         x = np.asarray(x, np.float64)
         with x64():
             theta, _restore = ravel_pytree(self._constants_of(self._params))
@@ -370,7 +374,9 @@ class PassReference:
             tops[leaf] = max(tops.get(leaf, 0.0), float(value))
         scale = np.asarray([value if value > 0 else (tops[name.rsplit("[", 1)[0]] or 1.0)
                             for name, value in zip(names, theta)])
-        moved = self.sensitivities(x) * scale[None, :]
+        moved = (self.sensitivities(x) if sensitivities is None
+                 else np.asarray(sensitivities, np.float64)) * scale[None, :]
+        assert moved.shape == (self.size, len(names)), (moved.shape, self.size, len(names))
         weights, zero = norm.weights(x), np.zeros(self.size)
         return np.asarray([norm.of_difference(moved[:, c], zero, weights)
                            for c in range(moved.shape[1])])

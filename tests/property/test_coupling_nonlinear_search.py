@@ -40,6 +40,12 @@ Away from the fixed point -- where a capped or early-stopped solve
 returns -- the Jacobian is another matrix, and only the numerical
 reference knows it.
 
+A cell's index is its name: the pins at the foot of the module say
+``Case(26, ...)``.  The 43 cells of the rotation (:data:`ROTATED`) keep
+their places, a new configuration is appended (:data:`APPENDED`), and
+``test_coupling_search_cells_are_pinned.py`` holds every cell's
+configuration per push.
+
 **The scores** are those of the linear search, restated for a map that
 is not affine:
 
@@ -96,6 +102,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import strategies as st
+from jax.flatten_util import ravel_pytree
 
 from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.graph_manager import GraphManager
@@ -202,6 +209,9 @@ def bound_reference(ref: cr.PassReference, values: dict, built_twin: ct.Built) -
 
 #: The example a twin's layout probe steps (see ``PassReference.of``).
 _PROBE = linear.Case(0, 1, 0.6, False, 1.0, 0.0, 1.0, 0, 0.5, 0)
+#: The linear search's multi-rate cell, found by what it is (the cell's
+#: place in ``linear.CELLS`` is the linear search's to keep).
+_LINEAR_MULTIRATE = linear.CELLS.index(linear.Cell("ring-3-multirate", "float32", 6, 5))
 
 
 @functools.lru_cache(maxsize=8)
@@ -412,16 +422,65 @@ class Cell:
         return (KINDS[self.topo.names.index(name) % len(KINDS)] if self.kind == "each"
                 else self.kind)
 
+    @property
+    def sweeps_a_product_of_two_members(self) -> bool:
+        """Whether a member multiplies the deviations of two fields that
+        two *other* members hold, in float32, under Gauss-Seidel.
+
+        ``phi_j = u_j + s_j (u_j - c_j)(u_j' - c_j')`` with ``s_j = curve /
+        max|c_j|``: the curve is measured against the port's own field and
+        multiplies the *other* port's deviation, so where the two fields
+        are in units a factor ``U`` apart the product is ``curve * U``
+        over a field's own size, and the member's derivative ``1 + s_j
+        (u_j' - c_j')`` moves by ``curve * U * eps`` when ``u_j'`` moves by
+        one rounding.  Under Gauss-Seidel ``u_j'`` is a value this pass has
+        just computed -- in float32, to a float32 rounding -- so at ``U =
+        1e6`` the pass the group runs and its float64 twin have other
+        Jacobians at one state, and the twin is no reference for the
+        group's radius (MADD-ANO-239; the two radius scores are drawn with
+        the change of units on such a cell within
+        :data:`SWEPT_PRODUCT_DECADES`).
+        Under Jacobi ``u_j' - c_j'`` is a difference of two floats of the
+        iterate, exact in either dtype."""
+        if self.dtype != "float32" or self.knobs["iteration_mode"] != "gauss-seidel":
+            return False
+        topo = self.topo
+        for nd in topo.nodes:
+            if self.kind_of(nd.name) != "product":
+                continue
+            read = {}
+            for e in topo.edges:
+                if e.dst == nd.name:
+                    read.setdefault(e.port, set()).add(e.src)
+            if len({frozenset(v) for v in read.values()}) > 1:
+                return True
+        return False
+
+
+#: The rows of ``linear.KNOBS`` and the caps the rotation below takes,
+#: FROZEN: the seven rows and two caps the linear search held when these
+#: cells were laid out.  The rotation is over these tuples and never over
+#: the length of a table of another module: a row appended to
+#: ``linear.KNOBS`` (2026-10-07) silently turned 21 of the 43 cells into
+#: other configurations, under pins whose comments described the old ones.
+#: A new configuration is a new cell, appended (:data:`APPENDED`);
+#: ``tests/property/test_coupling_search_cells_are_pinned.py`` holds every
+#: cell's configuration per push.
+ROTATED_KNOBS = (0, 1, 2, 3, 4, 5, 6)
+ROTATED_CAPS = (5, 120)
+
 
 def _cells() -> tuple:
     """Every structure with every nonlinearity at both dtypes, the
-    configurations and the caps rotated as the linear search rotates them."""
+    configurations and the caps rotated as the linear search rotated them
+    over :data:`ROTATED_KNOBS` and :data:`ROTATED_CAPS`."""
     out = []
     for s, name in enumerate(STRUCTURES):
         for q, kind in enumerate(KINDS):
             for t, dtype in enumerate(("float32", "float64")):
-                knob = (s + 3 * t + 2 * q) % len(linear.KNOBS)
-                out.append(Cell(name, dtype, knob, linear.CAPS[(s + t + q) % 2], kind))
+                knob = ROTATED_KNOBS[(s + 3 * t + 2 * q) % len(ROTATED_KNOBS)]
+                out.append(Cell(name, dtype, knob,
+                                ROTATED_CAPS[(s + t + q) % len(ROTATED_CAPS)], kind))
     return tuple(out)
 
 
@@ -433,11 +492,48 @@ def _cells() -> tuple:
 #: diagnostics (seconds); the three nonlinearities apart, at both dtypes
 #: and under every configuration, are the slow hunt's.
 _FIRST = (Cell("tri", "float32", 1, 5, "each"),)
-CELLS = _FIRST + tuple(c for c in _cells() if c not in _FIRST)
+#: The 43 cells of the rotation, the per-push one first.  Their indices
+#: are what the pins at the foot of the module name: never reordered.
+ROTATED = _FIRST + tuple(c for c in _cells() if c not in _FIRST)
+#: The linear search's eighth row, found by what it is: no acceleration,
+#: Jacobi, the interface norm.
+_JACOBI_INTERFACE = linear.KNOBS.index(
+    dict(acceleration="none", iteration_mode="jacobi", convergence_norm="interface"))
+#: Cells added on purpose, after every cell of the rotation (a new cell
+#: goes at the end of this tuple).  From 2026-10-07 to the day the
+#: rotation was frozen, 21 cells of the rotation were other configurations
+#: by accident (:data:`ROTATED_KNOBS`); these are the ones that accident
+#: visited and the rotation does not.
+APPENDED = (
+    # What cell 41 was by accident: ``tri`` with a product of two fields on
+    # every member in float32, Aitken under Gauss-Seidel, the interface
+    # norm, stopped after five passes.  The first cell on which a member
+    # multiplies two other members' fields in a float32 sweep
+    # (``sweeps_a_product_of_two_members``; MADD-ANO-239 is pinned on it).
+    Cell("tri", "float32", 2, 5, "product"),
+    # The same on the fan-out hub with no acceleration under the l2 norm
+    # (what cell 29 was by accident).
+    Cell("hub", "float32", 0, 5, "product"),
+    # The eighth row, which the rotation over seven never takes: on ``tri``
+    # at both dtypes (the per-push cell's nonlinearities, and the product),
+    # and on the five structures the accident put it on.
+    Cell("tri", "float32", _JACOBI_INTERFACE, 5, "each"),
+    Cell("tri", "float64", _JACOBI_INTERFACE, 120, "product"),
+    Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"),
+    Cell("hub", "float64", _JACOBI_INTERFACE, 120, "saturating"),
+    Cell("pair-3", "float32", _JACOBI_INTERFACE, 120, "product"),
+    Cell("ring-5", "float64", _JACOBI_INTERFACE, 5, "quadratic"),
+    Cell("ring-2", "float64", _JACOBI_INTERFACE, 120, "product"),
+)
+CELLS = ROTATED + APPENDED
 PER_PUSH_CELLS = tuple(range(len(_FIRST)))
 ALL_CELLS = tuple(range(len(CELLS)))
-#: The slow hunt's blocks (each cell compiles a graph and a twin).
-BLOCKS = tuple(ALL_CELLS[k::6] for k in range(6))
+APPENDED_CELLS = ALL_CELLS[len(ROTATED):]
+#: The slow hunt's blocks (each cell compiles a graph and a twin): the
+#: cells of the rotation six ways, as they were before a cell was
+#: appended (so a hunt over one draws what it drew), and the appended
+#: cells.
+BLOCKS = tuple(ALL_CELLS[:len(ROTATED)][k::6] for k in range(6)) + (APPENDED_CELLS,)
 
 
 def build(cell: Cell, knobs: dict, dtype: str) -> ct.Built:
@@ -491,6 +587,59 @@ def _built(index: int) -> tuple:
         values = values_of(Case(index, _PROBE, 1.0))
         ct.set_initial(twin, values)
         return built, twin, cr.PassReference.of(twin.gm, params=params_for(twin, values))
+
+
+@functools.lru_cache(maxsize=max(len(b) for b in BLOCKS) + 1)
+def _own_twin(index: int) -> tuple:
+    """``(a one-pass twin of float32 cell *index* in the cell's OWN dtype, a
+    slot for its compiled tangents)``: :func:`cr.twin_knobs` without x64,
+    so the pass rounds as the graph under test rounds it."""
+    cell = CELLS[index]
+    assert cell.dtype == "float32", cell
+    with precision(False):
+        return build(cell, cr.twin_knobs(cell.knobs), cell.dtype), {}
+
+
+def own_sensitivities(index: int, values: dict, x: np.ndarray, ref: cr.PassReference) -> np.ndarray:
+    """``dP/dc`` at iterate *x* through the pass of float32 cell *index*
+    as the cell's own dtype evaluates it: the columns of
+    ``ref.sensitivities``, each the tangent the group's own pass has for
+    that constant (which is exactly zero where the pass, in float32, does
+    not move with it)."""
+    cell = CELLS[index]
+    twin, compiled = _own_twin(index)
+    p0, p1, count = (f"coupling_{cell.topo.group_key(0)}_pred_{s}" for s in ("0", "1", "count"))
+    with precision(False):
+        ct.set_initial(twin, values)
+        params = params_for(twin, values)
+        pre = twin.gm._state                              # noqa: SLF001
+        theta, restore = ravel_pytree(ref._constants_of(params))   # noqa: SLF001
+        if not compiled:
+            step, ext = twin.gm._raw_step_fn, twin.gm._default_external_inputs()   # noqa: SLF001
+
+            def moved(theta_, x_, pre_, params_):
+                c = restore(theta_)
+                nodes = {n: {**params_["nodes"].get(n, {}), **c["nodes"].get(n, {})}
+                         for n in params_["nodes"]}
+                mappings = {k: {**v, **c.get("mappings", {}).get(k, {})}
+                            for k, v in params_.get("mappings", {}).items()}
+                meta = {**pre_["_meta"], p0: x_, p1: x_,
+                        count: jnp.asarray(2, pre_["_meta"][count].dtype)}
+                after = step({**pre_, "_meta": meta}, ext,
+                             {**params_, "nodes": nodes, "mappings": mappings})
+                return jnp.concatenate([jnp.ravel(after[n][f])
+                                        for n, f, _s, _a, _b in ref.layout])
+
+            compiled["both"] = jax.jit(lambda *a: (moved(*a), jax.jacfwd(moved)(*a)))
+        value, tangents = compiled["both"](theta, jnp.asarray(x, jnp.float32), pre, params)
+    # The twin is the pass the reference differentiates, to float32
+    # rounding (it reads the iterate through the same three slots).
+    exact = ref.apply(x)
+    for _n, _f, _shape, a, b in ref.layout:
+        size = float(np.max(np.abs(exact[a:b])))
+        assert np.max(np.abs(np.asarray(value, np.float64)[a:b] - exact[a:b])) <= (
+            2.0 ** 10 * float(np.finfo(np.float32).eps) * size), (cell, _n)
+    return np.asarray(tangents, np.float64)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -666,6 +815,38 @@ def observe(case: Case, rule=None) -> dict:
         # sides are two computations of one comparison).
         response = ref.pass_responses(x, raw)
         resolved = [not out["floor_reported"] or r > RESOLVED_MARGIN * floor for r in response]
+        own_too = [does_not_move_the_fixed_point(n) and r for n, r in zip(names, resolved)]
+        if cell.dtype == "float32" and out["floor_reported"] and any(own_too):
+            # CPL-093 is "a bound on the relative error of the IFT gradient
+            # ... |g_k - g*| <= bound * |g_k|", made for "a constant the
+            # pass resolves: moving it by its own magnitude moves one pass
+            # from x_k by more than the residual's float floor ... and its
+            # tangent is not exactly zero".  The pass, the tangent and
+            # g_k are the group's own, in float32.  The tangent of a
+            # nonlinearity's centre or curve is a difference that cancels
+            # at the centre, and where that difference is a float32
+            # rounding of a value the pass has just computed the float64
+            # twin holds another number: two floors where the float32
+            # pass's is exactly zero (``_NO_TANGENT_IN_FLOAT32``: not in
+            # the bound, "which says nothing of it"), or 2.4 floors beside
+            # 695, where the error is 6.7 of the twin's g_k and 0.97 of the
+            # group's own under a bound of 1.93.  A centre or a curve is
+            # scored where the float32 pass resolves it too and the twin's
+            # response is the float32 pass's within ``RESOLVED_MARGIN``:
+            # where the twin's g_k is the gradient the bound is about.
+            own = ref.pass_responses(x, raw, sensitivities=own_sensitivities(
+                case.cell, values, x, ref))
+
+            def the_twin_s(r, o) -> bool:
+                return (o > RESOLVED_MARGIN * floor and o <= RESOLVED_MARGIN * r
+                        and r <= RESOLVED_MARGIN * o)
+
+            out["report"]["unresolved_by_the_float32_pass"] = {
+                n: (float(r / floor), float(o / floor))
+                for n, mine, r, o in zip(names, own_too, response, own)
+                if mine and not the_twin_s(r, o)}
+            resolved = [r_ and not (mine and not the_twin_s(r, o))
+                        for r_, mine, r, o in zip(resolved, own_too, response, own)]
         out["report"]["constants_resolved"] = (sum(resolved), len(resolved))
         for score, vanishing in (("gradient", False), ("gradient_vanishing", True)):
             mine = [does_not_move_the_fixed_point(n) is vanishing for n in names]
@@ -711,11 +892,40 @@ RESOLVED_MARGIN = 2.0
 REFERENCED_FLOOR = 0.75
 
 
-def cases(cells=ALL_CELLS, domain: linear.Domain = linear.CLAIMED, curves=CURVES):
+#: The largest change of units, in decades, the two radius scores are
+#: drawn at on a cell whose pass multiplies two members' fields in a
+#: float32 sweep (:attr:`Cell.sweeps_a_product_of_two_members`).  Within a
+#: decade the product is at most a thousand over a field's own size, and
+#: one float32 rounding moves the Jacobian by 1e-4; at the six decades the
+#: linear search draws, by more than the whole of it (MADD-ANO-239, pinned
+#: at the foot of the module on what the search read there).  The other
+#: scores are drawn at every change of units on those cells too.
+SWEPT_PRODUCT_DECADES = 1
+#: The scores of CPL-087, which MADD-ANO-239 is about.
+RADIUS_SCORES = ("radius", "radius_strict")
+
+
+def within_the_units_a_swept_product_is_claimed_for(case: "Case") -> "Case":
+    """*case* with its change of units within :data:`SWEPT_PRODUCT_DECADES`
+    where its cell sweeps a product of two members' fields; any other
+    case unchanged."""
+    unit = case.base.unit
+    if abs(unit) <= SWEPT_PRODUCT_DECADES or not CELLS[case.cell].sweeps_a_product_of_two_members:
+        return case
+    return dataclasses.replace(case, base=dataclasses.replace(
+        case.base, unit=int(math.copysign(SWEPT_PRODUCT_DECADES, unit))))
+
+
+def cases(cells=ALL_CELLS, domain: linear.Domain = linear.CLAIMED, curves=CURVES, *,
+          swept_units_held: bool = False):
     """Draw a :class:`Case` on one of *cells*: the linear search's numbers
-    within *domain* and a curve."""
-    return st.builds(Case, cell=st.sampled_from(tuple(cells)), base=linear.cases((0,), domain),
-                     curve=st.floats(*curves).map(lambda x: 10.0 ** x))
+    within *domain* and a curve.  *swept_units_held*: with the change of
+    units held within :data:`SWEPT_PRODUCT_DECADES` on a cell that sweeps
+    a product of two members' fields (the same draws otherwise)."""
+    drawn = st.builds(Case, cell=st.sampled_from(tuple(cells)), base=linear.cases((0,), domain),
+                      curve=st.floats(*curves).map(lambda x: 10.0 ** x))
+    return (drawn.map(within_the_units_a_swept_product_is_claimed_for) if swept_units_held
+            else drawn)
 
 
 def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CLAIMED,
@@ -733,8 +943,8 @@ def search(name: str, *, cells=PER_PUSH_CELLS, domain: linear.Domain = linear.CL
         seen = observe(case)
         return seen[name], seen["report"]
 
-    report = targeted_search(cases(cells, domain), score, THRESHOLD[name], profile=profile,
-                             label=name, fail=fail)
+    report = targeted_search(cases(cells, domain, swept_units_held=name in RADIUS_SCORES), score,
+                             THRESHOLD[name], profile=profile, label=name, fail=fail)
     seen = [observe(c) for c in drawn]
     count = max(len(seen), 1)
     return report, dict(usable=sum(s[FLAG[name]] for s in seen) / count,
@@ -803,9 +1013,7 @@ def test_the_reference_reproduces_the_closed_form_on_every_per_push_draw():
     ring, twelve scalars), the seed shapes, and the same number of draws
     on the multi-rate cell (a sub-cycled member, linear interpolation)."""
     drawn = _per_push_draws(linear.PER_PUSH_CELLS) + list(linear.SEEDS.values())
-    multirate = len(linear.PER_PUSH_CELLS)
-    assert linear.CELLS[multirate].structure.endswith("multirate")
-    drawn += _per_push_draws((multirate,))[:150]
+    drawn += _per_push_draws((_LINEAR_MULTIRATE,))[:150]
     worst = assert_the_reference_reproduces_the_closed_form(drawn)
     print(f"{len(drawn)} draws; the worst miss over what is allowed: "
           + ", ".join(f"{k} {v:.3g}" for k, v in sorted(worst.items())))
@@ -856,8 +1064,7 @@ def test_the_reference_reproduces_the_closed_form_on_a_sparse_cell():
 # Slow (the marked cells): a twin and an iterating twin compiled per cell.
 # Per push: tests/property/test_coupling_nonlinear_search.py::test_several_passes_of_an_iterating_twin_are_compositions_of_the_single_pass
 @pytest.mark.parametrize("index", [0, pytest.param(2, marks=pytest.mark.slow),
-                                   pytest.param(len(linear.PER_PUSH_CELLS),
-                                                marks=pytest.mark.slow)])
+                                   pytest.param(_LINEAR_MULTIRATE, marks=pytest.mark.slow)])
 def test_several_passes_of_an_iterating_twin_are_compositions_of_the_single_pass(index):
     """The single-pass branch of the step (``max_iterations=1``) runs the
     pass an iterating group iterates: three passes of a twin that iterates
@@ -918,16 +1125,12 @@ def _transformed_scatter() -> ct.Topology:
 READ_STRUCTURES = {name: topo for name, topo in {
     **linear.STRUCTURES, **STRUCTURES, "transformed-scatter": _transformed_scatter()}.items()
     if max(nd.n for nd in topo.nodes) <= 64}
-#: The interface norm under Jacobi, the row the hunted cell below holds,
-#: found by what it is.
-_INTERFACE_JACOBI = linear.KNOBS.index(
-    dict(acceleration="none", iteration_mode="jacobi", convergence_norm="interface"))
 #: The hunted cell on which the interface norm reads a mapping at its
 #: source: the ring of three whose edge ``m2 -> m0`` delivers three entries
 #: from two, a quadratic term on every member, float32, Jacobi, no
-#: acceleration, stopped after five passes.  Found by what it is (a
-#: cell's index is its place in a table that grows).
-SOURCE_CELL = CELLS.index(Cell("mapped", "float32", _INTERFACE_JACOBI, 5, "quadratic"))
+#: acceleration, stopped after five passes (one of :data:`APPENDED`).
+#: Found by what it is, not by its place.
+SOURCE_CELL = CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"))
 
 
 def _expands(topo: ct.Topology, i: int) -> bool:
@@ -952,7 +1155,7 @@ def test_the_search_reads_an_edge_where_the_linear_model_does(structure, rule):
     with such a mapping (the last assertions) and nothing compared them:
     the slow hunt met it on one cell."""
     topo = READ_STRUCTURES[structure]
-    cfgs = linear.Cell("ring-3", "float64", _INTERFACE_JACOBI, 5).cfgs
+    cfgs = linear.Cell("ring-3", "float64", _JACOBI_INTERFACE, 5).cfgs
     rng = np.random.default_rng(len(structure))
     values = ct.draw_values(topo, rng, 0.5, dtype="float64", group_cfgs=cfgs)
     model = ct.LinearModel(topo, values, dtype="float64", group_cfgs=cfgs, interface_side=rule)
@@ -1110,9 +1313,10 @@ def test_the_floor_covers_what_the_reported_residual_misses_on_the_nonlinear_cel
     _held("floor", fractions)
 
 
-# Slow: 115 random examples a search on each of six blocks of seven cells,
-# each cell a compile of the graph with its diagnostics and of its twin;
-# the blocks outermost, so the searches share a block's compiled graphs.
+# Slow: 115 random examples a search on each of six blocks of seven cells
+# and on the block of the appended cells, each cell a compile of the graph
+# with its diagnostics and of its twin; the blocks outermost, so the
+# searches share a block's compiled graphs.
 # Per push: tests/property/test_coupling_nonlinear_search.py::test_a_usable_error_bound_reaches_the_distance_on_the_nonlinear_cell_per_push
 @pytest.mark.slow
 @pytest.mark.parametrize("block,name", [(b, n) for b in range(len(BLOCKS))
@@ -1358,3 +1562,148 @@ def test_a_group_that_leaves_float_range_under_iqn_still_returns(acceleration):
     group does.  It did not return (no return in 240 s): the secant
     least-squares handed LAPACK's SVD a matrix holding an ``inf``."""
     assert _steps_in_a_subprocess(acceleration, 30.0) == "RETURNED 120 False"
+
+
+# ---------------------------------------------------------------------------
+# What the search read on the cells an accident visited
+# ---------------------------------------------------------------------------
+
+#: ``tri`` with a product of two fields on every member in float32, Aitken
+#: under Gauss-Seidel, the interface norm, five passes: the cell the three
+#: examples below were drawn on (found by what it is, not by its index).
+_SWEPT_PRODUCT = CELLS.index(Cell("tri", "float32", 2, 5, "product"))
+#: Their numbers: non-normal gains at a loop gain of a third, member ``a``
+#: in units of 1e6, started ON the fixed point (one pass, a float32
+#: rounding from it, ``precision_limited``).
+_ON_THE_FIXED_POINT_IN_OTHER_UNITS = dict(rho=1.0 / 3.0, nonnormal=True, small=1.0, spread=0.0,
+                                          cancel=1.0, unit=6, offset=0.0, member=5)
+
+
+def _swept(seed: int, curve: float) -> Case:
+    return Case(_SWEPT_PRODUCT, linear.Case(0, seed, **_ON_THE_FIXED_POINT_IN_OTHER_UNITS), curve)
+
+
+class SettledOnAJacobianFloat32DoesNotDetermine(AssertionError):
+    """MADD-ANO-239: ``rho_spectral`` with ``spectral_usable`` set, outside
+    what CPL-087 says of it, where one float32 rounding of a value the
+    pass has just computed moves the pass's Jacobian by more."""
+
+
+#: MADD-ANO-239, as drawn by the hunt of 2026-10-07 on this cell.  Member
+#: ``c`` reads ``a`` (about 1e6, a float32 rounding 0.125) and ``b`` (about
+#: 1) and its derivative with respect to ``b`` is ``1 + curve (a' - c_0) /
+#: max|c_1|``: ``a'`` is the value this Gauss-Seidel pass has just computed
+#: for ``a``, and ``a' - c_0`` is whatever rounding the float32 pass left in
+#: it.  ``rho_spectral`` is, to six digits, the radius of the Jacobian at
+#: the same-pass values the float32 pass forms; the float64 reference's is
+#: at the exact ones.  ``{name: (case, score)}``.
+UNDETERMINED = {
+    # A curve of 19: 0.324 for 0.0238, 8.9 margins of the flag (the radius
+    # is 0.048 to 0.59 over the float32 values within two roundings of the
+    # exact same-pass ones).
+    "a-radius-a-rounding-of-a-same-pass-value-moves-past-the-flag-s-margin": (
+        _swept(65535, 19.05131244763185), "radius_strict"),
+    # A curve of 0.19: 0.11014 for 0.11156, inside the flag's margin and
+    # 1.3% off where CPL-087 says 1e-4 and the movement under a rounding
+    # of the Jacobian (0.110 to 0.113 over the sixteen roundings).
+    "a-radius-a-rounding-of-a-same-pass-value-moves-by-a-hundredth": (
+        _swept(65536, 0.19051312447631852), "radius"),
+}
+
+
+@pytest.mark.parametrize("case,score", [pytest.param(*row, marks=pytest.mark.xfail(
+    strict=True, raises=SettledOnAJacobianFloat32DoesNotDetermine,
+    reason="MADD-ANO-239: spectral_usable does not see a Jacobian that one float32 rounding of "
+           "a same-pass value moves")) for row in UNDETERMINED.values()], ids=list(UNDETERMINED))
+def test_a_settled_radius_is_the_radius_where_a_same_pass_rounding_moves_the_jacobian(
+        case, score):
+    """CPL-087 with the flag set and eight scalars crossing the group's
+    edges.  Strict: withdrawing the flag where the Jacobian moves with a
+    rounding of the iterate turns both green (a score is 0 where its flag
+    is False), and :data:`SWEPT_PRODUCT_DECADES` then goes."""
+    seen = observe(case)
+    cell = CELLS[case.cell]
+    assert cell.sweeps_a_product_of_two_members and abs(case.base.unit) > SWEPT_PRODUCT_DECADES
+    assert seen["stepped"] and seen["referenced"], seen
+    if seen[score] > THRESHOLD[score]:
+        raise SettledOnAJacobianFloat32DoesNotDetermine(
+            f"{score} is {seen[score]!r} with spectral_usable={seen['spectral_usable']}: "
+            f"{seen['report']}")
+
+
+#: The third example of that hunt: a curve of 0.019.  The float64 twin
+#: holds the same-pass ``a`` 0.006 and 0.28 of a float32 rounding off its
+#: centre, so for it the pass moves with ``c``'s centres ``c1[0]`` and
+#: ``c1[1]`` by 2 and 146 floors, the gradient with respect to ``c1[0]``
+#: at the returned iterate is a forty-seventh of the fixed point's, and
+#: "gradient_vanishing" read 1.28 (47.2 beside a bound of 6.77).  In
+#: float32 ``a' - c_0`` is exactly zero and so are both tangents: CPL-093's
+#: bound "says nothing of" a constant whose tangent is exactly zero.
+_NO_TANGENT_IN_FLOAT32 = _swept(65535, 0.019051312447631853)
+#: The same on the hub with no acceleration under the l2 norm (the other
+#: cell that sweeps a product), a member in units of 1e-6: the twin's pass
+#: moves with three centres of ``l1`` by 34 to 222 floors where the float32
+#: pass has no tangent, and with a fourth by 2.4 where the float32 pass's
+#: is 695 -- the error is 6.7 of the twin's gradient at the returned
+#: iterate ("gradient_vanishing" read 2.59) and 0.97 of the group's own,
+#: under a bound of 1.93.
+_ANOTHER_TANGENT_IN_FLOAT32 = Case(
+    CELLS.index(Cell("hub", "float32", 0, 5, "product")),
+    linear.Case(0, 34949, 0.05000000000000001, False, 1.0, 0.0, 1.0, -6, 0.0, 0), 1.0)
+
+
+# Slow (the hub): one more cell compiled, with its twins.
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_a_centre_whose_tangent_is_a_float32_rounding_is_not_in_the_gradient_score
+@pytest.mark.parametrize("case,centre", [
+    pytest.param(_NO_TANGENT_IN_FLOAT32, "c.c1[1]", id="tri"),
+    pytest.param(_ANOTHER_TANGENT_IN_FLOAT32, "l1.c0[0]", id="hub", marks=pytest.mark.slow)])
+def test_a_centre_whose_tangent_is_a_float32_rounding_is_not_in_the_gradient_score(case, centre):
+    """CPL-093 bounds the error of the gradient the group has, for a
+    constant its pass resolves.  Where the float64 twin's response to a
+    centre is not the float32 pass's (here: a hundred floors and more
+    beside exactly none), the twin's gradient is not the group's, and the
+    score leaves the centre out: it holds on what remains."""
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["stepped"] and seen["referenced"] and seen["gradient_usable"], seen
+    assert CELLS[case.cell].sweeps_a_product_of_two_members
+    dropped = report["unresolved_by_the_float32_pass"]
+    twin_floors, own_floors = dropped[centre]
+    # units: floors -- the twin's response is far above RESOLVED_MARGIN, the float32 pass's is none.
+    assert twin_floors > 16.0 and own_floors == 0.0, dropped
+    assert report["gradient_vanishing_constant"] not in dropped, report
+    assert seen["gradient_vanishing"] <= THRESHOLD["gradient_vanishing"], report
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+
+
+def test_the_float32_pass_resolves_what_the_twin_resolves_away_from_the_centre():
+    """The other side of the condition above, on the seed whose iterate is
+    a thousandth of a field from its centres: every centre and curve the
+    float64 twin's pass resolves, the float32 pass resolves too, so the
+    score still takes them (the seed test holds that it reads 0.79)."""
+    case, score, _least = SEEDS["a-nonlinearity-s-own-constant-resolved-short-of-the-fixed-point"]
+    seen = observe(case)
+    assert score == "gradient_vanishing" and seen["vanishing_scored"], seen
+    assert seen["report"]["unresolved_by_the_float32_pass"] == {}, seen["report"]
+    resolved, total = seen["report"]["gradient_vanishing_constants"]
+    assert 0 < resolved <= total, seen["report"]
+
+
+def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
+    """The radius scores are drawn as the linear search draws on every
+    cell but the two that multiply two members' fields in a float32
+    sweep, where a change of units is held within a decade (MADD-ANO-239);
+    the other scores are drawn at every change of units there too."""
+    swept = [i for i, c in enumerate(CELLS) if c.sweeps_a_product_of_two_members]
+    assert swept == [_SWEPT_PRODUCT, _ANOTHER_TANGENT_IN_FLOAT32.cell]
+    assert all(i in APPENDED_CELLS for i in swept)
+    for index in ALL_CELLS:
+        for unit in (0, -6, -3, -1, 1, 3, 6):
+            case = Case(index, dataclasses.replace(_PROBE, unit=unit), 1.0)
+            held = within_the_units_a_swept_product_is_claimed_for(case)
+            if index in swept and abs(unit) > SWEPT_PRODUCT_DECADES:
+                assert held.base.unit == (1 if unit > 0 else -1), (index, unit)
+                assert dataclasses.replace(held, base=dataclasses.replace(
+                    held.base, unit=unit)) == case
+            else:
+                assert held is case, (index, unit)

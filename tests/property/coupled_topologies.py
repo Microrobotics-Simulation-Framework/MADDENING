@@ -1497,20 +1497,28 @@ class LinearModel:
                 count += B.shape[0]
         return float(np.sqrt(total / max(count, 1)))
 
+    def exact_pass(self, gi: int, pre: dict, state: dict) -> np.ndarray:
+        """``F(x)`` for the members' stacked ``x`` of *state*, in the
+        reference's extended precision (:meth:`returned_from` works in
+        float64, which is the rounding of a float64 graph's own pass).
+        *state* also supplies what the group read from outside."""
+        members, _off, k = self._group_layout(gi)
+        L, U = self.group_pass(gi)
+        x = np.concatenate([np.asarray(np.asarray(state[m]["x"]), LD) for m in members])
+        return _solve(np.eye(k, dtype=LD) - L, U @ x + self.group_constant(gi, pre, state))
+
     def pass_rounding(self, gi: int, pre: dict, state: dict) -> np.ndarray:
         """Per entry of the members' stacked ``x``: how far one float pass at
         *state* can be from the exact pass there (``|(I - L)^{-1}|`` of the
         members' own rounding, :meth:`rounding`, each edge read at the
         larger of *state*'s value and the pass's).  What a field the solve
         returns recomputed (:meth:`recomputed`) may differ by from
-        :meth:`returned_from` of the iterate it was recomputed at.
+        :meth:`exact_pass` at the iterate it was recomputed at.
         *state* also supplies what the group read from outside."""
         members, off, k = self._group_layout(gi)
-        L, U = self.group_pass(gi)
-        x = np.concatenate([np.asarray(np.asarray(state[m]["x"]), LD) for m in members])
-        F = np.asarray(_solve(np.eye(k, dtype=LD) - L,
-                              U @ x + self.group_constant(gi, pre, state)), np.float64)
-        x = np.asarray(x, np.float64)
+        L, _U = self.group_pass(gi)
+        x = np.concatenate([np.asarray(state[m]["x"], np.float64) for m in members])
+        F = np.asarray(self.exact_pass(gi, pre, state), np.float64)
         read = {}
         for m in members:
             for i, _K in self.terms[m][2]:

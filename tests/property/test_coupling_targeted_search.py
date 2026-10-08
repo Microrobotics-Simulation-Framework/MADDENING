@@ -283,7 +283,7 @@ def returned_scores(cell, values: dict, accepted: ct.Step) -> dict:
 
     * *the pass*: every recomputed field is one plain pass at ``x``, to
       :data:`PASS_ROUNDINGS` of the pass's own rounding
-      (``LinearModel.returned_from`` and ``pass_rounding``);
+      (``LinearModel.exact_pass`` and ``pass_rounding``);
     * *the readings*: ``y`` reads within the reported residual of what
       ``x`` reads, in the residual's own weights and count -- and at the
       residual exactly where every field the norm reads was recomputed
@@ -343,11 +343,14 @@ def returned_scores(cell, values: dict, accepted: ct.Step) -> dict:
     cancels = _cancellation(model, step.pre, step.state)
     rounds = cancels * floor
 
-    # The pass: a recomputed field is ``F(x)``'s.
-    want = model.returned_from(0, accepted.pre, accepted.state, x)
+    # The pass: a recomputed field is ``F(x)``'s (the exact pass in the
+    # reference's extended precision: a float64 graph's rounding is the
+    # rounding of a float64 closed form).
+    want = model.exact_pass(0, accepted.pre, accepted.state)
+    exact = np.concatenate([np.asarray(np.asarray(step.state[m]["x"]), ct.LD) for m in members])
     eta = model.pass_rounding(0, accepted.pre, accepted.state)
     projector = np.diag(model._recomputed_projector(0)) > 0     # noqa: SLF001
-    off_pass = float(np.max(np.abs(y - want)[projector] / np.maximum(
+    off_pass = float(np.max(np.abs(np.asarray(exact - want, np.float64))[projector] / np.maximum(
         PASS_ROUNDINGS * eta[projector], 1e-300), initial=0.0))
 
     # The readings: within the residual of the accepted iterate's.

@@ -758,7 +758,7 @@ def _check_restart(cell) -> None:
             f"{_same_graph(a, b)}")
 
 
-def _same_member(where: str, member, alone) -> None:
+def _same_member(where: str, member, alone, ulps: float = 0.0) -> None:
     """A member of a ``vmap`` batch is its own unbatched solve.
 
     The state, the verdict, the pass count and every integer slot to the
@@ -769,12 +769,33 @@ def _same_member(where: str, member, alone) -> None:
     twenty values a reading; the cells of every push agree to the bit).
     A member that kept iterating with its batch, or stopped with it,
     would differ by passes, not by bits.
+
+    *ulps* (the pairs with geometry edges): the state to that many ``eps``
+    of each field's largest entry instead of to the bit, the verdict and
+    the pass count still exact.  The batched step and the unbatched one
+    are two programs, and a member that adds a product to a bias, or an
+    edge that sums two weighted samples, is compiled with a fused
+    multiply-add in one and not in the other (measured: one float32 ulp
+    of one entry of ``x`` on two gather-only pairs of nineteen cells,
+    jaxlib 0.11.0, CPU; the same pass counts and the same residual to the
+    bit).
     """
     for name in ("a", "b"):
         assert sorted(member.state[name]) == sorted(alone.state[name]), where
         for field in member.state[name]:
-            assert cd.bitwise(member.state[name][field], alone.state[name][field]), (
-                f"{where}: {name}.{field} differs from its unbatched solve's")
+            got, want = member.state[name][field], alone.state[name][field]
+            if not ulps:
+                assert cd.bitwise(got, want), (
+                    f"{where}: {name}.{field} differs from its unbatched solve's")
+                continue
+            assert got.dtype == want.dtype and got.shape == want.shape, (where, name, field)
+            bound = ulps * float(cd.finfo(want.dtype).eps) * float(np.max(np.abs(want)))
+            worst = float(np.max(np.abs(got.astype(np.float64) - want.astype(np.float64))))
+            assert worst <= bound, (
+                f"{where}: {name}.{field} is {worst:.3e} from its unbatched solve's "
+                f"(bound {bound:.3e})")
+    for key in ("converged", "iterations"):
+        assert member.report[key] == alone.report[key], (where, key)
     assert sorted(member.report) == sorted(alone.report), where
     assert sorted(member.meta) == sorted(alone.meta), where
     differ = {key: (member.report[key], alone.report[key]) for key in member.report
@@ -1525,7 +1546,7 @@ def _check_geo_batch(cell) -> None:
     assert [r.draw for r in run.refs] == [r.draw for r in plain.refs], cell.id
     passes = set()
     for k, (s, alone) in enumerate(zip(run.solves, plain.solves)):
-        _same_member(f"{cell.id}: member {k} of the batch", s, alone)
+        _same_member(f"{cell.id}: member {k} of the batch", s, alone, ulps=4.0)
         passes.add(s.report["iterations"])
     if cell.acceleration == "none":
         assert len(passes) > 1, (

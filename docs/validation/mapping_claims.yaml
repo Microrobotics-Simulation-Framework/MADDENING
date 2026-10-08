@@ -2792,7 +2792,9 @@ claims:
     of its fixed point in these readings", and "K does not see the size of
     the grid or the place of the origin". compile() warns of each edge
     "whose positions put that count at the tolerance or above", the count
-    being the float floor's: "4 * E * eps * max|u| >= rtol".
+    being the float floor's: "4 * E * eps * max|u| >= rtol", for "a scatter
+    anchored at its source", which reads the positions, and for "a gather",
+    whose value is "interpolated at those positions".
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What the interface norm reads on a geometry edge)'
     - 'docs/user_guide/geometry_dependent_mappings.md (What convergence_norm="interface" reads on a geometry edge)'
@@ -2803,6 +2805,7 @@ claims:
     - 'src/maddening/core/coupling/acceleration.py::coupling_residual_interface'
     - 'src/maddening/core/coupling/acceleration.py::residual_precision_floor'
     - 'src/maddening/core/coupling/acceleration.py::_positions_floors'
+    - 'src/maddening/core/coupling/acceleration.py::_positions_resolution'
     - 'src/maddening/core/coupling/_group_layout.py::_unresolved_position_warnings'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping.geometry_length_scale'
   conditions: >-
@@ -2833,24 +2836,48 @@ claims:
     reference: the reported residual and the state returned (one cell on
     every push). For positions their dtype resolves to the tolerance: the
     claim is stated for a group compile() does not warn of. It warns
-    (UserWarning, never a refusal) of each edge whose reading holds
-    positions where the float floor of those positions by themselves is the
+    (UserWarning, never a refusal) of each edge whose reading rests on
+    stored positions - a scatter anchored at its source, which reads them
+    as a part of their own, and a gather (a mapping read as delivered) at
+    either anchor, whose value is computed at them - where what those
+    positions put into the float floor of that part by themselves is the
     criterion's threshold or more, 4 E eps max|u| >= rtol, u in the spacing
-    of its own axis, E the group's structural evaluation count (float32 at
-    rtol=1e-4: from 210 spacings from zero where every node reads the
-    previous iterate, 105 for a Gauss-Seidel pair), on the state compile()
-    is called with and on no later write. Tested two thousandths either
-    side of that distance at rtol=1e-4 and 1e-3, on one and two axes and
-    both signs, in float64 at rtol=1e-12, and silent for a float64
-    geometry beside float32 values, a target-anchored geometry, a gather
-    and the other two norms. Under the threshold the positions still enter
-    the floor, so a residual can be at its floor without the warning. The
-    steps compiled (jit) by the graph. A scan, a batch (vmap) and forward and reverse derivatives
-    through the solve are exercised in the slow lane only, on three kinds
-    of pair. Not claimed for another mapping kind or a sub-cycled group
-    (refused: MAP-033), for the bounds (withheld: MAP-048), 16-bit dtypes,
-    gradients, vmap, multi-rate graphs, predictors, run_adaptive or sharded
-    graphs.
+    of its own axis, eps of the dtype the positions are stored in, E the
+    group's structural evaluation count (float32 at rtol=1e-4: from 210
+    spacings from zero where every node reads the previous iterate, 105
+    for a Gauss-Seidel pair), on the state compile() is called with and on
+    no later write (a gather anchored at its target: at the target's
+    positions in that state). For a delivered value the count is a worst
+    case (a field that varies by its own size across one cell), and it is
+    that part's whole floor only where the positions' rounding is coarser
+    than the value's own (from one spacing out, for positions no wider
+    than the value). Tested two thousandths either side of that distance
+    at rtol=1e-4 and 1e-3, on one and two axes and both signs, for pairs
+    of scatters, of gathers and of one of each; in float64 at rtol=1e-12;
+    with the far markers on one node of the pair only, on every kind and
+    anchor (the edges warned of are the ones whose positions that node
+    stores); silent for a float64 geometry beside float32 values, a
+    scatter anchored at its target and the other two norms; and in every
+    domain of the battery below by the dtype of the member that stores
+    the positions. Under the threshold the positions still enter the
+    floor, so a residual can be at its floor without the warning. The
+    steps compiled (jit) by the graph. In the every-domain battery (5
+    markers on 40 grid points, the lattice centred on zero, the markers
+    moving by up to 1/32 of a cell a step): a two-way pair on every push
+    in float32, with a float32 member beside a float64 one, as a member
+    of a vmap batch (against the same scenario stepped alone: the same
+    verdict and pass count, the state to four eps of each field; to the
+    bit on that pair, one ulp of one entry apart on two gather-only pairs
+    of the slow lane), in a multi-rate graph whose group runs at one rate (against the
+    pair at one rate, to the bit, and on the base steps it fires on),
+    under predictor="quadratic" (the loop started at the guess, five
+    steps) and across a checkpoint restart; every kind and schedule in
+    each of those domains and in float64 in the slow lane, with aitken
+    and iqn-ils once per domain. A scan and forward and reverse
+    derivatives through the solve are exercised in the slow lane only, on
+    three kinds of pair. Not claimed for another mapping kind or a
+    sub-cycled group (refused: MAP-033), for the bounds (withheld:
+    MAP-048), 16-bit dtypes, gradients, run_adaptive or sharded graphs.
   oracle: >-
     a float64 NumPy restatement of the pass with a stencil of its own
     (checked against the rational-arithmetic kernel reference), of the
@@ -2862,9 +2889,13 @@ claims:
     a function of its flat iterate; fourteen seeded faults of the library
     (the test module's docstring lists eleven with their first signal).
     For the advisory: the rule restated in NumPy from the stored positions
-    (four roundings of the farthest coordinate per evaluation, over rtol),
-    the library's own floor of the compiled state over a sweep of nine
-    distances, and seventeen seeded faults.
+    (four roundings of the farthest coordinate per evaluation, over rtol)
+    and from the kinds and anchors (which edges rest on which node's
+    positions), the library's own floor of the compiled state over a sweep
+    of nine distances on three kinds of pair, and seeded faults (the
+    notes). In the battery: the same reference with every number as its
+    member stores it, started from the state each step started from, and
+    the marker-side twin built in the domain.
   tests:
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_residual_of_two_states_is_the_rules'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_float_floor_counts_each_part_at_its_own_resolution'
@@ -2879,7 +2910,7 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_threshold'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_same_positions_held_in_float64_compile_silently'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_float64_positions_warn_at_their_own_distance_and_are_not_told_to_widen'
-    - 'tests/property/test_coupling_geometry_interface_norm.py::test_positions_that_are_no_part_of_the_reading_are_not_warned_of'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_an_edge_is_warned_of_for_the_positions_its_reading_rests_on_and_no_others'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_other_norms_measure_positions_against_their_own_size_and_are_not_warned'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_whole_problem_translated_far_from_zero_warns_and_translated_back_does_not'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distances'
@@ -2887,6 +2918,11 @@ claims:
     - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_reports_as_its_static_mapping_under_the_interface_norm'
     - 'tests/core/test_interface_plan.py::test_the_parts_of_a_geometry_edges_reading'
     - 'tests/core/test_interface_plan.py::test_a_readings_geometry_is_at_the_time_level_the_step_uses'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_reports_what_its_marker_side_twin_reports'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graphs_pair_with_geometry_edges_is_the_pair_at_one_rate'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_sub_cycled_pair_with_geometry_edges_is_refused_under_the_interface_norm'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_compile_warns_of_far_markers_by_the_dtype_of_the_member_that_stores_them'
   status: verified
   notes: >-
     Measured (jaxlib 0.11.0, CPU, float64, rtol=1e-4). K on a two-way pair
@@ -2921,16 +2957,16 @@ claims:
   domains:
     f32: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
     f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
-    mixed_dtype: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_step_records_the_floor_of_a_reading_at_a_pre_step_geometry'
+    mixed_dtype: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
     16bit: narrowed
     jit: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
     grad: narrowed
-    vmap: narrowed
-    multi_rate: narrowed
+    vmap: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    multi_rate: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
     sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    predictors_warm_starts: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
     adaptive: narrowed
-    checkpoint_restart: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
+    checkpoint_restart: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
     sharded: narrowed
 - id: MAP-049
   area: geometry-dependent mapping diagnostics

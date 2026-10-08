@@ -961,6 +961,39 @@ def test_float64_positions_warn_at_their_own_distance_and_are_not_told_to_widen(
         assert "coordinates local to the grid" in text and "loosen rtol above" in text, text
 
 
+def test_a_delivered_value_is_warned_of_for_its_positions_rounding_and_not_for_its_own():
+    """float32 values gathered at float64 positions, under a tolerance
+    float32 itself does not resolve (``rtol=5e-7`` under Gauss-Seidel:
+    eight float32 roundings are 1.9 tolerances).  The float floor of the
+    delivered value is its own dtype's, wherever the markers are: a
+    thousand spacings out the float64 positions put 3.6e-6 of a tolerance
+    into it, and ``compile()`` says nothing of them (the group is limited
+    by its values, which is not this advisory's to say).  The same pair
+    with float32 positions is warned of.  And float64 positions far enough
+    for their own count (``rtol=1e-12``) are named as float64 beside the
+    float32 values, with the two remedies that are left."""
+    base = _PLACED["gather-only"]
+    wide = dataclasses.replace(base, geom_dtype="float64")
+    rtol, E = 5e-7, gi.EVALUATIONS[base.schedule]
+    positions, origin = _markers(base, 1_000.0)
+    assert 4.0 * E * float(np.finfo(np.float32).eps) / rtol > 1.5, "premise: the value's floor"
+    assert E * gi.positions_floor(positions, base.spacing, "float64", rtol) < 1e-5
+    with precision(True):
+        assert _compile_warnings(_placed(wide, positions, origin, rtol=rtol)) == []
+        narrow = _edges_warned(_compile_warnings(_placed(base, positions, origin, rtol=rtol)))
+        at = _threshold_reach(wide, 1e-12)
+        over, origin = _markers(wide, at * (1 + 2e-3))
+        got = _edges_warned(_compile_warnings(_placed(wide, over, origin, rtol=1e-12)))
+    assert sorted(narrow) == sorted(got) == ["p.x->q.u", "q.x->p.u"]
+    _says_how(base, narrow)
+    _says_how(wide, got)
+    for text in narrow.values():
+        assert "float32 positions" in text and "in float64 (" in text, text
+    for text in got.values():
+        assert "float64 positions" in text and "float32" not in text, text
+        assert "in float64 (" not in text and "loosen rtol above" in text, text
+
+
 @pytest.mark.parametrize("anchors", ANCHORS, ids="-".join)
 @pytest.mark.parametrize("kind", gi.KINDS)
 def test_an_edge_is_warned_of_for_the_positions_its_reading_rests_on_and_no_others(

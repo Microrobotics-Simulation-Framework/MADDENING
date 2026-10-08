@@ -1199,7 +1199,10 @@ at the source carries none.
   at `eps |u|` of one spacing.  The floor of a gather anchored at its
   target needs the pre-step positions, which the returned state does not
   hold: the step records it (`reading_floor`), and a state no step wrote
-  has none.
+  has none.  `compile()` warns of each edge for which the positions' term
+  alone, `4 E eps max|u| / rtol`, is one or more on the state it sees: a
+  part that is positions, or a value delivered at them (the user guide's
+  limits have the rule and the remedies).
 * **The claim.**  A group that reports `converged=True` is within $K$
   tolerances of its fixed point in these readings, $K = \lVert D (I -
   A)^{-1} (I - L) D^{-1} \rVert_2$ on the compact readings as for a

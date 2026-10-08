@@ -211,29 +211,41 @@ names the edge and says what to do.
 * **Under the interface norm, positions need a dtype that resolves the
   tolerance where they are.**  A position `u` spacings from zero is stored
   to `eps * u` spacings (`eps` is 1.2e-7 in float32 and 2.2e-16 in
-  float64), and the criterion asks the positions it reads (a scatter's,
-  anchored at its source) to change by less than `rtol` of one spacing.
+  float64).  That rounding enters what the criterion reads in two ways:
+  - **a scatter anchored at its source** reads those positions themselves
+    and asks them to change by less than `rtol` of one spacing;
+  - **a gather** (and any mapping read as delivered, at either anchor)
+    reads a value interpolated at those positions.  A position moved by
+    `eps * u` spacings moves an interpolation weight by as much, and the
+    delivered value by up to that fraction of its own size (the worst
+    case: a field that varies by its own size across one cell), of which
+    the criterion asks a change below `rtol`.
+
   The float floor of the residual counts four such roundings per
-  evaluation of a pass (`PRECISION_FLOOR_ULPS`; `E` evaluations a pass:
-  one where every node reads the previous iterate and evaluates once, two
-  for a Gauss-Seidel pair), and `compile()` warns (`UserWarning`) of each
-  edge whose positions put that count at the tolerance or above:
+  evaluation of a pass for every entry of either reading
+  (`PRECISION_FLOOR_ULPS`; `E` evaluations a pass: one where every node
+  reads the previous iterate and evaluates once, two for a Gauss-Seidel
+  pair), and `compile()` warns (`UserWarning`) of each edge whose
+  positions put that count at the tolerance or above:
 
   ```text
   4 * E * eps * max|u| >= rtol
   ```
 
-  with `u` taken axis by axis in that axis's spacing, on the state
-  `compile()` is called with.  In float32 at `rtol=1e-4` that is from 210
-  spacings from zero (105 for a Gauss-Seidel pair); at the default
-  `rtol=1e-6`, from two.  From there on the rounding counted for such a
-  position is the tolerance asked of it, or more: rounding alone can keep
-  the group from converging (it then runs to `max_iterations`), and where
-  it does converge the criterion says little of those positions.  It is a
-  warning, and the step is built as it would be without it: where the
-  positions settle to the last bit the group converges as before.  The
-  message names the edge, the field, the distance and the dtype, and three
-  remedies:
+  with `u` taken axis by axis in that axis's spacing and `eps` that of the
+  dtype the positions are stored in, on the state `compile()` is called
+  with.  In float32 at `rtol=1e-4` that is from 210 spacings from zero
+  (105 for a Gauss-Seidel pair); at the default `rtol=1e-6`, from two.
+  From there on the rounding counted for the positions is the tolerance
+  asked of the reading, or more: rounding alone can keep the group from
+  converging (it then runs to `max_iterations`), and where it does
+  converge the criterion says little of those positions, or of the last
+  digits of that value.  It is a warning, and the step is built as it
+  would be without it: where the positions settle to the last bit the
+  group converges as before, and a gathered field that varies little
+  across a cell is moved by less than the count allows for.  The message
+  names the edge, the node and field that store the positions, which of
+  the two readings it is, the distance and the dtype, and three remedies:
   - hold the positions in float64.  This needs `jax_enable_x64`; the
     mapping computes its weights in the geometry's dtype and casts them to
     the field's, so the other fields can stay float32;
@@ -242,9 +254,12 @@ names the edge and says what to do.
   - loosen `rtol`.
 
   Positions written after `compile()` (`set_node_state`) are not asked
-  again until the next `compile()`.  A target-anchored geometry (no
-  reading), a gather (read as delivered) and the `"l2"` and `"mixed"`
-  norms (which measure positions against their own size) are not asked.
+  again until the next `compile()`.  A gather anchored at its target is
+  asked at the target's positions in that state (what a step started from
+  it reads).  A scatter anchored at its target is not asked: its reading
+  is its source value alone, and the float floor counts no position for
+  it.  Neither are the `"l2"` and `"mixed"` norms, which measure positions
+  against their own size and read no delivered value.
 * **No adaptive stepping** and **no sharded nodes** on a geometry edge.
 * **The geometry is a state field of the edge's own source or target.**
   To use positions another node holds, carry them in the source's or the
@@ -289,8 +304,10 @@ For a `multilinear_grid` edge inside a group that does not sub-cycle:
   position `u` spacings from zero is stored to about `1e-7 u` spacings;
   at `rtol=1e-4` that is the whole tolerance by a thousand spacings, and
   `compile()` warns from a quarter of that distance (an eighth for a
-  Gauss-Seidel pair; the limits above have the arithmetic).  Hold the
-  positions in float64, keep the origin near the grid, or loosen `rtol`.
+  Gauss-Seidel pair; the limits above have the arithmetic), of a scatter
+  that reads the positions and of a gather whose value is interpolated at
+  them.  Hold the positions in float64, keep the origin near the grid, or
+  loosen `rtol`.
 * **No bound is reported under this norm yet**: `rho_spectral`,
   `spectral_error_bound`, the gradient bound and `precision_limited` are
   withheld with a `not_usable_reason`, as in the limits above.

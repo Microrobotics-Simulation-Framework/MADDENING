@@ -404,7 +404,7 @@ class Cell:
         just computed -- in float32, to a float32 rounding -- so at ``U =
         1e6`` the pass the group runs and its float64 twin have other
         Jacobians at one state, and the twin is no reference for the
-        group's radius (MADD-ANO-238; the two radius scores are drawn with
+        group's radius (MADD-ANO-239; the two radius scores are drawn with
         the change of units on such a cell within
         :data:`SWEPT_PRODUCT_DECADES`).
         Under Jacobi ``u_j' - c_j'`` is a difference of two floats of the
@@ -476,7 +476,7 @@ APPENDED = (
     # every member in float32, Aitken under Gauss-Seidel, the interface
     # norm, stopped after five passes.  The first cell on which a member
     # multiplies two other members' fields in a float32 sweep
-    # (``sweeps_a_product_of_two_members``; MADD-ANO-238 is pinned on it).
+    # (``sweeps_a_product_of_two_members``; MADD-ANO-239 is pinned on it).
     Cell("tri", "float32", 2, 5, "product"),
     # The same on the fan-out hub with no acceleration under the l2 norm
     # (what cell 29 was by accident).
@@ -858,11 +858,11 @@ REFERENCED_FLOOR = 0.75
 #: float32 sweep (:attr:`Cell.sweeps_a_product_of_two_members`).  Within a
 #: decade the product is at most a thousand over a field's own size, and
 #: one float32 rounding moves the Jacobian by 1e-4; at the six decades the
-#: linear search draws, by more than the whole of it (MADD-ANO-238, pinned
+#: linear search draws, by more than the whole of it (MADD-ANO-239, pinned
 #: at the foot of the module on what the search read there).  The other
 #: scores are drawn at every change of units on those cells too.
 SWEPT_PRODUCT_DECADES = 1
-#: The scores of CPL-087, which MADD-ANO-238 is about.
+#: The scores of CPL-087, which MADD-ANO-239 is about.
 RADIUS_SCORES = ("radius", "radius_strict")
 
 
@@ -1324,12 +1324,12 @@ def _swept(seed: int, curve: float) -> Case:
 
 
 class SettledOnAJacobianFloat32DoesNotDetermine(AssertionError):
-    """MADD-ANO-238: ``rho_spectral`` with ``spectral_usable`` set, outside
+    """MADD-ANO-239: ``rho_spectral`` with ``spectral_usable`` set, outside
     what CPL-087 says of it, where one float32 rounding of a value the
     pass has just computed moves the pass's Jacobian by more."""
 
 
-#: MADD-ANO-238, as drawn by the hunt of 2026-10-07 on this cell.  Member
+#: MADD-ANO-239, as drawn by the hunt of 2026-10-07 on this cell.  Member
 #: ``c`` reads ``a`` (about 1e6, a float32 rounding 0.125) and ``b`` (about
 #: 1) and its derivative with respect to ``b`` is ``1 + curve (a' - c_0) /
 #: max|c_1|``: ``a'`` is the value this Gauss-Seidel pass has just computed
@@ -1353,7 +1353,7 @@ UNDETERMINED = {
 
 @pytest.mark.parametrize("case,score", [pytest.param(*row, marks=pytest.mark.xfail(
     strict=True, raises=SettledOnAJacobianFloat32DoesNotDetermine,
-    reason="MADD-ANO-238: spectral_usable does not see a Jacobian that one float32 rounding of "
+    reason="MADD-ANO-239: spectral_usable does not see a Jacobian that one float32 rounding of "
            "a same-pass value moves")) for row in UNDETERMINED.values()], ids=list(UNDETERMINED))
 def test_a_settled_radius_is_the_radius_where_a_same_pass_rounding_moves_the_jacobian(
         case, score):
@@ -1432,7 +1432,7 @@ def test_the_float32_pass_resolves_what_the_twin_resolves_away_from_the_centre()
 def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
     """The radius scores are drawn as the linear search draws on every
     cell but the two that multiply two members' fields in a float32
-    sweep, where a change of units is held within a decade (MADD-ANO-238);
+    sweep, where a change of units is held within a decade (MADD-ANO-239);
     the other scores are drawn at every change of units there too."""
     swept = [i for i, c in enumerate(CELLS) if c.sweeps_a_product_of_two_members]
     assert swept == [_SWEPT_PRODUCT, _ANOTHER_TANGENT_IN_FLOAT32.cell]

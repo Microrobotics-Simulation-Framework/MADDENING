@@ -376,6 +376,16 @@ def _exit_rows():
             yield pytest.param(shape, rule, id=f"{_id(shape)}-{rule}", marks=marks)
 
 
+def _assert_returned(shape, seen, want) -> None:
+    """The state the step returned is *want*, to the rounding of its passes."""
+    close = 1e-9 if shape.dtype == "float64" else 2e-4
+    for name in ("p", "q"):
+        gap = float(np.max(np.abs(seen["state"][name] - want[name])))
+        assert gap <= close * float(np.max(np.abs(want[name]))), (
+            f"{name} is {gap:.3e} from the accepted iterate with its unmeasured fields "
+            f"one pass on (measured whole: {seen['whole']})")
+
+
 @pytest.mark.parametrize("shape,rule", list(_exit_rows()))
 def test_the_plain_loop_stops_where_the_reference_of_its_rule_does(shape, rule):
     """Residual, verdict and pass count of ``acceleration="none"`` against the
@@ -386,17 +396,20 @@ def test_the_plain_loop_stops_where_the_reference_of_its_rule_does(shape, rule):
     seen = sg.run(shape, draw)
     ref = seen["reference"]
     expected = ref.plain_exit(rule)
-    restated = seen[f"residual_{rule}"]
     # A float32 residual is a float32 sum of squares of float32 readings.
     tight = 1e-9 if shape.dtype == "float64" else 2e-3
-    assert abs(seen["residual"] - restated) <= tight * restated, (
-        f"the step reports residual {seen['residual']!r}; the {rule} reading of the state "
-        f"it returned gives {restated!r}")
+    # The report is of the iterate the loop accepted: the reference's own
+    # loop stops on it, with this residual.
+    assert abs(seen["residual"] - expected["residual"]) <= tight * expected["residual"], (
+        f"the step reports residual {seen['residual']!r}; the {rule} reading of the iterate "
+        f"the reference's loop accepts gives {expected['residual']!r}")
     assert seen["converged"] == expected["converged"]
     assert seen["iterations"] == expected["iterations"], (
         f"the step took {seen['iterations']} passes; the plain loop under the {rule} "
         f"reading stops after {expected['iterations']} (margin {expected['margin']:.3g})")
-    assert abs(expected["residual"] - seen["residual"]) <= tight * restated
+    # ... and the state returned is that iterate with the fields the norm
+    # does not measure whole one plain pass on (both, behind two mappings).
+    _assert_returned(shape, seen, ref.returned(expected["state"], seen["whole"]))
 
 
 TWIN_SHAPES = (
@@ -459,8 +472,12 @@ def test_the_marker_side_twin_stops_where_the_compact_reference_does(shape):
     ref, _seen, twin = _twin_reports(shape)
     expected = ref.plain_exit("compact")
     tight = 1e-9 if shape.dtype == "float64" else 2e-3
-    assert abs(twin["residual"] - twin["residual_compact"]) <= tight * twin["residual"]
+    assert abs(twin["residual"] - expected["residual"]) <= tight * twin["residual"]
     assert (twin["iterations"], twin["converged"]) == (expected["iterations"], True)
+    # ``p`` is read by a plain edge and kept; ``q``, behind the gather, is
+    # one pass on.
+    assert twin["whole"] == ("p",)
+    _assert_returned(shape, twin, ref.returned(expected["state"], twin["whole"]))
     assert twin["excess"] <= 1.0
 
 
@@ -592,11 +609,19 @@ def test_a_step_is_the_models_under_its_rule(row, rule):
             raise AssertionError(f"{row}: no seed decides its exit with margin")
         (step,) = ct.run(built, values, 1)
     report = step.reports[0]
-    restated = model.pass_residual(0, step.pre, step.state)
+    # The report is of the iterate the loop accepted, which the model's
+    # restated loop gives; the state returned is that iterate with the
+    # fields the norm does not measure whole one plain pass on.
+    restated = expected["residual"]
     tight = 1e-9 if dtype == "float64" else 2e-3
     assert abs(float(report["residual"]) - restated) <= tight * restated, (
         f"the step reports residual {report['residual']!r}; the {rule} reading of the "
-        f"state it returned gives {restated!r}")
+        f"iterate the model's loop accepts gives {restated!r}")
+    close = 1e-9 if dtype == "float64" else 2e-4
+    for name, want in expected["returned"].items():
+        got = np.asarray(step.state[name]["x"], np.float64)
+        assert np.max(np.abs(got - want)) <= close * max(float(np.max(np.abs(want))), 1.0), (
+            row, name, got, want)
     model.check_step(step.pre, step.state, step.reports, thresholds=[1.0],
                      where="-".join(row))
     assert bool(report["converged"]) == expected["converged"]

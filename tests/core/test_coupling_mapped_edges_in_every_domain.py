@@ -31,9 +31,12 @@ is a reading of another edge.
 each dtype stores them, and call nothing of the library's reading:
 
 * CPL-041: a group stopped at its cap unconverged reports the residual of
-  the state it returns, ``||F(x) - x||`` with ``F`` one Gauss-Seidel pass
-  -- here the RMS, over every entry the two edges deliver, of the change
-  of the delivered value over ``rtol`` times its edge's largest magnitude;
+  the iterate its loop stopped on, ``||F(x) - x||`` with ``F`` one
+  Gauss-Seidel pass -- here the RMS, over every entry the two edges
+  deliver, of the change of the delivered value over ``rtol`` times its
+  edge's largest magnitude.  (The step returns that iterate with the
+  field read only through the mapping one pass on, CPL-191, so the
+  iterate is read with the return rule switched off);
 * CPL-088: where ``spectral_usable`` is True, ``spectral_error_bound`` is
   at least the distance to the exact fixed point in the same norm at the
   returned state;
@@ -45,6 +48,8 @@ each dtype stores them, and call nothing of the library's reading:
 
 from __future__ import annotations
 
+import contextlib
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -54,6 +59,7 @@ from maddening.core.coupling.acceleration import (
     residual_precision_floor,
 )
 from tests.core import coupling_domains as cd
+from tests.property import coupled_graphs as cg
 
 #: Every domain, ``run_adaptive`` slow (it compiles its step on every call).
 EVERY = list(cd.EVERY) + [pytest.param(cd.ADAPTIVE, marks=pytest.mark.slow)]
@@ -82,17 +88,18 @@ def _rtol(domain) -> float:
     return 0.02 if _sixteen(domain) else 1e-5
 
 
-def _graph(label):
+def _graph(label, accepted=False):
     """The mapped pair in *label*'s domain: two passes with the report's
-    analysis on, compiled once per module."""
-    if label not in _GRAPHS:
+    analysis on, compiled once per module.  *accepted*: a second graph, to
+    be stepped with the return rule switched off (:func:`_solves`)."""
+    if (label, accepted) not in _GRAPHS:
         d = cd.DOMAINS[label]
         with cd.entered(d):
-            _GRAPHS[label] = cd.pair(
+            _GRAPHS[label, accepted] = cd.pair(
                 d, n=2, g=GAINS, c=FORCING, mappings=(DECOY, None),
                 convergence_norm="interface", rtol=_rtol(d), max_iterations=2,
                 diagnostics=True)
-    return _GRAPHS[label]
+    return _GRAPHS[label, accepted]
 
 
 def _scenarios(domain, gm) -> list:
@@ -104,10 +111,20 @@ def _scenarios(domain, gm) -> list:
     return [seq] if (domain.predictor or domain.restart) else [seq[0]]
 
 
-def _solves(label) -> list:
+#: The graphs already traced with the return rule switched off.
+_TRACED_AT_THE_ACCEPTED_ITERATE: set = set()
+
+
+def _solves(label, accepted=False) -> list:
+    """The domain's solves.  *accepted*: of the iterate each loop stopped on
+    -- the state its report is of -- read by stepping a graph of its own
+    with the interface norm's return rule switched off
+    (:func:`tests.property.coupled_graphs.accepted_iterate`)."""
     d = cd.DOMAINS[label]
-    gm = _graph(label)
-    with cd.entered(d):         # x64 on in the float64 and mixed-dtype domains
+    with contextlib.ExitStack() as stack:
+        asked = stack.enter_context(cg.accepted_iterate()) if accepted else None
+        gm = _graph(label, accepted)
+        stack.enter_context(cd.entered(d))  # x64 on in the float64 and mixed-dtype domains
         out = []
         for scenario in _scenarios(d, gm):
             if isinstance(scenario, list):
@@ -115,6 +132,9 @@ def _solves(label) -> list:
             else:
                 out.extend(cd.run(d, gm, [scenario]))
         cd.assert_in_domain(d, gm, out)
+    if accepted and label not in _TRACED_AT_THE_ACCEPTED_ITERATE:
+        assert asked, "the step never asked the return rule: the patch is on the wrong name"
+        _TRACED_AT_THE_ACCEPTED_ITERATE.add(label)
     return out
 
 
@@ -160,15 +180,18 @@ def test_the_interface_norm_measures_what_mapped_edges_deliver(label):
     """CPL-041 on a mapped internal edge beside a plain one.
 
     At its cap of two passes the group is far from converged, so the
-    residual it reports is that of the state it returns: the change, over
-    one more pass, of what the two edges deliver -- the mapped one with the
-    matrix the step ran with.  Read on the source fields -- or with the
-    mapping object's own weights -- the same state gives another number.
+    residual it reports is that of the iterate its loop stopped on: the
+    change, over one more pass, of what the two edges deliver -- the mapped
+    one with the matrix the step ran with.  Read on the source fields -- or
+    with the mapping object's own weights -- the same iterate gives another
+    number.  (The step returns that iterate with ``b``, which is read only
+    through the mapping, one pass on; the iterate itself is read with the
+    return rule switched off.)
     """
     d = cd.DOMAINS[label]
-    gm = _graph(label)
+    gm = _graph(label, accepted=True)
     eps = float(cd.finfo(d.coarsest).eps)
-    for s in _solves(label):
+    for s in _solves(label, accepted=True):
         r = s.report
         x = _state(s)
         fx = _one_pass(gm, s, x)

@@ -33,6 +33,7 @@ modules and by nothing in ``src/``.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import warnings
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 from hypothesis import strategies as st
 
+from maddening.core.coupling import _coupled_block
 from maddening.core.coupling.group import _FIELD_DEFAULTS, _INERT_RULES
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
@@ -461,6 +463,37 @@ def set_initial(gm: GraphManager, values: dict) -> None:
             s = dict(gm.get_node_state(name))
             s["x"] = jnp.asarray(v["x0"], jnp.float32)
             gm.set_node_state(name, s)
+
+
+@contextlib.contextmanager
+def accepted_iterate():
+    """Inside: an ``"interface"`` group returns the iterate its loop accepted, nothing recomputed.
+
+    Under ``convergence_norm="interface"`` a solve returns the iterate it
+    accepted with every field the norm does not measure whole recomputed
+    by one plain pass at it (``_fields_the_interface_norm_misses``).  The
+    state returned is then not the iterate the report is *of*, and does
+    not determine it.  A test of the report -- the residual's reading, a
+    bound taken at the accepted iterate -- reads that iterate by building
+    and stepping its graph in here: the rule is replaced by one that names
+    no field, on the name the step reads at trace time.
+
+    Yields the list of schedules the step asked the rule about.  **Assert
+    it is not empty** once the graph has stepped: a graph traced elsewhere
+    never read the patch.
+    """
+    asked = []
+
+    def nothing(_group, _interface_edges, schedule, _state):
+        asked.append(tuple(schedule))
+        return {}
+
+    real = _coupled_block._fields_the_interface_norm_misses
+    _coupled_block._fields_the_interface_norm_misses = nothing
+    try:
+        yield asked
+    finally:
+        _coupled_block._fields_the_interface_norm_misses = real
 
 
 def snapshot(gm: GraphManager) -> dict:

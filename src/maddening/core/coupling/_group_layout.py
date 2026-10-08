@@ -143,6 +143,66 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     return True
 
 
+def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -> dict:
+    """``{member: (field, ...)}``: the floating fields *group*'s solve returns recomputed at the iterate it accepts.
+
+    ``convergence_norm="interface"`` measures, on each pass, how far what
+    the internal edges deliver moved between an iterate and its successor,
+    and nothing else.  The members of the iterate it accepts were computed
+    from the readings of the iterate *before* it, which the exit does not
+    compare with anything.  So the norm answers only for a field it
+    **measures whole**: the source field of an internal edge that delivers
+    it as it is, with no mapping and no transform
+    (:func:`maddening.core.edge._delivered` applies nothing else) -- an
+    edge whose reading *is* its source field, which the group's plan
+    answers (``InterfaceEdge.reads_source_as_is``).  Every
+    other floating field could be returned from a pass before the readings
+    the verdict was taken on, with ``converged=True``:
+
+    * a field **no internal edge reads** (a one-way pair under Jacobi
+      returned its target computed from the pre-step source at
+      ``iterations=1`` and a residual of exactly zero: MADD-ANO-240);
+    * a field internal edges read **only through a mapping or a
+      transform**, which may deliver less than the field: the part of it
+      they do not deliver is measured by nothing (MADD-ANO-241).
+
+    The return rule (``_with_nonfloat_fields_at`` in the step): a field
+    measured whole keeps the accepted iterate's value, bit for bit; every
+    field named here takes the value **one plain pass of the group's own
+    schedule computes at the accepted iterate**, from the readings the
+    verdict was taken on.  One rule for every member, schedule,
+    acceleration, solver and verdict: under a relaxation an unmeasured
+    field is a blend of every pass so far, and a member a sweep feeds
+    forward lags too once its inputs came through a mapping, so no
+    narrower set was found that is right everywhere.
+
+    ``{}`` for every other norm, and for an interface group whose every
+    floating field is measured whole: such a group keeps its compiled
+    step and is not charged the pass.  Static.  **The one place the set
+    is defined**, and a derivation over the group's description:
+    *interface_edges* is its plan (or a bare sequence of edges), and
+    which edge reads its source field as it is is the plan's answer, on
+    the side the norm reads that edge.  So a field the norm does measure
+    whole is never recomputed, whichever side that is.
+
+    Which fields are floating is decided on *state* alone (the step
+    hands the first pass's, the state its non-floating fields are named
+    on), as the norm's reading decides it on the state it is handed
+    (``acceleration._interface_readings``) and not on a record's
+    ``source_kind``, which is of the state the plan was built from.  The
+    two agree wherever a pass keeps each field's dtype kind.
+    """
+    if group.convergence_norm != "interface":
+        return {}
+    floats = float_fields_of(state, list(schedule))
+    whole = {record.source
+             for record in _interface_plan.interface_records(interface_edges)
+             if record.reads_source_as_is}
+    missed = {nn: tuple(f for f in floats[nn] if (nn, f) not in whole)
+              for nn in schedule}
+    return {nn: fields for nn, fields in missed.items() if fields}
+
+
 #: Every ``_meta`` slot a coupling group can own, as the suffix after
 #: ``coupling_<group key>_``.  Read by :func:`_refuse_colliding_group_keys`.
 _GROUP_META_SUFFIXES = (

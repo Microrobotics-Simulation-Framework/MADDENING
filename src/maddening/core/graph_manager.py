@@ -2832,6 +2832,12 @@ class GraphManager:
                             meta[f"coupling_{key}_geometry_plane_limit"] = jnp.array(
                                 jnp.nan, dtype=spec_dtype
                             )
+                            # How many radii of the Kantorovich ball
+                            # around the iterate the nearest lattice
+                            # plane is away (same condition).
+                            meta[f"coupling_{key}_geometry_plane_margin"] = jnp.array(
+                                jnp.nan, dtype=spec_dtype
+                            )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -5234,6 +5240,32 @@ class GraphManager:
                             geometry_keys, reported_bound, float(plane_limit),
                             _bounds.GEOMETRY_PLANE_REACH),
                     })
+                if plane_limit is not None and result[key]["gradient_bound_usable"]:
+                    # Experimental: the gradient's flag does not stand on
+                    # that check.  It takes the Jacobian at the iterate
+                    # and at the Newton point; the gradient of the fixed
+                    # point is the Jacobian's *there*, and a fixed point
+                    # just past a plane the Newton point stops short of is
+                    # in a cell neither was taken in (the bound was 15 to
+                    # 70,000 times under the error, MADD-ANO-251).  The
+                    # flag stands only where no lattice plane is in the
+                    # Newton-Kantorovich ball around the iterate at all:
+                    # the step stored how many radii of that ball the
+                    # nearest plane is away
+                    # (``_bounds._kantorovich_ball_plane_margin``, with
+                    # the argument; a margin that is absent or not a
+                    # number counts as none).  At one or under the
+                    # gradient's flag is withdrawn whatever the check
+                    # read; the numbers stay, and ``spectral_usable`` is
+                    # the rule's above.
+                    margin = meta.get(f"coupling_{key}_geometry_plane_margin")
+                    margin = float("nan") if margin is None else float(margin)
+                    if not margin > 1.0:
+                        result[key].update({
+                            "gradient_bound_usable": False,
+                            "not_usable_reason": _group_layout._geometry_ball_plane_reason(
+                                geometry_keys, margin, _bounds.GEOMETRY_PLANE_REACH),
+                        })
         return result
 
     # ------------------------------------------------------------------
@@ -6497,7 +6529,7 @@ class GraphManager:
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
                            "pass_evaluations", "reading_floor", "geometry_gap",
-                           "geometry_plane_limit"):
+                           "geometry_plane_limit", "geometry_plane_margin"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):

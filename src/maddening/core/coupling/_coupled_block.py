@@ -1520,13 +1520,12 @@ def _run_coupled_block_impl(
                     field_ids, n_fields)
                 return gap if located else jnp.full_like(gap, jnp.nan)
 
-            def _plane_limit_at(x_sg, kept_weights, spectrum_weights, scale):
-                """The largest ``spectral_error_bound`` at which no position
-                the pass reads from the iterate can be across a lattice
-                plane at the fixed point (``_geometry_plane_limit``), in
-                the units of the group's norm: its constant is 1 under
-                ``"l2"`` and ``1 / (rtol sqrt(count))`` under ``"mixed"``,
-                ``count`` the entries of the fields the norm reads."""
+            def _plane_readers():
+                """``(where, shape, dtype, mapping)`` per position field the
+                pass reads from the iterate or from the state the same pass
+                has built (``InterfacePlan.geometry_iterate_reads``): the
+                readers of the lattice-plane rule (``_geometry_plane_limit``,
+                ``_kantorovich_ball_plane_margin``)."""
                 n = int(x0_full.shape[0])
                 positions = unflatten_coupled_state(
                     np.arange(n, dtype=np.int32), template_img, group_node_names,
@@ -1537,6 +1536,16 @@ def _run_coupled_block_impl(
                         at = np.asarray(positions[holder][fld], np.int64)
                         readers.append((np.ravel(at), at.shape,
                                         jnp.asarray(template_state[holder][fld]).dtype, mapping))
+                return readers
+
+            def _plane_limit_at(x_sg, kept_weights, spectrum_weights, scale):
+                """The largest ``spectral_error_bound`` at which no position
+                the pass reads from the iterate can be across a lattice
+                plane at the fixed point (``_geometry_plane_limit``), in
+                the units of the group's norm: its constant is 1 under
+                ``"l2"`` and ``1 / (rtol sqrt(count))`` under ``"mixed"``,
+                ``count`` the entries of the fields the norm reads."""
+                readers = _plane_readers()
                 unit = jnp.ones((), x_sg.dtype)
                 if group.convergence_norm == "mixed":
                     count = jnp.maximum(jnp.sum(kept_weights > 0), 1).astype(x_sg.dtype)
@@ -1601,6 +1610,7 @@ def _run_coupled_block_impl(
             pass_evals = jnp.full((), jnp.nan, x0_full.dtype)
             geometry_gap = jnp.full((), jnp.nan, x0_full.dtype)
             plane_limit = jnp.full((), jnp.nan, x0_full.dtype)
+            plane_margin = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
                 # How many evaluations' rounding the pass carries, with
                 # each same-pass read weighted by its measured relative
@@ -1658,10 +1668,28 @@ def _run_coupled_block_impl(
                 # secant, a second difference of the adjoint's own matvec.
                 # ``11 + 4 k + 5 n_p + 2 k n_p`` more JVPs, ``n_p`` the probes (see
                 # ``_gradient_error_bound_at``).
-                grad_bound = _gradient_error_bound_at(
-                    step_pure, x_star_full, consts, weights,
-                    rho_spec, spec_resid, spec_amp, resolution=resolution,
-                )
+                ball_readers = _plane_readers() if geometry_checked else []
+                if ball_readers:
+                    # With the lattice-plane margin of the Kantorovich
+                    # ball around the iterate: whether the fixed point is
+                    # in the iterate's polynomial piece, for the
+                    # gradient's flag (``_kantorovich_ball_plane_margin``).
+                    grad_bound, plane_margin = _gradient_error_bound_at(
+                        step_pure, x_star_full, consts, weights,
+                        rho_spec, spec_resid, spec_amp, resolution=resolution,
+                        plane_readers=ball_readers,
+                    )
+                    plane_margin = plane_margin.astype(x0_full.dtype)
+                else:
+                    if geometry_checked:
+                        # Every position is a constant of the pass: no
+                        # plane can come between the iterate and the
+                        # fixed point.
+                        plane_margin = jnp.full((), jnp.inf, x0_full.dtype)
+                    grad_bound = _gradient_error_bound_at(
+                        step_pure, x_star_full, consts, weights,
+                        rho_spec, spec_resid, spec_amp, resolution=resolution,
+                    )
                 if transformed_reading:
                     # The report reads ``gradient_bound_usable`` off the
                     # reading's spectrum below; the gradient bound rests on
@@ -1731,13 +1759,14 @@ def _run_coupled_block_impl(
                         recomputed_ok)}
             final = _merge(template_state, returned, jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
-                            spec_amp, grad_bound, pass_evals, geometry_gap, plane_limit),
+                            spec_amp, grad_bound, pass_evals, geometry_gap, plane_limit,
+                            plane_margin),
                     (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
                            spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap,
-                           plane_limit),
+                           plane_limit, plane_margin),
              vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
@@ -1749,7 +1778,7 @@ def _run_coupled_block_impl(
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
                          spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap,
-                         plane_limit)
+                         plane_limit, plane_margin)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -2135,7 +2164,7 @@ def _run_coupled_block_impl(
         diag_data = None
         if track_diag:
             nan = jnp.full((), jnp.nan, jnp.asarray(final_res).dtype)
-            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan, nan, nan)
+            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan, nan, nan, nan)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -2267,7 +2296,7 @@ def _run_coupled_block_impl(
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         (iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp,
-         grad_bound, pass_evals, geometry_gap, plane_limit) = diag_data
+         grad_bound, pass_evals, geometry_gap, plane_limit, plane_margin) = diag_data
         # Written in the dtype ``compile()`` seeded the slot with, so the
         # scan carry keeps its type whatever the residual was computed
         # in (the seed is the promotion of the group's floating fields,
@@ -2364,6 +2393,11 @@ def _run_coupled_block_impl(
                 # from the iterate reaches a lattice plane.
                 result[_META_KEY][f"coupling_{group_key}_geometry_plane_limit"] = (
                     jnp.asarray(plane_limit, dtype=spec_dtype))
+                # How many radii of the Kantorovich ball around the
+                # iterate the nearest lattice plane is away (the
+                # gradient's flag).
+                result[_META_KEY][f"coupling_{group_key}_geometry_plane_margin"] = (
+                    jnp.asarray(plane_margin, dtype=spec_dtype))
 
     # Store V/W matrices for IQN-IMVJ Jacobian reuse
     if group.acceleration == "iqn-imvj" and vw_data is not None:

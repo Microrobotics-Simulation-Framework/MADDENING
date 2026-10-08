@@ -149,6 +149,30 @@ def _geometry_product_gap(step_pure, x_star, consts, directions, weights, resolu
 #: admits (``t* <= 2 eta`` at ``h = 1/2``), and the bound is at least the
 #: Newton step.
 GEOMETRY_PLANE_REACH = 2.0  # units: spectral_error_bound
+#: How many float resolutions of a position a lattice plane must be away
+#: from it for the plane rule to take the position as off the plane
+#: (:func:`_reader_plane_distance`).  Experimental.  Nearer, the position
+#: counts as *on* the plane: its distance is zero.  The kernel decides
+#: the lattice cell from a rounded quotient and a pass builds a position
+#: with a rounding of its own, so which cell's polynomial the floats
+#: evaluated is not decided by the position's value there: an iterate 4.7
+#: resolutions before a plane with its fixed point 0.7 past it kept both
+#: flags on a gradient bound 25x under the reference's error
+#: (MADD-ANO-251).  The resolution is the mapping's
+#: (``_plane_resolution``): ``eps`` of the position's dtype times the
+#: larger of the position and its offset from the lattice origin.
+GEOMETRY_PLANE_ULPS = 8.0  # units: float resolutions of the position
+
+
+def _reader_plane_distance(mapping, here, work):
+    """How far every coordinate of the positions *here* is from the nearest
+    lattice plane of *mapping*, flat, in the analysis dtype *work*, with a
+    coordinate within :data:`GEOMETRY_PLANE_ULPS` float resolutions of a
+    plane taken as on it (zero).  NaN for a coordinate that is not finite.
+    """
+    distance = jnp.ravel(mapping._plane_distance(here)).astype(work)
+    window = GEOMETRY_PLANE_ULPS * jnp.ravel(mapping._plane_resolution(here)).astype(work)
+    return jnp.where(distance <= window, jnp.zeros((), work), distance)
 
 
 def _geometry_plane_limit(step_pure, x_star, consts, readers, weights, unit):
@@ -224,13 +248,18 @@ def _geometry_plane_limit(step_pure, x_star, consts, readers, weights, unit):
 
     def limit(operands):
         xx, cc, dd, uu = operands
-        moved = jnp.abs(_F_dispatch(step_pure, xx, cc).astype(work) - xx.astype(work))
+        passed = _F_dispatch(step_pure, xx, cc)
+        moved = jnp.abs(passed.astype(work) - xx.astype(work))
         nearest = jnp.full((), jnp.inf, work)
         for where, shape, dtype, mapping in readers:
             at = jnp.asarray(where, jnp.int32)
             here = xx[at].reshape(shape).astype(dtype)
-            distance = jnp.ravel(mapping._plane_distance(here)).astype(work)
+            distance = _reader_plane_distance(mapping, here, work)
             distance = jnp.where(moved[at] > distance, jnp.zeros((), work), distance)
+            # The position the pass builds (the one a Gauss-Seidel sweep
+            # reads after its holder's update) on a plane too.
+            built = _reader_plane_distance(mapping, passed[at].reshape(shape).astype(dtype), work)
+            distance = jnp.where(built > 0, distance, built)
             nearest = jnp.minimum(nearest, jnp.min(distance * dd[at]))
         return uu * nearest / GEOMETRY_PLANE_REACH
 
@@ -683,7 +712,8 @@ def _probe_plan(consts, probed):
 
 
 def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
-                             arnoldi_residual, amplification, resolution=None):
+                             arnoldi_residual, amplification, resolution=None,
+                             plane_readers=None):
     """A bound on the relative error of the IFT tangent at the returned iterate.
 
     The IFT rule (:func:`_ift_solve_jvp`) solves
@@ -769,6 +799,14 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     the group's, over the fields its norm reads.  ``resolution`` is the
     residual's float resolution per entry, as :func:`_spectral_rate_at`
     takes it.
+
+    With *plane_readers* (experimental: a group whose pass reads a moving
+    geometry; the ``readers`` of :func:`_geometry_plane_limit`, at least
+    one) the return is the pair ``(bound, margin)``, ``margin`` the
+    lattice-plane margin of the Newton-Kantorovich ball around the iterate
+    (:func:`_kantorovich_ball_plane_margin`): one more evaluation of the
+    pass.  Without it nothing of that is traced and the return is the
+    bound alone.
     """
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(jnp.asarray(c)) for c in consts)
@@ -783,14 +821,16 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
         i for i, c in enumerate(consts_sg)
         if jnp.issubdtype(c.dtype, jnp.floating) and c.size > 0
     ]
+    readers = tuple(plane_readers) if plane_readers else ()
+    nothing = (nan, nan) if readers else nan
     if not probed or x_sg.size == 0:
         # Nothing the fixed point can respond to, or a fixed-point vector
         # with no entries (every floating field of the group has none):
         # no gradient, no error.
-        return nan
+        return nothing
 
     def bound(operands):
-        return _gradient_error_bound_body(step_pure, probed, *operands)
+        return _gradient_error_bound_body(step_pure, probed, *operands, readers=readers)
 
     # In a branch of its own, so XLA compiles it as a separate
     # computation.  Inlined beside the forward, the Jacobian-vector
@@ -804,7 +844,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     # gradient bound to compute, which is what makes the predicate a
     # runtime one.
     return jax.lax.cond(
-        jnp.all(jnp.isfinite(x_sg)), bound, lambda _operands: nan,
+        jnp.all(jnp.isfinite(x_sg)), bound, lambda _operands: nothing,
         (x_sg, consts_sg, d, rho, arnoldi_residual, amplification, res),
     )
 
@@ -894,8 +934,103 @@ def _kantorovich_root_and_miss(step, h):
     return root, jnp.where(h > 0, step * (2.0 * h) / ((1.0 + root) * (1.0 + root)), 0.0)
 
 
+def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, radius):
+    """How many times the radius of the Newton-Kantorovich ball around the
+    returned iterate the nearest lattice plane of a position the pass reads
+    is away (experimental): over one, the iterate, the Newton point and the
+    fixed point are in one polynomial piece of the pass.
+
+    **Why the gradient's flag needs it.**  The gradient bound is the
+    smooth theory's: it takes the pass's Jacobian at the returned iterate
+    ``x_k`` and at the Newton point ``x_N = x_k + delta`` and bounds the
+    Jacobian at the fixed point ``x*`` from the two.  A
+    geometry-dependent mapping is another polynomial of the positions
+    across a lattice plane, and two Jacobians say nothing of a plane
+    neither point is beyond: with ``x*`` just past a plane ``x_N`` stops
+    short of, both are one cell's, the check reads no change (``h`` near
+    0), and the gradient of the fixed point is the other cell's.  The
+    bound was 15 to 70,000 times under the reference's error with its
+    flag set (MADD-ANO-251).  So the flag does not stand on what the
+    check reads; it stands where no plane is in the ball at all.
+
+    **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``
+    and *radius* ``= GEOMETRY_PLANE_REACH * eta + floor``
+    (:func:`_gradient_error_bound_body` forms it), under these
+    assumptions:
+
+    1. *The kernel.*  Between two positions with no lattice plane and no
+       face of the hull between them the mapping is one polynomial of the
+       positions, and ``mapping._plane_distance`` is the distance to the
+       nearest (``multilinear_grid``: MAP-049).
+    2. *The members.*  Away from those planes the pass is smooth: no
+       member's ``update`` has a kink of its own inside the ball (the
+       condition every nonlinear group's bound has, CPL-088).
+    3. *The smooth theory.*  For the polynomial piece ``p`` the pass is
+       at ``x_k``, taken as a map of the whole space, Newton-Kantorovich
+       holds with a constant ``h = beta L eta <= 1/2`` (the step measures
+       ``h`` on the secant from ``x_k`` to ``x_N`` and the bound is
+       ``inf`` where it reads 1/2 or more).  Then ``p`` has a fixed point
+       ``x_p`` with ``||D (x_p - x_k)||_2 <= t* <= 2 eta``, whatever
+       ``h`` is under one half: the radius does not use the measured
+       value.
+    4. *The floats.*  The measured residual is the exact pass's to within
+       its float resolution, which the resolvent carries into ``floor``;
+       and a position within :data:`GEOMETRY_PLANE_ULPS` float
+       resolutions of a plane is on it (:func:`_reader_plane_distance`).
+    5. *The norm.*  ``||D v||_2 <= R`` bounds entry ``j`` by ``R / D_j``
+       where ``D_j > 0``, and bounds nothing where ``D_j = 0`` (an entry
+       the norm does not read counts as on a plane).
+
+    For every entry ``j`` of a position field the pass reads from the
+    iterate or from the state the same pass has built (*readers*, those of
+    :func:`_geometry_plane_limit`: a constant of the pass is not one), let
+    ``d_j`` be the distance from ``x_k[j]`` to the nearest plane, zero
+    where the position the pass *builds* at either point it is evaluated
+    at -- ``F(x_k)[j]`` (*f_k*) and ``F(x_N)[j]`` (*f_newton*), what a
+    Gauss-Seidel sweep reads after its holder's update -- is not strictly
+    inside that cell (it is further than ``d_j`` from ``x_k[j]``, or on a
+    plane):
+
+        ``margin = min_j (D_j d_j) / radius``.
+
+    Where ``margin > 1``: by 5 every position of every state in the ball
+    is in the cell ``x_k``'s is in, ``x_N`` and ``x_p`` among them (3, 4);
+    the positions the pass builds at ``x_k`` and at ``x_N`` are in it by
+    the two evaluations, and at ``x_p`` they are ``x_p``'s own; so by 1
+    and 2 the pass *is* ``p`` at the three points, ``x_p`` is a fixed
+    point of the pass, both Jacobians the bound takes and the one it
+    bounds are ``p``'s, and the bound is the smooth one.  Where it is not,
+    a plane is in the ball and ``gradient_bound_usable`` is withdrawn
+    whatever ``h`` reads.  No point is sampled to speak for a plane it is
+    not at: the ball is covered by a distance, and the two evaluations
+    answer only for themselves.
+
+    Returns a scalar in the weights' dtype: ``inf`` at a zero radius off
+    every plane, NaN where a position or the radius is not a number.
+    """
+    work = weights.dtype
+    zero = jnp.zeros((), work)
+    nearest = jnp.full((), jnp.inf, work)
+    for where, shape, dtype, mapping in readers:
+        at = jnp.asarray(where, jnp.int32)
+        start = x_k[at].astype(work)
+        distance = _reader_plane_distance(mapping, x_k[at].reshape(shape).astype(dtype), work)
+        unknown = jnp.isnan(distance)
+        for built in (f_k[at], f_newton[at]):
+            on_a_plane = _reader_plane_distance(mapping, built.reshape(shape).astype(dtype), work)
+            inside = (jnp.abs(built.astype(work) - start) < distance) & (on_a_plane > 0)
+            unknown = unknown | jnp.isnan(on_a_plane)
+            distance = jnp.where(inside, distance, zero)
+        distance = jnp.where(unknown, jnp.full((), jnp.nan, work), distance)
+        nearest = jnp.minimum(nearest, jnp.min(distance * weights[at]))
+    return jnp.where(
+        jnp.isnan(nearest) | jnp.isnan(radius), jnp.full((), jnp.nan, work),
+        jnp.where(radius > 0, nearest / jnp.where(radius > 0, radius, 1.0),
+                  jnp.where(nearest > 0, jnp.inf, jnp.nan)))
+
+
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
-                               arnoldi_residual, amplification, res):
+                               arnoldi_residual, amplification, res, readers=()):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
         _spectral_norm,
@@ -1324,4 +1459,20 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         extra = jnp.max(extra_i)
     worst = jnp.where(certified, worst * factor + extra / safe_root,
                       jnp.full_like(worst, jnp.inf))
-    return jnp.where(captured, worst, nan)
+    if not readers:
+        return jnp.where(captured, worst, nan)
+    # **Which polynomial piece the fixed point is in** (a pass that reads
+    # a moving geometry; ``_kantorovich_ball_plane_margin`` has the
+    # argument).  The check above compares the Jacobian at ``x_k`` and at
+    # the Newton point and cannot see a lattice plane beyond both, so the
+    # gradient's flag stands only where no plane is in the Kantorovich
+    # ball around ``x_k``: ``GEOMETRY_PLANE_REACH`` Newton steps (``t* <=
+    # 2 eta`` at any ``h <= 1/2``: not the measured ``h``), plus the part
+    # of the distance that has no direction (the residual's rounding
+    # through the resolvent).  At an iterate whose residual is not above
+    # its floor the step is a stand-in and the whole distance has none.
+    # One more evaluation of the pass, at the Newton point.
+    f_newton = _F_dispatch(step_pure, points[1], consts_sg)
+    radius = GEOMETRY_PLANE_REACH * jnp.where(resolved, step, distance) + undirected
+    margin = _kantorovich_ball_plane_margin(readers, x_sg, f_k[0], f_newton, d, radius)
+    return jnp.where(captured, worst, nan), jnp.where(captured, margin, nan)

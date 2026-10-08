@@ -207,8 +207,8 @@ _GROUP_META_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification", "rho_spectral",
     "spectral_residual", "spectral_amplification",
     "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
-    "geometry_gap", "geometry_plane_limit", "V", "W", "pred_count", "pred_0", "pred_1",
-    "pred_2",
+    "geometry_gap", "geometry_plane_limit", "geometry_plane_margin", "V", "W", "pred_count",
+    "pred_0", "pred_1", "pred_2",
 )
 
 
@@ -429,6 +429,33 @@ def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
     why = _GEOMETRY_SELF_CHECK_WHY if gap == gap else _GEOMETRY_SELF_CHECK_UNEVALUATED_WHY
     return _GEOMETRY_DIAGNOSTICS_REASON.format(
         keys=list(keys), why=why.format(gap=gap, allowed=allowed))
+
+
+#: Why ``gradient_bound_usable`` alone is False for a group with a
+#: lattice plane inside the Newton-Kantorovich ball around the returned
+#: iterate (``_bounds._kantorovich_ball_plane_margin``).
+_GEOMETRY_BALL_PLANE_REASON = (
+    "the group resolves geometry-dependent mapping(s) on edge(s) {keys}; a position its "
+    "pass reads from the iterate has a lattice plane of the mapping's grid, or a face of "
+    "its hull, inside the Newton-Kantorovich ball around the returned iterate ({reach:g} "
+    "Newton steps plus the float floor; the nearest plane is {margin}). "
+    "gradient_relative_error_bound is the bound of a smooth pass: it takes the Jacobian at "
+    "the returned iterate and at the Newton point, and across a lattice plane the mapping "
+    "is another polynomial of the positions, so with a plane in the ball the fixed point "
+    "may be in a lattice cell neither Jacobian was taken in. gradient_bound_usable is "
+    "therefore False, whatever the bound reads; the number is reported as computed, and "
+    "spectral_usable is not affected by this. The ball shrinks with the residual: a "
+    "tighter tolerance usually clears the plane."
+)
+
+
+def _geometry_ball_plane_reason(keys, margin: float, reach: float) -> str:
+    """The reason of a report whose gradient flag is withdrawn because a
+    lattice plane is inside the Kantorovich ball around the iterate
+    (*margin* at most one, or not a number: not measured)."""
+    told = (f"{margin:.3g} radii of that ball away" if margin == margin
+            else "not measured: the margin is not a number")
+    return _GEOMETRY_BALL_PLANE_REASON.format(keys=list(keys), margin=told, reach=reach)
 
 
 def _geometry_plane_reason(keys, bound: float, limit: float, reach: float) -> str:

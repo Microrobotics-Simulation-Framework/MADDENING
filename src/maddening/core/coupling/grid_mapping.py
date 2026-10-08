@@ -367,6 +367,28 @@ class MultilinearGridMapping:
             out.append(jnp.where(jnp.isfinite(cols[:, a]), distance, jnp.asarray(jnp.nan, T)))
         return jnp.stack(out, axis=1).reshape(geom.shape)
 
+    def _plane_resolution(self, geom):
+        """The float resolution at which a coordinate can be told from a
+        lattice plane, in the geometry's units, shape and dtype: ``eps``
+        of the dtype times the larger of the coordinate's magnitude and
+        of its offset from the lattice origin of its axis.
+
+        The stencil decides the lattice cell from the rounded quotient of
+        that offset by the spacing (:meth:`_lattice_coordinates`), and a
+        coordinate is itself known to one rounding: nearer a plane than a
+        few of these, which side of it the floats evaluated is not the
+        value's to say.  Read by the coupling diagnostics
+        (``_bounds._reader_plane_distance``).
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        eps = jnp.asarray(jnp.finfo(T).eps, T)
+        out = [eps * jnp.maximum(jnp.abs(cols[:, a]),
+                                 jnp.abs(cols[:, a] - jnp.asarray(self.origin[a], T)))
+               for a in range(self._d)]
+        return jnp.stack(out, axis=1).reshape(geom.shape)
+
     def _floating(self, field, what: str):
         field = jnp.asarray(field)
         if not jnp.issubdtype(field.dtype, jnp.floating):

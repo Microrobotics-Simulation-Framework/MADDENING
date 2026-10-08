@@ -1533,6 +1533,12 @@ claims:
     transform the step returns it one plain pass on (CPL-191), and the
     residual of the state returned is another number; the domain cells read
     the accepted iterate with the return rule switched off.
+    The three rules together: a pair with an edge read at its source and a
+    field with no entries on the member it reads (unread; read by a plain
+    or a transformed edge; or behind a mapping of none onto more entries,
+    which is read at its source and so is not read) returns and reports
+    what the pair without the field does, to the bit, on jax 0.10.2,
+    0.11.0 and 0.11.2.
   oracle: closed form over the edge values that are read, in float64.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
@@ -1543,6 +1549,7 @@ claims:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_that_is_not_finite_fails_the_criterion
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_an_integer_source_and_an_empty_delivery_carry_no_norm
     - tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does
+    - tests/core/test_coupling_empty_field_beside_an_edge_read_at_its_source.py::test_a_group_with_an_edge_read_at_its_source_reports_what_its_twin_without_the_field_does
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_one_pass_reports_the_change_of_what_its_edges_delivered
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_group_iterates_until_what_its_mapped_edge_delivers_has_stopped_moving
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver
@@ -5815,6 +5822,9 @@ claims:
     Gauss-Seidel and Jacobi, float32 and float64; a hub whose one field a
     gather edge and a scatter edge both read; Aitken, fixed relaxation,
     IQN-ILS and IQN-IMVJ only through the converged distance (CPL-192).
+    The source field of an edge read at its source is measured whole, so
+    the state a solve returns keeps it as the accepted iterate holds it
+    (the return rule, CPL-191).
     Only a group with an edge read through its mapping, whose source field
     is floating, owns the `_meta` slot coupling_<key>_reading_floor (the
     floor per evaluation, NaN until a step has written it, restarted with

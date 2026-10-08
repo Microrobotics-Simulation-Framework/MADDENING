@@ -546,6 +546,13 @@ APPENDED = (
     Cell("pair-3", "float32", _JACOBI_INTERFACE, 120, "product"),
     Cell("ring-5", "float64", _JACOBI_INTERFACE, 5, "quadratic"),
     Cell("ring-2", "float64", _JACOBI_INTERFACE, 120, "product"),
+    # What cell 34 was by accident, and no cell since: the mapped ring with
+    # a quadratic term in float64, Aitken under Gauss-Seidel, the interface
+    # norm, a cap of 120.  Its group returns a field its norm reads
+    # recomputed (:func:`reads_a_recomputed_field`), so it is the float64
+    # cell on which the state a user gets is checked beside the hunt (the
+    # two others that are, are float32).
+    Cell("mapped", "float64", 2, 120, "quadratic"),
 )
 CELLS = ROTATED + APPENDED
 PER_PUSH_CELLS = tuple(range(len(_FIRST)))
@@ -1655,7 +1662,7 @@ def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
 # ---------------------------------------------------------------------------
 
 
-def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_mapping():
+def test_the_cells_observed_at_the_accepted_iterate_are_the_three_read_through_a_mapping():
     """Which cells are stepped with the return rule off, with the state a
     user gets checked beside them (:func:`returned_score`), is decided by
     what a cell is (:func:`reads_a_recomputed_field`) and not by its index.
@@ -1664,14 +1671,18 @@ def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_m
     nothing.  (On the layout a rotation over eight rows left by accident
     they were cells 33 and 34.)  Held here, each cell found by what it is:
     the mapped ring under the interface norm, once in the rotation (Aitken
-    under Gauss-Seidel, a cap of 120) and once appended (Jacobi, stopped
-    after five passes).  No compile."""
+    under Gauss-Seidel, a cap of 120, float32) and twice appended (Jacobi,
+    stopped after five passes, float32; and the accident's cell 34, Aitken
+    under Gauss-Seidel with a cap of 120 in float64, so that the check is
+    made in both dtypes).  No compile."""
     observed = tuple(i for i in ALL_CELLS if reads_a_recomputed_field(CELLS[i]))
     assert observed == (
         CELLS.index(Cell("mapped", "float32", 2, 120, "product")),
-        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"))), observed
-    rotated, appended = observed
-    assert rotated < len(ROTATED) <= appended
+        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic")),
+        CELLS.index(Cell("mapped", "float64", 2, 120, "quadratic"))), observed
+    rotated, appended, in_float64 = observed
+    assert rotated < len(ROTATED) <= appended < in_float64 == len(CELLS) - 1
+    assert {CELLS[i].dtype for i in observed} == {"float32", "float64"}
     for index in observed:
         knobs = CELLS[index].knobs
         assert knobs["convergence_norm"] == "interface" and knobs["solver"] == "ift", knobs

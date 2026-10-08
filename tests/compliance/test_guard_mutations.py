@@ -572,6 +572,19 @@ MUTANTS: tuple[Mutant, ...] = (
        + _GS_L2, CELLS_PINNED,
        "the first two rows of the geometry search's KNOBS exchanged: its cells keep their indices and "
        "run the other schedule and norm, under the radius seeds pinned on them"),
+    _M("L4", _LIN, '    dict(acceleration="none"), dict(acceleration="aitken"),\n'
+       '    dict(acceleration="fixed", relaxation=0.7), dict(acceleration="iqn-ils"),\n'
+       '    dict(acceleration="iqn-imvj", jacobian_reuse=2))\n',
+       '    dict(acceleration="aitken"), dict(acceleration="none"),\n'
+       '    dict(acceleration="fixed", relaxation=0.7), dict(acceleration="iqn-ils"),\n'
+       '    dict(acceleration="iqn-imvj", jacobian_reuse=2))\n', CELLS_PINNED,
+       "the first two accelerations of the linear search's returned-state cells exchanged: the cells "
+       "keep their indices, and the per-push cell and the zero-crossing test (cell 0) run under "
+       "Aitken where their comments say no acceleration"),
+    _M("L5", _NL, '    Cell("mapped", "float64", 2, 120, "quadratic"),\n',
+       '    Cell("mapped", "float64", 0, 120, "quadratic"),\n', CELLS_PINNED,
+       "the nonlinear search's appended float64 mapped ring moved off the interface norm: no float64 "
+       "nonlinear cell is then observed with the returned-state check, and nothing says so"),
     # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
     _M("K1", CPL, "    float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,\n",
        "    float32, a rate near 1. Not claimed for float64 (x64),\n", CLAIMS,

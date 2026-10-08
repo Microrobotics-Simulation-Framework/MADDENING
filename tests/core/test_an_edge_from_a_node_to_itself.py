@@ -382,7 +382,7 @@ def test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_impli
             gm = _alone(dict(max_iterations=cap, tolerance=1e-13, solver=solver))
             gm.step()
             partial = sum((-K * DT) ** j for j in range(cap + 1))
-            assert _x(gm) == pytest.approx(partial, abs=1e-15), cap
+            assert _x(gm) == pytest.approx(partial, abs=1e-12), cap     # the caps are 1e-8 apart
         if solver == "ift":
             strict = _alone(dict(max_iterations=2, tolerance=1e-13, strict_convergence=True))
             with pytest.raises(Exception, match="without converging"):

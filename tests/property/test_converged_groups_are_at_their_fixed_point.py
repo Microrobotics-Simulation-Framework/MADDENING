@@ -450,7 +450,11 @@ def check_the_library_returns_the_models_state(name, schedule, draws) -> None:
         at += n
     # The restated checks hold of the state returned.
     model.check_step(step.pre, step.state, step.reports, thresholds=[1.0], where=where)
-    moved = model.readings_moved(0, step.pre, step.pre, x)
+    # The library's own returned state, not the model's: its readings
+    # against the accepted iterate's, in the residual's weights and count.
+    moved = model.residual_between(0, got, x)
+    assert abs(moved - model.readings_moved(0, step.pre, step.pre, x)) <= (
+        2e-3 * moved + 16 * eps / RTOL), (where, moved)
     assert moved <= float(report["residual"]) * (1.0 + 2e-3) + 16 * eps / RTOL, (
         f"{where}: the returned state's readings are {moved:.4g} from the accepted "
         f"iterate's, beside a reported residual of {report['residual']!r}")

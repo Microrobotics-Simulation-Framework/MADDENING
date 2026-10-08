@@ -54,7 +54,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.coupling import _coupled_block
+from maddening.core.coupling import _coupled_block, _interface_plan
 from maddening.core.coupling._group_layout import _fields_the_interface_norm_misses
 from maddening.core.coupling.acceleration import float_fields_of
 from maddening.core.coupling.group import CouplingGroup
@@ -129,9 +129,11 @@ H = np.array([[1.0, 0.5], [-0.25, 1.5]])
 SELECT = np.array([[1.0, 0.0]])
 
 
-def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), timesteps=None, calls=None):
+def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), timesteps=None, calls=None,
+           diagnostics=None):
     """*edges*: ``(src, dst, G, how)`` with *how* ``None`` (plain), a matrix
-    (the edge's mapping) or a callable (its transform)."""
+    (the edge's mapping) or a callable (its transform).  *diagnostics*:
+    ``None`` asks for them only where the solver reports nothing without."""
     ports = {name: {} for name, *_ in nodes}
     for i, (_src, dst, gain, _how) in enumerate(edges):
         gain = np.asarray(gain, np.float64)
@@ -150,8 +152,10 @@ def _graph(nodes, edges, group, *, dtype=np.float32, wide=(), timesteps=None, ca
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")         # the deprecated "fori" says so
         # ``"fori"`` reports only with its diagnostics on.
-        gm.add_coupling_group([name for name, *_ in nodes],
-                              diagnostics=group.get("solver") == "fori", **group)
+        gm.add_coupling_group(
+            [name for name, *_ in nodes],
+            diagnostics=group.get("solver") == "fori" if diagnostics is None else diagnostics,
+            **group)
         gm.compile()
     return gm
 
@@ -820,6 +824,236 @@ def test_a_recomputed_field_carries_the_fixed_points_derivative(case, solver):
 
 
 # ---------------------------------------------------------------------------
+# Derivatives at an early exit: every returned field carries the implicit
+# rule's derivative of the accepted iterate, so the gradient bound covers it
+# ---------------------------------------------------------------------------
+#
+# ``solver="ift"`` gives the accepted iterate ``x`` the derivative ``g = (I -
+# J)^{-1} dF`` of the pass ``F`` linearised at ``x`` (``J = dF/dx``, ``dF``
+# the pass's own derivative in the constant), whatever pass ``x`` was
+# accepted on; ``gradient_relative_error_bound`` bounds how far ``g`` is from
+# the fixed point's (CPL-093).  A recomputed field is ``F(x)``'s, and
+# differentiating ``F(x)`` with ``x`` carrying ``g`` gives ``J g + dF = g``:
+# **the same derivative, field for field.**  So the state returned has the
+# gradient the bound is on, recomputed fields included, and no second bound
+# is needed.  Tested with a constant the pass is *not* linear in jointly
+# with the iterate -- a mapping weight, which multiplies the field it reads
+# -- so that the derivative at an early exit is not the fixed point's.
+
+
+def _implicit_derivative(nodes, edges, wide, at, schedule, sweep, edge, entry):
+    """``{node: {field: d field / d H[entry]}}`` in float64, ``H`` the
+    mapping of edge number *edge*: the implicit rule of one plain pass of
+    *schedule* linearised at the iterate *at*.
+
+    With ``M`` the group's coupling matrix and each edge read at the value
+    the pass reads it at (this pass's, where the sweep ran its source
+    first; *at*'s otherwise), ``g = (I - M)^{-1} (gain dH read)``; a field
+    no edge reads has ``K (dH read + H g)`` of what it reads.  At the fixed
+    point both readings are the fixed point's.
+    """
+    off, k = {}, 0
+    for name, n, *_ in nodes:
+        off[name] = k
+        k += n
+    size = _sizes(nodes)
+    after = _plain_pass(nodes, edges, at, schedule, wide, sweep)
+
+    def read(src, dst):
+        ahead = schedule == "gauss-seidel" and sweep.index(src) < sweep.index(dst)
+        return np.asarray((after if ahead else at)[src]["u"], float)
+
+    M = np.zeros((k, k))
+    for src, dst, gain, how in edges:
+        M[off[dst]:off[dst] + size[dst], off[src]:off[src] + size[src]] += (
+            np.asarray(gain, float) @ _delivers(how, size[src]))
+    src, dst, gain, how = edges[edge]
+    dH = np.zeros(np.asarray(how).shape)
+    dH[entry] = 1.0
+    rhs = np.zeros(k)
+    rhs[off[dst]:off[dst] + size[dst]] = np.asarray(gain, float) @ dH @ read(src, dst)
+    g = np.linalg.solve(np.eye(k) - M, rhs)
+    out = {name: {"u": g[off[name]:off[name] + size[name]]} for name in size}
+    for name in wide:
+        dw = np.zeros(size[name])
+        for i, (s_, d_, gain_, how_) in enumerate(edges):
+            if d_ != name:
+                continue
+            through = _delivers(how_, size[s_]) @ out[s_]["u"]
+            if i == edge:
+                through = through + dH @ read(s_, d_)
+            dw = dw + K[:, :np.asarray(gain_).shape[1]] @ through
+        out[name]["w"] = dw
+    return out
+
+
+def _weights_of(params, key):
+    """``(weights, put)``: the weight matrix of the mapping in slot *key*
+    of ``params["mappings"]`` and a function giving the parameter pytree
+    with another matrix in its place."""
+    slot = params["mappings"][key]
+    if not isinstance(slot, dict):
+        return slot, lambda q: {**params, "mappings": {**params["mappings"], key: q}}
+    ((leaf, weights),) = slot.items()
+    return weights, lambda q: {**params, "mappings": {**params["mappings"], key: {leaf: q}}}
+
+
+#: The cases with a mapping weight to differentiate in: every ``u`` read
+#: only through a mapping; a selection, and a field no edge reads; fields
+#: measured whole beside a recomputed member.
+GRADIENT_CASES = ("mapped", "selected", "tail")
+#: Passes short of convergence at ``RTOL`` in every case and schedule.
+EARLY = 4
+
+
+#: ``(case, schedule)``.  Per push: fields measured whole beside a
+#: recomputed member and a field no edge reads, under Jacobi; and every
+#: field recomputed under a sweep that reads this pass's values.
+GRADIENT_ROWS = tuple(itertools.product(GRADIENT_CASES, ("jacobi", "gauss-seidel")))
+GRADIENT_PER_PUSH = (("tail", "jacobi"), ("mapped", "gauss-seidel"))
+
+
+def assert_the_returned_gradient_is_the_accepted_iterates(case, schedule):
+    """And so the gradient bound covers the state returned (CPL-093).
+
+    Forward mode over every scalar weight of every mapping, against the
+    float64 closed form at the accepted iterate (read with the rule
+    switched off).  The premise is shown too: the derivative at this exit
+    is not the fixed point's, and it is not the value's own (a field
+    returned a pass behind would carry that pass's).  Where the report
+    says ``gradient_bound_usable``, the bound is then held against the
+    library's own derivative of the returned state: its distance from the
+    fixed point's derivative, in the raw fields the norm reads, each over
+    its magnitude at the returned state.
+    """
+    nodes, edges, wide = CASES[case]
+    group = dict(iteration_mode=schedule, convergence_norm="interface", rtol=RTOL,
+                 solver="ift", max_iterations=EARLY)
+    accepted, loop = _solve(nodes, edges, group, wide=wide, rule="none", x64=True)
+    assert loop["converged"] is False and loop["iterations"] == EARLY, loop
+    mapped = [i for i, (*_e, how) in enumerate(edges) if how is not None and not callable(how)]
+    with cd.x64(True):
+        gm = _graph(nodes, edges, group, dtype=np.float64, wide=wide, diagnostics=True)
+        gm.step()
+        (report,) = gm.coupling_diagnostics().values()
+        returned = {name: {f: np.asarray(v) for f, v in gm.get_node_state(name).items()}
+                    for name, *_ in nodes}
+        gm.reset_state()
+        step, ext = gm._raw_step_fn, gm._default_external_inputs()      # noqa: SLF001
+        params, start = gm.params, gm._state                             # noqa: SLF001
+        keys = {i: gm._edges[i].key for i in mapped}                     # noqa: SLF001
+
+        def fields(mappings):
+            out = step(start, ext, {**params, "mappings": mappings})
+            return {name: {f: out[name][f] for f in returned[name]} for name, *_ in nodes}
+
+        # One compiled tangent map for every weight of every mapping.
+        jvp = jax.jit(lambda t: jax.jvp(fields, (params["mappings"],), (t,))[1])
+        still = jax.tree.map(jnp.zeros_like, params["mappings"])
+        pushed = {}
+        for i in mapped:
+            weights, put = _weights_of({"mappings": still}, keys[i])
+            for entry in np.ndindex(*np.shape(weights)):
+                tangent = put(weights.at[entry].set(1.0))["mappings"]
+                pushed[(i, entry)] = {name: {f: np.asarray(v) for f, v in fs.items()}
+                                      for name, fs in jvp(tangent).items()}
+    assert (report["iterations"], report["converged"]) == (EARLY, False), report
+    sweep = [m for m in gm.schedule if m in _sizes(nodes)]
+    fixed = _fixed_point(nodes, edges, wide)
+    whole = _whole(edges)
+    #: The raw fields the norm reads, each over its magnitude as returned.
+    read = sorted({src for src, *_rest in edges})
+    weight = {src: 1.0 / float(np.max(np.abs(returned[src]["u"]))) for src in read}
+
+    def size(g):
+        return float(np.sqrt(sum(np.sum((weight[src] * g[src]["u"]) ** 2) for src in read)))
+
+    differs, behind, worst = 0.0, 0.0, 0.0
+    for (i, entry), got in pushed.items():
+        here = _implicit_derivative(nodes, edges, wide, accepted, schedule, sweep, i, entry)
+        there = _implicit_derivative(nodes, edges, wide, fixed, schedule, sweep, i, entry)
+        scale = max(float(np.max(np.abs(f))) for fs in here.values() for f in fs.values())
+        for name, fs in got.items():
+            for f, value in fs.items():
+                assert np.max(np.abs(value - here[name][f])) <= 1e-9 * max(scale, 1e-3), (
+                    f"{case} {schedule}: d {name}.{f} / d H{i}{list(entry)} of the returned "
+                    f"state is {value}; the implicit rule at the accepted iterate gives "
+                    f"{here[name][f]} ({'kept' if (name, f) in whole else 'recomputed'})")
+                differs = max(differs, float(np.max(np.abs(here[name][f] - there[name][f]))))
+        gap = {src: {"u": got[src]["u"] - there[src]["u"]} for src in read}
+        if size(got) > 0:
+            worst = max(worst, size(gap) / size(got))
+        behind = max(behind, scale)
+    assert differs > 1e-3 * behind, (
+        "at this exit the implicit derivative is the fixed point's: nothing is tested")
+    if report["gradient_bound_usable"]:
+        bound = float(report["gradient_relative_error_bound"])
+        assert worst <= bound * (1.0 + 1e-6) + 64 * _eps(True), (
+            f"{case} {schedule}: the derivative of the returned state is {worst:.4g} "
+            f"(relative) from the fixed point's; the report bounds it by {bound:.4g}")
+    # Every row's report says so (jaxlib 0.10.2, 0.11.0 and 0.11.2): the
+    # bound half of the check ran.
+    assert report["gradient_bound_usable"], (
+        f"{case} {schedule}: the gradient bound is no longer usable here, and the bound "
+        f"half of this check ran on nothing ({report})")
+
+
+@pytest.mark.parametrize("row", GRADIENT_PER_PUSH, ids=_row_id)
+def test_at_an_early_exit_every_returned_field_carries_the_accepted_iterates_implicit_derivative(
+        row):
+    assert_the_returned_gradient_is_the_accepted_iterates(*row)
+
+
+# Per push: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_at_an_early_exit_every_returned_field_carries_the_accepted_iterates_implicit_derivative
+@pytest.mark.slow
+@pytest.mark.parametrize("row", [r for r in GRADIENT_ROWS if r not in GRADIENT_PER_PUSH],
+                         ids=_row_id)
+def test_the_returned_gradient_is_the_accepted_iterates_in_every_case_and_schedule(row):
+    assert_the_returned_gradient_is_the_accepted_iterates(*row)
+
+
+@pytest.mark.parametrize("case", ["tail"])
+def test_under_the_unrolled_solver_a_returned_field_has_the_derivative_of_its_value(case):
+    """``solver="fori"`` differentiates the passes it ran: at an early exit
+    the derivative of every returned field, recomputed or kept, is the
+    central difference of that field as returned (the map is linear in
+    one weight at a time up to the products the passes compound, so a
+    step of ``1e-6`` is good to ``1e-9``)."""
+    nodes, edges, wide = CASES[case]
+    group = dict(iteration_mode="jacobi", convergence_norm="interface", rtol=RTOL,
+                 solver="fori", max_iterations=EARLY)
+    i = next(i for i, (*_e, how) in enumerate(edges) if how is not None and not callable(how))
+    with cd.x64(True):
+        gm = _graph(nodes, edges, group, dtype=np.float64, wide=wide)
+        gm.step()
+        (report,) = gm.coupling_diagnostics().values()
+        assert (report["iterations"], report["converged"]) == (EARLY, False), report
+        names = {name: tuple(gm.get_node_state(name)) for name, *_ in nodes}
+        gm.reset_state()
+        step, ext = gm._raw_step_fn, gm._default_external_inputs()      # noqa: SLF001
+        params, start, key = gm.params, gm._state, gm._edges[i].key      # noqa: SLF001
+        weights, put = _weights_of(params, key)
+
+        @jax.jit
+        def fields(q):
+            out = step(start, ext, put(q))
+            return {name: {f: out[name][f] for f in fs} for name, fs in names.items()}
+
+        tangent = jnp.zeros_like(weights).at[(0, 0)].set(1.0)
+        pushed = jax.jit(lambda t: jax.jvp(fields, (weights,), (t,))[1])(tangent)
+        h = 1e-6
+        up, down = fields(weights + h * tangent), fields(weights - h * tangent)
+    moved = 0.0
+    for name, fs in names.items():
+        for f in fs:
+            central = (np.asarray(up[name][f]) - np.asarray(down[name][f])) / (2.0 * h)
+            np.testing.assert_allclose(np.asarray(pushed[name][f]), central, rtol=1e-7,
+                                       atol=1e-8, err_msg=f"{case}: {name}.{f}")
+            moved = max(moved, float(np.max(np.abs(central))))
+    assert moved > 1e-2, "no field depends on the weight: nothing is tested"
+
+
+# ---------------------------------------------------------------------------
 # The static rule
 # ---------------------------------------------------------------------------
 
@@ -892,3 +1126,52 @@ def test_a_field_one_edge_delivers_whole_is_not_named_for_another_that_maps_it(l
     verdict was taken on."""
     edges = [_edge("a", "b"), _edge("a", "c", **lossy), _edge("b", "a"), _edge("c", "a")]
     assert _named(edges) == {"a": ("w",), "b": ("w",)}
+
+
+def test_the_set_is_the_same_from_the_groups_plan_as_from_its_bare_edges():
+    """The step hands the rule the group's plan (``InterfacePlan``); a
+    direct call may hand it the edges.  One answer."""
+    edges = [_edge("a", "b"), _edge("b", "c", mapping=_MAPPED), _edge("c", "a", transform=_first)]
+    order = ["a", "b", "c"]
+    plan = _interface_plan.interface_plan(frozenset(order), edges, order, _STATE, None)
+    g = CouplingGroup(nodes=frozenset(order), convergence_norm="interface")
+    want = {"a": ("w",), "b": ("u", "w"), "c": ("u",)}
+    assert _fields_the_interface_norm_misses(g, plan, order, _STATE) == want
+    assert _fields_the_interface_norm_misses(g, edges, order, _STATE) == want
+
+
+def test_the_set_follows_the_plans_answer_on_which_edge_reads_its_source_as_it_is():
+    """Which edge the norm reads at its source field itself is the plan's
+    to say (``InterfaceEdge.reads_source_as_is``), on whichever side it
+    reads that edge.  With that answer changed for a mapped edge -- as a
+    rule that reads a static mapping at its source would change it -- the
+    field is measured whole and no longer named; the rule holds no test
+    of an edge's mapping or transform of its own."""
+    edges = [_edge("a", "b", mapping=_MAPPED), _edge("b", "a")]
+    assert _named(edges) == {"a": ("u", "w"), "b": ("w",), "c": ("u",)}
+    with mock.patch.object(_interface_plan.InterfaceEdge, "reads_source_as_is",
+                           property(lambda self: True)):
+        assert _named(edges) == {"a": ("w",), "b": ("w",), "c": ("u",)}
+    with mock.patch.object(_interface_plan.InterfaceEdge, "reads_source_as_is",
+                           property(lambda self: False)):
+        assert _named(edges) == {"a": ("u", "w"), "b": ("u", "w"), "c": ("u",)}
+
+
+def test_which_fields_are_floating_is_decided_on_the_state_handed_not_on_the_plans():
+    """The norm's reading decides it on the state it is handed, and the
+    step hands the rule the first pass's.  A plan built from a state in
+    which a source field was not yet floating must not make the rule
+    recompute a field the norm measures whole; and a field that is not
+    floating in the state handed is never named (it is recomputed with the
+    other non-floating fields)."""
+    edges = [_edge("a", "b"), _edge("b", "a")]
+    order = ["a", "b"]
+    floating = {"a": {"u": jnp.zeros(2)}, "b": {"u": jnp.zeros(2)}}
+    counted = {"a": {"u": jnp.zeros(2, jnp.int32)}, "b": {"u": jnp.zeros(2)}}
+    g = CouplingGroup(nodes=frozenset(order), convergence_norm="interface")
+    before = _interface_plan.interface_plan(frozenset(order), edges, order, counted, None)
+    assert before.internal[0].source_kind == _interface_plan.NON_FLOATING
+    assert _fields_the_interface_norm_misses(g, before, order, floating) == {}
+    after = _interface_plan.interface_plan(frozenset(order), edges, order, floating, None)
+    assert _fields_the_interface_norm_misses(g, after, order, counted) == {}
+

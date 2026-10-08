@@ -5,7 +5,7 @@ delivers **more** entries than its source field holds is read at its
 source value -- the compact side -- and every other edge as delivered
 (CPL-188); a group that reports ``converged=True`` is then within ``K``
 tolerances of its fixed point in those readings, ``K`` from the loop's own
-operator and blind to the size of the large field (CPL-191).  Those rows'
+operator and blind to the size of the large field (CPL-192).  Those rows'
 own tests run float32 and float64 pairs, one rate, unbatched.  The pairs
 of :mod:`tests.core.coupling_domains` have one size for both members, so
 in the battery of every other domain a mapped edge is a tie, read as
@@ -579,7 +579,7 @@ def _check_twin(cell, count=None) -> None:
 
 
 def _check_claim(cell, count=None) -> None:
-    """CPL-191 on *cell*: every solve converges, within ``K`` tolerances."""
+    """CPL-192 on *cell*: every solve converges, within ``K`` tolerances."""
     run = _run(cell, count=count)
     for k, (s, ref) in enumerate(zip(run.solves, run.refs)):
         assert s.report["converged"] is True, (cell.id, k, s.report)
@@ -849,7 +849,7 @@ def test_a_pair_of_two_sizes_stops_where_the_compact_reference_does(cell):
     """CPL-188 in every domain: the residual, the verdict and the pass count
     of the plain iteration are the exact reference's under the compact
     rule, the fields read at their source are its iterate, and a converged
-    pair is within ``K`` tolerances (CPL-191).  In the 16-bit domains, at
+    pair is within ``K`` tolerances (CPL-192).  In the 16-bit domains, at
     the cap: the residual of the iterate the loop holds."""
     _check_reference(cell)
 
@@ -867,7 +867,7 @@ _ACCELERATED = [c for c in PUSH if c.acceleration != "none"]
 
 @pytest.mark.parametrize("cell", _ACCELERATED, ids=_ids(_ACCELERATED))
 def test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances(cell):
-    """CPL-191 under each stock acceleration, in the domains that run them."""
+    """CPL-192 under each stock acceleration, in the domains that run them."""
     _check_claim(cell)
 
 

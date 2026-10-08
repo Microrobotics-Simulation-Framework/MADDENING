@@ -94,7 +94,7 @@ def test_the_claim_holds_with_a_sharded_member(row, monkeypatch):
 @pytest.mark.slow
 @pytest.mark.parametrize("cell", sizes.SHARDED, ids=[c.id for c in sizes.SHARDED])
 def test_a_pair_of_two_sizes_with_a_sharded_member(cell):
-    """CPL-188 and CPL-191 with ``b`` sharded: a small field coupled to a
+    """CPL-188 and CPL-192 with ``b`` sharded: a small field coupled to a
     large one through an edge that expands and one that reduces (the every
     other domain's cells are in the module imported as ``sizes``).
 

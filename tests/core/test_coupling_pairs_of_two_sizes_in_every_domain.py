@@ -497,15 +497,20 @@ def _one_program(cell) -> bool:
     """Do the edge-mapped pair and its twin evaluate the same numbers in the
     same order?
 
-    Not in the mixed-dtype domain (:func:`_same_solve`).  Elsewhere: where
-    the scatter is held in its natural layout (the mapping and the twin's
-    node are the same scatter-add), or no cell of the large field takes
-    the contributions of two markers (every sum the scatter makes has one
-    term, in any order: the cells of every push).  A dense matrix or the
-    other layout sums two markers' contributions to one cell in an order
-    of its own, and the passes then differ in the last bit.
+    Not in the mixed-dtype domain (:func:`_same_solve`).  Elsewhere, at
+    the sizes of every push, where the scatter is held in its natural
+    layout (the mapping and the twin's node are the same scatter-add), or
+    no cell of the large field takes the contributions of two markers
+    (every sum the scatter makes has one term, in any order).  A dense
+    matrix or the other layout sums two markers' contributions to one cell
+    in an order of its own, and the passes then differ in the last bit.
+    And not with more than three values a reading: the two graphs' states
+    can still agree to the bit, but each compiles its own sum of a
+    reading's squares, and with twenty terms the two float32 sums of the
+    same numbers were measured a bit apart on an earlier pass (the
+    amplification 2.3629119 against 2.3629122).
     """
-    if cell.domain.dtype_a != cell.domain.dtype_b:
+    if cell.domain.dtype_a != cell.domain.dtype_b or cell.n_small > cs.N_SMALL:
         return False
     cells = sg.edges_of(cell.shape)[0].cells
     touched = np.concatenate([cells, cells + 1])

@@ -5743,10 +5743,28 @@ claims:
     graph's own weights; a checkpoint that carries the slot of a group that
     does not own it (a development tree before this rule wrote one for
     every mapped group) loads with a RuntimeWarning naming the slot, which
-    is dropped.  The source-side reading is exercised at one rate and
-    unbatched, in float32 and float64, with that checkpoint; the cells of
-    the other domains below run a tie, read as delivered through its
-    mapping.
+    is dropped.  The source-side reading is exercised in every domain
+    below, on pairs of three values against thirty-six (6 against 600 and
+    20 against 2000 in the slow lane): two ways with the small field on
+    either member (so on the member a domain sub-steps, shards or holds in
+    float64 beside a float32 one), both edges expanding, both reducing,
+    the mapping forms and both schedules rotated over them.  Each against
+    the exact reference of the compact rule (residual, verdict, pass
+    count, the fields read at their source), against its marker-side twin
+    (state, report and _meta: to the bit wherever the two steps are one
+    program, to float32 rounding in the mixed-dtype domain), and for the
+    slot's owner and its number.  In bfloat16 and float16 at a cap of two
+    passes: the residual of the iterate the loop holds, and the twin.
+    Under vmap each member of the batch against its own unbatched solve;
+    on a multi-rate graph the base step on which the group does not fire
+    leaves report, slot and members as they were; a sub-cycled pair is the
+    pair at one rate to the bit (memoryless members: the reading is taken
+    once per pass, the fast member's field after its sub-steps); under a
+    predictor the pass count is that of the guess; after a checkpoint
+    restart the report, the slot or its absence and the next step are the
+    uninterrupted run's.  Under run_adaptive without the pass count (the
+    reported solve is its last half step's).  With a sharded member: two
+    ways through the dense kind.  The tie's cells are kept beside them.
   oracle: >-
     the residual of a plain edge over the prescribed reading, to the bit;
     the float64 reference of either rule on the compact system
@@ -5778,27 +5796,62 @@ claims:
     - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[tie-40-40-sparse-gauss-seidel-float64-compact]'
     - 'tests/property/test_coupling_interface_side.py::test_a_step_is_the_models_under_its_rule[side-hub-matrix-local-float64-gauss-seidel-compact]'
     - tests/property/test_coupling_interface_side.py::test_a_source_side_reading_does_not_carry_the_edges_transform
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_reports_what_its_marker_side_twin_reports
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_only_a_pair_with_an_edge_read_through_its_mapping_owns_the_floor_slot
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_restart_brings_back_the_report_the_floor_slot_and_the_next_step
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_each_member_of_a_batch_of_pairs_of_two_sizes_is_its_own_unbatched_solve
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_at_two_rates_is_the_pair_at_one
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graph_reads_a_pair_of_two_sizes_on_the_steps_its_group_fires
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_diagnosed_pair_of_two_sizes_reports_the_spectrum_of_its_twin
   status: verified
   domains:
     f32:
       - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f32]'
-    f64: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f64]'
-    mixed_dtype: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[mixed_dtype]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[f32-two-way-matrix-gauss-seidel]'
+    f64:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f64]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[f64-two-way-sparse-gauss-seidel]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[mixed_dtype]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[mixed_dtype-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_only_a_pair_with_an_edge_read_through_its_mapping_owns_the_floor_slot[mixed_dtype-two-way-matrix-jacobi-small-b]'
     16bit:
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[bfloat16]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[float16]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[bfloat16-two-way-matrix-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[float16-two-way-sparse-transposed-gauss-seidel]'
     jit:
       - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f32]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[f32-two-way-sparse-jacobi-small-b]'
     grad: n/a
-    vmap: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[vmap]'
-    multi_rate: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[multi_rate]'
-    sub_cycled: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[sub_cycled]'
-    predictors_warm_starts: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[predictors_warm_starts]'
-    adaptive: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[adaptive]'
-    checkpoint_restart: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[checkpoint_restart]'
-    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-188]'
+    vmap:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[vmap]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-two-way-sparse-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_each_member_of_a_batch_of_pairs_of_two_sizes_is_its_own_unbatched_solve[vmap-two-way-matrix-jacobi-small-b]'
+    multi_rate:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[multi_rate]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[multi_rate-two-way-sparse-transposed-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graph_reads_a_pair_of_two_sizes_on_the_steps_its_group_fires[multi_rate-two-way-sparse-jacobi-small-b]'
+    sub_cycled:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[sub_cycled]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[sub_cycled-two-way-sparse-transposed-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_at_two_rates_is_the_pair_at_one[sub_cycled-two-way-matrix-gauss-seidel]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[predictors_warm_starts]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[predictors_warm_starts-two-way-sparse-gauss-seidel]'
+    adaptive:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[adaptive]'
+      - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_run_adaptive_steps_a_pair_of_two_sizes_as_a_plain_step_does
+    checkpoint_restart:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[checkpoint_restart]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_restart_brings_back_the_report_the_floor_slot_and_the_next_step[checkpoint_restart-two-way-sparse-transposed-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_restart_brings_back_the_report_the_floor_slot_and_the_next_step[checkpoint_restart-scatter-only-matrix-gauss-seidel]'
+    sharded:
+      - 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-188]'
+      - tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member
 
 - id: CPL-189
   area: report
@@ -5942,10 +5995,17 @@ claims:
     compares is never below the residual: CPL-048).  Measured before the
     rule of CPL-188, with a scatter read as delivered: 23 to 459 tolerances
     at 1e3 to 1e6 target entries, growing as the square root of the count;
-    with it 3.3 to 3.6 at every size.  Not claimed for mixed dtypes,
-    float16 or bfloat16, vmap, multi-rate graphs, sub-cycled groups,
-    predictors or warm starts, run_adaptive, checkpoint restarts or
-    sharded graphs.
+    with it 3.3 to 3.6 at every size.  Outside float32 and float64 at one
+    rate the claim is held on pairs of three values against thirty-six (to
+    20 against 2000 in the slow lane), plain and under each stock
+    acceleration: a float32 member beside a float64 one, a vmap of the
+    step, a multi-rate graph, a sub-cycled group, a predictor (and
+    IQN-IMVJ's Jacobian carried from step to step), a checkpoint restart,
+    run_adaptive, and a member sharded over four devices (the dense kind).
+    Not claimed for float16 or bfloat16: at a tolerance those dtypes
+    resolve the residual's float floor is 0.2 and 1.6 tolerances, so a
+    converged verdict there is not above the floor, which the claim
+    presupposes; their cells stop at a cap of two passes (CPL-188).
   oracle: >-
     the exact float64 fixed point of the compact system and K from the
     loop's operator (tests/property/interface_side_graphs.py::Reference;
@@ -5962,20 +6022,34 @@ claims:
     - tests/property/test_coupling_targeted_search.py::test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances_on_a_larger_target
     - tests/property/test_coupling_targeted_search.py::test_a_known_side_defect_the_search_reached_is_fixed
     - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances
   status: verified
   domains:
     f32:
       - 'tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size[two-way-sparse-jacobi-float32-none]'
       - 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[gather-only]'
     f64: 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[two-way]'
-    mixed_dtype: narrowed
+    mixed_dtype:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[mixed_dtype-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[mixed_dtype-two-way-sparse-gauss-seidel-fixed-small-b]'
     16bit: narrowed
     jit: 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[scatter-only]'
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[vmap-two-way-sparse-transposed-gauss-seidel-iqn-imvj]'
+    multi_rate:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[multi_rate-scatter-only-matrix-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[multi_rate-two-way-matrix-jacobi-aitken-small-b]'
+    sub_cycled:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[sub_cycled-gather-only-sparse-jacobi]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[sub_cycled-two-way-sparse-gauss-seidel-iqn-ils]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[predictors_warm_starts-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[predictors_warm_starts-two-way-sparse-transposed-gauss-seidel-iqn-imvj-small-b]'
+    adaptive: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_run_adaptive_steps_a_pair_of_two_sizes_as_a_plain_step_does
+    checkpoint_restart:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-two-way-sparse-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[checkpoint_restart-two-way-matrix-gauss-seidel-fixed]'
+    sharded: tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member

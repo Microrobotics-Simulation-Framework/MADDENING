@@ -3345,6 +3345,23 @@ claims:
     set, and spectral_error_bound held in every measured case.  The
     nonlinear search holds such a cell's units within a decade for the
     two radius scores and pins the case as a strict xfail.
+    Statement (2) asks more of the pass than the flag's margin does: it
+    is of a pass whose Jacobian such a rounding leaves standing to its
+    1e-4.  A float32 Gauss-Seidel member with a quadratic term or a
+    product, of curvature 100 over the size of the field it reads, has a
+    derivative one rounding of a same-pass value moves by 2.4e-5, and
+    the float32 pass's Jacobian then has a radius up to 5e-4 of itself
+    from the one exact arithmetic gives at the returned state (5e-5 at a
+    curvature of 10, 5e-6 at 1; the same at any units, with and without
+    a mapping; 7e-7 under saturating gains; 5e-5 under Jacobi through a
+    mapping).  rho_spectral is the float32 pass's to 2e-8 there.
+    Measured on a mapped ring of three whose members square what they
+    read: 0.404214 for 0.404298, 1.53 of statement (2)'s allowance and
+    0.3% of the flag's margin, so statement (1) held (the same on the
+    release branch before this ring's mapping was read at its source);
+    2.3 allowances on a ring with no mapping.  The nonlinear search
+    draws the "radius" score at a curvature within 10 on such a cell
+    and holds the measured draw as a test.
     Under convergence_norm="interface" "the returned state" is the iterate
     the loop accepted, of which the state returned is one plain pass on in
     the fields the norm does not measure whole (CPL-191).
@@ -3369,6 +3386,8 @@ claims:
     - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle
     - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_direction_far_above_rounding_is_kept_in_float64
     - tests/core/test_coupling_spectral_estimate_rounding.py::test_the_compressed_radius_is_the_eigenvalues_not_the_squaring
+    - tests/property/test_coupling_nonlinear_search.py::test_the_radius_score_is_drawn_at_a_curve_a_float32_sweep_resolves
+    - tests/property/test_coupling_nonlinear_search.py::test_a_radius_settled_in_a_float32_sweep_is_the_radius_of_the_pass_s_own_jacobian
   status: verified
   notes: >-
     16bit domain failing on d2429a6: the spectral slots were stored in the

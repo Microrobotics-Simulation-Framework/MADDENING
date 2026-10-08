@@ -374,7 +374,10 @@ node multiplies two other nodes' fields held in units a factor of 1e3 or more ap
 rounding of such a field can move the pass's derivative by more than the flag's margin, and
 `rho_spectral` then describes the float32 pass, not the equations (0.324 for 0.0238 in the measured
 case, with `spectral_usable=True`; the error bound still held).  Run it in float64 or under Jacobi,
-or hold the multiplied fields as deviations in comparable units (MADD-ANO-239).
+or hold the multiplied fields as deviations in comparable units (MADD-ANO-239).  Inside that
+margin the same rounding still shows in the digits: where a node of such a group has a quadratic
+or product term of curvature 100 over the size of the field it reads, `rho_spectral` is the float32
+pass's radius to eight digits and a few parts in ten thousand from the one exact arithmetic gives.
 
 **What `diagnostics=True` costs.**  It is opt-in per group, and the work is done in every step of
 that group.  Beside the solve, the step runs 9 Jacobian-vector products for the spectrum (18 under

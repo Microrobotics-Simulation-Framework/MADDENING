@@ -1065,6 +1065,51 @@ def two_body(c: Case) -> GGraph:
     return GGraph(nodes, edges, groups)
 
 
+#: What ``compile()`` says of positions the interface norm reads that
+#: their dtype cannot resolve to the tolerance (its advisory's own words).
+POSITIONS_ADVISORY = "cannot be resolved to this tolerance"
+
+
+def positions_advisory_owed(c: Case) -> bool:
+    """Does ``compile()`` owe the edge-mapped graph of *c* that advisory?
+
+    Restated from the case, not read from the library.  Under the
+    interface norm the up edge of a ``multilinear`` case (four points
+    scattered onto more cells) is read at its source, and anchored there
+    its positions are read in grid spacings.  The advisory is owed where
+    four roundings of the farthest coordinate per evaluation of the pass
+    (each body declares one: two for the pair under Gauss-Seidel, one
+    under Jacobi) are ``rtol`` of a spacing or more -- the rule of
+    ``geometry_interface_graphs.positions_floor``.
+    """
+    knobs = dict(c.knobs or {})
+    if (c.kind != "multilinear" or knobs.get("convergence_norm") != "interface"
+            or c.up != "source" or refused(c)):
+        return False
+    dtype = np.dtype(c.geom_dtype or c.dtype)
+    held = np.asarray(np.asarray(geometry_fields(c)["P"]["pos"], dtype), np.float64)
+    reach = float(np.max(np.abs(held / np.asarray(_grid_of(c)[1]))))
+    evaluations = 1.0 if knobs.get("iteration_mode", "gauss-seidel") == "jacobi" else 2.0
+    return 4.0 * evaluations * float(np.finfo(dtype).eps) * reach >= float(knobs["rtol"])
+
+
+def build_edge_mapped(c: Case) -> GraphManager:
+    """:func:`build` of :func:`two_body` of *c*, holding ``compile()`` to
+    its advisory about unresolved positions: said once, of the up edge and
+    its source's positions, where :func:`positions_advisory_owed`, and not
+    at all where it is not.  Any other warning stays what it was."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.filterwarnings("always", f".*{POSITIONS_ADVISORY}", UserWarning)
+        gm = build(two_body(c))
+    said = [str(w.message) for w in caught]
+    if not positions_advisory_owed(c):
+        assert not said, said
+        return gm
+    (text,) = said
+    assert POSITIONS_ADVISORY in text and "'P.x->F.u'" in text and "positions P.pos" in text, text
+    return gm
+
+
 def graphs(c: Case) -> tuple:
     """``(edge-mapped GraphManager, node-inlined GraphManager)``, both compiled."""
     return build(two_body(c)), build(inline_geometry(two_body(c)))

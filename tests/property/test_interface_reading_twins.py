@@ -364,7 +364,11 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_b
         else:
             # The ``multilinear_grid`` kind: accepted (the criterion reads
             # its geometry); the slow sibling steps it and reads its report.
-            gg.build(gg.two_body(c))
+            # Its float32 markers sit five spacings from zero under
+            # ``rtol=1e-6``, which their dtype cannot resolve there:
+            # ``compile()`` says so, and builds the graph all the same.
+            assert gg.positions_advisory_owed(c)
+            assert gg.build_edge_mapped(c)._compiled_step is not None     # noqa: SLF001
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
     assert all(e.geometry is None and e.mapping is None for e in twin.edges)
 
@@ -391,9 +395,9 @@ def test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin(c):
             assert bool(report["spectral_usable"]) and np.isfinite(
                 float(report["spectral_error_bound"])), report
             if not gg.refused(c):
-                edge = gg.build(gg.two_body(c))
+                edge = gg.build_edge_mapped(c)
                 edge.step()
                 keys = [e.key for e in edge.edges if e.geometry is not None]
                 gg.assert_not_diagnosed(edge.coupling_diagnostics()[KEY], keys, "norm")
             return
-        compare(c, gg.build(gg.two_body(c)), twin, relay=True)
+        compare(c, gg.build_edge_mapped(c), twin, relay=True)

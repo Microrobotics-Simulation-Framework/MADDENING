@@ -107,8 +107,13 @@ ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
 CI_ALL = DUR + SHARD + WF
 
+#: The searches' slow hunts are seeded: the helper's rules, and a scan of
+#: every module that names the slow profile (no compile).
+_HUNTS = "tests/property/test_targeted_search.py"
+
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN)
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
+               _HUNTS)
 
 
 @dataclass(frozen=True)
@@ -147,9 +152,6 @@ CELLS_PINNED = ("tests/property/test_coupling_search_cells_are_pinned.py",)
 _NL = "tests/property/test_coupling_nonlinear_search.py"
 _LIN = "tests/property/test_coupling_targeted_search.py"
 _GEO = "tests/property/geometry_cells.py"
-#: The searches' slow hunts are seeded: the helper's rules, and a scan of
-#: every module that names the slow profile (no compile).
-_HUNTS = "tests/property/test_targeted_search.py"
 _HELPER = "tests/property/targeted_search.py"
 _SYSID = "tests/property/test_sysid_targeted_search.py"
 HUNTS_SEEDED = (f"{_HUNTS}::test_no_hunt_in_the_tree_is_written_without_a_seed",)

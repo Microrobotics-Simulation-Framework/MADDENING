@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling import _interface_plan
-from maddening.core.coupling.acceleration import float_fields_of
+from maddening.core.coupling.acceleration import _has_entries, float_fields_of
 from maddening.core.coupling.group import CouplingGroup
 
 
@@ -726,7 +726,7 @@ def _group_state_finite(state, node_names):
     for nn in node_names:
         for v in state[nn].values():
             v = jnp.asarray(v)
-            if jnp.issubdtype(v.dtype, jnp.floating) and v.size > 0:
+            if jnp.issubdtype(v.dtype, jnp.floating) and _has_entries(v):
                 ok = jnp.logical_and(ok, jnp.all(jnp.isfinite(v)))
     return ok
 

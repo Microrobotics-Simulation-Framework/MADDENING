@@ -248,11 +248,11 @@ def test_every_acceleration_and_order_reports_what_its_twin_does(cell):
 # Per push: tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does[unread_mapped-mixed-fori+diag-none-jacobi-f64]
 @pytest.mark.slow
 @pytest.mark.parametrize("cell", [
-    _cell(shape, norm, "ift", True, dtype="float64")
-    for shape in eg.SHAPES if shape not in eg.DEGENERATE
-    for norm in NORMS
+    _cell(shape, NORMS[i % 3], "ift", True, dtype="float64")
+    for i, shape in enumerate(s for s in eg.SHAPES if s not in eg.DEGENERATE)
 ])
 def test_every_shape_reports_what_its_twin_does_in_float64(cell):
+    """Every shape, the norms in turn (the float32 sweep above crosses them)."""
     _assert_reports_what_its_twin_does(cell)
 
 
@@ -274,13 +274,13 @@ def test_a_field_with_no_entries_of_a_coarser_dtype_coarsens_nothing(cell):
 # Per push: tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does[only_field-mixed-fori+diag-fixed-jacobi-f32-grad]
 @pytest.mark.slow
 @pytest.mark.parametrize("cell", [
-    _cell(shape, NORMS[i % 3], solver, diagnostics, gradient=True)
-    for i, shape in enumerate(s for s in eg.SHAPES if s not in eg.DEGENERATE)
-    for solver, diagnostics in (("ift", True), ("ift", False), ("fori", True))
+    _cell(shape, "mixed", "ift", True, gradient=True)
+    for shape in eg.SHAPES if shape not in eg.DEGENERATE
 ])
-def test_the_gradient_through_every_shape_is_its_twins(cell):
-    """``jax.grad`` through a step, under the diagnostics too: finite, not
-    zero, and the twin's to the bit."""
+def test_the_gradient_through_the_diagnosed_step_is_its_twins(cell):
+    """``jax.grad`` through a step under ``solver="ift"`` with the
+    diagnostics (the per-push cells take it under the other settings):
+    finite, not zero, and the twin's to the bit."""
     _assert_reports_what_its_twin_does(cell)
 
 
@@ -381,14 +381,67 @@ def test_a_group_with_nothing_to_iterate_on_steps_and_is_differentiable(
 def test_a_group_with_nothing_to_iterate_on_is_reported_at_its_fixed_point(
         shape, norm, acceleration):
     """Under ``solver="ift"`` with the diagnostics, every norm and a
-    quasi-Newton acceleration, with the gradient taken through them."""
-    cell = _cell(shape, norm, "ift", True, acceleration, gradient=True).values[0]
+    quasi-Newton acceleration, and the gradient through the diagnosed step."""
+    gradient = norm == "mixed" and acceleration == "none"
+    cell = _cell(shape, norm, "ift", True, acceleration, gradient=gradient).values[0]
     got, kept = _graph(cell)
     report = got["report"]
     assert kept and report["converged"] is True and report["residual"] == 0.0
     assert report["rho_spectral"] == 0.0 and report["spectral_usable"] is True
     assert math.isfinite(report["spectral_error_bound"])
-    assert np.all(np.isfinite(got["gradient"])) and np.any(got["gradient"] != 0)
+    if gradient:
+        assert np.all(np.isfinite(got["gradient"])) and np.any(got["gradient"] != 0)
     if shape == "no_entries":
         assert report["spectral_error_bound"] == 0.0
         assert report["gradient_bound_usable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Beside a geometry edge
+# ---------------------------------------------------------------------------
+
+
+# Per push: tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does[source_mapped-interface-ift+diag-iqn-ils-jacobi-f32]
+@pytest.mark.slow
+@pytest.mark.parametrize("norm", ("l2", "mixed"))
+def test_a_field_with_no_entries_beside_a_geometry_edge_changes_nothing(norm):
+    """A group whose edges read a moving geometry (the ``multilinear_grid``
+    kind, under the norms whose diagnostics read one), one of whose bodies
+    also holds a field with no entries: the state, the report with its
+    geometry self-check, and the gradient are those of the same group
+    without the field."""
+    from tests.property import geometry_graphs as gg  # noqa: PLC0415
+
+    class BodyWithNone(gg.Body):
+        """The same body, holding one more field: ``none``, with no entries."""
+
+        def initial_state(self):
+            return {**super().initial_state(), "none": jnp.zeros((0,), self._dtype)}
+
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            out = super().update(state, boundary_inputs, dt, params=params)
+            return {**out, "none": state["none"]}
+
+    threshold = {"l2": dict(tolerance=1e-5), "mixed": dict(rtol=1e-5)}[norm]
+    case = gg.case("multilinear group and a field with no entries", kind="multilinear",
+                   adv=0.3, down="target", up="source",
+                   group=dict(max_iterations=200, convergence_norm=norm, diagnostics=True,
+                              **threshold))
+
+    def run(empty):
+        graph = gg.two_body(case)
+        if empty:
+            body = graph.node("P")
+            assert type(body) is gg.Body
+            body.__class__ = BodyWithNone
+        gm = gg.build(graph)
+        out = eg.outcome(gm, with_gradient=True)
+        return out, (eg.none_fields_are_kept(gm, case.dtype) if empty else None)
+
+    twin, _ = run(False)
+    got, kept = run(True)
+    assert kept
+    # The twin's diagnostics read its geometry: this is not NaN against NaN.
+    assert math.isfinite(twin["report"]["rho_spectral"])
+    assert eg.differences(got, twin) == []
+    assert np.all(np.isfinite(got["gradient"])) and np.any(got["gradient"] != 0)

@@ -1527,6 +1527,7 @@ claims:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_dead_band_is_the_delivered_values
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_that_is_not_finite_fails_the_criterion
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_an_integer_source_and_an_empty_delivery_carry_no_norm
+    - tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_one_pass_reports_the_change_of_what_its_edges_delivered
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_group_iterates_until_what_its_mapped_edge_delivers_has_stopped_moving
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver

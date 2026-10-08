@@ -570,6 +570,26 @@ def test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_
     del report
 
 
+def test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push():
+    """The gradient's flag on plane draws (MADD-ANO-251): its bound against
+    the reference's error wherever it is set, and never set with the fixed
+    point in another lattice cell than the returned iterate -- the flag
+    stands only with no plane inside the Newton-Kantorovich ball around the
+    iterate (``_bounds._kantorovich_ball_plane_margin``).  The draws that
+    put the fixed point just past a plane the Newton point stops short of
+    are the table's (``test_coupling_plane_sides.py``): these have it 1e-6
+    of a spacing or more from the plane."""
+    report, fractions = SEARCH.run("gradient", PER_PUSH_CELLS, planes=True)
+    assert fractions["referenced"] > 0.5, fractions
+    del report
+    placed = [(case, seen) for case, seen in SEARCH._seen.items()         # noqa: SLF001
+              if isinstance(case, gc.PlaneCase) and seen.get("placed") and seen["referenced"]]
+    across = [case for case, seen in placed if seen["crossed"]]
+    assert across and len(across) < len(placed), (len(across), len(placed))
+    flagged = [case for case, seen in placed if seen["crossed"] and seen["gradient_usable"]]
+    assert not flagged, flagged[:3]
+
+
 def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified():
     """The report's side, on the per-push graph with the two slots the
     rule reads replaced: the flag stands with the bound at the limit, and
@@ -620,6 +640,41 @@ def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is
                     assert {k: report[k] for k in rest} == rest, report
                     (row,) = list(gm.coupling_report())
                     assert any("lattice plane" in f for f in row["flags"]), row["flags"]
+            # The gradient's flag reads the margin of the Kantorovich ball,
+            # whatever the limit and the bound read: over one it stands; at
+            # one, under it, not a number or absent it is withdrawn alone,
+            # with the numbers and the spectral flag kept (MADD-ANO-251).
+            margin_slot = f"coupling_{gc.KEY}_geometry_plane_margin"
+            assert float(kept["_meta"][margin_slot]) > 1.0
+
+            def report_at(margin, limit=math.inf):
+                slots = {limit_slot: np.asarray(limit, dtype)}
+                meta_now = {**kept["_meta"], **slots}
+                if margin is None:
+                    del meta_now[margin_slot]
+                else:
+                    meta_now[margin_slot] = np.asarray(margin, dtype)
+                gm._state = {**kept, "_meta": meta_now}                    # noqa: SLF001
+                return dict(gm.coupling_diagnostics()[gc.KEY])
+
+            above = float(np.nextafter(np.asarray(1.0, dtype), np.asarray(2.0, dtype)))
+            for margin in (above, 26.0, math.inf):
+                for limit in (math.inf, 0.0):
+                    assert report_at(margin, limit) == honest, (margin, limit)
+            for margin in (1.0, 0.5, 0.0, math.nan, None):
+                for limit in (math.inf, 2.0 * bound, 0.0):
+                    report = report_at(margin, limit)
+                    assert report["gradient_bound_usable"] is False, (margin, limit)
+                    assert report["spectral_usable"] is True, (margin, limit)
+                    reason = report.pop("not_usable_reason")
+                    assert "Newton-Kantorovich ball" in reason and "lattice plane" in reason
+                    assert all(e.key in reason for e in gm._edges)         # noqa: SLF001
+                    rest = {k: v for k, v in honest.items() if k != "gradient_bound_usable"}
+                    assert {k: report[k] for k in rest} == rest, report
+                    (row,) = list(gm.coupling_report())
+                    assert any(f.startswith("gradient_bound_usable=False") and "ball" in f
+                               for f in row["flags"]), row["flags"]
+                    assert not any(f.startswith("spectral_usable=False") for f in row["flags"])
             # The self-check's failure is the whole report's; the plane's is not added to it.
             gm._state = {**kept, "_meta": {**kept["_meta"],                # noqa: SLF001
                                            limit_slot: np.asarray(0.0, dtype),
@@ -996,7 +1051,8 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
         print(f"{name}, cell {index} ({cell!r}), seed {seed}: worst {report.score:.4g}; "
               f"{fractions}")
     counts = dict(placed=0, across=0, across_before=0, across_violating_before=0,
-                  across_now=0, same=0, same_before=0, same_withheld=0)
+                  across_now=0, same=0, same_before=0, same_withheld=0,
+                  across_gradient_now=0, same_gradient_before=0, same_gradient_now=0)
     for case, seen in search._seen.items():               # noqa: SLF001
         if case.cell != index or not (seen.get("placed") and seen["referenced"]):
             continue
@@ -1009,6 +1065,15 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
         kind = "across" if seen["crossed"] else "same"
         counts[kind] += 1
         counts[f"{kind}_before"] += seen["usable_before"]
+        # The gradient's flag (MADD-ANO-251): it stood wherever the spectral
+        # one did on a finite bound; it now needs no plane in the
+        # Kantorovich ball.  Never across a plane, its bound held wherever
+        # it is set, and the honest ones (same cell) it costs are counted.
+        counts[f"{kind}_gradient_now"] += seen["gradient_usable"]
+        counts["same_gradient_before"] += (not seen["crossed"] and seen["spectral_usable"]
+                                           and math.isfinite(
+                                               report["gradient_relative_error_bound"]))
+        assert seen["gradient"] <= gc.THRESHOLD["gradient"], (case, seen)
         if seen["crossed"]:
             counts["across_violating_before"] += seen["plane_before"] > 1.0
             counts["across_now"] += seen["spectral_usable"]
@@ -1016,6 +1081,7 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
             counts["same_withheld"] += seen["usable_before"] and not seen["spectral_usable"]
     print(f"cell {index}, seed {seed}: {counts}")
     assert counts["placed"] >= 30, counts
+    assert counts["across_gradient_now"] == 0, counts
     # The self-check on these honest passes.  Away from a plane it never
     # fires and every gap has its margin.  Beside one (MADD-ANO-246, open)
     # a pass that reads a position it built in the same sweep can read a

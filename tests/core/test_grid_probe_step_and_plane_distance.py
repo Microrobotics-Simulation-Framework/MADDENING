@@ -486,26 +486,34 @@ def _margin(positions, *, radius=0.01, built_k=None, built_n=None, weights=None,
 
 def test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius():
     mid, near = ORIGIN + 1.3 * SPACING, ORIGIN + 2.02 * SPACING
-    # Distances 0.15 and 0.01, each times the weight 0.5, over the radius.
-    assert _margin([mid, near]) == pytest.approx(0.5 * 0.01 / 0.01, rel=1e-4)
-    assert _margin([mid, mid]) == pytest.approx(0.5 * 0.15 / 0.01, rel=1e-5)
-    assert _margin([mid, mid], radius=0.3) == pytest.approx(0.5 * 0.15 / 0.3, rel=1e-5)
+    # Eight float resolutions of the lattice: the least a plane is away by.
+    window = 8.0 * _resolution(ORIGIN, SPACING, POINTS, np.float32)
+    assert 1e-6 < window < 2e-6
+    # Distances 0.15 and 0.01 less the window, each times the weight 0.5,
+    # over the radius.
+    assert _margin([mid, near]) == pytest.approx(0.5 * (0.01 - window) / 0.01, rel=2e-5)
+    assert _margin([mid, mid]) == pytest.approx(0.5 * (0.15 - window) / 0.01, rel=2e-6)
+    assert _margin([mid, mid], radius=0.3) == pytest.approx(0.5 * (0.15 - window) / 0.3, rel=2e-6)
     # In the units of the norm, not of the position: the entry's weight.
     assert _margin([mid, near], weights=[1.0, 1.0, 0.01, 4.0]) == pytest.approx(
-        0.01 * 0.15 / 0.01, rel=1e-5)
+        0.01 * (0.15 - window) / 0.01, rel=2e-6)
     # A face of the hull is a plane.
-    assert _margin([mid, TOP - 0.004]) == pytest.approx(0.5 * 0.004 / 0.01, rel=1e-3)
+    assert _margin([mid, TOP - 0.004]) == pytest.approx(0.5 * (0.004 - window) / 0.01, rel=1e-4)
     # The Newton step's own move of the entry is added to its reach, and
     # only to its own.
     assert _margin([mid, near], moved=[9.0, 9.0, 0.0, 0.015]) == pytest.approx(
-        0.5 * 0.01 / (0.015 + 0.01), rel=1e-4)
+        0.5 * (0.01 - window) / (0.015 + 0.01), rel=2e-5)
     assert _margin([mid, near], moved=[9.0, 9.0, 0.5, 0.0]) == pytest.approx(
-        min(0.5 * 0.15 / (0.5 + 0.01), 0.5 * 0.01 / 0.01), rel=1e-4)
+        min(0.5 * (0.15 - window) / (0.5 + 0.01), 0.5 * (0.01 - window) / 0.01), rel=2e-5)
     # An entry the norm does not read is bounded by nothing.
     assert _margin([mid, mid], weights=[1.0, 1.0, 0.5, 0.0]) == 0.0
-    # Within eight float resolutions of a plane: on it.
+    # Within eight float resolutions of a plane: on it.  And the window is
+    # off the distance wherever the plane is in the ball: twelve
+    # resolutions away, the margin is of four.
     plane = ORIGIN + 2 * SPACING
-    assert _margin([mid, plane * (1 + 5 * float(np.finfo(np.float32).eps))]) == 0.0
+    assert _margin([mid, plane + 5.0 / 8.0 * window]) == 0.0
+    assert _margin([mid, plane + 1.5 * window], radius=1e-6) == pytest.approx(
+        0.5 * 0.5 * window / 1e-6, rel=0.1)
 
 
 def test_the_ball_margin_reads_only_the_positions_that_move_with_the_iterate():
@@ -514,7 +522,7 @@ def test_the_ball_margin_reads_only_the_positions_that_move_with_the_iterate():
     # between the iterate and the fixed point.
     assert _margin([mid, near], readers=[]) == math.inf
     only_first = [(np.asarray([2]), (1, 1), np.dtype(np.float32), _line(1))]
-    assert _margin([mid, near], readers=only_first) == pytest.approx(0.5 * 0.15 / 0.01, rel=1e-5)
+    assert _margin([mid, near], readers=only_first) == pytest.approx(0.5 * 0.15 / 0.01, rel=1e-4)
 
 
 def test_the_ball_margin_is_zero_where_a_position_the_pass_builds_leaves_the_cell():
@@ -522,7 +530,7 @@ def test_the_ball_margin_is_zero_where_a_position_the_pass_builds_leaves_the_cel
     sweep reads after its holder's update is the pass's own output."""
     mid, near = ORIGIN + 1.3 * SPACING, ORIGIN + 2.02 * SPACING
     stays, leaves = [mid, near + 0.004], [mid, near - 0.03]
-    assert _margin([mid, near], built_k=stays, built_n=stays) == pytest.approx(0.5, rel=1e-4)
+    assert _margin([mid, near], built_k=stays, built_n=stays) == pytest.approx(0.5, rel=1e-3)
     assert _margin([mid, near], built_k=leaves) == 0.0
     assert _margin([mid, near], built_n=leaves) == 0.0
     # Away from the plane by more than the iterate's distance: another

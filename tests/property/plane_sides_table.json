@@ -1,0 +1,1494 @@
+{
+ "note": "Drawn by the sweep's generator (tests/property/plane_sides.py, seed 465) and pinned; the audited rows are the audit's own cases (benchmarks/results/audit_040_p4_17/mapping).",
+ "rows": [
+  {
+   "name": "f32 jacobi mixed, positions constant of the pass: a plane between the pre-step position and the fixed point's",
+   "structure": "f32 jacobi mixed, positions constant of the pass",
+   "row": "k!=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": true,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 2.4990910726163662e-05,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "target"
+    ],
+    "aF": 0.23615461587905884,
+    "bF": 0.16316033899784088,
+    "aP": 0.5977077484130859,
+    "bP": -1.2011281251907349,
+    "cP": 0.7906028628349304,
+    "vP": [
+     -0.03306744992733002
+    ],
+    "kP": 0.12808950245380402,
+    "vF": [
+     -0.01090925931930542
+    ],
+    "kF": -0.7103392481803894,
+    "quad": 0.0,
+    "xF0": [
+     0.4344298541545868,
+     1.5212982892990112,
+     0.42234888672828674,
+     1.5832723379135132,
+     1.9237568378448486,
+     1.4067981243133545
+    ],
+    "xP0": [
+     1.8501776456832886
+    ],
+    "posP0": [
+     0.7264225482940674
+    ],
+    "posF0": [
+     0.6012919545173645
+    ],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f32 jacobi mixed, positions constant of the pass: the fixed point beside a plane",
+   "structure": "f32 jacobi mixed, positions constant of the pass",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": true,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 1.882069717940027e-05,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "target"
+    ],
+    "aF": 0.6743465662002563,
+    "bF": 0.13615372776985168,
+    "aP": -0.6817705035209656,
+    "bP": -1.0160319805145264,
+    "cP": -0.7718545198440552,
+    "vP": [
+     0.03240123391151428
+    ],
+    "kP": 0.7377516627311707,
+    "vF": [
+     -0.04962215572595596
+    ],
+    "kF": -0.24105927348136902,
+    "quad": 0.0,
+    "xF0": [
+     0.02693089097738266,
+     -0.4108720123767853,
+     1.8677339553833008,
+     1.9669960737228394,
+     0.020329751074314117,
+     -0.9416036009788513
+    ],
+    "xP0": [
+     0.371091365814209
+    ],
+    "posP0": [
+     0.461765855550766
+    ],
+    "posF0": [
+     1.1196621656417847
+    ],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f32 gauss-seidel l2: all in one cell, no plane in the ball",
+   "structure": "f32 gauss-seidel l2",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": true,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 0.1373606459404032,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.7896797060966492,
+    "bF": -0.17769870162010193,
+    "aP": 0.48451170325279236,
+    "bP": 1.0512324571609497,
+    "cP": 0.7366807460784912,
+    "vP": [
+     0.014096359722316265
+    ],
+    "kP": -0.08587818592786789,
+    "vF": [
+     -0.04443798586726189
+    ],
+    "kF": 0.010818429291248322,
+    "quad": 0.0,
+    "xF0": [
+     -1.8613669872283936,
+     0.3779635727405548,
+     -0.6719667911529541,
+     1.426254153251648,
+     1.645321011543274,
+     -0.7553995847702026
+    ],
+    "xP0": [
+     -1.660465121269226
+    ],
+    "posP0": [
+     0.08679167181253433
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "gauss-seidel",
+    "norm": "l2",
+    "tolerance": 0.03,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f32 gauss-seidel l2: all in one cell, a plane in the ball",
+   "structure": "f32 gauss-seidel l2",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 0.00016199756882295802,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": 0.6572954058647156,
+    "bF": 0.1535392850637436,
+    "aP": 0.6724680662155151,
+    "bP": -0.0806412398815155,
+    "cP": 0.4837867319583893,
+    "vP": [
+     0.07693850994110107
+    ],
+    "kP": -0.12227894365787506,
+    "vF": [
+     -0.04213656485080719
+    ],
+    "kF": 0.012722908519208431,
+    "quad": -0.01718110591173172,
+    "xF0": [
+     0.8347064852714539,
+     0.29527294635772705,
+     1.2565665245056152,
+     -0.32874560356140137,
+     0.755132257938385,
+     0.5029106140136719
+    ],
+    "xP0": [
+     -1.9197802543640137
+    ],
+    "posP0": [
+     0.6744927167892456
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "gauss-seidel",
+    "norm": "l2",
+    "tolerance": 0.03,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f32 gauss-seidel l2: k!=* N=*",
+   "structure": "f32 gauss-seidel l2",
+   "row": "k!=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": false,
+   "fixed_point_spacings_from_a_plane": 0.0001455998952160087,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.10970807820558548,
+    "bF": -0.07860638201236725,
+    "aP": 0.7908983826637268,
+    "bP": 0.42407530546188354,
+    "cP": 0.6262031197547913,
+    "vP": [
+     -0.01416638121008873
+    ],
+    "kP": -0.6651524305343628,
+    "vF": [
+     0.07994531840085983
+    ],
+    "kF": 0.831774115562439,
+    "quad": -0.011100275442004204,
+    "xF0": [
+     1.5961517095565796,
+     1.3143099546432495,
+     1.8824697732925415,
+     1.9635484218597412,
+     1.4782652854919434,
+     0.41289687156677246
+    ],
+    "xP0": [
+     1.9064068794250488
+    ],
+    "posP0": [
+     0.5876437425613403
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "gauss-seidel",
+    "norm": "l2",
+    "tolerance": 0.03,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f32 gauss-seidel l2: a few float resolutions from a plane",
+   "structure": "f32 gauss-seidel l2",
+   "row": "k=* N=*",
+   "on_a_plane": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 2.96409035005496e-06,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.1676594763994217,
+    "bF": -0.15958797931671143,
+    "aP": -0.3197397291660309,
+    "bP": 1.2472975254058838,
+    "cP": -0.2796715497970581,
+    "vP": [
+     0.08674722909927368
+    ],
+    "kP": 0.016316302120685577,
+    "vF": [
+     -0.026371832937002182
+    ],
+    "kF": -0.10420432686805725,
+    "quad": -0.2835065424442291,
+    "xF0": [
+     -0.9664216637611389,
+     -0.1784965991973877,
+     0.2072298377752304,
+     0.7843126058578491,
+     0.5141444206237793,
+     1.6775320768356323
+    ],
+    "xP0": [
+     -1.4244732856750488
+    ],
+    "posP0": [
+     1.1666172742843628
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "gauss-seidel",
+    "norm": "l2",
+    "tolerance": 0.03,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi l2: all in one cell, no plane in the ball",
+   "structure": "f64 jacobi l2",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": true,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 0.12467125926791806,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.09529602126650405,
+    "bF": 0.3388195474680622,
+    "aP": 0.625373353677183,
+    "bP": -0.6291662023679094,
+    "cP": 0.5057201415836137,
+    "vP": [
+     -0.061205730472099124
+    ],
+    "kP": -0.516905956641237,
+    "vF": [
+     0.06569606225189692
+    ],
+    "kF": -0.7373958998898422,
+    "quad": 0.0,
+    "xF0": [
+     -1.248490080699554,
+     1.5524783293439466,
+     -1.7843575669162028,
+     0.779269384524973,
+     0.2541020736768429,
+     1.047168065298639
+    ],
+    "xP0": [
+     -0.8845979796631964
+    ],
+    "posP0": [
+     0.05232640497655684
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 1e-05,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi l2: all in one cell, a plane in the ball",
+   "structure": "f64 jacobi l2",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 2.3003821070233244e-13,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": 0.34812637214650977,
+    "bF": -0.4166004277506533,
+    "aP": 0.36949280249140215,
+    "bP": -0.16215391771941917,
+    "cP": 0.15163874511249187,
+    "vP": [
+     0.07245162188999496
+    ],
+    "kP": 0.06128678793533339,
+    "vF": [
+     0.04872639797937228
+    ],
+    "kF": 0.6338561252991106,
+    "quad": 0.0,
+    "xF0": [
+     0.596440087326505,
+     1.6807852863731143,
+     1.0561836933548905,
+     0.398238323234603,
+     1.1836223211223413,
+     1.3225768178374973
+    ],
+    "xP0": [
+     1.79783481275405
+    ],
+    "posP0": [
+     0.4133869010627577
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 1e-05,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi l2: k=* N!=*",
+   "structure": "f64 jacobi l2",
+   "row": "k=* N!=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": false,
+   "fixed_point_spacings_from_a_plane": 2.5579538487363607e-13,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.36304129970433263,
+    "bF": 0.32675415890635834,
+    "aP": -0.07215208542923313,
+    "bP": -0.12169219844535767,
+    "cP": 0.4291948726956407,
+    "vP": [
+     -0.009724051791486138
+    ],
+    "kP": 0.2717468446898346,
+    "vF": [
+     0.07503955625796813
+    ],
+    "kF": -0.01873488291312904,
+    "quad": 0.0,
+    "xF0": [
+     1.2842216864237512,
+     1.1074794242444919,
+     0.4236549859542249,
+     1.2705968718842668,
+     0.4764341590284501,
+     0.4733639315667714
+    ],
+    "xP0": [
+     1.5415602022641182
+    ],
+    "posP0": [
+     1.0312341678184944
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 1e-05,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi l2: k!=* N=*",
+   "structure": "f64 jacobi l2",
+   "row": "k!=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 2.8954616482224083e-12,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.2521712940407742,
+    "bF": -0.4021154398444303,
+    "aP": 0.10668770834541574,
+    "bP": 0.0759901035536766,
+    "cP": -0.3443423061547606,
+    "vP": [
+     0.03649702541276742
+    ],
+    "kP": -0.021949181475055663,
+    "vF": [
+     -0.013364372920686554
+    ],
+    "kF": -0.6309543633965237,
+    "quad": 0.020319222639922644,
+    "xF0": [
+     -0.8394722382339244,
+     -1.4401337392160118,
+     1.940682352843217,
+     0.9820831202411715,
+     1.0741012735193451,
+     -0.4861238222939268
+    ],
+    "xP0": [
+     1.8074347241838313
+    ],
+    "posP0": [
+     0.2220342197489872
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 1e-05,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi l2: a few float resolutions from a plane",
+   "structure": "f64 jacobi l2",
+   "row": "k=* N=*",
+   "on_a_plane": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 3.9968028886505635e-15,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.3509203513403879,
+    "bF": -0.9120169401000542,
+    "aP": 0.29959771782243716,
+    "bP": 0.9653435006024285,
+    "cP": -0.33844389779907624,
+    "vP": [
+     0.06768148996671047
+    ],
+    "kP": -0.24969995693355984,
+    "vF": [
+     0.055079598777487276
+    ],
+    "kF": -0.014535684256214645,
+    "quad": 0.0,
+    "xF0": [
+     1.4835965500383057,
+     0.9958435877210712,
+     0.5841035931668292,
+     0.4213323900786584,
+     1.9389787691295788,
+     1.321253234771204
+    ],
+    "xP0": [
+     1.367475978101163
+    ],
+    "posP0": [
+     0.3794410494488704
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 1e-05,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi mixed aitken: all in one cell, no plane in the ball",
+   "structure": "f64 jacobi mixed aitken",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": true,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 0.09569369554230933,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.5
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": 0.7626759612519058,
+    "bF": -0.7269516537927969,
+    "aP": -0.06651330809839584,
+    "bP": -0.263939642801131,
+    "cP": 0.4180331180618879,
+    "vP": [
+     -0.03508922614874033
+    ],
+    "kP": 0.06166029696817186,
+    "vF": [
+     0.07469779454909428
+    ],
+    "kF": -0.029804873079775297,
+    "quad": -0.16823501475346894,
+    "xF0": [
+     -0.9281848506723991,
+     1.363893057027521,
+     -1.0617723304565554,
+     1.1084376255186594,
+     0.7834069474846568,
+     0.6254123872629087
+    ],
+    "xP0": [
+     -1.804855581668366
+    ],
+    "posP0": [
+     1.6270159547682055
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "aitken",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi mixed aitken: all in one cell, a plane in the ball",
+   "structure": "f64 jacobi mixed aitken",
+   "row": "k=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 3.4727776210274897e-13,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.5
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.22264837093034495,
+    "bF": 0.2975914101057472,
+    "aP": 0.6769975788138951,
+    "bP": 0.07068772201919477,
+    "cP": -0.48452347632263826,
+    "vP": [
+     0.0586300176107917
+    ],
+    "kP": -0.05387308825545086,
+    "vF": [
+     -0.026294987229331657
+    ],
+    "kF": 0.8198333536726772,
+    "quad": 0.0,
+    "xF0": [
+     1.2415930783631475,
+     1.236832493850943,
+     0.6455821633831937,
+     1.221273764327226,
+     1.3745719285225626,
+     1.2699611994774302
+    ],
+    "xP0": [
+     1.9655525469029254
+    ],
+    "posP0": [
+     1.9394444938541677
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "aitken",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi mixed aitken: k=* N!=*",
+   "structure": "f64 jacobi mixed aitken",
+   "row": "k=* N!=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 3.0752289603697136e-11,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.5
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": 0.3196827738944221,
+    "bF": 0.08286634512630625,
+    "aP": -0.4617986757311123,
+    "bP": -0.051904880367670575,
+    "cP": -0.30992570679292664,
+    "vP": [
+     0.09883180762750596
+    ],
+    "kP": 0.03647325244680562,
+    "vF": [
+     0.06569444839215832
+    ],
+    "kF": -0.019936344741789576,
+    "quad": 0.16447556884167489,
+    "xF0": [
+     0.48610573870365226,
+     -1.7605988297867499,
+     0.4905360011027091,
+     0.2198241418545468,
+     0.26266633869387546,
+     -0.23109332717764453
+    ],
+    "xP0": [
+     0.5767180636796458
+    ],
+    "posP0": [
+     0.9187377219184235
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "aitken",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi mixed aitken: k!=* N=*",
+   "structure": "f64 jacobi mixed aitken",
+   "row": "k!=* N=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 3.4150460237469815e-13,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.5
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": 0.3196827738944221,
+    "bF": 0.08286634512630625,
+    "aP": -0.4617986757311123,
+    "bP": -0.051904880367670575,
+    "cP": -0.30992570679292664,
+    "vP": [
+     0.09883180762750596
+    ],
+    "kP": 0.03647325244680562,
+    "vF": [
+     0.06569444839215832
+    ],
+    "kF": -0.019936344741789576,
+    "quad": 0.16447556884167489,
+    "xF0": [
+     0.48610573870365226,
+     -1.7605988297867499,
+     0.4905360011027091,
+     0.2198241418545468,
+     0.26266633869387546,
+     -0.23109332717764453
+    ],
+    "xP0": [
+     0.5767180636796458
+    ],
+    "posP0": [
+     0.9187377219020184
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "aitken",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "f64 jacobi mixed aitken: k!=* N!=*",
+   "structure": "f64 jacobi mixed aitken",
+   "row": "k!=* N!=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "fixed_point_spacings_from_a_plane": 2.8610447344590284e-13,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.5
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.5928310547206124,
+    "bF": 0.18353980246667398,
+    "aP": -0.39502545713475856,
+    "bP": 0.24579923757211936,
+    "cP": 0.4011471471020829,
+    "vP": [
+     0.08953270079730477
+    ],
+    "kP": 0.37736018478081956,
+    "vF": [
+     -0.046885433870077264
+    ],
+    "kF": 0.13792953691201076,
+    "quad": 0.29427424317996764,
+    "xF0": [
+     0.8953207179921956,
+     0.6979360403370967,
+     1.6868523122986916,
+     1.6246082609883281,
+     1.3835332609482252,
+     1.1548306644874256
+    ],
+    "xP0": [
+     -1.233566306808024
+    ],
+    "posP0": [
+     0.5542570105214235
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "aitken",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   }
+  },
+  {
+   "name": "audited: the gradient bound short of a plane: f32_l2",
+   "structure": "audited: the gradient bound short of a plane",
+   "row": "k!=* N!=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.752949059009552,
+    "bF": 0.21677719056606293,
+    "aP": -0.327198326587677,
+    "bP": 0.9620803594589233,
+    "cP": 0.8380011916160583,
+    "vP": [
+     0.04396766051650047
+    ],
+    "kP": 0.42091310024261475,
+    "vF": [
+     -0.09793174266815186
+    ],
+    "kF": -0.9926989674568176,
+    "quad": 0.0,
+    "xF0": [
+     1.5935572385787964,
+     0.49212324619293213,
+     1.5711195468902588,
+     0.9061514735221863,
+     0.4315726161003113,
+     0.5989429950714111
+    ],
+    "xP0": [
+     -1.2650885581970215
+    ],
+    "posP0": [
+     0.8779765367507935
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "gauss-seidel",
+    "norm": "l2",
+    "tolerance": 0.03,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   },
+   "fixed_point_spacings_from_a_plane": 3.573693400138467e-05
+  },
+  {
+   "name": "audited: the gradient bound short of a plane: f64_loose",
+   "structure": "audited: the gradient bound short of a plane",
+   "row": "k!=* N!=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.5
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.752949038743002,
+    "bF": 0.21677718463551693,
+    "aP": -0.3271983215114105,
+    "bP": 0.9620803875063497,
+    "cP": 0.838001175887541,
+    "vP": [
+     0.043967662107926186
+    ],
+    "kP": 0.4209130997389794,
+    "vF": [
+     -0.09793173928194746
+    ],
+    "kF": -0.992698943344137,
+    "quad": 0.0,
+    "xF0": [
+     1.59355720143003,
+     0.4921232493982237,
+     1.5711195287005393,
+     0.906151456104787,
+     0.43157261189626184,
+     0.5989430106831275
+    ],
+    "xP0": [
+     -1.265088616371138
+    ],
+    "posP0": [
+     2.146476971890607
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.03,
+    "max_iterations": 60,
+    "acceleration": "aitken",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   },
+   "fixed_point_spacings_from_a_plane": 1.7989605058055247e-05
+  },
+  {
+   "name": "audited: the gradient bound short of a plane: f64_tight",
+   "structure": "audited: the gradient bound short of a plane",
+   "row": "k!=* N!=*",
+   "on_a_plane": false,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "cfg": {
+    "N": [
+     6
+    ],
+    "m": 1,
+    "origin": [
+     0.0
+    ],
+    "spacing": [
+     0.25
+    ],
+    "dtype": "float64",
+    "anchors": [
+     "target",
+     "source"
+    ],
+    "aF": -0.6515533302114509,
+    "bF": -1.2040132135754635,
+    "aP": -0.21578560305335093,
+    "bP": 0.050000231303340616,
+    "cP": -0.879144983102643,
+    "vP": [
+     0.020314046247923503
+    ],
+    "kP": -0.03051463391733564,
+    "vF": [
+     0.0962061234782089
+    ],
+    "kF": 0.16714387814410728,
+    "quad": -0.04139282689691142,
+    "xF0": [
+     -1.593590608344921,
+     1.4161557415461874,
+     -0.41571722299398584,
+     1.1267497438346012,
+     -0.7096113132251918,
+     0.5028913792848058
+    ],
+    "xP0": [
+     1.1619269097706584
+    ],
+    "posP0": [
+     1.028644118135489
+    ],
+    "posF0": [],
+    "order": [
+     "F",
+     "P"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 1e-05,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "none",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   },
+   "fixed_point_spacings_from_a_plane": 1.0369483049998962e-12
+  },
+  {
+   "name": "audited: a position within a rounding of a plane: grad_origin20",
+   "structure": "audited: a position within a rounding of a plane",
+   "row": "k!=* N=*",
+   "on_a_plane": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "cfg": {
+    "N": [
+     3,
+     3
+    ],
+    "m": 1,
+    "origin": [
+     20.0,
+     20.0
+    ],
+    "spacing": [
+     0.25,
+     0.25
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "source",
+     "source"
+    ],
+    "aF": -0.3780505657196045,
+    "bF": -0.15095114707946777,
+    "aP": 0.17087501287460327,
+    "bP": 0.39315173029899597,
+    "cP": 0.5951147675514221,
+    "vP": [
+     -0.02428451180458069,
+     0.03381134197115898
+    ],
+    "kP": 0.4275497794151306,
+    "vF": [
+     -0.026517076417803764,
+     -0.04844183102250099
+    ],
+    "kF": -0.014378701336681843,
+    "quad": 0.0,
+    "xF0": [
+     1.389947772026062,
+     0.7611458897590637,
+     1.1512783765792847,
+     1.7100974321365356,
+     1.5622870922088623,
+     0.8871843218803406,
+     1.8373814821243286,
+     1.7684935331344604,
+     1.6869789361953735
+    ],
+    "xP0": [
+     -0.6746971607208252
+    ],
+    "posP0": [
+     20.47212028503418,
+     20.295522689819336
+    ],
+    "posF0": [
+     20.122472763061523,
+     20.223285675048828
+    ],
+    "order": [
+     "P",
+     "F"
+    ],
+    "mode": "jacobi",
+    "norm": "l2",
+    "tolerance": 0.0001,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "fixed",
+    "relaxation": 0.7,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   },
+   "fixed_point_spacings_from_a_plane": 6.7764445219609115e-06
+  },
+  {
+   "name": "audited: a position within a rounding of a plane: radius",
+   "structure": "audited: a position within a rounding of a plane",
+   "row": "k!=* N=*",
+   "on_a_plane": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": true,
+   "cfg": {
+    "N": [
+     7
+    ],
+    "m": 1,
+    "origin": [
+     20.0
+    ],
+    "spacing": [
+     0.5
+    ],
+    "dtype": "float32",
+    "anchors": [
+     "source",
+     "source"
+    ],
+    "aF": 0.4471771717071533,
+    "bF": -0.15995223820209503,
+    "aP": 0.7781617641448975,
+    "bP": 0.16612346470355988,
+    "cP": -0.491978257894516,
+    "vP": [
+     0.009108633734285831
+    ],
+    "kP": 0.42551812529563904,
+    "vF": [
+     -0.06589123606681824
+    ],
+    "kF": -0.047759562730789185,
+    "quad": 0.0,
+    "xF0": [
+     0.33851656317710876,
+     1.0708438158035278,
+     -1.0803108215332031,
+     1.5042051076889038,
+     -1.5413906574249268,
+     0.3339032828807831,
+     1.8611409664154053
+    ],
+    "xP0": [
+     -0.5302696824073792
+    ],
+    "posP0": [
+     20.41596794128418
+    ],
+    "posF0": [
+     20.09230613708496
+    ],
+    "order": [
+     "P",
+     "F"
+    ],
+    "mode": "gauss-seidel",
+    "norm": "mixed",
+    "tolerance": 0.0001,
+    "rtol": 0.0001,
+    "max_iterations": 60,
+    "acceleration": "iqn-imvj",
+    "relaxation": 1.0,
+    "flux": false,
+    "predictor": "none",
+    "sweep": [],
+    "group": true
+   },
+   "fixed_point_spacings_from_a_plane": 8.454164444060552e-07
+  }
+ ]
+}

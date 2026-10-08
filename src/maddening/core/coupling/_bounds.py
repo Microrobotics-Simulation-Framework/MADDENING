@@ -981,7 +981,9 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
        its float resolution, which the resolvent carries into the Newton
        step and into ``eta``, once each (``floor`` is twice that); and a
        position within :data:`GEOMETRY_PLANE_ULPS` float resolutions of a
-       plane is on it (:func:`_reader_plane_distance`).
+       plane is on it (:func:`_reader_plane_distance`), wherever in the
+       ball it is: ``window_j`` below is that many resolutions of
+       ``x_k[j]``.
     5. *The norm.*  ``||D v||_2 <= R`` bounds entry ``j`` by ``R / D_j``
        where ``D_j > 0``, and bounds nothing where ``D_j = 0`` (an entry
        the norm does not read counts as on a plane).
@@ -989,7 +991,8 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     For every entry ``j`` of a position field the pass reads from the
     iterate or from the state the same pass has built (*readers*, those of
     :func:`_geometry_plane_limit`: a constant of the pass is not one), let
-    ``d_j`` be the distance from ``x_k[j]`` to the nearest plane, zero
+    ``d_j`` be the distance from ``x_k[j]`` to the nearest plane less
+    ``window_j`` (zero within it), and zero
     where the position the pass *builds* at either point it is evaluated
     at -- ``F(x_k)[j]`` (*f_k*) and ``F(x_N)[j]`` (*f_newton*), what a
     Gauss-Seidel sweep reads after its holder's update -- is not strictly
@@ -1001,7 +1004,7 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     Where ``margin > 1``: entry ``j`` of the Newton point is ``|delta_j|``
     from ``x_k[j]``, and by 3, 4 and 5 entry ``j`` of ``x_p`` is within
     ``radius / D_j`` of that, so every position of ``x_N`` and of ``x_p``
-    is in the cell ``x_k``'s is in;
+    is in the cell ``x_k``'s is in, further than the window from its planes;
     the positions the pass builds at ``x_k`` and at ``x_N`` are in it by
     the two evaluations, and at ``x_p`` they are ``x_p``'s own; so by 1
     and 2 the pass *is* ``p`` at the three points, ``x_p`` is a fixed
@@ -1021,13 +1024,18 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     for where, shape, dtype, mapping in readers:
         at = jnp.asarray(where, jnp.int32)
         start = x_k[at].astype(work)
-        distance = _reader_plane_distance(mapping, x_k[at].reshape(shape).astype(dtype), work)
+        here = x_k[at].reshape(shape).astype(dtype)
+        distance = _reader_plane_distance(mapping, here, work)
         unknown = jnp.isnan(distance)
         for built in (f_k[at], f_newton[at]):
             on_a_plane = _reader_plane_distance(mapping, built.reshape(shape).astype(dtype), work)
             inside = (jnp.abs(built.astype(work) - start) < distance) & (on_a_plane > 0)
             unknown = unknown | jnp.isnan(on_a_plane)
             distance = jnp.where(inside, distance, zero)
+        # Off the plane by the window everywhere in the ball, not only at
+        # the iterate.
+        window = GEOMETRY_PLANE_ULPS * jnp.ravel(mapping._plane_resolution(here)).astype(work)
+        distance = jnp.maximum(distance - window, zero)
         distance = jnp.where(unknown, jnp.full((), jnp.nan, work), distance)
         reach = moved[at].astype(work) + radius
         # ``0 / 0`` (on a plane, with nothing to reach it by) is no margin.

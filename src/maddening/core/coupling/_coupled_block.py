@@ -1007,7 +1007,8 @@ def _run_coupled_block_impl(
             # ``gradient_bound_usable=False``.
             if group.solver == "ift" or group.diagnostics:
                 nan = jnp.full((), jnp.nan, jnp.asarray(single_r).dtype)
-                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan, nan, nan), None
+                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan, nan, nan,
+                           nan), None
             return r, None, None
 
         # Determine n_dof for acceleration

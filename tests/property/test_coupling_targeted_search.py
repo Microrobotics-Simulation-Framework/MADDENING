@@ -71,7 +71,13 @@ The floor is promised only where no node "cancels inside itself"
 (CPL-092's condition).  A relay whose bias cancels its inputs does, by
 the factor :func:`_cancellation` measures, so scores 1 and 4 allow the
 floor that factor: a mapping row that cancels is *not* inside a node and
-is not allowed for (MADD-ANO-212).
+is not allowed for where a member reads it (MADD-ANO-212).  Where the
+*norm* reads it -- under ``"interface"`` a value an edge delivers by
+cancellation is floored at its own magnitude and rounds at its source's
+(MADD-ANO-247, open) -- the scores allow the floor the factor
+:func:`_reading_cancellation` measures as well: the last bit of such a
+row decides nothing here, and the defect is held with no allowance by
+``tests/core/test_coupling_interface_floor_of_a_delivered_difference.py``.
 
 Per push: each search on :data:`PER_PUSH_CELLS`, derandomised, at the
 house floor of examples, over the domain the claims are made on and
@@ -322,8 +328,9 @@ def returned_scores(cell, values: dict, accepted: ct.Step) -> dict:
       = 1`` -- a cap reached with a reading still moving by its own size
       -- nothing is claimed.
 
-    The float floor is allowed as the other scores allow it: one more
-    evaluation of the pass rounds once more.  ``without_the_drift`` and
+    The float floor is allowed as the other scores allow it (a node that
+    cancels inside itself, a delivered value that cancels inside its
+    edge): one more evaluation of the pass rounds once more.  ``without_the_drift`` and
     ``without_the_residual`` are the third score with that factor, or
     that term, left out: measurements of whether a draw needs them.
     """
@@ -363,7 +370,7 @@ def returned_scores(cell, values: dict, accepted: ct.Step) -> dict:
     eps = float(np.finfo(cell.dtype).eps)
     x, y = _stacked(topo, accepted.state), _stacked(topo, step.state)
     cancels = _cancellation(model, step.pre, step.state)
-    rounds = cancels * floor
+    rounds = cancels * _reading_cancellation(model, step.state) * floor
 
     # The pass: a recomputed field is ``F(x)``'s (the exact pass in the
     # reference's extended precision: a float64 graph's rounding is the
@@ -568,6 +575,39 @@ def _cancellation(model: ct.LinearModel, pre: dict, state: dict) -> float:
         size = float(np.max(np.abs(np.asarray(state[m]["x"], np.float64))))
         if size > 0:
             worst = max(worst, float(np.max(terms)) / size)
+    return worst
+
+
+def _reading_cancellation(model: ct.LinearModel, state: dict) -> float:
+    """How far the worst value the norm reads "cancels inside its edge":
+    the largest sum of magnitudes a row of a mapped edge's reading adds,
+    over the largest entry that edge delivers.  1 where no row cancels,
+    and exactly 1 for every field the norm reads as stored: the L2 and
+    the mixed norm, an unmapped edge, an edge read at its source.
+
+    Under ``"interface"`` the floor of a delivered value is
+    ``PRECISION_FLOOR_ULPS`` units of ``eps`` times the delivered field's
+    own largest entry, and a row that differences entries of its source
+    field delivers the entries' rounding, this factor times that unit:
+    MADD-ANO-247, open (0.056 of a floor per unit of it on the pair that
+    pins it, under either schedule).  The scores allow the floor this
+    factor beside :func:`_cancellation`'s, so that a hunt's verdict does
+    not turn on the last bit of such a row: the example that found the
+    defect (:data:`A_DELIVERED_DIFFERENCE`) reads 1.098 floors on one CPU
+    and 0.21 on another, its gains being scaled through LAPACK.  A row a
+    *member* reads under the other norms gets nothing: MADD-ANO-212's
+    pins stay strict
+    (``test_the_reading_allowance_is_one_where_the_norm_reads_the_fields``).
+    """
+    members, _off, _k = model._group_layout(0)  # noqa: SLF001
+    x = np.concatenate([np.asarray(state[m]["x"], np.float64) for m in members])
+    worst = 1.0
+    for B, gamma in model.norm_fields(0):
+        if gamma == 0.0 or not B.shape[0]:
+            continue                    # read as stored: nothing to cancel
+        delivered = float(np.max(np.abs(B @ x)))
+        if delivered > 0:
+            worst = max(worst, float(np.max(np.abs(B) @ np.abs(x))) / delivered)
     return worst
 
 
@@ -841,11 +881,15 @@ def observe(case: Case) -> dict:
     if not finite or not math.isfinite(d["residual"]):
         return out
     residual = float(d["residual"])
-    cancels = _cancellation(model, step.pre, step.state)
-    # The floor a node that cancels inside itself is outside the promise by.
+    inside = _cancellation(model, step.pre, step.state)
+    reads = _reading_cancellation(model, step.state)
+    # The floor a node that cancels inside itself is outside the promise
+    # by, and a value the norm reads that cancels inside its edge
+    # (MADD-ANO-247).
+    cancels = inside * reads
     allowed = ((residual + cancels * floor) / (residual + floor)
                if out["floor_reported"] and residual + floor > 0 else 1.0)
-    out["report"].update(floor=floor, cancellation=cancels)
+    out["report"].update(floor=floor, cancellation=inside, reading_cancellation=reads)
 
     if out["floor_reported"]:
         _dn, _b, detail = model.group_report_consistency(
@@ -1608,7 +1652,11 @@ SIDE_DIAGNOSED_CELLS = tuple(range(len(CELLS), len(CELLS) + len(SIDE_DIAGNOSED))
 #: on different scales, so an analysis taken on one reading under a
 #: criterion taken on the other reports a wrong bound -- which, on a
 #: well-conditioned mapping, it does not (seeded: the "bound" search over
-#: :data:`SIDE_DIAGNOSED` alone lets it through).
+#: :data:`SIDE_DIAGNOSED` alone lets it through).  They are also where the
+#: floor's own unit is too fine (MADD-ANO-247): the delivered field's
+#: largest entry is 1/16 or less of the terms its rows add on 2.6% of the
+#: draws, and the scores allow the floor that factor
+#: (:func:`_reading_cancellation`).
 SIDE_CANCELLING = (
     Cell("side-3-6", "float64", 6, 120, "matrix"),
     Cell("side-2-8", "float64", _JACOBI_INTERFACE, 120, "matrix"),
@@ -1819,6 +1867,65 @@ def test_the_reported_numbers_hold_where_a_gather_row_differences_a_large_field(
                             profile=profile)
     print(f"{name}, cancelling side cells: worst {report}; usable fraction {usable:.2f}")
     assert usable > 0, f"{name}: no example had the flag set"
+
+
+#: What that hunt reached under its seed on one CI runner (jaxlib 0.10.2):
+#: the exact residual of the returned state 1.098 times the reported one
+#: plus the floor, in float64 under Jacobi, one pass from the fixed point.
+#: The gather delivers ``[-0.53, 0.054]`` of entries at 13.0 and 13.6, and
+#: 97% of that residual is the differencing row's.  Not pinned by its
+#: score: the example's gains are scaled through LAPACK, whose kernels
+#: round differently per CPU, and it reads 0.21 on another machine (0.12
+#: under a third kernel; the same on jaxlib 0.10.2 and 0.11.2 on each).
+#: The defect is MADD-ANO-247, pinned where nothing depends on a last bit
+#: (``tests/core/test_coupling_interface_floor_of_a_delivered_difference.py``:
+#: 5.7 and 45 floors, the bound at 0.25 and 0.031 of the distance).
+A_DELIVERED_DIFFERENCE = Case(SIDE_CANCELLING_CELLS[1], 2593, 0.8515625, True, 1.0, 0.0,
+                              7.498942093324558, 0, 0.0, 0)
+
+
+def _at_the_start(case: Case):
+    """``(model, state)`` of *case* at the state its step starts from (no
+    graph is compiled)."""
+    cell = CELLS[case.cell]
+    values = values_of(case)
+    model = ct.LinearModel(cell.topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    return model, {m: {"x": np.asarray(values["nodes"][m]["x0"])} for m in cell.topo.groups[0]}
+
+
+def test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads():
+    """On the example the hunt reached: the largest sum of magnitudes a
+    row of either mapped edge adds, over that edge's largest delivered
+    entry -- 26.6 over 0.53 on the gather, whose two rows both cancel."""
+    case = A_DELIVERED_DIFFERENCE
+    cell = CELLS[case.cell]
+    assert cell.knobs["convergence_norm"] == "interface" and case.cancel > 1, cell
+    model, state = _at_the_start(case)
+    by_hand = []
+    for i in cell.topo.internal_edges(0):
+        e = cell.topo.edges[i]
+        assert e.mapped and e.transform is None, e
+        H = np.asarray(model.values["H"][i], np.float64)
+        x = np.asarray(state[e.src]["x"], np.float64)
+        by_hand.append(float(np.max(np.abs(H) @ np.abs(x)) / np.max(np.abs(H @ x))))
+    reads = _reading_cancellation(model, state)
+    assert reads == pytest.approx(max(by_hand), rel=1e-12), (reads, by_hand)
+    assert 40.0 < reads < 60.0, (reads, by_hand)
+    # The same numbers where the norm reads the fields: nothing is allowed.
+    mixed = ct.LinearModel(cell.topo, model.values, dtype=cell.dtype, group_cfgs=ct.group_cfgs_of(
+        [dict(cell.knobs, convergence_norm="mixed")]))
+    assert _reading_cancellation(mixed, state) == 1.0
+
+
+@pytest.mark.parametrize("name", sorted(KNOWN) + sorted(SEEDS))
+def test_the_reading_allowance_is_one_where_the_norm_reads_the_fields(name):
+    """Exactly 1 on MADD-ANO-212's pins, whose differencing row a member
+    reads under the L2 norm (the allowance must not reach them: they are
+    strict), and on every seed shape, the interface hub's among them (its
+    edges are unmapped): the scores there are the ones they were, to the
+    bit."""
+    case = KNOWN[name].values[0] if name in KNOWN else SEEDS[name]
+    assert _reading_cancellation(*_at_the_start(case)) == 1.0
 
 
 # =============================================================================

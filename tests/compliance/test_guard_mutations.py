@@ -102,6 +102,12 @@ ORACLE = (f"{_SEARCH}::test_the_gradient_constants_of_a_mapped_edge_are_the_weig
 #: (CPL-093's condition), on both sides of the margin (no graph compiled).
 RESOLVES = (f"{_SEARCH}::test_the_gradient_score_is_taken_over_the_constants_the_pass_resolves",
             f"{_SEARCH}::test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score")
+#: What the scores allow a floor whose norm reads a value an edge delivers
+#: by cancellation (MADD-ANO-247): the factor itself, and that it is 1
+#: where the norm reads the fields (no graph compiled).
+ALLOWANCE = (
+    f"{_SEARCH}::test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads",
+    f"{_SEARCH}::test_the_reading_allowance_is_one_where_the_norm_reads_the_fields")
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -754,6 +760,20 @@ MUTANTS: tuple[Mutant, ...] = (
        "a constant's pass response taken per unit of the constant, not at the size the bound probes "
        "it at: a gain of 1e-3 reads a thousand times more resolved than it is, and is scored where "
        "the row says nothing"),
+    _M("O5", _SEARCH,
+       "            worst = max(worst, float(np.max(np.abs(B) @ np.abs(x))) / delivered)\n",
+       "            worst = max(worst, float(np.max(np.abs(B) @ np.abs(x))) / delivered * 1e3)\n",
+       ALLOWANCE,
+       "the search's allowance for a delivered value that cancels inside its edge taken a thousand "
+       "times what the row cancels by: every floor and every bound on a mapped interface cell is "
+       "excused, whatever the library reports there"),
+    _M("O6", _SEARCH,
+       "    for B, gamma in model.norm_fields(0):\n",
+       "    for B, gamma in ct.LinearModel(model.topo, model.values, dtype=model.dtype, "
+       "group_cfgs=[dict(model.cfgs[0], convergence_norm=\"interface\")]).norm_fields(0):\n",
+       ALLOWANCE,
+       "the allowance taken over every mapped edge whatever the norm reads: a differencing row a "
+       "member reads under the L2 norm is excused, and MADD-ANO-212's strict pins read as fixed"),
     # --- IP: a coupling group's edges are enumerated in one module only, -----
     # --- tests/core/test_interface_plan_is_the_only_enumeration.py -----------
     _M("IP1", "src/maddening/core/coupling/_group_layout.py",

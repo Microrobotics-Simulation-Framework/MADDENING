@@ -521,6 +521,12 @@ class of your own needs the members of the `Mapping` protocol and a
 `spec` attribute, and no `describe()` method: the edge writes the spec
 for you.
 
+Check a kind of your own with `maddening.testing.mapping.verify_mapping`
+(experimental): linearity, the consistency or conservation it claims, the
+adjoint identity between `apply` and `apply_T`, and the save/load round
+trip of a registered kind; see [Verifying a coupled model in three
+levels](../../developer_guide/verification.md#verifying-a-coupled-model-in-three-levels).
+
 ### What `params_pytree()` may contain
 
 The graph snapshots `mapping.params_pytree()` into

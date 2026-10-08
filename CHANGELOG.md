@@ -215,6 +215,8 @@ guidance; the itemized changes follow.
   populations, an index), `verify_node` takes `constrain_state=` /
   `constrain_boundary=` (a function applied to every draw, in every check)
   and `state_strategy=` / `boundary_strategy=` (your own Hypothesis strategy)
+  Beyond the node (experimental): `maddening.testing.mapping.verify_mapping` / `assert_mapping_verified` check an interface mapping of any kind, registered or not, or a whole `EdgeSpec` (linearity, the claimed consistency / conservation, the adjoint identity, the position derivative, the save/load round trip),
+  and `maddening.testing.coupled.verify_graph_order` / `verify_graph_gci` measure a coupled graph's order with a guard on the coupling's iteration error (`docs/developer_guide/verification.md`, "Verifying a coupled model in three levels").
 - Property-test coverage for round trips, the REST and FMU-bridge surfaces
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 

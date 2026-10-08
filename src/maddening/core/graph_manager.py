@@ -1821,6 +1821,23 @@ class GraphManager:
                 f"mapping {mapping!r} on {source}.{source_field} -> "
                 f"{target}.{target_field}: {problem}"
             )
+        # A mapping of a kind registered with ``register_mapping`` is
+        # rebuilt by ``from_dict`` through that kind's factory, and what
+        # the factory returns is refused there unless it is a Mapping of
+        # the kind.  Asked here too, of the object itself: an edge that
+        # was accepted, stepped and written by ``to_dict()`` used to be
+        # refused only when its config was loaded (MADD-ANO-245).
+        from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+            _registered_mapping_problem,
+        )
+        unfit = _registered_mapping_problem(mapping)
+        if unfit is not None:
+            error, text = unfit
+            raise error(
+                f"the mapping on {source}.{source_field} -> {target}.{target_field} is "
+                f"{text}.  GraphManager.from_dict refuses the config this edge would "
+                f"write, so the edge is refused where it is added"
+            )
         leads = _graph_specs._mapping_field_leads(mapping)
         src_spec = self._nodes.get(source)
         if src_spec is not None:
@@ -2807,6 +2824,12 @@ class GraphManager:
                             # a geometry (experimental): written by the
                             # step under the same condition.
                             meta[f"coupling_{key}_geometry_gap"] = jnp.array(
+                                jnp.nan, dtype=spec_dtype
+                            )
+                            # The largest bound at which no position the
+                            # pass reads from the iterate reaches a
+                            # lattice plane (same condition).
+                            meta[f"coupling_{key}_geometry_plane_limit"] = jnp.array(
                                 jnp.nan, dtype=spec_dtype
                             )
                 if g.acceleration == "iqn-imvj":
@@ -4852,7 +4875,21 @@ class GraphManager:
             step then compares its own Jacobian-vector product along
             the positions with a finite difference of the pass, and
             the bounds stand where the two agree to
-            ``GEOMETRY_GAP_TOLERANCE``.  Any other such group, and one
+            ``GEOMETRY_GAP_TOLERANCE``.  The spectrum is taken at the
+            returned iterate, and a multilinear stencil is another
+            polynomial across a lattice plane: where a position the pass
+            reads from the iterate (a member's source-anchored geometry,
+            or the target-anchored one of a member that computes fluxes)
+            is within twice ``"spectral_error_bound"`` of a lattice plane
+            of its mapping's grid or of a face of the grid's hull, and
+            the step did not certify its linearisation across the Newton
+            step to the fixed point
+            (``"gradient_relative_error_bound"`` is not finite),
+            ``"spectral_usable"`` and ``"gradient_bound_usable"`` are
+            ``False``, every number is reported as computed, and the
+            entry has a ``"not_usable_reason"`` saying so: the fixed
+            point may be in another lattice cell, where the pass
+            contracts at another rate.  Any other such group, and one
             whose step failed that check, reports the solve's own
             ``"iterations"``,
             ``"total_iterations"``, ``"residual"`` and ``"converged"``
@@ -4866,7 +4903,9 @@ class GraphManager:
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
-            says which case it is; no other group's entry has it.  The values are
+            says which case it is; besides the lattice-plane case above
+            and a checkpoint saved after a state write, no other
+            group's entry has it.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -5165,6 +5204,35 @@ class GraphManager:
                         "gradient_bound_usable": False,
                         "precision_limited": False,
                         "not_usable_reason": geometry_reason,
+                    })
+                    continue
+                plane_limit = (meta.get(f"coupling_{key}_geometry_plane_limit")
+                               if geometry_keys else None)
+                reported_bound = result[key]["spectral_error_bound"]
+                if (plane_limit is not None and math.isfinite(reported_bound)
+                        and not reported_bound <= float(plane_limit)
+                        and not math.isfinite(grad_bound)):
+                    # Experimental: the bound is the linearisation at the
+                    # returned iterate, and a multilinear stencil is
+                    # another polynomial across a lattice plane.  Where a
+                    # position the pass reads from the iterate is within
+                    # the bound's reach of one
+                    # (``_bounds._geometry_plane_limit``; a limit that is
+                    # not a number counts), the fixed point may be in
+                    # another cell, and the linearisation stands only if
+                    # the step certified it across the Newton step to the
+                    # fixed point: the Newton-Kantorovich check of the
+                    # gradient bound, which takes the pass's Jacobian at
+                    # both ends and is what a finite
+                    # ``gradient_relative_error_bound`` records.  Without
+                    # that the flag is withdrawn and the numbers stay,
+                    # with the reason (MADD-ANO-242).
+                    result[key].update({
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "not_usable_reason": _group_layout._geometry_plane_reason(
+                            geometry_keys, reported_bound, float(plane_limit),
+                            _bounds.GEOMETRY_PLANE_REACH),
                     })
         return result
 
@@ -6428,7 +6496,8 @@ class GraphManager:
             key = "+".join(sorted(group.nodes))
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
-                           "pass_evaluations", "reading_floor", "geometry_gap"):
+                           "pass_evaluations", "reading_floor", "geometry_gap",
+                           "geometry_plane_limit"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):
@@ -7311,6 +7380,10 @@ class GraphManager:
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;
+        * ``not_usable_reason`` for a group with a geometry-dependent
+          mapping whose bound reaches a lattice plane without the step
+          having certified its linearisation across it (experimental):
+          ``spectral_usable`` is withdrawn and the numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

@@ -129,9 +129,70 @@ names the edge and says what to do.
   it compares its Jacobian-vector product along the positions with a
   finite difference of the pass along the same direction, and where the
   two differ by more than a quarter (`GEOMETRY_GAP_TOLERANCE`) the
-  report withholds the bounds.  That happens for a node whose derivative
-  is not the derivative of its value (a `stop_gradient` on an input, a
-  rounding), and on a step whose state is not finite.
+  report withholds the bounds.  An honest pass reads the finite
+  difference's own error: about 6e-4 in float32 (at most 6e-3 on 235
+  drawn examples of six cells, and at most 1e-2 on three thousand more
+  away from a lattice plane) and under 5e-6 in float64.  The check fails
+  for a node or a mapping whose derivative is not the derivative of its
+  value (a `stop_gradient` on an input, a rounding, a branch on a
+  position): a pass whose product saw no geometry at all read 0.31 to
+  0.98 in float32 on those draws and 1.0 in float64.  It is a coarse
+  check, and it has three measured limits:
+
+  - **A wrong derivative of a weak term is not seen.**  A term the
+    product misses reads `G / (G + 32 res)`, where the term moves a field
+    by `G` and `res` is the field's float resolution: 0.22, under the
+    tolerance, on a deposit so weak that it moved the grid's field by
+    nine resolutions.  The spectral radius reported there was 0.003
+    against 0.025.
+  - **An honest float32 report can be withheld beside a lattice plane.**
+    Where a member reads, in the same Gauss-Seidel sweep, positions that
+    another member has just built, and one of them is within about 2e-5
+    of a spacing of a lattice plane, the check's step carries it across
+    the plane and the difference is not a derivative.  Of 2829 drawn
+    examples of two such groups, 1489 of them that near a plane, 47 read
+    over 0.05, two over 0.2 and one 0.59; of a thousand further from a
+    plane none read over 5e-3 (MADD-ANO-246).
+  - **An honest float32 report is withheld behind a strongly cancelling
+    gather.**  A Gauss-Seidel group whose gather samples a field that
+    changes sign across a cell reads 0.25 to 0.75 once the lattice
+    values are about a thousand times the sample (one band at 0.14
+    passes).  The bound is too low there anyway (MADD-ANO-212).
+
+  `not_usable_reason` therefore names both readings of a gap over the
+  tolerance, a derivative that is not the value's and a finite
+  difference that could not be formed: one number does not tell them
+  apart.  A step where the two could not be compared at all (a state
+  that is not finite, or a geometry the pass reads from a constant the
+  step could not move) has a reason of its own.  The tolerance is not
+  lower because of the second limit: at 0.05 the check would catch the
+  weak deposit and would withhold 7 to 9 of the 4,450 honest examples of
+  the test suite's searches, where it now withholds none or one.
+* **Across a lattice plane the flags are withdrawn and the numbers
+  kept.**  A multilinear stencil is one polynomial of the positions
+  inside a lattice cell and another in the next, so the pass's Jacobian
+  jumps where a position crosses a lattice plane, or a face of the
+  grid's hull (outside it the kernel clamps).  `rho_spectral`,
+  `spectral_error_bound` and `gradient_relative_error_bound` are the
+  linearisation at the returned iterate: they describe the pass in the
+  lattice cells its positions are in *there*.  Where a position the pass
+  reads from the iterate is within twice `spectral_error_bound` of a
+  lattice plane, the bound stands only if the step certified its
+  linearisation across the Newton step to the fixed point (the
+  Newton-Kantorovich check behind `gradient_relative_error_bound`, which
+  is then finite).  Otherwise `spectral_usable` and
+  `gradient_bound_usable` are `False`, the numbers are reported as
+  computed, and `not_usable_reason` names the case: the fixed point may
+  be in the next cell, where the pass contracts at another rate.
+  Measured on a marker whose fixed point was 2e-4 of a spacing past a
+  plane: a radius of 0.28 before the plane and 0.97 after it, and a
+  bound 0.13 times the true distance on a converged solve.  The
+  positions concerned are a member's source-anchored geometry and the
+  target-anchored geometry of a member that computes fluxes; a position
+  that is a constant of the pass (a target-anchored geometry read by
+  `update`, a node outside the group) does not move between the iterate
+  and the fixed point and withdraws nothing.  A tighter tolerance
+  usually brings the returned iterate into the fixed point's cell.
 * **Everywhere else the report says so.**  For any other group that
   resolves a geometry-dependent mapping (another mapping kind, a
   sub-cycled group, the interface norm with a geometry edge entering

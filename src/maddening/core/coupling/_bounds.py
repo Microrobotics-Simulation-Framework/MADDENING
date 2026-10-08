@@ -27,10 +27,48 @@ def _F_dispatch(step_pure, x, consts):
 #: along a geometry and a finite difference of the pass along the same
 #: direction (:func:`_geometry_product_gap`) at which
 #: ``coupling_diagnostics()`` still reports the bounds of a group with a
-#: geometry edge.  Experimental.  A product that does not see the geometry
-#: at all reads a gap of 1 on every field the geometry moves, one that
-#: sees half of it 0.5; an honest pass reads the finite difference's own
-#: error, a few ``sqrt(eps)`` of the geometry's dtype.
+#: geometry edge.  Experimental.  A product that misses a term which
+#: moves a field by ``G`` reads ``G / (G + c res)`` on that field (``res``
+#: the field's float resolution, ``c``
+#: :data:`_GEOMETRY_GAP_RESOLUTIONS`): 1 where the term is strong, and
+#: under this tolerance where it moves the field by fewer than about 11
+#: resolutions.  One that sees half of a strong term reads 0.5.  An
+#: honest pass reads the finite difference's own error, a few
+#: ``sqrt(eps)`` of the coarsest dtype the pass evaluates in.
+#:
+#: Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2 (MAP-045):
+#:
+#: * honest, 350 drawn examples of six cells of the geometry search: a
+#:   median of 6e-4 and at most 5.7e-3 in float32, at most 4.3e-6 in
+#:   float64; the search's hunts away from a lattice plane (2171
+#:   examples, and a thousand plane draws further than 2e-5 of a spacing
+#:   from their plane): at most 9.5e-3;
+#: * every geometry read under ``stop_gradient``, the same six cells: 0.305
+#:   to 0.98 in float32 and 1.0 in float64, all 353 withheld;
+#: * the source-anchored reads alone under ``stop_gradient``, on a deposit
+#:   that moves the grid's field by nine resolutions (and the spectral
+#:   radius from 0.025 to 0.003): 0.22, under this tolerance.
+#:
+#: It is not lower, to catch that, because honest float32 passes of two
+#: kinds read as much and more, and their reports would be withheld:
+#:
+#: * a pass that reads a position it built in the same sweep
+#:   (Gauss-Seidel, a source-anchored geometry whose holder is swept
+#:   first) with that position within about 2e-5 of a spacing of a
+#:   lattice plane.  The step moves it across the plane through its
+#:   holder's mapped input.  Of 2829 plane draws of two such cells on
+#:   jaxlib 0.11.0 (1489 within 2e-5), 47 read over 0.05, 13 over 0.1, 2
+#:   over 0.2 and one 0.59; one draw of the plane hunt reads 0.26 and
+#:   0.29 on 0.10.2 and 0.11.2 (MADD-ANO-246);
+#: * a Gauss-Seidel pass behind a gather of a field that changes sign
+#:   across a cell: 0.025 to 0.087 where the lattice values are up to a
+#:   thousand times the sample, 0.14 to 0.75 beyond (MADD-ANO-212, whose
+#:   bound is wrong there, so that withholding is no loss).
+#:
+#: At 0.05 the self-check would withhold 7 to 9 of the 4,450 honest
+#: examples of the search's hunts (all of the first kind) where it now
+#: withholds none or one.  The reason of a withheld report names both
+#: readings of a gap.
 GEOMETRY_GAP_TOLERANCE = 0.25  # units: relative gap
 #: How many of the residual's float resolutions the finite difference of
 #: :func:`_geometry_product_gap` is allowed as rounding, per field: a
@@ -101,6 +139,104 @@ def _geometry_product_gap(step_pure, x_star, consts, directions, weights, resolu
                         jnp.max(gap), jnp.nan)
         worst = jnp.where(jnp.isnan(gap) | jnp.isnan(worst), jnp.nan, jnp.maximum(worst, gap))
     return worst
+
+
+#: How many times ``spectral_error_bound`` every position the pass reads
+#: from the iterate must be from the nearest lattice plane of its mapping
+#: for the bound's flag to stand (:func:`_geometry_plane_limit`).
+#: Experimental.  Two is the radius of the Newton-Kantorovich ball in
+#: units of the Newton step at the largest nonlinearity the theorem
+#: admits (``t* <= 2 eta`` at ``h = 1/2``), and the bound is at least the
+#: Newton step.
+GEOMETRY_PLANE_REACH = 2.0  # units: spectral_error_bound
+
+
+def _geometry_plane_limit(step_pure, x_star, consts, readers, weights, unit):
+    """The largest ``spectral_error_bound`` at which no position the pass
+    reads from the iterate can be across a lattice plane at the fixed
+    point (experimental).
+
+    A geometry-dependent mapping is piecewise smooth in the positions it
+    reads: a multilinear stencil is one polynomial inside a lattice cell
+    and another in the next, so the pass's Jacobian jumps where a
+    position crosses a lattice plane.  The spectral estimate and the
+    bounds built on it are the linearisation at the returned iterate
+    ``x_k``, which describes the pass only in the cells the positions are
+    in *there*.  With the fixed point across a plane the bound read
+    0.13x the true distance with its flag set (MADD-ANO-242).
+
+    The bound ``B`` states ``unit * ||D (x_k - x*)||_2 <= B`` (``D`` the
+    *weights*, ``unit`` the norm's constant: 1 under ``"l2"``, ``1 /
+    (rtol sqrt(count))`` under ``"mixed"``), so entry ``j`` of the fixed
+    point is within ``B / (unit D_j)`` of the iterate's.  For every entry
+    ``j`` of a position field the pass reads from the iterate or from the
+    state the same pass has built (*readers*), with ``d_j`` the distance
+    from ``x_k[j]`` to the nearest plane of the mapping that reads it
+    (``mapping._plane_distance``):
+
+        ``limit = unit * min_j (D_j d_j) / GEOMETRY_PLANE_REACH``,
+
+    with ``d_j`` taken as zero where the pass itself moves the position
+    further than that (``|F(x_k)_j - x_k[j]| > d_j``: the position a
+    Gauss-Seidel sweep reads after its holder's update is then in another
+    cell than the iterate's).  Where ``B <= limit``:
+
+    * a fixed point across a lattice plane is further than
+      ``GEOMETRY_PLANE_REACH * B`` from ``x_k``, so it is not the one
+      ``B`` is about;
+    * the pass's polynomial piece at ``x_k`` has, by Newton-Kantorovich
+      (``h <= 1/2``), a fixed point within twice the Newton step, hence
+      within ``GEOMETRY_PLANE_REACH * B``; its positions are then in the
+      cells of ``x_k``'s, where the piece *is* the pass, so it is a fixed
+      point of the pass and the linearisation describes the way to it as
+      it would on a smooth map.
+
+    Where ``B > limit`` a plane is within reach, and the report keeps the
+    flag only if the step certified the linearisation across it: the
+    gradient bound's Newton-Kantorovich check
+    (:func:`_gradient_error_bound_at`) takes the pass's Jacobian at
+    ``x_k`` and at the Newton point ``x_k + delta`` -- across whatever
+    plane the predicted fixed point is beyond -- and is finite only where
+    the resolvent applied to the difference is under one half.  A screen
+    alone would withdraw the flag of nearly every step of a group with
+    many points (one of them is always near a plane); the check alone
+    would withdraw it wherever a smooth nonlinearity fails Kantorovich
+    far from any plane, which the bound's documented conditions already
+    cover.
+
+    A position that is a constant of the pass (a target-anchored edge of
+    ``update``, a node outside the group) does not move between the
+    iterate and the fixed point and is not in *readers*.
+
+    *readers* is a sequence of ``(where, shape, dtype, mapping)``: the
+    flat indices of a position field, its shape and dtype, and a mapping
+    that reads it.  Returns a scalar in the analysis dtype: ``inf`` with
+    no reader, NaN where a position is not finite.  One evaluation of the
+    pass, in a branch of its own (as :func:`_spectral_rate_at`).
+    """
+    x_sg = jax.lax.stop_gradient(x_star)
+    consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
+    work = _analysis_dtype(x_sg.dtype)
+    d = jax.lax.stop_gradient(jnp.asarray(weights, work))
+    scale = jax.lax.stop_gradient(jnp.asarray(unit, work))
+    if not readers:
+        return jnp.full((), jnp.inf, work)
+
+    def limit(operands):
+        xx, cc, dd, uu = operands
+        moved = jnp.abs(_F_dispatch(step_pure, xx, cc).astype(work) - xx.astype(work))
+        nearest = jnp.full((), jnp.inf, work)
+        for where, shape, dtype, mapping in readers:
+            at = jnp.asarray(where, jnp.int32)
+            here = xx[at].reshape(shape).astype(dtype)
+            distance = jnp.ravel(mapping._plane_distance(here)).astype(work)
+            distance = jnp.where(moved[at] > distance, jnp.zeros((), work), distance)
+            nearest = jnp.minimum(nearest, jnp.min(distance * dd[at]))
+        return uu * nearest / GEOMETRY_PLANE_REACH
+
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), limit, lambda _operands: jnp.full((), jnp.nan, work),
+        (x_sg, consts_sg, d, scale))
 
 
 def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,

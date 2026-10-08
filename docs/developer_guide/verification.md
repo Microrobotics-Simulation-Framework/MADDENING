@@ -88,6 +88,85 @@ Inputs declared in `boundary_input_spec()` are sampled automatically; bound
 them with `boundary_bounds={...}`. If `update()` needs an input the node does
 not declare, pass a fixed dict with `boundary_inputs={...}`.
 
+### Fields with constraints
+
+Every state field is sampled on its own, in a box.  A field that only
+means something under a constraint — a unit quaternion, lattice populations
+that are positive, a step counter the node uses as an index, two fields
+that must agree — gets draws the node is never given.  The battery then
+fails for a reason that is not a defect (the zero quaternion cannot be
+normalised), or passes on states that say nothing about the node.
+
+`constrain_state=` takes a function that is applied to every drawn state
+before any check uses it; `constrain_boundary=` does the same for the drawn
+boundary inputs.
+
+```python
+import jax.numpy as jnp
+import numpy as np
+
+from maddening.nodes.rigid_body import RigidBodyNode
+from maddening.testing.verification import verify_node
+
+
+def unit_quaternion(state):
+    # In float64: the square of a tiny float32 draw underflows.  The zero
+    # quaternion has no direction, so the identity stands in for it.
+    q = np.asarray(state["orientation"], dtype=np.float64)
+    norm = np.linalg.norm(q)
+    q = q / norm if norm > 0 else np.array([1.0, 0.0, 0.0, 0.0])
+    return {**state, "orientation": jnp.asarray(q, dtype=state["orientation"].dtype)}
+
+
+body = RigidBodyNode("body", 0.01, mass=2.0, inertia=(1.0, 2.0, 3.0))
+results = verify_node(
+    body,
+    bounds={"orientation": (-1.0, 1.0), "angular_velocity": (-5.0, 5.0)},
+    boundary_bounds={"force": (-50.0, 50.0), "torque": (-50.0, 50.0)},
+    constrain_state=unit_quaternion,
+    checks=["finite", "gradient_finite"],
+    max_examples=50,
+    derandomize=True,
+)
+assert all(r.passed for r in results.values()), [str(r) for r in results.values()]
+```
+
+Every check sees the mapped state and only that — the eager and the
+compiled call, the point a gradient is taken at, `energy_fn`, `invariants`
+— and it is the state a counterexample reports.  `bounds` still set the box
+the raw draw comes from.  The function must return the fields it was given,
+each with the shape and dtype it was drawn with (`jnp.clip` keeps an `int32`
+counter `int32`; cast back after computing in float64, as above).  Anything
+else raises a `ValueError` that names the field: a refused function says
+nothing about the node, so it is never reported as a `FAIL`.
+
+For what a map cannot express — fields tied together through a shared draw,
+a state taken from a short trajectory — pass your own Hypothesis strategy as
+`state_strategy=` (or `boundary_strategy=`):
+
+<!-- snippet: no-run, reason: fragment: my_node, n_cells and h are the reader's -->
+```python
+from hypothesis import strategies as st
+from maddening.testing.verification import verify_node
+
+@st.composite
+def located(draw):
+    cell = draw(st.integers(0, n_cells - 1))
+    offset = draw(st.floats(0.0, 0.5, width=32))
+    return {"x": jnp.asarray((cell + offset) * h, jnp.float32),
+            "cell": jnp.asarray(cell, jnp.int32)}       # agrees with x
+
+verify_node(my_node, state_strategy=located())
+```
+
+The strategy replaces the per-field sampling, so it is refused together with
+`bounds` (and `boundary_strategy` with `boundary_bounds` or
+`boundary_inputs`) rather than silently ignoring them.  Its examples reach
+the node exactly as drawn (`dtype` is not applied to them), they shrink as
+usual, and `constrain_state`, if also given, is applied to them.  In your
+own `@given` test the same function is a `.map()`:
+`node_states(my_node).map(unit_quaternion)`.
+
 ### Writing your own `@given` tests
 
 The strategies underneath the battery are public:
@@ -428,6 +507,8 @@ nothing any more; it is kept as a signpost to the root file.
 ## Checklist for new nodes
 
 - [ ] `assert_node_verified(node, bounds=...)` with a physically meaningful envelope
+- [ ] A state field with a constraint (a unit quaternion, positive populations,
+      an index): `constrain_state=`, so the battery judges states the node is given
 - [ ] `NodeMeta(discretization_order=DiscretizationOrder(...))`, and an MMS
       study measuring it — an order nobody measured is a claim, not evidence
 - [ ] A node with a natural forcing input can be MMS-tested; everything else

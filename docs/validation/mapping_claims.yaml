@@ -1904,7 +1904,7 @@ claims:
     grad: n/a
     vmap: n/a
     multi_rate: n/a
-    sub_cycled: n/a
+    sub_cycled: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_sub_cycled_group_with_a_geometry_edge_is_refused_under_the_interface_norm'
     predictors_warm_starts: n/a
     adaptive: n/a
     checkpoint_restart: n/a
@@ -2703,8 +2703,8 @@ claims:
     by the self-check as a constant of the pass.
   domains:
     f32: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
-    f64: narrowed
-    mixed_dtype: narrowed
+    f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
+    mixed_dtype: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
     16bit: narrowed
     jit: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
     grad: narrowed
@@ -2713,7 +2713,7 @@ claims:
     sub_cycled: narrowed
     predictors_warm_starts: narrowed
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
     sharded: narrowed
 
 - id: MAP-050
@@ -2775,9 +2775,12 @@ claims:
     every push). Above the float floor: a float32 position hundreds of
     spacings from zero is stored to more than rtol=1e-4 spacings and such a
     group may not converge (the guide says so). The steps compiled (jit) by
-    the graph. Not claimed for another mapping kind or a sub-cycled group
+    the graph. A scan, a batch (vmap) and forward and reverse derivatives
+    through the solve are exercised in the slow lane only, on three kinds
+    of pair. Not claimed for another mapping kind or a sub-cycled group
     (refused: MAP-033), for the bounds (withheld: MAP-048), 16-bit dtypes,
-    multi-rate graphs, predictors, run_adaptive or sharded graphs.
+    gradients, vmap, multi-rate graphs, predictors, run_adaptive or sharded
+    graphs.
   oracle: >-
     a float64 NumPy restatement of the pass with a stencil of its own
     (checked against the rational-arithmetic kernel reference), of the
@@ -2805,7 +2808,23 @@ claims:
     - 'tests/core/test_interface_plan.py::test_a_readings_geometry_is_at_the_time_level_the_step_uses'
   status: verified
   notes: >-
-    PENDING-FIGURES
+    Measured (jaxlib 0.11.0, CPU, float64, rtol=1e-4). K on a two-way pair
+    of 30 markers under Gauss-Seidel, at 1.2e2, 1.2e3, 1.2e4, 1.2e5 and
+    1.2e6 grid points: 1.93, 2.01, 1.91, 1.93, 2.07, with the returned
+    state 0.48, 0.87, 0.53, 0.54, 0.54 tolerances from the fixed point
+    after 13, 11, 11, 11, 12 passes; on a scatter-only pair under Jacobi:
+    4.50, 4.31, 4.65, 4.65, 5.13 (0.86, 0.79, 0.71, 0.71, 0.80 tolerances;
+    24, 21, 22, 22, 27 passes). The same problem 1000 spacings from the
+    origin: the same passes on four draws (12, 7, 15, 14), the residual
+    equal to 2.6e-10 to 1.9e-9 of itself, K equal to four digits. The
+    slow sweep's worst distance over K tolerances: 0.40 (30 configurations
+    at three or four sizes). In this family the positions settle with the
+    values, so a position measured against its own magnitude changes the
+    residual's number and not the pass a plain loop stops on: the two
+    properties hold for the library and do not by themselves tell that
+    fault; the edge-by-edge residual, the plain loop's residual, the
+    search and the plan's pins do. Seeded faults: fourteen, each caught by
+    two per-push instruments or more.
   domains:
     f32: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
     f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'

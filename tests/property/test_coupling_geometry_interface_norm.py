@@ -334,6 +334,7 @@ def _check_plain_loop(shape, draw):
         assert abs(out["residual"] - plain["residual"]) <= allowed, (out["residual"], plain)
         want = ref.returned(plain["state"], out["whole"])
         after = ref.one_pass(plain["state"])
+        told_apart = {}
         for name in ("p", "q"):
             for field in ("x", "pos"):
                 # A value over its own size; a position in spacings.
@@ -343,12 +344,15 @@ def _check_plain_loop(shape, draw):
                 np.testing.assert_allclose(
                     out["state"][name][field], want[name][field], rtol=0, atol=allowed,
                     err_msg=f"{name}.{field}")
-                if exact and ref.pull:
-                    # The accepted iterate and one pass on differ by far more
-                    # than the comparison allows, so a field on the wrong
-                    # side of the return rule is seen.
-                    gap = float(np.max(np.abs(after[name][field] - plain["state"][name][field])))
-                    assert gap > 100 * allowed, (name, field, gap, allowed)
+                gap = float(np.max(np.abs(after[name][field] - plain["state"][name][field])))
+                told_apart[name, field] = gap > 100 * allowed
+        if exact:
+            # Premise: the accepted iterate and one pass on differ by far
+            # more than the comparison allows on a field the rule keeps (on
+            # some field, where it keeps none), so a field on the wrong side
+            # of the return rule is seen.
+            kept = [told_apart[key] for key in out["whole"]]
+            assert any(kept) if kept else any(told_apart.values()), told_apart
     assert out["excess"] <= ALLOWED[shape.dtype], (out["distance"], out["K"])
     return out
 
@@ -452,7 +456,11 @@ def _check_twin(shape, draw):
     assert a["iterations"] > 2 and a["converged"] and bool(report["converged"])
     assert int(report["iterations"]) == a["iterations"], (report, a["report"])
     tight = 1e-9 if shape.dtype == "float64" else 1e-3
-    assert abs(float(report["residual"]) - a["residual"]) <= tight * a["residual"], (
+    # (In float32 the two graphs round a position another way, and the
+    # residual carries ``eps |u| / rtol`` of it: within the floor.)
+    allowed = (tight * a["residual"] if shape.dtype == "float64"
+               else 0.05 * a["residual"] + 0.5 * ref.floor(a["state"]))
+    assert abs(float(report["residual"]) - a["residual"]) <= allowed, (
         report["residual"], a["residual"])
     for name in ("p", "q"):
         for field in ("x", "pos"):

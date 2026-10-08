@@ -15,6 +15,7 @@ import numpy as np
 from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    _has_entries,
     _interface_readings,
     _reading_eps,
     float_fields_of,
@@ -528,6 +529,8 @@ def _run_coupled_block_impl(
         out, d_out = jax.jvp(dst_of, (primal,), (primal,))
         gain = jnp.float32(0.0)
         for f, v in out.items():
+            if not _has_entries(v):
+                continue        # no entries: no gain (``_has_entries``)
             ref = jnp.max(jnp.abs(v)).astype(jnp.float32)
             change = jnp.max(jnp.abs(d_out[f])).astype(jnp.float32)
             gain = jnp.maximum(gain, jnp.where(ref > 0, change / jnp.where(ref > 0, ref, 1.0), 0.0))
@@ -1195,11 +1198,17 @@ def _run_coupled_block_impl(
                     lambda _xx: jnp.asarray(pass_evaluations, jnp.float32), x_full)
 
             def _read_fields(s_star):
-                """``(node, field, value)`` for every field the norm reads."""
+                """``(node, field, value)`` for every field the norm reads.
+
+                Not a field with no entries (``_has_entries``): it has no
+                magnitude, so it gets no weight and cannot set their scale.
+                """
                 read = plan.source_fields()
                 for nn in group_node_names:
                     for fld in float_fields[nn]:
                         if use_interface_norm and (nn, fld) not in read:
+                            continue
+                        if not _has_entries(s_star[nn][fld]):
                             continue
                         yield nn, fld, jnp.asarray(s_star[nn][fld])
 
@@ -1230,11 +1239,15 @@ def _run_coupled_block_impl(
                 return jnp.where(top, 16.0, 1.0).astype(x_full.dtype)
 
             def _field_magnitudes(x_full):
-                """At each entry of the flat state, its field's ``max|v|``."""
+                """At each entry of the flat state, its field's ``max|v|``.
+
+                A field with no entries has none to hold one (``_has_entries``).
+                """
                 s_star = _embed(x_full)
                 m = {nn: {fld: jnp.broadcast_to(
                     jnp.max(jnp.abs(jnp.asarray(s_star[nn][fld]))),
                     jnp.shape(s_star[nn][fld])).astype(jnp.asarray(s_star[nn][fld]).dtype)
+                    if _has_entries(s_star[nn][fld]) else s_star[nn][fld]
                     for fld in float_fields[nn]}
                     for nn in group_node_names}
                 return _flatten_full({**s_star, **m})

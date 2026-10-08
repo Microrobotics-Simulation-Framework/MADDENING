@@ -15942,3 +15942,47 @@ anomalies:
       - "tests/core/test_geometry_edge_refusals.py::test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group"
       - "tests/core/test_geometry_edge_refusals.py::test_the_kernel_refuses_a_geometry_dtype_that_cannot_resolve_its_grid_when_called_directly"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-238"
+    title: "A coupling group with a zero-size floating field fails to trace under solver='ift' with diagnostics=True: a bare ValueError from a reduction over no entries"
+    description: >
+      A member of a coupling group may hold a floating field with no
+      entries (an empty contact set, a list of none this configuration).
+      The residual norms skip such a field, and the group steps under
+      `solver="fori"` with or without the diagnostics and under
+      `solver="ift"` without them.  Under `solver="ift"` with
+      `diagnostics=True` the step fails to trace with `ValueError:
+      zero-size array to reduction operation max which has no identity`,
+      raised in the report's measured evaluation count (`_read_gain` in
+      `core/coupling/_coupled_block.py`, which takes `max|field|` of
+      every floating field a member returns), whatever the convergence
+      norm, and with nothing naming the field or the group.  Measured on
+      the 0.4.0 development tree (CPU, jaxlib 0.11.0): two relays with a
+      two-entry field on their edges and a `(0,)` field beside it; all
+      nine combinations of norm and solver step except the three with
+      `solver="ift", diagnostics=True`.  The same graph compiles and
+      steps at v0.3.1 (`git archive` of the tag) in all nine, so this is
+      a regression of the development tree that no release carries.
+      Found while taking the census of a group's edge enumerations
+      (an edge that delivers no entries is one of its shapes).  The
+      sites that take a reduction over a field were not swept: the fix
+      should sweep them (`_field_magnitudes`, `_norm_weights`,
+      `_weight_scale`, the reading's weights).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raises before returning anything, so no wrong value
+      is reported.  The harm is a graph that stepped in 0.3.1 failing in
+      0.4.0 with an error that names no field.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.coupling.group.CouplingGroup"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Set `diagnostics=False` on the group, use `solver="fori"`, or keep
+      the empty field out of the member's state.
+    resolution_status: "open"
+    verification:
+      - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps_under_ift_with_diagnostics"
+      - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps"
+    github_issue: null

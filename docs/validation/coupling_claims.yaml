@@ -2531,7 +2531,7 @@ claims:
     standing for its producer's whole (floating) state.
   sources:
     - src/maddening/core/coupling/group.py:143 (CouplingGroup, accelerated_fields)
-    - src/maddening/core/coupling/_group_layout.py::_interface_state_fields
+    - src/maddening/core/coupling/_interface_plan.py::InterfacePlan.iqn_fields
   conditions: >-
     the IQN accelerations. Not claimed for vmap, multi-rate graphs,
     sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
@@ -5465,7 +5465,7 @@ claims:
     order of the add_edge calls nor on the nodes' names."
   sources:
     - src/maddening/core/coupling/acceleration.py:354 (coupling_residual_interface, Notes)
-    - src/maddening/core/coupling/_group_layout.py::_interface_edge_order
+    - src/maddening/core/coupling/_interface_plan.py::_interface_edge_order
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     convergence_norm="interface", any acceleration and solver; two edges

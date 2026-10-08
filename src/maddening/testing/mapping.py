@@ -855,7 +855,11 @@ def _mapping_geometry_derivative(subject: _Subject, sampling: _Sampling,
         if jump > 6.0 * noise / h + _KINK_FRACTION * slope:
             counts["kink"] += 1
             raise _Kink
-        tol = 4.0 * noise / h + 2.0 * abs(central - central_half) + jump
+        # The derivative arrives in the positions' dtype: below that dtype's
+        # range (a float64 field of 1e-150 read at float32 positions) it is
+        # zero, whatever the kernel's slope.
+        underflow = max(_magnitude_floor(geom_j.dtype), _magnitude_floor(xj.dtype))
+        tol = 4.0 * noise / h + 2.0 * abs(central - central_half) + jump + underflow
         gap = abs(derivative - central_half)
         counts["compared"] += 1
         assert gap <= tol, (

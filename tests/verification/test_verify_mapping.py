@@ -48,6 +48,7 @@ from maddening.core.coupling.sparse_mapping import (  # noqa: E402
 from maddening.core.edge import EdgeSpec  # noqa: E402
 from maddening.testing.mapping import (  # noqa: E402
     DEFAULT_MAPPING_CHECKS,
+    DEFAULT_ROUNDING_UNITS,
     assert_mapping_verified,
     verify_mapping,
 )
@@ -249,7 +250,9 @@ def test_shipped_kind_passes_at_the_default_depth_in_float64(case, float64):
     grid double-precision positions.  The RBF factories solve a kernel
     system with a relative ridge of 1e-8, so in float64 they reproduce
     and conserve to 1e-8, not to rounding (the guide says so): that is
-    the tolerance they are held to here."""
+    the tolerance they are held to here.  The grids of one and three
+    axes keep float32 positions under the float64 field: the mixed
+    precision the guide documents for this kind."""
     mapping, claims = {**SHIPPED, **SHIPPED_SLOW}[case]()
     if case.startswith("multilinear_grid") and not case.endswith("d"):
         mode, layout = case.split("-")[1:]
@@ -419,6 +422,126 @@ def test_seeded_broken_kind_fails_the_check_that_should_catch_it_and_no_other(ca
     results = verify_mapping(build(), **claims, **KW)
     assert _failed(results) == [caught_by], _report(results) or "nothing failed"
     assert results[caught_by].failed and results[caught_by].counterexample
+
+
+# ---------------------------------------------------------------------------
+# The width of every comparison: a small defect, at two stated widths
+# ---------------------------------------------------------------------------
+
+#: A defect of a thousandth: some 130 of the default tolerances in
+#: float32, and an eighth of a tolerance a thousand times wider.  The
+#: gross faults above would fail at either width, so they say nothing of
+#: the width a check applies; these do.
+_DELTA = 1e-3  # units: relative size of the seeded defect
+_WIDER = 1e3 * DEFAULT_ROUNDING_UNITS
+
+
+class _SlightlyNonLinear(_HandWritten):
+    def apply(self, field, weights=None, geom=None):
+        return self.matrix @ (field + _DELTA * field * jnp.abs(field) / 100.0)
+
+
+class _TransposeSlightlyOff(_HandWritten):
+    def apply_T(self, field, weights=None, geom=None):
+        return (1.0 + _DELTA) * (self.matrix.T @ field)
+
+
+class _SlightlyDifferentUnderJit(_HandWritten):
+    def apply(self, field, weights=None, geom=None):
+        factor = 1.0 + _DELTA if isinstance(field, jax.core.Tracer) else 1.0
+        return factor * (self.matrix @ field)
+
+
+class _SlightlyDifferentInFloat32(_HandWritten):
+    def apply(self, field, weights=None, geom=None):
+        factor = 1.0 + _DELTA if jnp.asarray(field).dtype == jnp.float32 else 1.0
+        return (self.matrix @ field) * jnp.asarray(factor, jnp.asarray(field).dtype)
+
+
+class _SlightlyStateful(_HandWritten):
+    calls = 0
+
+    def apply(self, field, weights=None, geom=None):
+        self.calls += 1
+        return self.matrix @ field * (1.0 + _DELTA * (self.calls % 2))
+
+
+class _SlightlyDifferentOutsideTheHull(MultilinearGridMapping):
+    def __init__(self):
+        super().__init__(ORIGIN, SPACING, SHAPE, N_POINTS, "consistent", "flat", None)
+
+    def apply(self, field, weights=None, geom=None):
+        geom = jnp.asarray(geom)
+        beyond = jnp.any((geom > jnp.asarray(UPPER, geom.dtype))
+                         | (geom < jnp.asarray(LOWER, geom.dtype)))
+        return super().apply(field, weights, geom) * jnp.where(beyond, 1.0 + _DELTA, 1.0)
+
+
+class _DerivativeAHundredTimesTheDefectOff(MultilinearGridMapping):
+    """The value is the kernel's; the derivative with respect to a
+    position is a tenth too large.  (A tenth, not a thousandth: the
+    derivative is compared with a finite difference, whose tolerance is
+    the rounding over the step.)"""
+
+    def __init__(self):
+        super().__init__(ORIGIN, SPACING, SHAPE, N_POINTS, "consistent", "flat", None)
+
+    def _stencil(self, geom):
+        geom = jnp.asarray(geom)
+        return super()._stencil(geom + 100 * _DELTA * (geom - jax.lax.stop_gradient(geom)))
+
+
+def _linear_fields_slightly_off():
+    """Thin-plate-spline weights moved along a direction that keeps every
+    row sum: constants are still reproduced, linear fields are not."""
+    matrix = np.array(rbf_mapping(XS, XT, kernel="thin_plate_spline").H)
+    matrix[:, 0] += _DELTA
+    matrix[:, -1] -= _DELTA
+    return _HandWritten(matrix)
+
+
+#: ``id -> (() -> mapping, keywords, the result that turns on the width)``.
+SLIGHT = {
+    "structure": (lambda: _SlightlyStateful(_row_stochastic()), dict(consistent=False),
+                  "structure"),
+    "linearity": (lambda: _SlightlyNonLinear(_row_stochastic()), {}, "linearity"),
+    "consistent-constants": (
+        lambda: _HandWritten((1.0 + _DELTA) * _row_stochastic()), {}, "consistent"),
+    "consistent-polynomials": (
+        _linear_fields_slightly_off, dict(polynomial_order=1, **COORDS), "consistent"),
+    "conservative": (
+        lambda: _HandWritten((1.0 + _DELTA) * _row_stochastic().T, mode="conservative"), {},
+        "conservative"),
+    "adjoint": (lambda: _TransposeSlightlyOff(_row_stochastic()), {}, "adjoint"),
+    "geometry_derivative": (
+        _DerivativeAHundredTimesTheDefectOff,
+        lambda: dict(geometry_strategy=_positions(LOWER, UPPER)), "geometry_derivative"),
+    "outside_hull": (_SlightlyDifferentOutsideTheHull, _grid_claims, "outside_hull"),
+    "dtype": (lambda: _SlightlyDifferentInFloat32(_row_stochastic()), {}, "dtype_float32"),
+    "jit_consistent": (lambda: _SlightlyDifferentUnderJit(_row_stochastic()),
+                       dict(consistent=False), "jit_consistent"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SLIGHT))
+def test_a_small_defect_fails_at_the_default_width_and_passes_at_a_stated_wider_one(
+        case, request):
+    """The default width of each comparison is what catches a defect of a
+    thousandth, and ``rounding_units`` is that width: a caller who states
+    a thousand times more is given exactly that."""
+    if case == "dtype":  # a float32 evaluation is compared with a float64 one
+        request.getfixturevalue("float64")
+    build, claims, name = SLIGHT[case]
+    claims = dict(claims() if callable(claims) else claims)
+    claims["checks"] = [name.split("_float")[0]]
+    at_default = verify_mapping(build(), **claims, **KW)[name]
+    assert at_default.failed, f"{name} passed a defect of {_DELTA}: {at_default.detail}"
+    wider = verify_mapping(build(), rounding_units=_WIDER, **claims, **KW)[name]
+    assert wider.status == "PASS", wider.detail
+    if case == "consistent-polynomials":
+        assert "exponents (1,)" in at_default.detail
+    if case == "consistent-constants":
+        assert "a constant field" in at_default.detail
 
 
 def test_wrong_output_dtype_fails_the_dtype_check_and_no_other(float64):
@@ -619,6 +742,21 @@ def test_a_drawn_kink_is_counted_beside_the_draws_that_were_compared():
     compared, kinks = (int(part.split()[0]) for part in result.detail.split(";"))
     assert compared > 0 and kinks > 0 and compared + kinks == result.n_examples
     assert "on a kink of the kernel" in result.detail
+
+
+def test_a_slope_below_the_range_of_the_positions_dtype_is_not_a_wrong_derivative(float64):
+    """A float64 field of 1e-150 read at float32 positions: the kernel's
+    slope is some 1e-150, and the derivative with respect to a float32
+    position is a float32, where that is zero.  The right kind must not
+    fail for it (the default-depth float64 run of the one-axis grid drew
+    such a field and did)."""
+    mapping = multilinear_grid_mapping((0.5,), (0.25,), (5,), n_points=N_POINTS)
+    positions = np.full((N_POINTS, 1), 0.625, np.float32)
+    result = verify_mapping(mapping, geometry=positions, dtype=np.float64,
+                            bounds=(1e-150, 8e-150), checks=["geometry_derivative"],
+                            **KW)["geometry_derivative"]
+    assert not result.failed, result.detail
+    assert result.status == "PASS" and "draws compared" in result.detail
 
 
 def test_a_geometry_strategy_that_raises_is_refused_not_reported_as_the_mappings_failure():

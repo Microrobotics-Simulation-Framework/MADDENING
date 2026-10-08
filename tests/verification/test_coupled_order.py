@@ -443,7 +443,7 @@ def test_non_matching_grids_in_a_converged_group_keep_the_mappings_order(
     assert result.status == "PASS", result.detail
 
 
-# Per push: tests/verification/test_coupled_order.py::test_the_diagnostics_route_reads_a_real_group_and_refuses_one_with_no_bound and ::test_a_bound_far_below_the_error_passes_by_its_route
+# Per push: tests/verification/test_coupled_order.py::test_the_diagnostics_route_reads_a_real_group_and_refuses_one_with_no_bound and tests/verification/test_coupled_order.py::test_a_bound_far_below_the_error_passes_by_its_route
 @pytest.mark.slow
 def test_the_exchange_is_first_order_in_time_and_the_diagnostics_guard_it(float64):
     """A partitioned exchange hands each rod its input once per step, so
@@ -462,7 +462,7 @@ def test_the_exchange_is_first_order_in_time_and_the_diagnostics_guard_it(float6
     assert "diagnostics" in result.detail and "re-run" not in result.detail
 
 
-# Per push: tests/verification/test_coupled_order.py::test_a_bound_that_is_not_far_below_the_error_fails_as_inconclusive and ::test_an_unusable_bound_falls_through_to_the_rerun_and_to_a_skip_without_one
+# Per push: tests/verification/test_coupled_order.py::test_a_bound_that_is_not_far_below_the_error_fails_as_inconclusive and tests/verification/test_coupled_order.py::test_an_unusable_bound_falls_through_to_the_rerun_and_to_a_skip_without_one
 @pytest.mark.slow
 def test_a_loose_tolerance_is_caught_by_both_routes_before_it_is_read_as_an_order(float64):
     """At ``tolerance=1e-4`` the group stops after one pass on the fine

@@ -34,7 +34,12 @@ on one compiled graph; :func:`draw_values` zeroes the drawn ``H`` outside
 it instead, before a group's spectral radius is rescaled, and the model
 below is handed that same ``H``.  The reference, the oracle and
 :class:`LinearModel` are therefore the dense ones, unchanged: a sparse edge
-must reproduce what a dense edge with the same matrix does.
+must reproduce what a dense edge with the same matrix does.  That is a
+statement about the *step*.  The two edges do not hold the same
+*parameters*: a dense edge holds every entry of its matrix, a zero one
+included, and a sparse edge only its pattern's, so an oracle that
+differentiates with respect to "every mapping weight" asks
+:func:`parameter_entries` which entries those are.
 
 **The reference.**  Every node is affine in its pre-step state and its
 inputs, so a step is one linear system: each edge reads its source's new
@@ -559,6 +564,33 @@ def mapping_pattern(topo: Topology, edge_index: int, mapping_kind: str) -> Optio
         size = n_src if i == full or n_src == 1 else int(rng.integers(1, n_src))
         mask[i, rng.choice(n_src, size=size, replace=False)] = True
     return mask
+
+
+def parameter_entries(topo: Topology, edge_index: int, mapping_kind: str) -> np.ndarray:
+    """The entries of mapped edge *edge_index*'s matrix that a graph built
+    under *mapping_kind* holds as parameters: a boolean ``(n_target,
+    n_source)`` mask.
+
+    :func:`build` gives a ``"matrix"`` or a ``"matrix-local"`` edge the
+    dense ``matrix_mapping``: every entry is a weight of the graph, also
+    where the drawn matrix is zero (a local matrix outside its pattern),
+    and a user can write any of them and ask for a derivative with respect
+    to it.  Every other kind is a ``StaticSparseMapping`` laid out from
+    :func:`mapping_pattern`: the pattern's entries are its weights -- one
+    whose drawn weight happens to be zero included -- and an entry outside
+    it is structure.  The graph holds no number there, so nothing can be
+    differentiated with respect to one and no reported bound speaks of it.
+
+    Not ``values["H"] != 0`` (a weight at zero is still a weight) and not
+    :func:`mapping_pattern` alone (it also says where a *dense* local
+    matrix is drawn non-zero, which is not what that edge holds).
+    """
+    assert mapping_kind in MAPPING_KINDS + LOCAL_KINDS, mapping_kind
+    e = topo.edges[edge_index]
+    assert e.mapped, e
+    if mapping_kind in ("matrix", "matrix-local"):
+        return np.ones((topo.node(e.dst).n, topo.node(e.src).n), dtype=bool)
+    return mapping_pattern(topo, edge_index, mapping_kind)
 
 
 def local_pattern(topo: Topology, edge_index: int) -> np.ndarray:

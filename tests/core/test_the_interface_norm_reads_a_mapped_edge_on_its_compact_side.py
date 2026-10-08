@@ -330,7 +330,7 @@ def graph(request):
             (report,) = built.gm.coupling_diagnostics().values()
     finally:
         patch.undo()
-    return dict(kind=request.param, shape=shape, built=built, plans=plans, seeded=seeded,
+    return dict(kind=request.param, shape=shape, built=built, site_plans=plans, seeded=seeded,
                 after_step=after_step, report=dict(report), ref=ref)
 
 
@@ -340,13 +340,13 @@ def test_every_plan_a_graph_builds_of_a_group_reads_each_edge_on_the_same_side(g
     -- and it is the one the two ends' sizes prescribe."""
     _shape, sides, _owns = GRAPHS[graph["kind"]]
     want = {"p.x->q.u": sides[0], "q.x->p.u": sides[1]}
-    sites = [site for site, _plan in graph["plans"]]
+    sites = [site for site, _plan in graph["site_plans"]]
     assert sites.count("graph_manager") >= 2 and sites.count("coupled_block") >= 1, (
         f"both patches took effect: {sites}")
-    for site, plan in graph["plans"]:
+    for site, plan in graph["site_plans"]:
         assert {r.key: r.norm_side for r in plan.internal} == want, site
     sizes = sg.node_sizes(graph["shape"])
-    for record in graph["plans"][-1][1].internal:
+    for record in graph["site_plans"][-1][1].internal:
         n_source, n_target = sizes[record.source[0]][0], sizes[record.target[0]][1]
         assert record.norm_side == sg.side_of(n_source, n_target)
         assert (record.mapping.n_source, record.mapping.n_target) == (n_source, n_target)

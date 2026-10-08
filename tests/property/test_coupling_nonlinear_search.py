@@ -115,36 +115,66 @@ EPS64 = cr.EPS64
 # ---------------------------------------------------------------------------
 
 
-def edge_fields(topo: ct.Topology, values: dict, ref: cr.PassReference, *, raw: bool = False):
-    """The interface norm's reading of a flat iterate: what each internal
-    edge delivers (its source's ``x`` through the edge's ``H`` and its
-    transform's factor), or with *raw* the source field it reads -- one
-    field per internal edge either way, as that norm counts them."""
-    edges = [(e, np.asarray(values["H"][i], np.float64) if e.mapped else None)
-             for i, e in enumerate(topo.edges) if topo.internal(e)]
+def edge_readings(topo: ct.Topology, values: dict, x: dict, *, raw: bool = False,
+                  rule=None) -> list:
+    """The interface norm's reading of the members' fields ``{node: x}``,
+    one field per internal edge as that norm counts them.
+
+    **By the rule the library is held to** (:func:`ct.interface_side_of`,
+    which is ``ct.INTERFACE_SIDE`` where *rule* is ``None``; the linear
+    search reads it there too, through ``LinearModel.norm_fields``): an
+    edge read at its *source* -- a mapping onto more entries than its
+    source holds -- contributes the source's ``x`` as stored, before the
+    mapping and before the transform; every other edge what it delivers
+    (the source's ``x`` through the edge's ``H``, then its transform's
+    factor).  With *raw* every edge contributes the source field it reads
+    (the gradient bound's norm).
+
+    This module wrote "what each edge delivers" down by itself while the
+    library read every edge so, and kept it when the rule changed: on the
+    one hunted cell with a mapping onto a larger member under this norm
+    the floor and the error bound were then scored in a reading the
+    library does not report in (a residual of 0.1516 against the reported
+    0.1223, the distance 1.106 of the bound; in the reading of the rule
+    0.12228 and 0.905).  ``test_the_search_reads_an_edge_where_the_linear_model_does``
+    holds the two restatements together on every structure.
+    """
+    out = []
+    for i, e in enumerate(topo.edges):
+        if not topo.internal(e):
+            continue
+        src = np.asarray(x[e.src], np.float64)
+        if raw or ct.interface_side_of(topo, i, rule) == "source":
+            out.append(src)
+        else:
+            H = np.asarray(values["H"][i], np.float64) if e.mapped else None
+            out.append(ct.TRANSFORM_FACTORS[e.transform] * (src if H is None else H @ src))
+    return out
+
+
+def edge_fields(topo: ct.Topology, values: dict, ref: cr.PassReference, *, raw: bool = False,
+                rule=None):
+    """:func:`edge_readings` of a flat iterate of *ref*'s layout."""
+    sources = sorted({e.src for e in topo.edges if topo.internal(e)})
 
     def fields(x):
-        out = []
-        for e, H in edges:
-            src = np.asarray(ref.field(x, e.src, "x"), np.float64)
-            if raw:
-                out.append(src)
-            else:
-                out.append(ct.TRANSFORM_FACTORS[e.transform] * (src if H is None else H @ src))
-        return out
+        return edge_readings(topo, values, {name: ref.field(x, name, "x") for name in sources},
+                             raw=raw, rule=rule)
 
     return fields
 
 
-def norms_of(cfg: dict, topo: ct.Topology, values: dict, ref: cr.PassReference) -> tuple:
+def norms_of(cfg: dict, topo: ct.Topology, values: dict, ref: cr.PassReference, *,
+             rule=None) -> tuple:
     """``(norm, raw norm)`` of a group under *cfg*: the norm its error
     bound is stated in, and the one its gradient bound is (the raw source
-    fields under ``"interface"``; the same norm otherwise)."""
+    fields under ``"interface"``; the same norm otherwise).  *rule*: the
+    side rule the interface reading is stated by (:func:`edge_readings`)."""
     kind, rtol = cfg["convergence_norm"], cfg["rtol"]
     if kind != "interface":
         norm = ref.norm(kind, rtol)
         return norm, norm
-    return (ref.norm(kind, rtol, edge_fields(topo, values, ref)),
+    return (ref.norm(kind, rtol, edge_fields(topo, values, ref, rule=rule)),
             ref.norm(kind, rtol, edge_fields(topo, values, ref, raw=True)))
 
 
@@ -553,8 +583,14 @@ def does_not_move_the_fixed_point(constant: str) -> bool:
 
 
 @functools.lru_cache(maxsize=4096)
-def observe(case: Case) -> dict:
-    """One step of *case* and the scores of what it reported."""
+def observe(case: Case, rule=None) -> dict:
+    """One step of *case* and the scores of what it reported.
+
+    *rule*: the side rule the reference states the interface norm's
+    reading by.  ``None`` is the library's (``ct.INTERFACE_SIDE``), which
+    every search takes; the other one is for a premise -- the same step
+    scored in a reading the library does not report in
+    (:data:`READ_AT_ITS_SOURCE`)."""
     cell = CELLS[case.cell]
     topo = cell.topo
     values = values_of(case)
@@ -586,7 +622,7 @@ def observe(case: Case) -> dict:
     exact = ref.flat({m: {"x": values["fixed_point"][m]} for m in topo.names})
     out["report"]["fixed_point_vs_linear"] = float(
         np.max(np.abs(fixed.x - exact)) / max(float(np.max(np.abs(exact))), 1e-300))
-    norm, raw = norms_of(cell.cfgs[0], topo, values, ref)
+    norm, raw = norms_of(cell.cfgs[0], topo, values, ref, rule=rule)
     residual = float(d["residual"])
     cancels = _cancellation(cell, values, step.pre, step.state)
     allowed = ((residual + cancels * floor) / (residual + floor)
@@ -859,6 +895,123 @@ def test_the_reference_refuses_a_twin_it_cannot_read():
 
 
 # ---------------------------------------------------------------------------
+# The reading, held to the linear model's
+# ---------------------------------------------------------------------------
+
+
+def _transformed_scatter() -> ct.Topology:
+    """A pair whose mapping onto the larger member carries a transform,
+    which no structure of the two searches has there: read at its source,
+    the reading is before the transform as well as before the mapping."""
+    b = ct.TopologyBuilder()
+    b.node("s", 2, alpha=0.0)
+    b.node("g", 5, alpha=0.0)
+    b.edge("g", "s", mapped=True, transform="scale_0.5")
+    b.edge("s", "g", mapped=True, transform="scale_2.0")
+    b.group("s", "g")
+    return b.build("transformed-scatter")
+
+
+#: Every structure either search draws on, and :func:`_transformed_scatter`
+#: (but for the pairs with a member of 300 entries: the model of one is
+#: seconds, and the pairs of 60 and 12 are the same shape).
+READ_STRUCTURES = {name: topo for name, topo in {
+    **linear.STRUCTURES, **STRUCTURES, "transformed-scatter": _transformed_scatter()}.items()
+    if max(nd.n for nd in topo.nodes) <= 64}
+#: The interface norm under Jacobi, the row the hunted cell below holds,
+#: found by what it is.
+_INTERFACE_JACOBI = linear.KNOBS.index(
+    dict(acceleration="none", iteration_mode="jacobi", convergence_norm="interface"))
+#: The hunted cell on which the interface norm reads a mapping at its
+#: source: the ring of three whose edge ``m2 -> m0`` delivers three entries
+#: from two, a quadratic term on every member, float32, Jacobi, no
+#: acceleration, stopped after five passes.  Found by what it is (a
+#: cell's index is its place in a table that grows).
+SOURCE_CELL = CELLS.index(Cell("mapped", "float32", _INTERFACE_JACOBI, 5, "quadratic"))
+
+
+def _expands(topo: ct.Topology, i: int) -> bool:
+    """Whether internal edge *i* is a mapping onto more entries than its source holds."""
+    e = topo.edges[i]
+    return e.mapped and topo.node(e.dst).n > topo.node(e.src).n
+
+
+@pytest.mark.parametrize("rule", ["compact", "delivered"])
+@pytest.mark.parametrize("structure", sorted(READ_STRUCTURES))
+def test_the_search_reads_an_edge_where_the_linear_model_does(structure, rule):
+    """Two references write the interface norm's reading down: the linear
+    model (``LinearModel.norm_fields``, which the linear search scores by)
+    and this module's :func:`edge_readings` (which the numerical reference
+    is handed).  They are the same reading of the same fields on every
+    structure, under either rule, for the norm and for the gradient
+    bound's raw one -- and under the rule the library is held to, a
+    mapping onto more entries is the source's field as stored.
+
+    No graph is compiled.  While this module read every edge as delivered
+    and the model followed the rule, the two differed on every structure
+    with such a mapping (the last assertions) and nothing compared them:
+    the slow hunt met it on one cell."""
+    topo = READ_STRUCTURES[structure]
+    cfgs = linear.Cell("ring-3", "float64", _INTERFACE_JACOBI, 5).cfgs
+    rng = np.random.default_rng(len(structure))
+    values = ct.draw_values(topo, rng, 0.5, dtype="float64", group_cfgs=cfgs)
+    model = ct.LinearModel(topo, values, dtype="float64", group_cfgs=cfgs, interface_side=rule)
+    members, off, k = model._group_layout(0)              # noqa: SLF001
+    stacked = rng.normal(size=k)
+    x = {m: stacked[off[m]:off[m] + topo.node(m).n] for m in members}
+    internal = topo.internal_edges(0)
+    for raw in (False, True):
+        mine = edge_readings(topo, values, x, raw=raw, rule=rule)
+        theirs = [np.asarray(B, np.float64) @ stacked
+                  for B, _gamma in model.norm_fields(0, raw=raw)]
+        assert len(mine) == len(theirs) == len(internal), (len(mine), len(theirs), len(internal))
+        for i, a, b in zip(internal, mine, theirs):
+            assert a.shape == b.shape, (topo.edges[i], raw, a.shape, b.shape)
+            # units: relative; the two sum one row's products in another order.
+            np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12,
+                                       err_msg=f"{topo.edges[i]}, raw={raw}")
+    # The rule itself, and that the two rules are told apart here.
+    compact = edge_readings(topo, values, x, rule="compact")
+    delivered = edge_readings(topo, values, x, rule="delivered")
+    for i, at_source, as_delivered in zip(internal, compact, delivered):
+        e = topo.edges[i]
+        assert as_delivered.shape == (topo.node(e.dst).n if e.mapped else topo.node(e.src).n,)
+        if _expands(topo, i):
+            assert np.array_equal(at_source, x[e.src]), e
+            assert at_source.shape != as_delivered.shape, e
+        else:
+            assert np.array_equal(at_source, as_delivered), e
+    if rule == ct.INTERFACE_SIDE:
+        for a, b in zip(edge_readings(topo, values, x), edge_readings(topo, values, x, rule=rule)):
+            assert np.array_equal(a, b), "the default rule is the library's"
+
+
+def cells_read_at_a_source() -> tuple:
+    """The cells whose group, under the interface norm, holds a mapping
+    onto a larger member: where the rule reads an edge at its source and
+    a reading "as delivered" is another number."""
+    return tuple(i for i, c in enumerate(CELLS)
+                 if c.knobs["convergence_norm"] == "interface"
+                 and any(_expands(c.topo, e) for e in c.topo.internal_edges(0)))
+
+
+def test_the_hunt_visits_a_cell_whose_mapping_is_read_at_its_source():
+    """The structures the comparison above can fail on, and the hunted
+    cell the pins at the foot of the module live on."""
+    expanding = {name for name, topo in READ_STRUCTURES.items()
+                 if any(_expands(topo, i) for i in topo.internal_edges(0))}
+    assert {"mapped", "transformed-scatter", "side-2-8", "side-hub"} <= expanding, expanding
+    assert {"tri", "hub", "side-4-4"}.isdisjoint(expanding), expanding
+    topo = READ_STRUCTURES["transformed-scatter"]
+    assert any(_expands(topo, i) and topo.edges[i].transform is not None
+               for i in topo.internal_edges(0))
+    assert ct.INTERFACE_SIDE == "compact", "the pins below are of the compact-side rule"
+    hunted = cells_read_at_a_source()
+    assert SOURCE_CELL in hunted, (SOURCE_CELL, hunted)
+    assert all(any(i in block for block in BLOCKS) for i in hunted), (hunted, BLOCKS)
+
+
+# ---------------------------------------------------------------------------
 # The searches on the nonlinear cells
 # ---------------------------------------------------------------------------
 
@@ -1065,6 +1218,72 @@ def test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_bound(name)
     assert seen["gradient"] <= THRESHOLD["gradient"], report
     # units: a relative error; the hub read 1.09 with those probes in it.
     assert report["gradient_relative_error_bound"] < 1e-5, report
+
+
+#: Draws on :data:`SOURCE_CELL` where the two sides of its mapping onto
+#: the larger member are two different
+#: numbers, ``{name: (case, which side a wrong reading is on)}``:
+#:
+#: * ``"above"``: scored in the delivered reading the same step is over
+#:   the floor's and the bound's thresholds.  These are the two draws the
+#:   hunt stopped on while this module still read every edge as delivered
+#:   (and the library, by the rule, at the source): a reference on the
+#:   wrong side fails here.
+#: * ``"below"``: the solve stops at its cap, so the returned state is the
+#:   same whichever side the criterion reads, and the residual in the
+#:   delivered reading is short of the one in the rule's by thousands of
+#:   floors: a library that reported in the delivered reading fails the
+#:   floor score here (seeded: 22 282 floors).
+READ_AT_ITS_SOURCE = {
+    # Converged in three passes: reported residual 0.12227; the reference
+    # reads 0.12228 at the source and 0.15162 as delivered (4.28 floors
+    # over), the distance 0.905 of the bound against 1.106.
+    "the-delivered-residual-a-quarter-above-the-report": (
+        Case(SOURCE_CELL, linear.Case(0, 0, 0.05, True, 1.0, 0.0, 1.0, -1, 0.06150448688973633, 0),
+             0.06150448688973633), "above"),
+    # Converged in four: 0.06842 reported, 0.06841 and 0.09011 (2.78
+    # floors over); the distance 0.783 of the bound against 1.066.
+    "the-delivered-residual-a-third-above-the-report": (
+        Case(SOURCE_CELL, linear.Case(0, 49692, 0.05, True, 1.0, 0.0, 1.0, -3, 1.0, 0), 0.1), "above"),
+    # A loop gain of 0.91 stopped at the cap: residual 2442.4 at the
+    # source, 1794.9 as delivered.
+    "the-delivered-residual-a-quarter-below-the-report": (
+        Case(SOURCE_CELL, linear.Case(0, 139, 0.9102494263119776, True, 1.0, 0.0, 1.0, 0, 1.0, 0),
+             1.0), "below"),
+}
+
+
+# Slow: the cell's graph with its diagnostics and its twin compiled.
+# Per push: tests/property/test_coupling_nonlinear_search.py::test_the_search_reads_an_edge_where_the_linear_model_does
+@pytest.mark.slow
+@pytest.mark.parametrize("name", sorted(READ_AT_ITS_SOURCE))
+def test_every_score_holds_where_a_mapping_is_read_at_its_source(name):
+    """The library's report against the numerical reference in the reading
+    of the rule, on draws where the other side of the mapping is another
+    number -- and the premise that it is (so that a reference, or a
+    library, on the other side fails here)."""
+    case, side = READ_AT_ITS_SOURCE[name]
+    cell = CELLS[case.cell]
+    assert SOURCE_CELL in cells_read_at_a_source()
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["stepped"] and seen["referenced"] and seen["floor_reported"], seen
+    over = {score: seen[score] for score in SEARCHES + ("radius_strict",)
+            if seen[score] > THRESHOLD[score]}
+    assert not over, f"{name}: {over} ({report})"
+    other = observe(case, "delivered")
+    assert other["report"]["residual"] == report["residual"], "one step, scored twice"
+    if side == "above":
+        assert seen["spectral_usable"] and seen["near"], seen
+        assert other["floor"] > 2.0 * THRESHOLD["floor"], (other["floor"], other["report"])
+        # units: the distance over the bound, a ratio of two norms.
+        assert other["bound"] > 1.05, (other["bound"], other["report"])
+    else:
+        assert side == "below", side
+        assert not report["converged"] and report["iterations"] == cell.cap, report
+        short = report["residual_true"] - other["report"]["residual_true"]
+        # units: floors of the residual (the floor score's own unit).
+        assert short > 1e3 * report["cancellation"] * report["floor"], (short, report)
 
 
 #: The example the hunt stopped on: the fan-out hub with products of two

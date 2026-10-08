@@ -802,12 +802,18 @@ class Reference:
 
     # -- the plain iteration ------------------------------------------------
 
-    def plain_exit(self, rule: str = "decision", cap: Optional[int] = None) -> dict:
+    def plain_exit(self, rule: str = "decision", cap: Optional[int] = None,
+                   start: Optional[dict] = None) -> dict:
         """Where ``acceleration="none"`` stops under the residual of *rule*
-        (the loop of ``interface_side_graphs.Reference.plain_exit``)."""
+        (the loop of ``interface_side_graphs.Reference.plain_exit``).
+
+        The loop's first iterate is the pre-step state, or *start* (a
+        predictor's guess: the members still integrate from the pre-step
+        state, and a target-anchored geometry is still read there)."""
         cap = self.shape.cap if cap is None else cap
-        x = self.one_pass(self.pre)
-        res = prev = prev2 = self.residual(x, self.pre, rule)
+        first = self.pre if start is None else start
+        x = self.one_pass(first)
+        res = prev = prev2 = self.residual(x, first, rule)
         margin = math.inf
         for i in range(1, cap):
             y = self.one_pass(x)

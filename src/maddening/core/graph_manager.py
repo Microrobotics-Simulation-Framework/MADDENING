@@ -1826,7 +1826,7 @@ class GraphManager:
         # the factory returns is refused there unless it is a Mapping of
         # the kind.  Asked here too, of the object itself: an edge that
         # was accepted, stepped and written by ``to_dict()`` used to be
-        # refused only when its config was loaded (MADD-ANO-242).
+        # refused only when its config was loaded (MADD-ANO-245).
         from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
             _registered_mapping_problem,
         )
@@ -5209,7 +5209,7 @@ class GraphManager:
                     # both ends and is what a finite
                     # ``gradient_relative_error_bound`` records.  Without
                     # that the flag is withdrawn and the numbers stay,
-                    # with the reason (MADD-ANO-239).
+                    # with the reason (MADD-ANO-242).
                     result[key].update({
                         "spectral_usable": False,
                         "gradient_bound_usable": False,

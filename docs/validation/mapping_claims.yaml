@@ -2534,8 +2534,8 @@ claims:
     face of the hull, a rounding inside or outside either face and far
     outside, the pair with a marker on the top face, and a step taken
     beside the positions a pass derives from a pre-step one
-    (MADD-ANO-240);
-    mixed dtypes (float32 fields at float64 positions, MADD-ANO-241): the
+    (MADD-ANO-243);
+    mixed dtypes (float32 fields at float64 positions, MADD-ANO-244): the
     step's size and the gap of a toy pass. The steps compiled (jit) by
     the graph. The separation is measured, not guaranteed, on jaxlib
     0.10.2, 0.11.0 and 0.11.2. Honest: at most 5.7e-3 in float32 and
@@ -2552,7 +2552,7 @@ claims:
     of a lattice plane, can read a gap of any size and be withheld: of
     2829 plane draws of two such cells (1489 that near) 47 read over
     0.05, 13 over 0.1, 2 over 0.2 and one 0.59 (jaxlib 0.11.0); one draw of the plane hunt reads 0.26 and 0.29
-    on 0.10.2 and 0.11.2 (MADD-ANO-243, open). (3) An honest float32
+    on 0.10.2 and 0.11.2 (MADD-ANO-246, open). (3) An honest float32
     Gauss-Seidel pass behind a gather of a field alternating +A, -A
     around a sample of order one reads under 0.09 up to A = 1020 and 0.25
     to 0.75 beyond, except 0.14 at A = 2200 to 2700 (MADD-ANO-212; over

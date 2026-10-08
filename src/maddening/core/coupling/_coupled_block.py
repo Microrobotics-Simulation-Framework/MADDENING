@@ -1397,7 +1397,7 @@ def _run_coupled_block_impl(
                 # ones and reads after that member's update are the
                 # pass's own output: a step of the pre-step positions
                 # moves them too, and must not carry them across a
-                # lattice plane either (MADD-ANO-240).
+                # lattice plane either (MADD-ANO-243).
                 in_pass = _F_dispatch(step_pure, x_sg, consts)
                 for holder, fld, mapping in geometry_checked:
                     beside = None

@@ -16017,7 +16017,7 @@ anomalies:
       - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-239"
+  - anomaly_id: "MADD-ANO-242"
     title: "spectral_error_bound of a group with a multilinear_grid edge read 0.13x the true distance with spectral_usable=True when a marker's fixed point lay across a lattice plane from the returned iterate"
     description: >
       A `multilinear_grid` mapping is one polynomial of the positions it
@@ -16096,7 +16096,7 @@ anomalies:
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-240"
+  - anomaly_id: "MADD-ANO-243"
     title: "A marker exactly on the last lattice point of an axis failed the geometry self-check on an honest pass: every bound of the group withheld, with a reason blaming a member's derivative"
     description: >
       With `diagnostics=True` the step of a group with a `multilinear_grid`
@@ -16147,7 +16147,7 @@ anomalies:
       - "tests/property/test_coupling_geometry_search.py::test_a_marker_whose_in_pass_position_is_a_rounding_from_a_plane_passes_the_self_check"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-241"
+  - anomaly_id: "MADD-ANO-244"
     title: "Float32 fields read at float64 positions always failed the geometry self-check: every bound of the group withheld, with a reason blaming a member's derivative"
     description: >
       The self-check's step of a position was `sqrt(eps)` of the lattice
@@ -16184,7 +16184,7 @@ anomalies:
       - "tests/property/test_coupling_geometry_search.py::test_float32_fields_at_float64_positions_pass_the_self_check"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-242"
+  - anomaly_id: "MADD-ANO-245"
     title: "A mapping of a registered kind short of a Mapping protocol member, or carrying another kind, was accepted by add_edge and written by to_dict(), and from_dict() then refused that config"
     description: >
       What a factory registered with `register_mapping` returns is checked
@@ -16229,7 +16229,7 @@ anomalies:
       - "tests/core/test_mapping_registry.py::test_a_registered_class_with_every_member_passes_every_door"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-243"
+  - anomaly_id: "MADD-ANO-246"
     title: "The geometry self-check can withhold the honest report of a float32 Gauss-Seidel group in which a member reads a position that another member has just built, when that position is within about 2e-5 of a spacing of a lattice plane"
     description: >
       With `diagnostics=True` the step of a group with a `multilinear_grid`
@@ -16239,7 +16239,7 @@ anomalies:
       bound where the two differ by more than `GEOMETRY_GAP_TOLERANCE`
       (0.25).  The step is chosen so that no position it moves crosses a
       lattice plane, the positions a sweep builds from a pre-step one
-      included (MADD-ANO-240).  It does not choose how a position moves
+      included (MADD-ANO-243).  It does not choose how a position moves
       that a member builds *from its mapped input* and another member
       reads in the same Gauss-Seidel sweep (a source-anchored geometry
       whose holder is swept before its reader): the step of the positions

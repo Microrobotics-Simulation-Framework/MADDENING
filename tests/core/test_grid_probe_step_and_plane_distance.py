@@ -18,15 +18,15 @@ The statements, each on float32 and float64 where a dtype enters:
 0. a step taken *beside* a second set of positions that move with the
    first (the positions a pass derives from a member's pre-step ones)
    carries neither across a lattice plane: each coordinate steps towards
-   the middle of the cell of whichever is nearer to one (MADD-ANO-240);
+   the middle of the cell of whichever is nearer to one (MADD-ANO-243);
 1. over the probe step the gather's finite difference is its
    Jacobian-vector product, for a point anywhere: mid-cell, on an interior
    lattice plane, on either face of the hull, a rounding inside or outside
-   either face, far outside (MADD-ANO-240: a point on the top face stepped
+   either face, far outside (MADD-ANO-243: a point on the top face stepped
    out of the hull, where the kernel clamps, and the difference was zero);
 2. the step is ``sqrt`` of the coarser of the geometry's rounding and the
    pass's, and a float32 gather read at float64 positions is resolved by
-   it and not by the geometry's own (MADD-ANO-241);
+   it and not by the geometry's own (MADD-ANO-244);
 3. the plane distance is the distance to the nearest lattice plane inside
    the hull, to the clamping face outside, zero on a plane, ``inf`` on an
    axis of one point and NaN for a coordinate that is not finite; a move
@@ -209,7 +209,7 @@ def _mixed_gap(eps):
 
 
 def test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_step():
-    """MADD-ANO-241: a step sized for the float64 positions alone (1.5e-8
+    """MADD-ANO-244: a step sized for the float64 positions alone (1.5e-8
     of a spacing) is below what the float32 gather resolves, and the
     difference is rounding against a product that is not: the gap of an
     honest pass read 0.27 to 1.0.  At the pass's coarsest rounding it is

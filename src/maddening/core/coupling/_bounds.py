@@ -59,7 +59,7 @@ def _F_dispatch(step_pure, x, consts):
 #:   holder's mapped input.  Of 2829 plane draws of two such cells on
 #:   jaxlib 0.11.0 (1489 within 2e-5), 47 read over 0.05, 13 over 0.1, 2
 #:   over 0.2 and one 0.59; one draw of the plane hunt reads 0.26 and
-#:   0.29 on 0.10.2 and 0.11.2 (MADD-ANO-243);
+#:   0.29 on 0.10.2 and 0.11.2 (MADD-ANO-246);
 #: * a Gauss-Seidel pass behind a gather of a field that changes sign
 #:   across a cell: 0.025 to 0.087 where the lattice values are up to a
 #:   thousand times the sample, 0.14 to 0.75 beyond (MADD-ANO-212, whose
@@ -163,7 +163,7 @@ def _geometry_plane_limit(step_pure, x_star, consts, readers, weights, unit):
     bounds built on it are the linearisation at the returned iterate
     ``x_k``, which describes the pass only in the cells the positions are
     in *there*.  With the fixed point across a plane the bound read
-    0.13x the true distance with its flag set (MADD-ANO-239).
+    0.13x the true distance with its flag set (MADD-ANO-242).
 
     The bound ``B`` states ``unit * ||D (x_k - x*)||_2 <= B`` (``D`` the
     *weights*, ``unit`` the norm's constant: 1 under ``"l2"``, ``1 /

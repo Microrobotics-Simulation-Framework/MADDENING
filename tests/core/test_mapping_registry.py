@@ -1759,7 +1759,7 @@ _RETURNS = dict(arrays=("source_points", "target_points"), hyperparameters={"sca
 
 @pytest.mark.parametrize("case", sorted(_UNFIT_CLASSES))
 def test_an_object_its_kind_cannot_be_rebuilt_as_is_refused_at_every_door(case):
-    """MADD-ANO-242.  One rule at each place a mapping of a registered
+    """MADD-ANO-245.  One rule at each place a mapping of a registered
     kind is taken in or its recipe written out.  ``add_edge`` refuses the
     object, so no graph holds it; a graph that holds it all the same (the
     edge placed without ``add_edge``) is not written by ``to_dict()``,

@@ -356,7 +356,7 @@ def test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused():
 
 def test_the_usd_writer_refuses_an_object_its_kind_cannot_be_rebuilt_as():
     """The second writer of a mapping's recipe asks the same question as
-    ``to_dict()`` (MADD-ANO-242): the classes are the registry tests'."""
+    ``to_dict()`` (MADD-ANO-245): the classes are the registry tests'."""
     from maddening.core.edge import EdgeSpec  # noqa: PLC0415
     from tests.core import test_mapping_registry as registry  # noqa: PLC0415
 

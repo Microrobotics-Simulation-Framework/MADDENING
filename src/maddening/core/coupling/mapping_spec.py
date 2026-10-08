@@ -1329,7 +1329,7 @@ def _registered_class_problem(entry: _MappingKind, mapping: Any) -> Optional[tup
     three places a mapping of a registered kind is taken in or written
     out (``add_edge``, :func:`check_mapping_serialisable`,
     :func:`build_mapping`): the config one of them writes is one the
-    others accept (MADD-ANO-242).
+    others accept (MADD-ANO-245).
     """
     from maddening.core.coupling.mapping import Mapping  # noqa: PLC0415
 

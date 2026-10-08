@@ -45,7 +45,7 @@ cancels three digits and more is withheld in bands of the amplitude
 (MADD-ANO-212, where the bound is wrong in the bands between); an honest
 float32 pass that reads a position it built in the same sweep, a few
 millionths of a spacing from a lattice plane, can be withheld
-(MADD-ANO-243: the plane hunt counts them).
+(MADD-ANO-246: the plane hunt counts them).
 
 **Seeded faults** (``plans``-side mutant list; the table in
 ``tests/property/geometry_graphs.py`` names them): the geometry term
@@ -436,7 +436,7 @@ def test_the_self_check_is_traced_only_with_diagnostics_on_a_geometry_group():
 
 
 # ---------------------------------------------------------------------------
-# Across a lattice plane (MAP-049, MADD-ANO-239)
+# Across a lattice plane (MAP-049, MADD-ANO-242)
 # ---------------------------------------------------------------------------
 
 #: The cell of the pinned case: one marker on a line of four lattice
@@ -623,7 +623,7 @@ def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is
 
 
 def test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check():
-    """MADD-ANO-240.  The per-push pair with one marker starting exactly on
+    """MADD-ANO-243.  The per-push pair with one marker starting exactly on
     the last lattice point of its axis (and one on the first): the gather
     reads those positions as constants of the pass, and the self-check
     moves them.  It stepped a point on the top face out of the hull, where
@@ -650,7 +650,7 @@ def test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check():
 # Per push: tests/core/test_grid_probe_step_and_plane_distance.py::test_a_step_beside_the_positions_derived_from_it_carries_neither_across_a_plane
 @pytest.mark.slow
 def test_a_marker_whose_in_pass_position_is_a_rounding_from_a_plane_passes_the_self_check():
-    """MADD-ANO-240, the other way a step left the stencil's polynomial.
+    """MADD-ANO-243, the other way a step left the stencil's polynomial.
     Under Gauss-Seidel a member swept after the holder of the positions
     reads them as the pass has just built them, ``pos_pre + drift + ...``.
     The self-check moved the pre-step positions towards the middle of
@@ -690,7 +690,7 @@ class WidePositions(gc.GeoRelay):
 @pytest.mark.parametrize("anchors", [("source", "source"), ("target", "target")],
                          ids=["read from the iterate", "read from the pre-step state"])
 def test_float32_fields_at_float64_positions_pass_the_self_check(anchors):
-    """MADD-ANO-241.  The self-check's step was ``sqrt(eps)`` of the
+    """MADD-ANO-244.  The self-check's step was ``sqrt(eps)`` of the
     spacing in the *positions'* dtype, 7e-9 of a spacing in float64, which
     a float32 field cannot resolve: an honest pass read a gap of 0.27 to
     1.0 and every bound was withheld.  The step is the pass's coarsest
@@ -941,7 +941,7 @@ PLANE_CELLS = (
 PLANE_HUNT_SEEDS = (3000, 3001)
 _PLANE_HUNTS: dict = {}
 #: How near a lattice plane, in spacings, a fixed point is for an honest
-#: pass to read a self-check gap over :data:`HONEST_GAP` (MADD-ANO-243).
+#: pass to read a self-check gap over :data:`HONEST_GAP` (MADD-ANO-246).
 #: Measured on three jaxlib versions: every such example of the hunt (28
 #: of 589 on the two cells below on 0.11.0, up to 0.096; 0.26 and 0.29 on
 #: one draw on 0.10.2 and 0.11.2) is within 1.7e-5, and about a thousand
@@ -1007,7 +1007,7 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
     print(f"cell {index}, seed {seed}: {counts}")
     assert counts["placed"] >= 30, counts
     # The self-check on these honest passes.  Away from a plane it never
-    # fires and every gap has its margin.  Beside one (MADD-ANO-243, open)
+    # fires and every gap has its margin.  Beside one (MADD-ANO-246, open)
     # a pass that reads a position it built in the same sweep can read a
     # gap of any size in float32: the check's finite difference carries
     # that position across the plane.  Held: it happens nowhere else, and

@@ -152,7 +152,7 @@ names the edge and says what to do.
     the plane and the difference is not a derivative.  Of 2829 drawn
     examples of two such groups, 1489 of them that near a plane, 47 read
     over 0.05, two over 0.2 and one 0.59; of a thousand further from a
-    plane none read over 5e-3 (MADD-ANO-243).
+    plane none read over 5e-3 (MADD-ANO-246).
   - **An honest float32 report is withheld behind a strongly cancelling
     gather.**  A Gauss-Seidel group whose gather samples a field that
     changes sign across a cell reads 0.25 to 0.75 once the lattice

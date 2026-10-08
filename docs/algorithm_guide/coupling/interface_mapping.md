@@ -1028,7 +1028,7 @@ difference's own error.  Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2:
 | honest, the search's hunts away from a lattice plane | 3,200 | at most 9.5e-3 |
 | every read of a geometry under `stop_gradient`, the six cells | 353 | float32: 0.305 to 0.98; float64: 1.0 |
 | the source-anchored reads under `stop_gradient`, a deposit that moves the grid's field by nine resolutions | 1 | 0.22, under the tolerance: the radius reported was 0.003 against 0.025 |
-| honest float32, a position built and read in one Gauss-Seidel sweep, placed 1e-6 to 1e-2 of a spacing from a lattice plane (1489 within 2e-5) | 2829 | 47 over 0.05, 13 over 0.1, 2 over 0.2, one 0.59 (MADD-ANO-243) |
+| honest float32, a position built and read in one Gauss-Seidel sweep, placed 1e-6 to 1e-2 of a spacing from a lattice plane (1489 within 2e-5) | 2829 | 47 over 0.05, 13 over 0.1, 2 over 0.2, one 0.59 (MADD-ANO-246) |
 | honest float32, Gauss-Seidel behind a gather of a field alternating $\pm A$ around a sample of order one | 126 | under 0.09 up to $A = 1020$; 0.25 to 0.75 beyond, but 0.14 at $A$ = 2200 to 2700 (MADD-ANO-212) |
 
 The separation is therefore measured and not clean.  The step of the

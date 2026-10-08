@@ -16615,7 +16615,7 @@ anomalies:
       draws, both under Jacobi, by 2.0 and 2.8 times, and no bound was
       under its distance.  With the row at 30 times the difference, a loop
       gain of 0.05 and a start at the fixed point, 4 of 300 draws stalled
-      with the bound at 0.62x to 0.88x the distance, flag set.  How it was
+      with the bound at 0.62x to 0.89x the distance, flag set.  How it was
       found: the seeded slow hunt on those cells read, on one CI runner,
       an exact residual of 1.105e-11 beside a reported 6.9e-13 and a floor
       of 8.9e-12 (1.098 of what the floor allows; the bound held, 16 times

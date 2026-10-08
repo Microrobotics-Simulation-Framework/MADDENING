@@ -1009,6 +1009,19 @@ tie.  A claim about a mapped edge that expands or reduces is lifted with
 small one), `Stored` is that module's exact reference with every number as
 its member stores it, and `build_twin` the same pair with the scatter
 applied inside the large member (`test_coupling_pairs_of_two_sizes_in_every_domain.py`).
+A claim about an edge with a geometry-dependent mapping is lifted the same
+way: `build_geometry(GeoCell(domain, kind, anchors, ...))` puts the markers
+and the grid of `tests/property/geometry_interface_graphs.py` in a domain,
+`GeoStored` is that module's reference as the members store its numbers,
+and `build_geometry_twin` its marker-side twin.  Its members have a memory
+(the positions integrate from the pre-step state), so a reference is
+handed the state its step started from (`from_state`) and a predictor's
+guess is the loop's first iterate, not what the members integrate from.
+Write the markers after `compile()`, as a step's state is: `compile()`
+warns of positions a dtype cannot resolve to the tolerance on the state it
+sees, and the suite turns a warning into an error (`build_geometry` hands
+its advisories back; a cell that compiles with the markers in place asserts
+them).
 
 The cross-cutting oracles fill cells too, and a narrowed cell is
 re-examined whenever one lands: if it now runs the claim in that domain,

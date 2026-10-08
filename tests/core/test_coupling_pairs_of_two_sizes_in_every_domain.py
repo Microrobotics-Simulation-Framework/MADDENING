@@ -1689,10 +1689,13 @@ def _geo_owed(cell, pre: dict) -> dict:
 
 
 #: The pairs the advisory is asked of in each domain: the two-way pair with
-#: the markers' values on either member, and two gathers each anchored at
-#: its source (so each member's positions are behind one edge).
+#: the markers' values on either member; two gathers each anchored at its
+#: source (so each member's positions are behind one edge); and a scatter
+#: anchored at its target (no reading of positions: never warned of)
+#: beside a gather anchored at its source, both on the positions of ``a``.
 _GEO_ADVISED = (("two-way", ("source", "target"), "a"), ("two-way", ("source", "target"), "b"),
-                ("gather-only", ("source", "source"), "a"))
+                ("gather-only", ("source", "source"), "a"),
+                ("two-way", ("target", "source"), "b"))
 
 
 @pytest.mark.parametrize("label", cs.GEO_ACCEPTED)
@@ -1702,8 +1705,8 @@ def test_compile_warns_of_far_markers_by_the_dtype_of_the_member_that_stores_the
     reading rests on positions a float32 member stores -- a part of a
     scatter's reading, or what a gather's value is delivered at -- naming
     the member, and says nothing of a float64 member's (the mixed-dtype
-    domain has one of each) nor of any pair near zero.  The graph is
-    compiled either way."""
+    domain has one of each), of a scatter anchored at its target, nor of
+    any pair near zero.  The graph is compiled either way."""
     seen = set()
     for kind, anchors, small in _GEO_ADVISED:
         for origin in (cs.GEO_ORIGIN, 3000.0):
@@ -1724,10 +1727,12 @@ def test_compile_warns_of_far_markers_by_the_dtype_of_the_member_that_stores_the
             if origin == cs.GEO_ORIGIN:
                 assert not owed, (cell.id, owed)
             seen.add(len(owed))
-    # Every edge of a pair warned of, and in the mixed-dtype domain one of two.
-    mixed = cd.DOMAINS[label].dtype_a != cd.DOMAINS[label].dtype_b
-    assert seen == ({0, 1, 2} if mixed else ({0, 2} if not cd.DOMAINS[label].x64 else {0})), (
-        label, seen)
+    # Premise: pairs with both edges warned of and with one (the scatter
+    # anchored at its target is silent; so is a float64 member's edge in
+    # the mixed-dtype domain); none where every member holds float64.
+    d = cd.DOMAINS[label]
+    every_float64 = all(jnp.dtype(t) == jnp.dtype(jnp.float64) for t in d.dtypes)
+    assert seen == ({0} if every_float64 else {0, 1, 2}), (label, seen)
 
 
 # Slow: a graph compiled per cell (two for a batch), a hundred and twenty cells.

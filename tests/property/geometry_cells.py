@@ -413,13 +413,30 @@ def plane_limit_reference(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -
     weights, from *x* to a state with one coordinate the pass reads from
     the iterate on a lattice plane (or on the face of the hull it is
     clamped to), halved (``GEOMETRY_PLANE_REACH``); zero where the pass
-    itself moves a coordinate across; ``inf`` where the pass reads no
+    itself moves a coordinate across, and where the coordinate, or the one
+    the pass builds from it, is within eight float resolutions of a plane
+    (``GEOMETRY_PLANE_ULPS``: ``eps`` of *cell*'s dtype times the largest
+    coordinate of the lattice's axis, or the coordinate's own magnitude
+    where that is larger; MADD-ANO-247); ``inf`` where the pass reads no
     position from the iterate."""
     origin, spacing, shape = cell.grid
     x = np.asarray(x, np.float64)
     after = ref.apply(x)
     weights = norm.weights(x)
+    eps = float(np.finfo(cell.dtype).eps)
     best = math.inf
+
+    def from_a_plane(value: float, axis: int) -> tuple:
+        """``(distance, window)`` of one coordinate: to its nearest plane,
+        and the eight float resolutions under which it is on it."""
+        n = shape[axis]
+        u = (value - origin[axis]) / spacing[axis]
+        near = -u if u < 0 else u - (n - 1) if u > n - 1 else min(u - math.floor(u),
+                                                                1.0 - (u - math.floor(u)))
+        top = origin[axis] + (n - 1) * spacing[axis]
+        scale = max(abs(value), abs(value - origin[axis]), abs(origin[axis]), abs(top))
+        return near * spacing[axis], 8.0 * eps * scale
+
     for name in sorted(set(cell.iterate_reads)):
         k = [(n, f) for n, f, _s, _a, _b in ref.layout].index((name, "pos"))
         _n, _f, _shape, a, b = ref.layout[k]
@@ -428,11 +445,9 @@ def plane_limit_reference(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -
             n = shape[axis]
             if n < 2:
                 continue
-            u = (x[j] - origin[axis]) / spacing[axis]
-            near = -u if u < 0 else u - (n - 1) if u > n - 1 else min(u - math.floor(u),
-                                                                    1.0 - (u - math.floor(u)))
-            dist = near * spacing[axis]
-            if abs(after[j] - x[j]) > dist:
+            dist, window = from_a_plane(x[j], axis)
+            built, built_window = from_a_plane(after[j], axis)
+            if dist <= window or built <= built_window or abs(after[j] - x[j]) > dist:
                 dist = 0.0
             moved = x.copy()
             moved[j] += dist
@@ -442,10 +457,15 @@ def plane_limit_reference(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -
 
 def plane_limit_resolution(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -> float:
     """How far ``geometry_plane_limit`` moves when a position the pass
-    reads from the iterate moves by eight roundings of *cell*'s dtype (of
-    the coordinate, or of a spacing where that is larger): what the
-    stored limit of a point a few roundings from a plane is good to."""
-    origin, spacing, _shape = cell.grid
+    reads from the iterate moves by sixteen roundings of *cell*'s dtype
+    (of the lattice's largest coordinate, of the coordinate, or of a
+    spacing, whichever is largest): what the stored limit of a point a few
+    roundings from a plane is good to.  Twice the window under which a
+    position is on a plane: at the window's edge the step's float
+    arithmetic and this reference's can disagree about which side of it a
+    point is, and the limit is then zero by one and the window by the
+    other."""
+    origin, spacing, shape = cell.grid
     x = np.asarray(x, np.float64)
     weights = norm.weights(x)
     eps = float(np.finfo(cell.dtype).eps)
@@ -455,7 +475,9 @@ def plane_limit_resolution(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) 
         _n, _f, _s, a, b = ref.layout[k]
         for j in range(a, b):
             moved = x.copy()
-            moved[j] += 8.0 * eps * max(abs(x[j]), spacing[(j - a) % cell.d])
+            axis = (j - a) % cell.d
+            top = origin[axis] + (shape[axis] - 1) * spacing[axis]
+            moved[j] += 16.0 * eps * max(abs(x[j]), spacing[axis], abs(origin[axis]), abs(top))
             worst = max(worst, norm.of_difference(moved, x, weights))
     return worst / 2.0
 

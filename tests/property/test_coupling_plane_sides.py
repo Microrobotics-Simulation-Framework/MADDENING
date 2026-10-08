@@ -28,8 +28,9 @@ point are in the fixed point's lattice cells.
   float resolutions of a plane; and the five audited cases, pinned as the
   audit recorded them.
 * **Slow**: the sweep -- every anchoring, both schedules, both norms,
-  float32 and float64 -- with the signed distances drawn log-uniformly from
-  four float resolutions to a tenth of a spacing.
+  float32 and float64, a loose and a tight tolerance and a plain and an
+  Aitken iteration spread evenly over them -- with the signed distances
+  drawn log-uniformly from four float resolutions to a tenth of a spacing.
 """
 
 from __future__ import annotations
@@ -222,27 +223,31 @@ def test_the_audited_bounds_were_flagged_and_far_under_the_error():
 # ---------------------------------------------------------------------------
 
 #: Every anchoring (gather, scatter), both schedules, both norms, both
-#: dtypes: 32 cells.  The tolerance alternates loose and tight with the
-#: cell, the lattice with the dtype (float32 at an origin forty spacings
-#: from zero in the mixed cells, where a float resolution is 4e-6 of a
-#: spacing).
+#: dtypes: 32 cells.  A loose and a tight tolerance, the order the members
+#: are added in and a plain or an Aitken iteration are spread over them so
+#: that each is half of every anchoring, schedule, norm and dtype (a parity
+#: of the cell's four indices: nothing here is read off another table).
+#: The mixed cells are on a lattice whose origin is forty spacings from
+#: zero, where a float32 resolution is 4e-6 of a spacing.
 def _sweep_cells() -> list:
     cells = []
-    for i, (anchors, mode, norm, dtype) in enumerate(
-            (a, m, n, d)
-            for a in (("target", "source"), ("source", "source"), ("source", "target"),
-                      ("target", "target"))
-            for m in ("gauss-seidel", "jacobi") for n in ("l2", "mixed")
-            for d in ("float32", "float64")):
-        loose = i % 2 == 0
-        lattice = (dict(N=(6,), origin=(20.0,), spacing=(0.5,)) if norm == "mixed"
-                   else dict(N=(6,), origin=(0.0,), spacing=(0.25,)))
-        knobs = (dict(tolerance=0.03 if loose else (1e-5 if dtype == "float64" else 1e-3))
-                 if norm == "l2" else
-                 dict(rtol=0.03 if loose else (1e-5 if dtype == "float64" else 1e-3)))
-        cells.append(dict(anchors=anchors, mode=mode, norm=norm, dtype=dtype, m=1,
-                          order=("F", "P") if i % 4 < 2 else ("P", "F"),
-                          max_iterations=60, acceleration="none", **lattice, **knobs))
+    anchorings = (("target", "source"), ("source", "source"), ("source", "target"),
+                  ("target", "target"))
+    for a, anchors in enumerate(anchorings):
+        for m, mode in enumerate(("gauss-seidel", "jacobi")):
+            for n, norm in enumerate(("l2", "mixed")):
+                for d, dtype in enumerate(("float32", "float64")):
+                    loose = (a + m + n + d) % 2 == 0
+                    tight = 1e-5 if dtype == "float64" else 1e-3
+                    lattice = (dict(N=(6,), origin=(20.0,), spacing=(0.5,)) if norm == "mixed"
+                               else dict(N=(6,), origin=(0.0,), spacing=(0.25,)))
+                    knobs = {"tolerance" if norm == "l2" else "rtol": 0.03 if loose else tight}
+                    cells.append(dict(
+                        anchors=anchors, mode=mode, norm=norm, dtype=dtype, m=1,
+                        order=("F", "P") if (a + n) % 2 == 0 else ("P", "F"),
+                        max_iterations=60,
+                        acceleration="aitken" if (m + d) % 2 == 1 else "none",
+                        **lattice, **knobs))
     return cells
 
 
@@ -252,7 +257,8 @@ BASES, DISTANCES = 6, 12
 
 def _cell_id(cell: dict) -> str:
     return "-".join([cell["anchors"][0][0] + cell["anchors"][1][0], cell["mode"], cell["norm"],
-                     cell["dtype"]])
+                     cell["dtype"], "loose" if 0.03 in (cell.get("tolerance"), cell.get("rtol"))
+                     else "tight", cell["acceleration"]])
 
 
 # Per push: tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference

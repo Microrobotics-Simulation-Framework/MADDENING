@@ -223,7 +223,12 @@ def test_a_sweep_that_updates_the_holder_first_has_no_geometry_column():
         case = Case(1, seed, 0.7, 0.2)
         seen = GS_SEARCH.observe(case)
         report = seen["report"]
-        assert seen["scored"] and seen["spectral_usable"] and seen["reason"] is None, seen
+        # The only reason this report may carry is the gradient flag's own
+        # (a plane inside the Kantorovich ball, MADD-ANO-247): the radius
+        # and its flag are what is read here.
+        assert seen["scored"] and seen["spectral_usable"], seen
+        assert seen["reason"] is None or (
+            "Newton-Kantorovich ball" in seen["reason"] and not seen["gradient_usable"]), seen
         _gm, twin, ref = GS_SEARCH._built(1)                # noqa: SLF001
         values = gc.values_of(case, cell)
         ref = gc.bound_reference(ref, twin, values)

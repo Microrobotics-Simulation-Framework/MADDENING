@@ -16092,8 +16092,8 @@ anomalies:
       the size of the field it reads has a derivative one rounding of a
       same-pass value moves by 2.4e-5, and the float32 pass's Jacobian
       has a radius up to 5e-4 of itself from the exact one at the
-      returned state (5e-5 at a curvature of 10; the same at a change of
-      units of 0, 1, 3 and 6 decades, with and without a mapping; 100
+      returned state (5e-5 at a curvature of 10; no larger at a change
+      of units of 6 decades than at 1, with and without a mapping; 100
       random draws on each of six cells, jaxlib 0.11.2).  `rho_spectral`
       is the float32 pass's to 2e-8 there, and CPL-087's second
       statement (1e-4 of the radius and its movement under a rounding of

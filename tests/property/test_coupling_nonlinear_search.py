@@ -1128,12 +1128,14 @@ RADIUS_SCORES = ("radius", "radius_strict")
 #: draws a cell (jaxlib 0.11.2; three such cells on the mapped ring and
 #: three on rings with no mapping): the radius of the float32 pass's own
 #: Jacobian is up to 5e-4 of itself from the float64 twin's at a curve of
-#: 100, 5e-5 at 10 and 5e-6 at 1 -- as the curve, the same at a change of
-#: units of 0, 1, 3 and 6 decades -- where CPL-087's second statement is
-#: 1e-4 of the radius.  The score read 0.23 at most at a curve of 10; at
-#: 100 it read 2.3 on a ring with no mapping and 1.53 on the draw a hunt
-#: over one cell stopped on (:data:`ITS_OWN_JACOBIAN`).  Within a decade,
-#: as the units are (:data:`SWEPT_PRODUCT_DECADES`).
+#: 100, 5e-5 at 10 and 5e-6 at 1 -- as the curve, and no larger at a
+#: change of units of 6 decades than at 1 -- where CPL-087's second
+#: statement is 1e-4 of the radius.  The score read 0.23 at most at a
+#: curve of 10; at 100 it read 2.3 on a ring with no mapping and 1.53 on
+#: the draw a hunt over one cell stopped on (:data:`ITS_OWN_JACOBIAN`;
+#: held, that hunt's 115 examples read 0.027 at most, under CI's command
+#: for its shard on jaxlib 0.10.2 and 0.11.2).  Within a decade, as the
+#: units are (:data:`SWEPT_PRODUCT_DECADES`).
 SWEPT_CURVE = 10.0
 #: The score of CPL-087's second statement, the one held to that curve:
 #: ``"radius_strict"`` is the flag's margin, hundreds of times wider, and

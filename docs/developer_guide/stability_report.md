@@ -191,6 +191,14 @@ import time.  Levels:
 | `maddening.sysid.init_window_states` | evolving |
 | `maddening.sysid.observations_from_history` | evolving |
 | `maddening.sysid.windowed_loss` | evolving |
+| `maddening.testing.coupled.IterationErrorBound` | experimental |
+| `maddening.testing.coupled.assert_graph_gci_verified` | experimental |
+| `maddening.testing.coupled.assert_graph_order_verified` | experimental |
+| `maddening.testing.coupled.coupling_iteration_bound` | experimental |
+| `maddening.testing.coupled.verify_graph_gci` | experimental |
+| `maddening.testing.coupled.verify_graph_order` | experimental |
+| `maddening.testing.mapping.assert_mapping_verified` | experimental |
+| `maddening.testing.mapping.verify_mapping` | experimental |
 | `maddening.testing.mms.ApparentOrder` | experimental |
 | `maddening.testing.mms.ConvergenceRegime` | experimental |
 | `maddening.testing.mms.GridConvergenceStudy` | experimental |
@@ -227,4 +235,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*207 API surfaces registered.*
+*215 API surfaces registered.*

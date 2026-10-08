@@ -427,6 +427,37 @@ def test_wrong_output_dtype_fails_the_dtype_check_and_no_other(float64):
     assert "promote to float64" in results["dtype_float64"].detail
 
 
+class _AnotherResultUnderJit(_HandWritten):
+    """Branches in Python on whether it is being traced."""
+
+    def __init__(self):
+        super().__init__(_row_stochastic())
+
+    def apply(self, field, weights=None, geom=None):
+        if isinstance(field, jax.core.Tracer):
+            return 1.5 * (self.matrix @ field)
+        return self.matrix @ field
+
+
+def test_a_kind_that_computes_another_result_under_jit_fails_jit_consistent():
+    results = verify_mapping(_AnotherResultUnderJit(), consistent=False,
+                             checks=["structure", "jit_consistent", "dtype"], **KW)
+    assert _failed(results) == ["jit_consistent"], _report(results) or "nothing failed"
+    assert "compiled delivery differs" in results["jit_consistent"].detail
+
+
+def test_a_kind_that_does_not_clamp_where_it_was_declared_to_fails_the_hull_check():
+    """The shipped grid, declared to clamp at a box one cell short of its
+    own: between the two it interpolates, which is not a clamp."""
+    mapping = multilinear_grid_mapping(ORIGIN, SPACING, SHAPE, n_points=N_POINTS)
+    short = UPPER - np.asarray(SPACING)
+    results = verify_mapping(mapping, geometry_strategy=_positions(LOWER, short),
+                             hull=(LOWER, short), outside="clamp",
+                             checks=["outside_hull"], **KW)
+    assert results["outside_hull"].failed
+    assert "declared to clamp" in results["outside_hull"].detail
+
+
 def test_the_adjoint_identity_is_not_judged_on_a_map_that_is_not_linear():
     results = verify_mapping(_NonLinear(), consistent=False, **KW)
     assert results["adjoint"].skipped and "not linear" in results["adjoint"].detail
@@ -442,6 +473,13 @@ def test_a_claim_the_kind_does_not_keep_fails():
     results = verify_mapping(conservative, polynomial_order=1, checks=["conservative"],
                              **COORDS, **KW)
     assert results["conservative"].failed and "moment" in results["conservative"].detail
+    # A cell average reproduces constants at the cell centres, not linear
+    # fields (the guide's worked example turns on this).
+    centres = dict(source_coordinates=0.5 * (SB[1:] + SB[:-1]),
+                   target_coordinates=0.5 * (TB[1:] + TB[:-1]))
+    results = verify_mapping(projection_1d_mapping(SB, TB), consistent=True,
+                             polynomial_order=1, checks=["consistent"], **centres, **KW)
+    assert results["consistent"].failed
 
 
 def test_a_factory_that_does_not_record_what_it_was_given_fails_the_round_trip(

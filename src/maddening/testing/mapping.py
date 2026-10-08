@@ -68,7 +68,7 @@ import json
 import math
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -309,7 +309,7 @@ class _Sampling:
         drawn = dtype if dtype in _IEEE else np.dtype(np.float32)
         lo, hi = _representable(self.bounds[0], self.bounds[1], drawn)
         fields = arrays(drawn, lead, elements=st.floats(
-            lo, hi, width=drawn.itemsize * 8, allow_nan=False, allow_infinity=False,
+            lo, hi, width=_width(drawn), allow_nan=False, allow_infinity=False,
             allow_subnormal=False))
         return fields if drawn == dtype else fields.map(lambda a: a.astype(dtype))
 
@@ -337,6 +337,13 @@ class _Sampling:
 
 
 _IEEE = (np.dtype(np.float16), np.dtype(np.float32), np.dtype(np.float64))
+
+
+def _width(dtype: np.dtype) -> Literal[16, 32, 64]:
+    """The width Hypothesis draws floats of *dtype* in."""
+    if dtype == np.float16:
+        return 16
+    return 32 if dtype == np.float32 else 64
 
 
 def _drive(
@@ -684,7 +691,7 @@ def _mapping_consistent(subject: _Subject, sampling: _Sampling, rounding_units: 
 
     lo, hi = _representable(sampling.bounds[0], sampling.bounds[1], dtype)
     strategy = st.fixed_dictionaries({
-        "c": st.floats(lo, hi, width=dtype.itemsize * 8, allow_nan=False),
+        "c": st.floats(lo, hi, width=_width(dtype), allow_nan=False),
         "geom": sampling.geom()})
     return _drive("consistent", strategy, body, **kw)
 

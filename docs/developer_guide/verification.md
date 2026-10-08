@@ -11,6 +11,10 @@ deterministic, JIT-consistent and differentiable.  [Order of
 accuracy](#order-of-accuracy-the-method-of-manufactured-solutions) is the
 other half of the battery: it compares the code to the mathematics.
 
+A node is the first of three levels.  The transfer between two nodes and the
+coupled graph have batteries of their own: see [Verifying a coupled model in
+three levels](#verifying-a-coupled-model-in-three-levels).
+
 Install via:
 
 ```bash
@@ -481,6 +485,385 @@ cleanly to the wrong limit.**  MMS can.  Where a node has a natural forcing
 input, MMS is the stronger test and GCI is the uncertainty statement on top of
 it — not a substitute for it.
 
+## Verifying a coupled model in three levels
+
+Verified nodes are not yet a verified model.  Each node was checked alone,
+against its own equations; a coupled graph adds the transfer between two
+discretisations and the scheme that advances the exchange in time, and
+either can be wrong while every node is right.  The verification of a
+coupled model therefore has three levels, and each establishes one thing:
+
+| level | what is checked | with | what it establishes |
+|---|---|---|---|
+| 1. the node | `update()` against an analytical or manufactured solution | `verify_node`, `verify_node_order`, `verify_node_gci` (above) | each node solves *its* equations at its declared order |
+| 2. the edge | the transfer between two nodes | `verify_mapping` | nothing is created or destroyed on the way, and a value arrives as the value it was |
+| 3. the graph | the coupled model against a known solution, or against itself under refinement | `verify_graph_order`, `verify_graph_gci` | the *coupled* scheme converges, at the order the exchange and the edges allow |
+
+**What none of them does.**  All three are *verification*: evidence that the
+equations written down are solved correctly.  None says the equations are
+the right ones.  *Validation* against experiments, the regime a model is
+valid in, and the uncertainty of its parameters are separate work, and a
+model that passes all three levels can still describe the wrong physics.
+Manufactured solutions for a whole graph (a source term injected into each
+node) are not in this release: level 3 here needs a coupled problem with a
+known solution, or uses grid convergence, which needs none.
+
+*`verify_mapping`, `verify_graph_order` and `verify_graph_gci` are
+experimental in 0.4.0.*
+
+### Level 2: the edge
+
+`verify_mapping` is the battery for an interface mapping.  It takes any
+object with the members of the `Mapping` protocol -- built by a shipped
+factory, registered with `register_mapping`, or written by hand and never
+registered -- or a whole `EdgeSpec`, in which case every check is made on what
+the edge *delivers*: the mapping and then the edge's `transform`, through the
+one function the step delivers an edge through.
+
+```python
+import numpy as np
+
+from maddening.core.coupling.mapping import nearest_neighbor_mapping, rbf_mapping
+from maddening.core.edge import EdgeSpec
+from maddening.testing.mapping import assert_mapping_verified, verify_mapping
+
+fluid = np.linspace(0.0, 1.0, 9)            # where the fluid's interface values are
+solid = np.linspace(0.05, 0.95, 7)          # ... and the solid's
+
+# A consistent transfer of a value, claimed to reproduce linear fields.
+to_solid = rbf_mapping(fluid, solid, kernel="thin_plate_spline")
+assert_mapping_verified(to_solid, polynomial_order=1,
+                        source_coordinates=fluid, target_coordinates=solid)
+
+# A conservative transfer of a force, on its edge: N to kN, and a sign.
+edge = EdgeSpec("fluid", "solid", "traction", "force",
+                mapping=nearest_neighbor_mapping(fluid, solid, mode="conservative"),
+                transform=lambda force: -1e-3 * force)
+results = verify_mapping(edge, scale=-1e-3)
+assert all(r.passed for r in results.values())
+assert results["conservative"].status == "PASS"      # the total, times the scale
+assert results["consistent"].skipped                 # not claimed, so not checked
+
+# Nearest neighbour reproduces constants and no more: a claim it does not keep fails.
+too_much = verify_mapping(nearest_neighbor_mapping(fluid, solid), polynomial_order=1,
+                          source_coordinates=fluid, target_coordinates=solid)
+assert too_much["consistent"].failed
+```
+
+**What the mapping claims is your statement.**  The battery cannot know what
+a kind of your own promises and does not guess.  `consistent=` and
+`conservative=` default to the mapping's `mode`; `polynomial_order=` is the
+degree the claim holds to (0: constants, the total); a property that is not
+claimed is a `SKIP` that says "not claimed".  What the two words mean for a
+transfer:
+
+* **consistent** is the transfer of a *value* (a temperature, a
+  displacement): a field that is uniform on the source arrives as the same
+  uniform field, and, for degree `p`, every polynomial of the coordinates
+  up to `p` arrives as itself.  The degree is the order of the transfer: a
+  kind that reproduces degree `p` carries a smooth field with an error of
+  order `h**(p + 1)`, which is what level 3 then measures.
+* **conservative** is the transfer of an *amount* (a force, a heat flow):
+  the total over the target is the total over the source, and for degree
+  `p` so are the moments up to `p` (degree 1: where the amount sits).  With
+  `source_measure=` / `target_measure=` the totals are weighted sums, for a
+  field of densities on cells of different sizes.
+
+**Conservation of work is a property of a pair.**  The `adjoint` check holds
+the two applications of one mapping to `<apply(x), y> == <x, apply_T(y)>`.
+If a displacement goes one way through a gather `H` and the force comes back
+through the scatter `Hᵀ`, the work done on the two sides of the interface is
+the same number: `fᵀ (H u) = (Hᵀ f)ᵀ u`.  Neither transfer has that property
+alone.  A force returned through an independently built mapping, however
+accurate, exchanges different amounts of work in the two directions, and the
+coupled model gains or loses energy at the interface.
+
+The checks, each a named result:
+
+| result | what it holds the edge to |
+|---|---|
+| `structure` | the protocol's members; the `params_pytree()` contract `add_edge` enforces; the delivered shapes; no argument, weight or parameter changed by a call, nothing kept between calls |
+| `linearity` | `delivered(a x + b y) == a delivered(x) + b delivered(y)` |
+| `consistent`, `conservative` | as claimed, above |
+| `adjoint` | `<delivered(x), y> == scale * <x, apply_T(y)>` |
+| `geometry_derivative` | for a geometry-dependent kind: the derivative with respect to a position against a central difference |
+| `outside_hull` | with `hull=` and `outside="clamp"`: a position outside the kernel's box is its projection onto it, and the derivative with respect to it is zero |
+| `dtype_float32`, `dtype_float64` | the delivered dtype is the one the field and the weights promote to; float64 needs `jax_enable_x64` |
+| `jit_consistent` | the compiled delivery equals the eager one |
+| `round_trip` | a registered kind, written as a config writes it and rebuilt as a config reads it, has the same weights and delivers the same field, bit for bit |
+
+A few things to know when reading a result:
+
+* **An edge with a transform.**  A transform that multiplies by a known
+  factor (a unit conversion, a sign) is declared with `scale=`.  One that is
+  not that scaling -- a clamp, an offset, an undeclared factor -- fails
+  `conservative` (and `linearity`, `adjoint`) with the transform named in the
+  message: the mapping may conserve and the edge still not.
+* **A geometry-dependent kind** needs positions: `geometry=` (one array of
+  sample positions) or `geometry_strategy=` (a Hypothesis strategy that
+  yields them, the vocabulary of `state_strategy=`).  Keep them where the
+  kind's claims hold; a multilinear gather reproduces linear fields inside
+  its hull.  The kernel of such a kind has *kinks* (a lattice plane, a face
+  of the hull), where a finite difference is not a derivative.  The check
+  lays a five-point stencil along one coordinate and compares only where
+  the stencil's third differences vanish; a draw where they do not is *on a
+  kink*, and the result's detail counts those draws beside the ones
+  compared.  A check in which no draw could be compared is a `SKIP`.
+* **Tolerances are in units of rounding**, `rounding_units * eps * gain *
+  max|field|`, with `eps` the coarsest rounding among the dtypes involved
+  and `gain` the largest absolute row sum of the operator.  A kind whose
+  documented accuracy is not rounding needs a larger `rounding_units`, said
+  where it is passed: the RBF factories solve a kernel system with a
+  relative ridge of `1e-8`, so in float64 they reproduce and conserve to
+  `1e-8`, which is some `5e7` float64 roundings.
+* **A `SKIP` counts as passed**, as it does for a node.  Where a check must
+  have been made, `assert_mapping_verified(..., require=("round_trip",))`
+  raises on a skip of it.  An unregistered kind's `round_trip` is always a
+  skip: it has no save/load route to check.
+
+### Level 3: the coupled graph, and the iteration-error trap
+
+`verify_graph_order` and `verify_graph_gci` are the graph-level forms of
+`verify_node_order` and `verify_node_gci`, over the same machinery: you give
+a function that builds the graph at a refinement level, runs it and returns
+one number, and the levels.  Two things differ from a node.
+
+**A graph declares no order, so you state the one you expect.**  Without
+`expected=` the result is a `SKIP`.  What a partitioned coupling can reach:
+
+* **first order in time**, whatever the nodes' own integrators are.  Each
+  node receives its boundary inputs once per step and holds them across it
+  (MADD-ANO-014), so the exchange is first order even where a coupling
+  group iterates the step to convergence;
+* **order `p + 1` in space** through an edge whose mapping reproduces
+  polynomials of degree `p`, and no more than the nodes' own order.
+
+**The iteration error is not the discretisation error.**  A coupling group
+solves each step's exchange iteratively, to a tolerance.  What is left of
+that iteration is an error of the *solver*; a refinement ladder reads it as
+an error of the *scheme*.  Measured on the worked example below, refining
+the timestep on a fixed grid (the coupled scheme is first order):
+
+| group `tolerance` | pairwise orders (50, 100, 200, 400 steps) | last step's bound / error, finest level |
+|---|---|---|
+| `1e-8` | 0.994, 0.997, 0.999 | `3.6e-8` |
+| `1e-4` | 1.005, 1.134, **0.506** | `1.2e-2` |
+
+At `1e-4` the group stops after two passes on the coarse levels and one on
+the fine ones, so the ladder compares two different schemes and the order
+it reports belongs to neither.  Note the last column: the bound the
+diagnostics report for the *last step* is 1.2% of the error and looks
+harmless.  A fixed-point iteration stopped early from the previous step's
+state errs the same way at every step, and the errors add: it is the bound
+**times the number of steps** that has to be small.
+
+Both functions therefore carry a guard and do not report an order as
+verified without it.  At every level the iteration error must be at most
+`iteration_factor` (default 0.05) of the discretisation error being
+measured -- an error known to within 5% at two levels moves the order read
+from them by at most 0.14, inside the band -- by one of two routes:
+
+* **from the diagnostics**: `iteration_bound_at=lambda level:
+  coupling_iteration_bound(graph_at(level), steps=...)`.  It reads
+  `coupling_report()` and returns `steps` times the largest
+  `spectral_error_bound`, usable where every group reports
+  `spectral_usable=True` (`solver="ift"`, `diagnostics=True`; see *Reading
+  `coupling_diagnostics()`* in the coupling algorithm guide);
+* **by running the level again** at a tighter coupling tolerance:
+  `tightened_error_at=` (or `tightened_solution_at=`).  The iteration error
+  is then the difference of the two measurements, in the study's own units.
+  This route assumes nothing about the graph, and is the one to use where a
+  group reports no usable bound: `solver="fori"`, diagnostics off, a
+  geometry-dependent mapping the diagnostics do not read, a wide interface,
+  a custom edge.
+
+Where the guard finds the iteration error too large the result is a `FAIL`
+that says the study is inconclusive (tighten the tolerance), not that the
+model is wrong.  Where neither route can be taken the result is a `SKIP`
+that says the iteration error was not checked.  A graph with no coupling
+group iterates nothing: say `iterated=False`, and the lag of its staggered
+exchange is part of the time discretisation the study measures.
+
+### A worked example
+
+Two rods on the same interval exchange heat along their whole length, each
+insulated at its ends:
+
+$$
+\partial_t T_a = \alpha\, \partial_x^2 T_a + k\,(T_b - T_a), \qquad
+\partial_t T_b = \alpha\, \partial_x^2 T_b + k\,(T_a - T_b).
+$$
+
+From $T_a = 1 + \cos \pi x$, $T_b = 0$ the sum and the difference decouple:
+$T_a + T_b = 1 + \cos(\pi x)\, e^{-\alpha \pi^2 t}$ and
+$T_a - T_b = e^{-2kt} + \cos(\pi x)\, e^{-(\alpha \pi^2 + 2k) t}$.  Each rod
+is a `HeatNode` (second order in space, forward Euler in time), and the
+exchange is four additive edges into the rods' `heat_source`.  On matching
+grids the two cross edges are plain; on non-matching grids they carry a
+mapping, and levels 2 and 3 meet.
+
+```python
+import math
+
+import jax
+
+jax.config.update("jax_enable_x64", True)  # a ladder is a ratio of small numbers
+
+import jax.numpy as jnp
+import numpy as np
+
+from maddening.core.coupling.mapping import nearest_neighbor_mapping, projection_1d_mapping
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.heat import HeatNode
+from maddening.testing.coupled import (
+    coupling_iteration_bound, verify_graph_gci, verify_graph_order,
+)
+from maddening.testing.mapping import assert_mapping_verified
+from maddening.testing.mms import RefinementAxis
+
+ALPHA, K, T_END = 0.1, 1.0, 0.5
+
+
+def centres(n):
+    return (np.arange(n) + 0.5) / n
+
+
+def faces(n):
+    return np.linspace(0.0, 1.0, n + 1)
+
+
+def projection(n_from, n_to):
+    return projection_1d_mapping(faces(n_from), faces(n_to))
+
+
+def nearest(n_from, n_to):
+    return nearest_neighbor_mapping(centres(n_from), centres(n_to))
+
+
+def run(n_a, n_b, steps, mapping=None, **group):
+    """The two rods after `steps` steps to T_END.  A fresh graph every time:
+    a run leaves a graph at its final state."""
+    dt = T_END / steps
+    gm = GraphManager()
+    gm.add_node(HeatNode("a", dt, n_cells=n_a, thermal_diffusivity=ALPHA))
+    gm.add_node(HeatNode("b", dt, n_cells=n_b, thermal_diffusivity=ALPHA))
+    for rod in ("a", "b"):
+        gm.add_edge(rod, rod, "temperature", "heat_source", additive=True,
+                    transform=lambda temperature: -K * temperature)
+    for source, target, n_from, n_to in (("a", "b", n_a, n_b), ("b", "a", n_b, n_a)):
+        gm.add_edge(source, target, "temperature", "heat_source", additive=True,
+                    transform=lambda temperature: K * temperature,
+                    mapping=None if mapping is None else mapping(n_from, n_to))
+    if group:
+        gm.add_coupling_group(["a", "b"], max_iterations=100, **group)
+    gm.compile()
+    # A HeatNode's state is float32 until it is set.
+    gm.set_node_state("a", {"temperature": jnp.asarray(1.0 + np.cos(np.pi * centres(n_a)))})
+    gm.set_node_state("b", {"temperature": jnp.zeros(n_b, jnp.float64)})
+    gm.run_scan(steps)
+    return gm
+
+
+def exact(x):
+    total = 1.0 + np.cos(np.pi * x) * math.exp(-ALPHA * np.pi ** 2 * T_END)
+    difference = math.exp(-2 * K * T_END) + np.cos(np.pi * x) * math.exp(
+        -(ALPHA * np.pi ** 2 + 2 * K) * T_END)
+    return 0.5 * (total + difference), 0.5 * (total - difference)
+
+
+def error(n, ratio=1.0, mapping=None, **group):
+    """Relative L2 error on grids of n and ratio * n cells.  The timestep is
+    refined as dx**2: the scheme is first order in time, so its time error
+    falls at order 2 in dx and cannot limit a ladder that expects 2 or 1."""
+    n_b = round(ratio * n)
+    gm = run(n, n_b, math.ceil(T_END * ALPHA * max(n, n_b) ** 2 / 0.2), mapping, **group)
+    t_a, t_b = (np.asarray(gm.get_node_state(rod)["temperature"]) for rod in "ab")
+    e_a, e_b = exact(centres(n))[0], exact(centres(n_b))[1]
+    return math.sqrt((np.mean((t_a - e_a) ** 2) + np.mean((t_b - e_b) ** 2))
+                     / (np.mean(e_a ** 2) + np.mean(e_b ** 2)))
+
+
+SPACE, TIME = RefinementAxis.SPACE, RefinementAxis.TIME
+
+# Level 2, on the edge the non-matching model will use: a cell average
+# reproduces constants and preserves the integral (cell sizes as the measure).
+assert_mapping_verified(projection(8, 12), consistent=True, conservative=True,
+                        source_measure=np.diff(faces(8)), target_measure=np.diff(faces(12)))
+
+# Level 3, matching grids on plain edges, in a group iterated to convergence.
+# The guard takes the re-run route: the same error at a tighter tolerance.
+matching = verify_graph_order(
+    axis=SPACE, levels=(8, 16, 32), expected=2.0,
+    error_at=lambda n: error(n, tolerance=1e-10),
+    tightened_error_at=lambda n: error(n, tolerance=1e-12))
+assert matching.status == "PASS", matching.detail
+
+# Non-matching grids (three cells to two) through the cell-average projection:
+# second order still.  No group here, so nothing iterates.
+projected = verify_graph_order(
+    axis=SPACE, levels=(8, 16, 32), expected=2.0, iterated=False,
+    error_at=lambda n: error(n, ratio=1.5, mapping=projection))
+assert projected.status == "PASS", projected.detail
+
+# Through nearest neighbour, which reproduces degree 0: first order, and a
+# claim of second is caught.
+by_nearest = dict(axis=SPACE, levels=(8, 16, 32), iterated=False,
+                  error_at=lambda n: error(n, ratio=1.5, mapping=nearest))
+assert verify_graph_order(expected=1.0, **by_nearest).status == "PASS"
+assert verify_graph_order(expected=2.0, **by_nearest).failed
+
+# The order in time, on one grid, from three timesteps compared with each
+# other (no exact solution needed), guarded from the diagnostics.
+runs = {}
+
+
+def at(steps):
+    if steps not in runs:
+        runs[steps] = run(16, 16, steps, tolerance=1e-8, solver="ift", diagnostics=True)
+    return runs[steps]
+
+
+in_time = verify_graph_gci(
+    axis=TIME, levels=(50, 100, 200), expected=1.0,
+    solution_at=lambda steps: float(
+        jnp.sqrt(jnp.mean(at(steps).get_node_state("b")["temperature"] ** 2))),
+    iteration_bound_at=lambda steps: coupling_iteration_bound(at(steps), steps=steps))
+assert in_time.status == "PASS", in_time.detail
+```
+
+What the example measures, on ladders of 8, 16, 32 and 64 cells (the mapped
+rows without a coupling group; in a converged group they are the same to the
+band):
+
+| edges | order observed | why |
+|---|---|---|
+| plain, matching grids | 1.97, 1.99, 2.00 | the rods' own second order |
+| `rbf_mapping` (thin-plate spline), 3:2 and 2:1 | 2.01, 2.00, 2.00 | reproduces linear fields: order 2 |
+| `projection_1d_mapping`, 3:2 and 2:1 | 2.01, 2.00, 2.00 | see below |
+| `nearest_neighbor_mapping`, 3:2 | 1.00, 0.97, 0.98 | reproduces constants only: order 1 |
+| `nearest_neighbor_mapping`, 2:1 | 0.64, 0.79, 0.90 | order 1, reached slowly |
+| time, matching grids (50 to 400 steps) | 0.99, 1.00, 1.00 | inputs supplied once per step |
+
+Two of those rows say something the edge check alone does not.
+
+* **The cell-average projection keeps second order although, pointwise, it
+  reproduces only constants** (`verify_mapping(..., polynomial_order=1)`
+  fails for it at the cell centres).  Its error has zero mean over every
+  source cell -- that is what preserving the integral means -- so it is a
+  grid-scale oscillation that diffusion damps, and the coupled solution
+  converges at the rods' order.  The degree an edge reproduces is the order
+  it *guarantees*; the coupled study measures the order the model *has*.
+* **Nearest neighbour at 2:1 is biased.**  A coarse cell centre is exactly
+  between two fine ones, the tie goes to the lower index (as documented),
+  and every coarse cell reads a value a quarter of a cell to its left.  The
+  model is first order, with a larger constant than at 3:2.
+
+Stability, for this construction: each rod keeps its own explicit limit
+(`dt * alpha / dx**2` below 1/2 on the finer rod; the example runs at 0.2)
+and `k * dt` is small.  Two rods coupled *end to end* through their
+Dirichlet inputs are a different construction with a lower limit of their
+own, 3/8 at `stencil_order=2` (MADD-ANO-050).
+
 ## Running the suite
 
 ```bash
@@ -517,5 +900,8 @@ nothing any more; it is kept as a signpost to the root file.
 - [ ] `update(state, bi, dt=0)` is identity (zero-step) — add as an `invariants` entry
 - [ ] If dissipative: `energy_fn=`
 - [ ] If a conservation law applies: `invariants=` for the conserved quantity
+- [ ] A mapping kind of your own on an edge: `assert_mapping_verified(mapping, ...)`
+      with the claims it makes; a coupled model: `verify_graph_order(...)` with the
+      iteration-error guard ([three levels](#verifying-a-coupled-model-in-three-levels))
 - [ ] Document CFL / stability conditions in `meta.limitations`
 - [ ] Document parameter constraints (e.g. `mass > 0`) with validation in `__init__`

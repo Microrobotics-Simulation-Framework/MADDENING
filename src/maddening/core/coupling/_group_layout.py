@@ -145,7 +145,8 @@ _GROUP_META_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification", "rho_spectral",
     "spectral_residual", "spectral_amplification",
     "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
-    "geometry_gap", "V", "W", "pred_count", "pred_0", "pred_1", "pred_2",
+    "geometry_gap", "geometry_plane_limit", "V", "W", "pred_count", "pred_0", "pred_1",
+    "pred_2",
 )
 
 
@@ -277,8 +278,33 @@ _GEOMETRY_SUBCYCLED_WHY = (
 _GEOMETRY_SELF_CHECK_WHY = (
     "where the pass's Jacobian-vector product along the geometry disagrees with a finite "
     "difference of the pass along the same direction (relative gap {gap:.3g}, allowed "
-    "{allowed:.3g}: a member or a mapping whose derivative is not that of its value, or a "
-    "state the check could not be evaluated at)"
+    "{allowed:.3g}: a member or a mapping whose derivative is not that of its value)"
+)
+#: The same check where it produced no number: nothing was compared, so
+#: nothing is said about any member's derivative.
+_GEOMETRY_SELF_CHECK_UNEVALUATED_WHY = (
+    "where the pass's Jacobian-vector product along the geometry could not be compared "
+    "with a finite difference of the pass (relative gap {gap:.3g}, allowed {allowed:.3g}: "
+    "the pass or its product is not a number at the returned state, or the pass reads a "
+    "geometry from a constant the step could not move)"
+)
+#: Why ``spectral_usable`` is False for a group whose step passed its
+#: self-check (``_bounds._geometry_plane_limit``, with the gradient
+#: bound's Newton-Kantorovich check).  The numbers stay: they are the
+#: linearisation's own, in the lattice cells of the returned iterate.
+_GEOMETRY_PLANE_REASON = (
+    "the group resolves geometry-dependent mapping(s) on edge(s) {keys}; a position its "
+    "pass reads from the iterate is within {reach:g} times spectral_error_bound of a "
+    "lattice plane of the mapping's grid or of a face of its hull (spectral_error_bound is "
+    "{bound:.3g}; no plane is within its reach up to {limit:.3g} at this state), and the "
+    "step did not certify its linearisation across the Newton step to the fixed point "
+    "(gradient_relative_error_bound is not finite). Across a lattice plane the mapping is "
+    "another polynomial of the positions, and rho_spectral and spectral_error_bound are "
+    "the linearisation at the returned iterate, which describes the pass only in the "
+    "lattice cells its positions are in there: the fixed point may be in another cell, "
+    "where the pass contracts at another rate. spectral_usable and gradient_bound_usable "
+    "are therefore False; the numbers are reported as computed. The bound shrinks with the "
+    "residual: a tighter tolerance usually brings the iterate into the fixed point's cell."
 )
 
 
@@ -317,9 +343,19 @@ def _geometry_diagnostics_refusal(group, nodes, plan) -> Optional[str]:
 
 
 def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
-    """The reason of a report whose step failed its geometry self-check."""
+    """The reason of a report whose step failed its geometry self-check:
+    a gap over *allowed* (the product is not the derivative), or a gap
+    that is not a number (the two could not be compared)."""
+    why = _GEOMETRY_SELF_CHECK_WHY if gap == gap else _GEOMETRY_SELF_CHECK_UNEVALUATED_WHY
     return _GEOMETRY_DIAGNOSTICS_REASON.format(
-        keys=list(keys), why=_GEOMETRY_SELF_CHECK_WHY.format(gap=gap, allowed=allowed))
+        keys=list(keys), why=why.format(gap=gap, allowed=allowed))
+
+
+def _geometry_plane_reason(keys, bound: float, limit: float, reach: float) -> str:
+    """The reason of a report whose bound reaches a lattice plane
+    (``spectral_error_bound`` over the step's ``geometry_plane_limit``)."""
+    return _GEOMETRY_PLANE_REASON.format(
+        keys=list(keys), bound=bound, limit=limit, reach=reach)
 
 
 _WRITTEN_BEFORE_SAVE_REASON = (

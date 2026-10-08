@@ -23,7 +23,7 @@ _REPORT_SLOT_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification",
     "rho_spectral", "spectral_residual", "spectral_amplification",
     "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
-    "geometry_gap",
+    "geometry_gap", "geometry_plane_limit",
 )
 
 
@@ -263,7 +263,7 @@ def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> N
 _PER_SOLVE_REPORT_SUFFIXES = (
     "residual", "amplification", "rho_spectral", "spectral_residual",
     "spectral_amplification", "gradient_relative_error_bound", "pass_evaluations",
-    "geometry_gap",
+    "geometry_gap", "geometry_plane_limit",
 )
 
 

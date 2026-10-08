@@ -23,12 +23,29 @@ Gauss-Seidel in float64, and a sweep whose Jacobian has no geometry
 column; a member whose tangent is half its derivative, end to end; a
 geometry held by a node outside the group.
 
+**Across a lattice plane** (MAP-049).  The stencil is another polynomial
+in the next lattice cell, and the spectrum is taken at the returned
+iterate: where a position the pass reads from the iterate is within twice
+the bound of a plane, the report withdraws ``spectral_usable`` and
+``gradient_bound_usable`` and keeps the numbers.  **Per push:** plane
+draws (``geometry_cells.PlaneCase``: a fixed point a drawn 1e-6 to 1e-2 of
+a spacing from a lattice plane or a face of the hull) on the per-push pair
+at a looser tolerance, where the iterate stops a plane away from its fixed
+point: no flag with the fixed point across, on twelve pinned draws of
+which several had the flag before the criterion, and on the house floor of
+drawn ones; the slot against its definition; the report's reading of the
+slot; a marker on the top face of the hull.  **Slow:** the plane hunt over
+:data:`PLANE_CELLS` (every anchoring, both schedules, both norms, both
+dtypes, one and two axes), and float32 fields at float64 positions.
+
 **Seeded faults** (``plans``-side mutant list; the table in
 ``tests/property/geometry_graphs.py`` names them): the geometry term
 dropped from the product, the product taken with the geometry of another
 iterate, a target-anchored geometry read from the iterate, and the
 self-check's comparison disabled are each caught by a per-push test of
-this module or of the geometry harness.
+this module or of the geometry harness; so are the lattice-plane
+criterion disabled, taken on another field, taken in lattice units, and
+blind to the faces of the hull.
 """
 
 from __future__ import annotations
@@ -314,10 +331,15 @@ def test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolera
                 if not fails:
                     assert report == honest, (gap, report)
                     continue
-                gg.assert_not_diagnosed(report, keys, "self-check")
+                # A gap that is not a number is a check that compared
+                # nothing: the reason does not blame a derivative.
+                why = "self-check" if gap == gap else "self-check-unevaluated"
+                gg.assert_not_diagnosed(report, keys, why)
                 assert f"relative gap {gap:.3g}, allowed 0.25" in report["not_usable_reason"]
+                assert ("derivative is not that of its value"
+                        in report["not_usable_reason"]) is (gap == gap)
                 (row,) = list(gm.coupling_report())
-                assert any("disagrees with a finite difference" in f for f in row["flags"])
+                assert any(gg.WHY[why] in f for f in row["flags"])
         finally:
             gm._state = kept                               # noqa: SLF001
     assert dict(gm.coupling_diagnostics()[gc.KEY]) == honest
@@ -377,6 +399,327 @@ def test_the_self_check_is_traced_only_with_diagnostics_on_a_geometry_group():
     assert "geometry_gap" not in meta
     assert "not_usable_reason" not in d and not d["spectral_usable"]
     assert d["ratio_usable"] in (True, False) and math.isfinite(d["residual"])
+
+
+# ---------------------------------------------------------------------------
+# Across a lattice plane (MAP-049, MADD-ANO-239)
+# ---------------------------------------------------------------------------
+
+#: The cell of the pinned case: one marker on a line of four lattice
+#: points, the gather reading its position before the step and the scatter
+#: from the iterate, Gauss-Seidel with the grid first, the plain norm at a
+#: tolerance of 1e-4.
+PINNED_CELL = Cell(("target", "source"), True, "float32", 0, 400, d=1, m=1, origin=0.0,
+                   tolerance=1e-4)
+PINNED_SEARCH = gc.Search((PINNED_CELL,))
+
+
+def _pinned_values(*, drift: float) -> dict:
+    """A grid ``x <- a x_pre + b deposit + s`` and a marker ``x <- c x_pre
+    + d sampled``, ``pos <- pos_pre + drift + e sampled``, as
+    :class:`~tests.property.geometry_cells.GeoRelay` holds them (its
+    ``alpha`` is fixed, so the rest of ``a x_pre`` is in the bias).
+
+    With ``drift = 0.42483514706375847`` the marker's fixed point is 2e-4
+    of a spacing past the lattice plane at 1.0 and the pass contracts at
+    0.28 in the cell before the plane and at 0.97 in the cell after it: an
+    iterate that stops before the plane is a few bounds from a fixed point
+    its linearisation knows nothing of.
+    """
+    a, b, c, d, e = (0.325056206536607, 0.9249118408408878, 0.17671563155427855,
+                     0.8011272103796088, -0.6953020489474653)
+    grid = np.asarray([1.436, 0.491, -0.452, -0.91])
+    bias = np.asarray([-0.855, 0.377, -0.4, -0.428])
+    marker = np.asarray([2.788])
+    return {"F": {"x": grid, "g": b, "c": (a - gc.ALPHA) * grid + bias},
+            "P": {"x": marker, "g": d, "c": (c - gc.ALPHA) * marker,
+                  "pos": np.asarray([[0.7877]]), "drift": np.asarray([[drift]]),
+                  "Q": np.asarray([[e]])}}
+
+
+PINNED_ACROSS = 0.42483514706375847
+PINNED_MID_CELL = 0.30
+
+
+def _pinned(drift: float) -> dict:
+    case = Case(0, 0, 0.0, 0.0)
+    return gc.observe(PINNED_CELL, case, PINNED_SEARCH._built(0),      # noqa: SLF001
+                      values=_pinned_values(drift=drift), across=True)
+
+
+def test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane():
+    """The audited case.  The solve converges (its criterion is met) with
+    the marker before the plane at 1.0 and its fixed point after it.  The
+    spectrum at the returned iterate is right about the cell the iterate
+    is in (``rho_spectral`` is the reference's radius there) and the bound
+    built on it is several times under the true distance.  Before the
+    criterion ``spectral_usable`` was set on it; now a plane is within
+    twice the bound, the step's Newton-Kantorovich check did not certify
+    the linearisation across it, and the flag is withdrawn with the
+    numbers kept and the reason.  The same graph with the fixed point in
+    the middle of a cell keeps its flag and holds its bound."""
+    seen = _pinned(PINNED_ACROSS)
+    report = seen["report"]
+    assert seen["referenced"] and seen["crossed"] and report["converged"], seen
+    # The premise: the flag as it was, on a bound under half the distance.
+    assert seen["usable_before"] and seen["plane_before"] > 1.0, seen
+    assert report["distance"] > 2.0 * report["spectral_error_bound"] > 0.0
+    assert report["spectral_error_bound"] > report["plane_limit"] >= 0.0
+    assert not math.isfinite(report["gradient_relative_error_bound"])
+    # The fix.
+    assert seen["spectral_usable"] is False and seen["gradient_usable"] is False
+    assert seen["plane"] == 0.0
+    reason = seen["reason"]
+    assert "lattice plane" in reason and "P.x->F.u" in reason and "F.x->P.u" in reason
+    assert f"{report['spectral_error_bound']:.3g}" in reason
+    assert "do not read a moving geometry" not in reason       # the numbers are reported
+    assert math.isfinite(report["rho_spectral"]) and math.isfinite(report["residual"])
+
+    control = _pinned(PINNED_MID_CELL)
+    assert control["referenced"] and not control["crossed"] and control["scored"], control
+    assert control["spectral_usable"] is True and control["reason"] is None, control
+    assert control["report"]["plane_limit"] > control["report"]["spectral_error_bound"]
+    assert control["near"] and 0.0 < control["bound"] <= gc.THRESHOLD["bound"], control
+
+
+#: Plane draws on the per-push pair (its own tolerance): each face of the
+#: hull from either side, an interior plane from either side, at three
+#: distances, on either coordinate.
+PINNED_PLANES = tuple(
+    gc.PlaneCase(0, seed, loop, 0.15, which=which, plane=plane, offset=offset)
+    for seed, loop, which, plane, offset in (
+        (1, 0.3, 0, 0, 3e-4), (2, 0.8, 1, 0, -5e-3), (3, 0.3, 1, 3, -1e-5), (4, 0.8, 0, 3, 5e-3),
+        (5, 0.3, 0, 1, -3e-4), (6, 0.8, 1, 1, 1e-5), (7, 0.3, 1, 2, 5e-3), (5, 0.8, 0, 2, -1e-5)))
+
+
+def test_the_plane_limit_the_step_stores_is_its_definition():
+    """``geometry_plane_limit`` against
+    :func:`~tests.property.geometry_cells.plane_limit_reference`, which
+    measures the distance to the nearest plane in the reference's norm at
+    the returned state: the entries of ``P.pos`` (the positions the pass
+    reads from the iterate), in the mixed norm's units, in lengths, the
+    faces of the hull counted.  A point outside the hull is among the
+    draws, and one whose nearest plane is a face."""
+    outside = faces = 0
+    origin, spacing, shape = CELLS[0].grid
+    for case in PINNED_PLANES:
+        seen = SEARCH.observe(case)
+        assert seen["placed"] and seen["referenced"], (case, seen)
+        report = seen["report"]
+        want = report["plane_limit_reference"]
+        assert math.isfinite(want) and want >= 0.0
+        assert report["plane_limit"] == pytest.approx(want, rel=1e-3, abs=1e-6 * want), (
+            case, report)
+        # No flag on a bound the fixed point is outside twice of.
+        assert seen["plane"] <= gc.THRESHOLD["plane"], (case, seen)
+        assert seen["bound"] <= gc.THRESHOLD["bound"], (case, seen)
+        top = origin[0] + (shape[0] - 1) * spacing[0]
+        target = origin[0] + (case.plane % shape[0] + case.offset) * spacing[0]
+        outside += not origin[0] <= target <= top
+        faces += case.plane % shape[0] in (0, shape[0] - 1)
+    assert outside >= 2 and faces >= 4
+
+
+def test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_per_push():
+    report, fractions = SEARCH.run("plane", PER_PUSH_CELLS, planes=True)
+    assert fractions["referenced"] > 0.5, fractions
+    del report
+
+
+def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified():
+    """The report's side, on the per-push graph with the two slots the
+    rule reads replaced: the flag stands with the bound at the limit, and
+    over it where the gradient bound is finite (the step certified its
+    linearisation across the Newton step); over the limit without that it
+    is withdrawn, the numbers kept, with the reason; a limit that is not a
+    number counts as a plane in reach, ``inf`` as none."""
+    case, _least = RADIUS_SEEDS["the-geometry-lowers-the-radius"]
+    cell = CELLS[case.cell]
+    gm, _twin, _ref = SEARCH._built(case.cell)             # noqa: SLF001
+    limit_slot = f"coupling_{gc.KEY}_geometry_plane_limit"
+    gradient_slot = f"coupling_{gc.KEY}_gradient_relative_error_bound"
+    with gc.precision(cell.dtype == "float64"):
+        _pre, _state, honest, meta = gc.run_once(gm, gc.values_of(case, cell))
+        assert "not_usable_reason" not in honest and honest["spectral_usable"] is True
+        assert honest["gradient_bound_usable"] is True
+        bound = honest["spectral_error_bound"]
+        kept = gm._state                                   # noqa: SLF001
+        dtype = meta["geometry_plane_limit"].dtype
+        under = float(np.nextafter(np.asarray(bound, dtype), np.asarray(0, dtype)))
+
+        def report_with(limit, gradient=None):
+            slots = {limit_slot: np.asarray(limit, dtype)}
+            if gradient is not None:
+                slots[gradient_slot] = np.asarray(gradient, dtype)
+            gm._state = {**kept, "_meta": {**kept["_meta"], **slots}}     # noqa: SLF001
+            return dict(gm.coupling_diagnostics()[gc.KEY])
+
+        try:
+            for limit in (bound, math.inf, 2.0 * bound):
+                assert report_with(limit) == honest, limit
+                assert report_with(limit, math.inf)["spectral_usable"] is True, limit
+            # A plane in reach, certified: the flag stands.
+            for limit in (under, 0.0, math.nan):
+                assert report_with(limit) == honest, limit
+            # A plane in reach, not certified.
+            for limit in (under, 0.0, math.nan):
+                for gradient in (math.inf, math.nan):
+                    report = report_with(limit, gradient)
+                    assert report["spectral_usable"] is False
+                    assert report["gradient_bound_usable"] is False
+                    reason = report.pop("not_usable_reason")
+                    assert "lattice plane" in reason and f"{bound:.3g}" in reason
+                    assert all(e.key in reason for e in gm._edges)         # noqa: SLF001
+                    rest = {k: v for k, v in honest.items()
+                            if k not in ("spectral_usable", "gradient_bound_usable",
+                                         "gradient_relative_error_bound")}
+                    assert {k: report[k] for k in rest} == rest, report
+                    (row,) = list(gm.coupling_report())
+                    assert any("lattice plane" in f for f in row["flags"]), row["flags"]
+            # The self-check's failure is the whole report's; the plane's is not added to it.
+            gm._state = {**kept, "_meta": {**kept["_meta"],                # noqa: SLF001
+                                           limit_slot: np.asarray(0.0, dtype),
+                                           gradient_slot: np.asarray(math.inf, dtype),
+                                           f"coupling_{gc.KEY}_geometry_gap":
+                                               np.asarray(1.0, dtype)}}
+            assert "lattice plane" not in gm.coupling_diagnostics()[gc.KEY]["not_usable_reason"]
+        finally:
+            gm._state = kept                               # noqa: SLF001
+    assert dict(gm.coupling_diagnostics()[gc.KEY]) == honest
+
+
+def test_a_marker_on_the_top_face_of_the_hull_passes_the_self_check():
+    """MADD-ANO-240.  The per-push pair with one marker starting exactly on
+    the last lattice point of its axis (and one on the first): the gather
+    reads those positions as constants of the pass, and the self-check
+    moves them.  It stepped a point on the top face out of the hull, where
+    the kernel clamps, and read a gap of 0.6 to 0.76 on an honest pass;
+    stepping inwards it reads the finite difference's own error."""
+    case, _least = RADIUS_SEEDS["the-geometry-lowers-the-radius"]
+    cell = CELLS[case.cell]
+    gm, _twin, _ref = SEARCH._built(case.cell)             # noqa: SLF001
+    origin, spacing, shape = cell.grid
+    top = origin[0] + (shape[0] - 1) * spacing[0]
+    for first, second in ((top, origin[0] + 0.4 * spacing[0]), (origin[0], top)):
+        values = gc.values_of(case, cell)
+        values["P"]["pos"] = np.asarray([[first], [second]])
+        values["P"]["drift"] = np.zeros((2, 1))
+        with gc.precision(False):
+            _pre, _state, d, meta = gc.run_once(gm, values)
+        gap = float(meta["geometry_gap"])
+        assert 0.0 < gap <= HONEST_GAP, (first, second, gap)
+        assert "do not read a moving geometry" not in d.get("not_usable_reason", ""), d
+        assert math.isfinite(d["rho_spectral"]) and math.isfinite(d["spectral_error_bound"])
+
+
+class WidePositions(gc.GeoRelay):
+    """Float32 values at float64 positions."""
+
+    def initial_state(self):
+        state = super().initial_state()
+        if "pos" in state:
+            state["pos"] = state["pos"].astype("float64")
+        return state
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        out = super().update(state, boundary_inputs, dt, params=params)
+        if "pos" in out:
+            out["pos"] = out["pos"].astype("float64")
+        return out
+
+
+# Slow: a compile of a group with its diagnostics under x64.
+# Per push: tests/core/test_grid_probe_step_and_plane_distance.py::test_float32_fields_at_float64_positions_pass_the_self_check_at_the_pass_s_step
+@pytest.mark.slow
+@pytest.mark.parametrize("anchors", [("source", "source"), ("target", "target")],
+                         ids=["read from the iterate", "read from the pre-step state"])
+def test_float32_fields_at_float64_positions_pass_the_self_check(anchors):
+    """MADD-ANO-241.  The self-check's step was ``sqrt(eps)`` of the
+    spacing in the *positions'* dtype, 7e-9 of a spacing in float64, which
+    a float32 field cannot resolve: an honest pass read a gap of 0.27 to
+    1.0 and every bound was withheld.  The step is the pass's coarsest
+    dtype's."""
+    cell = Cell(anchors, True, "float32", 0, 120)
+    with gc.precision(True):
+        gm = gc.build(cell, cell.knobs, cell.dtype, node=WidePositions)
+        for seed in (7, 8, 29):
+            _pre, state, d, meta = gc.run_once(gm, gc.values_of(Case(0, seed, 0.3, 0.2), cell))
+            assert {str(v.dtype) for v in state["P"].values()} == {"float32", "float64"}
+            gap = float(meta["geometry_gap"])
+            assert 0.0 < gap <= HONEST_GAP, (seed, gap)
+            assert "do not read a moving geometry" not in d.get("not_usable_reason", ""), d
+            assert math.isfinite(d["rho_spectral"])
+
+
+#: The plane hunt's cells: where the pass reads positions from the
+#: iterate, each anchoring, schedule, norm, dtype and dimension, at a
+#: tolerance that stops an iterate a plane away from its fixed point; and
+#: the anchoring where every position is a constant of the pass, whose
+#: flag no plane may withdraw.  Written out: no other table's length
+#: decides a cell.
+PLANE_CELLS = (
+    Cell(("target", "source"), True, "float32", 1, 120, tolerance=1e-3),
+    Cell(("target", "source"), True, "float64", 0, 400, d=1, m=1, origin=0.0, tolerance=1e-4),
+    Cell(("source", "source"), True, "float32", 0, 120, tolerance=1e-4),
+    Cell(("source", "source"), True, "float64", 3, 120, d=2, m=3, tolerance=1e-4),
+    Cell(("target", "source"), True, "float64", 0, 120, order=("P", "F"), tolerance=1e-4),
+    Cell(("source", "target"), True, "float64", 1, 120, origin=40.0, tolerance=1e-3),
+    Cell(("source", "source"), True, "float32", 2, 120, d=2, tolerance=1e-3),
+    Cell(("target", "target"), True, "float32", 0, 120, tolerance=1e-4),
+)
+PLANE_HUNT_SEEDS = (3000, 3001)
+_PLANE_HUNTS: dict = {}
+
+
+# Slow: two seeds of 60 plane draws a search on each of eight cells, each a
+# compile of the graph with its diagnostics and of its twin.
+# Per push: tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane
+# Per push: tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition
+@pytest.mark.slow
+@pytest.mark.parametrize("index,seed", [(i, s) for i in range(len(PLANE_CELLS))
+                                        for s in PLANE_HUNT_SEEDS])
+def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a_plane(
+        index, seed):
+    """Not shrunk.  Per cell and seed: the three scores of a plane draw;
+    the slot against its definition on every example; and the counts the
+    record quotes (examples with the fixed point across a plane, how many
+    of those had the flag before the criterion and have it now, and the
+    honest ones -- same cell -- whose flag the criterion took)."""
+    search = _PLANE_HUNTS.setdefault(index, gc.Search(PLANE_CELLS))
+    cell = PLANE_CELLS[index]
+    for name in gc.PLANE_SEARCHES:
+        profile = dataclasses.replace(SLOW, max_examples=60).seeded(seed + 10 * index,
+                                                                    shrink=False)
+        report, fractions = search.run(name, (index,), profile=profile, planes=True)
+        print(f"{name}, cell {index} ({cell!r}), seed {seed}: worst {report.score:.4g}; "
+              f"{fractions}")
+    counts = dict(placed=0, across=0, across_before=0, across_violating_before=0,
+                  across_now=0, same=0, same_before=0, same_withheld=0)
+    for case, seen in search._seen.items():               # noqa: SLF001
+        if case.cell != index or not (seen.get("placed") and seen["referenced"]):
+            continue
+        counts["placed"] += 1
+        report = seen["report"]
+        if "plane_limit" in report and math.isfinite(report["plane_limit_reference"]):
+            assert report["plane_limit"] == pytest.approx(
+                report["plane_limit_reference"], rel=1e-3,
+                abs=1e-6 * report["plane_limit_reference"]), (case, report)
+        kind = "across" if seen["crossed"] else "same"
+        counts[kind] += 1
+        counts[f"{kind}_before"] += seen["usable_before"]
+        if seen["crossed"]:
+            counts["across_violating_before"] += seen["plane_before"] > 1.0
+            counts["across_now"] += seen["spectral_usable"]
+        else:
+            counts["same_withheld"] += seen["usable_before"] and not seen["spectral_usable"]
+    print(f"cell {index}, seed {seed}: {counts}")
+    assert counts["placed"] >= 30, counts
+    if not cell.iterate_reads:
+        # Constants of the pass: nothing to cross, and no flag withdrawn.
+        assert counts["across"] == 0 and counts["same_withheld"] == 0, counts
+        assert all(seen["report"].get("plane_limit") == math.inf
+                   for case, seen in search._seen.items()                 # noqa: SLF001
+                   if case.cell == index and seen.get("placed") and seen["finite"])
 
 
 # ---------------------------------------------------------------------------
@@ -490,15 +833,19 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_group_with_a_geometry_e
         report, fractions = search.run(name, BLOCKS[block], profile=profile)
         print(f"{name}, block {block}, seed {seed}: worst {report.score:.4g}; {fractions}")
         _held(name, fractions)
-    fired = 0
+    fired = withheld = before = 0
     for case, seen in search._seen.items():               # noqa: SLF001
-        fired += seen["reason"] is not None
+        took = seen["usable_before"] and not seen["spectral_usable"]
+        withheld += took
+        before += seen["usable_before"]
+        fired += seen["reason"] is not None and not took
         if seen["finite"] and "geometry_gap" in seen["report"]:
             dtype = CELLS[case.cell].dtype
             gap = seen["report"]["geometry_gap"]
             worst_gap[dtype] = max(worst_gap[dtype], gap if math.isfinite(gap) else math.inf)
     print(f"block {block}, seed {seed}: {len(search._seen)} examples, self-check fired on "  # noqa: SLF001
-          f"{fired}, worst gap {worst_gap}")
+          f"{fired}, worst gap {worst_gap}; the lattice-plane rule withdrew {withheld} of "
+          f"{before} flags")
     assert fired == 0, f"the self-check fired on {fired} honest examples"
     for dtype, gap in worst_gap.items():
         assert gap <= limit[dtype], (dtype, gap)

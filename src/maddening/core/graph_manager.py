@@ -2809,6 +2809,12 @@ class GraphManager:
                             meta[f"coupling_{key}_geometry_gap"] = jnp.array(
                                 jnp.nan, dtype=spec_dtype
                             )
+                            # The largest bound at which no position the
+                            # pass reads from the iterate reaches a
+                            # lattice plane (same condition).
+                            meta[f"coupling_{key}_geometry_plane_limit"] = jnp.array(
+                                jnp.nan, dtype=spec_dtype
+                            )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -5149,6 +5155,35 @@ class GraphManager:
                         "precision_limited": False,
                         "not_usable_reason": geometry_reason,
                     })
+                    continue
+                plane_limit = (meta.get(f"coupling_{key}_geometry_plane_limit")
+                               if geometry_keys else None)
+                reported_bound = result[key]["spectral_error_bound"]
+                if (plane_limit is not None and math.isfinite(reported_bound)
+                        and not reported_bound <= float(plane_limit)
+                        and not math.isfinite(grad_bound)):
+                    # Experimental: the bound is the linearisation at the
+                    # returned iterate, and a multilinear stencil is
+                    # another polynomial across a lattice plane.  Where a
+                    # position the pass reads from the iterate is within
+                    # the bound's reach of one
+                    # (``_bounds._geometry_plane_limit``; a limit that is
+                    # not a number counts), the fixed point may be in
+                    # another cell, and the linearisation stands only if
+                    # the step certified it across the Newton step to the
+                    # fixed point: the Newton-Kantorovich check of the
+                    # gradient bound, which takes the pass's Jacobian at
+                    # both ends and is what a finite
+                    # ``gradient_relative_error_bound`` records.  Without
+                    # that the flag is withdrawn and the numbers stay,
+                    # with the reason (MADD-ANO-239).
+                    result[key].update({
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "not_usable_reason": _group_layout._geometry_plane_reason(
+                            geometry_keys, reported_bound, float(plane_limit),
+                            _bounds.GEOMETRY_PLANE_REACH),
+                    })
         return result
 
     # ------------------------------------------------------------------
@@ -6411,7 +6446,8 @@ class GraphManager:
             key = "+".join(sorted(group.nodes))
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
-                           "pass_evaluations", "reading_floor", "geometry_gap"):
+                           "pass_evaluations", "reading_floor", "geometry_gap",
+                           "geometry_plane_limit"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):

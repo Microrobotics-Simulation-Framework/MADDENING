@@ -49,6 +49,7 @@ from maddening.core.coupling._group_layout import (
 )
 from maddening.core.coupling._bounds import (
     _analysis_dtype,
+    _geometry_plane_limit,
     _geometry_product_gap,
     _gradient_error_bound_at,
     _interface_spectral_rate_at,
@@ -941,7 +942,7 @@ def _run_coupled_block_impl(
             # ``gradient_bound_usable=False``.
             if group.solver == "ift" or group.diagnostics:
                 nan = jnp.full((), jnp.nan, jnp.asarray(single_r).dtype)
-                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan, nan), None
+                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan, nan, nan), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -1357,7 +1358,7 @@ def _run_coupled_block_impl(
                     for source_dtype, v in parts])
                 return (scale * evaluations.astype(work)) * _residual_resolution(eps)
 
-            def _geometry_gap_at(x_sg, check_weights, resolution):
+            def _geometry_gap_at(x_sg, check_weights, resolution, coarsest_eps):
                 """The self-check of the pass's product along the geometry
                 (``_geometry_product_gap``), at the returned state.
 
@@ -1369,7 +1370,10 @@ def _run_coupled_block_impl(
                 pre-step state (a target-anchored edge of ``update``) and
                 the state of a node outside the group (a source-anchored
                 edge into it).  Each step is the mapping's own
-                (``_probe_step``).  A geometry the pass must read from a
+                (``_probe_step``), sized for the coarsest floating dtype
+                the pass evaluates in (``coarsest_eps``): a step sized
+                for float64 positions is below what float32 fields
+                resolve.  A geometry the pass must read from a
                 constant that the closure conversion did not hoist (a
                 step traced on concrete values) cannot be moved: the gap
                 is NaN, which the report reads as a failed check.
@@ -1393,7 +1397,8 @@ def _run_coupled_block_impl(
                         if fld in float_fields[holder]:
                             at = np.asarray(positions[holder][fld], np.int64)
                             where = jnp.asarray(np.ravel(at), jnp.int32)
-                            step = mapping._probe_step(x_sg[where].reshape(at.shape))
+                            step = mapping._probe_step(x_sg[where].reshape(at.shape),
+                                                       eps=coarsest_eps)
                             dx = dx.at[where].set(jnp.ravel(step).astype(dx.dtype))
                             moved_in_iterate = True
                         held = [initial_node_states[holder].get(fld)]
@@ -1407,7 +1412,7 @@ def _run_coupled_block_impl(
                     ids = {id(v) for v in held if v is not None}
                     found = [i for i, c in enumerate(consts) if id(c) in ids]
                     for i in found:
-                        dconsts[i] = mapping._probe_step(consts[i])
+                        dconsts[i] = mapping._probe_step(consts[i], eps=coarsest_eps)
                     located = located and (bool(found) or not needed)
                 directions = []
                 if moved_in_iterate:
@@ -1418,6 +1423,30 @@ def _run_coupled_block_impl(
                     step_pure, x_sg, consts, directions, check_weights, resolution,
                     field_ids, n_fields)
                 return gap if located else jnp.full_like(gap, jnp.nan)
+
+            def _plane_limit_at(x_sg, kept_weights, spectrum_weights, scale):
+                """The largest ``spectral_error_bound`` at which no position
+                the pass reads from the iterate can be across a lattice
+                plane at the fixed point (``_geometry_plane_limit``), in
+                the units of the group's norm: its constant is 1 under
+                ``"l2"`` and ``1 / (rtol sqrt(count))`` under ``"mixed"``,
+                ``count`` the entries of the fields the norm reads."""
+                n = int(x0_full.shape[0])
+                positions = unflatten_coupled_state(
+                    np.arange(n, dtype=np.int32), template_img, group_node_names,
+                    fields=float_fields)
+                readers = []
+                for holder, fld, mapping in plan.geometry_iterate_reads():
+                    if fld in float_fields[holder]:
+                        at = np.asarray(positions[holder][fld], np.int64)
+                        readers.append((np.ravel(at), at.shape,
+                                        jnp.asarray(template_state[holder][fld]).dtype, mapping))
+                unit = jnp.ones((), x_sg.dtype)
+                if group.convergence_norm == "mixed":
+                    count = jnp.maximum(jnp.sum(kept_weights > 0), 1).astype(x_sg.dtype)
+                    unit = unit / (float(group.rtol) * jnp.sqrt(count))
+                return _geometry_plane_limit(
+                    step_pure, x_sg, consts, readers, spectrum_weights / scale, unit)
 
             if accel_fields is not None:
                 # Positions of the accelerated (interface) fields in
@@ -1475,6 +1504,7 @@ def _run_coupled_block_impl(
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             pass_evals = jnp.full((), jnp.nan, x0_full.dtype)
             geometry_gap = jnp.full((), jnp.nan, x0_full.dtype)
+            plane_limit = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
                 # How many evaluations' rounding the pass carries, with
                 # each same-pass read weighted by its measured relative
@@ -1559,7 +1589,11 @@ def _run_coupled_block_impl(
                     )
                 if geometry_checked:
                     geometry_gap = _geometry_gap_at(
-                        jax.lax.stop_gradient(x_star_full), spec_weights, resolution)
+                        jax.lax.stop_gradient(x_star_full), spec_weights, resolution,
+                        map_eps)
+                    plane_limit = _plane_limit_at(
+                        jax.lax.stop_gradient(x_star_full), weights, spec_weights,
+                        weight_scale)
                 # The factor the report's bound applies, in the returned
                 # state's weights: the gradient bound above takes its own
                 # residual in those weights already, so only the stored
@@ -1587,12 +1621,13 @@ def _run_coupled_block_impl(
                            _with_nonfloat_fields_at(_embed_live(x_star_full)),
                            jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
-                            spec_amp, grad_bound, pass_evals, geometry_gap),
+                            spec_amp, grad_bound, pass_evals, geometry_gap, plane_limit),
                     (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
-                           spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap),
+                           spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap,
+                           plane_limit),
              vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
@@ -1603,7 +1638,8 @@ def _run_coupled_block_impl(
             # through this step is trustworthy.  The spectral pair is
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
-                         spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap)
+                         spec_resid, spec_amp, grad_bound, pass_evals, geometry_gap,
+                         plane_limit)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -1984,7 +2020,7 @@ def _run_coupled_block_impl(
         diag_data = None
         if track_diag:
             nan = jnp.full((), jnp.nan, jnp.asarray(final_res).dtype)
-            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan, nan)
+            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan, nan, nan)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -2116,7 +2152,7 @@ def _run_coupled_block_impl(
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         (iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp,
-         grad_bound, pass_evals, geometry_gap) = diag_data
+         grad_bound, pass_evals, geometry_gap, plane_limit) = diag_data
         # Written in the dtype ``compile()`` seeded the slot with, so the
         # scan carry keeps its type whatever the residual was computed
         # in (the seed is the promotion of the group's floating fields,
@@ -2209,6 +2245,10 @@ def _run_coupled_block_impl(
                 # carry of every other group is the one it always was.
                 result[_META_KEY][f"coupling_{group_key}_geometry_gap"] = jnp.asarray(
                     geometry_gap, dtype=spec_dtype)
+                # The largest bound at which no position the pass reads
+                # from the iterate reaches a lattice plane.
+                result[_META_KEY][f"coupling_{group_key}_geometry_plane_limit"] = (
+                    jnp.asarray(plane_limit, dtype=spec_dtype))
 
     # Store V/W matrices for IQN-IMVJ Jacobian reuse
     if group.acceleration == "iqn-imvj" and vw_data is not None:

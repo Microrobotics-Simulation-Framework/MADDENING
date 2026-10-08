@@ -831,9 +831,10 @@ in_time = verify_graph_gci(
 assert in_time.status == "PASS", in_time.detail
 ```
 
-What the example measures, on ladders of 8, 16, 32 and 64 cells (the mapped
-rows without a coupling group; in a converged group they are the same to the
-band):
+What the example measures, on ladders of 8, 16, 32 and 64 cells, on jax
+0.11.0.  The mapped rows are without a coupling group; in a group iterated
+to convergence the thin-plate spline at both ratios, and the projection and
+nearest neighbour at 2:1, were measured too and stay inside the band:
 
 | edges | order observed | why |
 |---|---|---|

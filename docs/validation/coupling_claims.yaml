@@ -3410,7 +3410,9 @@ claims:
     source's eps (MADD-ANO-211).  Where the residual is at its float floor
     the bound rests on the counted floor (CPL-092, CPL-102), which does not
     see a same-pass read that differences entries of one field
-    (MADD-ANO-212, open).
+    (MADD-ANO-212, open), nor, under convergence_norm="interface", a
+    delivered value that is itself such a difference, under either
+    schedule (MADD-ANO-247, open).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm) is not a linear F: a
     gather or a scatter is nonlinear in the positions it reads.  The bound
@@ -3719,7 +3721,11 @@ claims:
     does the count see a same-pass read that differences entries of one
     source field (a mapping row [1, -1] on a field at 1000 with a
     difference of order one): a Gauss-Seidel group stalled behind it read
-    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-212, open).  In
+    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-212, open).  Under
+    convergence_norm="interface" the floor's unit is the delivered
+    value's own magnitude, so a group whose norm reads such a difference
+    stalls under its bound under Jacobi too: 0.25x with the flag set at a
+    field 100 times the difference, 0.031x at 1000 (MADD-ANO-247, open).  In
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
@@ -4053,7 +4059,12 @@ claims:
     "interface" the entries are what each internal edge delivers (its
     mapping, with the weights passed as `mappings`, then its transform),
     each at the coarser of its own dtype's eps and its source field's
-    (MADD-ANO-211).
+    (MADD-ANO-211).  The unit of a delivered entry is its own field's
+    largest magnitude: a value an edge delivers as a difference of
+    entries of one field rounds at the entries' magnitude, and the exact
+    residual of a stalled pair read 5.7 and 45 floors above a reported
+    0.0 at fields 100 and 1000 times the difference, under either
+    schedule (MADD-ANO-247, open; pinned as a strict xfail).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the floor is the
     members' state's, each position field at its own dtype's eps, with

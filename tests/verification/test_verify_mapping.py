@@ -160,9 +160,19 @@ SHIPPED = {
     "multilinear_grid-conservative-shaped": lambda: _grid("conservative", "shaped"),
 }
 
-#: What the per-push table leaves out: the two other RBF kernels, the two
-#: other mode-and-layout pairs of the grid kind, and grids of one and
-#: three axes.
+#: The cases of ``SHIPPED`` that run on every push: each shipped kind once,
+#: with both modes, both sparse layouts and a kind carrying both claims
+#: among them.  The rest of the table runs in the slow lane, held to the
+#: same assertions.
+SHIPPED_PER_PUSH = (
+    "rbf-thin_plate_spline-conservative", "nearest-consistent", "projection_1d",
+    "matrix-consistent", "sparse_nearest-conservative-scatter", "sparse_projection_1d",
+    "sparse_matrix-gather", "multilinear_grid-consistent-flat",
+)
+
+#: What ``SHIPPED`` leaves out: the two other RBF kernels, the two other
+#: mode-and-layout pairs of the grid kind, and grids of one and three
+#: axes.
 SHIPPED_SLOW = {
     **{f"rbf-{kernel}-consistent": (
         lambda kernel=kernel: (rbf_mapping(XS, XT, kernel=kernel),
@@ -210,7 +220,20 @@ def float64():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", sorted(SHIPPED))
+def test_the_per_push_cases_hold_every_shipped_kind_once():
+    kinds = [SHIPPED[case]()[0].kind for case in SHIPPED_PER_PUSH]
+    assert sorted(kinds) == sorted({SHIPPED[case]()[0].kind for case in SHIPPED})
+    modes = {SHIPPED[case]()[0].mode for case in SHIPPED_PER_PUSH}
+    assert modes == {"consistent", "conservative"}
+
+
+# Per push: tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes[projection_1d]
+# (each shipped kind once, SHIPPED_PER_PUSH, which
+# tests/verification/test_verify_mapping.py::test_the_per_push_cases_hold_every_shipped_kind_once
+# holds to the table; the slow cases are the other modes, kernels and layouts of the same kinds)
+@pytest.mark.parametrize("case", [
+    pytest.param(case, marks=() if case in SHIPPED_PER_PUSH else pytest.mark.slow)
+    for case in sorted(SHIPPED)])
 def test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes(case):
     mapping, claims = SHIPPED[case]()
     results = verify_mapping(mapping, **claims, **KW)
@@ -230,7 +253,7 @@ def test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes(case):
         assert "draws compared" in results["geometry_derivative"].detail
 
 
-# Per push: tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes (two RBF kernels in both modes; the two-axis grid in both modes, one layout each)
+# Per push: tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes[rbf-thin_plate_spline-conservative] and tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes[multilinear_grid-consistent-flat] (one RBF kernel and the two-axis grid in one mode and layout)
 @pytest.mark.slow
 @pytest.mark.parametrize("case", sorted(SHIPPED_SLOW))
 def test_the_other_kernels_layouts_and_grid_dimensions_pass_the_battery(case):
@@ -242,7 +265,7 @@ def test_the_other_kernels_layouts_and_grid_dimensions_pass_the_battery(case):
         assert results["geometry_derivative"].status == "PASS"
 
 
-# Per push: tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes
+# Per push: tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes[projection_1d] (each shipped kind once, in float32 at 20 draws)
 @pytest.mark.slow
 @pytest.mark.parametrize("case", sorted({**SHIPPED, **SHIPPED_SLOW}))
 def test_shipped_kind_passes_at_the_default_depth_in_float64(case, float64):
@@ -523,7 +546,21 @@ SLIGHT = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(SLIGHT))
+#: The cases that run in the slow lane only: the two on a grid kind (each
+#: compiles the kernel and its derivative twice) and the second of the two
+#: on ``consistent``.
+SLIGHT_SLOW = ("consistent-polynomials", "geometry_derivative", "outside_hull")
+
+
+# Per push: tests/verification/test_verify_mapping.py::test_a_small_defect_fails_at_the_default_width_and_passes_at_a_stated_wider_one[consistent-constants]
+# (the width of the seven other comparisons, one case each).  The two grid comparisons are made
+# per push at a gross fault only, by
+# tests/verification/test_verify_mapping.py::test_seeded_broken_kind_fails_the_check_that_should_catch_it_and_no_other
+# and tests/verification/test_verify_mapping.py::test_a_kind_that_does_not_clamp_where_it_was_declared_to_fails_the_hull_check
+# : their width is held in the slow lane.
+@pytest.mark.parametrize("case", [
+    pytest.param(case, marks=pytest.mark.slow if case in SLIGHT_SLOW else ())
+    for case in sorted(SLIGHT)])
 def test_a_small_defect_fails_at_the_default_width_and_passes_at_a_stated_wider_one(
         case, request):
     """The default width of each comparison is what catches a defect of a
@@ -582,7 +619,9 @@ def test_a_kind_that_does_not_clamp_where_it_was_declared_to_fails_the_hull_chec
 
 
 def test_the_adjoint_identity_is_not_judged_on_a_map_that_is_not_linear():
-    results = verify_mapping(_NonLinear(), consistent=False, **KW)
+    results = verify_mapping(_NonLinear(), consistent=False, checks=["linearity", "adjoint"],
+                             **KW)
+    assert results["linearity"].failed
     assert results["adjoint"].skipped and "not linear" in results["adjoint"].detail
 
 
@@ -680,7 +719,7 @@ def test_a_clamp_fails_conservation_visibly_with_the_reason():
     edge = EdgeSpec("fluid", "solid", "traction", "force",
                     mapping=nearest_neighbor_mapping(XS, XT, mode="conservative"),
                     transform=_clamp)
-    results = verify_mapping(edge, **KW)
+    results = verify_mapping(edge, checks=["linearity", "conservative"], **KW)
     assert results["conservative"].failed and results["linearity"].failed
     detail = results["conservative"].detail
     assert "is not preserved" in detail and "_clamp" in detail and "a clamp" in detail
@@ -688,6 +727,8 @@ def test_a_clamp_fails_conservation_visibly_with_the_reason():
     assert verify_mapping(edge.mapping, checks=["conservative"], **KW)["conservative"].passed
 
 
+# Per push: tests/verification/test_verify_mapping.py::test_an_edge_is_verified_on_what_it_delivers_with_its_declared_scale (an edge, its transform and its scale) and tests/verification/test_verify_mapping.py::test_shipped_kind_passes_the_battery_with_the_claims_the_guide_makes[multilinear_grid-consistent-flat] (the grid kind's own checks)
+@pytest.mark.slow
 def test_an_edge_with_a_geometry_dependent_mapping_is_verified_through_the_edge_rule():
     mapping, claims = _grid("conservative")
     edge = EdgeSpec("body", "fluid", "force", "body_force", mapping=mapping,
@@ -703,6 +744,8 @@ def test_an_edge_with_a_geometry_dependent_mapping_is_verified_through_the_edge_
 # ---------------------------------------------------------------------------
 
 
+# Per push: tests/verification/test_verify_mapping.py::test_a_drawn_kink_is_counted_beside_the_draws_that_were_compared and tests/verification/test_verify_mapping.py::test_a_check_in_which_no_draw_could_be_compared_is_a_skip_and_never_a_pass (both give the positions with geometry=)
+@pytest.mark.slow
 def test_fixed_sample_positions_are_enough_for_a_geometry_kind():
     mapping = multilinear_grid_mapping(ORIGIN, SPACING, SHAPE, n_points=N_POINTS)
     inside = (LOWER + np.random.default_rng(8).uniform(0.1, 0.9, (N_POINTS, 2))

@@ -424,7 +424,7 @@ def test_non_matching_grids_converge_at_the_order_the_mapping_allows(float64, ma
         assert claimed.failed and "below the declared 2" in claimed.detail
 
 
-def test_the_diagnostics_route_reads_a_real_group_and_refuses_one_with_no_bound(float64):
+def test_the_diagnostics_route_reads_the_bound_a_real_group_reports(float64):
     steps = 50
     gm = run(N_TIME, N_TIME, steps, group=_read_group(1e-8))
     found = coupling_iteration_bound(gm, steps=steps)
@@ -435,6 +435,12 @@ def test_the_diagnostics_route_reads_a_real_group_and_refuses_one_with_no_bound(
     assert found.per_step == reported > 0.0 and found.accumulated == steps * reported
     assert found.accumulated < DEFAULT_ITERATION_ERROR_FACTOR * relative_error(
         gm, N_TIME, N_TIME, RATE_ON_GRID)
+
+
+# Per push: tests/verification/test_coupled_order.py::test_the_bound_is_the_last_steps_times_the_steps_and_the_worst_group_decides (the same two reports, as rows)
+@pytest.mark.slow
+def test_real_graphs_with_no_bound_to_read_are_refused_or_read_as_zero(float64):
+    steps = 50
     plain = run(N_TIME, N_TIME, steps, group=_group(1e-8, solver="fori"))
     refused = coupling_iteration_bound(plain, steps=steps)
     assert not refused.usable and "solver='fori'" in refused.reason
@@ -459,7 +465,7 @@ def test_non_matching_grids_in_a_converged_group_keep_the_mappings_order(
     assert result.status == "PASS", result.detail
 
 
-# Per push: tests/verification/test_coupled_order.py::test_the_diagnostics_route_reads_a_real_group_and_refuses_one_with_no_bound and tests/verification/test_coupled_order.py::test_a_bound_far_below_the_error_passes_by_its_route
+# Per push: tests/verification/test_coupled_order.py::test_the_diagnostics_route_reads_the_bound_a_real_group_reports and tests/verification/test_coupled_order.py::test_a_bound_far_below_the_error_passes_by_its_route
 @pytest.mark.slow
 def test_the_exchange_is_first_order_in_time_and_the_diagnostics_guard_it(float64):
     """A partitioned exchange hands each rod its input once per step, so

@@ -472,7 +472,7 @@ inside the grid node, to the last digit, at every `N`; the mixed norm,
 which reads the grid's whole field, still stops where the diluted
 criterion did.
 
-The claim the rule is held to (CPL-191; `tests/property/test_coupling_interface_side.py`):
+The claim the rule is held to (CPL-192; `tests/property/test_coupling_interface_side.py`):
 `converged=True` under the interface norm implies that the distance to
 the fixed point in the compact readings, in the norm's own weights, is at
 most `K` tolerances, with `K = ‖D (I − A)⁻¹ (I − L) D⁻¹‖₂` of the loop on

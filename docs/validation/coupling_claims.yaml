@@ -5731,7 +5731,7 @@ claims:
     sparse layouts, gather, scatter and both, a tie, an offset transform,
     Gauss-Seidel and Jacobi, float32 and float64; a hub whose one field a
     gather edge and a scatter edge both read; Aitken, fixed relaxation,
-    IQN-ILS and IQN-IMVJ only through the converged distance (CPL-191).
+    IQN-ILS and IQN-IMVJ only through the converged distance (CPL-192).
     Only a group with an edge read through its mapping, whose source field
     is floating, owns the `_meta` slot coupling_<key>_reading_floor (the
     floor per evaluation, NaN until a step has written it, restarted with
@@ -5911,7 +5911,7 @@ claims:
     checkpoint_restart: narrowed
     sharded: narrowed
 
-- id: CPL-191
+- id: CPL-192
   area: norms
   claim: >-
     A coupling group that reports converged=True under

@@ -122,6 +122,13 @@ KNOBS = (
          convergence_norm="l2"),
     dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="interface"),
 )
+#: The rows above that :func:`_cells` rotates over, FROZEN at the seven the
+#: cells were laid out with.  A row added to :data:`KNOBS` (anywhere) must
+#: not move a cell a pin names by its index: a new configuration gets cells
+#: of its own, appended after every cell there is
+#: (``test_coupling_search_cells_are_pinned.py`` holds each cell's
+#: configuration per push).
+ROTATED_KNOBS = (0, 1, 2, 3, 4, 5, 6)
 #: A cap that stops the solve early and one that lets it converge or stall.
 CAPS = (5, 120)
 #: The ``"l2"`` tolerance per dtype (the default in float32; float64 is
@@ -169,7 +176,7 @@ def _cells() -> tuple:
     for s, (name, kind) in enumerate(shapes):
         for t, dtype in enumerate(("float32", "float64")):
             for j in range(3):
-                knob = (s + 3 * t + 2 * j) % len(KNOBS)
+                knob = ROTATED_KNOBS[(s + 3 * t + 2 * j) % len(ROTATED_KNOBS)]
                 out.append(Cell(name, dtype, knob, CAPS[(s + t + j) % 2], kind))
     return tuple(dict.fromkeys(out))
 

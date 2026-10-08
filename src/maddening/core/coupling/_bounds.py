@@ -280,12 +280,14 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     """``(rho, arnoldi_residual, amplification, ratio)`` in the interface norm's own coordinates.
 
     :func:`_spectral_rate_at` with ``field_reference``, for a group under
-    ``convergence_norm="interface"`` with a mapping or a transform on an
-    internal edge, or a field that more than one internal edge reads
-    (:func:`_reading_is_the_fields`).  That norm measures what each
-    internal edge *delivers*
+    ``convergence_norm="interface"`` with a transform, or a mapping the
+    norm reads as delivered, on an internal edge, or a field that more
+    than one internal edge reads (:func:`_reading_is_the_fields`).  That
+    norm measures what each internal edge *delivers*
     -- its source value through the edge's interface mapping and then its
-    transform (``coupling_residual_interface``) -- each over its own
+    transform (``coupling_residual_interface``) -- or, on an edge whose
+    static mapping delivers more entries than its source holds, the
+    source value itself, each over its own
     magnitude; the spectral analysis took its weights from the raw source
     fields, and the bound multiplied a residual in one set of coordinates
     by a resolvent norm in the other.  An offset (a unit conversion's
@@ -295,9 +297,11 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     0.0014-0.098x the true distance with ``spectral_usable=True``.
 
     So here every quantity is taken on the reading ``y = Phi(x)`` itself
-    (``reading``: the flat vector of the delivered edge values, in the
-    order the norm sums them).  The pass reads the iterate only through
-    those edges, ``F = G o Phi``, so the reading iterates by its own map
+    (``reading``: the flat vector of what the norm reads on each edge, in
+    the order the norm sums them).  The pass reads the iterate only through
+    those edges -- and what an edge delivers is a function of its reading,
+    the delivered value itself or the source value it is mapped from --
+    ``F = G o Phi``, so the reading iterates by its own map
     ``Phi o G``, whose Jacobian ``A = Phi' G'`` has ``dF/dx``'s non-zero
     spectrum, and for an affine reading of an affine map ``Phi(x) -
     Phi(x*) = (I - A)^{-1} (Phi(x) - Phi(F(x)))`` exactly: the resolvent of

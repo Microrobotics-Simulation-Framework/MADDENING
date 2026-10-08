@@ -54,6 +54,41 @@ receives them as a traced input, exactly like node constants (see
 `gm.params["mappings"]` is validated like the node entries: an unknown
 edge key is a `ValueError` at trace time.
 
+## A mapped edge inside a coupling group: what `convergence_norm="interface"` reads
+
+A coupling group under `convergence_norm="interface"` is judged on what
+crosses its internal edges, every entry pooled into one RMS.  **A mapped
+edge is read on its compact side:**
+
+| The edge's static mapping | The norm reads |
+|---|---|
+| delivers **more** entries than its source field holds (a scatter: a few values spread onto a grid) | the **source field** itself, before the mapping and before the edge's transform |
+| delivers fewer entries (a gather) | the delivered value: mapping, then transform |
+| delivers as many entries as it reads (**a tie**) | the delivered value |
+| no mapping | the delivered value (the field, through the transform if there is one) |
+
+The two sizes are the ones the mapping declares (`n_source` and
+`n_target`, or `field_shapes()` where it has one), which `add_edge`
+holds the edge's two ends to; a dense matrix, a sparse mapping in either
+layout and a registered kind of your own are treated alike.  The target
+still receives the mapped value and the weights are still parameters of
+the step: only the criterion changes side.
+
+Why: read as delivered, 30 marker forces scattered onto `N` cells put
+`N` entries into the norm of which a few dozen change, and the criterion
+loosens as the grid grows.  On a two-way marker and grid pair
+(`rtol=1e-4`, Gauss-Seidel) the marker forces at a `converged=True` exit
+were 23, 39, 134 and 459 tolerances from their fixed point at `N` = 1e3,
+1e4, 1e5 and 1e6; read on the compact side they are 3.3 to 3.6 at every
+`N` (the table is in the
+[coupling algorithm guide](../../developer_guide/coupling_algorithm_guide.md)).
+With the mixed norm, which reads every field of the group whole, the
+same pair stops as early as the diluted criterion did: prefer the
+interface norm where a small field drives a large one.
+
+A geometry-dependent mapping inside a group is not read by this norm in
+0.4.0 (`compile()` refuses the group; see below).
+
 ## `StaticLinearMapping` and its factories
 
 The first implementation is a dense matrix `H` (`n_target × n_source`),

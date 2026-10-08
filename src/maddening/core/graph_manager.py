@@ -4430,9 +4430,12 @@ class GraphManager:
               since -- a node rebuilt with another declared count -- does
               not move the report of a step that already ran, and a group
               a member of which was removed since has no entry.  Under
-              ``convergence_norm="interface"`` with an interface mapping
-              on an internal edge the entries are what the edges deliver,
-              which depends on the mapping weights the step ran with
+              ``convergence_norm="interface"`` the entries are what that
+              norm reads on each internal edge: the value the edge
+              delivers, or the source field itself where a static mapping
+              delivers more entries than the source holds.  A value
+              delivered through an interface mapping
+              depends on the mapping weights the step ran with
               (``params["mappings"]``, which a caller may override for one
               step): the step measures that group's floor itself and the
               report reads it, so a ``params`` override, or an edit of the
@@ -4499,7 +4502,11 @@ class GraphManager:
               the "fields" are what that norm reads: the value each
               internal edge *delivers* -- its source value through the
               edge's interface mapping, with the weights the step ran
-              with, and then its transform -- over its own magnitude,
+              with, and then its transform -- or, where a static mapping
+              delivers more entries than its source field holds, that
+              source field itself (the compact side: a group's verdict
+              does not depend on the size of a grid a few values are
+              scattered onto), each over its own magnitude,
               and the spectrum is taken on that reading (the Jacobian
               of the reading's own iteration, ``Phi' G'`` for ``F = G o
               Phi``, applied through state tangents, so no mapping or

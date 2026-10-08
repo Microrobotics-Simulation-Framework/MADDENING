@@ -1446,8 +1446,10 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 
     ``measure`` is a linear map from the iterate's coordinates to the
     coordinates a norm is taken in -- under ``convergence_norm="interface"``
-    the JVP of the interface reading, what each internal edge *delivers*
-    (its source value through the edge's mapping, then its transform)
+    the JVP of the interface reading, what that norm reads on each
+    internal edge (the value the edge *delivers*: its source value through
+    the edge's mapping, then its transform; or the source value itself
+    where a static mapping delivers more entries than the source holds)
     -- and the operator analysed is ``A`` with
     ``A measure(u) = measure(matvec(u))``.  It is well defined wherever
     ``matvec`` sends the kernel of ``measure`` to zero, which a coupling

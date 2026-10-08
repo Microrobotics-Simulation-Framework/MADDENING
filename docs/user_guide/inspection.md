@@ -338,7 +338,8 @@ notes:
     large factors even with ratio_usable=True; spectral_error_bound (solver='ift', diagnostics=True)
     is the bound where spectral_usable is True, for a linear map (asymptotic for a non-linear one),
     in the group's own norm at the returned state (under 'interface', what each edge delivers: its
-    mapping, then its transform). See coupling_diagnostics()
+    mapping, then its transform; or its source field where a static mapping delivers more entries
+    than the source holds). See coupling_diagnostics()
   - multi-rate graph: a group's entry is its most recent applied solve
 ```
 
@@ -363,8 +364,8 @@ its flag is relied on (MADD-ANO-230).
 
 **What `diagnostics=True` costs.**  It is opt-in per group, and the work is done in every step of
 that group.  Beside the solve, the step runs 9 Jacobian-vector products for the spectrum (18 under
-`convergence_norm="interface"` with a mapping or a transform on an internal edge, or a field more
-than one internal edge reads) and `11 + 4 k + 5 n_p + 2 k n_p` more for the gradient bound
+`convergence_norm="interface"` with a transform, or a mapping that does not deliver more entries
+than it reads, on an internal edge, or a field more than one internal edge reads) and `11 + 4 k + 5 n_p + 2 k n_p` more for the gradient bound
 (`k <= 8`, `n_p` the probed constants), then small dense factorisations (QR, linear solves, an
 SVD) and one non-symmetric eigenvalue solve of a matrix of at most 9 x 9.  The eigenvalue solve
 runs in LAPACK on the host; on a GPU backend it is a device round trip in every step.  Measured

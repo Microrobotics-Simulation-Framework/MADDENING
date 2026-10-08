@@ -751,8 +751,10 @@ def _run_coupled_block_impl(
         res_dtype = _group_residual_dtype(s_new, group_node_names)
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
-                # Each internal edge as the step delivers it: through its
-                # mapping, with this step's weights, then its transform.
+                # Each internal edge on its compact side (the plan's
+                # records): as the step delivers it -- through its mapping,
+                # with this step's weights, then its transform -- or at its
+                # source where a static mapping delivers more entries.
                 return coupling_residual_interface(
                     s_new, s_old, plan,
                     group.atol, group.rtol, mappings=step_mappings,
@@ -1276,29 +1278,35 @@ def _run_coupled_block_impl(
                     w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
-            # Under ``convergence_norm="interface"`` the norm reads what
-            # each internal edge *delivers* -- its source value through the
-            # mapping, then the transform -- once per edge.  With a mapping
-            # or a transform on an internal edge, or a field that more than
-            # one internal edge reads, that is not the read fields weighted
-            # once each, and the report's spectral analysis is taken on the
-            # reading (``_interface_spectral_rate_at``); the raw source
-            # fields' weights above measured a different norm.  Static
-            # (``_reading_is_the_fields``): every other group keeps the
-            # analysis it had.
+            # Under ``convergence_norm="interface"`` the norm reads each
+            # internal edge once, on its compact side: what the edge
+            # *delivers* -- its source value through the mapping, then the
+            # transform -- or the source value itself where a static
+            # mapping delivers more entries than the source holds.  With a
+            # transform, or a mapping read as delivered, on an internal
+            # edge, or a field that more than one internal edge reads, that
+            # is not the read fields weighted once each, and the report's
+            # spectral analysis is taken on the reading
+            # (``_interface_spectral_rate_at``); the raw source fields'
+            # weights above measured a different norm.  Static
+            # (``_reading_is_the_fields``): every other group -- one whose
+            # mapped edges are all read at their source among them -- keeps
+            # the analysis in the state's weights.
             transformed_reading = use_interface_norm and not _reading_is_the_fields(
                 plan, float_fields)
             def _reading_parts(s_star):
                 """The interface norm's reading at ``s_star``, as ``(source dtype,
-                value)`` per edge: what each internal edge delivers, in the order
-                and by the rules ``coupling_residual_interface`` sums them
+                value)`` per edge: what the norm reads on each internal edge
+                (the delivered value, or the source's where the edge is read
+                at its source), in the order and by the rules
+                ``coupling_residual_interface`` sums them
                 (``_interface_readings``, which both iterate)."""
                 return [(source_dtype, jnp.asarray(v))
                         for _e, source_dtype, v in _interface_readings(
                             plan, s_star, mappings=report_mappings)]
 
             def _reading_values(s_star):
-                """The delivered values alone."""
+                """The readings alone."""
                 return [v for _source_dtype, v in _reading_parts(s_star)]
 
             def _reading(x_full):
@@ -1543,8 +1551,8 @@ def _run_coupled_block_impl(
                         spectral_rate_settled(rho_spec, spec_resid), grad_bound,
                         jnp.full_like(grad_bound, jnp.nan))
                     # The report's triple, on the interface norm's own
-                    # reading: each internal edge's delivered value over its
-                    # own magnitude -- the coordinates ``residual`` and the
+                    # reading: what the norm reads on each internal edge over
+                    # its own magnitude -- the coordinates ``residual`` and the
                     # floor are measured in (``_interface_spectral_rate_at``).
                     x_sg = jax.lax.stop_gradient(x_star_full)
                     read_w, read_scale = _reading_weights(x_sg)
@@ -2143,8 +2151,9 @@ def _run_coupled_block_impl(
             # The residual's float floor per evaluation, at the state this
             # step returns and with the mapping weights it ran with.  The
             # report takes every other group's floor from the returned
-            # state alone (``coupling_diagnostics``); a mapped edge's
-            # delivered value also depends on ``params["mappings"]``, which
+            # state alone (``coupling_diagnostics``); the delivered value of
+            # a mapped edge the norm reads as delivered (not one it reads
+            # at its source) also depends on ``params["mappings"]``, which
             # a caller may override for one step and which the graph no
             # longer holds afterwards -- so the step measures it, once,
             # after the solve, by the function the report calls.  Only its

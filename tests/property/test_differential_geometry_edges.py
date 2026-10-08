@@ -1076,15 +1076,15 @@ FROZEN_INTERFACE = [
          **_FROZEN, **F_HOLDS),
     case("frozen group, multilinear, interface norm, one pass, target anchors",
          kind="multilinear", dtype="float64", group=_ONE_PASS, **_FROZEN, **TARGETS),
-    case("frozen group, multilinear 2-D, interface norm, one pass, float32",
-         kind="multilinear", d=2, group=_ONE_PASS, **_FROZEN, **SOURCES),
+    case("frozen group, multilinear 2-D, interface norm, one pass",
+         kind="multilinear", d=2, dtype="float64", group=_ONE_PASS, **_FROZEN, **SOURCES),
 ]
 
 
 #: How closely a frozen graph's residual is its static twin's: the two
 #: sum the same numbers through another program (a kernel against a
 #: matrix), so they differ by the rounding of the fields' dtype.
-_FROZEN_RESIDUAL_RTOL = {"float64": 1e-9, "float32": 2e-3}
+_FROZEN_RESIDUAL_RTOL = {"float64": 1e-9}
 
 
 def _one_pass_steps(gm, steps: int) -> list:

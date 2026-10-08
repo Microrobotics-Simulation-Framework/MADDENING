@@ -42,6 +42,7 @@ import numpy as np
 import pytest
 
 from tests.property import test_coupling_geometry_search as geometry
+from tests.property import test_coupling_geometry_search_under_the_interface_norm as geometry_interface
 from tests.property import test_coupling_nonlinear_search as nonlinear
 from tests.property import test_coupling_targeted_search as linear
 
@@ -90,6 +91,10 @@ PINNED = {
     "geometry-gauss-seidel": (
         "a706422d1e57", "3397ffc920f5",
     ),
+    "geometry-interface": (
+        "a459665b85bd", "620dc6c91a19", "bea19e468ec6", "4184d2007483", "56dca04871cf", "fedb3968af5e",
+        "cc4768642eac", "b81d64135dcc", "6958dfbaa543",
+    ),
 }
 
 
@@ -97,7 +102,8 @@ def searches() -> dict:
     """``{search: its cells}``, read when asked (a test replaces a table)."""
     return {"linear": linear.CELLS, "linear-side": linear.SIDE_CELLS,
             "nonlinear": nonlinear.CELLS, "geometry": geometry.CELLS,
-            "geometry-gauss-seidel": geometry.GS_CELLS}
+            "geometry-gauss-seidel": geometry.GS_CELLS,
+            "geometry-interface": geometry_interface.CELLS}
 
 
 def plain(value):

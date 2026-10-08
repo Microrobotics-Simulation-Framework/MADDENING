@@ -629,6 +629,16 @@ anomalies:
       not.  Under convergence_norm="l2", which is over every float
       field, the same fixtures agree to 2e-05.  Evidence:
       benchmarks/results/retire_known_disagreements/REPORT.md.
+      **Closed in 0.4.0** (MADD-ANO-240, MADD-ANO-241): the ten rows were
+      not the accelerated set's doing but the interface norm returning
+      every field it does not measure whole from a pass before the
+      readings it stopped on.  A solve now returns those fields as one
+      plain pass computes them at the accepted iterate; all ten rows agree
+      with plain iteration within 2.2e-03 (9.9e-06 to 2.2e-03 after 25
+      steps, jaxlib 0.11.0, against 2.6e-02 to 2.25), with the
+      auto-detected set unchanged, and the list is empty.  What remains of this gap: under the interface norm
+      error_estimate and the spectral bound are still statements about
+      the interface alone.
       Two further mechanisms, measured on the 0.4.0 release audit
       (benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md),
       break the estimate on a map that is linear and all of whose modes
@@ -16016,6 +16026,232 @@ anomalies:
       - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps_under_ift_with_diagnostics"
       - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-239"
+    title: "spectral_usable does not see a pass whose Jacobian one float32 rounding of a same-pass value moves: a float32 Gauss-Seidel group whose member multiplies two fields held in units of 1e6 apart read rho_spectral 0.324 for 0.0238, settled"
+    description: >
+      `rho_spectral` comes from Jacobian-vector products of the pass the
+      group runs, in the group's dtype.  Under Gauss-Seidel a member reads
+      values the same pass has just computed -- in float32, to a float32
+      rounding -- and the products linearise at those.  Where a member's
+      derivative depends on the difference between such a value and a
+      constant it nearly equals (the product of two fields' deviations
+      from stored centres, `u1 + s (u1 - c1)(u0 - c0)`, in a group at its
+      fixed point), that difference is rounding, and the derivative moves
+      by `s` times one rounding of `u0`.  With `u0` near 1e6 and `s` from
+      0.2 to 20 the weighted Jacobian moves by 2% to more than the whole
+      of it.  Measured (CPU, jaxlib 0.10.2, 0.11.0 and 0.11.2, the same
+      numbers): three float32 members of two entries, one in units of
+      1e6, started on the fixed point, one pass: `rho_spectral` 0.324
+      where the Jacobian at the returned state has radius 0.0238 (0.048
+      to 0.59 over the float32 values within two roundings of the exact
+      same-pass ones), with `spectral_usable=True` and
+      `precision_limited=True`; at a hundredth of the curvature 0.11014
+      for 0.11156, where CPL-087 says 1e-4 of the radius and its movement
+      under a rounding of the Jacobian.  The same with Aitken or no
+      acceleration, under each norm, at a cap of 5 or 120, and five
+      passes from a thousandth of a field away
+      (`precision_limited=False`); on a fan-out hub 3.7 allowances.
+      `rho_spectral` is, to six digits, the radius of the Jacobian at the
+      same-pass values the float32 pass forms: the estimate is right for
+      the pass it is given.  What is missing is a refusal: the flag's
+      certificate (MADD-ANO-229) perturbs the compressed matrix by the
+      measured rounding of a product and never moves the state the
+      products are taken at.  It needs float32 (1e-12 in float64),
+      Gauss-Seidel (under Jacobi the difference is of two floats of the
+      iterate, exact in either dtype), a member that multiplies two other
+      members' fields, and units 1e3 or more apart (nothing at 1e1).
+      `spectral_error_bound` held on every such example (at most 0.82 of
+      the distance), and so did the gradient bound for the gradient the
+      group computes.  The spectral keys are new in 0.4.0; no release
+      carries them.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported radius outside the margin its flag stands for is a
+      silent wrong result, never `minor`.  Not `critical`: reported, not
+      applied, and the error bound built on it held.  It needs a pass
+      whose derivative changes by more than the flag's margin when a
+      field moves by one float32 rounding -- dynamics float32 does not
+      resolve -- and is `context_dependent` as for the other spectral
+      entries.
+    affected_components:
+      - "maddening.core.coupling.acceleration.arnoldi_spectral_radius"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Run such a group in float64 or under Jacobi, or hold the two fields
+      a nonlinearity multiplies as deviations from their operating point,
+      in units within a decade of each other, rather than as absolute
+      values a factor of 1e3 or more apart.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  Suggested fix: in `_bounds._spectral_rate_at` and
+      `_bounds._interface_spectral_rate_at`, take the products on the
+      Krylov basis once more with the pass linearised one rounding of the
+      iterate away (`x (1 + eps s)` with random signs `s`, so that the
+      same-pass values are recomputed from it; or one second-order
+      product per basis vector along that displacement), add the
+      difference to the per-row rounding the certificate of MADD-ANO-229
+      is taken over, and withdraw the flag where it can move the radius
+      past the margin: eight more products where diagnostics are on.
+      For 0.4.0 the condition is stated instead (CPL-087 and the user
+      guide's inspection page): the flag is not claimed for a pass whose
+      Jacobian one rounding of the iterate in the group's dtype moves by
+      more than the margin.  The refusal above is planned with the 0.5.0
+      work that holds each coupling flag to a stated domain.
+    verification:
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_settled_radius_is_the_radius_where_a_same_pass_rounding_moves_the_jacobian"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-240"
+    title: "Under convergence_norm=\"interface\" a converged group returned a member computed from readings that had not settled: a one-way pair under Jacobi returned its target at the pre-step source, converged=True, iterations=1, residual 0"
+    description: >
+      The interface norm measures, on each pass, how far what a group's
+      internal edges deliver moved between an iterate and its successor.
+      The members of that iterate were computed from the readings of the
+      iterate before it, and a floating field the norm does not measure
+      whole -- one no internal edge reads, or one read only through a
+      mapping or a transform -- was measured by nothing.  A one-way pair
+      `A -> B` under `iteration_mode="jacobi"` stopped on its first pass:
+      `A` does not depend on the iterate, so what it delivers had "stopped
+      moving" with a residual of exactly zero, and `B` was returned as
+      computed from the pre-step `A` (state error 2.2 on values of order
+      one; 2.9 through a static `matrix_mapping`; both solvers; reproduced
+      at 0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1).  A chain `A -> B -> C`
+      returned `C` one pass behind `B` (1.5e4 tolerances).  A pair coupled
+      at a loop gain of 0.01 with a field no edge reads returned that field
+      up to 384 tolerances off under Jacobi and 25 under Gauss-Seidel (the
+      member that reads the back edge), where `"mixed"` held 1.7; a cycle
+      with a one-way tail returned the tail 5 tolerances off.  Under
+      `acceleration="fixed"` the field was a blend of every pass so far
+      (6800 tolerances at a relaxation of 0.5).  A pair whose every field
+      is delivered whole by an internal edge was never affected: there the
+      norm measures the state, and its solve is bit for bit the `"mixed"`
+      one.  The ten `iqn-*` / interface rows of the coupling sweep that
+      disagreed with plain iteration by 2.6e-02 to 2.25 (recorded under
+      MADD-ANO-005 as a blind spot of the auto-detected accelerated set)
+      were this: `velocity`, read by no edge.  Found by a spike on an
+      unrelated feature.  Resolved in 0.4.0 by the interface norm's return
+      rule: a field the norm measures whole (an internal edge delivers it
+      as it is, with no mapping and no transform) is returned as the
+      accepted iterate holds it, bit for bit; every other floating field
+      of every member is returned as one plain pass of the group's
+      schedule computes it at the accepted iterate, whatever the schedule,
+      the acceleration, the solver and the verdict.  Iterates, residuals
+      and pass counts are unchanged, and the ten rows agree with plain
+      iteration within 2.2e-03 (9.9e-06 to 2.2e-03 after 25 steps, jaxlib
+      0.11.0).  The same rule covers a field read only through a mapping or
+      a transform: MADD-ANO-241.
+    severity: major
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A state far from the group's fixed point reported `converged=True` is
+      a silent wrong result, never `minor`; `strict_convergence`, the sysid
+      mask and the profiler read the same verdict.  Not `critical`: it needs
+      the interface norm, which is not the default, and a field that norm
+      does not measure whole.  `context_dependent` because whether the
+      unmeasured field is used downstream is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: `convergence_norm="mixed"` (or `"l2"`), which measure
+      every member's state, or `iteration_mode="gauss-seidel"` for a group
+      with no cycle.
+    resolution_status: resolved
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A group with a field the norm does not measure whole pays one more
+      evaluation of its pass per solve.  The state returned is not an
+      iterate of the loop: the report (iterations, residual, the bounds)
+      is of the accepted iterate, and the returned state's readings are
+      within the reported residual of that iterate's.  A recomputed field
+      is the next step's pre-step state, so a trajectory stepped at an
+      unconverged cap differs from the one 0.3.1 stepped.  A recomputed
+      field is sometimes further from the fixed point than the value the
+      accepted iterate held: 27 of 375 recomputed fields by more than
+      1.25 times in the measured draws, by at most about one tolerance in
+      a converged solve, three times as often where the plain pass
+      expands (an accelerated loop of gain above one).  `max_iterations=1`
+      returns its one pass as it is.
+    verification:
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_solve_returns_the_accepted_iterate_with_its_unmeasured_fields_from_one_pass"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_field_no_edge_reads_is_within_the_tolerance_in_a_weakly_coupled_pair"
+      - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push"
+      - "tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point"
+
+  - anomaly_id: "MADD-ANO-241"
+    title: "Under convergence_norm=\"interface\" the part of a field its edges deliver only through a mapping or a transform is measured by nothing: converged=True with that part a pass behind, or between passes under a relaxation"
+    description: >
+      A field internal edges read only through a mapping or a transform
+      that delivers less than the field (a selection, a restriction) has a
+      part the interface norm does not see.  The iterate's value of that
+      part was computed from the readings of the pass before the pair the
+      verdict compared, and `"fixed"` and `"aitken"` relax it into a blend
+      of every pass so far.  Measured (CPU, jaxlib 0.11.0, float32): a
+      chain `A -> B -> C` under Jacobi with `B` delivered through a
+      selection of its first entry, which no input moves, returns `B`'s
+      second entry computed from the pre-step `A` (2.5 for -0.7) with
+      `converged=True`, `iterations=1` and a residual of zero, under every
+      acceleration and both solvers; a pair whose two edges each deliver a
+      first entry, coupled at 0.03, returns the second entries 10
+      tolerances off under Jacobi and under Gauss-Seidel.  `"mixed"` is
+      right in each case.  The same at 0.1.0 to 0.3.1.  Resolved in 0.4.0
+      by the return rule of MADD-ANO-240: such a field is not measured
+      whole, so it is returned as one plain pass computes it at the
+      accepted iterate, in every member and under every schedule,
+      acceleration and solver.  The field feeds the readings, so the state
+      returned is no longer an iterate of the loop: its readings differ
+      from the accepted iterate's on the edges that read a recomputed
+      field, by exactly the term the reported residual holds for each, and
+      the report is of the accepted iterate.  A mapping that loses nothing
+      cannot be told statically from one that does, so an identity-mapped
+      group recomputes its field too and equals its unmapped twin within
+      the residual, no longer to the bit (it still does under `"l2"` and
+      `"mixed"`).  Holding the exit to a second pass within the threshold
+      was measured and not taken: it does not close the case under a
+      relaxation.
+    severity: major
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A part of the state far from the fixed point with `converged=True` is
+      a silent wrong result, never `minor`.  Not `critical`: it needs the
+      interface norm and an internal edge that delivers less than the field
+      it reads, and the part concerned is one no member of the group reads.
+      `context_dependent` because whether anything outside the group reads
+      it is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: `convergence_norm="mixed"` wherever a field is
+      delivered through a mapping or a transform that loses part of it and
+      that part is used; or a second, plain internal edge that delivers
+      the field whole.
+    resolution_status: resolved
+    resolution_version: "0.4.0"
+    residual_risk: >
+      As MADD-ANO-240's: one more evaluation of the pass per solve; the
+      returned state's own residual is not the reported one (measured up
+      to 4.5 times it, and above the threshold beside `converged=True` in
+      1 of 48 converged draws), while its readings are within the
+      reported residual of the accepted iterate's; a recomputed field is
+      sometimes less accurate than the iterate's value, by at most about
+      one tolerance in a converged solve.  The part of a field no edge
+      delivers is still measured by nothing: it is one pass from readings
+      within the tolerance, which bounds it by its gains, not by a
+      criterion of its own.  Documented on `CouplingGroup.convergence_norm`.
+    verification:
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_solve_returns_the_accepted_iterate_with_its_unmeasured_fields_from_one_pass"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_selected_field_is_within_the_tolerance_in_a_weakly_coupled_pair"
+      - "tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_relaxation_does_not_leave_the_undelivered_part_of_a_field_between_passes"
+      - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push"
+      - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_the_library_returns_the_models_state_for_the_iterate_it_accepted_per_push"
 
   - anomaly_id: "MADD-ANO-242"
     title: "spectral_error_bound of a group with a multilinear_grid edge read 0.13x the true distance with spectral_usable=True when a marker's fixed point lay across a lattice plane from the returned iterate"

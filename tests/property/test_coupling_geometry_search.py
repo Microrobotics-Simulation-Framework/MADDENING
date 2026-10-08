@@ -83,6 +83,15 @@ _FIRST = (
 )
 
 
+#: The rows of ``gc.KNOBS`` the rotation below takes, FROZEN: the six rows
+#: that table held when these cells were laid out.  The rotation is over
+#: this tuple and never over the length of a table of another module, so a
+#: row added there cannot move a cell here; a new configuration is a new
+#: cell, appended (``test_coupling_search_cells_are_pinned.py`` holds every
+#: cell's configuration per push).
+ROTATED_KNOBS = (0, 1, 2, 3, 4, 5)
+
+
 def _cells() -> tuple:
     """Every anchoring with a moving and a still geometry, both dtypes,
     the configurations, the caps, the lattice's dimension, the members'
@@ -95,7 +104,8 @@ def _cells() -> tuple:
     for a, (anchors, moving) in enumerate(anchorings):
         for t, dtype in enumerate(("float32", "float64")):
             for v in range(2):
-                out.append(Cell(anchors, moving, dtype, (a + 3 * t + 2 * v) % len(gc.KNOBS),
+                out.append(Cell(anchors, moving, dtype,
+                                ROTATED_KNOBS[(a + 3 * t + 2 * v) % len(ROTATED_KNOBS)],
                                 (5, 120)[(a + t + v) % 2], d=1 + (k % 2), m=2 + (k % 3 == 2),
                                 origin=(0.5, 40.0, -3.25)[k % 3],
                                 order=(("F", "P"), ("P", "F"))[(k // 2) % 2]))

@@ -1346,7 +1346,15 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
                         if group.solver == "ift" else ""))
     reason = d.get("not_usable_reason")
     estimate = d.get("error_estimate")
-    if reason and isinstance(estimate, float) and not math.isnan(estimate):
+    bound = d.get("spectral_error_bound")
+    # Every number is there and only the spectral flags are withdrawn: a
+    # group with a geometry-dependent mapping whose bound reaches a
+    # lattice plane (experimental).  The caveats below still apply.
+    flags_only = bool(reason) and all(
+        isinstance(v, float) and not math.isnan(v) for v in (estimate, bound))
+    if flags_only:
+        pass
+    elif reason and isinstance(estimate, float) and not math.isnan(estimate):
         # Only what rests on the float floor is withheld (a checkpoint
         # saved after the state was written): the estimates are there,
         # and their caveats below still apply.
@@ -1356,7 +1364,7 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
                          "criterion fell back to the raw residual test; converged reports that "
                          "test, not a distance estimate (MADD-ANO-005)")
         return flags
-    if reason:
+    elif reason:
         # The report withholds every bound, estimate and ``*_usable`` flag
         # of this group, so the caveats below (which read them) would be
         # statements about values that are not there.
@@ -1371,7 +1379,9 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
                      "and error_estimate are rounding and converged can be True on a stalled "
                      "iterate; read spectral_error_bound (solver='ift', diagnostics=True)")
     rho = d.get("rho_spectral")
-    if isinstance(rho, float) and not math.isnan(rho) and not d.get("spectral_usable"):
+    if flags_only:
+        flags.append(f"spectral_usable=False: {reason}")
+    elif isinstance(rho, float) and not math.isnan(rho) and not d.get("spectral_usable"):
         flags.append("spectral_usable=False: the spectral bound is not settled or not finite")
     if whole and d.get("gradient_bound_usable"):
         named = ", ".join(f"{name} ({size} entries)" for name, size in whole)

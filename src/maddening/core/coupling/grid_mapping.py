@@ -280,7 +280,33 @@ class MultilinearGridMapping:
             weight.append(jnp.where(finite, w, nan))
         return jnp.stack(index, axis=1), jnp.stack(weight, axis=1)
 
-    def _probe_step(self, geom):
+    def _lattice_coordinates(self, cols):
+        """Each column of *cols* in lattice units (``0`` at the first
+        point of its axis, ``n - 1`` at the last), by the arithmetic of
+        :meth:`_stencil`: a point the stencil sees on a lattice plane is
+        on it here, to the bit."""
+        T = cols.dtype
+        out = []
+        for a in range(self._d):
+            p = pow2_host_factor(self.spacing[a], T)
+            out.append((cols[:, a] * jnp.asarray(p, T) - jnp.asarray(self.origin[a] * p, T)) / (
+                jnp.asarray(self.spacing[a] * p, T)))
+        return out
+
+    def _kink_distance(self, u, a: int):
+        """How many spacings lattice coordinate *u* of axis *a* is from
+        the nearest place the stencil changes polynomial: a lattice plane
+        inside the hull, the face it is clamped to outside (``inf`` on an
+        axis of one point)."""
+        n = self.shape[a]
+        if n < 2:
+            return jnp.full(u.shape, jnp.inf, u.dtype)
+        top = jnp.asarray(n - 1, u.dtype)
+        fraction = u - jnp.floor(u)
+        inside = jnp.minimum(fraction, 1 - fraction)
+        return jnp.where(u < 0, -u, jnp.where(u > top, u - top, inside))
+
+    def _probe_step(self, geom, eps: Optional[float] = None, beside=None):
         """A small step of every position towards the middle of its
         lattice cell, per coordinate: the direction the coupling
         diagnostics' self-check moves a geometry along
@@ -288,25 +314,70 @@ class MultilinearGridMapping:
 
         ``sqrt(eps)`` of the spacing (at least two ``eps`` of the
         coordinate, so that the step is not lost in it), signed so that no
-        point crosses a lattice plane: the stencil is one polynomial along
-        the whole step, and a finite difference over it is a derivative.
-        Zero for a non-finite coordinate.
+        point crosses a lattice plane or a face of the hull: the stencil
+        is one polynomial along the whole step, and a finite difference
+        over it is a derivative.  A point on the last lattice point of an
+        axis steps inwards, as one on the first does: outside the hull
+        the kernel clamps, and its derivative on a face is the interior
+        one.  Zero for a non-finite coordinate.
+
+        *eps* is the rounding of the coarsest floating dtype the pass
+        evaluates in, where that is coarser than the geometry's (float32
+        fields read at float64 positions): the step is ``sqrt`` of the
+        coarser of the two, since a step sized for the geometry alone is
+        below what the fields it moves can resolve.
+
+        *beside* is a second set of positions, of *geom*'s shape, that
+        move with it: the positions a pass derives from a member's
+        pre-step ones and reads after the member's update (``pos_pre +
+        drift + ...``).  Each coordinate then steps towards the middle of
+        the cell of whichever of the two is nearer to a lattice plane, so
+        that neither crosses one.
         """
         geom = jnp.asarray(geom)
         cols = geom if geom.ndim == 2 else geom[:, None]
         T = cols.dtype
-        eps = float(jnp.finfo(T).eps)
+        own = float(jnp.finfo(T).eps)
+        # units: relative rounding, the coarser of the positions' dtype and the pass's
+        coarsest = own if eps is None else max(own, float(eps))
+        other = None if beside is None else self._lattice_coordinates(
+            jnp.asarray(beside).astype(T).reshape(cols.shape))
         steps = []
-        for a in range(self._d):
-            p = pow2_host_factor(self.spacing[a], T)
-            u = (cols[:, a] * jnp.asarray(p, T) - jnp.asarray(self.origin[a] * p, T)) / (
-                jnp.asarray(self.spacing[a] * p, T))
-            size = jnp.maximum(jnp.asarray(math.sqrt(eps) * self.spacing[a], T),
-                               2 * jnp.asarray(eps, T) * jnp.abs(cols[:, a]))
-            below_the_middle = (u - jnp.floor(u)) * 2 < 1
-            step = jnp.where(below_the_middle, size, -size)
+        for a, u in enumerate(self._lattice_coordinates(cols)):
+            size = jnp.maximum(jnp.asarray(math.sqrt(coarsest) * self.spacing[a], T),
+                               2 * jnp.asarray(own, T) * jnp.abs(cols[:, a]))
+            top = jnp.asarray(self.shape[a] - 1, T)
+            upwards = ((u - jnp.floor(u)) * 2 < 1) & ~(u == top)
+            if other is not None:
+                v = other[a]
+                nearer = self._kink_distance(v, a) < self._kink_distance(u, a)
+                upwards = jnp.where(nearer, ((v - jnp.floor(v)) * 2 < 1) & ~(v == top), upwards)
+            step = jnp.where(upwards, size, -size)
             steps.append(jnp.where(jnp.isfinite(cols[:, a]), step, jnp.zeros((), T)))
         return jnp.stack(steps, axis=1).reshape(geom.shape)
+
+    def _plane_distance(self, geom):
+        """How far every coordinate is from the nearest place the stencil
+        changes polynomial, in the geometry's units and shape: the
+        nearest lattice plane of its axis for a point inside the hull
+        (the hull's two faces are the first and the last), the face it is
+        clamped to for a point outside.
+
+        Read by the coupling diagnostics
+        (``_bounds._geometry_plane_limit``): between two positions with
+        no such plane between them the mapping is one polynomial of the
+        positions, and the Jacobian taken at one describes the other.
+        ``inf`` on an axis of one lattice point (the stencil does not
+        depend on that coordinate); NaN for a non-finite coordinate.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        out = []
+        for a, u in enumerate(self._lattice_coordinates(cols)):
+            distance = self._kink_distance(u, a) * jnp.asarray(self.spacing[a], T)
+            out.append(jnp.where(jnp.isfinite(cols[:, a]), distance, jnp.asarray(jnp.nan, T)))
+        return jnp.stack(out, axis=1).reshape(geom.shape)
 
     def _floating(self, field, what: str):
         field = jnp.asarray(field)

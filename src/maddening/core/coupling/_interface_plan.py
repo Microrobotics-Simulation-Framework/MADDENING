@@ -949,6 +949,36 @@ class InterfacePlan:
             seen.setdefault((holder, field), rec.mapping)
         return [(node, field, mapping) for (node, field), mapping in seen.items()]
 
+    def geometry_iterate_reads(self) -> list:
+        """``[(node, field, mapping)]``: every geometry field of a member
+        that the group's pass reads from the iterate or from the state the
+        same pass has built, once per mapping that reads it so.
+
+        A source-anchored internal edge reads its source's field with its
+        value; a target-anchored edge into a member that computes fluxes
+        is resolved again for the flux hook, from the member's in-pass
+        state.  A target-anchored edge of ``update`` reads the member's
+        pre-step state and a source-anchored edge from outside the group
+        the outside node's: constants of the pass, not listed.
+
+        Read by the step's lattice-plane limit
+        (``_bounds._geometry_plane_limit``): these are the positions that
+        differ between the returned iterate and the fixed point.
+
+        **Differs from** :meth:`geometry_holders`, which lists every
+        geometry field the pass reads, constants included, once.
+        """
+        out = []
+        for rec in self.resolved_geometry_edges():
+            side, field = rec.anchor
+            if side == "source":
+                holder, moves = rec.source[0], rec.source[0] in self.members
+            else:
+                holder, moves = rec.target[0], rec.target[0] in self.flux_members
+            if moves:
+                out.append((holder, field, rec.mapping))
+        return out
+
     def reads_own_geometry(self, holder: str, field: str) -> bool:
         """Does an edge into member *holder* read *field* of *holder*'s own
         state as its geometry (a target anchor)?

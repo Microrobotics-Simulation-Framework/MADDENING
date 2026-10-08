@@ -11,10 +11,10 @@ returned from a pass the settled readings never produced, with
 
 * a field **no internal edge reads**: a one-way pair ``A -> B`` under
   Jacobi returned ``B`` computed from the *pre-step* ``A`` at
-  ``iterations=1`` and a residual of exactly zero (MADD-ANO-238; 0.1.0 to
+  ``iterations=1`` and a residual of exactly zero (MADD-ANO-239; 0.1.0 to
   0.3.1);
 * a field edges read **only through a mapping or a transform**: the part
-  of it they do not deliver was measured by nothing (MADD-ANO-239; 0.1.0
+  of it they do not deliver was measured by nothing (MADD-ANO-240; 0.1.0
   to 0.3.1).
 
 **The return rule.**  With ``x`` the iterate the loop accepts (or stops on

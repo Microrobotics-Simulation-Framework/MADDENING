@@ -5947,9 +5947,9 @@ claims:
     Until 0.4.0 the solve returned the accepted iterate as it was, and the
     norm answered only for what it measured: a one-way pair under Jacobi
     returned its target computed from the pre-step source, converged=True,
-    iterations=1, residual 0 (MADD-ANO-238), the part of a field a mapping
+    iterations=1, residual 0 (MADD-ANO-239), the part of a field a mapping
     does not deliver was a pass behind or a blend of passes
-    (MADD-ANO-239), both 0.1.0 to 0.3.1, and the ten iqn-* / interface
+    (MADD-ANO-240), both 0.1.0 to 0.3.1, and the ten iqn-* / interface
     rows of the coupling sweep disagreed with plain iteration by up to
     2.25 in a field no edge reads (recorded under MADD-ANO-005; CPL-174).
     Recomputing every floating field (the measured ones too) was measured

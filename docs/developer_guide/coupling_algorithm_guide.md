@@ -114,7 +114,7 @@ One rule, whatever the schedule, the acceleration, the solver and the
 verdict (`max_iterations=1` returns its one pass as it is).  Until 0.4.0
 the step returned `x` as it was, and a one-way pair under Jacobi came
 back with its target computed from the pre-step source, `converged=True`
-at `iterations=1` (MADD-ANO-238, MADD-ANO-239).  What the rule costs:
+at `iterations=1` (MADD-ANO-239, MADD-ANO-240).  What the rule costs:
 
 * **The report is of `x`, not of the state returned.**  `iterations`,
   `residual`, `converged` and the bounds are the ones the loop measured.
@@ -1343,7 +1343,7 @@ interface norm (1.60–1.65 passes either way), and 31–42x under L2 for
 at most one pass (2.0–2.9 against 2.95).
 
 Third, and this one was an accuracy caveat rather than a cost one, **now
-closed for the state a step returns** (MADD-ANO-238, MADD-ANO-239; see
+closed for the state a step returns** (MADD-ANO-239, MADD-ANO-240; see
 "What a converged step returns under each norm" above).  As first
 recorded:
 **do not pair the auto-detected `accelerated_fields` with
@@ -1629,7 +1629,7 @@ that matter more than any timing:
   the common fixed point are listed in `_KNOWN_DISAGREEMENTS` with the
   defect that explains each, and the test fails if a listed row starts
   agreeing, so the list cannot outlive its defect (it is empty since the
-  interface norm's return rule, MADD-ANO-238);
+  interface norm's return rule, MADD-ANO-239);
 * Gauss-Seidel on a ring is order-dependent and Jacobi is not — the test
   first checks that rotating the build really does rotate the schedule,
   so it cannot pass vacuously;

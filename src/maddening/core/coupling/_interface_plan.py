@@ -304,13 +304,14 @@ def _kernel_lengths(mapping) -> tuple:
     position is measured in by the interface norm; a user-supplied length
     is not offered.
     """
-    declared = getattr(mapping, "geometry_length_scale", None)
+    declared: Any = getattr(mapping, "geometry_length_scale", None)
     if not callable(declared):
         raise TypeError(
             f"mapping {mapping!r} declares no geometry_length_scale(): the interface "
             f"norm cannot measure its geometry (a position is measured in units of the "
             f"mapping kind's own length scale)")
-    return tuple(float(h) for h in declared())
+    lengths: Any = declared()
+    return tuple(float(h) for h in lengths)
 
 
 def _in_kernel_lengths(mapping, geom):
@@ -607,6 +608,8 @@ class InterfaceEdge:
         member's name, or a ``{name: state}`` dict); a reading that needs
         it outside a step, where it no longer exists, is refused.
         """
+        if self.anchor is None:
+            raise ValueError(f"edge {self.key!r} names no geometry")
         side, field = self.anchor
         if side == "source":
             return state[self.source[0]][field]
@@ -615,7 +618,8 @@ class InterfaceEdge:
                 f"edge {self.key!r}: the interface norm reads what this edge delivers "
                 f"at the pre-step {self.target[0]}.{field} (a target-anchored geometry), "
                 f"which only the step that solved the group holds")
-        held = pre_step(self.target[0]) if callable(pre_step) else pre_step[self.target[0]]
+        held: Any = (pre_step(self.target[0]) if callable(pre_step)
+                     else pre_step[self.target[0]])
         return held[field]
 
     def read(self, states, mappings=None, pre_step=None) -> tuple:

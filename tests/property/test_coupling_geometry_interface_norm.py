@@ -29,23 +29,45 @@ it on the ``multilinear_grid`` kind:
   and a derivative through the solve; and what stays refused or withheld.
 
 Seeded faults (``plans/tools/mutants.py`` on a scratch copy of ``src/``,
-jaxlib 0.11.0; the first failing test of this module, per push):
+jaxlib 0.11.0; each run against five per-push instruments separately:
+**pins** ``tests/core/test_interface_plan.py``, **edges** the edge-by-edge
+tests here, **solve** the compiled tests here, **search**
+``test_coupling_geometry_search_under_the_interface_norm.py`` (its one
+per-push cell: both edges, the gather anchored at its target, one axis),
+**frozen** the frozen identity of ``test_differential_geometry_edges.py``).
+Fourteen faults, each caught by two instruments or more:
 
-==  ================================================  =====================================================
-#   fault                                             first signal
-==  ================================================  =====================================================
-G1  a scatter read as delivered                        the edge-by-edge residual (every scatter cell)
-G2  the positions left out of a scatter's reading     the edge-by-edge residual (source-anchored scatters)
-G3  the positions over their own magnitude            the edge-by-edge residual; the translated problem
-G4  the spacing of the wrong axis                     the edge-by-edge residual on two axes
-G5  a target-anchored geometry counted as a reading   the edge-by-edge residual (target-anchored scatters)
-G6  a target anchor read from the iterate             the edge-by-edge residual (target-anchored gathers)
-G7  a source anchor read from the pre-step state      the edge-by-edge residual (source-anchored gathers)
-G8  the geometry's dtype left out of the floor        the edge-by-edge floor on mixed dtypes
-G9  the positions' entries left out of the pool       the edge-by-edge residual
-G10 the kept fields not following the reading         the plain loop's returned state
-G11 the slot not recorded for a target anchor         the slot of a group with a target-anchored gather
-==  ================================================  =====================================================
+===  ================================================  ====  =====  =====  ======  ======
+#    fault                                             pins  edges  solve  search  frozen
+===  ================================================  ====  =====  =====  ======  ======
+G1   a scatter read as delivered                       yes   yes    yes    yes     yes
+G2   the positions left out of a scatter's reading     yes   yes    yes    yes     yes
+G3   the positions over their own magnitude            yes   yes    yes    yes     -
+G4   the spacing of the wrong axis                     yes   yes    yes    -       -
+G5   a target-anchored geometry counted as a reading   yes   yes    yes    -       yes
+G6   a target anchor read from the iterate             yes   yes    yes    yes     -
+G7   a source anchor read from the pre-step state      -     yes    yes    -       -
+G8   the positions' dtype and rounding left out of     -     yes    yes    -       -
+     a delivered value's floor
+G9   the positions' entries left out of the pool       -     yes    yes    yes     yes
+G10  the kept fields not following the reading         yes   -      yes    yes     -
+G11  the slot not recorded for a target anchor         yes   -      yes    -       -
+G12  the report's fallback floor asked outside the     yes   -      yes    -       -
+     step (it raises)
+G13  a sub-cycled group not refused                    yes   -      yes    -       -
+G14  a position's floor without its size in spacings   -     yes    yes    -       -
+===  ================================================  ====  =====  =====  ======  ======
+
+First signals: ``test_the_residual_of_two_states_is_the_rules`` (G1 to G7,
+G9), ``test_the_float_floor_counts_each_part_at_its_own_resolution`` (G8,
+G14), ``test_a_plain_iteration_stops_where_the_reference_s_loop_does``
+(G1 to G7, G9, G10: the pass, the residual or the returned state),
+``test_the_step_records_the_floor_of_a_reading_at_a_pre_step_geometry``
+(G8, G11, G14), ``test_the_report_of_such_a_group_withholds_every_bound_and_says_why``
+(G12), ``test_a_sub_cycled_group_with_a_geometry_edge_is_refused_under_the_interface_norm``
+(G13).  The search's misses are its per-push cell's (one axis, a
+source-anchored scatter and a target-anchored gather: G4, G5 and G7 are
+not expressible on it; its slow hunt has the other cells).
 """
 
 from __future__ import annotations
@@ -518,20 +540,25 @@ def _check_report_is_withheld(shape, tmp_path):
         stepped = gi.state_of(gm)
         archive = str(tmp_path / "stepped.npz")
         gm.save_state(archive)
-        slot = np.asarray(gm._state["_meta"][f"coupling_{KEY}_reading_floor"])   # noqa: SLF001
+        name = f"coupling_{KEY}_reading_floor"
+        owns = name in gm._state["_meta"]                                         # noqa: SLF001
+        assert owns == any(way == "gather" and anchor == "target"
+                           for way, anchor in zip(gi.WAYS[shape.kind], shape.anchors))
+        slot = np.asarray(gm._state["_meta"][name]) if owns else None             # noqa: SLF001
         ref.start(gm)
         gm.load_state(archive)
-        assert np.array_equal(
-            np.asarray(gm._state["_meta"][f"coupling_{KEY}_reading_floor"]), slot)   # noqa: SLF001
+        if owns:
+            assert np.array_equal(np.asarray(gm._state["_meta"][name]), slot)     # noqa: SLF001
         gg.assert_not_diagnosed(dict(gm.coupling_diagnostics()[KEY]), keys, "norm")
         for name in ("p", "q"):
             for field in ("x", "pos"):
                 assert np.array_equal(gi.state_of(gm)[name][field], stepped[name][field])
-        # A state whose slot no step wrote: nothing to fall back to, and no raise.
-        meta = dict(gm._state["_meta"])                                           # noqa: SLF001
-        meta[f"coupling_{KEY}_reading_floor"] = jnp.asarray(jnp.nan, slot.dtype)
-        gm._state = {**gm._state, "_meta": meta}                                   # noqa: SLF001
-        gg.assert_not_diagnosed(dict(gm.coupling_diagnostics()[KEY]), keys, "norm")
+        if owns:
+            # A state whose slot no step wrote: nothing to fall back to, and no raise.
+            meta = dict(gm._state["_meta"])                                       # noqa: SLF001
+            meta[name] = jnp.asarray(jnp.nan, slot.dtype)
+            gm._state = {**gm._state, "_meta": meta}                               # noqa: SLF001
+            gg.assert_not_diagnosed(dict(gm.coupling_diagnostics()[KEY]), keys, "norm")
     assert before == {} or "not_usable_reason" in before
     return stepped
 

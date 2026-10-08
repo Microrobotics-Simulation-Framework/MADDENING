@@ -686,17 +686,21 @@ class Reference:
 
     @functools.cached_property
     def fixed_point(self) -> dict:
-        x = self.pre
+        # Plain passes until they stop getting closer: the iteration ends in
+        # a cycle of a few float64 ulps of the fields (the scatter's sums
+        # round), far below anything a comparison here resolves.
+        x, best, since = self.pre, math.inf, 0
         for _ in range(20_000):
             y = self.one_pass(x)
             moved = max(float(np.max(np.abs(y[n][f] - x[n][f])) / max(
                 float(np.max(np.abs(y[n][f]))), 1e-300)) for n in y for f in y[n])
             x = y
-            if moved <= 4e-16:
-                break
-        else:
-            raise AssertionError(f"{self.shape} {self.draw}: the plain iteration did not settle")
-        return x
+            since = 0 if moved < best else since + 1
+            best = min(best, moved)
+            if best <= 1e-11 and since >= 8:
+                return x
+        raise AssertionError(f"{self.shape} {self.draw}: the plain iteration did not settle "
+                             f"(a pass still moves a field by {best:.3g} of its size)")
 
     def K(self, whole: Optional[tuple] = None) -> float:
         """``|| D ((I - A)^{-1} (I - L) - P) D^{-1} ||_2`` at the fixed point.

@@ -362,11 +362,9 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_b
             gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)), keys,
                                              gg.refused(c))
         else:
-            # The ``multilinear_grid`` kind: the criterion reads its
-            # geometry, and the report withholds the bounds.
-            edge = gg.build(gg.two_body(c))
-            edge.step()
-            gg.assert_not_diagnosed(edge.coupling_diagnostics()[KEY], keys, "norm")
+            # The ``multilinear_grid`` kind: accepted (the criterion reads
+            # its geometry); the slow sibling steps it and reads its report.
+            gg.build(gg.two_body(c))
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
     assert all(e.geometry is None and e.mapping is None for e in twin.edges)
 
@@ -377,10 +375,14 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_b
 @pytest.mark.slow
 @pytest.mark.parametrize("c", gg.RELAY_INTERFACE_CASES, ids=repr)
 def test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin(c):
-    """PHASE 1 (see ``geometry_graphs``): the relay twin of a refused case
-    reports a usable spectrum today -- the report the edge-mapped graph is
-    held to once ``INTERFACE_NORM_READS_GEOMETRY`` is set, by the comparison of
-    the static cases."""
+    """The relay twin of each case reports a usable spectrum today.  The
+    edge-mapped graph of the ``multilinear_grid`` case steps, and its
+    report withholds the bounds with the norm named; the other kind is
+    refused.  The comparison of the two reports waits for the stage that
+    reports bounds under this norm (``INTERFACE_BOUNDS_READ_GEOMETRY``),
+    and then only for the gather: the relay twin moves a mapping onto the
+    delivered side of the reading, which is not where the norm reads a
+    scatter."""
     with gg.x64(c.needs_x64):
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
         if not gg.INTERFACE_BOUNDS_READ_GEOMETRY:
@@ -388,5 +390,10 @@ def test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin(c):
             report = twin.coupling_diagnostics()[KEY]
             assert bool(report["spectral_usable"]) and np.isfinite(
                 float(report["spectral_error_bound"])), report
+            if not gg.refused(c):
+                edge = gg.build(gg.two_body(c))
+                edge.step()
+                keys = [e.key for e in edge.edges if e.geometry is not None]
+                gg.assert_not_diagnosed(edge.coupling_diagnostics()[KEY], keys, "norm")
             return
         compare(c, gg.build(gg.two_body(c)), twin, relay=True)

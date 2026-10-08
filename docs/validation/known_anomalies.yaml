@@ -15957,44 +15957,69 @@ anomalies:
     title: "A coupling group with a zero-size floating field fails to trace under solver='ift' with diagnostics=True: a bare ValueError from a reduction over no entries"
     description: >
       A member of a coupling group may hold a floating field with no
-      entries (an empty contact set, a list of none this configuration).
-      The residual norms skip such a field, and the group steps under
-      `solver="fori"` with or without the diagnostics and under
-      `solver="ift"` without them.  Under `solver="ift"` with
-      `diagnostics=True` the step fails to trace with `ValueError:
-      zero-size array to reduction operation max which has no identity`,
-      raised in the report's measured evaluation count (`_read_gain` in
-      `core/coupling/_coupled_block.py`, which takes `max|field|` of
-      every floating field a member returns), whatever the convergence
-      norm, and with nothing naming the field or the group.  Measured on
-      the 0.4.0 development tree (CPU, jaxlib 0.11.0): two relays with a
-      two-entry field on their edges and a `(0,)` field beside it; all
-      nine combinations of norm and solver step except the three with
-      `solver="ift", diagnostics=True`.  The same graph compiles and
-      steps at v0.3.1 (`git archive` of the tag) in all nine, so this is
-      a regression of the development tree that no release carries.
-      Found while taking the census of a group's edge enumerations
-      (an edge that delivers no entries is one of its shapes).  The
-      sites that take a reduction over a field were not swept: the fix
-      should sweep them (`_field_magnitudes`, `_norm_weights`,
-      `_weight_scale`, the reading's weights).
+      entries (an empty contact set, a list with none this configuration),
+      and an edge may deliver one.  The residual norms skip such a field,
+      and the group stepped under `solver="fori"` with or without the
+      diagnostics and under `solver="ift"` without them.  Under
+      `solver="ift"` with `diagnostics=True` the step failed to trace with
+      `ValueError: zero-size array to reduction operation max which has no
+      identity`, raised in the report's measured evaluation count
+      (`_read_gain` in `core/coupling/_coupled_block.py`, which takes
+      `max|field|` of every floating field a member returns), whatever the
+      convergence norm, and with nothing naming the field or the group.
+      Measured on the 0.4.0 development tree (CPU, jaxlib 0.11.0): two
+      relays with a two-entry field on their edges and a `(0,)` field
+      beside it; all nine combinations of norm and solver stepped except
+      the three with `solver="ift", diagnostics=True`.  The same graph
+      compiles and steps at v0.3.1 (`git archive` of the tag) in all nine,
+      so this was a regression of the development tree that no release
+      carries.  The sweep of every reduction over a field found the same
+      error behind it twice more in that report (the weights and their
+      scale, then the per-field magnitudes); two sites that, once those
+      traced, would have reported a number the field had moved (the
+      coarsest `eps` of the pass's products took the field's dtype, and an
+      edge reading the field twice or through a transform selected the
+      interface reading's analysis: a bound of 2.18 where the same group
+      without the field reports 2.08); and three neighbours raising the
+      same bare `ValueError` on graphs that step in 0.3.1: a quasi-Newton
+      acceleration whose interface fields all have no entries (the
+      accelerator's power-of-two frame, under either solver, with or
+      without the diagnostics), the report of a group no member of which
+      holds an entry, and `jax.grad` through such a group under
+      `solver="ift"` (the adjoint's linear solve).  Fixed together under
+      one rule: a field with no entries is not read
+      (`acceleration._has_entries`) -- it carries no norm, no weight, no
+      floor term and no gain -- and a vector with no entries is framed by
+      one, bounded by nothing and solved by itself.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
-      Loud: the step raises before returning anything, so no wrong value
-      is reported.  The harm is a graph that stepped in 0.3.1 failing in
-      0.4.0 with an error that names no field.
+      Loud: the step raised before returning anything, so no wrong value
+      was reported.  The harm was a graph that stepped in 0.3.1 failing in
+      the development tree with an error that names no field.
     affected_components:
       - "maddening.core.graph_manager.GraphManager.step"
       - "maddening.core.coupling.group.CouplingGroup"
-    affected_versions: ">=0.4.0.dev0"
+    affected_versions: "none"
     workaround: >
-      Set `diagnostics=False` on the group, use `solver="fori"`, or keep
-      the empty field out of the member's state.
-    resolution_status: "open"
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A field with no entries still has a dtype.  One wider than every
+      other floating field of its group widens the dtype the group
+      iterates in (the promotion of its fields' dtypes, as in 0.3.1), so
+      that group's report agrees with the same group without the field to
+      rounding and not to the bit.  An edge that delivers no entries from
+      a source field that has some (a truncating transform) is not read
+      by the interface norm, but still selects the interface reading's
+      analysis for the report, whose bound is as valid.
     verification:
       - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps_under_ift_with_diagnostics"
       - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps"
+      - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does"
+      - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_nothing_to_iterate_on_steps_and_is_differentiable"
+      - "tests/core/test_pow2_frame.py::test_an_input_with_no_entries_is_framed_by_one_and_frames_nothing"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-239"

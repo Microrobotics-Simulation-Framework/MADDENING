@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling import _interface_plan
-from maddening.core.coupling.acceleration import float_fields_of
+from maddening.core.coupling.acceleration import _has_entries, float_fields_of
 from maddening.core.coupling.group import CouplingGroup
 
 
@@ -121,9 +121,11 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
       MADD-ANO-213).
 
     Static: *interface_edges* are the group's internal edges (its plan,
-    or a bare sequence of edges) and *float_fields* its floating fields
-    by node, so a group keeps one analysis for the life of its compiled
-    step.  Whether an edge delivers its field as it is follows from the
+    or a bare sequence of edges) and *float_fields* the floating fields a
+    norm can read, by node -- those with entries: an edge whose source
+    field has none delivers nothing and, like one that carries a counter,
+    is not read (``acceleration._has_entries``) -- so a group keeps one
+    analysis for the life of its compiled step.  Whether an edge delivers its field as it is follows from the
     side the norm reads it on (``InterfaceEdge.reads_source_as_is``).
     """
     read = set()
@@ -784,7 +786,7 @@ def _group_state_finite(state, node_names):
     for nn in node_names:
         for v in state[nn].values():
             v = jnp.asarray(v)
-            if jnp.issubdtype(v.dtype, jnp.floating) and v.size > 0:
+            if jnp.issubdtype(v.dtype, jnp.floating) and _has_entries(v):
                 ok = jnp.logical_and(ok, jnp.all(jnp.isfinite(v)))
     return ok
 

@@ -70,7 +70,11 @@ def node_states(
     """Strategy that generates valid state dicts for a node.
 
     Reads the node's ``initial_state()`` to determine field names and
-    shapes, then generates arrays within the declared bounds.
+    shapes, then generates arrays within the declared bounds.  Every field
+    is drawn on its own: for a field with a constraint (a unit quaternion,
+    positive populations, an index) ``.map()`` the strategy through a
+    function that restores it, which is what ``verify_node``'s
+    ``constrain_state=`` does on every draw of the battery.
 
     Parameters
     ----------

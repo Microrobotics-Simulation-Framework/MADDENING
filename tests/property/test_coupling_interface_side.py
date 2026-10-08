@@ -46,67 +46,73 @@ What is here:
   and its ``interface_side`` option: a tie, pairs of size ratio up to 100,
   and a hub whose one field a gather edge and a scatter edge both read.
 
-**Seeded faults**, and the instrument that catches each.  "Today" rows were
-seeded in a scratch copy of ``src/`` with ``plans/tools/mutants.py`` (the
-signal is the first test that failed); "rule" rows need the rule to exist
-and are written as the change to make to it then.
+**Seeded faults**, and the instrument that catches each, as measured with
+``plans/tools/mutants.py`` in a scratch copy of ``src/`` on the tree that
+implements the rule (the signal is the first test that failed; "core" is
+``tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py``,
+"pins" ``tests/core/test_interface_plan.py``, "search" the fifth score of
+``test_coupling_targeted_search.py``).  The T rows are faults of a
+delivered reading, first seeded while the library read every edge that way;
+the R rows change the rule; the S rows make two of the places that describe
+a group's edges disagree.
 
 ====  ======================================================  ========================================================
-id    fault                                                   caught by (measured signal)
+id    fault                                                   caught by (first failing test)
 ====  ======================================================  ========================================================
-T1    today: ``_interface_readings`` yields the source        caught: ``test_the_plain_loop_stops_where_the_reference_
-      value where the delivered one is prescribed             of_its_rule_does[gather-only-...-delivered]`` (residual)
-T2    today: the pool counts the source field's entries       caught: the same test on a gather-only and a
-      (the value right, the other side's count)               scatter-only row.  A two-way row cannot see it: the
-                                                              two edges' counts swap and their sum is the same
-T3    today: a field read by two edges is read once           caught: ``test_a_step_is_the_models_under_its_rule
-                                                              [side-hub-...-delivered]``
-T4    today: ``_delivered`` applies the transform before      caught: ``test_the_plain_loop_...[...-offset-delivered]``
-      the mapping
-T5    today: the spectral analysis reads the source values    **survives** the "bound" score of
-      (``_reading_parts`` in ``_coupled_block.py``) under a   ``test_coupling_targeted_search.py`` on the cells with
-      criterion on the delivered ones                         a mapping between sizes, with and without a
-                                                              differencing gather row, and
-                                                              ``test_interface_reading_twins.py``: the bound it
-                                                              reports is another number (8.17 for 1.05 on a
-                                                              differencing row, 0.1068 for 0.1093 on a plain one)
-                                                              but seldom one below the distance.  See R4
-T6    today: the floor reads the source values                survives (expected): see below
-      (``residual_precision_floor``)
-R1    rule: delivered read where the source is prescribed     the dilution pins (they keep failing) and every
-      (today's tree)                                          ``...-compact`` row of the two comparisons
-R2    rule: the source read where delivered is prescribed     ``...[gather-only-...-compact]`` rows; the tie rows
-      (a gather, or a tie, read at its source)
-R3    rule: the source value read, the delivered value's      the dilution pins (the residual is the diluted one);
-      entry count pooled                                      ``...-compact`` residuals
-R4    rule: the tie, or the side, decided differently in      tie rows (``tie-...``, ``side-4-4``) for the criterion;
-      the criterion, the floor and the spectral weights       ``test_an_edge_mapped_graph_s_diagnostics_are_its_
-      (three enumerations: ``_interface_readings``,           marker_side_twin_s``: the twin reads the compact side
-      ``_read_fields``, ``InterfacePlan.iqn_fields``)         by construction, so every reported number of the
-                                                              edge-mapped graph must be the twin's to 1e-6 -- the
-                                                              comparison T5 has no equivalent of today
-R5    rule: the side taken from the weights' shape (a sparse  ``sparse`` against ``sparse-transposed`` rows: one
-      layout's ``(rows, k)``), or from weights seen at build  matrix, three weight shapes; every graph is built
+R1    delivered read where the source is prescribed (the      here: the scatter rows of ``..._within_K_tolerances_at_
+      rule before 2026-10-07)                                 every_size`` (``Diluted``); search; core; pins
+R2    the source read where delivered is prescribed: a tie    a tie: ``test_the_plain_loop_...[tie-40-40-...-
+      read at its source; a gather read at its source         delivered]``; a gather: ``..._edges_all_gather_is_
+                                                              within_K_tolerances``; search, core and pins for both
+R3    the source value read, the delivered value's entry      here: the scatter rows (the residual is the diluted
+      count pooled                                            one); search; core ``test_the_residual_reads_each_...``
+R4    the side decided differently in the criterion, the      the floor: core only (``test_the_float_floor_takes_its_
+      floor and the spectral analysis                         eps_on_the_side_that_is_read``: see T6).  The spectrum
+                                                              (T5): ``test_an_edge_mapped_graph_s_diagnostics_are_
+                                                              its_marker_side_twin_s`` (slow), and per push the
+                                                              diagnosed twin of core.  A source-side reading that
+                                                              is merely not counted as "the field itself" (the
+                                                              report then takes a second spectrum of the same
+                                                              numbers): pins only
+R5    the side taken from the weights' shape (a sparse        ``..._edges_all_gather_...[gather-only-60-1000-sparse-
+      layout's ``(rows, k)``)                                 jacobi-float64]``; search; core (a mapping class of
+                                                              the caller's own); pins.  Every graph here is built
                                                               with zero weights and stepped with ``params``
-R6    rule: a source-side reading taken through the edge's    rows with ``offset``: the library applies the mapping,
-      transform                                               then the transform, so a pre-mapping value has no
-                                                              offset, and an offset moves the norm's scale
-R7    rule: a hub's field read once, by one edge's rule       ``side-hub`` rows (four readings, the hub's field
-                                                              twice: once as delivered, once at the source)
+R6    a source-side reading taken through the edge's          rows with ``offset``: ``test_the_plain_loop_...[two-
+      transform                                               way-...-offset-compact]``; core; pins
+R7    a field two edges read is read once (T3)                ``test_a_step_is_the_models_under_its_rule[side-hub-
+                                                              ...-compact]``; pins
+S1    ``compile()`` describes every edge as delivered while   core only: ``test_a_group_owns_the_floor_slot_where_an_
+      the trace reads the compact side                        edge_is_read_through_its_mapping[scatter-only]`` (a
+                                                              slot seeded and never written)
+S2    the trace describes every edge as delivered             as R1, and core's fixture (a slot written that was
+                                                              never seeded)
+S3    a bare edge (the report's fallback floor, a direct      core ``test_the_residual_reads_each_...``; pins
+      call of the norm) described as delivered                ``test_the_side_is_the_edges_own_wherever_it_is_
+                                                              described``
+T2    the pool counts the source field's entries where the    ``..._edges_all_gather_...[gather-only-5-100-matrix-
+      delivered value is read                                 ...]``; search; core
+T4    ``_delivered`` applies the transform before the         ``test_the_plain_loop_...[two-way-...-offset-
+      mapping                                                 compact]``; core
+T5    the spectral analysis reads the delivered values        see R4.  Before the rule nothing caught it (the
+      (``_reading_parts`` in ``_coupled_block.py``) under a   "bound" score of the search and
+      criterion on the compact ones                           ``test_interface_reading_twins.py`` let it through)
+T6    the floor reads the source values of every edge         core only (the eps cell and the dead-band cell)
+      (``residual_precision_floor``)
 ====  ======================================================  ========================================================
 
 **What no instrument here sees.**  The float floor of the residual is
 ``PRECISION_FLOOR_ULPS * eps / rtol`` per entry the norm reads, whichever
 entries those are, so a floor taken on the other side of a mapping is the
-same number unless a reading is exactly zero or dead-banded on one side
-only (T6 survives).  IQN's ``InterfacePlan.iqn_fields`` chooses the state
-fields the accelerator works on, which the side rule does not change; a
-wrong choice there moves pass counts, not a verdict's truth, and is held
-only through the property under ``iqn-*``.  And on this tree nothing
-catches T5: a spectral analysis on another reading than the criterion's
-gives a different bound that is rarely an *understated* one, which is all
-a score against the true distance can see.  The marker-side twin is the
-instrument for it and can only run once the two graphs share a criterion.
+same number unless a reading is dead-banded on one side only or the two
+sides differ in dtype: those two cells are held edge by edge in the core
+file, and nothing in this module tells such a floor apart (T6, and the
+floor half of R4, survive here).  IQN's ``InterfacePlan.iqn_fields``
+chooses the state fields the accelerator works on, which the side rule
+does not change; a wrong choice there moves pass counts, not a verdict's
+truth, and is held only through the property under ``iqn-*``.  The
+marker-side twin holds the spectrum to the criterion's side, and has
+finite bounds to compare only on its settled rows (:data:`TWIN_SETTLED`).
 """
 
 from __future__ import annotations

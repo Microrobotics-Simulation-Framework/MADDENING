@@ -454,9 +454,9 @@ def _reading_eps(source_dtype, value) -> float:
     """The float resolution of one reading: the coarser of its own dtype's and its source's.
 
     *value* is what the norm reads on the edge
-    (``InterfaceEdge.reading``).  Read at its source it is the stored
-    field, at that field's own eps: the dtype a mapping or a transform
-    would have delivered does not enter.  Read as delivered:
+    (``InterfaceEdge.reading``).  An edge read at its source hands the
+    stored field itself, so this is that field's own eps: the dtype a
+    mapping or a transform would have delivered does not enter.
 
     A delivered value is no finer than the field it was computed from.
     Under ``jax_enable_x64`` a float64 mapping matrix applied to a

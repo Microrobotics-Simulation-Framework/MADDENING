@@ -207,7 +207,7 @@ def _narrow(v):
 
 @pytest.mark.parametrize("form", sorted(FORMS))
 def test_the_float_floor_takes_its_eps_on_the_side_that_is_read(form):
-    """A float64 field whose edge delivers float32 (a narrowing transform):
+    """Under x64, a float64 field whose edge delivers float32 (a narrowing transform):
     read at its source the reading is the stored float64 field, at that
     dtype's eps; read as delivered it is the float32 value, at the coarser
     eps.  A floor left on the delivered side of an expanding edge is 5e8
@@ -372,7 +372,8 @@ def test_a_group_owns_the_floor_slot_where_an_edge_is_read_through_its_mapping(g
 
 def test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings(graph):
     """The claim, on each kind: converged, and the distance to the exact
-    fixed point in the compact readings is at most ``K`` tolerances."""
+    fixed point in the compact readings is at most ``K`` tolerances.  (One
+    jitted step of the compiled graph; the float64 kinds run under x64.)"""
     shape, built = graph["shape"], graph["built"]
     with precision(shape.dtype == "float64"):
         ref = _stepped(shape, built)

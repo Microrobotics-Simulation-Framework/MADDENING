@@ -587,9 +587,9 @@ claims:
   area: configuration
   claim: >-
     The diagnostics cost "9 Jacobian-vector products for the spectrum (18
-    under convergence_norm="interface" with a mapping or a transform on an
-    internal edge, or a field that more than one internal edge reads
-    ...) and 11 + 4 k + 5 n_p + 2 k n_p more for the bound per group per step (plus one
+    under the interface norm with a transform, or a mapping read as
+    delivered, on an internal edge, or a field that more than one internal
+    edge reads ...) and 11 + 4 k + 5 n_p + 2 k n_p more for the bound per group per step (plus one
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
     at most 64 entries, one per larger constant)"; arnoldi_spectral_radius "costs n_steps + 1
@@ -1503,22 +1503,29 @@ claims:
     between two successive iterations: for each intra-group edge, the value
     the edge delivers -- its source field through the edge's interface
     mapping and then its transform, exactly as the step hands it to the
-    target ...  Only the fields that appear on intra-group edges are
-    compared", scaled as the mixed norm.  The mapping weights are the ones
-    the step ran with (params["mappings"], a per-step override included).
+    target -- or, for an edge whose mapping delivers more entries than its
+    source field holds, the source field itself, before the mapping and the
+    transform ...  Only the fields that appear on intra-group edges are
+    compared", scaled as the mixed norm.  The mapping weights of an edge read
+    as delivered are the ones the step ran with (params["mappings"], a
+    per-step override included).
   sources:
-    - src/maddening/core/coupling/acceleration.py:461 (coupling_residual_interface)
-    - src/maddening/core/coupling/acceleration.py:402 (_interface_readings)
-    - src/maddening/core/edge.py:170 (_delivered)
-    - src/maddening/core/coupling/group.py:95 (CouplingGroup, convergence_norm)
+    - src/maddening/core/coupling/acceleration.py::coupling_residual_interface
+    - src/maddening/core/coupling/acceleration.py::_interface_readings
+    - src/maddening/core/coupling/_interface_plan.py::_norm_side
+    - src/maddening/core/edge.py::_delivered
+    - src/maddening/core/coupling/group.py::CouplingGroup (convergence_norm)
   conditions: >-
     convergence_norm="interface"; state edges (a flux edge is refused at
     compile: CPL-075), with or without an interface mapping and a transform;
-    an edge whose source field is not floating, or that delivers no entries,
-    is not read.  The dead band and the unevaluable-field rule are applied
-    to the delivered value.  The domain cells run a pair with one mapped and
-    one plain internal edge, the mapping's weights passed for the step.
-  oracle: closed form over the delivered edge values, in float64.
+    an edge whose source field is not floating, or whose reading has no
+    entries, is not read.  The dead band and the unevaluable-field rule are
+    applied to the value that is read: the delivered one, or the source
+    field of an edge read at its source (CPL-188 states which).  The domain
+    cells run a pair with one mapped and one plain internal edge, the
+    mapping a tie (read as delivered), its weights passed for the step; the
+    source-side reading has the cells of CPL-188.
+  oracle: closed form over the edge values that are read, in float64.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
     - tests/core/test_phases_5_7_8.py::TestInterfaceResidual::test_interface_residual_detects_difference
@@ -1531,6 +1538,8 @@ claims:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_group_iterates_until_what_its_mapped_edge_delivers_has_stopped_moving
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver
     - tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_the_monolithic_reference
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_residual_reads_each_static_mapped_edge_on_its_compact_side
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_pool_counts_the_entries_of_the_side_that_is_read
   status: verified
   notes: >-
     Until MADD-ANO-195 was fixed the norm applied an edge's transform
@@ -3363,7 +3372,11 @@ claims:
     under convergence_norm="interface" the fields are what that norm reads,
     the value each internal edge delivers: its source value through the
     edge's interface mapping (the weights the step ran with) and then its
-    transform, with the mappings linear and the transforms affine (offsets,
+    transform -- or the source value itself on an edge whose static mapping
+    delivers more entries than its source holds (CPL-188: the report of an
+    edge-mapped pair with such a scatter is its marker-side twin's, every
+    number of it, where the spectrum settles) -- with the mappings linear
+    and the transforms affine (offsets,
     scales, selections; a non-affine transform makes the map non-linear in
     the reading) (MADD-ANO-187, MADD-ANO-195), and a field that several
     internal edges read counted once for each of them, as that norm counts
@@ -3414,6 +3427,8 @@ claims:
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_weights_passed_for_one_step_are_read_as_the_mapping_objects_own_are
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_random_mapped_internal_edges
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_diagnosed_edge_mapped_pair_reports_every_number_of_its_marker_side_twin
+    - tests/property/test_coupling_interface_side.py::test_a_settled_spectrum_and_its_bounds_are_the_marker_side_twin_s
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_on_a_star
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_an_identity_transform_on_every_edge_of_a_star_changes_no_bound
@@ -3706,7 +3721,9 @@ claims:
     derivative only.  The resolvent is applied exactly to each probe's
     secant (MADD-ANO-142; per-entry probes MADD-ANO-143).  Its norms are
     the state's fields: under convergence_norm="interface" with an edge
-    transform, the raw source fields, before the transform.  The part of
+    transform or a mapping, the raw source fields, before either (for an
+    edge the norm reads at its source, CPL-188, that is the reading
+    itself).  The part of
     the distance that is the pass's rounding has no direction and is
     multiplied by the operator norm of the right-hand side's change over
     the directions the Jacobian reads (it took one stand-in direction and
@@ -3961,10 +3978,12 @@ claims:
   conditions: >-
     every norm; mixed dtypes; computed in at least float32 whatever the
     fields' dtypes, each field at its own dtype's eps (MADD-ANO-186).  Under
-    "interface" the entries are what each internal edge delivers (its
-    mapping, with the weights passed as `mappings`, then its transform),
-    each at the coarser of its own dtype's eps and its source field's
-    (MADD-ANO-211).
+    "interface" the entries are what that norm reads on each internal edge
+    (CPL-188): what the edge delivers (its mapping, with the weights passed
+    as `mappings`, then its transform), at the coarser of its own dtype's
+    eps and its source field's (MADD-ANO-211), or the source field itself,
+    at its own eps and with the dead band asked of it, where a static
+    mapping delivers more entries than the source holds.
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the floor is the
     members' state's, each position field at its own dtype's eps, with
@@ -3982,6 +4001,8 @@ claims:
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_counts_more_than_65504_entries
     - tests/property/test_coupling_targeted_search.py::test_the_floor_covers_what_the_reported_residual_misses_per_push
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_float_floor_takes_its_eps_on_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_dead_band_is_asked_of_the_side_that_is_read
   status: verified
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
@@ -5466,6 +5487,7 @@ claims:
   sources:
     - src/maddening/core/coupling/acceleration.py:354 (coupling_residual_interface, Notes)
     - src/maddening/core/coupling/_interface_plan.py::_interface_edge_order
+    - src/maddening/core/coupling/_interface_plan.py::InterfacePlan.norm_edges
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     convergence_norm="interface", any acceleration and solver; two edges
@@ -5477,6 +5499,7 @@ claims:
   tests:
     - tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
+    - tests/core/test_interface_plan.py::test_the_reports_fallback_floor_reads_the_edges_in_the_order_the_norm_sums_them
   status: verified
   notes: >-
     Failing until 0.4.0's claims fix: the norm summed in insertion order, and a
@@ -5668,29 +5691,68 @@ claims:
     sharded: narrowed
 
 - id: CPL-188
-  area: precision floor
+  area: norms
   claim: >-
-    Under convergence_norm="interface" with an interface mapping on an
-    internal edge "the entries are what the edges deliver, which depends on
-    the mapping weights the step ran with (params["mappings"], which a
-    caller may override for one step): the step measures that group's floor
-    itself and the report reads it, so a params override, or an edit of the
-    weights since, does not move it either."
+    convergence_norm="interface" reads a mapped internal edge on its compact
+    side: "an internal edge whose static mapping delivers more entries than
+    its source field holds ... is read at its source value: the field
+    itself, before the mapping and so before the transform ...  A mapping
+    onto fewer entries (a gather), a tie (as many entries delivered as read)
+    and an edge with no mapping are read as delivered.  The side is decided
+    in one place, from the two sizes the mapping declares ..., and the
+    residual, the float floor and its eps, the spectral analysis and its
+    weights, the bounds and the report all read through it."  Where an edge
+    is read as delivered through a mapping, the value "depends on the mapping
+    weights the step ran with (params["mappings"], which a caller may
+    override for one step): the step measures that group's floor itself and
+    the report reads it, so a params override, or an edit of the weights
+    since, does not move it either."
   sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - src/maddening/core/coupling/_interface_plan.py::_norm_side
+    - src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.reading
+    - src/maddening/core/coupling/acceleration.py::_interface_readings
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_error_bound)
     - src/maddening/core/coupling/_group_layout.py::_reads_mapping_weights
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
-    convergence_norm="interface" and an internal edge with a mapping whose
-    source field is floating: only that group owns the `_meta` slot
-    coupling_<key>_reading_floor (the floor per evaluation, NaN until a
-    step has written it, restarted with the group's other report slots);
-    every other group's floor is taken from the returned state alone, which
-    the graph keeps across a later state write (CPL-189).  A state whose slot was never written (a checkpoint from before
-    the slot existed) is read with the graph's own weights.
+    convergence_norm="interface"; static mappings: the dense kind, the
+    sparse kind in its padded-gather and in its scatter layout, and a
+    mapping class of the caller's own, the side taken from n_source and
+    n_target (or field_shapes()) and never from the shape of the weights; a
+    geometry-dependent mapping inside the group is refused at compile
+    (MAP-048).  Exercised edge by edge, on every one of those forms:
+    expanding, reducing and tied, with and without an edge transform, in
+    float32 and float64 (the residual to the bit against a plain edge over
+    the prescribed reading; the floor's eps and its dead band on the two
+    cells where the other side gives another number).  Exercised on
+    compiled pairs against the exact reference of each rule (residual, pass
+    count and verdict of the plain iteration): the dense kind and both
+    sparse layouts, gather, scatter and both, a tie, an offset transform,
+    Gauss-Seidel and Jacobi, float32 and float64; a hub whose one field a
+    gather edge and a scatter edge both read; Aitken, fixed relaxation,
+    IQN-ILS and IQN-IMVJ only through the converged distance (CPL-191).
+    Only a group with an edge read through its mapping, whose source field
+    is floating, owns the `_meta` slot coupling_<key>_reading_floor (the
+    floor per evaluation, NaN until a step has written it, restarted with
+    the group's other report slots); a group whose mapped edges are all
+    read at their source has no slot, and its floor, as every other
+    group's, is taken from the returned state alone, which the graph keeps
+    across a later state write (CPL-189).  A state whose slot was never
+    written (a checkpoint from before the slot existed) is read with the
+    graph's own weights; a checkpoint that carries the slot of a group that
+    does not own it (a development tree before this rule wrote one for
+    every mapped group) loads with a RuntimeWarning naming the slot, which
+    is dropped.  The source-side reading is exercised at one rate and
+    unbatched, in float32 and float64, with that checkpoint; the cells of
+    the other domains below run a tie, read as delivered through its
+    mapping.
   oracle: >-
-    residual_precision_floor of the returned state under the step's
-    weights; the documented bound formula on the reported slots.
+    the residual of a plain edge over the prescribed reading, to the bit;
+    the float64 reference of either rule on the compact system
+    (tests/property/interface_side_graphs.py), under which the other rule
+    must fail; residual_precision_floor of the returned state under the
+    step's weights; the documented bound formula on the reported slots.
   tests:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_recorded_floor_times_the_count_is_the_floor_the_report_adds
@@ -5698,6 +5760,24 @@ claims:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_replaced_group_does_not_inherit_the_recorded_floor
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_state_without_the_recorded_floor_is_read_with_the_graphs_own_weights
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_residual_reads_each_static_mapped_edge_on_its_compact_side
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_pool_counts_the_entries_of_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_float_floor_takes_its_eps_on_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_dead_band_is_asked_of_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_source_side_reading_takes_no_weights_the_step_ran_with
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_every_plan_a_graph_builds_of_a_group_reads_each_edge_on_the_same_side
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_group_owns_the_floor_slot_where_an_edge_is_read_through_its_mapping
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_checkpoint_that_carries_the_slot_of_a_group_that_no_longer_owns_it_loads_loudly
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_checkpoint_of_a_group_that_owns_the_slot_brings_it_back
+    - tests/core/test_interface_plan.py::test_a_static_mapping_onto_more_entries_is_read_at_its_source_and_a_tie_as_delivered
+    - tests/core/test_interface_plan.py::test_the_side_is_the_edges_own_wherever_it_is_described
+    - tests/core/test_interface_plan.py::test_only_an_edge_read_through_its_mapping_makes_the_floor_depend_on_weights
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[two-way-20-2000-matrix-gauss-seidel-float64-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[scatter-only-20-2000-sparse-gauss-seidel-float32-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[scatter-only-20-2000-sparse-transposed-jacobi-float64-offset-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[tie-40-40-sparse-gauss-seidel-float64-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_a_step_is_the_models_under_its_rule[side-hub-matrix-local-float64-gauss-seidel-compact]'
+    - tests/property/test_coupling_interface_side.py::test_a_source_side_reading_does_not_carry_the_edges_transform
   status: verified
   domains:
     f32:
@@ -5827,6 +5907,75 @@ claims:
     multi_rate: tests/core/test_multirate_flux_is_of_the_held_state.py::test_a_flux_reader_follows_the_held_state_at_every_base_step
     sub_cycled: narrowed
     predictors_warm_starts: n/a
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: CPL-191
+  area: norms
+  claim: >-
+    A coupling group that reports converged=True under
+    convergence_norm="interface" is within K tolerances of its fixed point:
+    "the distance to the fixed point in the compact readings, in the norm's
+    own weights, is at most K tolerances, with K = ||D (I - A)^-1 (I - L)
+    D^-1||_2 of the loop on its compact readings (A the pass's stationary
+    map, L its same-pass part, D dividing each reading by its own
+    magnitude) ...  K is about 1 / (1 - gain) for a normal loop and does not
+    see N", the size of a field a mapped edge delivers onto.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - src/maddening/core/coupling/_interface_plan.py::_norm_side
+    - src/maddening/core/coupling/acceleration.py::coupling_residual_interface
+    - benchmarks/results/interface_norm_dilution/RESULT.md
+  conditions: >-
+    an affine pass (linear nodes, linear static mappings, affine edge
+    transforms), above the residual's float floor; float32 and float64;
+    pairs whose two mapped internal edges gather, scatter, or one of each,
+    5 to 60 values against 1e2 to 1e5 (a million in the slow lane), and
+    relays of size ratio 1/300 to 300, a tie, and a hub whose one field a
+    gather edge and a scatter edge both read; the dense kind and the sparse
+    kind in either layout; Gauss-Seidel and Jacobi; no acceleration, Aitken,
+    fixed relaxation, IQN-ILS and IQN-IMVJ (the IQN rows up to 1e4
+    entries); loop gains 0.05 to 0.95 of either sign.  K is computed from
+    the loop's own operator, not chosen: the identity CPL-088's bound rests
+    on, applied to a residual at its threshold (the estimate a verdict
+    compares is never below the residual: CPL-048).  Measured before the
+    rule of CPL-188, with a scatter read as delivered: 23 to 459 tolerances
+    at 1e3 to 1e6 target entries, growing as the square root of the count;
+    with it 3.3 to 3.6 at every size.  Not claimed for mixed dtypes,
+    float16 or bfloat16, vmap, multi-rate graphs, sub-cycled groups,
+    predictors or warm starts, run_adaptive, checkpoint restarts or
+    sharded graphs.
+  oracle: >-
+    the exact float64 fixed point of the compact system and K from the
+    loop's operator (tests/property/interface_side_graphs.py::Reference;
+    tests/property/coupled_topologies.py::LinearModel.interface_claim).
+  tests:
+    - tests/property/test_coupling_interface_side.py::test_a_converged_group_whose_edges_all_gather_is_within_K_tolerances
+    - tests/property/test_coupling_interface_side.py::test_the_gather_only_shapes_converge_within_K_tolerances
+    - tests/property/test_coupling_interface_side.py::test_the_compact_rule_itself_keeps_the_claim_on_a_scatter
+    - tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size
+    - tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_a_million_cells
+    - tests/property/test_coupling_interface_side.py::test_the_claim_over_every_configuration
+    - tests/property/test_coupling_targeted_search.py::test_a_converged_interface_quantity_is_within_K_tolerances_per_push
+    - tests/property/test_coupling_targeted_search.py::test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances
+    - tests/property/test_coupling_targeted_search.py::test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances_on_a_larger_target
+    - tests/property/test_coupling_targeted_search.py::test_a_known_side_defect_the_search_reached_is_fixed
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings
+  status: verified
+  domains:
+    f32:
+      - 'tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size[two-way-sparse-jacobi-float32-none]'
+      - 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[gather-only]'
+    f64: 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[two-way]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[scatter-only]'
+    grad: n/a
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed

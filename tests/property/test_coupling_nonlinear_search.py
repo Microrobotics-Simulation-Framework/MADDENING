@@ -1601,3 +1601,32 @@ def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
                     held.base, unit=unit)) == case
             else:
                 assert held is case, (index, unit)
+
+
+# ---------------------------------------------------------------------------
+# The cells observed at the accepted iterate
+# ---------------------------------------------------------------------------
+
+
+def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_mapping():
+    """Which cells are stepped with the return rule off, with the state a
+    user gets checked beside them (:func:`returned_score`), is decided by
+    what a cell is (:func:`reads_a_recomputed_field`) and not by its index.
+    A change of layout therefore moves that treatment without a word -- to
+    other cells, or to none, and the check beside the hunt then tests
+    nothing.  (On the layout a rotation over eight rows left by accident
+    they were cells 33 and 34.)  Held here, each cell found by what it is:
+    the mapped ring under the interface norm, once in the rotation (Aitken
+    under Gauss-Seidel, a cap of 120) and once appended (Jacobi, stopped
+    after five passes).  No compile."""
+    observed = tuple(i for i in ALL_CELLS if reads_a_recomputed_field(CELLS[i]))
+    assert observed == (
+        CELLS.index(Cell("mapped", "float32", 2, 120, "product")),
+        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"))), observed
+    rotated, appended = observed
+    assert rotated < len(ROTATED) <= appended
+    for index in observed:
+        knobs = CELLS[index].knobs
+        assert knobs["convergence_norm"] == "interface" and knobs["solver"] == "ift", knobs
+        # In one block of the slow hunt, whose search asserts the score.
+        assert sum(index in block for block in BLOCKS) == 1, index

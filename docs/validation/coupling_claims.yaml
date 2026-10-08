@@ -6034,7 +6034,11 @@ claims:
     (to the bit under "l2" and "mixed").  One more evaluation of the pass
     per solve where a field is recomputed; none in a group whose every
     floating field is measured whole, whose compiled step is the one it
-    was.  A diverged (non-finite) accepted iterate is returned as the loop
+    was.  A static mapping onto more entries than its source holds is read
+    at its source (CPL-188): its source field is measured whole and kept,
+    and a pair whose two mapped edges both expand recomputes nothing (held
+    on compiled pairs of each kind against the reference's own loop, and
+    by the three-step relay twin).  A diverged (non-finite) accepted iterate is returned as the loop
     left it; a recomputed field that is not finite makes the residual inf
     and strict_convergence raise.  max_iterations=1 returns its single pass
     as it is.  Tested on groups whose members are linear in what they
@@ -6136,7 +6140,14 @@ claims:
     entries); loop gains 0.05 to 0.95 of either sign.  K is computed from
     the loop's own operator, not chosen: the identity CPL-088's bound rests
     on, applied to a residual at its threshold (the estimate a verdict
-    compares is never below the residual: CPL-048).  Measured before the
+    compares is never below the residual: CPL-048).  K is the constant of
+    the iterate the loop accepted, which the report is of.  The state a
+    solve returns is that iterate with the fields the norm does not measure
+    whole one plain pass on (CPL-191; a field read at its source is
+    measured whole and kept), and the tests hold the state returned to
+    K' = ||D [(I - A)^-1 (I - L) - P] D^-1||_2, P selecting the readings of
+    a recomputed source (Reference.K_returned; K' = K where both edges
+    scatter), and the report to the reference's own loop.  Measured before the
     rule of CPL-188, with a scatter read as delivered: 23 to 459 tolerances
     at 1e3 to 1e6 target entries, growing as the square root of the count;
     with it 3.3 to 3.6 at every size.  Not claimed for mixed dtypes,

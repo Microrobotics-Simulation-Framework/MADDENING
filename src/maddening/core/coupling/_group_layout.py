@@ -166,6 +166,12 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
       transform**, which may deliver less than the field: the part of it
       they do not deliver is measured by nothing (MADD-ANO-241).
 
+    A static mapping onto more entries than its source holds is read on
+    its compact side, at the source (``_interface_plan._norm_side``): the
+    reading is the source field itself, before the mapping and the
+    transform, so that field is measured whole and kept, like one a plain
+    edge reads.
+
     The return rule (``_with_nonfloat_fields_at`` in the step): a field
     measured whole keeps the accepted iterate's value, bit for bit; every
     field named here takes the value **one plain pass of the group's own

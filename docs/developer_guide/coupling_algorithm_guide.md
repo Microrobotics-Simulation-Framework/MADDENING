@@ -110,6 +110,12 @@ the iterate before it, which nothing compares.  So the step returns
   edge, or only through a mapping or a transform -- as `F(x)` holds it:
   one more evaluation of the pass, at `x`.
 
+A static mapping onto more entries than its source holds is read at its
+source (the compact-side rule, below): that reading is the source field
+itself, so the field is measured whole and kept, like one a plain edge
+reads.  A field read only through a gather, a tie or a transform is
+recomputed.
+
 One rule, whatever the schedule, the acceleration, the solver and the
 verdict (`max_iterations=1` returns its one pass as it is).  Until 0.4.0
 the step returned `x` as it was, and a one-way pair under Jacobi came
@@ -533,6 +539,13 @@ its compact readings (`A` the pass's stationary map, `L` its same-pass
 part, `D` dividing each reading by its own magnitude): the identity the
 bound above rests on, applied to a residual at its threshold.  `K` is
 about `1 / (1 − gain)` for a normal loop and does not see `N`.
+That is the iterate the loop accepted, which the report is of.  The state
+a solve returns is that iterate with every field the norm does not
+measure whole one plain pass on (the return rule above; CPL-191): a
+source field read at its source is measured whole and kept, the source of
+a gather or a tie is recomputed, and the state returned is within `K'`
+tolerances, `K' = ‖D [(I − A)⁻¹ (I − L) − P] D⁻¹‖₂` with `P` selecting the
+readings of a recomputed source (`K' = K` where both edges scatter).
 
 In either reading `1/(1 − rho)` is the resolvent's norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a

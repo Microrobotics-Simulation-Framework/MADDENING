@@ -732,6 +732,50 @@ def _apt_installs(job: dict, before: str) -> set[str]:
     return packages
 
 
+#: The longest an ``apt-get`` step may be allowed to run, in minutes.  The
+#: installs here take under one; a mirror that stops answering leaves
+#: apt-get waiting without output, and a step with no limit of its own then
+#: holds its runner until the job's (GitHub's default is six hours).
+APT_STEP_TIMEOUT_MINUTES = 15
+
+
+def _apt_steps():
+    """``(workflow, job, step)`` for every step of every workflow that runs ``apt-get``."""
+    found = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for job_name, job in _workflow(path.name)["jobs"].items():
+            for step in job.get("steps", ()):
+                # A word match, not a parse: other steps' scripts hold
+                # here-documents and JavaScript that shlex cannot split.
+                if any(re.search(r"(?<![\w-])apt-get(?![\w-])", line)
+                       for line in _logical_lines(step.get("run", ""))):
+                    found.append((path.name, job_name, step))
+    return found
+
+
+def test_the_scan_for_apt_get_steps_finds_the_ones_there_are():
+    """The test below is vacuous if the scan finds nothing."""
+    assert {(w, j) for w, j, _s in _apt_steps()} >= {("ci.yml", "test"), ("slow-tests.yml", "slow")}
+
+
+def test_every_apt_get_step_has_a_time_limit_of_its_own():
+    """A hung package mirror must cost minutes, not the job's whole limit.
+
+    On 2026-10-07 the per-push lane's install step sat in ``apt-get`` for
+    1 h 50 min in one shard of a pull request whose other jobs had all
+    passed; nothing limited the step, and ``ci.yml``'s jobs have no limit
+    of their own either.
+    """
+    unbounded = [f"{workflow}: {job}: {step.get('name', step.get('run', '')[:40])!r}"
+                 for workflow, job, step in _apt_steps()
+                 if not isinstance(step.get("timeout-minutes"), int)
+                 or isinstance(step.get("timeout-minutes"), bool)
+                 or not 0 < step["timeout-minutes"] <= APT_STEP_TIMEOUT_MINUTES]
+    assert not unbounded, (
+        f"these steps run apt-get without a `timeout-minutes` of at most "
+        f"{APT_STEP_TIMEOUT_MINUTES}: {unbounded}")
+
+
 @pytest.mark.parametrize("workflow, job, run_step, needed", [
     # test_fuzz_under_valgrind runs per push and self-skips without valgrind.
     ("ci.yml", "test", "Run tests", {"valgrind"}),

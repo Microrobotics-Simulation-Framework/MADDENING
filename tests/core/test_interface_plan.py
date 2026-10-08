@@ -518,6 +518,38 @@ def test_the_geometry_views_differ_in_whether_an_inbound_edge_counts():
         "a source anchor is not the holder reading its own state")
 
 
+def test_the_positions_a_pass_reads_from_the_iterate_are_listed_once_per_mapping():
+    """What differs between the returned iterate and the fixed point: the
+    positions a source-anchored internal edge reads with its value, and
+    those a member that computes fluxes reads again for its flux hook.  A
+    member's pre-step positions (a target anchor of ``update``) and an
+    outside node's are constants of the pass and are not listed."""
+    back = EdgeSpec("b", "a", "x", "u0")
+    other = _Geometry()
+    source = EdgeSpec("a", "b", "x", "u0", mapping=GEOM, geometry=("source", "g"))
+    again = EdgeSpec("a", "b", "x", "u1", mapping=other, geometry=("source", "g"))
+    assert _pair(source, again, back).geometry_iterate_reads() == [
+        ("a", "g", GEOM), ("a", "g", other)]
+    # A target anchor of ``update``: the member's pre-step state.
+    target = EdgeSpec("a", "b", "x", "u0", mapping=GEOM, geometry=("target", "g"))
+    plain = {name: types.SimpleNamespace(node=_Plain()) for name in "abo"}
+    assert _pair(target, back, nodes=plain).geometry_iterate_reads() == []
+    # The same edge into a member that computes fluxes is resolved again
+    # for the hook, from the member's in-pass state.
+    fluxy = {**plain, "b": types.SimpleNamespace(node=_Fluxy())}
+    assert _pair(target, back, nodes=fluxy).geometry_iterate_reads() == [("b", "g", GEOM)]
+    # From outside the group: the outside node's positions are a constant,
+    # the member's own are not where it computes fluxes.
+    outside = EdgeSpec("o", "a", "x", "u1", mapping=GEOM, geometry=("source", "g"))
+    inbound = EdgeSpec("o", "b", "x", "u1", mapping=GEOM, geometry=("target", "g"))
+    assert _pair(outside, back, nodes=plain).geometry_iterate_reads() == []
+    assert _pair(inbound, back, nodes=plain).geometry_iterate_reads() == []
+    assert _pair(inbound, back, nodes=fluxy).geometry_iterate_reads() == [("b", "g", GEOM)]
+    # Never an edge out of the group.
+    outbound = EdgeSpec("a", "o", "x", "u0", mapping=GEOM, geometry=("source", "g"))
+    assert _pair(outbound, back, nodes=plain).geometry_iterate_reads() == []
+
+
 def test_a_flux_across_the_groups_boundary_counts_for_the_pass_and_not_for_the_refusals():
     """Whether a pass computes fluxes at all counts every edge with an end in
     the group; the refusals read the internal ones."""

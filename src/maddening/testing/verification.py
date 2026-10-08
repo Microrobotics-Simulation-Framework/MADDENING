@@ -23,6 +23,13 @@ Each check is also exposed as a standalone function (``node_finite``,
 ``node_gradient_finite``, ...) for finer control, and
 :func:`node_invariant` accepts an arbitrary predicate.
 
+Every state field is sampled on its own, in a box.  A field that only
+means something under a constraint (a unit quaternion, positive
+populations, a counter used as an index, two fields that must agree)
+needs ``constrain_state=`` / ``constrain_boundary=`` (a function applied
+to every draw) or ``state_strategy=`` / ``boundary_strategy=`` (your own
+Hypothesis strategy); see :func:`verify_node`.
+
 Requires ``hypothesis >= 6.165``. Install via::
 
     pip install maddening[verify]
@@ -32,7 +39,7 @@ from __future__ import annotations
 
 import traceback
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import jax
@@ -62,6 +69,9 @@ except ImportError as e:  # pragma: no cover - exercised only without extra
 
 
 Bounds = dict[str, tuple[float, float]]
+#: A caller's map over a drawn state dict or boundary-input dict: the
+#: ``constrain_state`` / ``constrain_boundary`` of :func:`verify_node`.
+Constraint = Callable[[dict], dict]
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -104,6 +114,111 @@ class VerificationResult:
         return f"{head} ({self.n_examples} examples)"
 
 
+class _Refused(BaseException):
+    """A refusal of a ``constrain_*`` function or a supplied strategy, on
+    its way out of a check.
+
+    Hypothesis takes any ``Exception`` raised while an example is drawn
+    for a failing example of the test: it looks for more of them, shrinks,
+    runs its "explain" phase (some two hundred further draws) and hands
+    back an exception annotated as a falsifying example, in a group when
+    the node failed elsewhere too.  A refusal says nothing about the node
+    and is none of that.  Inside the battery it therefore travels as a
+    ``BaseException``, which ends the run at the first refused draw, and
+    :func:`_run` turns it into the ``ValueError`` the caller gets.  (When
+    the run was not derandomised, Hypothesis prints its one-line seed hint
+    for a run that ends this way.)  A caller drawing from
+    :meth:`_Inputs.strategy` in their own ``@given`` test gets the
+    ``ValueError`` directly, as that test's failure.
+    """
+
+
+def _shape_and_dtype(value: Any) -> tuple[tuple[int, ...], np.dtype]:
+    shape, dtype = getattr(value, "shape", None), getattr(value, "dtype", None)
+    if shape is None or dtype is None:  # a Python scalar, a list
+        value = np.asarray(value)
+        shape, dtype = value.shape, value.dtype
+    return tuple(int(d) for d in shape), np.dtype(dtype)
+
+
+def _constraint(option: str, fn: Constraint, refused: type[BaseException]) -> Constraint:
+    """``fn`` as a map over draws that refuses, by raising ``refused``, a
+    result of another structure.
+
+    A constraint moves values, not the layout: the same fields, each with
+    the shape and dtype it was drawn with.  A function that returns
+    anything else (a float64 quaternion beside float32 fields, an index
+    turned float by a clip, a field forgotten) would have every check
+    judge a state the node is never given, so it is refused by name.
+    """
+    def apply(drawn: dict) -> dict:
+        # Read before the call: a function may edit ``drawn`` in place.
+        before = {name: _shape_and_dtype(value) for name, value in drawn.items()}
+        try:
+            out = fn(drawn)
+        except HypothesisException:  # assume() / reject() inside the function
+            raise
+        except Exception as exc:
+            raise refused(
+                f"{option} raised {type(exc).__name__} on a drawn example: {exc}"
+            ) from exc
+        if not isinstance(out, dict):
+            raise refused(
+                f"{option} must return the dict it maps (fields {sorted(before)}), "
+                f"got {type(out).__name__}"
+            )
+        dropped, added = sorted(set(before) - set(out)), sorted(set(out) - set(before))
+        if dropped or added:
+            raise refused(
+                f"{option} changed the set of fields"
+                + (f": dropped {dropped}" if dropped else "")
+                + (f": added {added}" if added else "")
+                + ".  It must return every field it was given, and no other."
+            )
+        for name, (shape, dtype) in before.items():
+            new_shape, new_dtype = _shape_and_dtype(out[name])
+            if new_shape != shape:
+                raise refused(
+                    f"{option} changed the shape of '{name}': {shape} -> {new_shape}.  "
+                    "It must return every field with the shape it was drawn with."
+                )
+            if new_dtype != dtype:
+                raise refused(
+                    f"{option} changed the dtype of '{name}': {dtype} -> {new_dtype}.  "
+                    "It must return every field with the dtype it was drawn with "
+                    "(cast the result back)."
+                )
+        return out
+    return apply
+
+
+def _as_given(
+    option: str, strategy: st.SearchStrategy, refused: type[BaseException],
+) -> st.SearchStrategy:
+    """``strategy``'s own examples, untouched.  An exception it raises while
+    generating one is refused (``refused`` is raised) rather than reported
+    as the node's failure, with the previous example as its
+    "counterexample"; so is an example that is not a dict of fields."""
+    @st.composite
+    def drawn(draw):
+        try:
+            example = draw(strategy)
+        except HypothesisException:  # rejection and the engine's control flow
+            raise
+        except Exception as exc:
+            raise refused(
+                f"{option} raised {type(exc).__name__} while generating an "
+                f"example: {exc}"
+            ) from exc
+        if not isinstance(example, dict):
+            raise refused(
+                f"{option} must yield the dict of fields the node is given, "
+                f"got {type(example).__name__}"
+            )
+        return example
+    return drawn()
+
+
 @dataclass(frozen=True)
 class _Inputs:
     node: Any
@@ -112,16 +227,83 @@ class _Inputs:
     boundary_inputs: dict | None
     dt_range: tuple[float, float]
     dtype: np.dtype
+    constrain_state: Constraint | None = None
+    constrain_boundary: Constraint | None = None
+    state_strategy: st.SearchStrategy | None = None
+    boundary_strategy: st.SearchStrategy | None = None
+    #: Set by :func:`_run`: a refusal ends the check at once (see
+    #: :class:`_Refused`) instead of being an example for Hypothesis to shrink.
+    in_battery: bool = False
+
+    def __post_init__(self) -> None:
+        for option, fn in (("constrain_state", self.constrain_state),
+                           ("constrain_boundary", self.constrain_boundary)):
+            if fn is not None and not callable(fn):
+                raise TypeError(
+                    f"{option} must be a function from the drawn dict to a dict "
+                    f"of the same fields, got {type(fn).__name__}"
+                )
+        for option, given_strategy in (("state_strategy", self.state_strategy),
+                                       ("boundary_strategy", self.boundary_strategy)):
+            if given_strategy is not None and not isinstance(given_strategy, st.SearchStrategy):
+                raise TypeError(
+                    f"{option} must be a Hypothesis strategy that yields the "
+                    f"dict, got {type(given_strategy).__name__}"
+                )
+        if self.state_strategy is not None and self.bounds:
+            raise ValueError(
+                "state_strategy replaces the sampling of every state field, so "
+                f"bounds for {sorted(self.bounds)} would be ignored.  Pass one or "
+                "the other: bounds belong inside the strategy."
+            )
+        if self.boundary_strategy is not None and self.boundary_bounds:
+            raise ValueError(
+                "boundary_strategy replaces the sampling of every boundary input, "
+                f"so boundary_bounds for {sorted(self.boundary_bounds)} would be "
+                "ignored.  Pass one or the other."
+            )
+        if self.boundary_inputs is not None and self.boundary_strategy is not None:
+            raise ValueError(
+                "boundary_inputs is one fixed dict and boundary_strategy draws "
+                "the dict: pass one or the other."
+            )
+        if self.boundary_inputs is not None and self.constrain_boundary is not None:
+            raise ValueError(
+                "constrain_boundary maps drawn boundary inputs, and boundary_inputs "
+                "is one fixed dict that reaches the node as given: nothing is "
+                "drawn.  Apply the function to the dict yourself, or drop "
+                "boundary_inputs."
+            )
 
     def strategy(self) -> st.SearchStrategy:
+        """``(state, boundary_inputs, dt)``: what every check draws.
+
+        The one place a ``constrain_*`` function is applied, so no check
+        can be given the raw draw: each check's body, whatever it
+        evaluates (eagerly, compiled, under ``jax.grad``, twice), receives
+        the mapped example, and so does the counterexample it reports.
+        """
+        refused = _Refused if self.in_battery else ValueError
         if self.boundary_inputs is not None:
             bi = st.just(self.boundary_inputs)
+        elif self.boundary_strategy is not None:
+            bi = _as_given("boundary_strategy", self.boundary_strategy, refused)
         else:
             bi = boundary_inputs_for(
                 self.node, self.boundary_bounds, dtype=self.dtype,
             )
+        if self.state_strategy is not None:
+            state = _as_given("state_strategy", self.state_strategy, refused)
+        else:
+            state = node_states(self.node, self.bounds, dtype=self.dtype)
+        if self.constrain_state is not None:
+            state = state.map(
+                _constraint("constrain_state", self.constrain_state, refused))
+        if self.constrain_boundary is not None:
+            bi = bi.map(
+                _constraint("constrain_boundary", self.constrain_boundary, refused))
         return st.tuples(
-            node_states(self.node, self.bounds, dtype=self.dtype),
+            state,
             bi,
             bounded_dt(*self.dt_range),
         )
@@ -139,9 +321,17 @@ def _run(
 
     Hypothesis replays the minimal failing example last, so the inputs
     recorded on the final call are the shrunk counterexample.
+
+    ``prop`` below is not to be edited casually: Hypothesis seeds a
+    ``derandomize=True`` run from the text of the function it is given, so
+    any change to it changes the examples every derandomised battery
+    draws (``tests/verification/test_verify_node_constrained_inputs.py``
+    holds the text).  What an example *is* belongs in
+    :meth:`_Inputs.strategy`.
     """
     last: dict[str, Any] = {}
     count = 0
+    inputs = replace(inputs, in_battery=True)
 
     @settings(
         max_examples=max_examples,
@@ -161,6 +351,10 @@ def _run(
 
     try:
         prop()
+    except _Refused as refused:
+        # The caller's function or strategy, not the node: raised (from
+        # the exception it was refused for, if any), never a FAIL.
+        raise ValueError(str(refused)) from refused.__cause__
     except AssertionError as e:
         return VerificationResult(
             name, "FAIL", detail=str(e) or "assertion failed",
@@ -1135,11 +1329,23 @@ def make_inputs(
     boundary_inputs: dict | None = None,
     dt_range: tuple[float, float] = (1e-4, 0.01),
     dtype: npt.DTypeLike = np.float32,
+    constrain_state: Constraint | None = None,
+    constrain_boundary: Constraint | None = None,
+    state_strategy: st.SearchStrategy | None = None,
+    boundary_strategy: st.SearchStrategy | None = None,
 ) -> _Inputs:
-    """Bundle the sampling envelope for the standalone ``node_*`` checks."""
+    """Bundle the sampling envelope for the standalone ``node_*`` checks.
+
+    The arguments are :func:`verify_node`'s, with the same meaning and the
+    same refusals; ``.strategy()`` of the result is the strategy every
+    check draws ``(state, boundary_inputs, dt)`` from, with
+    ``constrain_state`` / ``constrain_boundary`` already applied.
+    """
     return _Inputs(
         node, bounds or {}, boundary_bounds or {}, boundary_inputs,
         dt_range, np.dtype(dtype),
+        constrain_state=constrain_state, constrain_boundary=constrain_boundary,
+        state_strategy=state_strategy, boundary_strategy=boundary_strategy,
     )
 
 
@@ -1158,6 +1364,10 @@ def verify_node(
     invariants: dict[str, Callable[[dict, dict, dict, float], bool]] | None = None,
     max_examples: int = 200,
     derandomize: bool = False,
+    constrain_state: Constraint | None = None,
+    constrain_boundary: Constraint | None = None,
+    state_strategy: st.SearchStrategy | None = None,
+    boundary_strategy: st.SearchStrategy | None = None,
 ) -> dict[str, VerificationResult]:
     """Run a battery of property checks on ``node.update``.
 
@@ -1193,10 +1403,48 @@ def verify_node(
     derandomize : bool
         Seed Hypothesis from the check's own structure so repeated runs
         draw identical samples (reproducible CI, weaker exploration).
+    constrain_state : callable, optional
+        ``fn(state) -> state``, applied to every drawn state before any
+        check uses it.  Every state field is otherwise drawn on its own
+        in a box, which a field with a constraint does not survive:
+        normalise a quaternion, make populations positive, clip a counter
+        used as an index, recompute a field derived from another.  Every
+        check sees the mapped state and only that -- the eager and the
+        compiled evaluation, the point a gradient is taken at,
+        ``energy_fn``, ``invariants`` -- and it is the state a
+        counterexample reports.  The function must return the fields it
+        was given, each with the shape and dtype it was drawn with;
+        ``bounds`` still set the box the raw draw comes from.
+    constrain_boundary : callable, optional
+        The same for every drawn boundary-input dict.  Not with a fixed
+        ``boundary_inputs``, where nothing is drawn.
+    state_strategy : hypothesis.strategies.SearchStrategy, optional
+        A strategy that yields whole state dicts, used instead of the
+        per-field sampling: for what a map cannot express, such as fields
+        that must agree with each other or a state taken from a short
+        trajectory.  Its examples reach the node exactly as drawn
+        (``dtype`` is not applied to them; ``constrain_state``, if also
+        given, is).  Not with ``bounds``, which it would ignore.
+    boundary_strategy : hypothesis.strategies.SearchStrategy, optional
+        The same for the boundary-input dict.  Not with
+        ``boundary_bounds`` or ``boundary_inputs``.
 
     Returns
     -------
     dict[str, VerificationResult]
+
+    Raises
+    ------
+    ValueError
+        An unknown name in ``checks``; sampling options that contradict
+        each other (as marked "not with" above); a ``constrain_*``
+        function that changes a field's shape or dtype or the set of
+        fields (the message names the field), or that raises; a supplied
+        strategy that raises while generating an example.  None of these
+        is a verdict on the node, so none is reported as a ``FAIL``.
+    TypeError
+        A ``constrain_*`` argument that is not callable, a ``*_strategy``
+        argument that is not a Hypothesis strategy.
 
     See Also
     --------
@@ -1209,6 +1457,8 @@ def verify_node(
     inputs = make_inputs(
         node, bounds, boundary_bounds=boundary_bounds,
         boundary_inputs=boundary_inputs, dt_range=dt_range, dtype=dtype,
+        constrain_state=constrain_state, constrain_boundary=constrain_boundary,
+        state_strategy=state_strategy, boundary_strategy=boundary_strategy,
     )
     kw = dict(max_examples=max_examples, derandomize=derandomize)
     battery = {
@@ -1248,6 +1498,9 @@ def assert_node_verified(node, bounds: Bounds | None = None, **kwargs) -> None:
 
         def test_my_node():
             assert_node_verified(my_node, bounds={"T": (200.0, 5000.0)})
+
+    Every keyword of :func:`verify_node` is accepted and passed on,
+    ``constrain_state`` and the other sampling options included.
 
     See Also
     --------

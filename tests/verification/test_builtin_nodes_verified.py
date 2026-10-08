@@ -25,6 +25,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hypothesis import given, settings
 
@@ -41,6 +42,18 @@ from maddening.testing.verification import DEFAULT_CHECKS, make_inputs, verify_n
 KW = dict(max_examples=100, derandomize=True)
 
 N_CELLS = 8
+
+
+def _unit_orientation(state):
+    """``constrain_state`` for the rigid body: its orientation on the unit
+    sphere.  Normalised in float64 (the square of a tiny float32 draw
+    underflows); the zero quaternion has no direction, so the identity
+    stands in for it."""
+    q = np.asarray(state["orientation"], dtype=np.float64)
+    norm = np.linalg.norm(q)
+    q = q / norm if norm > 0 else np.array([1.0, 0.0, 0.0, 0.0])
+    return {**state, "orientation": jnp.asarray(q, dtype=state["orientation"].dtype)}
+
 
 CASES = {
     "spring": dict(
@@ -83,12 +96,17 @@ CASES = {
         bounds={
             "position": (-10.0, 10.0),
             "velocity": (-10.0, 10.0),
-            # Away from the zero quaternion: ``quat_normalize`` divides
-            # by the norm and the physical state is unit-norm anyway.
-            "orientation": (0.25, 1.0),
+            # A unit quaternion of any sign pattern: drawn in a box round
+            # the origin, put on the sphere by ``constrain_state``.  Before
+            # the battery could be given a constraint this was the box
+            # (0.25, 1.0) -- kept off the zero quaternion, which
+            # ``quat_normalize`` cannot divide by -- so every orientation
+            # had four positive components and a norm between 0.5 and 2.
+            "orientation": (-1.0, 1.0),
             "angular_velocity": (-5.0, 5.0),
         },
         boundary_bounds={"force": (-50.0, 50.0), "torque": (-50.0, 50.0)},
+        kwargs=dict(constrain_state=_unit_orientation),
     ),
     "rigid_body_2d": dict(
         node=lambda: RigidBody2DNode("r2", 0.01, mass=2.0, inertia=0.5),

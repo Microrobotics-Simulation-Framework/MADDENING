@@ -266,6 +266,16 @@ def against_the_closed_form(case: linear.Case) -> dict:
     # takes the same constants (a sparse edge has none outside its pattern).
     grad, grad_exact = ref.gradient_error(x, fixed, raw)[0], linear._gradient_error(   # noqa: SLF001
         model, step.pre, step.state, cell.mapping_kind)
+    # What CPL-093's condition is read from (a constant is in the bound
+    # where its whole value moves a pass by more than the floor): the pass
+    # response of every constant the closed form takes, against the
+    # reference's of the same constant.
+    theirs = dict(zip(ref.constant_names(), ref.pass_responses(x, raw)))
+    names = reference_names(built_twin)
+    responses = [(mine, theirs[names[linear._named(c)]])                # noqa: SLF001
+                 for c, _tangent, _miss, mine in linear.gradient_rows(
+                     model, step.pre, step.state, cell.mapping_kind)]
+    assert len(responses) == len(names) > 0, (len(responses), len(names))
     scale = max(float(np.max(np.abs(x_star))), np.finfo(np.float64).tiny)
     # A relative norm divides a field by ``rtol`` times its size: one float64
     # rounding of a field is this much of the norm's unit.
@@ -279,8 +289,42 @@ def against_the_closed_form(case: linear.Case) -> dict:
         distance=abs(dist - dist_exact), distance_exact=dist_exact, norm_unit=unit,
         residual=abs(ref.residual(x, norm) - detail["residual_true"]),
         residual_exact=detail["residual_true"],
-        gradient=abs(grad - grad_exact), gradient_exact=grad_exact)
+        gradient=abs(grad - grad_exact), gradient_exact=grad_exact,
+        response=max(abs(mine - other) / max(other, np.finfo(np.float64).tiny)
+                     for mine, other in responses),
+        responses=len(responses))
     return out
+
+
+def reference_names(built: ct.Built) -> dict:
+    """``{(node, port, edge, entry): the reference's name}`` for every
+    constant the closed form's gradient score takes on *built*'s graph
+    (``linear.gradient_constants``): a gain entry is ``node.G<port>[flat
+    index]``, a mapping weight ``mapping:<edge key>.<leaf>[flat index]``,
+    the index of a sparse edge's weight being its slot's."""
+    topo = built.topo
+    names = {}
+    for m in topo.groups[0]:
+        nd = topo.node(m)
+        for j in range(nd.ports):
+            for a in range(nd.n):
+                for b in range(nd.n):
+                    names[(m, j, None, (a, b))] = f"{m}.G{j}[{a * nd.n + b}]"
+    params = built.gm.params.get("mappings", {})
+    for i, key in built.mapping_keys.items():
+        (leaf, _held), = params[key].items()
+        if i in built.slots:
+            slots = built.slots[i]
+            where = zip(slots.target.ravel(), slots.source.ravel(), slots.valid.ravel())
+            for at, (a, b, valid) in enumerate(where):
+                if valid:
+                    names[(None, None, i, (int(a), int(b)))] = f"mapping:{key}.{leaf}[{at}]"
+        else:
+            n_src = topo.node(topo.edges[i].src).n
+            for a in range(topo.node(topo.edges[i].dst).n):
+                for b in range(n_src):
+                    names[(None, None, i, (a, b))] = f"mapping:{key}.{leaf}[{a * n_src + b}]"
+    return names
 
 
 #: What "to float64 rounding" allows each difference, as measured over
@@ -290,9 +334,11 @@ def against_the_closed_form(case: linear.Case) -> dict:
 #: norm; the Jacobian in ``eps`` of its largest entry; the radius absolute;
 #: the distance and the residual in the norm's own rounding unit ``eps /
 #: rtol`` times the resolvent's norm (a relative norm divides a field by
-#: ``rtol`` times its size); the gradient error absolute beside one.
+#: ``rtol`` times its size); the gradient error absolute beside one; a
+#: constant's pass response relative to itself (one product of the pass's
+#: derivative, with no solve through the resolvent).
 ALLOWED = dict(fixed_point=2.0 ** 10, jacobian=2.0 ** 6, radius=2.0 ** 10 * EPS64,
-               distance=2.0 ** 12, residual=2.0 ** 12, gradient=1e-9)
+               distance=2.0 ** 12, residual=2.0 ** 12, gradient=1e-9, response=1e-9)
 
 
 def closed_form_misses(seen: dict) -> dict:
@@ -310,7 +356,8 @@ def closed_form_misses(seen: dict) -> dict:
             unit + EPS64 * seen["distance_exact"])),
         residual=seen["residual"] / (ALLOWED["residual"] * (
             unit + EPS64 * seen["residual_exact"])),
-        gradient=seen["gradient"] / (ALLOWED["gradient"] * max(seen["gradient_exact"], 1.0)))
+        gradient=seen["gradient"] / (ALLOWED["gradient"] * max(seen["gradient_exact"], 1.0)),
+        response=seen["response"] / ALLOWED["response"])
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +576,13 @@ APPENDED = (
     Cell("pair-3", "float32", _JACOBI_INTERFACE, 120, "product"),
     Cell("ring-5", "float64", _JACOBI_INTERFACE, 5, "quadratic"),
     Cell("ring-2", "float64", _JACOBI_INTERFACE, 120, "product"),
+    # What cell 34 was by accident, and no cell since: the mapped ring with
+    # a quadratic term in float64, Aitken under Gauss-Seidel, the interface
+    # norm, a cap of 120.  Its group returns a field its norm reads
+    # recomputed (:func:`reads_a_recomputed_field`), so it is the float64
+    # cell on which the state a user gets is checked beside the hunt (the
+    # two others that are, are float32).
+    Cell("mapped", "float64", 2, 120, "quadratic"),
 )
 CELLS = ROTATED + APPENDED
 PER_PUSH_CELLS = tuple(range(len(_FIRST)))
@@ -990,7 +1044,7 @@ USABLE_FLOOR = 0.25
 #: (``PassReference.pass_responses``) is above this many floors: the
 #: bound drops a probe at one floor, by its own float32 or float64
 #: arithmetic, and the reference measures the response in float64.
-RESOLVED_MARGIN = 2.0
+RESOLVED_MARGIN = linear.RESOLVED_MARGIN
 REFERENCED_FLOOR = 0.75
 
 
@@ -1859,7 +1913,7 @@ def test_only_a_cell_that_sweeps_a_product_of_two_members_has_its_units_held():
 # ---------------------------------------------------------------------------
 
 
-def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_mapping():
+def test_the_cells_observed_at_the_accepted_iterate_are_the_three_read_through_a_mapping():
     """Which cells are stepped with the return rule off, with the state a
     user gets checked beside them (:func:`returned_score`), is decided by
     what a cell is (:func:`reads_a_recomputed_field`) and not by its index.
@@ -1868,14 +1922,18 @@ def test_the_cells_observed_at_the_accepted_iterate_are_the_two_read_through_a_m
     nothing.  (On the layout a rotation over eight rows left by accident
     they were cells 33 and 34.)  Held here, each cell found by what it is:
     the mapped ring under the interface norm, once in the rotation (Aitken
-    under Gauss-Seidel, a cap of 120) and once appended (Jacobi, stopped
-    after five passes).  No compile."""
+    under Gauss-Seidel, a cap of 120, float32) and twice appended (Jacobi,
+    stopped after five passes, float32; and the accident's cell 34, Aitken
+    under Gauss-Seidel with a cap of 120 in float64, so that the check is
+    made in both dtypes).  No compile."""
     observed = tuple(i for i in ALL_CELLS if reads_a_recomputed_field(CELLS[i]))
     assert observed == (
         CELLS.index(Cell("mapped", "float32", 2, 120, "product")),
-        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic"))), observed
-    rotated, appended = observed
-    assert rotated < len(ROTATED) <= appended
+        CELLS.index(Cell("mapped", "float32", _JACOBI_INTERFACE, 5, "quadratic")),
+        CELLS.index(Cell("mapped", "float64", 2, 120, "quadratic"))), observed
+    rotated, appended, in_float64 = observed
+    assert rotated < len(ROTATED) <= appended < in_float64 == len(CELLS) - 1
+    assert {CELLS[i].dtype for i in observed} == {"float32", "float64"}
     for index in observed:
         knobs = CELLS[index].knobs
         assert knobs["convergence_norm"] == "interface" and knobs["solver"] == "ift", knobs

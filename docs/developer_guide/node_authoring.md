@@ -160,7 +160,11 @@ by default) is what the graph injects, `param_specs()` says what an
 optimiser may do with each leaf, and the `verify_node` battery's
 `params_consistent` / `params_gradient_finite` / `params_effective` checks
 fail on the classic mistakes (a constant read from `self.params` on one
-path only, a NaN gradient, a leaf the update never reads).  A node on the
+path only, a NaN gradient, a leaf the update never reads).  The battery
+draws every state field on its own in a box, so a field that only means
+something under a constraint (a unit quaternion, positive populations, a
+counter used as an index) needs `constrain_state=`: see
+[Fields with constraints](verification.md#fields-with-constraints).  A node on the
 old 3-argument `update` still works, but its constants are baked into the
 trace and absent from `gm.params`.
 

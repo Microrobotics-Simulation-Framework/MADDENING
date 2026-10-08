@@ -173,8 +173,8 @@ assert abs(explicit - (1 - k * dt)) < 1e-6 and abs(implicit - 1 / (1 + k * dt)) 
 Neither graph draws a warning or a line from `gm.validate()`: putting a
 node in a group is how one of its terms is made implicit.  Nothing else
 changes which value is read (not the node's other edges, a neighbour's
-group or the order the graph was built in), `gm.print_graph()` names the
-level of every edge ("back edge: reads the previous step's value" or
+group or the order the graph was built in), `gm.print_graph()` says which
+beside the edge ("back edge: reads the previous step's value" or
 "iterated inside its coupling group"), and `gm.auto_couple()` groups only
 cycles of two or more nodes, so it leaves such an edge explicit.
 

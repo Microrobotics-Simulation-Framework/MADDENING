@@ -1708,7 +1708,7 @@ class GraphManager:
         group and at convergence the node reads its new value, so the term
         is implicit (``x / (1 + k dt)``).  Nothing else decides it, and
         neither :meth:`validate` nor :meth:`compile` remarks on it;
-        :meth:`format_graph` names the level of every edge.
+        :meth:`format_graph` says which beside the edge.
 
         ``mapping`` (a :class:`maddening.core.coupling.mapping.Mapping`)
         transfers the source field onto the target interface before

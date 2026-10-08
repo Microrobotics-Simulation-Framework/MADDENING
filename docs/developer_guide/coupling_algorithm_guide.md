@@ -1667,10 +1667,10 @@ graph by `tests/core/test_an_edge_from_a_node_to_itself.py`):
   its own level.  Neither `validate()` nor `compile()` remarks on the edge
   in either place (`validate()` names loops of two or more nodes only),
   and `auto_couple()` groups loops of two or more nodes, so it leaves the
-  edge explicit.  `format_graph()` names the level of every edge.
+  edge explicit.  `format_graph()` says which beside the edge.
 * **The term is implicit once the group has converged, and only then.**
   The first pass reads the previous step, so `max_iterations=1` returns
-  the *explicit* value, and a cap of `n` passes the first `n` corrections
+  the *explicit* value, and a cap of `n` returns the first `n` corrections
   of `1 - k dt + (k dt)^2 - ...` (`0.99`, `0.9901`, `0.990099`).  A cap
   that was reached is reported like any other: in `coupling_diagnostics()`
   or by `strict_convergence`, and otherwise not at all.
@@ -1697,9 +1697,10 @@ graph by `tests/core/test_an_edge_from_a_node_to_itself.py`):
   `(1 + k dt / 2)^-2`.
 * **On a multi-rate graph the previous step is the state the node
   holds.**  A node with rate divider 2 that reads itself steps
-  `x (1 - 2 k dt)` on the base steps it fires on and keeps that value on
-  the others; in a group of itself, `x / (1 + 2 k dt)`.  `run_adaptive`
-  takes each of the steps it tries by the same rule.
+  `x (1 - 2 k dt)`, `dt` the base timestep, on the base steps it fires on
+  and keeps that value on the others; in a group of itself,
+  `x / (1 + 2 k dt)`.  `run_adaptive` takes each of the steps it tries by
+  the same rule.
 * **An edge from a node's own flux** is iterated inside a group like any
   other.  Outside one it cannot be read: the previous step's flux is not
   kept, and the step fails with a bare `KeyError` naming the flux

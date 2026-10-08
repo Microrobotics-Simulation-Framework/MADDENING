@@ -12,8 +12,8 @@
 
 Nothing else decides it: not the node's other edges, not its neighbours'
 groups, not the order the graph was built in.  ``validate()`` and
-``compile()`` say nothing in either case (a decision, 2026-10-08: putting
-the node in a group is how a term is made implicit, so there is no warning).
+``compile()`` say nothing in either case, by decision: putting the node in
+a group is how a term is made implicit, so there is no warning.
 
 This module reads the values from the compiled graph, against closed forms
 in float64, across what could change them: the schedule, the solver, the

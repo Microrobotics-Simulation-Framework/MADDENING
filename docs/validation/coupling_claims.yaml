@@ -6066,8 +6066,8 @@ claims:
     group (... a group of that one node is enough) the edge is iterated
     with the group and at convergence the node reads its new value, so the
     term is implicit (x / (1 + k dt)).  Nothing else decides it, and
-    neither validate() nor compile() remarks on it; format_graph() names
-    the level of every edge."
+    neither validate() nor compile() remarks on it; format_graph() says
+    which beside the edge."
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.add_edge
     - src/maddening/core/graph_manager.py::GraphManager.add_coupling_group
@@ -6087,7 +6087,7 @@ claims:
     multi-rate graph (rate divider 2, in no group and in a group of
     itself); run_adaptive, each step it tries.  "At convergence" is part
     of the claim: max_iterations=1 returns the explicit value, a cap of n
-    passes the first n corrections of 1 - k dt + (k dt)^2 - ..., and the
+    returns the first n corrections of 1 - k dt + (k dt)^2 - ..., and the
     plain iteration converges only for |k dt| < 1 (aitken and iqn-ils
     reach 1 / (1 + k dt) at k dt = 1.5; a cap that was reached is in the
     diagnostics or raised by strict_convergence, as for any group).  A

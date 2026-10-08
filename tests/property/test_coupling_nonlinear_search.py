@@ -231,6 +231,16 @@ def against_the_closed_form(case: linear.Case) -> dict:
     # takes the same constants (a sparse edge has none outside its pattern).
     grad, grad_exact = ref.gradient_error(x, fixed, raw)[0], linear._gradient_error(   # noqa: SLF001
         model, step.pre, step.state, cell.mapping_kind)
+    # What CPL-093's condition is read from (a constant is in the bound
+    # where its whole value moves a pass by more than the floor): the pass
+    # response of every constant the closed form takes, against the
+    # reference's of the same constant.
+    theirs = dict(zip(ref.constant_names(), ref.pass_responses(x, raw)))
+    names = reference_names(built_twin)
+    responses = [(mine, theirs[names[linear._named(c)]])                # noqa: SLF001
+                 for c, _tangent, _miss, mine in linear.gradient_rows(
+                     model, step.pre, step.state, cell.mapping_kind)]
+    assert len(responses) == len(names) > 0, (len(responses), len(names))
     scale = max(float(np.max(np.abs(x_star))), np.finfo(np.float64).tiny)
     # A relative norm divides a field by ``rtol`` times its size: one float64
     # rounding of a field is this much of the norm's unit.
@@ -244,8 +254,42 @@ def against_the_closed_form(case: linear.Case) -> dict:
         distance=abs(dist - dist_exact), distance_exact=dist_exact, norm_unit=unit,
         residual=abs(ref.residual(x, norm) - detail["residual_true"]),
         residual_exact=detail["residual_true"],
-        gradient=abs(grad - grad_exact), gradient_exact=grad_exact)
+        gradient=abs(grad - grad_exact), gradient_exact=grad_exact,
+        response=max(abs(mine - other) / max(other, np.finfo(np.float64).tiny)
+                     for mine, other in responses),
+        responses=len(responses))
     return out
+
+
+def reference_names(built: ct.Built) -> dict:
+    """``{(node, port, edge, entry): the reference's name}`` for every
+    constant the closed form's gradient score takes on *built*'s graph
+    (``linear.gradient_constants``): a gain entry is ``node.G<port>[flat
+    index]``, a mapping weight ``mapping:<edge key>.<leaf>[flat index]``,
+    the index of a sparse edge's weight being its slot's."""
+    topo = built.topo
+    names = {}
+    for m in topo.groups[0]:
+        nd = topo.node(m)
+        for j in range(nd.ports):
+            for a in range(nd.n):
+                for b in range(nd.n):
+                    names[(m, j, None, (a, b))] = f"{m}.G{j}[{a * nd.n + b}]"
+    params = built.gm.params.get("mappings", {})
+    for i, key in built.mapping_keys.items():
+        (leaf, _held), = params[key].items()
+        if i in built.slots:
+            slots = built.slots[i]
+            where = zip(slots.target.ravel(), slots.source.ravel(), slots.valid.ravel())
+            for at, (a, b, valid) in enumerate(where):
+                if valid:
+                    names[(None, None, i, (int(a), int(b)))] = f"mapping:{key}.{leaf}[{at}]"
+        else:
+            n_src = topo.node(topo.edges[i].src).n
+            for a in range(topo.node(topo.edges[i].dst).n):
+                for b in range(n_src):
+                    names[(None, None, i, (a, b))] = f"mapping:{key}.{leaf}[{a * n_src + b}]"
+    return names
 
 
 #: What "to float64 rounding" allows each difference, as measured over
@@ -255,9 +299,11 @@ def against_the_closed_form(case: linear.Case) -> dict:
 #: norm; the Jacobian in ``eps`` of its largest entry; the radius absolute;
 #: the distance and the residual in the norm's own rounding unit ``eps /
 #: rtol`` times the resolvent's norm (a relative norm divides a field by
-#: ``rtol`` times its size); the gradient error absolute beside one.
+#: ``rtol`` times its size); the gradient error absolute beside one; a
+#: constant's pass response relative to itself (one product of the pass's
+#: derivative, with no solve through the resolvent).
 ALLOWED = dict(fixed_point=2.0 ** 10, jacobian=2.0 ** 6, radius=2.0 ** 10 * EPS64,
-               distance=2.0 ** 12, residual=2.0 ** 12, gradient=1e-9)
+               distance=2.0 ** 12, residual=2.0 ** 12, gradient=1e-9, response=1e-9)
 
 
 def closed_form_misses(seen: dict) -> dict:
@@ -275,7 +321,8 @@ def closed_form_misses(seen: dict) -> dict:
             unit + EPS64 * seen["distance_exact"])),
         residual=seen["residual"] / (ALLOWED["residual"] * (
             unit + EPS64 * seen["residual_exact"])),
-        gradient=seen["gradient"] / (ALLOWED["gradient"] * max(seen["gradient_exact"], 1.0)))
+        gradient=seen["gradient"] / (ALLOWED["gradient"] * max(seen["gradient_exact"], 1.0)),
+        response=seen["response"] / ALLOWED["response"])
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +899,7 @@ USABLE_FLOOR = 0.25
 #: (``PassReference.pass_responses``) is above this many floors: the
 #: bound drops a probe at one floor, by its own float32 or float64
 #: arithmetic, and the reference measures the response in float64.
-RESOLVED_MARGIN = 2.0
+RESOLVED_MARGIN = linear.RESOLVED_MARGIN
 REFERENCED_FLOOR = 0.75
 
 

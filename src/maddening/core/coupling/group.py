@@ -107,14 +107,16 @@ class CouplingGroup:
         field through the edge's interface mapping and then its
         transform, the value the step hands the target (both
         converged when the norm <= 1.0).
-        What ``"interface"`` does not measure: a floating field no
-        internal edge reads is returned as one pass computes it at the
-        returned state, from the readings the verdict was taken on.  A
-        field edges read only through a mapping or a transform is
-        measured through them alone: the part of it they do not deliver
-        can be a pass behind, or under ``"aitken"`` or ``"fixed"`` a
-        blend of the passes so far, with ``converged=True``
-        (MADD-ANO-239).  Use ``"mixed"`` where that part matters.
+        What ``"interface"`` returns: a field an internal edge
+        delivers as it is (no mapping, no transform) is measured whole
+        and is returned as the accepted iterate holds it; every other
+        floating field of every member is returned as one plain pass
+        computes it at the accepted iterate, from the readings the
+        verdict was taken on (one more evaluation of the pass).  The
+        report is of the accepted iterate, and the state returned is
+        within the reported residual of it on what the edges deliver;
+        a field the norm does not measure meets no criterion of its
+        own.  Use ``"mixed"`` or ``"l2"`` where every field must.
     atol : float
         Dead band, in each field's own units: a field whose magnitude
         does not exceed ``atol`` counts as being at zero, **leaves the

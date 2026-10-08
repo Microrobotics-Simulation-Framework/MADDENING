@@ -416,6 +416,14 @@ def check_the_library_returns_the_models_state(name, schedule, draws) -> None:
     # The rule moves no iterate, residual or pass count.
     for key in ("iterations", "converged", "residual"):
         assert report[key] == loop.reports[0][key], (where, key)
+    if not all(np.all(np.isfinite(np.asarray(v["x"]))) for v in loop.state.values()):
+        # A draw the loop diverges on: the iterate is returned as the loop
+        # left it, and there is no state to hold to the model.
+        assert not report["converged"], where
+        for m in topo.groups[0]:
+            assert np.array_equal(step.state[m]["x"], loop.state[m]["x"], equal_nan=True), (
+                where, m)
+        return
     # The report is the accepted iterate's: the plain checks hold of it, the
     # equality of the reported residual included.
     model.check_step(loop.pre, loop.state, loop.reports, thresholds=[1.0], where=where,

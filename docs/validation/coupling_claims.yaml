@@ -1168,6 +1168,9 @@ claims:
     threshold above the norm's float32 floor (below it the two loops may
     stop on different passes: CPL-063). Not claimed for mixed dtypes, 16-bit
     floats, vmap, run_adaptive, checkpoint restarts or sharded graphs.
+    Under convergence_norm="interface" both return that iterate with the
+    fields the norm does not measure whole recomputed by one plain pass at
+    it, by the one rule (CPL-191).
   oracle: state equality to float32 round-off; gradients against each other at a tight tolerance.
   tests:
     - tests/core/test_coupling_solver_equivalence.py::test_the_two_solvers_return_the_same_state_on_a_converged_exit
@@ -1518,6 +1521,11 @@ claims:
     is not read.  The dead band and the unevaluable-field rule are applied
     to the delivered value.  The domain cells run a pair with one mapped and
     one plain internal edge, the mapping's weights passed for the step.
+    The residual a step reports is of the iterate its loop accepted: where
+    a field is read only through a mapping or a transform the step returns
+    it one plain pass on (CPL-191), and the residual of the state returned
+    is another number; the domain cells read the accepted iterate with the
+    return rule switched off.
   oracle: closed form over the delivered edge values, in float64.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
@@ -1991,7 +1999,12 @@ claims:
     returned is not finite ... which can come before the cap."
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (converged)
-  conditions: any configuration.
+  conditions: >-
+    any configuration.
+    Under convergence_norm="interface" the state held to the threshold is
+    the iterate the loop stopped on; the state returned has the fields the
+    norm does not measure whole one plain pass on (CPL-191), and a
+    recomputed field that is not finite makes the verdict False too.
   oracle: converged=False implies iterations == max_iterations or a non-finite returned state, over every acceleration and both modes.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_unconverged_means_at_the_cap_or_not_finite
@@ -2162,7 +2175,13 @@ claims:
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (iterations)
     - src/maddening/core/coupling/_fixed_point.py::_fixed_point_while (n_passes)
-  conditions: both solvers, any float dtype (the count is int32).
+  conditions: >-
+    both solvers, any float dtype (the count is int32).
+    Under convergence_norm="interface" the count is of the iterate the loop
+    accepted: the one further evaluation of the pass that recomputes the
+    fields the norm does not measure whole (CPL-191) is not counted, as the
+    evaluation that measures the residual is not, so the cap check is the
+    one it was.
   oracle: a group that cannot meet its tolerance; one that converges a pass short.
   tests:
     - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_ran_out_of_passes_reports_the_cap_it_ran_out_of
@@ -3300,6 +3319,9 @@ claims:
     on float32 draws where the Jacobian without its position columns has
     a radius 12% and 14% off, and both statements above are scored
     against that reference.
+    Under convergence_norm="interface" "the returned state" is the iterate
+    the loop accepted, of which the state returned is one plain pass on in
+    the fields the norm does not measure whole (CPL-191).
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
@@ -3383,6 +3405,11 @@ claims:
     search, h the reference's measure of how far the Jacobian moves
     between the returned iterate and the fixed point, on examples whose
     points stay in one lattice cell between the two.
+    Under convergence_norm="interface" x is the iterate the loop accepted:
+    the state returned has the fields the norm does not measure whole one
+    plain pass on (CPL-191), and its distance in the same norm is within
+    the bound plus the reported residual, the residual being exactly how
+    far the readings of a recomputed field moved.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3729,6 +3756,11 @@ claims:
     pre-step state, and the bound is held against the float64 reference's
     implicit derivative for every constant of the members the pass
     resolves.
+    Under convergence_norm="interface" the bound is on the gradient of the
+    iterate the loop accepted; a field returned recomputed (CPL-191)
+    carries the derivative of one plain pass at that iterate, which is the
+    fixed point's at a fixed point and is not separately bounded short of
+    one.
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -5317,18 +5349,26 @@ claims:
 - id: CPL-174
   area: coupling guide
   claim: >-
-    "do not pair the auto-detected accelerated_fields with
-    convergence_norm="interface" ... naming every field in
+    As first recorded: "do not pair the auto-detected accelerated_fields
+    with convergence_norm="interface" ... naming every field in
     accelerated_fields closes all ten at the same iteration count, and
-    tightening atol/rtol ... does not".
+    tightening atol/rtol ... does not".  Closed for the state a step
+    returns: "the ten rows agree with plain Gauss-Seidel within the test's
+    interface allowance at the fixtures' own rtol, with the auto-detected
+    set unchanged".
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#four-combinations-that-theory-says-should-win
     - docs/validation/known_anomalies.yaml (MADD-ANO-005)
-  conditions: iqn-* rows under the interface norm.
+  conditions: >-
+    iqn-* rows under the interface norm, after the interface norm's return
+    rule (CPL-191).  The sweep's recorded figures quoted beside the first
+    sentence predate that rule and have not been recorded again; that
+    tightening rtol does not move the stiff-pair row still holds.
   oracle: the plain-iteration fixed point.
   tests:
     - tests/core/test_coupling_fixture_invariants.py::test_tightening_rtol_does_not_move_the_resistant_stiff_pair_row
     - tests/property/test_coupling_acceleration_agreement.py::test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration
+    - tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point
   status: verified
   domains:
     f32: tests/core/test_coupling_fixture_invariants.py::test_tightening_rtol_does_not_move_the_resistant_stiff_pair_row
@@ -5834,64 +5874,104 @@ claims:
 - id: CPL-191
   area: criterion
   claim: >-
-    Under convergence_norm="interface", "a floating field no internal edge
-    reads is returned as one pass computes it at the returned state, from
-    the readings the verdict was taken on."  So converged=True puts every
-    member whose fields are either delivered whole by an internal edge or
-    read by none within the tolerance of its update at the state returned,
-    as under "mixed" and "l2"; iterates, residuals and pass counts are the
-    ones the solve had.
+    Under convergence_norm="interface" a solve returns a field the norm
+    measures whole -- "the source field of an internal edge that delivers
+    it as it is, with no mapping and no transform" -- as the accepted
+    iterate holds it, bit for bit, and every other floating field of every
+    member as "one plain pass of the group's own schedule computes [it] at
+    the accepted iterate", whatever the schedule, the acceleration, the
+    solver and the verdict.  The report (iterations, residual, converged,
+    the bounds) is of the accepted iterate, and no iterate, residual or
+    pass count moves.  The state returned is not an iterate of the loop:
+    its readings differ from the accepted iterate's only on the edges whose
+    source field was recomputed, there by that edge's own term of the
+    reported residual, so they are within the reported residual of the
+    accepted iterate's, in the residual's own weights.
   sources:
     - src/maddening/core/coupling/group.py::CouplingGroup (convergence_norm)
     - src/maddening/core/coupling/_group_layout.py::_fields_the_interface_norm_misses
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (_with_nonfloat_fields_at)
   conditions: >-
-    A group whose members are linear in what they read; both schedules,
-    both solvers, every acceleration; plain, mapped and transformed
-    internal edges into a member whose own fields no edge reads; float32
-    and float64; the derivative of a recomputed field through the jitted
-    step.  A field internal edges read only through a mapping or a
-    transform is MADD-ANO-239 (open).  max_iterations=1 returns its single
-    pass and reports how far the readings moved over it.  Not claimed for
-    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled
-    groups, predictors and warm starts, run_adaptive, a checkpoint restart
-    or sharded graphs.
+    Three costs.  (1) Where a recomputed field is read (through a mapping
+    or a transform) the report is not of the state returned: that state's
+    own residual was measured up to 4.5 times the reported one, and above
+    the threshold beside converged=True in 1 of 48 converged float32 draws;
+    a bound taken at the accepted iterate holds of the state returned with
+    the reported residual added on the readings of a recomputed field.
+    (2) A recomputed field is sometimes further from the fixed point than
+    the value the accepted iterate held: 27 of 375 recomputed fields by
+    more than 1.25 times (289 converged float32 draws of linear relay
+    groups, jaxlib 0.11.0), one of them ending above a tolerance (1.06 to
+    2.07), never by more than about one tolerance in a converged solve,
+    and about three times as often where the plain pass expands (15 of 87
+    fields at a gain of 1.5 under an acceleration; 12 of 228 in
+    contractive loops).  (3) An identity-mapped group recomputes its field
+    too and equals its unmapped twin within the residual, not to the bit
+    (to the bit under "l2" and "mixed").  One more evaluation of the pass
+    per solve where a field is recomputed; none in a group whose every
+    floating field is measured whole, whose compiled step is the one it
+    was.  A diverged (non-finite) accepted iterate is returned as the loop
+    left it; a recomputed field that is not finite makes the residual inf
+    and strict_convergence raise.  max_iterations=1 returns its single pass
+    as it is.  Tested on groups whose members are linear in what they
+    read: both schedules, both solvers, every acceleration, converged and
+    at a cap; float32 and float64; jvp and grad of a recomputed field
+    through the jitted step; three steps; a sub-cycled member (the
+    composition, against the library's own pass).  Not claimed for mixed
+    dtypes, 16-bit floats, vmap, multi-rate graphs, predictors and warm
+    starts, run_adaptive, a checkpoint restart or sharded graphs.
   oracle: >-
-    the float64 fixed point of the linear map the graph holds; each
-    member's defect at the returned state against the per-entry change its
-    threshold allows, and the state within the resolvent of those
-    allowances.
+    the accepted iterate, read from the same library with the return rule
+    switched off; a float64 closed form of one pass at it, of the interface
+    norm and of the fixed point; on the exact model, x + P (F(x) - x) and
+    the identity y - Phi(y) = -[(I - L) - (I - M) P] (F(x) - x).
   tests:
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_solve_returns_the_accepted_iterate_with_its_unmeasured_fields_from_one_pass
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_return_rule_holds_under_every_schedule_solver_acceleration_and_verdict
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_rule_costs_one_evaluation_of_the_pass_and_only_where_it_recomputes
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_cap_of_one_returns_its_one_pass_as_it_is
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_recomputed_field_that_is_not_finite_is_in_the_verdict
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_strict_convergence_names_a_recomputed_field_that_is_not_finite
     - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns
-    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_no_acceleration_leaves_a_one_way_target_between_passes
-    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_chain_under_jacobi_returns_its_last_member_at_the_members_before_it
-    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_field_no_edge_reads_is_within_the_tolerance_in_a_weakly_coupled_pair
-    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_under_jacobi_every_fed_member_reads_the_previous_iterate
-    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_under_gauss_seidel_only_a_back_edges_target_reads_the_previous_iterate
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_part_of_a_field_its_edge_does_not_deliver_is_not_left_a_pass_behind
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_every_step_of_a_trajectory_ends_at_its_own_fixed_point
+    - tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_field_one_edge_delivers_whole_is_not_named_for_another_that_maps_it
+    - tests/property/test_converged_groups_are_at_their_fixed_point.py::test_on_the_exact_model_the_returned_state_reads_within_the_residual_of_its_iterate
+    - tests/property/test_converged_groups_are_at_their_fixed_point.py::test_the_library_returns_the_models_state_for_the_iterate_it_accepted_per_push
     - tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
     - tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point
+    - tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_the_returned_state_bit_identical
     - tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point
   status: verified
   notes: >-
-    Until MADD-ANO-238 was fixed the norm stopped on readings that had
-    settled while a member still held the value of readings that had not:
-    a one-way pair under Jacobi returned its target computed from the
-    pre-step source, converged=True, iterations=1, residual 0 (0.1.0 to
-    0.3.1), and the ten iqn-* / interface rows of the coupling sweep
-    disagreed with plain iteration by up to 2.25 in a field no edge reads
-    (recorded under MADD-ANO-005; CPL-174).  A group whose every field is
-    delivered whole by an internal edge is measured as under "mixed" and
-    its compiled step is unchanged.
+    Until 0.4.0 the solve returned the accepted iterate as it was, and the
+    norm answered only for what it measured: a one-way pair under Jacobi
+    returned its target computed from the pre-step source, converged=True,
+    iterations=1, residual 0 (MADD-ANO-238), the part of a field a mapping
+    does not deliver was a pass behind or a blend of passes
+    (MADD-ANO-239), both 0.1.0 to 0.3.1, and the ten iqn-* / interface
+    rows of the coupling sweep disagreed with plain iteration by up to
+    2.25 in a field no edge reads (recorded under MADD-ANO-005; CPL-174).
+    Recomputing every floating field (the measured ones too) was measured
+    and not taken: it changes the one kind of group that was never wrong
+    and loses by the plain gain where the pass expands.  Keeping the
+    accepted value in the members a Gauss-Seidel sweep feeds forward with
+    no acceleration would save the pass there (the ten fields on which the
+    two differed were within 0.65 tolerance either way): a possible later
+    optimisation, not taken for the sake of one rule.  The set is defined
+    in one function and must follow the norm's reading rule: a later stage
+    that reads a static mapping on its compact side makes that source
+    field measured whole.
   domains:
-    f32: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_chain_under_jacobi_returns_its_last_member_at_the_members_before_it
-    f64: 'tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_one_way_group_under_jacobi_returns_its_target_at_the_source_it_returns[plain-f64-ift]'
+    f32: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_solve_returns_the_accepted_iterate_with_its_unmeasured_fields_from_one_pass
+    f64: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_return_rule_holds_in_float64
     mixed_dtype: narrowed
     16bit: narrowed
-    jit: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push
-    grad: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_the_refreshed_field_carries_the_fixed_points_derivative
+    jit: tests/property/test_converged_groups_are_at_their_fixed_point.py::test_the_library_returns_the_models_state_for_the_iterate_it_accepted_per_push
+    grad: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_recomputed_field_carries_the_fixed_points_derivative
     vmap: narrowed
     multi_rate: narrowed
-    sub_cycled: narrowed
+    sub_cycled: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_sub_cycled_member_is_returned_by_the_same_rule
     predictors_warm_starts: narrowed
     adaptive: narrowed
     checkpoint_restart: narrowed

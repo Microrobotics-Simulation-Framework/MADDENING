@@ -4182,6 +4182,16 @@ class GraphManager:
         steps its rate divider fires on, and between those its entry is
         the most recent applied solve's.
 
+        Under ``convergence_norm="interface"`` "the state this step
+        returned" is, in every entry below, **the iterate the loop
+        accepted**.  The step returns that iterate with each floating
+        field the norm does not measure whole -- one no internal edge
+        reads, or one read only through a mapping or a transform --
+        recomputed by one plain pass at it (not counted in
+        ``iterations``), so the state held afterwards is within the
+        reported residual of the reported iterate on what the internal
+        edges deliver, and is not itself an iterate of the loop.
+
         Returns
         -------
         dict

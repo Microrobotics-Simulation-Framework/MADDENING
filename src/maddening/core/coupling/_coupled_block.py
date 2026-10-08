@@ -391,13 +391,6 @@ def _run_coupled_block_impl(
     # does not sub-cycle, including ``subcycling=True`` over one timestep).
     group_dividers = _group_dividers(group, nodes) or {}
     use_subcycling = bool(group_dividers)
-    # Static: the floating fields the interface norm does not measure
-    # whole (read by no internal edge, or only through a mapping or a
-    # transform).  The solve returns them as one plain pass computes them
-    # at the iterate it accepts.  Empty for every other group, whose
-    # compiled step is the one it was.
-    refreshed_fields = _fields_the_interface_norm_misses(
-        group, interface_edges_in_order, group_node_names, new_state)
     # The group's macro timestep: the time one coupling pass covers.
     macro_dt = (max(nodes[nn].timestep for nn in group_dividers)
                 if use_subcycling else None)
@@ -904,6 +897,16 @@ def _run_coupled_block_impl(
                           jnp.asarray(state_after_first[nn][f]).dtype, jnp.floating))
             for nn in group_node_names
         }
+
+        # Static: the floating fields the interface norm does not measure
+        # whole (read by no internal edge, or only through a mapping or a
+        # transform).  The solve returns them as one plain pass computes
+        # them at the iterate it accepts.  Floating-ness is decided on the
+        # state ``nonfloat_fields`` is decided on, so the two sets are
+        # complements within what the norm does not measure.  Empty for
+        # every other group, whose compiled step is the one it was.
+        refreshed_fields = _fields_the_interface_norm_misses(
+            group, interface_edges_in_order, group_node_names, state_after_first)
 
         def _with_nonfloat_fields_at(s_full):
             """*s_full* with the group's non-floating fields recomputed at it.

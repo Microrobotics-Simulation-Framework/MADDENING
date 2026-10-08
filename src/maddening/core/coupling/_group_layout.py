@@ -14,7 +14,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling import _interface_plan
-from maddening.core.coupling.acceleration import _has_entries, float_fields_of
+from maddening.core.coupling.acceleration import (
+    PRECISION_FLOOR_ULPS,
+    _has_entries,
+    _positions_floors,
+    float_fields_of,
+)
 from maddening.core.coupling.group import CouplingGroup
 
 
@@ -554,6 +559,105 @@ def _geometry_edge_coupling_errors(group, nodes, plan) -> list[str]:
         errors.append(stem.format(names=names, key=r.key, side=r.anchor[0],
                                   field=r.anchor[1], why=why))
     return errors
+
+
+#: The float floor of a positions part, taken by itself, at which
+#: ``compile()`` warns: the threshold the interface criterion compares the
+#: residual with.  At or above it the rounding the floor counts for those
+#: positions is, entry for entry, the tolerance asked of them or more.
+_POSITIONS_FLOOR_WARNED = 1.0  # units: tolerances (the residual's units under the interface norm)
+
+
+def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
+    """``UserWarning`` texts for positions the interface norm reads that
+    their dtype cannot resolve to the group's tolerance (experimental;
+    empty for every other group).
+
+    ``convergence_norm="interface"`` reads the positions of a
+    geometry-dependent mapping read at its source and anchored there in
+    units of the mapping kind's length scale, and asks that they change
+    by less than ``rtol`` lengths (``InterfaceEdge.parts``).  A position
+    ``u`` lengths from zero is stored to ``eps * |u|`` lengths, and the
+    float floor of the residual
+    (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`)
+    counts ``PRECISION_FLOOR_ULPS`` of those per evaluation of the pass
+    for every entry of that part.  **Warned: a part for which that count
+    reaches the tolerance**,
+
+        ``PRECISION_FLOOR_ULPS * evaluations * eps * max|u| >= rtol``,
+
+    which is where the floor of the part by itself reaches the
+    criterion's threshold
+    (``acceleration._positions_floors``, the floor's own arithmetic).
+    So a group that is not warned has a floor the positions leave below
+    its threshold (pooled with the other entries the norm reads they
+    contribute at most the largest part's), and one that is warned has
+    position entries whose counted rounding is the tolerance asked of
+    them or more, and a floor of at least that times the root of their
+    share of the entries the norm reads: the loop can run to its cap on
+    rounding alone.
+
+    A warning, never a refusal, and it changes no number: where the
+    positions settle to the bit the group converges as before.
+    Measured on two float32 pairs at ``rtol=1e-4`` against the same
+    pairs in float64 (jaxlib 0.11.0, CPU): the same passes up to 2 and
+    6 times the threshold, more passes from 3 and 10 times, and one of
+    the two at its cap at 24 times.  Below the threshold the positions
+    still enter the floor: the two pairs stop at residuals of 0.25 and
+    0.48 tolerances, which is at or under their floors at 0.44 and 0.87
+    of the threshold (and above them at 0.15 and 0.30), so a residual
+    can be at its floor without this warning; what the warning marks is
+    where the positions' rounding by itself reaches the tolerance.
+
+    Asked of the state ``compile()`` sees; positions written afterwards
+    (``set_node_state``) are not asked again until the next
+    ``compile()``.  *evaluations* is the group's structural count
+    (:func:`_group_evaluations`, on the compiled schedule): the count a
+    step measures with ``diagnostics=True`` can be larger.
+    """
+    if group.convergence_norm != "interface":
+        return []
+    names = sorted(group.nodes)
+    rtol = float(group.rtol)
+    count = PRECISION_FLOOR_ULPS * float(evaluations)
+    out = []
+    for reading, resolution, floor in _positions_floors(plan, state, rtol, evaluations):
+        if not floor >= _POSITIONS_FLOOR_WARNED:
+            continue            # resolved (or not a number: the criterion's own failure)
+        edge, dtype = reading[0], np.dtype(reading[1])
+        positions = np.abs(np.asarray(reading[2], np.float64))
+        if not np.all(np.isfinite(positions)):
+            continue            # a non-finite position fails the criterion by itself
+        columns = positions.reshape(positions.shape[0], -1)
+        axis = int(np.argmax(np.max(columns, axis=0)))
+        spacing = _interface_plan._kernel_lengths(edge.mapping)[axis]
+        eps = float(np.finfo(dtype).eps)
+        node, field = reading.part.field
+        remedies = [
+            f"use coordinates local to the grid (a {dtype} position within "
+            f"{rtol / (count * eps):.3g} spacings of zero resolves this tolerance)",
+            f"loosen rtol above {count * resolution:.3g}",
+        ]
+        if dtype != np.dtype(np.float64):
+            remedies.insert(0, (
+                f"hold {node}.{field} in float64 (under jax_enable_x64; the mapping computes "
+                f"its weights in the geometry's dtype and casts them to the field's, so the "
+                f"other fields can stay as they are)"))
+        out.append(
+            f"coupling group {names} (convergence_norm='interface', rtol={rtol:g}): the "
+            f"{dtype} positions {node}.{field} read on edge {getattr(edge, 'key', None)!r} "
+            f"cannot be resolved to this tolerance. The norm measures them in grid spacings "
+            f"and asks that they change by less than rtol of one. They reach "
+            f"{float(np.max(columns)):.6g} spacings from zero (axis {axis}, spacing "
+            f"{spacing:g}), where a {dtype} position is stored to {resolution:.3g} spacings; "
+            f"the residual's float floor counts {count:g} of those per pass "
+            f"(PRECISION_FLOOR_ULPS times {float(evaluations):g} evaluation(s)), which is "
+            f"{floor:.3g} times the tolerance. Rounding alone can keep these positions "
+            f"from meeting the criterion (the group then runs to max_iterations), and where "
+            f"it is met it says little of them. "
+            f"Remedies: " + "; or ".join(remedies) + "."
+        )
+    return out
 
 
 def _flux_edge_coupling_errors(group, nodes, plan, state) -> list[str]:

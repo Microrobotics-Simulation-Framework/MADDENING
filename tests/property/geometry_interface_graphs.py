@@ -224,7 +224,7 @@ class GeoSideNode(SimulationNode):
     """
 
     def __init__(self, name, timestep, *, n, port, m, d, dtype, geom_dtype, pair, direction,
-                 spacing):
+                 spacing, placed=None):
         dt_, gd = jnp.dtype(dtype), jnp.dtype(geom_dtype)
         super().__init__(name, timestep, a=jnp.zeros((), dt_), b=jnp.zeros(n, dt_),
                          pull=jnp.zeros((), gd))
@@ -232,10 +232,14 @@ class GeoSideNode(SimulationNode):
         self._dtype, self._gd = dt_, gd
         self._pair = np.asarray(pair, np.int32)
         self._reach = np.asarray(direction, np.float64) * np.asarray(spacing, np.float64)
+        #: Where the markers start (zero by default: the tests write the
+        #: pre-step state after ``compile()``).  What ``compile()`` sees.
+        self._placed = (np.zeros((self._m, self._d)) if placed is None
+                        else np.asarray(placed, np.float64).reshape(self._m, self._d))
 
     def initial_state(self):
         return {"x": jnp.zeros(self._n, self._dtype),
-                "pos": jnp.zeros((self._m, self._d), self._gd)}
+                "pos": jnp.asarray(self._placed, self._gd)}
 
     def boundary_input_spec(self):
         return {"u": BoundaryInputSpec(shape=(self._port,), dtype=self._dtype,
@@ -273,12 +277,14 @@ def _mapping(shape: Shape, way: str):
         mode="conservative" if way == "scatter" else "consistent")
 
 
-def _nodes(shape: Shape, timesteps: Optional[dict] = None) -> dict:
+def _nodes(shape: Shape, timesteps: Optional[dict] = None,
+           placed: Optional[dict] = None) -> dict:
     sizes, lay = node_sizes(shape), layout_of(shape)
     return {name: GeoSideNode(
         name, (timesteps or {}).get(name, DT), n=sizes[name][0], port=sizes[name][1], m=shape.n_small, d=shape.d,
         dtype=shape.dtype, geom_dtype=shape.geometry_dtype, pair=lay[name]["pair"],
-        direction=lay[name]["direction"], spacing=shape.spacing) for name in ("p", "q")}
+        direction=lay[name]["direction"], spacing=shape.spacing,
+        placed=(placed or {}).get(name)) for name in ("p", "q")}
 
 
 def build(shape: Shape) -> Built:
@@ -437,6 +443,27 @@ class Draw:
 
 #: What a part is measured against: its own largest magnitude, or one grid spacing.
 OWN, SPACINGS = "own", "spacings"
+
+#: How many evaluations one pass of the pair rounds like, by schedule: each
+#: node declares one, and under Gauss-Seidel ``q`` reads what ``p`` wrote in
+#: the same pass (a chain of two).  What the float floor is multiplied by.
+EVALUATIONS = {"jacobi": 1.0, "gauss-seidel": 2.0}
+
+
+def positions_floor(positions, spacing, dtype: str, rtol: float = RTOL) -> float:
+    """The float floor of positions read in grid spacings, by themselves,
+    per evaluation of the pass and in tolerances: four roundings of the
+    farthest coordinate as *dtype* holds it (``eps |u|`` spacings, ``u``
+    its distance from zero in the spacing of its own axis) over ``rtol``.
+
+    The rule of ``compile()``'s advisory, restated: it warns of a part
+    where this times :data:`EVALUATIONS` is one or more (the criterion's
+    threshold): the rounding counted for such a position is then the
+    tolerance asked of it, or more.
+    """
+    held = np.asarray(np.asarray(positions, np.dtype(dtype)), np.float64)
+    reach = float(np.max(np.abs(held / np.asarray(spacing, np.float64))))
+    return 4.0 * float(np.finfo(np.dtype(dtype)).eps) * reach / rtol
 
 
 def measured_whole(shape: Shape) -> tuple:

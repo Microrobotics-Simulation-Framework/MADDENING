@@ -208,6 +208,43 @@ names the edge and says what to do.
   with a geometry-dependent mapping reports its solve and withholds the
   bounds, as above; with another mapping kind on an internal edge, or in a
   sub-cycled group, it is refused at `compile()`: use `"l2"` or `"mixed"`.
+* **Under the interface norm, positions need a dtype that resolves the
+  tolerance where they are.**  A position `u` spacings from zero is stored
+  to `eps * u` spacings (`eps` is 1.2e-7 in float32 and 2.2e-16 in
+  float64), and the criterion asks the positions it reads (a scatter's,
+  anchored at its source) to change by less than `rtol` of one spacing.
+  The float floor of the residual counts four such roundings per
+  evaluation of a pass (`PRECISION_FLOOR_ULPS`; `E` evaluations a pass:
+  one where every node reads the previous iterate and evaluates once, two
+  for a Gauss-Seidel pair), and `compile()` warns (`UserWarning`) of each
+  edge whose positions put that count at the tolerance or above:
+
+  ```text
+  4 * E * eps * max|u| >= rtol
+  ```
+
+  with `u` taken axis by axis in that axis's spacing, on the state
+  `compile()` is called with.  In float32 at `rtol=1e-4` that is from 210
+  spacings from zero (105 for a Gauss-Seidel pair); at the default
+  `rtol=1e-6`, from two.  From there on the rounding counted for such a
+  position is the tolerance asked of it, or more: rounding alone can keep
+  the group from converging (it then runs to `max_iterations`), and where
+  it does converge the criterion says little of those positions.  It is a
+  warning, and the step is built as it would be without it: where the
+  positions settle to the last bit the group converges as before.  The
+  message names the edge, the field, the distance and the dtype, and three
+  remedies:
+  - hold the positions in float64.  This needs `jax_enable_x64`; the
+    mapping computes its weights in the geometry's dtype and casts them to
+    the field's, so the other fields can stay float32;
+  - use coordinates local to the grid, so that the positions are small
+    numbers (the origin of the coordinates near the markers);
+  - loosen `rtol`.
+
+  Positions written after `compile()` (`set_node_state`) are not asked
+  again until the next `compile()`.  A target-anchored geometry (no
+  reading), a gather (read as delivered) and the `"l2"` and `"mixed"`
+  norms (which measure positions against their own size) are not asked.
 * **No adaptive stepping** and **no sharded nodes** on a geometry edge.
 * **The geometry is a state field of the edge's own source or target.**
   To use positions another node holds, carry them in the source's or the
@@ -250,8 +287,10 @@ For a `multilinear_grid` edge inside a group that does not sub-cycle:
   group under this norm.
 * **A float32 position far from the origin limits the tolerance.**  A
   position `u` spacings from zero is stored to about `1e-7 u` spacings;
-  at `rtol=1e-4` that is the whole tolerance by a thousand spacings.
-  Hold the positions in float64, or keep the origin near the grid.
+  at `rtol=1e-4` that is the whole tolerance by a thousand spacings, and
+  `compile()` warns from a quarter of that distance (an eighth for a
+  Gauss-Seidel pair; the limits above have the arithmetic).  Hold the
+  positions in float64, keep the origin near the grid, or loosen `rtol`.
 * **No bound is reported under this norm yet**: `rho_spectral`,
   `spectral_error_bound`, the gradient bound and `precision_limited` are
   withheld with a `not_usable_reason`, as in the limits above.

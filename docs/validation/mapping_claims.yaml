@@ -2787,15 +2787,20 @@ claims:
     spacing", and the step records the floor of "a gather anchored at its
     target". "A group that reports converged=True is within K tolerances
     of its fixed point in these readings", and "K does not see the size of
-    the grid or the place of the origin".
+    the grid or the place of the origin". compile() warns of each edge
+    "whose positions put that count at the tolerance or above", the count
+    being the float floor's: "4 * E * eps * max|u| >= rtol".
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What the interface norm reads on a geometry edge)'
     - 'docs/user_guide/geometry_dependent_mappings.md (What convergence_norm="interface" reads on a geometry edge)'
+    - 'docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)'
     - 'src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.parts'
     - 'src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.geometry_at'
     - 'src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.read'
     - 'src/maddening/core/coupling/acceleration.py::coupling_residual_interface'
     - 'src/maddening/core/coupling/acceleration.py::residual_precision_floor'
+    - 'src/maddening/core/coupling/acceleration.py::_positions_floors'
+    - 'src/maddening/core/coupling/_group_layout.py::_unresolved_position_warnings'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping.geometry_length_scale'
   conditions: >-
     solver="ift", one rate, atol=0 unless said; a pair whose two internal
@@ -2823,10 +2828,21 @@ claims:
     cells under this norm (a gather alone, a scatter alone and both, the
     other direction a static matrix) against the numerical float64
     reference: the reported residual and the state returned (one cell on
-    every push). Above the float floor: a float32 position hundreds of
-    spacings from zero is stored to more than rtol=1e-4 spacings and such a
-    group may not converge (the guide says so). The steps compiled (jit) by
-    the graph. A scan, a batch (vmap) and forward and reverse derivatives
+    every push). For positions their dtype resolves to the tolerance: the
+    claim is stated for a group compile() does not warn of. It warns
+    (UserWarning, never a refusal) of each edge whose reading holds
+    positions where the float floor of those positions by themselves is the
+    criterion's threshold or more, 4 E eps max|u| >= rtol, u in the spacing
+    of its own axis, E the group's structural evaluation count (float32 at
+    rtol=1e-4: from 210 spacings from zero where every node reads the
+    previous iterate, 105 for a Gauss-Seidel pair), on the state compile()
+    is called with and on no later write. Tested two thousandths either
+    side of that distance at rtol=1e-4 and 1e-3, on one and two axes and
+    both signs, in float64 at rtol=1e-12, and silent for a float64
+    geometry beside float32 values, a target-anchored geometry, a gather
+    and the other two norms. Under the threshold the positions still enter
+    the floor, so a residual can be at its floor without the warning. The
+    steps compiled (jit) by the graph. A scan, a batch (vmap) and forward and reverse derivatives
     through the solve are exercised in the slow lane only, on three kinds
     of pair. Not claimed for another mapping kind or a sub-cycled group
     (refused: MAP-033), for the bounds (withheld: MAP-048), 16-bit dtypes,
@@ -2842,6 +2858,10 @@ claims:
     float64 reference of the coupling searches with the reading written as
     a function of its flat iterate; fourteen seeded faults of the library
     (the test module's docstring lists eleven with their first signal).
+    For the advisory: the rule restated in NumPy from the stored positions
+    (four roundings of the farthest coordinate per evaluation, over rtol),
+    the library's own floor of the compiled state over a sweep of nine
+    distances, and seventeen seeded faults.
   tests:
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_residual_of_two_states_is_the_rules'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_float_floor_counts_each_part_at_its_own_resolution'
@@ -2853,6 +2873,13 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_an_edge_mapped_scatter_reports_what_its_marker_side_twin_reports'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_kept_fields_are_the_ones_a_part_holds_whole'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_step_records_the_floor_of_a_reading_at_a_pre_step_geometry'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_threshold'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_same_positions_held_in_float64_compile_silently'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_float64_positions_warn_at_their_own_distance_and_are_not_told_to_widen'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_positions_that_are_no_part_of_the_reading_are_not_warned_of'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_other_norms_measure_positions_against_their_own_size_and_are_not_warned'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_whole_problem_translated_far_from_zero_warns_and_translated_back_does_not'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distances'
     - 'tests/property/test_coupling_geometry_search_under_the_interface_norm.py::test_what_a_group_with_a_geometry_edge_reports_under_the_interface_norm_per_push'
     - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_reports_as_its_static_mapping_under_the_interface_norm'
     - 'tests/core/test_interface_plan.py::test_the_parts_of_a_geometry_edges_reading'
@@ -2875,7 +2902,19 @@ claims:
     properties hold for the library and do not by themselves tell that
     fault; the edge-by-edge residual, the plain loop's residual, the
     search and the plan's pins do. Seeded faults: fourteen, each caught by
-    two per-push instruments or more.
+    two per-push instruments or more. The advisory, on a scatter-only pair
+    under Jacobi and a two-way pair under Gauss-Seidel in float32 at twelve
+    distances from 32 to 5032 spacings: warned exactly where its number
+    (the positions' floor by themselves, in tolerances) is one or more
+    (from 222 and 132 spacings; 0.87 at 182 and 92); an unwarned group's
+    floor 0.11 to 0.71; the passes of the same pair in float64 (24 and 12)
+    up to 2.1 and 6.0 times the threshold, 26 and 13 passes at 3.0 and 9.8
+    times, the cap of 400 at 24 times on the first pair and 25 passes at
+    48 times on the second. The two pairs stop at residuals of 0.25 and
+    0.48, at or under their floors at 0.44 and 0.87 of the threshold and
+    above them at 0.15 and 0.30.
+    Seeded faults of the advisory: seventeen, each caught by its per-push
+    cases and nine also by the sweep.
   domains:
     f32: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
     f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'

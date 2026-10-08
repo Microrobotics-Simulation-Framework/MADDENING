@@ -2634,6 +2634,18 @@ class GraphManager:
                 self._state, self._nodes)
             for g in self._coupling_groups
         }
+        # Positions the interface norm reads in grid spacings, held in a
+        # dtype that cannot resolve the group's tolerance where they are
+        # (experimental; a float32 coordinate far from zero).  A warning:
+        # the step is built as it would be without it.  On the count the
+        # report's floor is committed with below; a group under another
+        # norm, or without such positions, has nothing to say.
+        for g in self._coupling_groups:
+            evaluations, _declared = _group_layout._group_evaluations(
+                g, self._nodes, schedule, self._edges)
+            for warning_text in _group_layout._unresolved_position_warnings(
+                    g, interface_plans["+".join(sorted(g.nodes))], self._state, evaluations):
+                warnings.warn(warning_text, UserWarning, stacklevel=2)
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,

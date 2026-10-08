@@ -1929,6 +1929,43 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     return (PRECISION_FLOOR_ULPS * float(evaluations)) * jnp.sqrt(sum_sq)
 
 
+def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 1.0) -> list:
+    """``[(reading, resolution, floor), ...]``: the float floor of each
+    positions part of an interface reading at *state*, taken by itself.
+
+    One entry per part the norm reads in a mapping kind's length scale
+    (``InterfaceEdge.parts``: the positions of a geometry-dependent
+    mapping read at its source and anchored there).  ``resolution`` is
+    what :func:`residual_precision_floor` counts for every entry of that
+    part (:func:`_part_resolution`: ``eps`` of the positions' dtype
+    times their largest magnitude in lengths), and ``floor`` is the
+    value that function returns for a reading that is this part alone:
+    ``PRECISION_FLOOR_ULPS * evaluations * resolution / rtol``, in the
+    units the residual is reported in (tolerances).  Pooled with the
+    other entries the norm reads, the positions put at most the largest
+    of these into a group's floor, and at least each one times the root
+    of its part's share of the entries.
+
+    On the host, from a concrete state: Python floats.  Only the edges
+    that carry such a part are read, and such an edge is read at its
+    source, so no mapping is applied.  Read by
+    ``_group_layout._unresolved_position_warnings`` (``compile()``'s
+    advisory).
+    """
+    with_positions = [
+        record.edge for record in interface_records(interface_edges, state)
+        if any(part.unit == KERNEL_LENGTH for part in record.parts)]
+    floors = []
+    for reading in _interface_readings(with_positions, state):
+        if reading.part.unit != KERNEL_LENGTH:
+            continue
+        resolution = float(_part_resolution(reading))
+        floors.append((
+            reading, resolution,
+            PRECISION_FLOOR_ULPS * float(evaluations) * resolution / float(rtol)))
+    return floors
+
+
 def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
                          margin: float = SPECTRAL_MARGIN, floor: Any = 0.0):
     """The distance to the fixed point, from the spectrum of ``dF/dx``.

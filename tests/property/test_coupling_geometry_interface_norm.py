@@ -26,7 +26,12 @@ it on the ``multilinear_grid`` kind:
   in spacings reports the same numbers and returns the same state;
 * what follows from the reading: the fields a solve keeps as it accepted
   them, who owns the ``reading_floor`` slot, checkpoints, a scan, a batch
-  and a derivative through the solve; and what stays refused or withheld.
+  and a derivative through the solve; and what stays refused or withheld;
+* **the advisory**: ``compile()`` warns of positions whose dtype cannot
+  resolve the tolerance where they are -- from the distance at which the
+  float floor of the positions by themselves is the criterion's
+  threshold, ``4 E eps max|u| >= rtol`` -- two thousandths either side of
+  it, in both dtypes, and not for positions the reading does not hold.
 
 Seeded faults (``plans/tools/mutants.py`` on a scratch copy of ``src/``,
 jaxlib 0.11.0; each run against five per-push instruments separately:
@@ -68,12 +73,42 @@ G14), ``test_a_plain_iteration_stops_where_the_reference_s_loop_does``
 (G13).  The search's misses are its per-push cell's (one axis, a
 source-anchored scatter and a target-anchored gather: G4, G5 and G7 are
 not expressible on it; its slow hunt has the other cells).
+
+Seeded faults of the advisory (the same tool; **cases** the tests of the
+advisory here but the sweep, **sweep**
+``test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distances``,
+which is one axis, float32 and one tolerance).  Seventeen, each caught:
+
+===  ===================================================  =====  =====
+#    fault                                                cases  sweep
+===  ===================================================  =====  =====
+W1   the threshold off by the kernel length (raw          yes    yes
+     coordinates)
+W2   the threshold off by the kernel length (divided      yes    yes
+     twice)
+W3   the spacing of the wrong axis                        yes    -
+W4   the warning for a target anchor                      yes    -
+W5   the dtype ignored (float32's eps for every one)      yes    -
+W6   the dtype ignored (float64's eps for every one)      yes    yes
+W7   the group's evaluation count left out                yes    yes
+W8   the floor's four roundings left out                  yes    yes
+W9   the tolerance ignored                                yes    -
+W10  asked under every norm                               yes    -
+W11  warned from half the threshold                       yes    yes
+W12  warned from twice the threshold                      yes    yes
+W13  the mean position in place of the farthest           yes    yes
+W14  float64 offered to positions already float64         yes    -
+W15  the target node named as the positions' holder       yes    -
+W16  the first axis named whatever axis is farthest       yes    -
+W17  never asked                                          yes    yes
+===  ===================================================  =====  =====
 """
 
 from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -84,6 +119,7 @@ from maddening.core.coupling.acceleration import (
     coupling_residual_interface,
     residual_precision_floor,
 )
+from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
 from maddening.core.graph_manager import GraphManager
 from tests.property import geometry_interface_graphs as gi
 from tests.property.geometry_interface_graphs import Draw, Reference, Shape
@@ -744,6 +780,276 @@ def test_a_sub_cycled_group_with_a_geometry_edge_is_refused_under_the_interface_
         for norm in ("mixed", "l2"):
             assert not [i for i in make(norm, gi.DT / 2, subcycling=True).validate()
                         if i.startswith("ERROR")]
+
+
+# ---------------------------------------------------------------------------
+# compile() says where a dtype cannot resolve the positions to the tolerance
+# ---------------------------------------------------------------------------
+
+#: The pairs the advisory is asked of: a scatter at each end under Jacobi
+#: (one evaluation a pass), and a scatter and a gather under Gauss-Seidel
+#: (two), each scatter anchored at its source.
+_PLACED = {
+    "scatter-only": Shape("scatter-only", 40, 5, ("source", "source"), schedule="jacobi",
+                          dtype="float32"),
+    "two-way": Shape("two-way", 40, 5, ("source", "target"), dtype="float32"),
+    "two-axes": Shape("scatter-only", 120, 5, ("source", "source"), schedule="jacobi",
+                      dtype="float32", d=2),
+}
+#: The edges of those pairs whose reading holds positions (the scatters
+#: anchored at their source), and the node that holds them.
+_READ_POSITIONS = {"scatter-only": {"p.x->q.u": "p", "q.x->p.u": "q"},
+                   "two-way": {"p.x->q.u": "p"},
+                   "two-axes": {"p.x->q.u": "p", "q.x->p.u": "q"}}
+
+
+def _markers(shape, reach, *, axis=0, sign=1.0):
+    """``(positions, grid origin)``: markers whose farthest coordinate is
+    ``sign * reach`` spacings from zero on *axis* (one marker; the others
+    up to eleven spacings nearer, so a mean is not the maximum), an eighth
+    as far on the other axis, on a grid placed around them."""
+    m, h = shape.n_small, np.asarray(shape.spacing)
+    step = np.arange(m) / (m - 1)
+    index = np.empty((m, shape.d))
+    for a, n in enumerate(shape.grid_shape):
+        top = reach if a == axis else reach / 8.0
+        index[:, a] = sign * (top - step * (min(n - 1, 12) - 1))
+    origin = np.floor(index.min(axis=0))
+    assert np.all(index.max(axis=0) <= origin + np.asarray(shape.grid_shape) - 1)
+    return index * h, tuple(float(o) for o in origin * h)
+
+
+def _placed(shape, positions, origin, *, rtol=gi.RTOL, norm="interface"):
+    """*shape*'s pair, not yet compiled, both nodes starting at *positions*."""
+    gm = GraphManager()
+    for node in gi._nodes(shape, placed={"p": positions, "q": positions}).values():  # noqa: SLF001
+        gm.add_node(node)
+    for (src, dst), way, anchor in zip(gi.EDGES, gi.WAYS[shape.kind], shape.anchors):
+        mapping = multilinear_grid_mapping(
+            origin, shape.spacing, shape.grid_shape, n_points=shape.n_small,
+            mode="conservative" if way == "scatter" else "consistent")
+        gm.add_edge(src, dst, "x", "u", mapping=mapping, geometry=(anchor, "pos"))
+    tolerance = {"tolerance": 1e-6} if norm == "l2" else {"rtol": rtol}
+    gm.add_coupling_group(["p", "q"], iteration_mode=shape.schedule, convergence_norm=norm,
+                          max_iterations=20, **tolerance)
+    return gm
+
+
+def _compile_warnings(gm) -> list:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        gm.compile()
+    assert all(issubclass(w.category, UserWarning) for w in caught), caught
+    return [str(w.message) for w in caught]
+
+
+def _edges_warned(messages) -> dict:
+    """``{edge key: message}`` of the advisories about unresolved positions."""
+    out = {}
+    for text in messages:
+        assert "cannot be resolved to this tolerance" in text, text
+        (key,) = [k for k in ("p.x->q.u", "q.x->p.u") if repr(k) in text]
+        assert key not in out, messages
+        out[key] = text
+    return out
+
+
+def _threshold_reach(shape, rtol) -> float:
+    """The distance from zero, in spacings, at which the positions' floor
+    by itself is the criterion's threshold: ``rtol / (4 E eps)``."""
+    eps = float(np.finfo(np.dtype(shape.geometry_dtype)).eps)
+    return rtol / (4.0 * gi.EVALUATIONS[shape.schedule] * eps)
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["positive", "negative"])
+@pytest.mark.parametrize("rtol", [1e-4, 1e-3])
+@pytest.mark.parametrize("which, axis", [("scatter-only", 0), ("two-way", 0), ("two-axes", 1)])
+def test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_threshold(
+        which, axis, rtol, sign):
+    """float32 positions two thousandths under ``rtol / (4 E eps)`` spacings
+    from zero compile silently, and two thousandths over they warn: once per
+    edge whose reading holds them, by name, with the distance, the dtype,
+    the tolerance and the three remedies.  The count is the float floor's
+    (four roundings per evaluation; ``E`` is two under Gauss-Seidel), the
+    distance is in the spacing of its own axis, and the sign does not
+    matter."""
+    shape = _PLACED[which]
+    at = _threshold_reach(shape, rtol)
+    floors = {}
+    for side, reach in (("under", at * (1 - 2e-3)), ("over", at * (1 + 2e-3))):
+        positions, origin = _markers(shape, reach, axis=axis, sign=sign)
+        got = _edges_warned(_compile_warnings(_placed(shape, positions, origin, rtol=rtol)))
+        floor = gi.EVALUATIONS[shape.schedule] * gi.positions_floor(
+            positions, shape.spacing, shape.geometry_dtype, rtol)
+        floors[side] = floor
+        if side == "under":
+            assert not got, got
+            continue
+        assert sorted(got) == sorted(_READ_POSITIONS[which]), got
+        for key, text in got.items():
+            holder = _READ_POSITIONS[which][key]
+            assert f"positions {holder}.pos" in text and "float32" in text, text
+            assert f"rtol={rtol:g}" in text, text
+            said = float(text.split("They reach ")[1].split(" spacings")[0])
+            assert abs(said - reach) <= 1e-5 * reach, (said, reach)
+            assert f"(axis {axis}, spacing {shape.spacing[axis]:g})" in text, text
+            times = float(text.split("which is ")[1].split(" times the tolerance")[0])
+            assert abs(times - floor) <= 5e-3 * floor, (times, floor)
+            for remedy in ("in float64", "coordinates local to the grid", "loosen rtol above"):
+                assert remedy in text, (remedy, text)
+    # Premise: the two placements are either side of the rule's own number.
+    assert 0.99 < floors["under"] < 1.0 <= floors["over"] < 1.01, floors
+
+
+@pytest.mark.parametrize("dtype, geom_dtype", [("float32", "float64"), ("float64", None)])
+def test_the_same_positions_held_in_float64_compile_silently(dtype, geom_dtype):
+    """Five times past the float32 distance, a float64 geometry (beside
+    float32 values, or with float64 ones) resolves the tolerance by nine
+    orders: no warning.  The float32 pair at the same place warns."""
+    base = _PLACED["scatter-only"]
+    reach = 5.0 * _threshold_reach(base, gi.RTOL)
+    positions, origin = _markers(base, reach)
+    assert len(_edges_warned(_compile_warnings(_placed(base, positions, origin)))) == 2
+    shape = dataclasses.replace(base, dtype=dtype, geom_dtype=geom_dtype)
+    with precision(True):
+        assert _compile_warnings(_placed(shape, positions, origin)) == []
+
+
+def test_float64_positions_warn_at_their_own_distance_and_are_not_told_to_widen():
+    """The rule is the dtype's: float64 positions warn where ``4 E eps64``
+    of their distance reaches the tolerance (here ``rtol=1e-12``), and the
+    message then offers the two remedies that are left."""
+    shape = dataclasses.replace(_PLACED["scatter-only"], dtype="float64")
+    rtol = 1e-12
+    at = _threshold_reach(shape, rtol)
+    assert 1_000 < at < 1_200, at
+    with precision(True):
+        under, origin = _markers(shape, at * (1 - 2e-3))
+        assert _compile_warnings(_placed(shape, under, origin, rtol=rtol)) == []
+        over, origin = _markers(shape, at * (1 + 2e-3))
+        got = _edges_warned(_compile_warnings(_placed(shape, over, origin, rtol=rtol)))
+    assert sorted(got) == ["p.x->q.u", "q.x->p.u"]
+    for text in got.values():
+        assert "float64 positions" in text and "in float64 (" not in text, text
+        assert "coordinates local to the grid" in text and "loosen rtol above" in text, text
+
+
+@pytest.mark.parametrize("kind, anchors", [
+    ("two-way", ("target", "source")),          # the scatter anchored at its target
+    ("two-way", ("target", "target")),
+    ("scatter-only", ("target", "target")),
+    ("gather-only", ("source", "target")),      # no scatter: every edge read as delivered
+    ("gather-only", ("source", "source")),
+], ids=lambda v: v if isinstance(v, str) else "-".join(v))
+def test_positions_that_are_no_part_of_the_reading_are_not_warned_of(kind, anchors):
+    """A target-anchored geometry is the pre-step state, a constant of the
+    solve, and a gather is read as delivered: neither reading holds
+    positions, so float32 markers five times past the distance compile
+    silently -- and the same markers behind a source-anchored scatter warn."""
+    base = _PLACED["scatter-only"]
+    reach = 5.0 * _threshold_reach(base, gi.RTOL)
+    positions, origin = _markers(base, reach)
+    shape = dataclasses.replace(base, kind=kind, anchors=anchors)
+    assert not [held for held in gi.measured_whole(shape) if held[1] == "pos"]
+    assert [held for held in gi.measured_whole(base) if held[1] == "pos"]
+    assert _compile_warnings(_placed(shape, positions, origin)) == []
+    assert _edges_warned(_compile_warnings(_placed(base, positions, origin)))
+
+
+@pytest.mark.parametrize("norm", ["mixed", "l2"])
+def test_the_other_norms_measure_positions_against_their_own_size_and_are_not_warned(norm):
+    """``"mixed"`` and ``"l2"`` read the positions as a state field, over
+    its own magnitude: a float32 field resolves that wherever it is."""
+    shape = _PLACED["scatter-only"]
+    positions, origin = _markers(shape, 5.0 * _threshold_reach(shape, gi.RTOL))
+    assert _compile_warnings(_placed(shape, positions, origin, norm=norm)) == []
+
+
+def test_the_whole_problem_translated_far_from_zero_warns_and_translated_back_does_not():
+    """The same pair, grid and markers together, at the origin, three
+    thousand spacings out on either side, and back: what is warned of is
+    where the coordinates are, not the problem.  Read from the state
+    ``compile()`` is called with -- the nodes' initial state, or one
+    written before a later ``compile()`` -- and from nothing else."""
+    here = _PLACED["two-way"]
+    draw = DRAWS[0]
+    for origin, warned in ((0.0, False), (3000.0, True), (-3000.0, True), (0.0, False)):
+        shape = dataclasses.replace(here, origin=origin)
+        ref = Reference(shape, draw)
+        gm = gi.build(shape).gm          # the markers start at zero: silent wherever the grid is
+        ref.start(gm)                    # ... and are written where the problem has them
+        got = _edges_warned(_compile_warnings(gm))
+        assert sorted(got) == (["p.x->q.u"] if warned else []), (origin, got)
+        # The nodes' own initial state, on a first compile, reads the same.
+        first = _placed(shape, ref.pre["p"]["pos"], shape.grid_origin)
+        assert sorted(_edges_warned(_compile_warnings(first))) == sorted(got), origin
+        if warned:
+            reach = float(np.max(np.abs(ref.pre["p"]["pos"] / ref.h)))
+            said = float(got["p.x->q.u"].split("They reach ")[1].split(" spacings")[0])
+            assert abs(said - reach) <= 1e-5 * reach and reach > 2990.0, (said, reach)
+        # A warning and not a refusal: the graph is compiled either way.
+        assert gm._compiled_step is not None                              # noqa: SLF001
+
+
+#: Distances of the sweep, in spacings from zero to the lattice's origin
+#: (the markers sit eight to thirty-two spacings further).
+_DISTANCES = (0.0, 30.0, 60.0, 100.0, 150.0, 190.0, 300.0, 1_000.0, 3_000.0)
+
+
+@pytest.mark.parametrize("which", ["scatter-only", "two-way"])
+def test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distances(which):
+    """At every distance the library's own floor of the compiled state
+    (``residual_precision_floor``, the report's function, at the group's
+    evaluation count) is the reference's, whose positions' terms are the
+    advisory's number, part by part.  So: an edge is warned of exactly
+    where that number is one or more; a group that is not warned has a
+    floor the positions leave under its threshold (a residual at the
+    threshold is not at the floor for them); and a group that is warned
+    has a floor of at least the root of the positions' share of the
+    entries times the threshold."""
+    base = _PLACED[which]
+    E = gi.EVALUATIONS[base.schedule]
+    verdicts = set()
+    for distance in _DISTANCES:
+        shape = dataclasses.replace(base, origin=distance)
+        ref = Reference(shape, DRAWS[0])
+        state = ref.one_pass(ref.pre)
+        gm = gi.build(shape).gm
+        for name in ("p", "q"):
+            held = gm.get_node_state(name)
+            gm.set_node_state(name, {f: jnp.asarray(state[name][f], held[f].dtype)
+                                     for f in ("x", "pos")})
+        warned = _edges_warned(_compile_warnings(gm))
+        evaluations, _declared, edges = gm._committed_floor_inputs[KEY]     # noqa: SLF001
+        assert evaluations == E
+        held = {name: dict(gm.get_node_state(name)) for name in ("p", "q")}
+        library = float(residual_precision_floor(
+            held, ["p", "q"], "interface", 0.0, gi.RTOL, list(edges), evaluations=evaluations,
+            pre_step=_as_jax(shape, ref.pre)))
+        assert abs(library - E * ref.floor(state)) <= 1e-5 * library, (distance, library)
+        # The positions' own terms of that floor, and the entries it pools.
+        parts = ref.parts(state)
+        total = sum(v.size for _i, v, _unit in parts)
+        own = {f"{gi.EDGES[i][0]}.x->{gi.EDGES[i][1]}.u": (
+            E * gi.positions_floor(state[gi.EDGES[i][0]]["pos"], shape.spacing,
+                                   shape.geometry_dtype), v.size)
+            for i, v, unit in parts if unit == gi.SPACINGS}
+        assert sorted(own) == sorted(_READ_POSITIONS[which])
+        assert all(abs(floor - 1.0) > 0.02 for floor, _n in own.values()), own
+        assert sorted(warned) == sorted(k for k, (floor, _n) in own.items() if floor >= 1.0), (
+            distance, own, warned)
+        for key, text in warned.items():
+            times = float(text.split("which is ")[1].split(" times the tolerance")[0])
+            assert abs(times - own[key][0]) <= 5e-3 * times, (distance, times, own[key])
+        pooled = math.sqrt(sum(n * floor ** 2 for floor, n in own.values()) / total)
+        assert pooled <= library * (1 + 1e-6), (distance, pooled, library)
+        if warned:
+            least = min(math.sqrt(own[key][1] / total) for key in warned)
+            assert library >= least, (distance, library, least)
+        else:
+            assert pooled < 1.0, (distance, pooled)
+        verdicts.add(bool(warned))
+    assert verdicts == {True, False}
 
 
 # ---------------------------------------------------------------------------

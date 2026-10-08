@@ -2714,7 +2714,7 @@ claims:
     POST /graph/edges takes "these four keys and no other. A body with any
     other key, transform, additive, mapping or geometry among them, is a
     422 that names the key and adds nothing" (it was a 201 on a plain
-    edge: MADD-ANO-248), and checks "that the nodes and the source field exist"
+    edge: MADD-ANO-249), and checks "that the nodes and the source field exist"
     (404 for a missing node, 400 for a missing field or flux); DELETE
     /graph/edges removes every edge with those endpoints and fields, and is
     a 404 "when the graph has none (it used to answer 200 and change

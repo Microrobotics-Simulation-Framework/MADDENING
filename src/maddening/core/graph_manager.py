@@ -5247,7 +5247,7 @@ class GraphManager:
                     # point is the Jacobian's *there*, and a fixed point
                     # just past a plane the Newton point stops short of is
                     # in a cell neither was taken in (the bound was 15 to
-                    # 70,000 times under the error, MADD-ANO-247).  The
+                    # 70,000 times under the error, MADD-ANO-248).  The
                     # flag stands only where no lattice plane is in the
                     # Newton-Kantorovich ball around the iterate at all:
                     # the step stored how many radii of that ball the

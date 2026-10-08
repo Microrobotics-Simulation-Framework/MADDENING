@@ -16096,7 +16096,7 @@ anomalies:
       picks, exact arithmetic the other's: `rho_spectral` read 0.0077
       against 0.1412 with `spectral_usable=True`, and 13 to 22% of
       `1 - rho` off in seven examples of an independent audit.  Since
-      MADD-ANO-247 a position within eight float resolutions of a plane
+      MADD-ANO-248 a position within eight float resolutions of a plane
       counts as on it and `gradient_bound_usable` is withdrawn there;
       `spectral_usable` is withdrawn only where the step did not certify
       its linearisation, so that radius is still flagged.  The spectral
@@ -16578,7 +16578,7 @@ anomalies:
       - "tests/property/test_coupling_geometry_search.py::test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolerance"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-247"
+  - anomaly_id: "MADD-ANO-248"
     title: "gradient_bound_usable=True on a gradient_relative_error_bound 15 to 70,000 times under the true error, for a group with a multilinear_grid edge whose fixed point lay just past a lattice plane that the Newton point stopped short of"
     description: >
       `gradient_relative_error_bound` is the bound of a smooth pass: its
@@ -16681,7 +16681,7 @@ anomalies:
       - "tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-248"
+  - anomaly_id: "MADD-ANO-249"
     title: "POST /graph/edges and POST /graph/nodes answered 201 to a body carrying a key the route does not apply (additive, transform, mapping, geometry; a misspelt params) and built another graph than the one asked for"
     description: >
       The request models of the two routes named the keys they read and

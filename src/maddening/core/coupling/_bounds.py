@@ -163,7 +163,7 @@ GEOMETRY_PLANE_REACH = 2.0  # units: spectral_error_bound
 #: evaluated is not decided by the position's value there: an iterate 4.7
 #: resolutions before a plane with its fixed point 0.7 past it kept both
 #: flags on a gradient bound 25x under the reference's error
-#: (MADD-ANO-247).  The resolution is the mapping's
+#: (MADD-ANO-248).  The resolution is the mapping's
 #: (``_plane_resolution``): ``eps`` of the position's dtype times the
 #: largest coordinate magnitude of the lattice's axis, or the position's
 #: own where that is larger.
@@ -985,7 +985,7 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     short of, both are one cell's, the check reads no change (``h`` near
     0), and the gradient of the fixed point is the other cell's.  The
     bound was 15 to 70,000 times under the reference's error with its
-    flag set (MADD-ANO-247).  So the flag does not stand on what the
+    flag set (MADD-ANO-248).  So the flag does not stand on what the
     check reads; it stands where no plane is in the ball at all.
 
     **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``,

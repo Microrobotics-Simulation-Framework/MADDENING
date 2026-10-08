@@ -369,7 +369,7 @@ def test_the_plane_limit_is_not_a_number_where_it_cannot_be_evaluated():
 
 # ---------------------------------------------------------------------------
 # A position within a few float resolutions of a plane is on it
-# (``_bounds.GEOMETRY_PLANE_ULPS``, ``_plane_resolution``; MADD-ANO-247)
+# (``_bounds.GEOMETRY_PLANE_ULPS``, ``_plane_resolution``; MADD-ANO-248)
 # ---------------------------------------------------------------------------
 
 #: Lattices whose plane the position sits beside: at a position of order
@@ -458,7 +458,7 @@ def test_the_window_is_taken_at_the_position_the_pass_builds_too():
 
 # ---------------------------------------------------------------------------
 # The lattice-plane margin of the Kantorovich ball around the iterate
-# (``_bounds._kantorovich_ball_plane_margin``; MADD-ANO-247)
+# (``_bounds._kantorovich_ball_plane_margin``; MADD-ANO-248)
 # ---------------------------------------------------------------------------
 
 

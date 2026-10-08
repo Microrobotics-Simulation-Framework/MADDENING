@@ -224,7 +224,7 @@ def test_a_sweep_that_updates_the_holder_first_has_no_geometry_column():
         seen = GS_SEARCH.observe(case)
         report = seen["report"]
         # The only reason this report may carry is the gradient flag's own
-        # (a plane inside the Kantorovich ball, MADD-ANO-247): the radius
+        # (a plane inside the Kantorovich ball, MADD-ANO-248): the radius
         # and its flag are what is read here.
         assert seen["scored"] and seen["spectral_usable"], seen
         assert seen["reason"] is None or (
@@ -576,7 +576,7 @@ def test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_
 
 
 def test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push():
-    """The gradient's flag on plane draws (MADD-ANO-247): its bound against
+    """The gradient's flag on plane draws (MADD-ANO-248): its bound against
     the reference's error wherever it is set, and never set with the fixed
     point in another lattice cell than the returned iterate -- the flag
     stands only with no plane inside the Newton-Kantorovich ball around the
@@ -648,7 +648,7 @@ def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is
             # The gradient's flag reads the margin of the Kantorovich ball,
             # whatever the limit and the bound read: over one it stands; at
             # one, under it, not a number or absent it is withdrawn alone,
-            # with the numbers and the spectral flag kept (MADD-ANO-247).
+            # with the numbers and the spectral flag kept (MADD-ANO-248).
             margin_slot = f"coupling_{gc.KEY}_geometry_plane_margin"
             assert float(kept["_meta"][margin_slot]) > 1.0
 
@@ -1070,7 +1070,7 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
         kind = "across" if seen["crossed"] else "same"
         counts[kind] += 1
         counts[f"{kind}_before"] += seen["usable_before"]
-        # The gradient's flag (MADD-ANO-247): it stood wherever the spectral
+        # The gradient's flag (MADD-ANO-248): it stood wherever the spectral
         # one did on a finite bound; it now needs no plane in the
         # Kantorovich ball.  Never across a plane, its bound held wherever
         # it is set, and the honest ones (same cell) it costs are counted.

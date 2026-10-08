@@ -207,7 +207,7 @@ names the edge and says what to do.
   point; with the fixed point just past a plane that the Newton point
   stops short of, both are one cell's, the check reads no change, and
   the gradient of the fixed point is the next cell's.  The bound read 15
-  to 70,000 times under the true error with its flag set (MADD-ANO-247).
+  to 70,000 times under the true error with its flag set (MADD-ANO-248).
   So the flag does not stand on what that check reads.  It stands only
   where every position the pass reads from the iterate is further from
   its nearest lattice plane than the fixed point can be from it: the

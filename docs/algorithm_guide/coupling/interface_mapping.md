@@ -1107,7 +1107,7 @@ and two Jacobians say nothing of a plane neither point is beyond: with
 the fixed point just past a plane that $x_N$ stops short of, both are one
 cell's, $h$ reads near zero, and the gradient of the fixed point is the
 next cell's (a bound 15 to 70,000 times under the error, flagged;
-MADD-ANO-247).  `gradient_bound_usable` therefore does not stand on what
+MADD-ANO-248).  `gradient_bound_usable` therefore does not stand on what
 the check reads.  The step stores, with $\eta = \lVert D\delta \rVert_2$
 in the gradient bound's norm,
 

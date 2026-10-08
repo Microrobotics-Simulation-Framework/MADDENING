@@ -2051,7 +2051,7 @@ claims:
     between the returned iterate and the fixed point (across a lattice
     plane the flag is the run-time rule of MAP-049; gradient_bound_usable
     stands only with no lattice plane inside the Newton-Kantorovich ball
-    around the returned iterate, MAP-049 and MADD-ANO-247, so beside a
+    around the returned iterate, MAP-049 and MADD-ANO-248, so beside a
     plane it is withdrawn from honest reports too; and a position within
     eight float resolutions of a plane, eps of its dtype times the largest
     coordinate of the lattice's axis, counts as on it: at an origin forty
@@ -2833,7 +2833,7 @@ claims:
     it rests, FOR spectral_usable ONLY, on the gradient bound's measured
     Jacobian change across the Newton step (held against an independent
     reference within twice the bound across a plane on 54,482 scanned
-    reports). THE GRADIENT'S FLAG (MADD-ANO-247) is still a run-time
+    reports). THE GRADIENT'S FLAG (MADD-ANO-248) is still a run-time
     criterion, and an argument with five stated assumptions
     (_kantorovich_ball_plane_margin): the kernel is one polynomial between
     planes; no member has a kink of its own in the ball; Newton-Kantorovich
@@ -2854,7 +2854,7 @@ claims:
     fixed point's lattice cells), a row whose flag stands, a row with a
     plane in the ball and all three in one cell (an honest report
     withdrawn), a row within three float resolutions of a plane, and the
-    three audited cases of MADD-ANO-247 (bounds 15x to 70,000x under the
+    three audited cases of MADD-ANO-248 (bounds 15x to 70,000x under the
     error, now unflagged); in every row every number whose flag is set is
     scored (rho_spectral, spectral_error_bound, the gradient bound) and the
     gradient's flag is the pinned one; with positions constant of the

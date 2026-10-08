@@ -417,7 +417,7 @@ def plane_limit_reference(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -
     the pass builds from it, is within eight float resolutions of a plane
     (``GEOMETRY_PLANE_ULPS``: ``eps`` of *cell*'s dtype times the largest
     coordinate of the lattice's axis, or the coordinate's own magnitude
-    where that is larger; MADD-ANO-247); ``inf`` where the pass reads no
+    where that is larger; MADD-ANO-248); ``inf`` where the pass reads no
     position from the iterate."""
     origin, spacing, shape = cell.grid
     x = np.asarray(x, np.float64)

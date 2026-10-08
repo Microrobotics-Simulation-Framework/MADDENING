@@ -1,7 +1,7 @@
 """The lattice-plane table of a group with a geometry edge: every reported
 number whose flag is set, against an independent reference, with the
 returned iterate, the Newton point and the fixed point on every combination
-of sides of a lattice plane (MADD-ANO-247, MAP-049, CPL-093).
+of sides of a lattice plane (MADD-ANO-248, MAP-049, CPL-093).
 
 ``gradient_relative_error_bound`` is the smooth theory's bound: it takes the
 pass's Jacobian at the returned iterate and at the Newton point.  A
@@ -200,7 +200,7 @@ def test_the_audited_positions_within_a_rounding_of_a_plane_lose_the_gradient_fl
 
 
 def test_the_audited_bounds_were_flagged_and_far_under_the_error():
-    """The three audited rows of MADD-ANO-247 as the audit recorded them:
+    """The three audited rows of MADD-ANO-248 as the audit recorded them:
     the reference's gradient error is 15 to 70,000 times the bound the
     report still carries, the fixed point is across a plane the Newton point
     is short of, and the flag is what changed."""

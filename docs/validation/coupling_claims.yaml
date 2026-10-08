@@ -3454,7 +3454,7 @@ claims:
     lattice plane (eps of its dtype times the largest coordinate of the
     lattice's axis) counts as on it: its distance is zero, and a fixed
     point placed nearer a plane than that is not told from one on it
-    (MADD-ANO-247; rho_spectral there is the float pass's cell's,
+    (MADD-ANO-248; rho_spectral there is the float pass's cell's,
     MADD-ANO-239).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
@@ -3800,7 +3800,7 @@ claims:
     a relative error of 1.134 with those probes in it (MADD-ANO-234,
     resolved).
     BESIDE A LATTICE PLANE (a group with a geometry edge read from the
-    iterate; MAP-049, MADD-ANO-247): the Newton-Kantorovich check takes
+    iterate; MAP-049, MADD-ANO-248): the Newton-Kantorovich check takes
     the Jacobian at the iterate and at the Newton point and cannot see a
     plane beyond both, so gradient_bound_usable additionally needs no
     lattice plane inside the Newton-Kantorovich ball around the returned

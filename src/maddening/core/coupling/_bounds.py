@@ -647,8 +647,10 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
         i for i, c in enumerate(consts_sg)
         if jnp.issubdtype(c.dtype, jnp.floating) and c.size > 0
     ]
-    if not probed:
-        # Nothing the fixed point can respond to: no gradient, no error.
+    if not probed or x_sg.size == 0:
+        # Nothing the fixed point can respond to, or a fixed-point vector
+        # with no entries (every floating field of the group has none):
+        # no gradient, no error.
         return nan
 
     def bound(operands):

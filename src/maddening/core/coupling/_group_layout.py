@@ -121,9 +121,11 @@ def _reading_is_the_fields(interface_edges, float_fields) -> bool:
       MADD-ANO-213).
 
     Static: *interface_edges* are the group's internal edges (its plan,
-    or a bare sequence of edges) and *float_fields* its floating fields
-    by node, so a group keeps one analysis for the life of its compiled
-    step.  Whether an edge delivers its field as it is follows from the
+    or a bare sequence of edges) and *float_fields* the floating fields a
+    norm can read, by node -- those with entries: an edge whose source
+    field has none delivers nothing and, like one that carries a counter,
+    is not read (``acceleration._has_entries``) -- so a group keeps one
+    analysis for the life of its compiled step.  Whether an edge delivers its field as it is follows from the
     side the norm reads it on (``InterfaceEdge.reads_source_as_is``).
     """
     read = set()

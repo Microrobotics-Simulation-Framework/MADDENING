@@ -1068,6 +1068,16 @@ def _run_coupled_block_impl(
                 )
                 for nn in group_node_names
             }
+            # Those of them that hold entries (``_has_entries``).  A field
+            # with no entries stays in the fixed-point vector, to which it
+            # adds nothing, and out of every reduction the report takes
+            # over the group's fields: it has no magnitude to weigh, no
+            # rounding to count, and an edge that reads it delivers nothing
+            # for the norm to read.
+            entry_fields = {
+                nn: tuple(f for f in float_fields[nn] if _has_entries(template_state[nn][f]))
+                for nn in group_node_names
+            }
 
             # ``jax.closure_convert`` hoists every tracer ``_step_flat``
             # touches into the custom_jvp's constants.  An *integer or
@@ -1200,15 +1210,13 @@ def _run_coupled_block_impl(
             def _read_fields(s_star):
                 """``(node, field, value)`` for every field the norm reads.
 
-                Not a field with no entries (``_has_entries``): it has no
+                Not a field with no entries (``entry_fields``): it has no
                 magnitude, so it gets no weight and cannot set their scale.
                 """
                 read = plan.source_fields()
                 for nn in group_node_names:
-                    for fld in float_fields[nn]:
+                    for fld in entry_fields[nn]:
                         if use_interface_norm and (nn, fld) not in read:
-                            continue
-                        if not _has_entries(s_star[nn][fld]):
                             continue
                         yield nn, fld, jnp.asarray(s_star[nn][fld])
 
@@ -1299,8 +1307,10 @@ def _run_coupled_block_impl(
             # fields' weights above measured a different norm.  Static
             # (``_reading_is_the_fields``): every other group keeps the
             # analysis it had.
+            # (An edge whose source field has no entries is not read, so it
+            # cannot make the reading another norm: ``entry_fields``.)
             transformed_reading = use_interface_norm and not _reading_is_the_fields(
-                plan, float_fields)
+                plan, entry_fields)
             def _reading_parts(s_star):
                 """The interface norm's reading at ``s_star``, as ``(source dtype,
                 value)`` per edge: what each internal edge delivers, in the order
@@ -1521,11 +1531,12 @@ def _run_coupled_block_impl(
                     for nn in group_node_names
                 }))
                 # The rounding of the map's Jacobian-vector products: ``eps``
-                # of the coarsest field the pass evaluates in (static).
+                # of the coarsest field the pass evaluates in (static).  A
+                # field with no entries is not evaluated in.
                 map_eps = max(
                     float(jnp.finfo(template_state[nn][fld].dtype).eps)
-                    for nn in group_node_names for fld in float_fields[nn]
-                ) if any(float_fields[nn] for nn in group_node_names) else None
+                    for nn in group_node_names for fld in entry_fields[nn]
+                ) if any(entry_fields[nn] for nn in group_node_names) else None
                 if transformed_reading:
                     # The gradient bound's triple, in the state's weights,
                     # which its own norms are taken in.

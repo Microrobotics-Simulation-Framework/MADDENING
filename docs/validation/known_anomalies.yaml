@@ -629,7 +629,7 @@ anomalies:
       not.  Under convergence_norm="l2", which is over every float
       field, the same fixtures agree to 2e-05.  Evidence:
       benchmarks/results/retire_known_disagreements/REPORT.md.
-      **Closed in 0.4.0** (MADD-ANO-239, MADD-ANO-240): the ten rows were
+      **Closed in 0.4.0** (MADD-ANO-240, MADD-ANO-241): the ten rows were
       not the accelerated set's doing but the interface norm returning
       every field it does not measure whole from a pass before the
       readings it stopped on.  A solve now returns those fields as one
@@ -15997,7 +15997,7 @@ anomalies:
       - "tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_with_an_empty_field_steps"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-239"
+  - anomaly_id: "MADD-ANO-240"
     title: "Under convergence_norm=\"interface\" a converged group returned a member computed from readings that had not settled: a one-way pair under Jacobi returned its target at the pre-step source, converged=True, iterations=1, residual 0"
     description: >
       The interface norm measures, on each pass, how far what a group's
@@ -16035,7 +16035,7 @@ anomalies:
       and pass counts are unchanged, and the ten rows agree with plain
       iteration within 2.2e-03 (9.9e-06 to 2.2e-03 after 25 steps, jaxlib
       0.11.0).  The same rule covers a field read only through a mapping or
-      a transform: MADD-ANO-240.
+      a transform: MADD-ANO-241.
     severity: major
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16076,7 +16076,7 @@ anomalies:
       - "tests/property/test_converged_groups_are_at_their_fixed_point.py::test_a_converged_group_is_at_its_fixed_point_per_push"
       - "tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point"
 
-  - anomaly_id: "MADD-ANO-240"
+  - anomaly_id: "MADD-ANO-241"
     title: "Under convergence_norm=\"interface\" the part of a field its edges deliver only through a mapping or a transform is measured by nothing: converged=True with that part a pass behind, or between passes under a relaxation"
     description: >
       A field internal edges read only through a mapping or a transform
@@ -16093,7 +16093,7 @@ anomalies:
       first entry, coupled at 0.03, returns the second entries 10
       tolerances off under Jacobi and under Gauss-Seidel.  `"mixed"` is
       right in each case.  The same at 0.1.0 to 0.3.1.  Resolved in 0.4.0
-      by the return rule of MADD-ANO-239: such a field is not measured
+      by the return rule of MADD-ANO-240: such a field is not measured
       whole, so it is returned as one plain pass computes it at the
       accepted iterate, in every member and under every schedule,
       acceleration and solver.  The field feeds the readings, so the state
@@ -16128,7 +16128,7 @@ anomalies:
     resolution_status: resolved
     resolution_version: "0.4.0"
     residual_risk: >
-      As MADD-ANO-239's: one more evaluation of the pass per solve; the
+      As MADD-ANO-240's: one more evaluation of the pass per solve; the
       returned state's own residual is not the reported one (measured up
       to 4.5 times it, and above the threshold beside `converged=True` in
       1 of 48 converged draws), while its readings are within the

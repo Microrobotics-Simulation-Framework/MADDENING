@@ -157,10 +157,10 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
 
     * a field **no internal edge reads** (a one-way pair under Jacobi
       returned its target computed from the pre-step source at
-      ``iterations=1`` and a residual of exactly zero: MADD-ANO-239);
+      ``iterations=1`` and a residual of exactly zero: MADD-ANO-240);
     * a field internal edges read **only through a mapping or a
       transform**, which may deliver less than the field: the part of it
-      they do not deliver is measured by nothing (MADD-ANO-240).
+      they do not deliver is measured by nothing (MADD-ANO-241).
 
     The return rule (``_with_nonfloat_fields_at`` in the step): a field
     measured whole keeps the accepted iterate's value, bit for bit; every

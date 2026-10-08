@@ -9,7 +9,7 @@ what the norm leaves out: ``"l2"`` and ``"mixed"`` measure the state, and
 group to its reported residual *in its own norm*, so a member the interface
 norm does not read had no allowance and was skipped -- and a one-way group
 under Jacobi returned such a member computed from the pre-step value of
-what it reads, converged (MADD-ANO-239).
+what it reads, converged (MADD-ANO-240).
 
 **The property.**  For a group of linear relays the fixed point is a
 float64 solve.  Each member's *defect* at the returned state -- its value
@@ -21,8 +21,8 @@ with -- is what the tolerance bounds, member by member:
   defect of a member the pass computes from the iterate (Jacobi), or the
   defect up to the moves of the members swept before it (Gauss-Seidel);
 * a field the interface norm does not measure whole -- read by no
-  internal edge (MADD-ANO-239), or only through a mapping, which may
-  deliver less than the field (MADD-ANO-240: the ``lossy-ring`` shape) --
+  internal edge (MADD-ANO-240), or only through a mapping, which may
+  deliver less than the field (MADD-ANO-241: the ``lossy-ring`` shape) --
   is returned as one plain pass computes it at the accepted iterate, from
   the readings the verdict compared, and the other members read it within
   ``tau`` of those; so its defect is at most its gains times that.

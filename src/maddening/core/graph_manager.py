@@ -1698,6 +1698,18 @@ class GraphManager:
     ) -> None:
         """Add a data-dependency edge between two nodes.
 
+        ``source`` and ``target`` may be the same node, and where the node
+        is decides which of its own values such an edge reads.  Outside a
+        coupling group it is a back edge: the node reads its state of the
+        previous step, so the term the edge carries is explicit
+        (``dx/dt = -k x`` through the edge steps as ``x (1 - k dt)``).
+        With the node in a coupling group (:meth:`add_coupling_group`; a
+        group of that one node is enough) the edge is iterated with the
+        group and at convergence the node reads its new value, so the term
+        is implicit (``x / (1 + k dt)``).  Nothing else decides it, and
+        neither :meth:`validate` nor :meth:`compile` remarks on it;
+        :meth:`format_graph` names the level of every edge.
+
         ``mapping`` (a :class:`maddening.core.coupling.mapping.Mapping`)
         transfers the source field onto the target interface before
         ``transform`` is applied; its weights are snapshotted into
@@ -2144,12 +2156,16 @@ class GraphManager:
         repeatedly until convergence or *max_iterations*.
         All edges between nodes in the group use current-iteration
         values rather than staggered (previous-timestep) values.
+        A member's edge to itself is one of them: it is iterated with the
+        group, which makes the term it carries implicit (see
+        :meth:`add_edge`), and a group of one node is allowed for this.
 
         Parameters
         ----------
         nodes : sequence of str
             Node names forming the coupling group.  Must all exist in
-            the graph and should form (part of) a cycle.
+            the graph and should form (part of) a cycle; one node with an
+            edge to itself is a cycle.
         max_iterations : int
             Maximum iterations per timestep.
         tolerance : float

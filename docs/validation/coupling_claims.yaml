@@ -5696,6 +5696,7 @@ claims:
     - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps
     - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps
     - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_from_a_nodes_own_flux_reads_the_previous_step_outside_a_group
   status: failing
   finding: >-
     Three of the five fail to trace with a bare KeyError naming the flux.
@@ -5705,8 +5706,10 @@ claims:
     member.q -> reader raise (coupling/_coupled_block.py::_run_coupled_block_impl._resolve_value and
     graph_manager.py::GraphManager._build_step_fn's _resolve_and_update_node).  A back edge reads the old state, which
     holds no flux, so an ungrouped ring a.q -> b, b -> a raises when built
-    b, a and steps when built a, b.  Reproducers: the three strict xfails
-    cited.  Since 0.1.0 (MADD-ANO-156, MADD-ANO-157).
+    b, a and steps when built a, b.  An edge from a node's own flux is
+    always such a back edge outside a group, whatever the build order
+    (CPL-192).  Reproducers: the four strict xfails cited.  Since 0.1.0
+    (MADD-ANO-156, MADD-ANO-157).
   domains:
     f32: n/a
     f64: n/a
@@ -6049,5 +6052,107 @@ claims:
     sub_cycled: tests/core/test_coupling_interface_norm_answers_for_the_state_it_returns.py::test_a_sub_cycled_member_is_returned_by_the_same_rule
     predictors_warm_starts: narrowed
     adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: CPL-192
+  area: edges
+  claim: >-
+    An edge's "source and target may be the same node, and where the node
+    is decides which of its own values such an edge reads.  Outside a
+    coupling group it is a back edge: the node reads its state of the
+    previous step, so the term the edge carries is explicit (dx/dt = -k x
+    through the edge steps as x (1 - k dt)).  With the node in a coupling
+    group (... a group of that one node is enough) the edge is iterated
+    with the group and at convergence the node reads its new value, so the
+    term is implicit (x / (1 + k dt)).  Nothing else decides it, and
+    neither validate() nor compile() remarks on it; format_graph() names
+    the level of every edge."
+  sources:
+    - src/maddening/core/graph_manager.py::GraphManager.add_edge
+    - src/maddening/core/graph_manager.py::GraphManager.add_coupling_group
+    - src/maddening/core/coupling/group.py::CouplingGroup (nodes)
+    - docs/user_guide/quickstart.md#an-edge-from-a-node-to-itself
+    - docs/developer_guide/coupling_algorithm_guide.md#an-edge-from-a-node-to-itself
+  conditions: >-
+    The edge's source is a state field, and the term it carries is linear
+    in the value read: dx/dt = -k x alone, and beside a neighbour joined by
+    no edge, one edge either way or both, with the neighbour in no group,
+    its own or the node's, in either build order (40 graphs); an additive
+    edge to itself beside another edge into the same input, in either
+    order.  Groups of the node alone and of two nodes; Gauss-Seidel and
+    Jacobi, solver ift and fori, every acceleration, the l2, mixed and
+    interface norms, a quadratic predictor; float32 and float64; one step
+    and three by run_scan; jax.grad in the start value and in the rate; a
+    multi-rate graph (rate divider 2, in no group and in a group of
+    itself); run_adaptive, each step it tries.  "At convergence" is part
+    of the claim: max_iterations=1 returns the explicit value, a cap of n
+    passes the first n corrections of 1 - k dt + (k dt)^2 - ..., and the
+    plain iteration converges only for |k dt| < 1 (aitken and iqn-ils
+    reach 1 / (1 + k dt) at k dt = 1.5; a cap that was reached is in the
+    diagnostics or raised by strict_convergence, as for any group).  A
+    sub-cycled member reads the group's iterate at every sub-step, so its
+    term is implicit over the group's step and not its own sub-step, under
+    each boundary_interpolation (MADD-ANO-027).  An edge from the node's
+    own boundary flux is iterated inside a group; outside one it cannot be
+    read (CPL-186, MADD-ANO-157).  auto_couple() groups loops of two or
+    more nodes and leaves the edge explicit.  Not tested: an interface
+    mapping or a geometry on the edge, waveform_iterations above one, a
+    term nonlinear in the value read.  Not claimed for mixed dtypes,
+    16-bit floats, vmap, a checkpoint restart or sharded graphs.
+  oracle: >-
+    float64 closed forms: x (1 - k dt) and x / (1 + k dt), their powers
+    over several steps and their derivatives in x and in the rate; the
+    partial sums of the series at a cap; for the two-node graphs the
+    linear system the documented rule gives (an edge is read at the new
+    level when its two ends are members of one group or its source runs
+    earlier in the step, at the previous step's otherwise), with the
+    self-edge's level decided by its node's group alone; on two shipped
+    nodes, the bounce and the stretch each reading implies.
+  tests:
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_delivers
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_every_schedule_solver_and_acceleration_makes_the_term_implicit
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_each_convergence_norm_stops_at_the_implicit_value
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_implicit
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_past_k_dt_of_one_the_term_is_implicit_only_under_an_acceleration
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_predictor_only_moves_where_the_iteration_starts
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_on_a_multi_rate_graph_each_node_reads_its_own_value_at_its_own_rate
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_sub_cycled_member_reads_its_own_value_at_the_end_of_the_groups_step
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_run_adaptive_takes_each_of_its_steps_by_the_same_rule
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_from_a_nodes_own_flux_is_iterated_inside_a_group
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_auto_couple_puts_no_group_around_a_node_whose_only_loop_is_its_own_edge
+    - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_ball_position_to_table
+    - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_spring_position_to_anchor
+    - tests/core/test_schedule.py::TestIdentifyBackEdges::test_self_loop_is_back_edge
+    - tests/core/test_interface_plan.py::test_which_inputs_are_coupled_and_who_reads_whom
+  status: verified
+  notes: >-
+    Nothing documented was false before this row, and nothing said it: the
+    inspection guide's "iterated inside a coupling group or is a back edge
+    that reads the previous step's value" held, and a self-edge is the edge
+    whose half changes when a group is put around its node (0.99 against
+    0.990099 for one rod, found while writing a worked example, 2026-10-08).
+    The tests stopped below the compiled graph, and one accepted "a refusal
+    or any finite state".  Decided: the behaviour stays, with no warning,
+    because a group around the node is how the term is made implicit; it is
+    stated in add_edge, add_coupling_group, CouplingGroup and two guides.
+    validate() names every loop of two or more nodes ("cycle detected",
+    "handled by iterative coupling") and has no line for a self-loop in
+    either place.
+  domains:
+    f32: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    f64: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    grad: tests/core/test_an_edge_from_a_node_to_itself.py::test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took
+    vmap: narrowed
+    multi_rate: tests/core/test_an_edge_from_a_node_to_itself.py::test_on_a_multi_rate_graph_each_node_reads_its_own_value_at_its_own_rate
+    sub_cycled: tests/core/test_an_edge_from_a_node_to_itself.py::test_a_sub_cycled_member_reads_its_own_value_at_the_end_of_the_groups_step
+    predictors_warm_starts: tests/core/test_an_edge_from_a_node_to_itself.py::test_a_predictor_only_moves_where_the_iteration_starts
+    adaptive: tests/core/test_an_edge_from_a_node_to_itself.py::test_run_adaptive_takes_each_of_its_steps_by_the_same_rule
     checkpoint_restart: narrowed
     sharded: narrowed

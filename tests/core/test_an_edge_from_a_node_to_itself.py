@@ -354,6 +354,19 @@ def test_every_schedule_solver_and_acceleration_makes_the_term_implicit(
     assert got_alone == pytest.approx(IMPLICIT, abs=CLOSE)
 
 
+@pytest.mark.parametrize("norm", ["mixed", "interface"])
+def test_each_convergence_norm_stops_at_the_implicit_value(norm):
+    """``"l2"`` is the default above; ``"mixed"`` and ``"interface"`` carry ``rtol``.
+
+    The interface norm measures what the group's internal edges deliver,
+    and the node's edge to itself is one of them (here the only one).
+    """
+    with x64(True):
+        gm = _alone(dict(max_iterations=200, convergence_norm=norm, rtol=1e-13))
+        gm.step()
+        assert _x(gm) == pytest.approx(IMPLICIT, abs=CLOSE)
+
+
 @pytest.mark.parametrize("solver", ["ift", "fori"])
 def test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_implicit(solver):
     """A pass reads the previous iterate, and the first pass the previous step.
@@ -361,7 +374,8 @@ def test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_impli
     So ``max_iterations=1`` (one staggered pass) returns the *explicit*
     value, and a cap of ``n`` the first ``n`` corrections of the series
     ``1 - k dt + (k dt)^2 - ...`` whose sum is ``1 / (1 + k dt)``.  Nothing
-    is said: a group reports a cap it reached only through its diagnostics.
+    is said, as for any group that reaches its cap: it is in the group's
+    diagnostics, and ``strict_convergence`` raises.
     """
     with x64(True):
         for cap in (1, 2, 3):
@@ -369,6 +383,10 @@ def test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_impli
             gm.step()
             partial = sum((-K * DT) ** j for j in range(cap + 1))
             assert _x(gm) == pytest.approx(partial, abs=1e-15), cap
+        if solver == "ift":
+            strict = _alone(dict(max_iterations=2, tolerance=1e-13, strict_convergence=True))
+            with pytest.raises(Exception, match="without converging"):
+                strict.step()
     assert sum((-K * DT) ** j for j in range(2)) == EXPLICIT
 
 

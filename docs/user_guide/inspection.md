@@ -106,7 +106,10 @@ Execution order
   field or a boundary flux, the transform's registered name, the mapping
   and its `params["mappings"]` key, `additive`, units, and whether the edge
   is iterated inside a coupling group or is a back edge that reads the
-  previous step's value.
+  previous step's value.  An edge from a node to itself is one or the
+  other by whether the node is in a group, which makes the term it
+  carries implicit or explicit: see
+  [An edge from a node to itself](quickstart.md#an-edge-from-a-node-to-itself).
 - **Coupling groups**: members, solver, acceleration, iteration mode, the
   norm with the tolerance it actually reads (`tolerance` for `"l2"`,
   `atol`/`rtol` for `"mixed"` and `"interface"`), `max_iterations`,

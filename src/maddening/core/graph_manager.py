@@ -4192,7 +4192,14 @@ class GraphManager:
         recomputed by one plain pass at it (not counted in
         ``iterations``), so the state held afterwards is within the
         reported residual of the reported iterate on what the internal
-        edges deliver, and is not itself an iterate of the loop.
+        edges deliver, and is not itself an iterate of the loop.  Of the
+        state held, in the norm taken at it, ``spectral_error_bound``
+        reads ``(bound + residual) / (1 - rtol * residual * sqrt(N))``
+        with ``N`` the entries the norm pools (nothing where ``rtol *
+        residual * sqrt(N) >= 1``: a cap reached with a reading still
+        moving by its own size); ``gradient_relative_error_bound`` is of
+        the state held as it stands, every returned field carrying the
+        implicit derivative of the reported iterate.
 
         Returns
         -------

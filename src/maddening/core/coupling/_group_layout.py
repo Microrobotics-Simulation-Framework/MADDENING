@@ -147,10 +147,11 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     and nothing else.  The members of the iterate it accepts were computed
     from the readings of the iterate *before* it, which the exit does not
     compare with anything.  So the norm answers only for a field it
-    **measures whole**: the source field of an internal edge whose
-    reading *is* that field (``InterfaceEdge.reads_source_as_is``: on the
-    delivered side, an edge with no mapping and no transform, since
-    :func:`maddening.core.edge._delivered` applies nothing else).  Every
+    **measures whole**: the source field of an internal edge that delivers
+    it as it is, with no mapping and no transform
+    (:func:`maddening.core.edge._delivered` applies nothing else) -- an
+    edge whose reading *is* its source field, which the group's plan
+    answers (``InterfaceEdge.reads_source_as_is``).  Every
     other floating field could be returned from a pass before the readings
     the verdict was taken on, with ``converged=True``:
 

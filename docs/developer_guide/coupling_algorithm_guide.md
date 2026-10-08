@@ -123,7 +123,16 @@ at `iterations=1` (MADD-ANO-239, MADD-ANO-240).  What the rule costs:
   the residual, so they are within the reported residual of them.  Its
   own residual is another number: up to 4.5 times the reported one in
   the measured draws, and above the threshold beside `converged=True` in
-  1 of 48.
+  1 of 48.  `spectral_error_bound` carries over to the state returned
+  as `(bound + residual) / (1 - rtol * residual * sqrt(N))` in the norm
+  taken *at* that state, `N` the entries the norm pools: a converged
+  solve's denominator is one to within `rtol * sqrt(N)`, while at a cap
+  a recomputed reading returned near zero is divided by far less than
+  the bound's was (4.5 times `bound + residual` in the pinned case), and
+  past `rtol * residual * sqrt(N) = 1` nothing is claimed.  The
+  gradient bound carries over as it is: under `solver="ift"` every
+  returned field, recomputed or kept, has the implicit derivative of
+  `x`.
 * **A recomputed field is sometimes less accurate than `x`'s.**  27 of
   375 recomputed fields were further from the fixed point by more than
   1.25 times (linear relay groups, float32), one of them ending above a

@@ -1497,6 +1497,33 @@ class LinearModel:
                 count += B.shape[0]
         return float(np.sqrt(total / max(count, 1)))
 
+    def pass_rounding(self, gi: int, pre: dict, state: dict) -> np.ndarray:
+        """Per entry of the members' stacked ``x``: how far one float pass at
+        *state* can be from the exact pass there (``|(I - L)^{-1}|`` of the
+        members' own rounding, :meth:`rounding`, each edge read at the
+        larger of *state*'s value and the pass's).  What a field the solve
+        returns recomputed (:meth:`recomputed`) may differ by from
+        :meth:`returned_from` of the iterate it was recomputed at.
+        *state* also supplies what the group read from outside."""
+        members, off, k = self._group_layout(gi)
+        L, U = self.group_pass(gi)
+        x = np.concatenate([np.asarray(np.asarray(state[m]["x"]), LD) for m in members])
+        F = np.asarray(_solve(np.eye(k, dtype=LD) - L,
+                              U @ x + self.group_constant(gi, pre, state)), np.float64)
+        x = np.asarray(x, np.float64)
+        read = {}
+        for m in members:
+            for i, _K in self.terms[m][2]:
+                e = self.topo.edges[i]
+                if self.topo.group_of(e.src) == gi:
+                    cols = slice(off[e.src], off[e.src] + self.topo.node(e.src).n)
+                    read[(i,)] = np.maximum(np.abs(x[cols]), np.abs(F[cols]))
+                else:
+                    src = pre if i in self.back else state
+                    read[(i,)] = np.asarray(src[e.src]["x"], np.float64)
+        eps_vec = np.concatenate([self.rounding(m, pre, read) for m in members])
+        return np.abs(np.linalg.inv(np.eye(k) - np.asarray(L, np.float64))) @ eps_vec
+
     def group_pass(self, gi: int):
         """``(L, U)``: the one-pass map ``y = L y + U x + c_g`` over the group's members.
 

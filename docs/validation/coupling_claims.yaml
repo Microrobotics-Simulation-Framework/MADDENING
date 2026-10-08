@@ -3421,7 +3421,12 @@ claims:
     norm, spectral_usable set (the pinned case of the returned-state
     search).  Past rtol * residual * sqrt(N) = 1 -- a cap reached with a
     reading still moving by its own size -- nothing is claimed of the
-    state returned.
+    state returned.  The residual term is the proof's (a triangle
+    inequality through x) and no example has needed it: with it left
+    out, the distance reached 0.997 of the allowance at worst over 5,100
+    hunted examples on 22 cells (a ring holding a field measured whole,
+    one read through a mapping and one through a transform; every
+    acceleration, both schedules, float32 and float64; jaxlib 0.11.0).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'

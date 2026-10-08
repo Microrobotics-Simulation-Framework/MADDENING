@@ -776,9 +776,9 @@ def _same_member(where: str, member, alone, ulps: float = 0.0) -> None:
     are two programs, and a member that adds a product to a bias, or an
     edge that sums two weighted samples, is compiled with a fused
     multiply-add in one and not in the other (measured: one float32 ulp
-    of one entry of ``x`` on two gather-only pairs of nineteen cells,
-    jaxlib 0.11.0, CPU; the same pass counts and the same residual to the
-    bit).
+    of one entry of ``x`` on the two gather-only pairs of the seven
+    ``vmap`` cells, the other five to the bit; jaxlib 0.11.0, CPU; the
+    same pass counts and the same residual to the bit).
     """
     for name in ("a", "b"):
         assert sorted(member.state[name]) == sorted(alone.state[name]), where

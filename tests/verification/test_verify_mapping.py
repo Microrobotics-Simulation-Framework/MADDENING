@@ -546,14 +546,13 @@ SLIGHT = {
 }
 
 
-#: The cases that run in the slow lane only: the two on a grid kind (each
-#: compiles the kernel and its derivative twice) and the second of the two
-#: on ``consistent``.
-SLIGHT_SLOW = ("consistent-polynomials", "geometry_derivative", "outside_hull")
+#: The cases that run in the slow lane only: the two on a grid kind, each
+#: of which compiles the kernel and its derivative twice.
+SLIGHT_SLOW = ("geometry_derivative", "outside_hull")
 
 
 # Per push: tests/verification/test_verify_mapping.py::test_a_small_defect_fails_at_the_default_width_and_passes_at_a_stated_wider_one[consistent-constants]
-# (the width of the seven other comparisons, one case each).  The two grid comparisons are made
+# (the width of the eight other comparisons, one case each).  The two grid comparisons are made
 # per push at a gross fault only, by
 # tests/verification/test_verify_mapping.py::test_seeded_broken_kind_fails_the_check_that_should_catch_it_and_no_other
 # and tests/verification/test_verify_mapping.py::test_a_kind_that_does_not_clamp_where_it_was_declared_to_fails_the_hull_check

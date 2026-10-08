@@ -100,7 +100,8 @@ def pow2_frame(*arrays, mode: str = "common"):
     -------
     jnp.ndarray
         The factor, an exact power of two in the arrays' (promoted) dtype;
-        ``1`` where the input is zero or non-finite.  For example, in
+        ``1`` where the input is zero or non-finite, or has no entries (an
+        array with none frames nothing).  For example, in
         float32: ``[3.0, -0.1]`` is framed by ``0.25`` (common);
         ``[3.0, 0.0, 1e-3]`` by ``[0.25, 1.0, 512.0]`` (entrywise); and
         ``[1e-3]`` by ``1.0`` (lift: it is far above ``tiny / eps``).
@@ -108,6 +109,11 @@ def pow2_frame(*arrays, mode: str = "common"):
     """
     if mode == "common":
         dtype = jnp.result_type(*arrays)
+        # An array with no entries has no largest one and frames nothing
+        # (static: a shape); arrays that are all so are framed by 1.
+        arrays = tuple(v for v in arrays if 0 not in np.shape(v))
+        if not arrays:
+            return jnp.ones((), dtype)
         biggest = functools.reduce(
             jnp.maximum, [jnp.max(jnp.abs(v)) for v in arrays])
         info = jnp.finfo(dtype)
@@ -127,6 +133,8 @@ def pow2_frame(*arrays, mode: str = "common"):
             raise ValueError(f"pow2_frame(mode='lift') takes one array, got {len(arrays)}")
         (scale,) = arrays
         dtype = jnp.asarray(scale).dtype
+        if 0 in np.shape(scale):
+            return jnp.ones((), dtype)      # no entries: nothing to lift
         info = jnp.finfo(dtype)
         biggest = jnp.max(jnp.abs(scale))
         usable = jnp.logical_and(jnp.isfinite(biggest), biggest > 0)

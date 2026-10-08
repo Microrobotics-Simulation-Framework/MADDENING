@@ -29,6 +29,25 @@ def _is_float_leaf(v) -> bool:
     return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
 
 
+def _has_entries(v) -> bool:
+    """Does the field *v* hold at least one entry?
+
+    **A field with no entries is not read.**  A member of a coupling group
+    may hold a floating field of size zero (an empty contact set, a list
+    with none this configuration), and an edge may deliver one.  Such a
+    field has no magnitude to be measured against -- ``max|v|`` over no
+    entries is not a number -- so it carries no norm, no weight, no floor
+    term and no gain: every reduction the coupling machinery takes over a
+    field (the three norms and their float floor, the report's weights,
+    magnitudes, coarsest ``eps`` and measured evaluation count) is taken
+    over the fields this is true of, and a group with such a field reports
+    what the same group without it does.  Static -- a shape, never a value
+    -- so a group whose fields all have entries compiles the program it
+    always did.
+    """
+    return 0 not in np.shape(v)
+
+
 def float_fields_of(state: dict[str, dict], node_names) -> dict[str, tuple[str, ...]]:
     """``{node: (float fields...)}`` for the given nodes -- the fields a
     coupling norm, a predictor or a fixed-point vector may contain.  A
@@ -316,8 +335,8 @@ def coupling_residual_l2(
             if not _is_float_leaf(new_val):
                 continue        # counters / flags / keys: not part of the norm
             old_val = s_old[nn][field_name]
-            if jnp.asarray(new_val).size == 0:
-                continue
+            if not _has_entries(new_val):
+                continue        # no entries: not read (``_has_entries``)
             # ``rtol=1.0``: the L2 norm carries its threshold in
             # ``tolerance``, so the scale here is the bare magnitude.
             scaled, _active = _scaled_change(_widened(new_val), _widened(old_val), atol, 1.0)
@@ -391,8 +410,8 @@ def coupling_residual_mixed(
                 # carry them.
                 continue
             old_val = s_old[nn][field_name]
-            if jnp.asarray(new_val).size == 0:
-                continue
+            if not _has_entries(new_val):
+                continue        # no entries: not read (``_has_entries``)
             scaled, active = _scaled_change(_widened(new_val), _widened(old_val), atol, rtol)
             sum_sq = sum_sq + jnp.sum(scaled ** 2)
             count = count + jnp.where(active, scaled.size, 0)
@@ -440,8 +459,8 @@ def _interface_readings(interface_edges, *states, mappings=None):
             continue            # an integer interface field cannot carry a norm
         sources = (source,) + tuple(s[node][field] for s in states[1:])
         values = tuple(record.reading(v, mappings) for v in sources)
-        if jnp.asarray(values[0]).size == 0:
-            continue
+        if not _has_entries(values[0]):
+            continue            # delivers no entries: not read (``_has_entries``)
         yield (record.edge, jnp.asarray(source).dtype) + values
 
 
@@ -1758,7 +1777,7 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
                 if _is_float_leaf(v):
                     v = jnp.asarray(v)
                     values.append((v, float(jnp.finfo(v.dtype).eps)))
-    values = [(v, eps) for v, eps in values if v.size > 0]
+    values = [(v, eps) for v, eps in values if _has_entries(v)]
     if not values:
         return jnp.zeros((), jnp.float32)
     # At least float32, as the norms accumulate (``_widened``): in a 16-bit

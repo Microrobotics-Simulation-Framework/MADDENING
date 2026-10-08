@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core._graph_specs import _META_KEY
+from maddening.core.coupling.acceleration import _has_entries
 
 #: The ``_meta`` slots ``coupling_diagnostics()`` reads a group's report
 #: from, as ``coupling_{group key}_{suffix}``.  A step writes them; they
@@ -130,8 +131,8 @@ def _underflow_range_fields(groups, state) -> dict[str, list]:
                 if dtype is None or not jnp.issubdtype(dtype, jnp.floating):
                     continue
                 arr = np.asarray(jax.device_get(value))
-                if arr.size == 0:
-                    continue
+                if not _has_entries(arr):
+                    continue        # no entries: no magnitude (``_has_entries``)
                 mag = float(np.max(np.abs(arr.astype(np.float64))))
                 info = jnp.finfo(arr.dtype)
                 if 0.0 < mag < float(info.tiny) / float(info.eps):

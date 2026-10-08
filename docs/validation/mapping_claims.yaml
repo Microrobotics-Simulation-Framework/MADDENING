@@ -1969,7 +1969,7 @@ claims:
     (the compile-time refusal row).
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
-    - src/maddening/core/coupling/_group_layout.py (_interface_state_fields)
+    - src/maddening/core/coupling/_interface_plan.py (InterfacePlan.iqn_fields)
   conditions: >-
     the two-body graph in a coupling group whose geometry follows the
     iterate, accelerated by IQN-ILS (Gauss-Seidel and Jacobi, three passes

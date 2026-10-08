@@ -11,14 +11,14 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from maddening.core._pow2_frame import pow2_frame, pow2_rescue
-from maddening.core.edge import _delivered
+from maddening.core.coupling._interface_plan import InterfacePlan, interface_records
 
 
 # ------------------------------------------------------------------
@@ -406,7 +406,11 @@ def _interface_readings(interface_edges, *states, mappings=None):
     delivers it.**  The edge's source field, through the edge's interface
     mapping and then its transform (:func:`maddening.core.edge._delivered`,
     the function the step's boundary resolution calls), with the mapping
-    weights the step ran with.  The residual
+    weights the step ran with.  A view of the group's description
+    (``core/coupling/_interface_plan.py``): which edges, in what order
+    (``interface_records``) and on which side each is read
+    (``InterfaceEdge.reading``) are its; *interface_edges* is a group's
+    plan, or a bare sequence of edges read in the order given.  The residual
     (:func:`coupling_residual_interface`), its float floor
     (:func:`residual_precision_floor`) and the spectral analysis the
     report's bound is taken on (``_reading_values`` in
@@ -426,16 +430,19 @@ def _interface_readings(interface_edges, *states, mappings=None):
     pytree the step ran with (``{edge.key: weights}``); ``None`` reads
     each mapping with its own weights.
     """
-    for edge in interface_edges:
-        source = states[0][edge.source_node][edge.source_field]
+    for record in interface_records(interface_edges, states[0]):
+        node, field = record.source
+        source = states[0][node][field]
+        # Decided on the state handed, not on ``record.source_kind`` (the
+        # state the group's plan was built from): the two agree wherever a
+        # pass keeps each field's dtype kind.
         if not _is_float_leaf(source):
             continue            # an integer interface field cannot carry a norm
-        sources = (source,) + tuple(
-            s[edge.source_node][edge.source_field] for s in states[1:])
-        values = tuple(_delivered(edge, v, mappings) for v in sources)
+        sources = (source,) + tuple(s[node][field] for s in states[1:])
+        values = tuple(record.reading(v, mappings) for v in sources)
         if jnp.asarray(values[0]).size == 0:
             continue
-        yield (edge, jnp.asarray(source).dtype) + values
+        yield (record.edge, jnp.asarray(source).dtype) + values
 
 
 def _reading_eps(source_dtype, value) -> float:
@@ -465,7 +472,7 @@ def _reading_eps(source_dtype, value) -> float:
 def coupling_residual_interface(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
-    interface_edges: list,
+    interface_edges: Union[list, InterfacePlan],
     atol: float = 0.0,
     rtol: float = 1e-6,
     mappings: Optional[dict] = None,
@@ -489,7 +496,8 @@ def coupling_residual_interface(
     s_old : dict
         Previous iteration state.
     interface_edges : list of EdgeSpec
-        Edges internal to the coupling group.
+        Edges internal to the coupling group.  (The compiled step hands
+        the group's own description of them, an ``InterfacePlan``.)
     atol : float
         Dead band, in the interface quantity's own units: below this a
         quantity leaves the norm and stops being held to any criterion.
@@ -520,7 +528,7 @@ def coupling_residual_interface(
     edges in an order fixed by the group itself: by each edge's source's
     place in the group's sweep, then its source field, its target's place,
     its target field and its ordinal (``_interface_edge_order`` in
-    ``core/coupling/_group_layout.py``), the order the L2 and mixed norms sum the
+    ``core/coupling/_interface_plan.py``), the order the L2 and mixed norms sum the
     members in.  So the norm depends neither on the order of the
     ``add_edge`` calls nor on the nodes' names.  Before 0.4.0 it summed in
     the order the edges had been added: the same group built with its

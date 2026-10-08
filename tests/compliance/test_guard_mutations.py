@@ -83,6 +83,8 @@ CC = (_COMPILE_CACHE,)
 SLOW_RULE = (_SLOW_RULE,)
 _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
+_PLAN_SCAN = "tests/core/test_interface_plan_is_the_only_enumeration.py"
+PLAN_SCAN = (_PLAN_SCAN,)
 #: The witness rule alone (no collection of the tree), and its self-tests.
 WITNESS = (f"{_CLAIMS}::test_every_tested_domain_cites_a_test_that_names_its_domain",)
 SERVER_WORDS = (f"{_CLAIMS}::test_the_witness_rule_reads_the_server_vocabulary",)
@@ -102,7 +104,7 @@ ALLOW = (_REASONS, _COLLECTS)
 CI_ALL = DUR + SHARD + WF
 
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE)
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN)
 
 
 @dataclass(frozen=True)
@@ -454,20 +456,20 @@ MUTANTS: tuple[Mutant, ...] = (
        "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
        "        env:\n          PYTEST_ADDOPTS: \"--deselect tests/core\"\n", CI_ALL,
        "every slow-lane shard silently drops tests/core (selection moved into the step's env)"),
-    _M("Z4", SL, "        shard: [1, 2, 3, 4, 5, 6]\n",
-       "        shard: [1, 2, 3, 4, 5, 6]\n        exclude:\n          - shard: 6\n", CI_ALL,
-       "the slow lane's matrix excludes shard 6"),
+    _M("Z4", SL, "        shard: [1, 2, 3, 4, 5, 6, 7, 8]\n",
+       "        shard: [1, 2, 3, 4, 5, 6, 7, 8]\n        exclude:\n          - shard: 8\n", CI_ALL,
+       "the slow lane's matrix excludes shard 8"),
     _M("Z5", SL, "          timeout --kill-after=60s 175m python -m pytest tests/ \\\n",
-       "          MADDENING_TEST_SHARD=1/6 timeout --kill-after=60s 175m python -m pytest tests/ \\\n", CI_ALL,
-       "all six slow-lane shards run shard 1's files"),
-    _M("Z6", SL, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted"',
-       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"', SHARD,
-       "the slow lane runs six shards split by hash: every test once, the balance gone"),
-    _M("Z7", SL, "        shard: [1, 2, 3, 4, 5, 6]\n", "        shard: [1, 2, 3, 4, 5]\n", SHARD,
-       "the slow lane runs five of six shards"),
-    _M("Z8", SL, "-shard${{ matrix.shard }}of6", "-shard${{ matrix.shard }}of4", SHARD,
-       "the slow lane's artifacts are named for four shards: a download by name misses two"),
-    _M("Z9", SL, "shard ${{ matrix.shard }} of 6)", "shard ${{ matrix.shard }} of 4)", SHARD,
+       "          MADDENING_TEST_SHARD=1/8 timeout --kill-after=60s 175m python -m pytest tests/ \\\n", CI_ALL,
+       "all eight slow-lane shards run shard 1's files"),
+    _M("Z6", SL, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/8:weighted"',
+       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/8"', SHARD,
+       "the slow lane runs eight shards split by hash: every test once, the balance gone"),
+    _M("Z7", SL, "        shard: [1, 2, 3, 4, 5, 6, 7, 8]\n", "        shard: [1, 2, 3, 4, 5, 6, 7]\n", SHARD,
+       "the slow lane runs seven of eight shards"),
+    _M("Z8", SL, "-shard${{ matrix.shard }}of8", "-shard${{ matrix.shard }}of4", SHARD,
+       "the slow lane's artifacts are named for four shards: a download by name misses four"),
+    _M("Z9", SL, "shard ${{ matrix.shard }} of 8)", "shard ${{ matrix.shard }} of 4)", SHARD,
        "a shard's summary is titled 'shard 5 of 4'"),
     # --- PY: the pytest configuration, pyproject.toml -------------------------
     _M("PY1", PP, "addopts = \"-m 'not slow'\"", "addopts = \"-m 'not slow' --ignore=tests/fmi\"", CI_ALL,
@@ -664,6 +666,33 @@ MUTANTS: tuple[Mutant, ...] = (
        "the coupling search's gradient score taken over every entry of a mapped edge's matrix: on a "
        "sparse mapping it differentiates entries outside the pattern, which the graph does not hold "
        "(a score of 2.6 with the flag set, from constants that do not exist)"),
+    # --- IP: a coupling group's edges are enumerated in one module only, -----
+    # --- tests/core/test_interface_plan_is_the_only_enumeration.py -----------
+    _M("IP1", "src/maddening/core/coupling/_group_layout.py",
+       '    return group.convergence_norm == "interface" and plan.norm_reads_mapping_weights()\n',
+       '    return group.convergence_norm == "interface" and any(\n'
+       "        e.mapping is not None and e.source_field for e in plan.declared_edges())\n",
+       PLAN_SCAN, "a second enumeration of what the interface norm reads, in the layout module"),
+    _M("IP2", "src/maddening/core/coupling/_coupled_block.py",
+       "                read = plan.source_fields()\n",
+       "                read = {(e.source_node, e.source_field) for e in plan.declared_edges()}\n",
+       PLAN_SCAN, "the spectrum's weights looping over the edges themselves again"),
+    _M("IP3", _PLAN_SCAN,
+       'EDGE_ATTRIBUTES = ("source_node", "target_node", "source_field", "target_field", "geometry")',
+       'EDGE_ATTRIBUTES = ("source_field", "target_field")',
+       PLAN_SCAN, "a loop that tests only the edges' nodes, or reads their geometry"),
+    _M("IP4", _PLAN_SCAN,
+       '           if not where.startswith(f"{DESCRIPTION}::") and where not in allowed]',
+       '           if not where.startswith("core/coupling/") and where not in allowed]',
+       PLAN_SCAN, "any enumeration written in the coupling package: the whole package exempt"),
+    _M("IP5", _PLAN_SCAN,
+       '    return [*sorted((SRC / "core" / "coupling").glob("*.py")), SRC / "core" / "graph_manager.py"]',
+       '    return sorted((SRC / "core" / "coupling").glob("*.py"))',
+       PLAN_SCAN, "an enumeration written in graph_manager.py, which the scan no longer reads"),
+    _M("IP6", _PLAN_SCAN,
+       "            for where in sorted(allowed) if where not in found]",
+       "            for where in sorted(allowed) if False]",
+       PLAN_SCAN, "an allowance that outlives its function, inherited by the next one of that name"),
 )
 
 

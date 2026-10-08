@@ -1238,6 +1238,45 @@ def test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score():
         for error, c in gradient_errors(model, pre, state, cell.mapping_kind, floor=floor)}
 
 
+#: A draw on a per-push cell (the mapped float32 ring under Gauss-Seidel,
+#: converged in one pass at its floor) with one gain entry at 0.12 floors
+#: and every other constant above four.
+ONE_LEFT_OUT = Case(2, 11617, 0.28553335772377364, False, 0.03438394706508214, 0.0, 1.0, 0,
+                    2.30771016601352e-08, 2)
+
+
+def test_the_gradient_score_of_a_step_is_taken_at_the_floor_its_report_used():
+    """A compiled step (a per-push cell): what the score took and what it
+    left out are what the condition gives at the reported floor, the
+    worst of each is what the report names, and one constant is left out
+    (without which the example would not tell a score that ignored the
+    floor from one that read it)."""
+    case = ONE_LEFT_OUT
+    cell = CELLS[case.cell]
+    seen = observe(case)
+    report = seen["report"]
+    assert seen["gradient_usable"] and seen["floor_reported"] and seen["gradient_scored"], report
+    values = values_of(case)
+    with precision(cell.dtype == "float64"):
+        (step,) = ct.run(_built(case.cell), values, 1)
+    model = ct.LinearModel(cell.topo, values, dtype=cell.dtype, group_cfgs=cell.cfgs)
+    floor = report["floor"]
+    resolved, left_out = resolved_and_not(model, step.pre, step.state, cell.mapping_kind, floor)
+    assert len(left_out) == 1 and len(resolved) > 16, (len(resolved), len(left_out))
+    assert report["gradient_constants"] == (len(resolved), len(resolved) + len(left_out))
+    # units: floors -- no constant near the margin: measured 0.12, and 4.5 for the weakest scored.
+    assert left_out[0][2] < 0.5 * floor, left_out[0][2] / floor
+    assert min(response for _e, _c, response in resolved) > 1.5 * RESOLVED_MARGIN * floor
+    worst = max(resolved, key=lambda row: row[0])
+    assert report["gradient_error"] == pytest.approx(worst[0], rel=1e-9)
+    assert report["gradient_constant"] == worst[1]
+    assert report["gradient_response"] == pytest.approx(worst[2] / floor, rel=1e-9)
+    assert report["gradient_unresolved"]["constant"] == left_out[0][1]
+    assert report["gradient_unresolved"]["error"] == pytest.approx(left_out[0][0], rel=1e-9)
+    assert seen["gradient"] == pytest.approx(worst[0] / report["gradient_allowed"], rel=1e-9)
+    assert seen["gradient"] <= THRESHOLD["gradient"], report
+
+
 # Slow: the sparse ring compiled with diagnostics (no per-push cell).
 # Per push: tests/property/test_coupling_targeted_search.py::test_a_weak_constant_the_pass_still_resolves_stays_in_the_gradient_score
 @pytest.mark.slow

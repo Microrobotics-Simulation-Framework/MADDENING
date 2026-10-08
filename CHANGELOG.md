@@ -210,7 +210,11 @@ guidance; the itemized changes follow.
   (`SimulationNode.accepts_params()` exposes the probe);
   `maddening.testing.verification` is a Hypothesis battery over outputs,
   structure, determinism, jit/eager agreement and gradients;
-  `strategies.node_states` samples bool and integer fields
+  `strategies.node_states` samples bool and integer fields.  For a field
+  that only means something under a constraint (a unit quaternion, positive
+  populations, an index), `verify_node` takes `constrain_state=` /
+  `constrain_boundary=` (a function applied to every draw, in every check)
+  and `state_strategy=` / `boundary_strategy=` (your own Hypothesis strategy)
 - Property-test coverage for round trips, the REST and FMU-bridge surfaces
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 

@@ -39,9 +39,11 @@ the same call with the one thing put right goes through.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import warnings
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -733,44 +735,97 @@ def test_the_interface_norm_on_a_group_with_a_geometry_edge_is_refused_at_compil
         _ring(norm, mapping=_geom(), geometry=(anchor, "g")).compile()
 
 
-@pytest.mark.parametrize("anchor, norm", [("source", "l2"), ("target", "mixed")])
+#: The rings whose report is narrowed: ``(the geometry's anchor, the norm)``.
+NARROWED_RINGS = [("source", "l2"), ("target", "mixed")]
+#: The tolerance a ring's residual stops at its float floor under (the
+#: default of :func:`_ring`), and one every flag is usable under.
+TIGHT, LOOSE = 1e-6, 1e-3
+
+
+@functools.lru_cache(maxsize=None)
+def _stepped_ring(norm: str, tolerance: float, anchor: Optional[str]) -> GraphManager:
+    """The ring of :func:`_ring` under *norm* at *tolerance*, compiled and
+    stepped once: with a geometry edge anchored at *anchor*, or (``None``)
+    with a static mapping in its place.
+
+    One graph a call, kept for the module.  A diagnosed group is seconds to
+    compile and the four tests below read six of them: while one test built
+    its three it took 8 to 21 s on a CI runner, over the per-test budget on
+    the slower ones.  Each test now compiles one at most, and the two that
+    read the tight ring share it."""
+    edge = (dict(mapping=_static()) if anchor is None
+            else dict(mapping=_geom(), geometry=(anchor, "g")))
+    gm = _ring(norm, tolerance, **edge)
+    gm.compile()
+    assert gm.coupling_diagnostics() == {}, "no report before a step"
+    gm.step()
+    return gm
+
+
+def _with_the_rule_off(gm: GraphManager) -> dict:
+    """The report of *gm*'s group read as a group without a geometry edge
+    is read: the same slots, the narrowing switched off (and put back, the
+    graph being shared)."""
+    committed = gm._committed_geometry_edges              # noqa: SLF001
+    gm._committed_geometry_edges = {}                     # noqa: SLF001
+    try:
+        return dict(gm.coupling_diagnostics()["a+b"])
+    finally:
+        gm._committed_geometry_edges = committed          # noqa: SLF001
+
+
+@pytest.mark.parametrize("anchor, norm", NARROWED_RINGS)
 def test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason(anchor,
                                                                                     norm):
     """Diagnostics do not read the moving geometry of a mapping kind other
     than ``multilinear_grid`` in 0.4.0: the report keeps the solve's
     outcome, every bound is NaN, every ``*_usable`` flag False, and
-    ``not_usable_reason`` names the edge and the kind.  The same group with a static
-    mapping reports its bounds as it always did, and has no such key."""
-    gm = _ring(norm, mapping=_geom(), geometry=(anchor, "g"))
-    gm.compile()
-    assert gm.coupling_diagnostics() == {}
-    gm.step()
-    report = gm.coupling_diagnostics()["a+b"]
+    ``not_usable_reason`` names the edge and the kind.  (The premise --
+    every entry withheld would otherwise have said something -- and the
+    control with a static mapping are the three tests below.)"""
+    report = _stepped_ring(norm, TIGHT, anchor).coupling_diagnostics()["a+b"]
     gg.assert_not_diagnosed(report, [KEY], "kind")
     assert "'test_geom_matrix'" in report["not_usable_reason"]
     assert bool(report["converged"])
-    # The premise: every entry the report withholds would otherwise have
-    # said something.  Read the same slots as a group without a geometry
-    # edge would be read -- at a loose tolerance every flag is usable and
-    # every bound finite; at a tight one the residual is at its floor.
-    loose = _ring(norm, 1e-3, mapping=_geom(), geometry=(anchor, "g"))
-    loose.compile()
-    loose.step()
+
+
+@pytest.mark.parametrize("anchor, norm", NARROWED_RINGS)
+def test_what_a_narrowed_report_withholds_at_a_loose_tolerance_was_usable_and_finite(anchor, norm):
+    """The premise of the test above, at a loose tolerance: the same slots
+    read as a group without a geometry edge is read hold every flag True
+    and every bound finite, so each entry the report withholds would have
+    said something."""
+    loose = _stepped_ring(norm, LOOSE, anchor)
     gg.assert_not_diagnosed(loose.coupling_diagnostics()["a+b"], [KEY], "kind")
-    for graph in (gm, loose):
-        graph._committed_geometry_edges = {}          # noqa: SLF001
-    unnarrowed, tight = loose.coupling_diagnostics()["a+b"], gm.coupling_diagnostics()["a+b"]
+    unnarrowed = _with_the_rule_off(loose)
     assert "not_usable_reason" not in unnarrowed
     for flag in ("ratio_usable", "spectral_usable", "gradient_bound_usable"):
-        assert unnarrowed[flag] is True, (flag, dict(unnarrowed))
+        assert unnarrowed[flag] is True, (flag, unnarrowed)
     for bound in ("amplification", "error_estimate", "gradient_error_estimate",
                   "rho_spectral", "spectral_error_bound", "gradient_relative_error_bound"):
-        assert np.isfinite(unnarrowed[bound]), (bound, dict(unnarrowed))
-    assert tight["precision_limited"] is True, dict(tight)
-    static = _ring(norm, mapping=_static())
-    static.compile()
-    static.step()
-    plain = static.coupling_diagnostics()["a+b"]
+        assert np.isfinite(unnarrowed[bound]), (bound, unnarrowed)
+    # Put back: the shared graph still reports narrowed.
+    gg.assert_not_diagnosed(loose.coupling_diagnostics()["a+b"], [KEY], "kind")
+
+
+@pytest.mark.parametrize("anchor, norm", NARROWED_RINGS)
+def test_what_a_narrowed_report_withholds_at_a_tight_tolerance_was_a_residual_at_its_floor(
+        anchor, norm):
+    """The premise at the tight tolerance the first test steps at: read
+    with the rule off, the residual is at its float floor
+    (``precision_limited``, which the narrowed report reads False)."""
+    gm = _stepped_ring(norm, TIGHT, anchor)
+    tight = _with_the_rule_off(gm)
+    assert tight["precision_limited"] is True, tight
+    assert gm.coupling_diagnostics()["a+b"]["precision_limited"] is False
+
+
+@pytest.mark.parametrize("norm", sorted({norm for _anchor, norm in NARROWED_RINGS}))
+def test_the_same_group_with_a_static_mapping_reports_its_bounds_and_no_reason(norm):
+    """The control: the ring of the tests above with a static mapping where
+    the geometry edge was reports its bounds as it always did, and has no
+    ``not_usable_reason``."""
+    plain = _stepped_ring(norm, TIGHT, None).coupling_diagnostics()["a+b"]
     assert "not_usable_reason" not in plain
     assert bool(plain["ratio_usable"]) or bool(plain["spectral_usable"]), plain
 

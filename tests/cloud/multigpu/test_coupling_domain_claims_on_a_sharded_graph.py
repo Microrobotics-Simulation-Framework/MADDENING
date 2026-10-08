@@ -26,6 +26,7 @@ from tests.core import test_coupling_accelerations_in_every_domain as accelerati
 from tests.core import test_coupling_configuration_in_every_domain as configuration
 from tests.core import test_coupling_mapped_edges_in_every_domain as mapped
 from tests.core import test_coupling_norm_edges_in_every_domain as norms
+from tests.core import test_coupling_pairs_of_two_sizes_in_every_domain as sizes
 from tests.core import test_coupling_spectral_bound_where_edges_share_a_field as shared
 
 pytestmark = pytest.mark.skipif(len(jax.devices()) < cd.N_SHARD,
@@ -85,3 +86,24 @@ def test_the_claim_holds_with_a_sharded_member(row, monkeypatch):
             fn(cd.SHARDED, monkeypatch)
         else:
             fn(cd.SHARDED)
+
+
+# Slow: each cell's graphs compiled with a member partitioned over four devices.
+# Per push: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does
+# tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_reports_what_its_marker_side_twin_reports
+@pytest.mark.slow
+@pytest.mark.parametrize("cell", sizes.SHARDED, ids=[c.id for c in sizes.SHARDED])
+def test_a_pair_of_two_sizes_with_a_sharded_member(cell):
+    """CPL-188 and CPL-192 with ``b`` sharded: a small field coupled to a
+    large one through an edge that expands and one that reduces (the every
+    other domain's cells are in the module imported as ``sizes``).
+
+    With the small field on ``b`` the interface norm reads a sharded field
+    at its source, through cross-device reductions, and the reducing edge
+    delivers a gather of a replicated field onto the sharded member; with
+    it on ``a`` the expanding edge delivers onto the sharded one and the
+    gather reads it.  Each field is four copies of the cell's entries and
+    each mapping four diagonal copies of its matrix, so the reference and
+    its ``K`` are the cell's, entry by entry.
+    """
+    sizes.check_everything(cell)

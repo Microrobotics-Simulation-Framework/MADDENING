@@ -2647,6 +2647,9 @@ claims:
     reason's text, and the same graph's unwithheld report as the control.
   tests:
     - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    - 'tests/core/test_geometry_edge_refusals.py::test_what_a_narrowed_report_withholds_at_a_loose_tolerance_was_usable_and_finite'
+    - 'tests/core/test_geometry_edge_refusals.py::test_what_a_narrowed_report_withholds_at_a_tight_tolerance_was_a_residual_at_its_floor'
+    - 'tests/core/test_geometry_edge_refusals.py::test_the_same_group_with_a_static_mapping_reports_its_bounds_and_no_reason'
     - 'tests/core/test_geometry_edge_refusals.py::test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed'
     - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
   status: verified

@@ -195,7 +195,12 @@ def _twins_of(cells):
     return out
 
 
-@pytest.mark.parametrize("cell", _twins_of(PER_PUSH))
+#: A float64 field with no entries beside float32 members (the first
+#: exception below); its twin is compiled with the per-push twins.
+_WIDER = _cell("unread", "interface", "ift", True, none_dtype="float64")
+
+
+@pytest.mark.parametrize("cell", _twins_of(PER_PUSH + [_WIDER]))
 def test_the_twin_without_the_field_converges_and_reports_numbers(cell):
     """The comparison below is not between two failures: the twin of every
     per-push cell converges, and where the diagnostics are on under
@@ -322,7 +327,12 @@ def _close(a, b, rtol):
     return type(a) is type(b) and a == b
 
 
-@pytest.mark.parametrize("norm", NORMS)
+# Per push: tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_wider_field_with_no_entries_moves_the_report_by_rounding_only[interface]
+@pytest.mark.parametrize("norm", [
+    pytest.param("l2", marks=pytest.mark.slow),
+    pytest.param("mixed", marks=pytest.mark.slow),
+    "interface",
+])
 def test_a_wider_field_with_no_entries_moves_the_report_by_rounding_only(norm):
     """A float64 field with no entries beside float32 members.
 

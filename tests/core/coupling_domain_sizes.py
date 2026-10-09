@@ -486,11 +486,13 @@ GEO_MARKERS, GEO_GRID = 5, 40
 GEO_PULL = 0.03125
 #: Where the lattice of a geometry cell starts, in spacings from zero: the
 #: grid is centred on zero, so the markers (0.2 to 0.8 of the way along
-#: it) are within twelve spacings of it and a float32 member resolves
-#: them to 0.06 of the tolerance per evaluation.  ("Coordinates local to
-#: the grid", the advisory's own remedy; with the lattice starting at zero
-#: the float floor of these pairs is 2.7 times that, and with it what a
-#: float32 residual can be held to.)
+#: it) are within twelve spacings of zero and within thirty-two of the
+#: grid's first point.  A position is rounded at the larger of the two
+#: (the kernel forms the lattice coordinate in the positions' dtype), so
+#: a float32 member resolves them to 0.15 of the tolerance per
+#: evaluation: what the same pairs read with the lattice starting at
+#: zero.  No choice of the coordinates' origin changes a lattice
+#: coordinate.
 GEO_ORIGIN = -GEO_GRID / 2
 #: The domains a pair with ``multilinear_grid`` edges runs in under the
 #: interface norm, and the one in which it is refused at ``compile()``.
@@ -720,21 +722,23 @@ class GeoStored(gi.Reference):
     def floor(self, x=None) -> float:
         """The float floor of the residual at *x* per evaluation, each part
         at the resolution of the members that hold it: a scatter's source
-        value at its member's eps; its positions at ``eps |u|`` of one
+        value at its member's eps; its positions at ``eps r`` of one
         spacing; a gathered value at the coarsest of its source's eps, its
         target's (the cast) and the eps of the member whose positions it
-        was gathered at, and at that eps times those positions' distance
-        from zero in spacings where that is more."""
+        was gathered at, and at that eps times ``r`` of those positions
+        where that is more.  ``r`` is the magnitude a position is rounded
+        at, in spacings: the larger of its distance from the coordinates'
+        zero and of its lattice coordinate (``gi.rounded_at``)."""
         eps = {n: float(cd.finfo(t).eps) for n, t in self.cell.dtypes.items()}
         x = self.pre if x is None else x
         total, count = 0.0, 0
         for i, value, unit in self.parts(x):
             src, dst = gi.EDGES[i]
             if unit == gi.SPACINGS:
-                e = eps[src] * float(np.max(np.abs(value)))
+                e = eps[src] * self.reach(value * self.h)
             elif self.way(i) == "gather":
                 holder = src if self.shape.anchors[i] == "source" else dst
-                reach = float(np.max(np.abs(self.geometry(i, x[src]) / self.h)))
+                reach = self.reach(self.geometry(i, x[src]))
                 e = max(eps[src], eps[dst], eps[holder], eps[holder] * reach)
             else:
                 e = eps[src]

@@ -2734,14 +2734,19 @@ claims:
     norm in 0.4.0", and "a diagnostic run of the same group under "mixed"
     or "l2" reports them"). Such an entry keeps the residual's float
     floor: "residual_precision_floor is the floor of the state the step
-    returned and precision_limited is True where the residual is at or
-    below it, the rule of every group's report", on every step, "so
-    markers that drift, a state write and a loaded checkpoint are read
-    where they are": the run-time reading of what compile() warns of once
-    (MAP-050). The report never raises: where the float floor could only
-    have been measured by the step (an edge read at its target's pre-step
-    positions) and the state carries none, neither key is reported and
-    the reason says so. An internal geometry edge of another kind, or in a
+    returned, pooled as the residual is over every entry the norm reads,
+    and precision_limited is True where the residual is at or below it,
+    the rule of every group's report", on every step, "so markers that
+    drift, a state write and a loaded checkpoint are read where they
+    are": the run-time reading of what compile() warns of once (MAP-050),
+    counted with "the pass's structural evaluation count", "with
+    diagnostics=True as without". The report never raises, and the entry
+    always carries both keys: where the floor could not be measured,
+    precision_limited is False, residual_precision_floor is NaN and the
+    reason says which case it is - the floor could only have been
+    measured by the step (an edge read at its target's pre-step
+    positions) and the state carries none, or the state the step
+    returned is not finite. An internal geometry edge of another kind, or in a
     sub-cycled group, "is refused at compile()" (MAP-033).
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
@@ -2791,7 +2796,34 @@ claims:
     0.0) is in any dtype and which a converged residual often is under
     the advisory's distance: the floor's size against the tolerance is
     the reading. The same pair under "mixed" and "l2" has neither the key
-    nor a reason. Other reasons a geometry group is withheld for (another
+    nor a reason. A position enters that floor at the magnitude it is
+    rounded at, the larger of its distance from the coordinates' zero and
+    of its lattice coordinate (MAP-050 has the rule and the table):
+    float32 markers within 4 spacings of zero on grids whose first point
+    is 1000 to 50000 spacings away read precision_limited True beside a
+    floor of 68 to 6490 tolerances on all four anchor pairs, Gauss-Seidel
+    and Jacobi (0.26 to 0.50 and False counted from zero alone, with the
+    state up to 20 and 34 tolerances from the float64 fixed point). One
+    floor with diagnostics on and off: the report takes the pass's
+    structural count whatever count the step measured. A slot of 1339
+    evaluations written beside the state a step returned leaves the
+    report as it was (every push), and thirty pairs stepped with
+    diagnostics=True and without - float64 positions beside float32
+    values, float32, float64; the positions held by the markers or by the
+    grid node; 0 to 20000 spacings from zero - return the same state to
+    the bit and read the same floor and flag (slow lane). With the
+    measured count multiplied in, the float64-positions rows read 0.078
+    without diagnostics and 0.60 to 1189 with them, precision_limited
+    True on groups 0.1 to 0.6 tolerances from their fixed point (the
+    count weights a read of positions by their distance from zero, which
+    this floor already counts); the float32 rows that are limited stay
+    so. The same slot under "mixed" still moves that norm's report (the
+    control: CPL-100 has what the count does there). A position written
+    NaN before a step: residual inf, converged False, precision_limited
+    False, the floor NaN, and the reason says the floor could not be
+    measured because the state is not finite (it said the flags are not
+    reported until the group steps, or that the floor is reported, by
+    which node held the positions). Other reasons a geometry group is withheld for (another
     kind, a sub-cycled group, a failed self-check) keep precision_limited
     False and no floor key. Then, as before:
     a float32 pair joined by static mappings under the interface norm, with
@@ -2824,6 +2856,10 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_written_state_in_float64_is_not_flagged'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_floor_of_a_report_no_step_measured_is_not_reported_and_says_why'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_other_norms_reports_are_what_they_were'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_markers_near_zero_on_a_grid_whose_first_point_is_far_are_flagged'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_an_evaluation_count_a_step_measured_does_not_enter_the_floor_of_the_report'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_measured_count_still_enters_the_floor_of_a_group_whose_bounds_are_reported'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_after_a_step_on_a_non_finite_position_the_reason_says_the_state_is_not_finite'
     - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
   status: verified
   notes: >-
@@ -2832,6 +2868,9 @@ claims:
     compile() saw, the floor not a number, the reading withheld with the
     bounds, kept for every reason, the pre-step state's floor, an
     unmeasured floor reported as measured, the printed flag, the reason).
+    And of the count and the reason: the structural count dropped for
+    this group, the measured count kept for it and multiplied by ten, the
+    non-finite reason not given: each caught per push.
     Slow, run once on each JAX lane: the same graph under the mixed norm
     with diagnostics reports its bounds, the outside node's positions moved
     by the self-check as a constant of the pass.
@@ -2873,24 +2912,34 @@ claims:
     rounding "for a delivered one" ("the positions u it depends on": not a
     coordinate "on an axis of one lattice point", nor one "of a point
     clamped to the hull from further out than its rounding can cross"), a
-    position counts "at eps |u| of one
-    spacing", and the step records the floor of "a delivered value anchored
-    at its target". For a delivered value eps |u| "assumes a field that
+    position counts "at eps r of one spacing", r "the larger of two
+    magnitudes, per coordinate, in spacings: its distance from the
+    coordinates' zero" and "its lattice coordinate", "its distance from
+    the grid's first point", "the largest over them" where several edges
+    read one position field on different lattices; "no choice of the
+    coordinates' origin changes a lattice coordinate". The step records
+    the floor of "a delivered value anchored
+    at its target". For a delivered value eps r "assumes a field that
     varies across one cell by about the size of the value delivered": "it
     is early for a smoother field and it does not see a value far smaller
     than the field's variation across a cell". "A group that reports
     converged=True is within K tolerances
     of its fixed point in these readings", "to first order in the
-    distance", and "K does not see the size of
-    the grid or the place of the origin"; "a lattice plane ends it".
+    distance", "above the residual's float floor", and "K does not see
+    the size of the grid", "Nor the place of the coordinates' origin; the
+    floor sees a point's lattice coordinate". "The verdict is a local
+    statement": it holds "where the pass keeps that rate from the
+    accepted iterate to its fixed point", and there are "Two ways to lose
+    it", "a lattice plane" and "inside one cell, on two or three axes".
     compile() warns of each edge
     "whose positions put that count at the tolerance or above", the count
-    being the float floor's: "4 * E * eps * max|u| >= rtol", for "a mapping
+    being the float floor's: "4 * E * eps * max r >= rtol", for "a mapping
     that delivers more entries than it reads, anchored at its source",
     which reads the positions, and for "a mapping that does not deliver
     more entries than it reads", whose value is "computed at those
-    positions", "where the floor counts that part". "It is asked once":
-    the report reads the floor at every step (MAP-048).
+    positions", "where the floor counts that part". "It is asked once,
+    and it is one part's number": the report reads the floor at every
+    step, "pooled" (MAP-048).
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What the interface norm reads on a geometry edge)'
     - 'docs/user_guide/geometry_dependent_mappings.md (What convergence_norm="interface" reads on a geometry edge)'
@@ -2902,8 +2951,10 @@ claims:
     - 'src/maddening/core/coupling/acceleration.py::residual_precision_floor'
     - 'src/maddening/core/coupling/acceleration.py::_positions_floors'
     - 'src/maddening/core/coupling/acceleration.py::_positions_resolution'
+    - 'src/maddening/core/coupling/_interface_plan.py::_rounded_at'
     - 'src/maddening/core/coupling/_group_layout.py::_unresolved_position_warnings'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping.geometry_length_scale'
+    - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping.geometry_kernel_coordinates'
   conditions: >-
     solver="ift", one rate, atol=0 unless said; a pair whose two internal
     edges are a scatter and a gather, two gathers or two scatters of the
@@ -2935,8 +2986,10 @@ claims:
     residual_precision_floor is under one (the report's run-time reading,
     MAP-048). compile() asks the same of the state it is called with,
     once, and of nothing later: markers that drift, a state write and a
-    loaded checkpoint are read by the report alone. The claim is first
-    order in the distance, within the lattice cells of the fixed point: a
+    loaded checkpoint are read by the report alone. The verdict is a
+    local statement: the claim holds to first order where the pass keeps,
+    from the accepted iterate to its fixed point, the rate its last
+    passes showed. Two constructed ways to lose it. A lattice plane: a
     float64 Gauss-Seidel pair at rtol=1e-4 whose one point gathers a field
     of slope -0.05 per cell on one side of a lattice plane and 0.999 on
     the other, the point's position being a constant plus the value it
@@ -2949,7 +3002,23 @@ claims:
     short of the plane, or with the far cell contracting at 0.5, the same
     pair is within 0.63 tolerances (pinned with its controls; the solver
     is not changed: the estimate behind converged is CPL-041's, which is
-    not a bound). With more markers than grid entries (40 on 12) the
+    not a bound). Inside ONE lattice cell, with no plane and no face
+    crossed: within a cell the kernel is multilinear of degree d in the
+    positions (and a scatter bilinear in a value and its weight), so on
+    two or three axes the pass's rate varies inside the cell. One point
+    in a lattice of one cell (2 x 2 x 2), float64, Gauss-Seidel,
+    rtol=1e-4, at (v, v, v) for the value v it gathers: the pass is a
+    cubic with one real fixed point, 0.25 (contraction 0.05, K = 0.95),
+    that creeps at 0.9999 past 0.6; started at 0.8088 the first pass
+    lands on 0.6, the next moves by 0.61 tolerances and the step reports
+    converged=True after one counted pass, 14,000 tolerances from the
+    fixed point, with the start, the accepted iterate, the returned
+    state and the fixed point in the one cell. The same cell with a pass
+    that does not creep, and the creeping pass started 0.05 from its
+    fixed point, are within a tolerance (pinned with its controls). So
+    "no marker crosses a lattice plane" is not the condition; this row's
+    battery is on one and two axes with positions that stay within 0.15
+    of a cell of a cell's middle, and the kind takes three axes. With more markers than grid entries (40 on 12) the
     gather is the edge read at its source and the scatter the one read as
     delivered, on every anchor pair: the parts, the advisories and the
     reported floor.
@@ -2960,20 +3029,62 @@ claims:
     as a part of their own, and a mapping read as delivered at
     either anchor, whose value is computed at them - where what those
     positions put into the float floor of that part by themselves is the
-    criterion's threshold or more, 4 E eps max|u| >= rtol, u in the spacing
-    of its own axis, eps of the dtype the positions are stored in, E the
+    criterion's threshold or more, 4 E eps max r >= rtol, r the magnitude
+    a position is rounded at in the spacing of its own axis - the larger
+    of its distance from the coordinates' zero and of its lattice
+    coordinate, its distance from the grid's first point, which the
+    kernel forms in the positions' dtype; the largest over the lattices
+    that read the field - eps of the dtype the positions are stored in, E the
     group's structural evaluation count (float32 at rtol=1e-4: from 210
-    spacings from zero where every node reads the previous iterate, 105
-    for a Gauss-Seidel pair), on the state compile() is called with and on
-    no later write (a delivered value anchored at its target: at the
-    target's positions in that state). The parts asked are the parts the
+    spacings from zero or from the grid's first point where every node
+    reads the previous iterate, 105 for a Gauss-Seidel pair), on the
+    state compile() is called with and on no later write (a delivered
+    value anchored at its target: at the target's positions in that
+    state). Counted from the coordinates' zero alone, as it was: four
+    float32 markers within 4 spacings of zero on a grid of 16001 points
+    centred there compiled silently and read a floor of 0.26
+    (Gauss-Seidel, rtol=1e-5) and 0.42 to 0.50 (Jacobi, rtol=3e-6) with
+    converged=True and the state 2.1 to 4.2 and 9 to 20 tolerances from
+    the float64 fixed point (pooled; 12 and 42 in the worst entry), and
+    34 on a grid of 1e5 points; and one physical problem read a floor of
+    623 with the coordinates' zero at the grid's first point and 0.26
+    with it at the markers, which was the remedy the message named. Now
+    those grids are warned of on each edge that rests on the positions
+    and read 623, 1040 and 3890, and the one problem reads one floor in
+    both coordinate systems (to 1e-5). On this row's own pair (4 float32
+    markers within 4 spacings of zero, the grid's first point 5, 1000,
+    8000 and 50000 spacings away; Gauss-Seidel at rtol=1e-5 and Jacobi at
+    3e-6; four anchor pairs; jaxlib 0.10.2, 0.11.0 and 0.11.2, CPU) the
+    floors are 0.56 to 1.09, 68 to 130, 540 to 1040 and 3370 to 6490
+    with the state 0.06 to 0.41, 0.22 to 0.87, 1.4 to 5.3 and 14 to 47
+    tolerances from the float64 fixed point: no row reads a floor under
+    one with the state more than a tolerance off. With the first point 5
+    (2 under Jacobi) spacings away the pair is silent, under one and
+    within 0.32 of a tolerance; with float64 positions on the far grid it
+    is silent, reads the floor of its values (0.078, 0.095) and is within
+    0.4. Two edges that read one position field on two lattices (first
+    points 5 and 8000 spacings away) are both counted at the larger. No
+    choice of the coordinates' origin changes a lattice coordinate: the
+    message offers "use coordinates local to the grid" only where the
+    positions are within rtol / (4 E eps) spacings of the grid's first
+    point, and otherwise says that no choice of origin brings the count
+    under the tolerance (float64 positions or a looser rtol are what is
+    left). The number a message quotes is what the positions put into the
+    floor of the one part it names; the report's floor is pooled over
+    every entry the norm reads (four markers a thousand spacings out
+    beside two plain edges of 1e5 entries: 95.7 quoted, 0.61 reported),
+    and the message says so, with the part's entry count and which number
+    to compare with what. The parts asked are the parts the
     floor counts, by the floor's own functions: not a delivered value the
     dead band drops (atol above its magnitude: the group's floor is 0.0;
     a value that is exactly zero at compile() is asked, with a dead band
     or without), and not a delivered value for a coordinate its mapping
     does not read (an axis of one lattice point; a point outside the hull
-    by more than sqrt(eps) of its own distance from zero, whose weights
-    are exactly 0 and 1); positions that are a part are asked of every
+    by more than sqrt(eps) of the magnitude it is rounded at, whose
+    weights are exactly 0 and 1: a marker 1e-4 of a spacing past the last
+    point of 8000 float32 spacings, with the coordinates' zero at that
+    point, is read and warned of, where its own distance from zero alone
+    took it for clamped; 30 spacings past, it is not read); positions that are a part are asked of every
     coordinate, as the criterion reads them (one on an axis of one
     lattice point included, in the spacing declared for it). The true
     alarms beside each stay (pinned), and the audit's threshold, anchor
@@ -3008,7 +3119,8 @@ claims:
     too (a value at the group's coarsest; CPL-100), so float64 positions
     beside float32 fields compile silently and read the floor of their
     value parts alone (0.078 to 0.095 of a tolerance at rtol=1e-5 under
-    Gauss-Seidel, 100 to 7000 spacings out), with
+    Gauss-Seidel, 100 to 7000 spacings out, with diagnostics=True as
+    without: MAP-048), with
     precision_limited True only where the residual is at or below that.
     Tested two thousandths either side of that distance
     at rtol=1e-4 and 1e-3, on one and two axes and both signs, for pairs
@@ -3095,6 +3207,15 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_true_alarms_beside_a_one_point_axis_and_a_clamped_point_stay'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_jump_across_a_lattice_plane_into_a_slow_cell_reads_converged_far_from_the_fixed_point'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_within_one_lattice_cell_or_a_cell_of_a_like_rate_the_claim_holds'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_inside_one_cell_of_three_axes_a_pass_that_creeps_reads_converged_far_from_the_fixed_point'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_inside_one_cell_a_pass_that_keeps_its_rate_holds_the_claim'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_markers_near_zero_on_a_grid_whose_first_point_is_far_are_flagged'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_no_report_reads_a_floor_under_one_with_the_state_tolerances_off'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_one_problem_in_two_coordinate_systems_reads_one_floor'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_on_a_grid_whose_first_point_is_far_are_quiet'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_positions_two_edges_read_on_two_lattices_are_rounded_at_the_largest'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_point_just_past_the_last_lattice_point_of_a_long_grid_is_read'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_advisory_quotes_one_part_and_says_the_reports_floor_is_pooled'
   status: verified
   notes: >-
     Measured (jaxlib 0.11.0, CPU, float64, rtol=1e-4). K on a two-way pair
@@ -3128,7 +3249,12 @@ claims:
     cases and nine also by the sweep. Seeded faults of the floor's
     decisions, the count's wording, the side rule and the pin of
     MADD-ANO-247 (the test module's per-push tests): thirteen, each
-    caught.
+    caught. Seeded faults of where a position is rounded (the origin not
+    subtracted, the stored magnitude alone, the lattice coordinate alone,
+    the advisory reading the stored positions where the floor reads the
+    rounded ones, one lattice of two, the hull's slack from zero alone, a
+    part's floor quoted as the group's, the coordinates remedy offered
+    far into a grid): each caught per push.
   domains:
     f32: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
     f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'

@@ -450,11 +450,35 @@ OWN, SPACINGS = "own", "spacings"
 EVALUATIONS = {"jacobi": 1.0, "gauss-seidel": 2.0}
 
 
-def positions_floor(positions, spacing, dtype: str, rtol: float = RTOL) -> float:
+def rounded_at(positions, spacing, origin=None, grid_shape=None) -> np.ndarray:
+    """The magnitude each coordinate of *positions* is rounded at, in the
+    spacing of its own axis: the larger of its distance from the
+    coordinates' zero and of its **lattice coordinate**, its distance
+    from the grid's first point (*origin*, in the positions' units),
+    which the kernel forms in the positions' dtype and resolves its
+    weights to ``eps`` of.  On an axis of one lattice point the kernel
+    reads no coordinate and the stored magnitude stands.  (The pairs of
+    this module keep every marker inside the hull, so the kernel reads
+    every other coordinate.)  With no *origin* given, the distance from
+    zero alone: the grid's first point at the coordinates' zero."""
+    h = np.asarray(spacing, np.float64)
+    u = np.asarray(positions, np.float64) / h
+    if origin is None:
+        return np.abs(u)
+    lattice = np.abs(u - np.asarray(origin, np.float64) / h)
+    if grid_shape is not None:
+        lattice = np.where(np.asarray(grid_shape) >= 2, lattice, 0.0)
+    return np.maximum(np.abs(u), lattice)
+
+
+def positions_floor(positions, spacing, dtype: str, rtol: float = RTOL, *, origin=None,
+                    grid_shape=None) -> float:
     """The float floor of positions read in grid spacings, by themselves,
     per evaluation of the pass and in tolerances: four roundings of the
-    farthest coordinate as *dtype* holds it (``eps |u|`` spacings, ``u``
-    its distance from zero in the spacing of its own axis) over ``rtol``.
+    farthest coordinate as *dtype* holds it (``eps r`` spacings, ``r``
+    the magnitude it is rounded at in the spacing of its own axis,
+    :func:`rounded_at`: its distance from zero or, where larger, from
+    the grid's first point at *origin*) over ``rtol``.
 
     The rule of ``compile()``'s advisory, restated: it warns of an edge
     whose reading rests on those positions (:func:`positions_behind`: a
@@ -464,7 +488,7 @@ def positions_floor(positions, spacing, dtype: str, rtol: float = RTOL) -> float
     part, or more.
     """
     held = np.asarray(np.asarray(positions, np.dtype(dtype)), np.float64)
-    reach = float(np.max(np.abs(held / np.asarray(spacing, np.float64))))
+    reach = float(np.max(rounded_at(held, spacing, origin, grid_shape)))
     return 4.0 * float(np.finfo(np.dtype(dtype)).eps) * reach / rtol
 
 
@@ -579,6 +603,11 @@ class Reference:
     def way(self, i: int) -> str:
         return WAYS[self.shape.kind][i]
 
+    def reach(self, positions) -> float:
+        """The largest magnitude *positions* are rounded at, in spacings
+        (:func:`rounded_at`, on this pair's lattice)."""
+        return float(np.max(rounded_at(positions, self.h, self.o, self.shape.grid_shape)))
+
     def geometry(self, i: int, source: dict) -> np.ndarray:
         """The positions edge *i* is resolved with when its source holds
         *source*: the source's own for a source anchor (they move with the
@@ -669,11 +698,15 @@ class Reference:
         * a **value** entry at the ``eps`` of the group's coarsest dtype
           (the coarser of the values' and the positions': any value of a
           group may be downstream of its coarsest member), and a
-          delivered one no finer than the rounding ``eps |u|`` in
+          delivered one no finer than the rounding ``eps r`` in
           spacings of the positions it was gathered at, which moves its
           weights;
-        * a **position** ``u`` spacings from zero at ``eps |u|`` of the
-          positions' **own** dtype, whatever the values' is.
+        * a **position** at ``eps r`` of the positions' **own** dtype,
+          whatever the values' is;
+
+        ``r`` the magnitude a position is rounded at (:func:`rounded_at`:
+        the larger of its distance from the coordinates' zero and of its
+        lattice coordinate).
         """
         eps_x = float(np.finfo(np.dtype(self.shape.dtype)).eps)
         eps_g = float(np.finfo(np.dtype(self.shape.geometry_dtype)).eps)
@@ -682,10 +715,9 @@ class Reference:
         total, count = 0.0, 0
         for i, value, unit in self.parts(x):
             if unit == SPACINGS:
-                eps = eps_g * float(np.max(np.abs(value)))
+                eps = eps_g * self.reach(value * self.h)
             elif self.way(i) == "gather":
-                reach = float(np.max(np.abs(self.geometry(i, x[EDGES[i][0]]) / self.h)))
-                eps = max(eps_c, eps_g * reach)
+                eps = max(eps_c, eps_g * self.reach(self.geometry(i, x[EDGES[i][0]])))
             else:
                 eps = eps_c
             total += value.size * (eps / RTOL) ** 2

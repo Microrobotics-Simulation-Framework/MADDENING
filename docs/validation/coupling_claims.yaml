@@ -4185,8 +4185,8 @@ claims:
     A position is exempt and keeps its own dtype's eps: a geometry field
     an internal edge anchors a geometry-dependent mapping at (the l2 and
     the mixed norm), a position part read in kernel lengths (the interface
-    norm), and the stored rounding eps |u| of the positions a value was
-    delivered through; a stored float64 position has float64 resolution,
+    norm), and the rounding eps r of the positions a value was
+    delivered through (r as below); a stored float64 position has float64 resolution,
     and counted at a float32 member's eps float64 positions tens of
     spacings from zero read precision_limited=True on a floor of hundreds
     of tolerances with the iterate within a thousandth of one of its fixed
@@ -4216,8 +4216,16 @@ claims:
     difference, under either schedule (MADD-ANO-247, open; pinned as a
     strict xfail).  A value delivered through a multilinear_grid mapping
     (experimental; MAP-050) also counts the rounding of the positions it
-    depends on, eps |u| for positions u grid spacings from zero, which
-    assumes a field that varies across a cell by about the size of the
+    depends on, eps r with r the larger of a position's distance from the
+    coordinates' zero and of its lattice coordinate (its distance from
+    the grid's first point, which the kernel forms in the positions'
+    dtype), in grid spacings and over the coordinates the kernel reads;
+    counted from zero alone, float32 markers near zero on a grid whose
+    first point is 8000 spacings away read a floor of 0.26 to 0.50 with
+    the state 2 to 20 tolerances off (MAP-050).  The report of such a
+    group under the interface norm counts that floor with the pass's
+    structural evaluation count, with diagnostics on or off (MAP-048).
+    The count assumes a field that varies across a cell by about the size of the
     value delivered: a gather that samples a field near its zero is the
     same anomaly entered through the positions (the exact residual of the
     returned float32 state 6.3 and 22.5 tolerances beside 0.35 and 0.49
@@ -4227,7 +4235,19 @@ claims:
     mappings, one rate, the l2 or the mixed norm): the floor is the
     members' state's, each position field at its own dtype's eps, with
     the measured gain of a read through the gather or the scatter in the
-    evaluation count; the exact residual of the returned float32 state is
+    evaluation count.  That gain is taken against the positions' own
+    magnitude, so under these two norms the count a step measures with
+    diagnostics=True grows with the positions' distance from the
+    coordinates' zero (2, 15, 147, 468 and 3269 at 0, 100, 1e3, 5e3 and
+    2e4 spacings on one pair): float64 positions beside float32 values
+    read a floor of 0.091 ("mixed") and 0.64 ("l2") tolerances without
+    diagnostics and 0.71 to 1140 and 4.9 to 7980 with them, with
+    precision_limited True on groups 0.25 to 0.64 tolerances from their
+    fixed point; it is also what covers float32 positions there (2.5 to
+    74 tolerances off at 2e4 spacings), and on the 60 rows measured no
+    bound is below the distance.  Not changed in 0.4.0 (the interface
+    norm's report, which already counts a position in spacings, does not
+    take that count: MAP-048).  The exact residual of the returned float32 state is
     held to the reported one plus the floor against the float64 reference
     on the draws of the geometry search, whose fields are of one sign
     scale across a cell.  A gather that samples a field changing sign
@@ -6409,10 +6429,15 @@ claims:
     the fields computed from it (CPL-011).
     an affine pass (linear nodes, linear static mappings, affine edge
     transforms; for a mapping that reads a moving geometry the claim is
-    MAP-050's, to first order and within the lattice cells of the fixed
-    point: an iterate thrown across a lattice plane into a cell where the
-    pass contracts at 0.999 read converged=True 250 tolerances from a
-    fixed point in the cell it came from, K = 0.95 there), above the
+    MAP-050's: the verdict is a local statement, which holds to first
+    order where the pass keeps the rate its last passes showed all the
+    way to its fixed point. An iterate thrown across a lattice plane into
+    a cell where the pass contracts at 0.999 read converged=True 250
+    tolerances from a fixed point in the cell it came from, K = 0.95
+    there; and inside ONE cell of three axes, where the kernel is
+    multilinear of degree three in the positions, a pass that creeps at
+    0.9999 read converged=True 14,000 tolerances from its only fixed
+    point with no plane crossed), above the
     residual's float floor; float32
     and float64;
     pairs whose two mapped internal edges gather, scatter, or one of each,

@@ -1057,7 +1057,18 @@ $$
 cells.  When that is 1/16 of a cell or more for the dtype the geometry
 field has, `compile()` refuses the graph; at 1/1024 or more, `validate()`
 reports a warning.  Hold the geometry in float64 or move the origin of the
-coordinates closer to the grid.  The refusal is not only `compile()`'s: a
+coordinates closer to the grid.  That figure is the grid's own, at its
+farther end from the coordinates' zero.  A point's own figure is its
+**lattice coordinate**: the stencil forms $(x - o_a)/h_a$ in the
+geometry's dtype, so its weights on axis $a$ are resolved to
+$\varepsilon\,|x - o_a|/h_a$ of a cell, the point's distance from the
+grid's first point, whatever $|x|$ is.  On a grid of 16001 points
+centred on the coordinates' zero a float32 marker beside that zero has
+weights resolved to $\varepsilon \cdot 8000 = 9.5 \times 10^{-4}$ of a
+cell, which is the grid's figure and under this warning.  The float
+floor of the interface norm counts that per point (below), and it is
+the tolerance asked long before 1/1024 of a cell.  The refusal is not
+only `compile()`'s: a
 geometry compiled as float64 and later written as float32
 (`set_node_state` is not a recompile) changes the dtype of the program,
 which is then traced again, and the same rule is asked at that trace --
@@ -1253,20 +1264,35 @@ at the source carries none.
   source value of an edge that delivers more entries than it reads and,
   for a source anchor, its positions.  Every other floating field is
   recomputed by one plain pass.
-* **The float floor.**  A value counts at the `eps` of the coarsest dtype
-  it was computed from, the positions' among them for a delivered one,
-  and at least `eps |u|` for the positions `u` it depends on, in
-  spacings from zero (their stored rounding moves a kernel weight by as
-  much); a position counts at `eps |u|` of one spacing.  A value's `eps`
-  is taken no finer than the group's coarsest floating dtype's; the
-  `eps` of `eps |u|` is always that of the positions' own dtype, so
-  float64 positions beside float32 fields put only float64's `eps |u|`
-  into the floor.  For a
-  delivered value `eps |u|` **assumes a field that varies across one
+* **The float floor.**  A position is **rounded at** the larger of two
+  magnitudes, per coordinate, in spacings: its distance from the
+  coordinates' zero, $|u|$ (it is stored to `eps |u|`), and its lattice
+  coordinate, $|u - o/h|$, its distance from the grid's first point
+  (the kernel forms it in the positions' dtype and resolves its weights
+  to `eps` of that: the kernel paragraph above), wherever the kernel
+  reads the coordinate.  Call the larger $r$; where several edges read
+  one position field on different lattices, the largest over them.  A
+  value counts at the `eps` of the coarsest dtype it was computed from,
+  the positions' among them for a delivered one, and at least `eps r`
+  for the positions it depends on (their rounding moves a kernel weight
+  by as much); a position counts at `eps r` of one spacing.  A value's
+  `eps` is taken no finer than the group's coarsest floating dtype's;
+  the `eps` of `eps r` is always that of the positions' own dtype, so
+  float64 positions beside float32 fields put only float64's `eps r`
+  into the floor.  Counted from the coordinates' zero alone (`eps |u|`),
+  float32 markers within 4 spacings of zero on grids of 16001 and 1e5
+  points centred there read a floor of 0.26 to 0.50 and
+  `converged=True` with the state 2 to 20 and 34 tolerances from the
+  float64 fixed point, and one physical problem read 623 with the zero
+  at the grid's first point and 0.26 with it at the markers: **no choice
+  of the coordinates' origin changes a lattice coordinate**, so the
+  larger of the two does not depend on it once the lattice coordinate
+  is the larger.  For a
+  delivered value `eps r` **assumes a field that varies across one
   cell by about the size of the value delivered**: it is early for a
   smoother field and it does not see a value far smaller than the
   field's variation across a cell (a field sampled near its zero), which
-  the positions' rounding moves by `eps |u|` times that ratio
+  the positions' rounding moves by `eps r` times that ratio
   (MADD-ANO-247; the user guide's limits have the measured figures).
   The coordinates a delivered value does not depend on are not counted:
   one on an axis of one lattice point, and one of a point clamped to the
@@ -1277,29 +1303,63 @@ at the source carries none.
   pre-step positions, which the returned state does not hold: the step
   records it (`reading_floor`), and a state no step wrote has none.
 * **The advisory and the run-time reading.**  `compile()` warns of each
-  edge for which the positions' term alone, `4 E eps max|u| / rtol`, is
+  edge for which the positions' term alone, `4 E eps max r / rtol`, is
   one or more on the state it sees: a part that is positions, or a value
   delivered at them, where the floor counts that part (not one the dead
   band drops, and not a coordinate the mapping does not read).  It is
-  asked once.  The report of such a group reads the floor at every step:
-  `residual_precision_floor` is the floor of the state the step returned
-  and `precision_limited` is `True` where the residual is at or below
-  it, the rule of every group's report, so markers that drift, a state
-  write and a loaded checkpoint are read where they are (the user
-  guide's limits have the rule, the measured cases and the remedies).
+  asked once, and it is **one part's number**.  The report of such a
+  group reads the floor at every step: `residual_precision_floor` is the
+  floor of the state the step returned, **pooled** as the residual is
+  over every entry the norm reads, and `precision_limited` is `True`
+  where the residual is at or below it, the rule of every group's
+  report, so markers that drift, a state write and a loaded checkpoint
+  are read where they are.  With finer entries beside the part the
+  pooled floor is the smaller of the two, by up to the root of the
+  part's share of the entries (four markers a thousand spacings out
+  beside two plain edges of 1e5 entries: 95.7 quoted at `compile()`,
+  0.61 reported): compare the advisory's number with one for the part,
+  and the report's floor with its residual and with one for the group.
+  `E` is the pass's structural evaluation count in both, **with
+  `diagnostics=True` as without**: the count a step measures with
+  diagnostics weights a read of positions by their distance from the
+  coordinates' zero, which this floor already counts (multiplied in, the
+  floor of one state read 0.078 without diagnostics and 18 to 1189 with
+  them), and no other number of such a group reads it in 0.4.0.  (The
+  user guide's limits have the rule, the measured cases and the
+  remedies.)
 * **The claim.**  A group that reports `converged=True` is within $K$
   tolerances of its fixed point in these readings, $K = \lVert D (I -
   A)^{-1} (I - L) D^{-1} \rVert_2$ on the compact readings as for a
   static mapping, to first order in the distance (the pass is nonlinear
-  in the positions).  $K$ does not see the size of the grid or the place
-  of the origin (the measured figures are in MAP-050 of the mapping
-  claims).
-* **The claim is first order in the distance, and a lattice plane ends
-  it.**  $K$ is the linearisation at the fixed point, and the pass is
-  another polynomial of the positions in each lattice cell.  Where the
-  accepted iterate and the fixed point lie in different cells, $K$ of
-  the fixed point's cell does not describe the iterate's
-  (MAP-050 has a constructed case with its numbers).
+  in the positions), above the residual's float floor.  $K$ does not
+  see the size of the grid.  Nor the place of the coordinates' origin;
+  the floor sees a point's lattice coordinate (the measured figures are
+  in MAP-050 of the mapping claims).
+* **The verdict is a local statement.**  `converged=True` reads the
+  contraction the last passes showed (a residual under the threshold
+  after a step that shrank).  $K$ is the linearisation at the fixed
+  point.  The two describe the same thing **where the pass keeps that
+  rate from the accepted iterate to its fixed point**, and the claim
+  holds there to first order.  Two ways to lose it, each constructed
+  and pinned with its numbers (MAP-050):
+  - *a lattice plane.*  The pass is another polynomial of the positions
+    in each lattice cell.  An iterate thrown across a plane into a cell
+    where the pass contracts at 0.999 read `converged=True` 250
+    tolerances from a fixed point in the cell it came from ($K = 0.95$
+    there);
+  - *inside one cell, on two or three axes.*  Within a cell the kernel
+    is multilinear of degree $d$ in the positions (and a scatter is
+    bilinear in a value and its weight on any number of axes), so the
+    pass's rate varies inside the cell too.  One point in a lattice of
+    ONE cell on three axes, its position $(v, v, v)$ for the value $v$
+    it gathers, has a cubic pass with a single fixed point (contraction
+    0.05 there, $K = 0.95$) that creeps at 0.9999 elsewhere in the
+    cell: it read `converged=True` after one counted pass 14,000
+    tolerances from that fixed point, with no plane or face crossed.
+    "No marker crosses a lattice plane" is therefore **not** the
+    condition.  (A pass whose only nonlinearity is a gather on one axis
+    is linear in the position within a cell, and for that pass a plane
+    is the only place the rate changes.)
 * **Not in 0.4.0.**  The bounds of such a group (`rho_spectral`,
   `spectral_error_bound`, the gradient bound, the estimates and their
   flags) are not reported under this norm in 0.4.0 (the paragraph

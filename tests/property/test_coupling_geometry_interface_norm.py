@@ -908,7 +908,8 @@ def test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_thres
         positions, origin = _markers(shape, reach, axis=axis, sign=sign)
         got = _edges_warned(_compile_warnings(_placed(shape, positions, origin, rtol=rtol)))
         floor = gi.EVALUATIONS[shape.schedule] * gi.positions_floor(
-            positions, shape.spacing, shape.geometry_dtype, rtol)
+            positions, shape.spacing, shape.geometry_dtype, rtol, origin=origin,
+            grid_shape=shape.grid_shape)
         floors[side] = floor
         if side == "under":
             assert not got, got
@@ -919,7 +920,7 @@ def test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_thres
             assert "float32" in text and f"rtol={rtol:g}" in text, text
             said = float(text.split("They reach ")[1].split(" spacings")[0])
             assert abs(said - reach) <= 1e-5 * reach, (said, reach)
-            assert f"(axis {axis}, spacing {shape.spacing[axis]:g})" in text, text
+            assert f"(axis {axis}, spacing {shape.spacing[axis]:g};" in text, text
             times = float(text.split("which is ")[1].split(" times the tolerance")[0])
             assert abs(times - floor) <= 5e-3 * floor, (times, floor)
             for remedy in ("in float64", "coordinates local to the grid", "loosen rtol above"):
@@ -982,7 +983,8 @@ def test_a_delivered_value_is_warned_of_for_its_positions_rounding_and_not_for_i
     rtol, E = 5e-7, gi.EVALUATIONS[base.schedule]
     positions, origin = _markers(base, 1_000.0)
     assert 4.0 * E * float(np.finfo(np.float32).eps) / rtol > 1.5, "premise: the value's floor"
-    assert E * gi.positions_floor(positions, base.spacing, "float64", rtol) < 1e-5
+    assert E * gi.positions_floor(positions, base.spacing, "float64", rtol, origin=origin,
+                                  grid_shape=base.grid_shape) < 1e-5
     with precision(True):
         assert _compile_warnings(_placed(wide, positions, origin, rtol=rtol)) == []
         narrow = _edges_warned(_compile_warnings(_placed(base, positions, origin, rtol=rtol)))
@@ -1137,7 +1139,8 @@ def test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distance
                 entries[key] = v.size
         assert sorted(entries) == sorted(behind)
         own = {key: (E * gi.positions_floor(state[holder]["pos"], shape.spacing,
-                                            shape.geometry_dtype), entries[key])
+                                            shape.geometry_dtype, origin=shape.grid_origin,
+                                            grid_shape=shape.grid_shape), entries[key])
                for key, (holder, _how) in behind.items()}
         assert all(abs(floor - 1.0) > 0.02 for floor, _n in own.values()), own
         assert sorted(warned) == sorted(k for k, (floor, _n) in own.items() if floor >= 1.0), (

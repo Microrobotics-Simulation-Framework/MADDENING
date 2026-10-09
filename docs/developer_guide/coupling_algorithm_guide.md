@@ -249,8 +249,11 @@ one dtype nothing changes.  **A position is exempt from that rule and
 keeps its own dtype's `eps`**: a geometry field that an internal edge
 anchors a geometry-dependent mapping at (under `"l2"` and `"mixed"`), a
 position part read in kernel lengths (under `"interface"`), and the
-stored rounding `eps · |u|` of the positions a value was delivered
-through.  A stored float64 position has float64 resolution, and what a
+rounding `eps · r` of the positions a value was delivered through (`r`
+the larger of a position's distance from the coordinates' zero and of
+its lattice coordinate, in spacings: under `"interface"` the kernel's
+own difference from the grid's first point is where a position rounds,
+see the interface-mapping guide).  A stored float64 position has float64 resolution, and what a
 float32 member adds to it in a pass is a rounding of the increment;
 counted at float32's `eps`, float64 positions tens of spacings from zero
 put hundreds of tolerances into the floor and read

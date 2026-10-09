@@ -755,7 +755,7 @@ def _check_restart(cell) -> None:
             f"{_same_graph(a, b)}")
 
 
-def _same_member(where: str, member, alone, ulps: float = 0.0) -> None:
+def _same_member(where: str, member, alone, ulps: float = 0.0, numbers: float = 1e-5) -> None:
     """A member of a ``vmap`` batch is its own unbatched solve.
 
     The state, the verdict, the pass count and every integer slot to the
@@ -796,9 +796,9 @@ def _same_member(where: str, member, alone, ulps: float = 0.0) -> None:
     assert sorted(member.report) == sorted(alone.report), where
     assert sorted(member.meta) == sorted(alone.meta), where
     differ = {key: (member.report[key], alone.report[key]) for key in member.report
-              if not _numbers_agree(member.report[key], alone.report[key], 1e-5)}
+              if not _numbers_agree(member.report[key], alone.report[key], numbers)}
     differ.update({key: (member.meta[key], alone.meta[key]) for key in member.meta
-                   if not _slots_agree(member.meta[key], alone.meta[key], 1e-5)})
+                   if not _slots_agree(member.meta[key], alone.meta[key], numbers)})
     assert not differ, f"{where} differs from its unbatched solve: {differ}"
 
 
@@ -816,8 +816,13 @@ def _check_batch(cell, count=None) -> None:
             # claims "a few ulps").  A slow-lane runner returned one float32
             # ulp of one entry on the sparse two-way pair under jaxlib 0.10.2
             # where every other run had the pair to the bit.  The verdict
-            # and the pass count stay exact.
-            _same_member(f"{cell.id}: member {k} of the batch", s, alone, ulps=4.0)
+            # and the pass count stay exact.  The report's numbers follow
+            # the state: a rounding of an entry is ``eps / rtol`` of a
+            # tolerance in the residual (0.29356 for 0.29346 on that
+            # runner), so they are held to that many roundings as the
+            # residual resolves them (:func:`_resolution`), not to 1e-5.
+            _same_member(f"{cell.id}: member {k} of the batch", s, alone, ulps=4.0,
+                         numbers=max(1e-5, 4.0 * _resolution(cell)))
             passes.add(s.report["iterations"])
     if cell.acceleration == "none":
         assert len(passes) > 1, (

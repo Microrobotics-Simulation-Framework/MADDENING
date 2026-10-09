@@ -175,61 +175,94 @@ names the edge and says what to do.
   lower because of the second limit: at 0.05 the check would catch the
   weak deposit and would withhold 7 to 9 of the 4,450 honest examples of
   the test suite's searches, where it now withholds none or one.
-* **Across a lattice plane the flags are withdrawn and the numbers
-  kept.**  A multilinear stencil is one polynomial of the positions
+* **Beside a lattice plane the flags are withdrawn and the numbers
+  kept.**  What it costs in ordinary use first, measured on the example
+  above with `add_coupling_group(["grid", "markers"], diagnostics=True)`
+  over 300 steps (honest reports, their numbers right against a float64
+  reference, that lose `spectral_usable` and `gradient_bound_usable`;
+  the two go together):
+
+  | the group | honest reports that lose both flags |
+  |---|---|
+  | the example as written (markers advected across the lattice) | about 4%: 8 of 204 float32 reports at tolerances of 1e-4 and 1e-3 and 15 (7%) at 1e-2; 11 of 300 float64 reports at 1e-9, 1e-6 and 1e-3.  The same with the markers swept first and under the mixed norm |
+  | markers at rest inside cells, or outside the hull | none |
+  | a marker at rest exactly on a lattice point or on a face of the hull, its position read from the iterate | **every step** |
+  | every position a constant of the pass (both edges target-anchored), or fed back from the sampled value | none |
+  | both edges source-anchored | 3 of 68 (float32), 1 of 51 (float64) |
+  | the lattice moved to an origin of 20 | 13 of 83 (16%, float32), 11 of 300 (float64) |
+
+  So a body resting exactly on lattice planes, whose positions the group
+  solves, **has neither flag**, on any step and at any tolerance: the
+  rule cannot know that it is at rest.  Two ways out were measured, in
+  the table: hold the positions constant during the pass (anchor the
+  geometry at a target that `update` reads, or keep the body outside
+  the group), or place it a fraction of a cell off the planes.  For a
+  marker that is merely *near* a plane, a tighter tolerance clears it.
+  A search aimed at planes shows the worst of it: on an audit's scan
+  that places every fixed point beside a plane at tolerances of 1e-5 to
+  0.1, 75% of the honest reports that had the gradient's flag lost it,
+  45% on pairs whose positions the pass reads from the iterate and that
+  do not move, and none where every position is a constant of the pass.
+  And none of this matters to a group with more than eight independent
+  interface scalars (five markers in the example, whose positions and
+  values both move with the iterate): such a group has no flag to lose,
+  with or without a geometry, because the spectral estimate takes eight
+  Krylov steps and does not settle.
+
+  *Why.*  A multilinear stencil is one polynomial of the positions
   inside a lattice cell and another in the next, so the pass's Jacobian
   jumps where a position crosses a lattice plane, or a face of the
   grid's hull (outside it the kernel clamps).  `rho_spectral`,
   `spectral_error_bound` and `gradient_relative_error_bound` are the
-  linearisation at the returned iterate: they describe the pass in the
-  lattice cells its positions are in *there*.  Where a position the pass
-  reads from the iterate is within twice `spectral_error_bound` of a
-  lattice plane, the bound stands only if the step certified its
-  linearisation across the Newton step to the fixed point (the
-  Newton-Kantorovich check behind `gradient_relative_error_bound`, which
-  is then finite).  Otherwise `spectral_usable` and
-  `gradient_bound_usable` are `False`, the numbers are reported as
-  computed, and `not_usable_reason` names the case: the fixed point may
-  be in the next cell, where the pass contracts at another rate.
-  Measured on a marker whose fixed point was 2e-4 of a spacing past a
-  plane: a radius of 0.28 before the plane and 0.97 after it, and a
-  bound 0.13 times the true distance on a converged solve.  The
+  linearisation at the returned iterate: they describe the polynomial
+  the pass is in the lattice cells its positions are in *there*, and
+  `spectral_error_bound` is the distance to *that polynomial's* fixed
+  point.  If it lies past a lattice plane, the pass has no fixed point
+  there.  Measured: the returned iterate and the Newton point both a
+  little short of a plane, the polynomial's fixed point two millionths
+  of a spacing past it, the next cell expanding, and the pass's fixed
+  point two cells on, 17 to 1,294 bounds away, with `spectral_usable`
+  set; and a gradient bound 15 to 70,000 times under the true error with
+  its flag set (MADD-ANO-248).  The Newton-Kantorovich check behind the
+  gradient bound cannot see this: it takes the Jacobian at the iterate
+  and at the Newton point, and both were one cell's.
+* **Both flags need no lattice plane inside the Newton-Kantorovich ball
+  around the returned iterate.**  They stand only where every position
+  the pass reads from the iterate is further from its nearest lattice
+  plane than the fixed point of its cell's polynomial can be from it:
+  the Newton step's own move of that position, plus one more Newton step
+  and the float floor, in the group's norm.  The iterate, the Newton
+  point and that fixed point are then in one lattice cell, where the
+  pass is one polynomial, so the fixed point is the pass's and the
+  bounds are the smooth ones.  The step stores the margin
+  (`geometry_plane_margin`: how many radii of that ball the nearest
+  plane is away) and the flags need it over one; a margin that is
+  absent or not a number counts as none.  The rule does not look past
+  the plane, so it also withdraws the flags where the next cell would
+  have kept the bound.  **This withdraws honest reports**, and is meant
+  to: a wrong number with its flag set is the worse outcome.  The
   positions concerned are a member's source-anchored geometry and the
   target-anchored geometry of a member that computes fluxes; a position
   that is a constant of the pass (a target-anchored geometry read by
   `update`, a node outside the group) does not move between the iterate
-  and the fixed point and withdraws nothing.  A tighter tolerance
-  usually brings the returned iterate into the fixed point's cell.
-* **`gradient_bound_usable` needs more: no lattice plane inside the
-  Newton-Kantorovich ball around the returned iterate.**
-  `gradient_relative_error_bound` is the bound of a smooth pass.  It
-  takes the pass's Jacobian at the returned iterate and at the Newton
-  point; with the fixed point just past a plane that the Newton point
-  stops short of, both are one cell's, the check reads no change, and
-  the gradient of the fixed point is the next cell's.  The bound read 15
-  to 70,000 times under the true error with its flag set (MADD-ANO-248).
-  So the flag does not stand on what that check reads.  It stands only
-  where every position the pass reads from the iterate is further from
-  its nearest lattice plane than the fixed point can be from it: the
-  Newton step's own move of that position, plus one more Newton step
-  and the float floor in the group's norm.  The iterate, the Newton
-  point and the fixed point are then in one lattice cell, where the pass
-  is one polynomial and the bound is the smooth one.  Otherwise
-  `gradient_bound_usable` is `False` alone: the number is reported as
-  computed, `spectral_usable` is the rule's above, and
-  `not_usable_reason` names the ball.  **This withdraws honest
-  reports**, and is meant to: a wrong number with its flag set is the
-  worse outcome.  The ball is as wide as the solve is loose, so a group
-  converged to a few hundredths of a lattice spacing loses the
-  gradient's flag on most steps, and one with a marker on a lattice
-  plane that the pass reads from the iterate loses it on every step,
-  whether the marker moves or not.  Measured on honest reports (the
-  fixed point in the iterate's cell) that had the flag: 75% lost it on
-  an audit's scan that places every fixed point beside a plane at
-  tolerances of 1e-5 to 0.1, 45% on pairs whose positions the pass
-  reads from the iterate and that do not move, and none where every
-  position is a constant of the pass.
-  A tighter tolerance shrinks the ball.
+  and the fixed point and withdraws nothing.
+* **And, with a plane within twice `spectral_error_bound`, a
+  Newton-Kantorovich check that passed** (`gradient_relative_error_bound`
+  finite).  The ball's argument assumes that check's condition for the
+  cell's polynomial; this is where the step measures it.  Measured on a
+  marker whose fixed point was 2e-4 of a spacing past a plane with the
+  Newton point across it: a radius of 0.28 before the plane and 0.97
+  after it, and a bound 0.13 times the true distance on a converged
+  solve (MADD-ANO-242).
+* **`not_usable_reason` gives every cause of a `False` flag** of such a
+  group whose step computed the estimate: a plane in the ball (with the
+  margin), a position on a plane, a plane in reach without a passed
+  check (a gradient bound that was not computed, NaN, told from one that
+  did not certify, `inf`), the float floor (the example in float32 at
+  the default tolerance of 1e-6 is precision-limited on every step, and
+  has no flag for that reason), an estimate that did not settle.  It
+  names a plane only where a plane rule is a cause, and suggests a
+  tighter tolerance only where one can help.
 * **A position within eight float resolutions of a lattice plane is on
   it**, for both rules: its distance is zero.  The resolution is `eps`
   of the position's dtype times the largest coordinate of the lattice's
@@ -240,13 +273,17 @@ names the edge and says what to do.
   rounding of its own, so nearer than that the cell the floats
   evaluated is not the value's to say: an iterate 4.7 resolutions before
   a plane with its fixed point 0.7 past it kept both flags on a gradient
-  bound 25 times under the error.  The gradient's flag is withdrawn
-  there.  `spectral_usable` is not, where the step certified its
-  linearisation: `rho_spectral` is then the radius of the cell the
-  float pass evaluated, which for a position a fraction of a resolution
-  from a plane can be the other cell's than exact arithmetic's (13 to
-  22% of `1 - rho` apart in seven audited float32 Gauss-Seidel examples;
-  MADD-ANO-239, open).
+  bound 25 times under the error.  Both flags are withdrawn there, so
+  a `rho_spectral` that is the radius of the cell the float pass
+  evaluated rather than exact arithmetic's (13 to 22% of `1 - rho` apart
+  in seven audited float32 Gauss-Seidel examples; MADD-ANO-239) is no
+  longer flagged through a geometry.  On a plane the Newton-Kantorovich
+  check's own outcome is rounding's: for a marker at rest at coordinate
+  0.0 on the lower face of a lattice whose origin is 0.0,
+  `gradient_relative_error_bound` reads `inf` on some steps and a number
+  on others of the same resting state (the Newton point lands 1e-20
+  inside or outside the hull).  The flags and the reason do not follow
+  it.
 * **Everywhere else the report says so.**  For any other group that
   resolves a geometry-dependent mapping (another mapping kind, a
   sub-cycled group, the interface norm with a geometry edge entering

@@ -2060,10 +2060,14 @@ claims:
     mixed norm, one- and two-dimensional lattices, origins up to forty
     spacings from zero, on examples whose points stay in one lattice cell
     between the returned iterate and the fixed point (across a lattice
-    plane the flag is the run-time rule of MAP-049; gradient_bound_usable
-    stands only with no lattice plane inside the Newton-Kantorovich ball
-    around the returned iterate, MAP-049 and MADD-ANO-248, so beside a
-    plane it is withdrawn from honest reports too; and a position within
+    plane the flags are the run-time rule of MAP-049; spectral_usable and
+    gradient_bound_usable stand only with no lattice plane inside the
+    Newton-Kantorovich ball around the returned iterate, MAP-049 and
+    MADD-ANO-248, so beside a plane they are withdrawn from honest
+    reports too, and a marker at rest on a lattice plane whose position
+    the group solves has neither on any step; a False flag of a step
+    that computed the estimate carries every cause in
+    not_usable_reason; and a position within
     eight float resolutions of a plane, eps of its dtype times the largest
     coordinate of the lattice's axis, counts as on it: at an origin forty
     spacings from zero with a spacing of 0.5 that window is 3.8e-5 of a
@@ -2776,13 +2780,23 @@ claims:
 - id: MAP-049
   area: geometry-dependent mapping diagnostics
   claim: >-
-    Across a lattice plane: "Where a position the pass reads from the
-    iterate is within twice spectral_error_bound of a lattice plane, the
-    bound stands only if the step certified its linearisation across the
-    Newton step to the fixed point (the Newton-Kantorovich check behind
-    gradient_relative_error_bound, which is then finite). Otherwise
-    spectral_usable and gradient_bound_usable are False, the numbers are
-    reported as computed, and not_usable_reason names the case". "A position
+    Across a lattice plane, both flags have two more conditions, each of
+    which withdraws both and keeps the numbers.  THE BALL: "Both flags
+    stand only where margin > 1" -- no lattice plane, and no face of the
+    hull, inside the Newton-Kantorovich ball around the returned iterate;
+    then the fixed point of the polynomial the pass is in the iterate's
+    lattice cells is in those cells, "a fixed point of the pass", which
+    is what spectral_error_bound is a bound to and where the gradient
+    bound's Jacobians are taken.  A margin that is absent or not a
+    number is none.  THE LIMIT: "Where the bound B > limit a plane is
+    within 2B of a position, and the flags are kept only where the
+    Newton-Kantorovich check passed" (gradient_relative_error_bound
+    finite).  "Neither rule implies the other."  not_usable_reason gives
+    every cause of a False flag of a step that computed the estimate; a
+    plane is named only where a plane rule is a cause, a gradient bound
+    that was not computed (NaN) is told from one that did not certify
+    (inf), and a tighter tolerance is suggested only where one can help.
+    "A position
     that is a constant of the pass (a target-anchored geometry read by
     update, a node outside the group) does not move between the iterate and
     the fixed point and withdraws nothing." The step stores "limit = (u / 2)
@@ -2790,18 +2804,16 @@ claims:
     from the iterate, the faces of the hull counted as planes, in the units
     of spectral_error_bound. coupling_report() prints the reason beside
     spectral_usable=False.
-    The gradient's flag: "gradient_bound_usable needs more: no lattice plane
-    inside the Newton-Kantorovich ball around the returned iterate". The
-    step stores "margin = min_j D_j (d_j - w_j)_+ / (D_j |delta_j| + eta + 2
-    f)" over the same entries (the Newton step's own move of the entry, one
+    The step stores "margin = min_j D_j (d_j - w_j)_+ / (D_j |delta_j| +
+    eta + 2 f)" over the same entries, with the NORM's weights (the limit
+    uses the SPECTRUM's, in which a dead-banded field keeps its own
+    magnitude's weight): the Newton step's own move of the entry, one
     more Newton step and the float floor; d_j zero where a position the
     pass builds at the iterate or at the Newton point is not strictly
-    inside the iterate's cell), and the flag stands only where it is over
-    one, whatever the Newton-Kantorovich check read; otherwise
-    "gradient_bound_usable is False alone: the number is reported as
-    computed, spectral_usable is the rule's above, and not_usable_reason
-    names the ball", which coupling_report() prints beside
-    gradient_bound_usable=False. "A position within eight float
+    inside the iterate's cell.  A margin of zero is a position on a plane:
+    the report of a marker at rest on a lattice plane or a hull face is
+    the same on every step (both flags False, one reason), whatever the
+    gradient bound read.  "A position within eight float
     resolutions of a lattice plane is on it, for both rules": eps of its
     dtype times the largest coordinate of the lattice's axis, or the
     position's own magnitude where that is larger.
@@ -2811,6 +2823,7 @@ claims:
     - 'src/maddening/core/coupling/_bounds.py::_geometry_plane_limit'
     - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_REACH'
     - 'src/maddening/core/coupling/_bounds.py::_kantorovich_ball_plane_margin'
+    - 'src/maddening/core/coupling/_group_layout.py::_geometry_flags'
     - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_ULPS'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_resolution'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_distance'
@@ -2841,10 +2854,14 @@ claims:
     polynomial piece at the iterate having its fixed point within the
     Newton-Kantorovich ball (a smooth nonlinearity that fails this is the
     condition CPL-088 states for every nonlinear group), and where one is
-    it rests, FOR spectral_usable ONLY, on the gradient bound's measured
-    Jacobian change across the Newton step (held against an independent
-    reference within twice the bound across a plane on 54,482 scanned
-    reports). THE GRADIENT'S FLAG (MADD-ANO-248) is still a run-time
+    it rests on the gradient bound's measured Jacobian change across the
+    Newton step -- which sees a plane only where the Newton point is
+    across it, and so left spectral_usable standing on a bound 17 to
+    1,294 times under the distance (the iterate and the Newton point
+    both short of the plane, the cell polynomial's fixed point just past
+    it, the next cell expanding; an audit's constructed cases, and 66 of
+    2,700 float32 reports of its placement sweep). BOTH FLAGS
+    (MADD-ANO-248) therefore stand on the margin: still a run-time
     criterion, and an argument with five stated assumptions
     (_kantorovich_ball_plane_margin): the kernel is one polynomial between
     planes; no member has a kink of its own in the ball; Newton-Kantorovich
@@ -2867,8 +2884,28 @@ claims:
     withdrawn), a row within three float resolutions of a plane, and the
     three audited cases of MADD-ANO-248 (bounds 15x to 70,000x under the
     error, now unflagged); in every row every number whose flag is set is
-    scored (rho_spectral, spectral_error_bound, the gradient bound) and the
-    gradient's flag is the pinned one; with positions constant of the
+    scored (rho_spectral, spectral_error_bound, the gradient bound), both
+    flags are the pinned ones, neither stands on a row with a plane
+    between two of the points, and wherever the margin is over one the
+    fixed point of the iterate's polynomial piece (the reference's
+    stencil of the iterate's cell continued past its planes) is in the
+    iterate's cell and is the pass's. THE CONSTRUCTED CASES of the second
+    audit, per push in float64 (kernel curvature: a 6 x 3 lattice, linear
+    members) and float32 (a member's quadratic response on a
+    one-dimensional lattice), the other two dtypes slow: the cell
+    polynomial's fixed point 1e-6 to 2e-6 of a spacing-scale past the
+    plane with the iterate and the Newton point short of it, the next
+    cell expanding (the pass's fixed point two cells on, more than ten
+    bounds away) or contracting at 0.999 or 0.99: no flag in any; the
+    Newton point across: none; the fixed point just inside the cell with
+    the plane in the ball: none (honest, withdrawn); deep inside: both
+    flags, the distance within the bound. A marker at rest on the lower
+    hull face at coordinate 0.0: both flags False with one reason on
+    each of twelve steps. Slow: a placement sweep of that pair (ten
+    structures, three of them with an expanding next cell, four
+    tolerances, 21 signed distances, float32 and float64): no flagged
+    report with its fixed point beyond twice the bound, across a plane,
+    or with the polynomial's fixed point past one. With positions constant of the
     pass, a plane between the iterate's position and the fixed point's
     withdraws nothing and the margin is inf. The margin's arithmetic on a
     toy pass (weights, the entry's own move, the window through the ball,
@@ -2887,7 +2924,16 @@ claims:
     hunt that places a plane between the iterate and the fixed point;
     1,698 to 926 on pairs whose positions are read from the iterate and
     do not move; 752 to 752 with every position a constant of the pass.
-    No spectral_usable changed and no returned state moved. Not claimed
+    spectral_usable now follows the gradient's flag wherever a position
+    is read from the iterate. On ordinary use (the user guide's example,
+    300 steps, plane rules off as the baseline): of the honest reports, 8 of 204 lose both flags in float32 at tolerances
+    of 1e-4 and 1e-3 (4%; 15 at 1e-2) and 11 of 300 in float64; none with
+    the markers at rest inside cells or outside the hull, with every
+    position a constant of the pass, or fed back from the sampled value;
+    all (207 of 207, 300 of 300) with a marker at rest on a lattice point
+    or a hull face read from the iterate; 13 of 83 (float32) at a lattice
+    origin of 20; no flagged number wrong in any of 6,200 scored reports.
+    No returned state moved. Not claimed
     for float64 (x64) on every push for the limit (the slow
     plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
@@ -2912,6 +2958,12 @@ claims:
     - 'tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference'
     - 'tests/property/test_coupling_plane_sides.py::test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited_cases'
     - 'tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error'
+    - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_placement_sweep_finds_no_flagged_bound_under_the_distance'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_both_flags_of_a_geometry_group_need_the_plane_margin_over_one'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_limit_rule_stays_beside_the_margin_and_neither_implies_the_other'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_false_flag_names_a_lattice_plane_only_where_a_plane_rule_is_a_cause'
     - 'tests/property/test_coupling_geometry_search.py::test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_reads_only_the_positions_that_move_with_the_iterate'

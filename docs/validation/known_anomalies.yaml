@@ -16105,9 +16105,10 @@ anomalies:
       against 0.1412 with `spectral_usable=True`, and 13 to 22% of
       `1 - rho` off in seven examples of an independent audit.  Since
       MADD-ANO-248 a position within eight float resolutions of a plane
-      counts as on it and `gradient_bound_usable` is withdrawn there;
-      `spectral_usable` is withdrawn only where the step did not certify
-      its linearisation, so that radius is still flagged.  The spectral
+      counts as on it and both `spectral_usable` and
+      `gradient_bound_usable` are withdrawn there (the margin of the
+      Newton-Kantorovich ball is zero), so through a geometry that radius
+      is no longer flagged.  The spectral
       keys are new in 0.4.0; no release carries them.
     severity: "major"
     safety_relevance: "context_dependent"
@@ -16687,7 +16688,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-248"
-    title: "gradient_bound_usable=True on a gradient_relative_error_bound 15 to 70,000 times under the true error, for a group with a multilinear_grid edge whose fixed point lay just past a lattice plane that the Newton point stopped short of"
+    title: "gradient_bound_usable=True on a gradient_relative_error_bound 15 to 70,000 times under the true error, and spectral_usable=True on a spectral_error_bound 17 to 1,294 times under the distance, for a group with a multilinear_grid edge whose fixed point lay just past a lattice plane that the Newton point stopped short of"
     description: >
       `gradient_relative_error_bound` is the bound of a smooth pass: its
       Newton-Kantorovich check takes the pass's Jacobian at the returned
@@ -16720,23 +16721,54 @@ anomalies:
       resolution: a float32 iterate 4.7 float resolutions before a plane
       with its fixed point 0.7 past it kept both flags on a bound 25x under
       the error (the kernel decides the cell from a rounded quotient).
-      `spectral_error_bound` held throughout (within twice the bound across
-      a plane), and so did `rho_spectral` off a plane.  No release carried
-      it: the geometry-dependent tier and its diagnostics are new in
-      0.4.0's development.  Fixed in 0.4.0: `gradient_bound_usable` no
-      longer stands on what the check reads.  The step stores how many
+      On that audit's examples `spectral_error_bound` held (within twice
+      the bound across a plane), and so did `rho_spectral` off a plane:
+      their next lattice cell contracts as the first does.  THE SPECTRAL
+      FLAG HAD THE SAME HOLE, found by the audit of the first fix, which
+      had left `spectral_usable` on the older rule (withdrawn only with a
+      plane within twice the bound and a gradient bound that is not
+      finite).  `spectral_error_bound` is a bound to the fixed point of the
+      polynomial the pass is in the returned iterate's lattice cells;
+      inside a cell the pass is not affine (the kernel's own cross term, a
+      scatter times a field), so the Newton step misses that fixed point
+      at second order, and with it a distance under that miss past a
+      plane the iterate and the Newton point are in one cell, the check
+      reads that cell's small `h`, and the pass has no fixed point there.
+      Constructed, nothing drawn (jaxlib 0.11.0, every solve
+      `converged=True`, `precision_limited=False`, `rho_spectral` right): a
+      6 x 3 lattice with linear members, Gauss-Seidel, the L2 norm, the
+      next cell expanding at 1.2 so that the pass's fixed point is two
+      cells on: distance over bound 72.8 at `tolerance=0.03`, 181 at 0.01
+      and 603 at 0.003 in float64, 82.7 and 205 in float32; a
+      one-dimensional lattice with a member of smooth quadratic response:
+      166 (float64) and 190 (float32).  In float64 the Newton point was
+      2e-6 short of the plane, about 1e9 float resolutions.  On that
+      audit's placement sweep 66 of 2,700 scored float32 reports had the
+      flag on a bound 17 to 1,294 times under the distance, all in the
+      three structures whose next cell expands.  The library's own solve
+      at a tolerance of 1e-10 reaches the reference's fixed point.  No
+      release carried
+      either: the geometry-dependent tier and its diagnostics are new in
+      0.4.0's development.  Fixed in 0.4.0: NEITHER FLAG stands on what
+      the check reads.  The step stores how many
       radii of the Newton-Kantorovich ball around the returned iterate the
       nearest lattice plane of a position the pass reads is away
       (`geometry_plane_margin`: entry by entry, the Newton step's own move
       plus one more Newton step and the float floor, with a position within
-      eight float resolutions of a plane taken as on it), and the flag
-      stands only where that is over one: the iterate, the Newton point and
-      the fixed point are then in one lattice cell, where the pass is one
-      polynomial.  Otherwise `gradient_bound_usable` is `False` alone, the
-      number is kept, and `not_usable_reason` names the ball.  The same
-      window makes the distance of MADD-ANO-242's rule zero on a plane.
-      On the audit's scan the 872 and the 43 are 0, no `spectral_usable`
-      changed and no returned state moved.
+      eight float resolutions of a plane taken as on it), and both flags
+      stand only where that is over one: the iterate, the Newton point and
+      the fixed point of the cell's polynomial are then in one lattice
+      cell, where the pass is that polynomial, so that fixed point is the
+      pass's.  Otherwise `spectral_usable` and `gradient_bound_usable` are
+      `False`, the numbers are kept, and `not_usable_reason` gives every
+      cause (an absent or non-numeric margin counts as none: an archive
+      without the slot kept the spectral flag).  MADD-ANO-242's rule stays
+      beside it, for the one assumption the step measures: with a plane
+      within twice the bound, a Newton-Kantorovich check that did not pass
+      withdraws the flags whatever the margin reads.  The same window makes
+      the distance of that rule zero on a plane.  On the first audit's scan
+      the 872 and the 43 are 0; the second audit's constructed cases and
+      its sweep's 66 are unflagged; no returned state moved.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16755,7 +16787,7 @@ anomalies:
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
-      builds: do not gate on `gradient_bound_usable` for a group with a
+      builds: do not gate on `spectral_usable` or `gradient_bound_usable` for a group with a
       geometry edge read from the iterate unless every position is further
       from its nearest lattice plane than twice `spectral_error_bound`, in
       the units of the position.
@@ -16771,18 +16803,35 @@ anomalies:
       proved by the step); the float floor is the residual's resolution
       through the resolvent and eight float resolutions of the lattice at a
       plane; the norm bounds an entry only where its weight is not zero.
-      It withdraws honest reports beside a plane, by design: a group
-      converged to a few hundredths of a lattice spacing loses the
-      gradient's flag on most steps (75% of the honest flagged reports of
-      the audit's scan, which places every fixed point beside a plane), and
-      a marker on a lattice plane that the pass reads from the iterate
-      loses it on every step.  `rho_spectral` at a position a fraction of a
-      float resolution from a plane is still the float pass's cell's
-      (MADD-ANO-239).  Only the `multilinear_grid` kind is diagnosed.
+      It withdraws honest reports beside a plane, by design, and both
+      flags now: on the user guide's example over 300
+      steps about 4% of the honest reports lose both (8 of 204 in float32
+      at tolerances of 1e-4 and 1e-3, 11 of 300 in float64); a marker at
+      rest exactly on a lattice point or a hull face whose position the
+      pass reads from the iterate loses both on every step (the rule
+      cannot know it is at rest); none are lost with the markers inside
+      cells, with every position a constant of the pass, or fed back from
+      the sampled value.
+      On a scan that places every fixed point beside a plane at
+      tolerances of 1e-5 to 0.1, 75% of the honest flagged reports lose
+      the gradient's flag.  The rule does not look past the plane: where
+      the next cell contracts as the first does the bound would have held
+      (it did on the first audit's three cases), and the flags go there
+      too.  The assumption that the cell's polynomial satisfies
+      Newton-Kantorovich with `h <= 1/2` is checked only on the step's one
+      secant.  `rho_spectral` at a position a fraction of a float
+      resolution from a plane is the float pass's cell's (MADD-ANO-239)
+      and is no longer flagged.  Only the `multilinear_grid` kind is
+      diagnosed.
     verification:
       - "tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference"
       - "tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error"
       - "tests/property/test_coupling_plane_sides.py::test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane"
+      - "tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane"
+      - "tests/property/test_coupling_plane_sides.py::test_the_placement_sweep_finds_no_flagged_bound_under_the_distance"
+      - "tests/property/test_coupling_plane_sides.py::test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_both_flags_of_a_geometry_group_need_the_plane_margin_over_one"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_limit_rule_stays_beside_the_margin_and_neither_implies_the_other"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_position_within_eight_float_resolutions_of_a_plane_is_on_it"

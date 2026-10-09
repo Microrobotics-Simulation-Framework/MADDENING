@@ -3445,22 +3445,34 @@ claims:
     one read through a mapping and one through a transform; every
     acceleration, both schedules, float32 and float64; jaxlib 0.11.0).
     With a geometry edge, across a lattice plane the stencil is another
-    polynomial and the flag is checked at run time (MAP-049;
-    MADD-ANO-242): where a position the pass reads from the iterate is
-    within twice the bound of a lattice plane and the step did not certify
-    its linearisation across the Newton step, spectral_usable is False; on
-    plane draws (a fixed point 1e-6 to 1e-2 of a spacing from a plane or a
-    face of the hull) a fixed point in another cell than the returned
-    iterate is within twice the bound wherever the flag is set, with no
-    allowance for h.  A position within eight float resolutions of a
+    polynomial, and the bound is to the fixed point of the polynomial the
+    pass is in the returned iterate's lattice cells, which is a fixed
+    point of the pass only inside those cells.  spectral_usable therefore
+    also needs the step's geometry_plane_margin over one (no lattice
+    plane inside the Newton-Kantorovich ball around the returned iterate:
+    MAP-049, MADD-ANO-248; an absent or non-numeric margin counts as
+    none) and, with a plane within twice the bound, a Newton-Kantorovich
+    check that passed (MADD-ANO-242).  Wherever the flag is set on such
+    a group the fixed point is in the returned iterate's cells and within
+    twice the bound (the Kantorovich radius) on the table, the
+    constructed cases and the sweeps of MAP-049: no report is flagged
+    with its fixed point, or the fixed point of the iterate's polynomial
+    piece, past a plane.  Before, with the iterate and the Newton point
+    both short of a plane and that polynomial's fixed point just past it,
+    the flag stood on a bound 17 to 1,294 times under the distance where
+    the next cell expands.  The rule does not look past the plane: it
+    also withdraws the flag where the next cell would have kept the
+    bound, and from honest reports with a plane in the ball (MAP-049 has
+    the measured price).  A position within eight float resolutions of a
     lattice plane (eps of its dtype times the largest coordinate of the
-    lattice's axis) counts as on it: its distance is zero, and a fixed
-    point placed nearer a plane than that is not told from one on it
-    (MADD-ANO-248; rho_spectral there is the float pass's cell's,
+    lattice's axis) counts as on it: the margin is zero and the flag
+    False, so rho_spectral there (the float pass's cell's,
     MADD-ANO-239).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
+    - 'tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference'
+    - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane'
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not
     - tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_is_never_below_the_true_distance
@@ -3808,13 +3820,16 @@ claims:
     BESIDE A LATTICE PLANE (a group with a geometry edge read from the
     iterate; MAP-049, MADD-ANO-248): the Newton-Kantorovich check takes
     the Jacobian at the iterate and at the Newton point and cannot see a
-    plane beyond both, so gradient_bound_usable additionally needs no
-    lattice plane inside the Newton-Kantorovich ball around the returned
-    iterate (the step's geometry_plane_margin over one); otherwise the
-    flag is False whatever the bound reads, and the bound says nothing of
-    the gradient of a fixed point in another lattice cell (it read 15x to
-    70,000x under the error with the flag set).  Honest reports beside a
-    plane lose the flag by this rule.
+    plane beyond both, so gradient_bound_usable, as spectral_usable
+    (CPL-088), additionally needs no lattice plane inside the
+    Newton-Kantorovich ball around the returned iterate (the step's
+    geometry_plane_margin over one; absent or not a number counts as
+    none); otherwise the flag is False whatever the bound reads, and the
+    bound says nothing of the gradient of a fixed point in another
+    lattice cell (it read 15x to 70,000x under the error with the flag
+    set).  Honest reports beside a plane lose the flag by this rule.  A
+    False flag of such a group carries its causes, a bound that was not
+    computed (NaN) told from one that did not certify (inf).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the constants probed
     include the positions a target-anchored edge reads from a member's

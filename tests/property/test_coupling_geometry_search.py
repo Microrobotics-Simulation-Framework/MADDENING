@@ -139,6 +139,17 @@ SEARCH = gc.Search(CELLS)
 CONSTANT_CELLS = tuple(i for i, c in enumerate(CELLS) if not c.iterate_reads)
 
 
+def test_every_block_of_the_hunt_has_a_cell_whose_positions_are_constants_of_the_pass():
+    """Four cells with both edges target-anchored, one in each block of
+    the slow hunt, none of them the per-push cell: where the hunt's
+    flagged reports are, under the rule of 0.4.0."""
+    assert len(CONSTANT_CELLS) == 4, CONSTANT_CELLS
+    assert all(CELLS[i].anchors == ("target", "target") for i in CONSTANT_CELLS)
+    assert all(len(set(block) & set(CONSTANT_CELLS)) == 1 for block in BLOCKS), BLOCKS
+    assert not set(PER_PUSH_CELLS) & set(CONSTANT_CELLS)
+    assert all(CELLS[i].iterate_reads for i in ALL_CELLS if i not in CONSTANT_CELLS)
+
+
 def _held(name: str, fractions: dict) -> None:
     assert fractions["scored"] >= SCORED_FLOOR * fractions["finite"] > 0, (name, fractions)
     assert fractions[gc.FLAG[name]] >= USABLE_FLOOR, (name, fractions)
@@ -1285,5 +1296,18 @@ def test_the_hunt_finds_no_number_on_the_wrong_side_of_a_group_with_a_geometry_e
           f"{before} flags, {honest} of them on a bound the reference holds (near, same "
           f"cells)")
     assert fired == 0, f"the self-check fired on {fired} honest examples"
+    # The rule of 0.4.0 leaves a flag only where every position is a
+    # constant of the pass: this block's such cell must have carried flags
+    # (the report's own), or the hunt scored no flagged report at all.
+    constant = sorted(set(BLOCKS[block]) & set(CONSTANT_CELLS))
+    assert constant, block
+    for index in constant:
+        mine = [s for c, s in search._seen.items() if c.cell == index and s["finite"]]  # noqa: SLF001
+        flagged = sum(bool(s["report"]["spectral_usable"]) for s in mine)
+        both = sum(bool(s["report"]["gradient_bound_usable"]) for s in mine)
+        print(f"block {block}, seed {seed}: cell {index} ({CELLS[index]!r}), positions "
+              f"constants of the pass: {flagged} of {len(mine)} reports flagged, {both} with "
+              "the gradient's flag")
+        assert mine and flagged >= USABLE_FLOOR * len(mine), (index, flagged, len(mine))
     for dtype, gap in worst_gap.items():
         assert gap <= limit[dtype], (dtype, gap)

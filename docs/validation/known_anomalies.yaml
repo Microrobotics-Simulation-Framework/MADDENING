@@ -16404,7 +16404,7 @@ anomalies:
     verification:
       - "tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane"
       - "tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition"
-      - "tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach"
     github_issue: null
 
@@ -16780,26 +16780,37 @@ anomalies:
       at a tolerance of 1e-10 reaches the reference's fixed point.  No
       release carried
       either: the geometry-dependent tier and its diagnostics are new in
-      0.4.0's development.  Fixed in 0.4.0: NEITHER FLAG stands on what
-      the check reads.  The step stores how many
-      radii of the Newton-Kantorovich ball around the returned iterate the
-      nearest lattice plane of a position the pass reads is away
-      (`geometry_plane_margin`: entry by entry, the Newton step's own move
-      plus one more Newton step and the float floor, with a position within
-      eight float resolutions of a plane taken as on it), and both flags
-      stand only where that is over one: the iterate, the Newton point and
-      the fixed point of the cell's polynomial are then in one lattice
-      cell, where the pass is that polynomial, so that fixed point is the
-      pass's.  Otherwise `spectral_usable` and `gradient_bound_usable` are
-      `False`, the numbers are kept, and `not_usable_reason` gives every
-      cause (an absent or non-numeric margin counts as none: an archive
-      without the slot kept the spectral flag).  MADD-ANO-242's rule stays
-      beside it, for the one assumption the step measures: with a plane
-      within twice the bound, a Newton-Kantorovich check that did not pass
-      withdraws the flags whatever the margin reads.  The same window makes
-      the distance of that rule zero on a plane.  On the first audit's scan
-      the 872 and the 43 are 0; the second audit's constructed cases and
-      its sweep's 66 are unflagged; no returned state moved.
+      0.4.0's development.  THE RULE THAT CLOSED BOTH WAS FOUND SHORT
+      TOO, by the third audit in a row.  That rule kept both flags only
+      where no lattice plane was inside the Newton-Kantorovich ball around
+      the returned iterate (the step's `geometry_plane_margin` over one),
+      beside the older one (a plane within twice the bound needs a passed
+      check).  Its argument takes the cell's polynomial to satisfy
+      Newton-Kantorovich, which the step measures on one secant and does
+      not prove.  Constructed: one marker on a one-dimensional lattice,
+      affine members, the only nonlinearity the scatter's own, the pass a
+      saddle-node whose cell polynomial has no fixed point (a gap of 1e-5
+      to 1e-8); the solve reports `converged=True`, `rho_spectral` is
+      right (0.994), the step's own check had failed
+      (`gradient_relative_error_bound` was `inf`), the margin read 2.8 to
+      186, the bound was under the limit, and `spectral_usable` stood on a
+      bound 34 to 191 times under the distance in float32 (12 of 30
+      reports; both sweep orders, both norms, Aitken) and 61 to 1,874
+      times in float64 (11 of 18), the pass's only fixed point being one
+      cell on.  Resolved in 0.4.0 BY WITHDRAWING THE CERTIFICATE, not by a
+      fourth rule: a group whose pass reads a position from the iterate,
+      or builds one and reads it in the same pass, has
+      `spectral_usable=False` and `gradient_bound_usable=False` on every
+      step, whatever its numbers read; the numbers are reported as
+      computed and `not_usable_reason` names the positions and says so.
+      A group whose positions are all constants of the pass (a
+      target-anchored geometry read by `update`, positions held by a node
+      outside the group) keeps a smooth group's flags, where the step
+      recorded that it read none from the iterate (an absent or
+      non-numeric record sets no flag).  One function decides
+      (`_group_layout._geometry_flags`), from what `compile()` committed.
+      Every audited case above is unflagged; no returned state, verdict
+      or reported number moved.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16818,55 +16829,43 @@ anomalies:
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
-      builds: do not gate on `spectral_usable` or `gradient_bound_usable` for a group with a
-      geometry edge read from the iterate unless every position is further
-      from its nearest lattice plane than twice `spectral_error_bound`, in
-      the units of the position.
+      builds: do not gate on `spectral_usable` or `gradient_bound_usable`
+      for a group that solves the positions of a geometry-dependent
+      mapping.
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The rule is an argument with five assumptions, stated beside the code
-      (`_bounds._kantorovich_ball_plane_margin`): the kernel is one
-      polynomial between lattice planes; no member has a kink of its own in
-      the ball; Newton-Kantorovich holds for the polynomial piece with some
-      `h <= 1/2` (the radius does not use the measured `h`, but that the
-      true one is under one half is the smooth bound's own condition, not
-      proved by the step); the float floor is the residual's resolution
-      through the resolvent and eight float resolutions of the lattice at a
-      plane; the norm bounds an entry only where its weight is not zero.
-      It withdraws honest reports beside a plane, by design, and both
-      flags now: on the user guide's example over 300
-      steps about 4% of the honest reports lose both (8 of 204 in float32
-      at tolerances of 1e-4 and 1e-3, 11 of 300 in float64); a marker at
-      rest exactly on a lattice point or a hull face whose position the
-      pass reads from the iterate loses both on every step (the rule
-      cannot know it is at rest); none are lost with the markers inside
-      cells, with every position a constant of the pass, or fed back from
-      the sampled value.
-      On a scan that places every fixed point beside a plane at
-      tolerances of 1e-5 to 0.1, 75% of the honest flagged reports lose
-      the gradient's flag.  The rule does not look past the plane: where
-      the next cell contracts as the first does the bound would have held
-      (it did on the first audit's three cases), and the flags go there
-      too.  The assumption that the cell's polynomial satisfies
-      Newton-Kantorovich with `h <= 1/2` is checked only on the step's one
-      secant.  `rho_spectral` at a position a fraction of a float
-      resolution from a plane is the float pass's cell's (MADD-ANO-239)
-      and is no longer flagged.  Only the `multilinear_grid` kind is
-      diagnosed.
+      None for the flags: a group that solves positions has none.  What
+      remains is a limit of 0.4.0, stated in the user guide and in
+      `not_usable_reason`: such a group's `rho_spectral`,
+      `spectral_error_bound` and `gradient_relative_error_bound` are
+      uncertified estimates (usually right away from lattice planes: an
+      audit of the user guide's example over 300 steps found no wrong
+      number among the reports the last rule had flagged), and the flags
+      are available only with every position fixed during the pass.  The
+      stored `geometry_plane_limit` and `geometry_plane_margin` are still
+      the numbers their definitions give and decide nothing.  A sharper
+      rule has to establish the Newton-Kantorovich condition for the
+      cell's polynomial instead of assuming it; it is left to a later
+      release.  Under `"l2"` and `"mixed"` a position field is weighted by
+      its own largest magnitude, so `rho_spectral` of a group with a
+      marker near the coordinate origin is ill-conditioned in float32
+      (0.245 read for 0.153, CPL-087's stated condition); it carries no
+      flag either.  Only the `multilinear_grid` kind is diagnosed.
     verification:
       - "tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference"
       - "tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error"
       - "tests/property/test_coupling_plane_sides.py::test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane"
       - "tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane"
       - "tests/property/test_coupling_plane_sides.py::test_the_placement_sweep_finds_no_flagged_bound_under_the_distance"
+      - "tests/property/test_coupling_plane_sides.py::test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point"
       - "tests/property/test_coupling_plane_sides.py::test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step"
-      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_both_flags_of_a_geometry_group_need_the_plane_margin_over_one"
-      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_limit_rule_stays_beside_the_margin_and_neither_implies_the_other"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_constant_positions_keep_a_smooth_group_s_flags_only_where_the_step_recorded_them"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_position_within_eight_float_resolutions_of_a_plane_is_on_it"
-      - "tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-249"

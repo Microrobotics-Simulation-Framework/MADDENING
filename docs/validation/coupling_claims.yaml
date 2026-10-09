@@ -3322,7 +3322,15 @@ claims:
     the breakdown test discarded counts for its bare norm.
     Made for fields no smaller than a hundredth of what drives them; below
     that a float32 group's radius is more often undetermined and the flag
-    False.  (A sub-cycled member's interpolated boundary value lost a loop
+    False. A POSITION FIELD IS SUCH A FIELD WHEREVER IT IS NEAR THE
+    COORDINATE ORIGIN: under "l2" and "mixed" it is scaled by its own
+    largest magnitude, which has no natural zero, so a group that solves the
+    position of a marker near coordinate zero is outside this condition
+    whatever its physics (one marker 5e-4 from zero is weighted by 2,008,
+    and rho_spectral read 0.245 for 0.153 in float32, pinned as a
+    characterisation); such a group carries no flag in 0.4.0 (MAP-049), and
+    convergence_norm="interface", which measures a position in lattice
+    spacings, is the norm to prefer for it.  (A sub-cycled member's interpolated boundary value lost a loop
     below a field's rounding from the products: MADD-ANO-222, resolved.)
     On a backend where JAX lowers
     no non-symmetric eigenvalue problem (neither CPU nor GPU) the
@@ -3368,9 +3376,11 @@ claims:
     the fields the norm does not measure whole (CPL-191).
     With a geometry edge, rho_spectral is the radius in the lattice cells
     the returned iterate's positions are in: the pass's Jacobian is another
-    in the next cell (0.28 at the iterate against 0.97 at a fixed point
-    2e-4 of a spacing past a plane, measured), which spectral_usable
-    covers at run time (MAP-049).
+        in the next cell (0.28 at the iterate against 0.97 at a fixed point 2e-4
+    of a spacing past a plane, measured). So where the group solves
+    positions rho_spectral carries no flag in 0.4.0 (MAP-049, MADD-ANO-248);
+    where every position is a constant of the pass no plane can come between
+    the iterate and the fixed point.
   oracle: eigenvalues of the matrix; NaN where documented.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
@@ -3487,27 +3497,20 @@ claims:
     With a geometry edge, across a lattice plane the stencil is another
     polynomial, and the bound is to the fixed point of the polynomial the
     pass is in the returned iterate's lattice cells, which is a fixed
-    point of the pass only inside those cells.  spectral_usable therefore
-    also needs the step's geometry_plane_margin over one (no lattice
-    plane inside the Newton-Kantorovich ball around the returned iterate:
-    MAP-049, MADD-ANO-248; an absent or non-numeric margin counts as
-    none) and, with a plane within twice the bound, a Newton-Kantorovich
-    check that passed (MADD-ANO-242).  Wherever the flag is set on such
-    a group the fixed point is in the returned iterate's cells and within
-    twice the bound (the Kantorovich radius) on the table, the
-    constructed cases and the sweeps of MAP-049: no report is flagged
-    with its fixed point, or the fixed point of the iterate's polynomial
-    piece, past a plane.  Before, with the iterate and the Newton point
-    both short of a plane and that polynomial's fixed point just past it,
-    the flag stood on a bound 17 to 1,294 times under the distance where
-    the next cell expands.  The rule does not look past the plane: it
-    also withdraws the flag where the next cell would have kept the
-    bound, and from honest reports with a plane in the ball (MAP-049 has
-    the measured price).  A position within eight float resolutions of a
-    lattice plane (eps of its dtype times the largest coordinate of the
-    lattice's axis) counts as on it: the margin is zero and the flag
-    False, so rho_spectral there (the float pass's cell's,
-    MADD-ANO-239).
+        point of the pass only inside those cells. Three rules in turn tried to
+    certify that it is (a screen on the bound, MADD-ANO-242; a Newton-
+    Kantorovich check where a plane is within twice the bound; no plane
+    inside the Newton-Kantorovich ball), and each left spectral_usable on a
+    bound far under the distance: 0.13 times it; 17 to 1,294 times under;
+    and 34 to 1,874 times under in a cell whose polynomial has no fixed
+    point (MADD-ANO-248). So in 0.4.0 a group that solves positions (its
+    pass reads one from the iterate, or builds one and reads it in the same
+    pass) has spectral_usable False on every step, whatever the bound reads,
+    and the bound is reported uncertified; a group whose positions are all
+    constants of the pass keeps this claim as any other group (MAP-049).
+    rho_spectral at a position within eight float resolutions of a lattice
+    plane is the float pass's cell's (MADD-ANO-239) and carries no flag
+    either.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3861,19 +3864,19 @@ claims:
     floor) is not in the bound, which says nothing of it; it read 1.09 for
     a relative error of 1.134 with those probes in it (MADD-ANO-234,
     resolved).
-    BESIDE A LATTICE PLANE (a group with a geometry edge read from the
-    iterate; MAP-049, MADD-ANO-248): the Newton-Kantorovich check takes
-    the Jacobian at the iterate and at the Newton point and cannot see a
-    plane beyond both, so gradient_bound_usable, as spectral_usable
-    (CPL-088), additionally needs no lattice plane inside the
-    Newton-Kantorovich ball around the returned iterate (the step's
-    geometry_plane_margin over one; absent or not a number counts as
-    none); otherwise the flag is False whatever the bound reads, and the
-    bound says nothing of the gradient of a fixed point in another
-    lattice cell (it read 15x to 70,000x under the error with the flag
-    set).  Honest reports beside a plane lose the flag by this rule.  A
-    False flag of such a group carries its causes, a bound that was not
-    computed (NaN) told from one that did not certify (inf).
+    A GROUP THAT SOLVES POSITIONS (a geometry edge read from the iterate, or
+    from the state the same pass has built; MAP-049, MADD-ANO-248): the
+    Newton-Kantorovich check takes the Jacobian at the iterate and at the
+    Newton point and cannot see a lattice plane beyond both (the bound read
+    15x to 70,000x under the error with the flag set), and the rule that
+    then asked for no plane inside the Newton-Kantorovich ball kept the
+    spectral flag in a cell whose polynomial has no fixed point. So in 0.4.0
+    gradient_bound_usable, as spectral_usable (CPL-088), is False on every
+    step for such a group, whatever the bound reads, and the bound is
+    reported uncertified. Where every position is a constant of the pass
+    this claim holds as for any other group, and a False flag carries its
+    causes, a bound that was not computed (NaN) told from one that did not
+    certify (inf).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the constants probed
     include the positions a target-anchored edge reads from a member's

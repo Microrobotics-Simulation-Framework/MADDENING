@@ -2070,14 +2070,14 @@ claims:
     pairs under every stock acceleration, both schedules, the l2 and the
     mixed norm, one- and two-dimensional lattices, origins up to forty
     spacings from zero, on examples whose points stay in one lattice cell
-    between the returned iterate and the fixed point (across a lattice
-    plane the flags are the run-time rule of MAP-049; spectral_usable and
-    gradient_bound_usable stand only with no lattice plane inside the
-    Newton-Kantorovich ball around the returned iterate, MAP-049 and
-    MADD-ANO-248, so beside a plane they are withdrawn from honest
-    reports too, and a marker at rest on a lattice plane whose position
-    the group solves has neither on any step; a False flag of a step
-    that computed the estimate carries every cause in
+    between the returned iterate and the fixed point (the FLAGS of such a group depend on whether it solves the positions,
+    MAP-049: where the pass reads a position from the iterate, or builds one
+    and reads it in the same pass, spectral_usable and gradient_bound_usable
+    are False on every step in 0.4.0, whatever the numbers read (MAP-049,
+    MADD-ANO-248): the numbers are reported as computed, uncertified, and
+    not_usable_reason names the positions and says so; where every position
+    is a constant of the pass the flags are any other group's, and a False
+    one of a step that computed the estimate carries every cause in
     not_usable_reason; and a position within
     eight float resolutions of a plane, eps of its dtype times the largest
     coordinate of the lattice's axis, counts as on it: at an origin forty
@@ -2105,7 +2105,7 @@ claims:
     - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
     - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
     - 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker'
-    - 'tests/core/test_geometry_edge_surfaces.py::test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_the_floors_reason_alone'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_report_of_a_single_rate_grid_group_has_its_numbers_and_no_flag_with_the_rule_s_reason'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_twin_s_report_keeps_its_own_caveats'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_printed_coupling_report_prints_the_reason'
@@ -3006,43 +3006,32 @@ claims:
 - id: MAP-049
   area: geometry-dependent mapping diagnostics
   claim: >-
-    Across a lattice plane, both flags have two more conditions, each of
-    which withdraws both and keeps the numbers.  THE BALL: "Both flags
-    stand only where margin > 1" -- no lattice plane, and no face of the
-    hull, inside the Newton-Kantorovich ball around the returned iterate;
-    then the fixed point of the polynomial the pass is in the iterate's
-    lattice cells is in those cells, "a fixed point of the pass", which
-    is what spectral_error_bound is a bound to and where the gradient
-    bound's Jacobians are taken.  A margin that is absent or not a
-    number is none.  THE LIMIT: "Where the bound B > limit a plane is
-    within 2B of a position, and the flags are kept only where the
-    Newton-Kantorovich check passed" (gradient_relative_error_bound
-    finite).  "Neither rule implies the other."  not_usable_reason gives
-    every cause of a False flag of a step that computed the estimate; a
-    plane is named only where a plane rule is a cause, a gradient bound
-    that was not computed (NaN) is told from one that did not certify
-    (inf), and a tighter tolerance is suggested only where one can help.
-    "A position
-    that is a constant of the pass (a target-anchored geometry read by
-    update, a node outside the group) does not move between the iterate and
-    the fixed point and withdraws nothing." The step stores "limit = (u / 2)
-    min_j D_j d_j" over the entries of every position field the pass reads
-    from the iterate, the faces of the hull counted as planes, in the units
-    of spectral_error_bound. coupling_report() prints the reason beside
+    In 0.4.0 a coupling group that SOLVES the positions of a
+    multilinear_grid mapping has no usable flag. Where the group's pass
+    reads a position from the iterate, or builds one and reads it in the
+    same pass (a member's source-anchored geometry; the target-anchored
+    geometry of a member that computes fluxes), spectral_usable and
+    gradient_bound_usable are False on every step, whatever the numbers
+    read; the numbers are reported as computed; and not_usable_reason is one
+    sentence that names the positions, says the numbers are uncertified and
+    gives the two ways to keep the flags. A group whose positions are all
+    constants of the pass (a target-anchored geometry read by update,
+    positions held by a node outside the group) has a smooth group's flags,
+    only where the step recorded that it read no position from the iterate
+    (both stored numbers inf: an absent or non-numeric slot sets no flag),
+    and no reason of its report names a lattice plane. The step still stores
+    two NUMBERS, on which no flag stands: "limit = (u / 2) min_j D_j d_j"
+    over the entries of every position field the pass reads from the
+    iterate, the faces of the hull counted as planes, in the units of
+    spectral_error_bound, with the SPECTRUM's weights; and "margin = min_j
+    D_j (d_j - w_j)_+ / (D_j |delta_j| + eta + 2 f)" over the same entries
+    with the NORM's weights (the Newton step's own move of the entry, one
+    more Newton step and the float floor; d_j zero where a position the pass
+    builds at the iterate or at the Newton point is not strictly inside the
+    iterate's cell). A position within eight float resolutions of a lattice
+    plane is on it, for both numbers; both read inf where every position is
+    a constant of the pass. coupling_report() prints the reason beside
     spectral_usable=False.
-    The step stores "margin = min_j D_j (d_j - w_j)_+ / (D_j |delta_j| +
-    eta + 2 f)" over the same entries, with the NORM's weights (the limit
-    uses the SPECTRUM's, in which a dead-banded field keeps its own
-    magnitude's weight): the Newton step's own move of the entry, one
-    more Newton step and the float floor; d_j zero where a position the
-    pass builds at the iterate or at the Newton point is not strictly
-    inside the iterate's cell.  A margin of zero is a position on a plane:
-    the report of a marker at rest on a lattice plane or a hull face is
-    the same on every step (both flags False, one reason), whatever the
-    gradient bound read.  "A position within eight float
-    resolutions of a lattice plane is on it, for both rules": eps of its
-    dtype times the largest coordinate of the lattice's axis, or the
-    position's own magnitude where that is larger.
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
@@ -3057,6 +3046,29 @@ claims:
     - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
     - 'src/maddening/core/inspection.py::_coupling_flags'
   conditions: >-
+    THE RULE OF 0.4.0 (MADD-ANO-248). Three rules in turn set a flag from
+    these numbers, and an independent audit of each found spectral_usable
+    beside a wrong number near a lattice plane; the last on a cell whose
+    polynomial has no fixed point (a saddle-node, affine members), where the
+    step's own Newton-Kantorovich check had failed, the margin read 2.8 to
+    186, the bound was under the limit, and the bound was 34 to 1,874 times
+    under the distance. So no flag stands on them, and no sharper rule is
+    attempted in 0.4.0. On every push: no flag and the one reason at every
+    reading of the slots (the rule's unit table; the per-push pair with its
+    three slots replaced, and its control read as constant positions, which
+    fails closed on any slot that is not inf); on the 19 rows of the pinned
+    plane-sides table whose pass reads a position from the iterate, on the
+    constructed cases, and on every example of the geometry searches
+    (geometry_cells.rule_violations); the saddle-node case in float32 and
+    float64 (slow: both sweep orders, the mixed norm, Aitken); the two table
+    rows of constant positions keep both flags with no lattice plane named.
+    WHAT FOLLOWS describes the stored numbers and the measurements taken
+    under the withdrawn rules: where it says a flag "stands", "is kept" or
+    "is withdrawn" for a group that reads a position from the iterate, read
+    "the number is, or is not, still scored against the reference" (the
+    table's *_number_holds rows; geometry_cells.held_numbers), and the
+    measured price of the withdrawn rule no longer applies (every report of
+    such a group has no flag).
     solver="ift" with diagnostics=True, a single-rate group of
     multilinear_grid edges under the l2 or the mixed norm (MAP-036). On
     every push: the audited float32 pair (one marker, Gauss-Seidel, the l2
@@ -3173,10 +3185,12 @@ claims:
     from the returned state by its definition; the documented reading of
     the slots.
   tests:
+    - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point'
+    - 'tests/property/test_coupling_geometry_search.py::test_every_block_of_the_hunt_has_a_cell_whose_positions_are_constants_of_the_pass'
     - 'tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane'
     - 'tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition'
     - 'tests/property/test_coupling_geometry_search.py::test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_per_push'
-    - 'tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_distance_is_to_the_nearest_plane_inside_and_to_the_face_outside'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_zero_where_the_pass_moves_a_position_across'
@@ -3187,9 +3201,9 @@ claims:
     - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane'
     - 'tests/property/test_coupling_plane_sides.py::test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step'
     - 'tests/property/test_coupling_plane_sides.py::test_the_placement_sweep_finds_no_flagged_bound_under_the_distance'
-    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_both_flags_of_a_geometry_group_need_the_plane_margin_over_one'
-    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_limit_rule_stays_beside_the_margin_and_neither_implies_the_other'
-    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_false_flag_names_a_lattice_plane_only_where_a_plane_rule_is_a_cause'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_constant_positions_keep_a_smooth_group_s_flags_only_where_the_step_recorded_them'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_false_flag_of_constant_positions_names_every_cause_and_no_lattice_plane'
     - 'tests/property/test_coupling_geometry_search.py::test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_reads_only_the_positions_that_move_with_the_iterate'

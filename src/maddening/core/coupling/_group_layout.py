@@ -350,12 +350,12 @@ def _longest_row(mapping) -> tuple:
     named = "" if kind is None else f" ({kind})"
     form = _interface_plan._mapping_form(mapping)
     if form == _interface_plan.STATIC_DENSE:
-        return (f"a dense matrix mapping{named}, each row of which sums the matrix's width",
+        return (f"a dense matrix mapping{named}, counted at the matrix's width,",
                 int(mapping.n_source))
     if form != _interface_plan.STATIC_SPARSE:
         source_lead, _target_lead = _interface_plan._mapping_leads(mapping)
         return (f"a static mapping of class {type(mapping).__name__}{named}, counted at "
-                f"the entries of its source side",
+                f"the entries of its source side,",
                 _interface_plan._entries(source_lead))
     what = f"a static sparse mapping{named} in the {mapping.layout} layout"
     index = np.asarray(mapping.indices)

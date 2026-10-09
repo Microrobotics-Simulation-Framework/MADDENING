@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import _group_layout
 from maddening.core.coupling.acceleration import (
     PRECISION_FLOOR_ULPS,
     _position_fields,
@@ -169,23 +170,44 @@ def _stalled(vdt, pdt, schedule="gauss-seidel", norm="mixed", rtol=1e-7):
         have = np.asarray(bound.field(x, node, field))
         terms.append(np.abs(have - star).ravel() / np.max(np.abs(have)))
     report["distance"] = float(np.sqrt(np.mean(np.concatenate(terms) ** 2))) / rtol
+    report["graph"] = gm
     return report
 
 
 # Per push: tests/core/test_the_float_floor_keeps_a_position_at_its_own_dtype.py::test_a_float64_position_field_beside_float32_values_is_floored_at_its_own_eps
 @pytest.mark.slow
-def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_a_bound_that_holds():
+def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_a_bound_that_holds(
+        monkeypatch):
     """The corner, characterised (not a proof): positions stored in
     float64 and recomputed every pass from float32 samples carry float32
     rounding, and the floor counts them at float64's eps.  On this pair
-    the flags are set, the bound is hundreds of times the distance, and
-    it is the lower of the two (against the same pair with float32
-    positions), by a few percent."""
+    the bound is hundreds of times the distance, and it is the lower of
+    the two (against the same pair with float32 positions), by a few
+    percent.
+
+    **Its flags.**  This corner leaves them set: with the float-floor
+    guard on a mapped row out of reach both reports set
+    ``spectral_usable``.  The report itself has none, for another cause:
+    the edge back, ``q.x -> p.u``, is a dense matrix 30 entries wide (an
+    interpolation, two non-zeros a row), which that guard counts at its
+    width, and at the float floor it withdraws the flags behind a row
+    over ten entries, with its reason (MADD-ANO-255).  Every number is
+    the one it was."""
     with x64(True):
         fine = _stalled("float32", "float64")
         coarse = _stalled("float32", "float32")
-    for report in (fine, coarse):
-        assert report["precision_limited"] and report["spectral_usable"], report
+        monkeypatch.setattr(_group_layout, "MAPPED_ROW_FLOOR_LIMIT", 10 ** 9)
+        unguarded = [dict(report["graph"].coupling_diagnostics()[KEY]) for report in (fine, coarse)]
+        monkeypatch.undo()
+    for report, bare in zip((fine, coarse), unguarded):
+        assert report["precision_limited"], report
+        assert bare["spectral_usable"] and "not_usable_reason" not in bare, bare
+        assert not report["spectral_usable"], report
+        for said in ("q.x->p.u", "a dense matrix mapping (matrix), counted at the matrix's width,",
+                     "adds up 30 entries",
+                     "MADD-ANO-255", "a wider dtype"):
+            assert said in report["not_usable_reason"], (said, report["not_usable_reason"])
+        assert report["spectral_error_bound"] == bare["spectral_error_bound"], (report, bare)
         assert report["spectral_error_bound"] >= 10.0 * report["distance"] > 0.0, report
     assert fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)
     assert fine["spectral_error_bound"] > 0.5 * coarse["spectral_error_bound"], (fine, coarse)

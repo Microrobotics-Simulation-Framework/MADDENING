@@ -17072,7 +17072,9 @@ anomalies:
       position has float64 resolution.  That leaves one corner: a float64
       position a member sets within the pass purely from float32 data is
       counted finer than it is (on the pair that pins it the bound held
-      by 575x and more with the flags set).
+      by 575x and more; the corner leaves the flags set, and the report
+      has them withdrawn for another cause, the pair's dense matrix 30
+      entries wide: MADD-ANO-255).
     verification:
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_float64_field_downstream_of_a_float32_member_is_floored_at_float32"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_set_flag_stands_on_a_bound_at_or_above_the_distance_in_a_group_of_two_dtypes"

@@ -541,7 +541,7 @@ def test_a_dense_row_is_the_matrix_width_whatever_its_weights():
     selection = matrix_mapping(jnp.eye(4, 40))
     full = matrix_mapping(jnp.ones((2, 40)))
     assert _longest_row(selection) == (
-        "a dense matrix mapping (matrix), each row of which sums the matrix's width", 40)
+        "a dense matrix mapping (matrix), counted at the matrix's width,", 40)
     assert _longest_row(full)[1] == 40
     assert _longest_row(matrix_mapping(jnp.ones((40, 3))))[1] == 3
     assert _longest_row(_row_mapping("dense", 7, rows=3))[1] == 21
@@ -793,8 +793,8 @@ def test_a_dense_selection_matrix_loses_its_flags_and_the_same_operator_held_spa
         assert report["spectral_error_bound"] >= report["distance"] > 0.0, report
     assert dense["rows"] == [40, 40] and sparse["rows"] == [1, 1]
     assert not dense["spectral_usable"] and not dense["gradient_bound_usable"], dense
-    for said in ("a dense matrix mapping (nearest_neighbor), each row of which sums the "
-                 "matrix's width", "adds up 40 entries", ANOMALY, "a wider dtype"):
+    for said in ("a dense matrix mapping (nearest_neighbor), counted at the matrix's width, "
+                 "whose longest row adds up 40 entries", ANOMALY, "a wider dtype"):
         assert said in dense["not_usable_reason"], (said, dense["not_usable_reason"])
     # (Forty loops that are one loop forty times: the gradient flag is
     # off in both forms, by another rule and with no reason of its own.)

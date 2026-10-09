@@ -4200,8 +4200,10 @@ claims:
     point.  The corner this leaves: a float64 position that a member sets
     within the pass purely from float32 data is counted finer than it is;
     on a pair of three such markers stalled at the float32 floor the bound
-    held by 575x and more with the flags set (a characterisation of one
-    pair, pinned in the slow lane).  A geometry field anchored only by an
+    held by 575x and more (a characterisation of one pair, pinned in the
+    slow lane; this corner leaves its flags set, and the report has them
+    withdrawn for another cause, the pair's dense matrix 30 entries wide,
+    MADD-ANO-255).  A geometry field anchored only by an
     edge from outside the group takes the coarsest eps.
     The rule assumes any field of the group may be downstream of its
     coarsest member, that a node's own arithmetic is no coarser than the

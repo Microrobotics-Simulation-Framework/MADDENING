@@ -3046,133 +3046,119 @@ claims:
     - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
     - 'src/maddening/core/inspection.py::_coupling_flags'
   conditions: >-
-    THE RULE OF 0.4.0 (MADD-ANO-252). Three rules in turn set a flag from
-    these numbers, and an independent audit of each found spectral_usable
-    beside a wrong number near a lattice plane; the last on a cell whose
-    polynomial has no fixed point (a saddle-node, affine members), where the
-    step's own Newton-Kantorovich check had failed, the margin read 2.8 to
-    186, the bound was under the limit, and the bound was 34 to 1,874 times
-    under the distance. So no flag stands on them, and no sharper rule is
-    attempted in 0.4.0. On every push: no flag and the one reason at every
-    reading of the slots (the rule's unit table; the per-push pair with its
-    three slots replaced, and its control read as constant positions, which
-    fails closed on any slot that is not inf); on the 19 rows of the pinned
-    plane-sides table whose pass reads a position from the iterate, on the
-    constructed cases, and on every example of the geometry searches
-    (geometry_cells.rule_violations); the saddle-node case in float32 and
-    float64 (slow: both sweep orders, the mixed norm, Aitken); the two table
-    rows of constant positions keep both flags with no lattice plane named.
-    WHAT FOLLOWS describes the stored numbers and the measurements taken
-    under the withdrawn rules: where it says a flag "stands", "is kept" or
-    "is withdrawn" for a group that reads a position from the iterate, read
-    "the number is, or is not, still scored against the reference" (the
-    table's *_number_holds rows; geometry_cells.held_numbers), and the
-    measured price of the withdrawn rule no longer applies (every report of
-    such a group has no flag).
     solver="ift" with diagnostics=True, a single-rate group of
-    multilinear_grid edges under the l2 or the mixed norm (MAP-036). On
-    every push: the audited float32 pair (one marker, Gauss-Seidel, the l2
+    multilinear_grid edges under the l2 or the mixed norm (MAP-036); the
+    steps compiled (jit) by the graph. THE RULE OF 0.4.0 (MADD-ANO-252). A
+    group whose pass reads a position from the iterate, or builds one and
+    reads it in the same pass, has neither flag on any step, with the one
+    reason; a group whose positions are all constants of the pass has a
+    smooth group's flags. One function decides (_geometry_flags), from the
+    record compile() committed of the positions the pass solves. THE STORED
+    NUMBERS SET NO FLAG. geometry_plane_limit and geometry_plane_margin are
+    what the claim's two formulae give at the returned iterate, and neither
+    says that the fixed point is in the iterate's lattice cells: a margin
+    over one puts the fixed point of the iterate's polynomial piece in the
+    iterate's cell only where that polynomial satisfies Newton-Kantorovich
+    with h <= 1/2, which the step measures on one secant and does not prove.
+    The rule reads the two slots only as the step's record that it read no
+    position from the iterate (both inf where every position is a constant
+    of the pass; any other reading withholds the flags). The rules that set
+    a flag from these numbers are withdrawn and decide nothing in 0.4.0 (the
+    limit with the gradient bound's Newton-Kantorovich check where the bound
+    is over it, MADD-ANO-242; the margin over one, MADD-ANO-252): an
+    independent audit of each found spectral_usable beside a bound far under
+    the distance, and the registry entries have those measurements. The
+    numbers of a group that solves positions are reported as computed and
+    are not certified. THE FLAGS, on every push. The rule's unit table: no
+    flag and the same one reason at every reading of the margin, the limit,
+    the bound and the gradient bound, the readings the withdrawn rules set a
+    flag on among them; with constant positions, a smooth group's flags only
+    where both slots read inf (a slot that is absent, NaN, not numeric or
+    finite sets no flag, with a reason that says the step's record is
+    missing), and every cause of a False flag, none naming a lattice plane.
+    The report's side, on the per-push pair of the geometry search with its
+    three slots replaced, on every printer, and its control read as constant
+    positions. The audited float32 pair (one marker, Gauss-Seidel, the l2
     norm, tolerance 1e-4) whose solve converges before a lattice plane with
-    its fixed point 2e-4 of a spacing past it, where the flag was set on a
-    bound under half the distance and is withdrawn with the numbers kept,
-    and the same graph with the fixed point mid-cell, which keeps its flag
-    and its bound; the stored limit against its definition (the distance
-    to the nearest plane in the reference's norm, halved) on eight pinned
-    plane draws of the float32 Jacobi pair under the mixed norm, either
-    face of the hull and a point outside it among them; no flag on a fixed
-    point beyond twice the bound on the house floor of drawn plane draws
-    of that pair; the report's reading of the two slots (at the limit,
-    over it with a finite gradient bound, over it without one, a limit
-    that is not a number, the self-check's failure first); the plane
-    distance and the limit's arithmetic on a toy pass; which positions
-    are listed (a source-anchored internal edge, a target-anchored edge
-    into a member that computes fluxes) and which are not. The steps
-    compiled (jit) by the graph. The rule is a run-time criterion and not
-    a proof: where no plane is within twice the bound it rests on the
-    polynomial piece at the iterate having its fixed point within the
-    Newton-Kantorovich ball (a smooth nonlinearity that fails this is the
-    condition CPL-088 states for every nonlinear group), and where one is
-    it rests on the gradient bound's measured Jacobian change across the
-    Newton step -- which sees a plane only where the Newton point is
-    across it, and so left spectral_usable standing on a bound 17 to
-    1,294 times under the distance (the iterate and the Newton point
-    both short of the plane, the cell polynomial's fixed point just past
-    it, the next cell expanding; an audit's constructed cases, and 66 of
-    2,700 float32 reports of its placement sweep). BOTH FLAGS
-    (MADD-ANO-252) therefore stand on the margin: still a run-time
-    criterion, and an argument with five stated assumptions
-    (_kantorovich_ball_plane_margin): the kernel is one polynomial between
-    planes; no member has a kink of its own in the ball; Newton-Kantorovich
-    holds for the polynomial piece with some h <= 1/2 (the radius does not
-    use the measured h; that the true one is under one half is the smooth
-    bound's own condition, CPL-093, and is not proved by the step); the
-    float floor is the residual's resolution through the resolvent and
-    eight float resolutions at a plane; the norm bounds an entry only
-    where its weight is not zero. On every push, against a NumPy reference
-    of the pass that does not import the library's kernel
-    (tests/property/plane_sides.py), with the fixed point PLACED at a
-    chosen signed distance from a plane by bisection of a marker's initial
-    position: a pinned table of 16 drawn rows on four structures (float32
-    Gauss-Seidel l2 at tolerance 0.03; float64 Jacobi l2 at 1e-5; float64
-    Jacobi mixed at rtol 0.03 with Aitken; float32 Jacobi mixed with every
-    position a constant of the pass) covering the four combinations of
-    sides (which of the returned iterate and the Newton point are in the
-    fixed point's lattice cells), a row whose flag stands, a row with a
-    plane in the ball and all three in one cell (an honest report
-    withdrawn), a row within three float resolutions of a plane, and the
-    three audited cases of MADD-ANO-252 (bounds 15x to 70,000x under the
-    error, now unflagged); in every row every number whose flag is set is
-    scored (rho_spectral, spectral_error_bound, the gradient bound), both
-    flags are the pinned ones, neither stands on a row with a plane
-    between two of the points, and wherever the margin is over one the
-    fixed point of the iterate's polynomial piece (the reference's
-    stencil of the iterate's cell continued past its planes) is in the
-    iterate's cell and is the pass's. THE CONSTRUCTED CASES of the second
-    audit, per push in float64 (kernel curvature: a 6 x 3 lattice, linear
-    members) and float32 (a member's quadratic response on a
-    one-dimensional lattice), the other two dtypes slow: the cell
-    polynomial's fixed point 1e-6 to 2e-6 of a spacing-scale past the
-    plane with the iterate and the Newton point short of it, the next
-    cell expanding (the pass's fixed point two cells on, more than ten
-    bounds away) or contracting at 0.999 or 0.99: no flag in any; the
-    Newton point across: none; the fixed point just inside the cell with
-    the plane in the ball: none (honest, withdrawn); deep inside: both
-    flags, the distance within the bound. A marker at rest on the lower
-    hull face at coordinate 0.0: both flags False with one reason on
-    each of twelve steps. Slow: a placement sweep of that pair (ten
-    structures, three of them with an expanding next cell, four
-    tolerances, 21 signed distances, float32 and float64): no flagged
-    report with its fixed point beyond twice the bound, across a plane,
-    or with the polynomial's fixed point past one. With positions constant of the
-    pass, a plane between the iterate's position and the fixed point's
-    withdraws nothing and the margin is inf. The margin's arithmetic on a
-    toy pass (weights, the entry's own move, the window through the ball,
-    a built position leaving the cell at either point, an entry the norm
-    does not read, NaN) and the radius the step takes on an affine pass
-    (the entry's move plus between one and three Newton steps: the floor
-    is in it), float32 and float64; the plane window at 0.3, 1 and 5 float
+    its fixed point 2e-4 of a spacing past it and the bound under half the
+    distance: no flag, the numbers kept, the reason; the same graph with the
+    fixed point mid-cell has no flag either, and its bound holds. The
+    saddle-node case (one marker on a one-dimensional lattice, affine
+    members, the returned iterate in a cell whose polynomial has no fixed
+    point, the pass's only fixed point one cell on; float32 and float64, and
+    slow: both sweep orders, the mixed norm, Aitken): converged, no flag,
+    the reason names the position and the edge, beside a bound more than ten
+    times under the distance, a margin over one, a gradient bound of inf and
+    a bound under the limit (the limit not pinned in the Aitken cells;
+    measured, MADD-ANO-252: margins of 2.8 to 186, bounds 34 to 1,874 times
+    under the distance). THE CONSTRUCTED CASES, per push in float64 (kernel
+    curvature: a 6 x 3 lattice, linear members) and float32 (a member's
+    quadratic response on a one-dimensional lattice), the other two dtypes
+    slow: the cell polynomial's fixed point 1e-6 to 2e-6 of a spacing-scale
+    past the plane with the iterate and the Newton point short of it, the
+    next cell expanding (the pass's fixed point two cells on, more than ten
+    bounds away) or contracting at 0.999 or 0.99; the Newton point across;
+    the fixed point just inside the cell with the plane in the ball; and
+    deep inside: no flag in any, with the rule's reason. A marker at rest on
+    the lower hull face at coordinate 0.0: both flags False with one reason
+    and a stored margin of zero on each of twelve steps. Every example of
+    the geometry searches is held to the rule
+    (geometry_cells.rule_violations), and no report of the per-push pair
+    carries a flag; the slow hunt has a cell of constant positions in each
+    of its four blocks, where its flagged reports are. Slow: a placement
+    sweep of the constructed pair (ten structures, three of them with an
+    expanding next cell, four tolerances, 21 signed distances, float32 and
+    float64): no flag and the rule's reason on either side of the plane, at
+    any distance. THE NUMBERS, on every push, against a NumPy reference of
+    the pass that does not import the library's kernel
+    (tests/property/plane_sides.py), with the fixed point PLACED at a chosen
+    signed distance from a plane by bisection of a marker's initial
+    position: a pinned table of 21 rows, 19 of them per push. Fourteen drawn
+    rows on three structures whose pass reads a position from the iterate
+    (float32 Gauss-Seidel l2 at tolerance 0.03; float64 Jacobi l2 at 1e-5;
+    float64 Jacobi mixed at rtol 0.03 with Aitken) cover the four
+    combinations of sides (which of the returned iterate and the Newton
+    point are in the fixed point's lattice cells) and a row within a few
+    float resolutions of a plane; two rows of float32 Jacobi mixed have
+    every position a constant of the pass, one of them with a plane between
+    the iterate's position and the fixed point's; three are the audited rows
+    of MADD-ANO-252 (the gradient bound 15 to 70,000 times under the error,
+    the fixed point across a plane the Newton point is short of); and two,
+    slow, are the audited rows of a position within a rounding of a plane.
+    In every row the sides are the pinned ones and the flags are the rule's:
+    none, with the rule's reason, on the 19 rows that read a position from
+    the iterate (17 per push); both, with both stored numbers inf and no
+    lattice plane named, on the two rows of constant positions, whose
+    flagged numbers hold against the reference. The numbers of a group that
+    solves positions carry no flag and are still scored where a row says so
+    (the table's *_number_holds; geometry_cells.held_numbers in the
+    searches): rho_spectral, spectral_error_bound and the gradient bound
+    hold on a row of each drawn structure, each with the iterate, the Newton
+    point and the fixed point in one cell and a margin over one; none is
+    scored with the fixed point across a plane; and on these rows, wherever
+    the margin is over one the fixed point of the iterate's polynomial piece
+    (the reference's stencil of the iterate's cell continued past its
+    planes) is in the iterate's cell and is the pass's, which the
+    saddle-node case shows does not hold in general. In the constructed
+    cases the margin is over one only with the fixed point deep inside the
+    cell, where the distance is within the bound. THE DEFINITIONS, on every
+    push: the stored limit against its definition (the distance to the
+    nearest plane in the reference's norm, halved) on eight pinned plane
+    draws of the float32 Jacobi pair under the mixed norm, either face of
+    the hull and a point outside it among them; the plane distance and the
+    limit's arithmetic on a toy pass; which positions are listed (a
+    source-anchored internal edge, a target-anchored edge into a member that
+    computes fluxes) and which are not; the margin's arithmetic on a toy
+    pass (weights, the entry's own move, the window through the ball, a
+    built position leaving the cell at either point, an entry the norm does
+    not read, NaN) and the radius the step takes on an affine pass (the
+    entry's move plus between one and three Newton steps: the floor is in
+    it), float32 and float64; the plane window at 0.3, 1 and 5 float
     resolutions (zero) and at 50 (kept), float32 and float64, at a lattice
     of order one, at an origin forty spacings from zero and at a plane on
-    zero of a lattice whose origin is far from it; the report's reading of
-    the margin slot (over one, at one, under, NaN, absent). THE PRICE,
-    measured on an audit's scan that places every fixed point beside a
-    plane (tolerances 1e-5 to 0.1; 54,482 reports, jaxlib 0.11.0): of
-    28,382 honest reports (the fixed point in the iterate's cell) with the
-    gradient flag before, 6,979 keep it (75% lose it); 3,695 to 363 on a
-    hunt that places a plane between the iterate and the fixed point;
-    1,698 to 926 on pairs whose positions are read from the iterate and
-    do not move; 752 to 752 with every position a constant of the pass.
-    spectral_usable now follows the gradient's flag wherever a position
-    is read from the iterate. On ordinary use (the user guide's example,
-    300 steps, plane rules off as the baseline): of the honest reports, 8 of 204 lose both flags in float32 at tolerances
-    of 1e-4 and 1e-3 (4%; 15 at 1e-2) and 11 of 300 in float64; none with
-    the markers at rest inside cells or outside the hull, with every
-    position a constant of the pass, or fed back from the sampled value;
-    all (207 of 207, 300 of 300) with a marker at rest on a lattice point
-    or a hull face read from the iterate; 13 of 83 (float32) at a lattice
-    origin of 20; no flagged number wrong in any of 8,408 scored reports.
-    No returned state moved. Not claimed
-    for float64 (x64) on every push for the limit (the slow
+    zero of a lattice whose origin is far from it. The rule sets flags and
+    reasons only: no returned state and no reported number depends on it.
+    Not claimed for float64 (x64) on every push for the limit (the slow
     plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
     checkpoints or sharded graphs, nor for a mapping kind other than

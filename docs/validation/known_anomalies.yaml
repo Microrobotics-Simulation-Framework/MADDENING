@@ -16360,15 +16360,29 @@ anomalies:
       already `inf` in every such row (its Newton-Kantorovich check takes
       the Jacobian at the Newton point).  No release carried it: the
       geometry-dependent tier and its diagnostics are new in 0.4.0's
-      development.  Fixed in 0.4.0: with `diagnostics=True` the step stores
-      the largest bound at which no position the pass reads from the
-      iterate is within twice the bound of a lattice plane
-      (`geometry_plane_limit`); where `spectral_error_bound` exceeds it and
-      the step did not certify its linearisation across the Newton step
-      (`gradient_relative_error_bound` not finite), the report sets
-      `spectral_usable` and `gradient_bound_usable` to `False`, keeps every
-      number, and says why in `not_usable_reason`.  A position that is a
-      constant of the pass withdraws nothing.
+      development.  Resolved first by a rule that no longer decides a flag:
+      with `diagnostics=True` the step stores the largest bound at which no
+      position the pass reads from the iterate is within twice the bound of
+      a lattice plane (`geometry_plane_limit`); where `spectral_error_bound`
+      exceeded it and the step had not certified its linearisation across
+      the Newton step (`gradient_relative_error_bound` not finite), the
+      report set `spectral_usable` and `gradient_bound_usable` to `False`,
+      kept every number, and said why in `not_usable_reason`; a position
+      that is a constant of the pass withdrew nothing.  THAT RULE IS
+      WITHDRAWN IN 0.4.0. Two later audits found a flag set beside a wrong
+      number under it (`spectral_usable` on a bound 17 to 1,294 times under
+      the distance, the fixed point just past a plane that the Newton point
+      stopped short of, so that the check passed) and under its successor,
+      which also asked for no plane inside the Newton-Kantorovich ball (34
+      to 1,874 times under, in a cell whose polynomial has no fixed point):
+      MADD-ANO-252 has both.  So 0.4.0 certifies no bound for a group that
+      solves positions: where the pass reads a position from the iterate, or
+      builds one and reads it in the same pass, `spectral_usable` and
+      `gradient_bound_usable` are `False` on every step, whatever the limit
+      or the gradient bound read; the numbers are reported as computed, and
+      `not_usable_reason` names the positions and says so.  The limit is
+      still stored, as a number that sets no flag.  A group whose positions
+      are all constants of the pass has a smooth group's flags.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16391,16 +16405,21 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The rule keeps the flag where no plane is within twice the bound, on
-      the argument that the polynomial piece at the iterate has its fixed
-      point within the Newton-Kantorovich ball; a smooth nonlinearity
-      strong enough to put that fixed point beyond twice the bound is the
-      condition `spectral_error_bound` documents for every nonlinear group,
-      not a new one.  Where a plane is within reach it relies on the
-      gradient bound's Kantorovich check, which measures the Jacobian's
-      change between the iterate and the Newton point and is an estimate of
-      the Lipschitz constant, not a proof.  Only the `multilinear_grid`
-      kind is diagnosed; a registered kind of one's own reports no bound.
+      As first resolved, the rule kept the flag where no plane was within
+      twice the bound, on the argument that the polynomial piece at the
+      iterate has its fixed point within the Newton-Kantorovich ball, and
+      where a plane was within reach it relied on the gradient bound's
+      Kantorovich check, which measures the Jacobian's change between the
+      iterate and the Newton point and is an estimate of the Lipschitz
+      constant, not a proof.  Both were found short (MADD-ANO-252), and
+      nothing rests on either in 0.4.0: a group that solves positions has no
+      usable flag.  What remains is a limit of 0.4.0, stated in the user
+      guide and in `not_usable_reason`: such a group's `rho_spectral`,
+      `spectral_error_bound` and `gradient_relative_error_bound` are
+      uncertified estimates, which can be far under their quantity beside a
+      lattice plane, as measured here; the flags are available only with
+      every position fixed during the pass. Only the `multilinear_grid` kind
+      is diagnosed; a registered kind of one's own reports no bound.
     verification:
       - "tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane"
       - "tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition"

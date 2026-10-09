@@ -1933,6 +1933,13 @@ class GraphManager:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
         resolved = _graph_specs._ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
+        # The shape compile() holds each of these edges' sources to, asked
+        # of *state* as every step program asks it of the state it is
+        # traced for (a missing field stays the KeyError described above).
+        _graph_specs._refuse_edge_sources(
+            _graph_specs._edge_source_rules(
+                [e for e in self._edges if e.target_node == node_name], self._nodes),
+            state, doing="read")
         out: dict[str, Any] = {}
         for edge in self._edges:
             if edge.target_node != node_name:
@@ -2377,35 +2384,22 @@ class GraphManager:
 
             # Shape check: compare when both source and spec shapes are
             # concrete.  ``spec.shape == ()`` means the input is a scalar
-            # — non-scalar sources still get flagged.
+            # — non-scalar sources still get flagged.  A mapping replaces
+            # the leading axes it reads by the ones it delivers (axis 0
+            # by its n_target, unless it declares its field shapes); the
+            # rest of the shape (vector components) passes through.  No
+            # comparison when the spec leaves a dimension symbolic
+            # (negative convention) or when a transform may reshape on
+            # the fly.  The rule is ``_edge_shape_issue``'s, which every
+            # step program asks again of the state it is traced for
+            # (``_refuse_edge_sources``): a state write is not a recompile.
             source_state = self._state.get(e.source_node, {})
             src_val = source_state.get(e.source_field)
-            if src_val is not None:
-                src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
-                spec_shape = tuple(spec.shape)
-                leads = (None if e.mapping is None
-                         else _graph_specs._mapping_field_leads(e.mapping))
-                if leads is not None and src_shape:
-                    # A mapping that declares its field shapes replaces
-                    # the leading axes it reads by the ones it delivers.
-                    src_shape = leads[1] + src_shape[len(leads[0]):]
-                elif e.mapping is not None and src_shape:
-                    # The mapping changes axis 0 to its n_target; the
-                    # rest of the shape (vector components) passes through.
-                    src_shape = (int(e.mapping.n_target),) + src_shape[1:]
-                # Skip when spec leaves any dimension symbolic (negative
-                # convention) or when a transform may reshape on the fly.
-                if (e.transform is None
-                        and all(d >= 0 for d in spec_shape)
-                        and src_shape != spec_shape):
-                    issues.append(
-                        f"WARNING[shape]: edge "
-                        f"{e.source_node}.{e.source_field} -> "
-                        f"{e.target_node}.{e.target_field}: "
-                        f"source shape {src_shape} disagrees with "
-                        f"target BoundaryInputSpec shape {spec_shape} "
-                        f"and no transform is set"
-                    )
+            shape_issue = _graph_specs._edge_shape_issue(
+                e, src_val, _graph_specs._edge_declared_shape(e, spec),
+                _graph_specs._edge_mapping_leads(e.mapping))
+            if shape_issue is not None:
+                issues.append(shape_issue)
 
             # Dtype check: only when both source and spec dtypes are set.
             if src_val is not None and spec.dtype is not None:
@@ -3570,6 +3564,12 @@ class GraphManager:
             e.target_node for e in self._edges
             if e.geometry is not None and e.geometry[0] == "target")
 
+        # What compile() asked of each edge's source field (the shape its
+        # target declares), asked again of the state each program below
+        # is traced for: a state write is not a recompile.
+        edge_source_rules = _graph_specs._edge_source_rules(
+            self._edges, nodes, self._state)
+
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None, hold=None,
@@ -3731,6 +3731,7 @@ class GraphManager:
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
             def graph_step(full_state, external_inputs, params=None):
+                _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
                 external_inputs = _graph_specs._cast_external_inputs(
                     external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
@@ -3747,6 +3748,7 @@ class GraphManager:
         if has_coupling and not is_multirate:
             # ---- Coupling groups, uniform rate ----
             def graph_step_coupled(full_state, external_inputs, params=None):
+                _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
                 external_inputs = _graph_specs._cast_external_inputs(
                     external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
@@ -3771,6 +3773,7 @@ class GraphManager:
 
         # ---- Multi-rate path (with or without coupling) ----
         def graph_step_multirate(full_state, external_inputs, params=None):
+            _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
             external_inputs = _graph_specs._cast_external_inputs(
                 external_inputs, declared_input_dtypes)
             node_params = _resolve_params(params)
@@ -6051,6 +6054,10 @@ class GraphManager:
         has_coupling = bool(coupling_groups)
 
         params_snapshot = self.params
+        # As in ``_build_step_fn``: compile()'s rule for each edge's
+        # source field, asked of the state the program is traced for.
+        edge_source_rules = _graph_specs._edge_source_rules(
+            self._edges, nodes_dict, self._state)
 
         from maddening.core.node import SimulationNode as _SimBase
         flux_producers = {
@@ -6121,6 +6128,7 @@ class GraphManager:
             return new_node_state
 
         def dt_step_fn(state, external_inputs, dt, params=None):
+            _graph_specs._refuse_edge_sources(edge_source_rules, state)
             external_inputs = _graph_specs._cast_external_inputs(
                 external_inputs, declared_input_dtypes)
             if params is None:

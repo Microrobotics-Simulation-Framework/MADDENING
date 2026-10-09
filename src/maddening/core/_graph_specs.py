@@ -326,6 +326,176 @@ def _mapping_field_leads(mapping) -> Optional[tuple[tuple, tuple]]:
     return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
 
 
+# ------------------------------------------------------------------
+# The shape an edge's target declares, asked of every traced state
+# ------------------------------------------------------------------
+
+
+class _EdgeSourceRule(NamedTuple):
+    """What ``compile()`` asked of one edge's source field, kept so that
+    every program traced afterwards asks it of the state it is handed
+    (:func:`_refuse_edge_sources`)."""
+
+    edge: EdgeSpec
+    #: The shape the target's ``BoundaryInputSpec`` declares for the input
+    #: this edge feeds; ``None`` where ``validate()`` compares none
+    #: (:func:`_edge_declared_shape`, or an input the target does not
+    #: declare).
+    declared: Optional[tuple]
+    #: ``(source lead, target lead)`` of the edge's mapping
+    #: (:func:`_edge_mapping_leads`); ``None`` without one.
+    leads: Optional[tuple[tuple, tuple]]
+    #: The source was a field of its node's state when the program was
+    #: built, and the node has no flux hook that could supply it instead.
+    held: bool
+
+
+def _edge_mapping_leads(mapping) -> Optional[tuple[tuple, tuple]]:
+    """The leading axes *mapping* reads and the ones it delivers, for the
+    shape rule: its ``field_shapes()`` where it declares them
+    (:func:`_mapping_field_leads`), otherwise axis 0 in (of any length:
+    ``add_edge`` and the kernel ask ``n_source``) and ``n_target`` out.
+    ``None`` for an edge without a mapping."""
+    if mapping is None:
+        return None
+    leads = _mapping_field_leads(mapping)
+    if leads is not None:
+        return leads
+    return ((-1,), (int(mapping.n_target),))
+
+
+def _edge_declared_shape(edge: EdgeSpec, spec) -> Optional[tuple]:
+    """The shape ``validate()`` holds the field *edge* delivers to, given
+    *spec*, the ``BoundaryInputSpec`` of the input it feeds; ``None``
+    where it compares none: a transform may reshape on the fly, and a
+    negative dimension in the spec is symbolic."""
+    if edge.transform is not None:
+        return None
+    declared = tuple(spec.shape)
+    if not all(d >= 0 for d in declared):
+        return None
+    return declared
+
+
+def _edge_shape_issue(edge: EdgeSpec, value, declared: Optional[tuple],
+                      leads: Optional[tuple[tuple, tuple]]) -> Optional[str]:
+    """``validate()``'s ``WARNING[shape]`` line for *edge* reading *value*
+    at its source, or ``None``.
+
+    The one rule ``validate()`` applies at ``compile()`` (which raises
+    the line as a :class:`~maddening.warnings.ShapeMismatchError`) and
+    :func:`_refuse_edge_sources` where a program is traced: the source
+    field's shape, with the leading axes its mapping reads replaced by
+    the ones it delivers, is the shape the target declares.  It reads a
+    shape and nothing else, so *value* may be a tracer.
+    """
+    if declared is None or value is None:
+        return None
+    shape = tuple(int(d) for d in getattr(value, "shape", ()))
+    if leads is not None and shape:
+        shape = leads[1] + shape[len(leads[0]):]
+    if shape == declared:
+        return None
+    return (
+        f"WARNING[shape]: edge "
+        f"{edge.source_node}.{edge.source_field} -> "
+        f"{edge.target_node}.{edge.target_field}: "
+        f"source shape {shape} disagrees with "
+        f"target BoundaryInputSpec shape {declared} "
+        f"and no transform is set"
+    )
+
+
+def _edge_source_rules(edges, nodes, state=None) -> tuple[_EdgeSourceRule, ...]:
+    """The rules of *edges* to ask again where a program is traced.
+
+    Called on the host when a step program is built (and per call by a
+    reader of the edges that is not a step): each target's
+    ``boundary_input_spec()`` is asked here, never inside a trace, so the
+    check itself adds nothing to a program.  *state* is the state the
+    graph held at the build; with it, an edge whose source is one of its
+    fields is recorded as *held* (see :func:`_refuse_edge_sources`).
+    """
+    rules = []
+    specs: dict[str, dict] = {}
+    for edge in edges:
+        declared = None
+        target = nodes.get(edge.target_node)
+        if target is not None:
+            if edge.target_node not in specs:
+                # A spec's ``default`` may be built with jax.numpy: on
+                # the host even when the caller is being traced.
+                with jax.ensure_compile_time_eval():
+                    specs[edge.target_node] = target.node.boundary_input_spec()
+            spec = specs[edge.target_node].get(edge.target_field)
+            if spec is not None:
+                declared = _edge_declared_shape(edge, spec)
+        source = nodes.get(edge.source_node)
+        held = (
+            state is not None and source is not None
+            and edge.source_field in state.get(edge.source_node, {})
+            and (type(source.node).compute_boundary_fluxes
+                 is SimulationNode.compute_boundary_fluxes))
+        if declared is not None or held:
+            rules.append(_EdgeSourceRule(
+                edge, declared, _edge_mapping_leads(edge.mapping), held))
+    return tuple(rules)
+
+
+def _refuse_edge_sources(rules: Sequence[_EdgeSourceRule], state, *,
+                         doing: str = "stepped") -> None:
+    """Raise if *state*, which a program is about to be traced for, breaks
+    a rule ``compile()`` asked of an edge's source field.
+
+    ``compile()`` holds every edge's source to the shape its target
+    declares (:func:`_edge_shape_issue`) on the state it is given, and a
+    state write is not a recompile: a field written with one entry for
+    three (``set_node_state``) was broadcast into every entry of the
+    node that reads it, where ``compile()`` refuses that state.  A
+    program is traced again whenever a shape changes, so asking here
+    cannot be bypassed.  The same ``ExceptionGroup`` of
+    :class:`~maddening.warnings.ShapeMismatchError` as ``compile()``,
+    with ``validate()``'s line for every edge that breaks the rule.
+
+    A *held* source that is no longer a field of its node's state is a
+    ``KeyError`` naming the edge (it was a ``KeyError`` raised by
+    whatever read the field first, naming nothing).
+
+    Host-side, on shapes and keys only: nothing is added to the program,
+    and a step that is not traced again does not come here.  The dtype
+    half of ``compile()``'s rule is not asked: a node's update may widen
+    a field (float32 to float64 under x64), which ``compile()`` accepts
+    as the state the graph produced.
+    """
+    asked_here = (f"compile() checks the state it is given: a state write made "
+                  f"after it is checked here, where a program is traced for the "
+                  f"state being {doing}")
+    lines = []
+    for rule in rules:
+        edge = rule.edge
+        fields = state.get(edge.source_node)
+        if fields is None:
+            continue
+        if edge.source_field not in fields:
+            if rule.held:
+                raise KeyError(
+                    f"edge {edge.source_node}.{edge.source_field} -> "
+                    f"{edge.target_node}.{edge.target_field}: source field "
+                    f"{edge.source_field!r} is not in the state of node "
+                    f"{edge.source_node!r} (available: {list(fields)}).  {asked_here}.")
+            continue
+        line = _edge_shape_issue(edge, fields[edge.source_field], rule.declared, rule.leads)
+        if line is not None:
+            lines.append(line)
+    if lines:
+        from maddening.warnings import ExceptionGroup, ShapeMismatchError  # noqa: PLC0415
+        raise ExceptionGroup(
+            "edge validation failed",
+            [ShapeMismatchError(f"{line}.  {asked_here}; the graph steps again "
+                                f"once the field has the shape compile() accepts.")
+             for line in lines])
+
+
 
 
 def _geometry_edge_issues(edges, nodes, state) -> list[str]:

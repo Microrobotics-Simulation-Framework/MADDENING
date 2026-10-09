@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import collections
 import functools
+import gc
 import json
 import os
 import re
@@ -58,6 +59,7 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import numpy as np
 import pytest
 
@@ -85,6 +87,19 @@ def _graph(key: tuple):
     gm = ps.build(cfg)
     gm.compile()
     return gm
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _the_compiled_graphs_live_for_this_module_only():
+    """:func:`_graph` keeps every structure's compiled graph while this
+    module runs.  Kept for the rest of a slow-lane shard, they and the
+    programs compiled for them left the files that ran afterwards without
+    memory: the shard aborted in a later file's compile on both jax
+    lanes.  So they go when the module's last test has run."""
+    yield
+    _graph.cache_clear()
+    gc.collect()
+    jax.clear_caches()
 
 
 def _stepped(cfg: ps.Cfg):

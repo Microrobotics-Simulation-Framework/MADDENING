@@ -106,8 +106,17 @@ def _reads_mapping_weights(group, plan) -> bool:
     the three agree on which groups own the slot; every other group's
     ``_meta`` and compiled step are what they were.  *plan* is the
     group's description (``InterfacePlan.norm_reads_beyond_the_state``).
+
+    **With a dead band** (``atol > 0``) an edge read at its source counts
+    too: the band is asked of the source field and of what the edge
+    delivers, so which entries the floor counts depends on the weights
+    the step ran with, or on its target's pre-step geometry
+    (``InterfacePlan.band_reads_beyond_the_state``).  At the default
+    ``atol == 0`` no group gains the slot.
     """
-    return group.convergence_norm == "interface" and plan.norm_reads_beyond_the_state()
+    return group.convergence_norm == "interface" and (
+        plan.norm_reads_beyond_the_state()
+        or (group.atol > 0 and plan.band_reads_beyond_the_state()))
 
 
 def _floor_needs_the_step(group, interface_edges) -> bool:
@@ -122,10 +131,14 @@ def _floor_needs_the_step(group, interface_edges) -> bool:
     was never written) then has nothing to measure on and says so,
     where a group that reads mapping weights falls back to the graph's
     own.  *interface_edges* is the group's plan, or the bare edges the
-    report keeps (``InterfacePlan.norm_edges``).
+    report keeps (``InterfacePlan.norm_edges``).  With a dead band
+    (``atol > 0``) an edge read at its source through a mapping anchored
+    at its target counts as well: the band is asked of what it delivers
+    at that geometry.
     """
     return group.convergence_norm == "interface" and any(
         record.reads_pre_step_geometry
+        or (group.atol > 0 and record.band_reads_pre_step_geometry)
         for record in _interface_plan.interface_records(interface_edges))
 
 

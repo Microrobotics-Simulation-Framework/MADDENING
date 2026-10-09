@@ -75,8 +75,15 @@ def _field_reference(new_val, old_val):
     return jnp.maximum(jnp.max(jnp.abs(new_val)), jnp.max(jnp.abs(old_val)))
 
 
-def _scaled_change(new_val, old_val, atol: float, rtol: float):
+def _scaled_change(new_val, old_val, atol: float, rtol: float, kept=None):
     """``(|dx| / (rtol * ref), active)`` for one field.
+
+    *kept* (a traced boolean, or ``None``) keeps the field out of the
+    dead band whatever its own magnitude: what an interface edge read at
+    its source delivers is above ``atol``
+    (:func:`_kept_by_what_is_delivered`).  ``None``, which is every field
+    of the L2 and mixed norms and every reading of a group that declares
+    no dead band, adds nothing to the expressions below.
 
     ``active`` is the dead band: a field whose own magnitude does not
     exceed ``atol`` is *at zero within the tolerance the caller
@@ -218,6 +225,14 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     # ``where`` selects, not a change to these.
     diff = jnp.abs(new_val - old_val)
     above = ref > atol
+    if kept is not None:
+        # Beside the band's own test, never in place of it, and only for
+        # a field that has a magnitude: everything below reads ``above``
+        # as "``ref > 0``" (the rescaled quotients divide by ``ref``), and
+        # a field at exactly zero has no scale to be measured against
+        # whatever a transform delivers from it.  A non-finite field
+        # still fails (``evaluable``).
+        above = jnp.logical_or(above, jnp.logical_and(kept, ref > 0))
     if isinstance(rtol, (int, float)) and float(rtol) >= 1.0:
         # ``scale >= ref`` here (the L2 norm passes ``rtol=1.0``), so a
         # field with a normal magnitude has a normal scale.
@@ -422,7 +437,8 @@ def coupling_residual_mixed(
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
 
 
-def _interface_readings(interface_edges, *states, mappings=None, pre_step=None):
+def _interface_readings(interface_edges, *states, mappings=None, pre_step=None,
+                        band: bool = False):
     """What ``convergence_norm="interface"`` reads on each internal edge, at each of *states*.
 
     **The one definition of how an interface edge is read: on its compact
@@ -471,7 +487,10 @@ def _interface_readings(interface_edges, *states, mappings=None, pre_step=None):
     each mapping with its own weights.  ``pre_step`` gives a member's
     pre-step state (a callable of its name, or a dict): what a
     target-anchored geometry is read from
-    (``InterfaceEdge.geometry_at``).
+    (``InterfaceEdge.geometry_at``).  ``band`` is that the reader's group
+    declares a dead band (``atol > 0``): the source-field part of an edge
+    read at its source then carries what the edge delivers as well
+    (``PartReading.delivered``), for :func:`_kept_by_what_is_delivered`.
     """
     for record in interface_records(interface_edges, states[0]):
         node, field = record.source
@@ -481,10 +500,63 @@ def _interface_readings(interface_edges, *states, mappings=None, pre_step=None):
         # pass keeps each field's dtype kind.
         if not _is_float_leaf(source):
             continue            # an integer interface field cannot carry a norm
-        for reading in record.read(states, mappings, pre_step):
+        for reading in record.read(states, mappings, pre_step, band=band):
             if not _has_entries(reading[2]):
                 continue        # no entries: not read (``_has_entries``)
             yield reading
+
+
+def _declares_a_band(atol) -> bool:
+    """Does a group with this ``atol`` declare a dead band?  ``atol > 0``
+    (``CouplingGroup`` holds a Python float, validated non-negative)."""
+    return float(atol) > 0.0
+
+
+def _kept_by_what_is_delivered(reading, atol):
+    """Is a reading taken at an edge's source kept out of the dead band by
+    what the edge delivers?
+
+    **The one place this is decided**, for the residual
+    (:func:`_part_scaled_change`), its float floor
+    (:func:`residual_precision_floor`) and the weights of the spectral
+    analysis (``_coupled_block.py``: ``_norm_weights`` and
+    ``_reading_weights``), which is where the report's bound takes the
+    dead-banded share from.
+
+    **The rule.**  ``atol`` is "how small is indistinguishable from
+    zero", in the interface quantity's own units.  An edge that is read
+    at its source (a static mapping onto more entries than the field
+    holds: :func:`~maddening.core.coupling._interface_plan._norm_side`)
+    has two quantities, the field and what the mapping and the transform
+    make of it, and they need not share units: a force of 1e-8 N that the
+    edge hands on as 17 to 520 uN (``transform=lambda f: f * 1e9``).  A
+    reading taken at the source is therefore dropped by the dead band
+    only where **both** the source field and what the edge delivers are
+    at or below ``atol``: what is negligible in only one of its two units
+    is not dropped.  Asked of the source field alone, that pair left the
+    norm at ``atol = 1e-6`` and a Jacobi pair accepted after one pass 34%
+    to 74% from its fixed point with ``converged=True``.
+
+    Only the band changes.  The reading itself, its scale and its float
+    floor stay the source field's (the compact-side rule: a few values
+    scattered onto a large field are judged as the few values they are),
+    and a source field that is exactly zero, or not finite, is treated as
+    every such field is (:func:`_scaled_change`).
+
+    ``None`` where the reading carries nothing delivered: every reading
+    of a group that declares no dead band (nothing is built for it),
+    every edge read as delivered (the band is asked of the value read,
+    which is the delivered one), and positions in a kind's length scale
+    (always read).  Otherwise a traced boolean: the largest magnitude of
+    what the edge delivers, over the states read, is above ``atol``.
+    """
+    delivered = getattr(reading, "delivered", None)
+    if delivered is None:
+        return None
+    first, last = jnp.asarray(delivered[0]), jnp.asarray(delivered[-1])
+    if not (_is_float_leaf(first) and _has_entries(first)):
+        return None             # nothing delivered that has a magnitude
+    return _field_reference(_widened(first), _widened(last)) > atol
 
 
 def _part_scaled_change(reading, atol: float, rtol: float):
@@ -500,7 +572,8 @@ def _part_scaled_change(reading, atol: float, rtol: float):
     """
     _edge, _source_dtype, new_val, old_val = reading
     if reading.part.unit != KERNEL_LENGTH:
-        return _scaled_change(_widened(new_val), _widened(old_val), atol, rtol)
+        return _scaled_change(_widened(new_val), _widened(old_val), atol, rtol,
+                              kept=_kept_by_what_is_delivered(reading, atol))
     diff = jnp.abs(new_val - old_val)
     finite = jnp.logical_and(jnp.all(jnp.isfinite(new_val)), jnp.all(jnp.isfinite(old_val)))
     scaled = jnp.where(finite, diff / rtol, jnp.full_like(diff, jnp.inf))
@@ -729,6 +802,9 @@ def coupling_residual_interface(
     atol : float
         Dead band, in the interface quantity's own units: below this a
         quantity leaves the norm and stops being held to any criterion.
+        An edge read at its source has two quantities, the field and
+        what the edge delivers, and leaves only where both are at or
+        below ``atol`` (:func:`_kept_by_what_is_delivered`).
         ``CouplingGroup``'s default is ``0.0``; see
         :func:`_scaled_change` for why the caller owns this number.
     rtol : float
@@ -773,7 +849,8 @@ def coupling_residual_interface(
     sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
     for reading in _interface_readings(
-            interface_edges, s_new, s_old, mappings=mappings, pre_step=pre_step):
+            interface_edges, s_new, s_old, mappings=mappings, pre_step=pre_step,
+            band=_declares_a_band(atol)):
         scaled, active = _part_scaled_change(reading, atol, rtol)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
         count = count + jnp.where(active, scaled.size, 0)
@@ -2023,7 +2100,8 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     values = []
     if norm == "interface":
         for reading in _interface_readings(
-                interface_edges, state, mappings=mappings, pre_step=pre_step):
+                interface_edges, state, mappings=mappings, pre_step=pre_step,
+                band=_declares_a_band(atol)):
             values.append((jnp.asarray(reading[2]),
                            _part_resolution(reading, group_eps=group_eps), reading))
     else:
@@ -2059,7 +2137,11 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
             # band does not apply: ``_part_scaled_change``).
             active = jnp.array(True)
         else:
-            _scaled, active = _scaled_change(_widened(v), _widened(v), atol, use_rtol)
+            # The band's decision is the residual's: for a reading taken at
+            # an edge's source, of the field and of what the edge delivers.
+            _scaled, active = _scaled_change(
+                _widened(v), _widened(v), atol, use_rtol,
+                kept=None if reading is None else _kept_by_what_is_delivered(reading, atol))
         eps = own_eps / use_rtol
         n = jnp.where(active, float(v.size), 0.0).astype(dtype)
         sum_sq = sum_sq + n * jnp.asarray(eps * eps, dtype)

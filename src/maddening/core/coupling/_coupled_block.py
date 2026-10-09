@@ -15,9 +15,11 @@ import numpy as np
 from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    _declares_a_band,
     _group_coarsest_eps,
     _has_entries,
     _interface_readings,
+    _kept_by_what_is_delivered,
     _part_reference,
     _part_resolution,
     float_fields_of,
@@ -1355,11 +1357,27 @@ def _run_coupled_block_impl(
                 w = {nn: {fld: jnp.zeros_like(jnp.asarray(s_star[nn][fld]))
                           for fld in float_fields[nn]}
                      for nn in group_node_names}
+                # Under the interface norm with a dead band, a field an edge
+                # reads at its source is kept where what the edge delivers
+                # is above the band (``_kept_by_what_is_delivered``, the
+                # residual's own decision).  Nothing is built otherwise.
+                kept_fields: dict = {}
+                if (zero_field_weight is None and use_interface_norm
+                        and _declares_a_band(group.atol)):
+                    for r in _reading_parts(s_star):
+                        kept = _kept_by_what_is_delivered(r, group.atol)
+                        if kept is not None:
+                            kept_fields[r.part.field] = (
+                                kept if r.part.field not in kept_fields
+                                else jnp.logical_or(kept_fields[r.part.field], kept))
                 for nn, fld, val in _read_fields(s_star):
                     ref = _field_reference(val, val)
                     k = jnp.asarray(scale, val.dtype)
                     if zero_field_weight is None:
-                        active = jnp.logical_and(ref > group.atol, ref > 0)
+                        above = ref > group.atol
+                        if (nn, fld) in kept_fields:
+                            above = jnp.logical_or(above, kept_fields[(nn, fld)])
+                        active = jnp.logical_and(above, ref > 0)
                         inv = jnp.where(active, k / jnp.where(active, ref, 1.0), 0.0)
                     else:
                         scaled = ref >= jnp.finfo(val.dtype).tiny
@@ -1395,7 +1413,8 @@ def _run_coupled_block_impl(
                 and by the rules ``coupling_residual_interface`` sums them
                 (``_interface_readings``, which both iterate)."""
                 return list(_interface_readings(
-                    plan, s_star, mappings=report_mappings, pre_step=_pre))
+                    plan, s_star, mappings=report_mappings, pre_step=_pre,
+                    band=_declares_a_band(group.atol)))
 
             def _reading_values(s_star):
                 """The readings alone."""
@@ -1442,9 +1461,11 @@ def _run_coupled_block_impl(
                         # The dead band is of a part measured against its own
                         # magnitude; positions in a kind's length scale are
                         # always read (``_part_scaled_change``).
-                        active = jnp.logical_and(
-                            jnp.logical_or(ref > group.atol, r.part.unit == KERNEL_LENGTH),
-                            ref > 0)
+                        above = jnp.logical_or(ref > group.atol, r.part.unit == KERNEL_LENGTH)
+                        kept = _kept_by_what_is_delivered(r, group.atol)
+                        if kept is not None:
+                            above = jnp.logical_or(above, kept)
+                        active = jnp.logical_and(above, ref > 0)
                         inv = jnp.where(active, k / jnp.where(active, ref, 1.0), 0.0)
                     else:
                         scaled = ref >= jnp.finfo(v.dtype).tiny

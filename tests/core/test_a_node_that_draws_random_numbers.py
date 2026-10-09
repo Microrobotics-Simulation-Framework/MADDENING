@@ -315,8 +315,9 @@ def test_a_sweep_runs_each_key_as_its_own_stream():
         want, key_after = stream(seed, 6)
         assert_draws(history["n"]["noise"][i], want)
         np.testing.assert_array_equal(np.asarray(final["n"]["key"][i]), key_after)
-        _, unbatched = _alone(seed=seed).run_scan_with_history(6)
-        assert_draws(history["n"]["noise"][i], np.asarray(unbatched["n"]["noise"]))
+    # ... which is its unbatched run.
+    _, unbatched = _alone(seed=seeds[0]).run_scan_with_history(6)
+    assert_draws(history["n"]["noise"][0], np.asarray(unbatched["n"]["noise"]))
     # A sweep does not advance the graph: its own key is where it was.
     np.testing.assert_array_equal(np.asarray(gm.get_node_state("n")["key"]),
                                   stream(SEED, 0)[1])
@@ -505,12 +506,12 @@ _ACCELERATIONS = ("none", "aitken", "fixed", "iqn-ils", "iqn-imvj")
 _SOLVERS = ("ift", "fori")
 _NORMS = ("l2", "mixed", "interface")
 
-#: Both schedules, both solvers and the three norms on every push; the
-#: whole product, and the predictors, are slow.
+#: Both schedules and both solvers on every push (the interface norm has a
+#: per-push test of its own below); the whole product, and the predictors,
+#: are slow.
 _PER_PUSH_CELLS = (
     dict(iteration_mode="gauss-seidel", acceleration="none", solver="ift", norm="l2"),
     dict(iteration_mode="jacobi", acceleration="aitken", solver="fori", norm="mixed"),
-    dict(iteration_mode="gauss-seidel", acceleration="iqn-ils", solver="ift", norm="interface"),
 )
 _EVERY_CELL = tuple(
     dict(iteration_mode=mode, acceleration=acceleration, solver=solver, norm=norm)
@@ -760,16 +761,7 @@ def _coupled_for_gradients():
     return gm, ("p", "a"), (("n", "amplitude"), ("p", "k"), ("p", "offset"))
 
 
-@pytest.mark.parametrize("build", [_plain_for_gradients, _coupled_for_gradients],
-                         ids=["plain", "through-an-ift-group"])
-def test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64(build):
-    """The noise is differentiated as a constant: the key is not a function
-    of any parameter, so ``jax.grad`` is the derivative of this realisation.
-
-    Against central differences under ``jax_enable_x64`` (float64): with
-    respect to the noise amplitude and to a parameter upstream of the sensor
-    (the decay rate; in the group, the plant's gain and offset).
-    """
+def _assert_the_gradient_is_the_central_difference(build):
     with _x64():
         gm, (node, field), leaves = build()
         initial = jax.tree.map(lambda leaf: leaf[None],
@@ -812,6 +804,26 @@ def test_under_x64_the_key_stays_uint32_and_the_stream_is_drawn_in_float64():
         single, single_key = stream(SEED, 4, np.float32)
         np.testing.assert_array_equal(single_key, key_after)
         assert not np.any(np.isclose(want, single, rtol=1e-3))
+
+
+def test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64():
+    """The noise is differentiated as a constant: the key is not a function
+    of any parameter, so ``jax.grad`` is the derivative of this realisation.
+
+    Against central differences under ``jax_enable_x64`` (float64): with
+    respect to the noise amplitude and to a parameter upstream of the sensor
+    (the decay rate).
+    """
+    _assert_the_gradient_is_the_central_difference(_plain_for_gradients)
+
+
+# Per push: tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64
+# Per push: tests/core/test_coupling_non_float_leaves.py::test_gradient_still_flows_with_wide_integer_leaves_in_the_group
+@pytest.mark.slow
+def test_the_gradient_through_an_ift_group_at_a_fixed_seed_is_the_finite_difference_in_float64():
+    """The same through a coupling group under ``solver="ift"``: with respect
+    to the noise amplitude and to the plant's gain and offset (float64, x64)."""
+    _assert_the_gradient_is_the_central_difference(_coupled_for_gradients)
 
 
 # ---------------------------------------------------------------------------

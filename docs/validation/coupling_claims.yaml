@@ -6531,7 +6531,7 @@ claims:
     - tests/core/test_a_node_that_draws_random_numbers.py::test_the_groups_report_is_the_constant_twins_under_other_norms_and_accelerations
     - tests/core/test_a_node_that_draws_random_numbers.py::test_a_slow_group_draws_one_sample_per_solve_it_applies
     - tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass
-    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_through_an_ift_group_at_a_fixed_seed_is_the_finite_difference_in_float64
     - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_x64
     - tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream
     - tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each
@@ -6543,7 +6543,7 @@ claims:
     mixed_dtype: narrowed
     16bit: narrowed
     jit: 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step[jacobi-aitken-fori-mixed]'
-    grad: 'tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64[through-an-ift-group]'
+    grad: tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_through_an_ift_group_at_a_fixed_seed_is_the_finite_difference_in_float64
     vmap: tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream
     multi_rate: tests/core/test_a_node_that_draws_random_numbers.py::test_a_slow_group_draws_one_sample_per_solve_it_applies
     sub_cycled:

@@ -229,13 +229,29 @@ diagnostics are on.
 The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
 every entry the norm reads, **per evaluation**, in the norm's units —
 `4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
-`"mixed"` and `"interface"` (`residual_precision_floor`), each field at
-its own dtype's `eps`.  Under `"interface"` the entries are what that
+`"mixed"` and `"interface"` (`residual_precision_floor`), **every entry
+at the `eps` of the coarsest floating dtype among the group's fields**.
+A field a node computes from a coarser neighbour's output carries that
+neighbour's rounding: a float64 field of `n` values that is a function
+of one float32 value is as far from its fixed point, relative to its own
+size, as that value is.  Taken at each field's own `eps`, as the floor
+was, those `n` entries added nothing and the pooled floor fell as
+`1/√(1+n)`: a pair stalled 500 float32 ulps short read its bound at 0.92
+of the distance at `n = 1e3` and 0.21 at `n = 2e4` with the flags set
+(under all three norms; a float16 or bfloat16 value beside 2e4 float32
+ones read 0.37 and 0.36).  The rule assumes that any field of a group
+may be downstream of its coarsest member (which fields are is inside
+the nodes), that a node's own arithmetic is no coarser than the fields
+it reads and writes, and that what enters from outside the group is a
+constant of the solve; where a fine field is in fact computed from fine
+fields alone the floor is too large, never too small.  In a group of
+one dtype nothing changes.  Under `"interface"` the entries are what that
 norm reads on the internal edges: what an edge delivers (mapping, then
-transform), at the coarser of its own dtype's `eps` and its source
-field's, or the source field itself, at its own `eps`, where a static
-mapping delivers more entries than the source holds (see "A mapped edge
-is read on its compact side" below).  Where an edge is read through its
+transform) or the source field itself where a static mapping delivers
+more entries than the source holds (see "A mapped edge is read on its
+compact side" below), each at the group's coarsest `eps` or, where it is
+coarser still, the `eps` of what the edge delivers (a transform that
+narrows).  Where an edge is read through its
 mapping, the delivered value depends on the weights the step ran with, so
 the step records the per-evaluation floor itself (`_meta`'s
 `coupling_<key>_reading_floor`) and the report reads that; a group whose

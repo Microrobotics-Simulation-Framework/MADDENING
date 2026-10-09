@@ -15,6 +15,7 @@ import numpy as np
 from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    _group_coarsest_eps,
     _has_entries,
     _interface_readings,
     _part_reference,
@@ -1452,18 +1453,20 @@ def _run_coupled_block_impl(
                     parts.append(jnp.broadcast_to(inv, (v.size,)).astype(v.dtype).astype(work))
                 return jnp.concatenate(parts), jnp.where(top, 16.0, 1.0).astype(work)
 
-            def _reading_resolution(x_full, scale, evaluations):
+            def _reading_resolution(x_full, scale, evaluations, group_eps):
                 """The reading's float resolution per entry, each part's value at
-                its own resolution over what it is measured against -- its
-                dtype's eps, or its source field's (or its geometry's) where
-                that is coarser (``_part_resolution``, as
+                its resolution over what it is measured against -- the
+                group's coarsest eps (*group_eps*: ``_group_coarsest_eps``),
+                or its own dtype's, its source field's or its geometry's
+                where one of those is coarser (``_part_resolution``, as
                 ``residual_precision_floor`` takes it) -- in the reading's
                 weights' units (``_residual_resolution``), for a pass that
                 rounds like ``evaluations``."""
                 parts = _reading_parts(_embed(x_full))
                 work = _analysis_dtype(jnp.result_type(*[jnp.asarray(r[2]).dtype for r in parts]))
                 eps = jnp.concatenate([
-                    jnp.full((jnp.asarray(r[2]).size,), _part_resolution(r), work)
+                    jnp.full((jnp.asarray(r[2]).size,),
+                             _part_resolution(r, group_eps=group_eps), work)
                     for r in parts])
                 return (scale * evaluations.astype(work)) * _residual_resolution(eps)
 
@@ -1645,25 +1648,28 @@ def _run_coupled_block_impl(
                     zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
                     scale=weight_scale,
                 )
-                # The residual's float resolution per entry, each field at
-                # its own dtype's eps (``_residual_resolution``), in the
-                # weights' units (so times their common scale), for a pass
-                # that rounds like ``pass_evals`` single ones.
+                # ``eps`` of the coarsest field the pass evaluates in
+                # (static; a field with no entries is not evaluated in):
+                # the rounding of the map's Jacobian-vector products, and
+                # the resolution every entry of the group's floor is
+                # counted at (``_group_coarsest_eps``, the function the
+                # report's floor reads: a field computed from a coarser
+                # member's output carries that member's rounding).
+                map_eps = _group_coarsest_eps(template_state, group_node_names)
+                # The residual's float resolution per entry, every field at
+                # that eps (``_residual_resolution``; a field's own where
+                # the group holds none with entries), in the weights' units
+                # (so times their common scale), for a pass that rounds
+                # like ``pass_evals`` single ones.  In a group of one dtype
+                # this is each field's own eps, the constant it always was.
                 resolution = (weight_scale * pass_evals) * _residual_resolution(_flatten_full({
                     nn: {fld: jnp.full(
                         jnp.shape(template_state[nn][fld]),
-                        jnp.finfo(template_state[nn][fld].dtype).eps,
+                        max(float(jnp.finfo(template_state[nn][fld].dtype).eps), map_eps or 0.0),
                         template_state[nn][fld].dtype)
                         for fld in float_fields[nn]}
                     for nn in group_node_names
                 }))
-                # The rounding of the map's Jacobian-vector products: ``eps``
-                # of the coarsest field the pass evaluates in (static).  A
-                # field with no entries is not evaluated in.
-                map_eps = max(
-                    float(jnp.finfo(template_state[nn][fld].dtype).eps)
-                    for nn in group_node_names for fld in entry_fields[nn]
-                ) if any(entry_fields[nn] for nn in group_node_names) else None
                 if transformed_reading:
                     # The gradient bound's triple, in the state's weights,
                     # which its own norms are taken in.
@@ -1705,7 +1711,7 @@ def _run_coupled_block_impl(
                     rho_spec, spec_resid, spec_amp, pair_ratio = _interface_spectral_rate_at(
                         step_pure, x_star_full, consts, spec_weights, _reading,
                         read_w, read_spec_w,
-                        _reading_resolution(x_sg, read_scale, pass_evals),
+                        _reading_resolution(x_sg, read_scale, pass_evals, map_eps),
                         _reading_reference, map_eps=map_eps,
                     )
                 if geometry_checked:

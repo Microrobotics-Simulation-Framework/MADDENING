@@ -515,7 +515,7 @@ def _part_reference(reading, value):
     return _field_reference(value, value)
 
 
-def _part_resolution(reading, state_index: int = 0):
+def _part_resolution(reading, state_index: int = 0, group_eps: Optional[float] = None):
     """The float resolution of one part, per entry, over what it is measured against.
 
     For a part measured against its own magnitude this is an ``eps``:
@@ -529,6 +529,12 @@ def _part_resolution(reading, state_index: int = 0):
     in lengths, is measured against one length: its resolution is
     ``eps`` of the geometry's dtype times its own largest magnitude.
 
+    *group_eps* is the coarsest ``eps`` among the group's floating fields
+    (:func:`_group_coarsest_eps`), which no entry of a group's floor is
+    finer than: every ``eps`` above is taken as the larger of itself and
+    that one.  ``None`` (a reading described outside a group) leaves each
+    as it is.
+
     A Python float where nothing depends on the state; otherwise a traced
     scalar, with no derivative (a resolution is not a quantity of the
     solve).
@@ -536,12 +542,13 @@ def _part_resolution(reading, state_index: int = 0):
     _edge, source_dtype, *values = reading
     value = jnp.asarray(values[state_index])
     positions = reading.positions[state_index]
+    eps_floor = 0.0 if group_eps is None else float(group_eps)
     if reading.part.unit == KERNEL_LENGTH:
-        return _positions_resolution(value)
+        return _positions_resolution(value, eps_floor)
     if positions is None:
-        return _reading_eps(source_dtype, value)
+        return max(_reading_eps(source_dtype, value), eps_floor)
     positions = jnp.asarray(positions)
-    eps_geometry = float(jnp.finfo(positions.dtype).eps)
+    eps_geometry = max(float(jnp.finfo(positions.dtype).eps), eps_floor)
     # units: dimensionless -- each eps is relative to a magnitude.  Taken
     # as it stands, the positions' is the resolution of a value computed
     # from positions of that dtype, over the value's own magnitude, like
@@ -549,10 +556,10 @@ def _part_resolution(reading, state_index: int = 0):
     # in the kind's lengths (``_positions_resolution``) it is their
     # stored rounding in lengths, which is what moves a kernel weight.
     static = max(_reading_eps(source_dtype, value), eps_geometry)
-    return jnp.maximum(static, _positions_resolution(positions))
+    return jnp.maximum(static, _positions_resolution(positions, eps_floor))
 
 
-def _positions_resolution(positions):
+def _positions_resolution(positions, eps_floor: float = 0.0):
     """The rounding *positions* are stored with, in the lengths they are given in.
 
     ``eps`` of their dtype times their largest magnitude: a position
@@ -563,10 +570,77 @@ def _positions_resolution(positions):
     mapping is no finer than.  ``compile()``'s advisory about positions
     a dtype cannot resolve (:func:`_positions_floors`) is this number
     and no other.  Traced where the positions are, with no derivative.
+
+    *eps_floor* is an ``eps`` the positions' own is not taken below: the
+    group's coarsest (:func:`_group_coarsest_eps`) inside a group's floor,
+    where positions a coarser member's output was computed into carry
+    that member's rounding.  The advisory speaks of the positions' own
+    dtype and passes none.
     """
     positions = jnp.asarray(positions)
-    return float(jnp.finfo(positions.dtype).eps) * jax.lax.stop_gradient(
+    return max(float(jnp.finfo(positions.dtype).eps), float(eps_floor)) * jax.lax.stop_gradient(
         jnp.max(jnp.abs(positions)))
+
+
+def _group_coarsest_eps(state, node_names) -> Optional[float]:
+    """``eps`` of the coarsest floating dtype among the fields of a group's members.
+
+    **The one resolution a group's float floor is counted at.**  Over
+    every floating field of ``state[node]`` for the nodes named that
+    holds entries (:func:`_has_entries`); ``None`` where there is none
+    (or no node is named).  Static: dtypes, never values.
+
+    **Why the coarsest, and not each field's own.**  One pass of a
+    coupling group computes every member's fields from the group's
+    fields.  A value is no finer than what it was computed from: a
+    float64 field a node computes from a float32 neighbour's output
+    holds float64 numbers that carry float32 rounding, relative to their
+    own magnitude, so a group that stalls a float32 rounding from its
+    fixed point leaves *every* field downstream of the float32 member
+    that far off, in each field's own units.  Counted at float64's
+    ``eps`` those entries put nothing into the floor: a float32 member
+    of one value beside a float64 field of ``n`` values, stalled 500
+    float32 ulps short (407 tolerances at every ``n``), read
+    ``spectral_error_bound`` at 0.92 of the distance at ``n = 1e3`` and
+    0.21 at ``n = 2e4`` with ``spectral_usable`` and
+    ``gradient_bound_usable`` set (Gauss-Seidel; ``"mixed"`` and
+    ``"interface"`` alike; CPU, jaxlib 0.11.0), because the pooled floor
+    is ``4 m eps32 / (rtol sqrt(1 + n))``.
+
+    The rule rests on three assumptions, each stated so it can be
+    attacked.  (1) *Every field of the group may be downstream of its
+    coarsest member within a pass or two.*  Which fields are is a
+    property of the nodes' updates that nothing outside them can see, so
+    all are taken to be; where a fine field is in fact computed from
+    fine fields only, its entries are counted too coarsely and the floor
+    is too large, never too small.  (2) *A node's own arithmetic is no
+    coarser than the coarsest field it reads or writes.*  A node that
+    rounds through a narrower dtype inside ``update`` and declares
+    neither is outside it, as a node that sub-steps without declaring
+    ``update_evaluations`` is outside the evaluation count.  (3) *What
+    enters the group from outside is a constant of the solve.*  An
+    external input of a coarser dtype perturbs the problem the group
+    solves, not the iteration's rounding, and is not counted.
+
+    **It only raises a floor.**  Each entry is taken at the larger of
+    this and the ``eps`` it had (its own dtype's; for what an edge
+    delivers, the coarser of the delivered dtype's and its source
+    field's, :func:`_reading_eps`; a geometry's), so no entry is counted
+    more finely than before.  In a group whose floating fields share one
+    dtype it *is* each field's own ``eps``, the same Python float, and
+    the floor and the program that computes it are unchanged to the bit.
+    Read by :func:`residual_precision_floor` and by the step's own
+    analysis (``_coupled_block.py``: the per-entry resolution of the
+    bounds, the reading's, and the products' rounding), so the report's
+    floor and the bounds' cannot take different numbers.
+    """
+    coarsest: Optional[float] = None
+    for node in node_names or ():
+        for value in (state.get(node) or {}).values():
+            if _is_float_leaf(value) and _has_entries(value):
+                eps = float(jnp.finfo(jnp.asarray(value).dtype).eps)
+                coarsest = eps if coarsest is None else max(coarsest, eps)
+    return coarsest
 
 
 def _reading_eps(source_dtype, value) -> float:
@@ -586,6 +660,10 @@ def _reading_eps(source_dtype, value) -> float:
     read its bound at 6.7e-7 of the true distance with
     ``spectral_usable=True`` (jaxlib 0.11.0, CPU).  An edge that delivers
     its source's dtype, or a narrower one, keeps the eps it had.
+
+    Inside a group's floor neither is taken below the group's coarsest
+    (:func:`_group_coarsest_eps`, applied by :func:`_part_resolution`):
+    the source field may itself carry a coarser member's rounding.
     """
     delivered = jnp.asarray(value).dtype
     eps = float(jnp.finfo(delivered).eps)
@@ -1856,9 +1934,12 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     * ``"l2"``: ``C * sqrt(sum over the active fields of size * eps**2)``,
       i.e. ``C * eps * sqrt(n)`` over the ``n`` float entries it reads;
     * ``"mixed"`` and ``"interface"``: the RMS of ``eps / rtol`` over the
-      active entries, i.e. ``C * eps / rtol`` for a single dtype;
+      active entries, i.e. ``C * eps / rtol``;
 
-    with ``C = PRECISION_FLOOR_ULPS`` and "active" exactly the rule the
+    with ``eps`` **that of the coarsest floating dtype among the group's
+    fields** (:func:`_group_coarsest_eps`, which gives the argument and
+    its assumptions: a field computed from a coarser member's output
+    carries that member's rounding), ``C = PRECISION_FLOOR_ULPS`` and "active" exactly the rule the
     norm applies (:func:`_scaled_change`): a field inside the dead band
     contributes nothing to the residual and nothing here.  ``0.0`` when
     the norm reads no active field -- it then measures nothing, and the
@@ -1869,7 +1950,11 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     state : dict
         ``{node: {field: array}}`` -- the state the residual describes.
     node_names : iterable of str
-        The group's nodes (read under ``"l2"`` and ``"mixed"``).
+        The group's nodes: the fields the ``"l2"`` and ``"mixed"`` norms
+        read, and under every norm the fields whose coarsest dtype sets
+        the ``eps`` of every entry.  Under ``"interface"`` with no node
+        named, each reading keeps the ``eps`` of its own dtype and its
+        source field's.
     convergence_norm : {"l2", "mixed", "interface"}
         The group's norm.
     atol, rtol : float
@@ -1901,9 +1986,9 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     -------
     jnp.ndarray
         Scalar, in the units ``residual`` is reported in, computed in at
-        least float32 whatever the fields' dtypes (each field still at its
-        own dtype's eps).  Traceable, so it can be taken inside a jitted
-        step as well as on the host.
+        least float32 whatever the fields' dtypes (every entry at the
+        group's coarsest eps, or a coarser one of its own).  Traceable, so
+        it can be taken inside a jitted step as well as on the host.
 
     Examples
     --------
@@ -1926,18 +2011,24 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     # an eps for a value over its own magnitude; for positions read in a
     # mapping kind's length scale, eps times their size in lengths), and
     # the part of an interface reading it is.
+    group_eps = _group_coarsest_eps(state, node_names)
     values = []
     if norm == "interface":
         for reading in _interface_readings(
                 interface_edges, state, mappings=mappings, pre_step=pre_step):
-            values.append((jnp.asarray(reading[2]), _part_resolution(reading), reading))
+            values.append((jnp.asarray(reading[2]),
+                           _part_resolution(reading, group_eps=group_eps), reading))
     else:
         for nn in node_names:
             for field_name in state[nn]:
                 v = state[nn][field_name]
                 if _is_float_leaf(v):
                     v = jnp.asarray(v)
-                    values.append((v, float(jnp.finfo(v.dtype).eps), None))
+                    # The group's coarsest eps (``_group_coarsest_eps``), which
+                    # is at least the field's own: every field read here is
+                    # one of the fields it is taken over.
+                    own = float(jnp.finfo(v.dtype).eps)
+                    values.append((v, own if group_eps is None else max(own, group_eps), None))
     values = [entry for entry in values if _has_entries(entry[0])]
     if not values:
         return jnp.zeros((), jnp.float32)
@@ -1945,9 +2036,9 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     # dtype ``(eps / rtol)**2`` overflowed for every rtol below about
     # 3.8e-6 under "mixed" and "interface", and the entry count above
     # 65 504 under every norm -- the floor read ``inf`` (or NaN) where it is
-    # documented as ``4 eps / rtol``.  Each field keeps its *own* dtype's
-    # eps; only the arithmetic is widened, so a float32 or float64 group's
-    # floor is the one it was.
+    # documented as ``4 eps / rtol``.  Only the arithmetic is widened: the
+    # eps stays a 16-bit one wherever a 16-bit field is in the group, and
+    # a float32 or float64 group's floor is the one it was.
     dtype = jnp.promote_types(
         jnp.result_type(*[v.dtype for v, _eps, _reading in values]), jnp.float32)
     sum_sq = jnp.zeros((), dtype)

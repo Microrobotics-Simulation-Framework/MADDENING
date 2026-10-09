@@ -1159,7 +1159,10 @@ withholds everything built on the float floor or on the contraction
 estimates: the bounds and estimates are NaN (`gradient_error_estimate`
 is `inf`), `ratio_usable`, `spectral_usable`, `gradient_bound_usable`
 and `precision_limited` are `False`, and the entry has a
-`not_usable_reason` string that says so.
+`not_usable_reason` string that says so.  One of these keeps the float
+floor itself: a group withheld on account of the interface norm reports
+`precision_limited` by the rule of every group and the floor it is
+taken from, `residual_precision_floor` (below).
 `convergence_norm="interface"` is refused at `compile()` for a group with
 a geometry-dependent mapping on an internal edge where the mapping is of
 another kind than `multilinear_grid` (a position is measured in the
@@ -1175,11 +1178,15 @@ The compact-side rule of a static mapping, with the geometry in it.  For
 an internal edge $S.f \to T$ through a `multilinear_grid` mapping $m$
 with positions $g$:
 
-| The mapping | Parts of the reading | Each part is measured against |
+| The mapping, between $M$ points and a grid of $N$ entries | Parts of the reading | Each part is measured against |
 |---|---|---|
-| does not deliver more entries than it reads (a gather, a tie) | the delivered value $t(m(S.f;\,g))$, $g$ at the time level the step uses: $S.g$ of the same iterate for a source anchor, the *pre-step* $T.g$ for a target anchor | its own largest magnitude |
-| delivers more entries (a scatter), source anchor | the source value $S.f$ as stored; **and** the positions $S.g$, coordinate $a$ divided by the grid spacing $h_a$ | $S.f$: its own largest magnitude.  The positions: **one spacing** |
+| does not deliver more entries than it reads: a gather onto $M \le N$ points, a scatter of $M \ge N$ points | the delivered value $t(m(S.f;\,g))$, $g$ at the time level the step uses: $S.g$ of the same iterate for a source anchor, the *pre-step* $T.g$ for a target anchor | its own largest magnitude |
+| delivers more entries, source anchor: a scatter of $M < N$ points (the markers hold $g$), a gather onto $M > N$ points (the grid node holds $g$) | the source value $S.f$ as stored; **and** the positions $S.g$, coordinate $a$ divided by the grid spacing $h_a$ | $S.f$: its own largest magnitude.  The positions: **one spacing** |
 | delivers more entries, target anchor | the source value $S.f$ as stored | its own largest magnitude |
+
+The rows are by the entry counts the mapping declares, never by its
+mode: with more markers than grid entries the gather is the edge read at
+its source and the scatter the one read as delivered.
 
 The residual pools every entry of every part into one root mean square:
 a value's change over `rtol` times its magnitude, a position's change
@@ -1201,19 +1208,40 @@ at the source carries none.
   not a reading of a scatter anchored there.
 * **What a solve returns.**  A field a part holds entry for entry is
   measured whole and returned as the accepted iterate holds it: the
-  source value of a scatter and, for a source anchor, its positions.
-  Every other floating field is recomputed by one plain pass.
+  source value of an edge that delivers more entries than it reads and,
+  for a source anchor, its positions.  Every other floating field is
+  recomputed by one plain pass.
 * **The float floor.**  A value counts at the `eps` of the coarsest dtype
   it was computed from, the positions' among them for a delivered one,
-  and at least `eps |u|` for positions `u` spacings from zero (their
-  stored rounding moves a kernel weight by as much); a position counts
-  at `eps |u|` of one spacing.  The floor of a gather anchored at its
-  target needs the pre-step positions, which the returned state does not
-  hold: the step records it (`reading_floor`), and a state no step wrote
-  has none.  `compile()` warns of each edge for which the positions' term
-  alone, `4 E eps max|u| / rtol`, is one or more on the state it sees: a
-  part that is positions, or a value delivered at them (the user guide's
-  limits have the rule and the remedies).
+  and at least `eps |u|` for the positions `u` it depends on, in
+  spacings from zero (their stored rounding moves a kernel weight by as
+  much); a position counts at `eps |u|` of one spacing.  Every `eps` is
+  taken no finer than the group's coarsest floating dtype's.  For a
+  delivered value `eps |u|` **assumes a field that varies across one
+  cell by about the size of the value delivered**: it is early for a
+  smoother field and it does not see a value far smaller than the
+  field's variation across a cell (a field sampled near its zero), which
+  the positions' rounding moves by `eps |u|` times that ratio
+  (MADD-ANO-247; the user guide's limits have the measured figures).
+  The coordinates a delivered value does not depend on are not counted:
+  one on an axis of one lattice point, and one of a point clamped to the
+  hull from further out than its rounding can cross
+  (`geometry_coordinates_read`).  Positions that are a part of the
+  reading are counted coordinate for coordinate, as the criterion reads
+  them.  The floor of a delivered value anchored at its target needs the
+  pre-step positions, which the returned state does not hold: the step
+  records it (`reading_floor`), and a state no step wrote has none.
+* **The advisory and the run-time reading.**  `compile()` warns of each
+  edge for which the positions' term alone, `4 E eps max|u| / rtol`, is
+  one or more on the state it sees: a part that is positions, or a value
+  delivered at them, where the floor counts that part (not one the dead
+  band drops, and not a coordinate the mapping does not read).  It is
+  asked once.  The report of such a group reads the floor at every step:
+  `residual_precision_floor` is the floor of the state the step returned
+  and `precision_limited` is `True` where the residual is at or below
+  it, the rule of every group's report, so markers that drift, a state
+  write and a loaded checkpoint are read where they are (the user
+  guide's limits have the rule, the measured cases and the remedies).
 * **The claim.**  A group that reports `converged=True` is within $K$
   tolerances of its fixed point in these readings, $K = \lVert D (I -
   A)^{-1} (I - L) D^{-1} \rVert_2$ on the compact readings as for a
@@ -1221,8 +1249,17 @@ at the source carries none.
   in the positions).  $K$ does not see the size of the grid or the place
   of the origin (the measured figures are in MAP-050 of the mapping
   claims).
-* **Not yet.**  The bounds of such a group are withheld under this norm
-  (the paragraph above); another mapping kind and a sub-cycled group are
+* **The claim is first order in the distance, and a lattice plane ends
+  it.**  $K$ is the linearisation at the fixed point, and the pass is
+  another polynomial of the positions in each lattice cell.  Where the
+  accepted iterate and the fixed point lie in different cells, $K$ of
+  the fixed point's cell does not describe the iterate's
+  (MAP-050 has a constructed case with its numbers).
+* **Not in 0.4.0.**  The bounds of such a group (`rho_spectral`,
+  `spectral_error_bound`, the gradient bound, the estimates and their
+  flags) are not reported under this norm in 0.4.0 (the paragraph
+  above); a diagnostic run of the same group under `"mixed"` or `"l2"`
+  reports them.  Another mapping kind and a sub-cycled group are
   refused.
 
 A graph without a geometry edge is not affected by any of this: it

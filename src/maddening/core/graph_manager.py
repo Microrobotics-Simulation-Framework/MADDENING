@@ -4934,7 +4934,31 @@ class GraphManager:
             ``"not_usable_reason"`` : str, which names the edges and
             says which case it is; besides the lattice-plane case above
             and a checkpoint saved after a state write, no other
-            group's entry has it.  The values are
+            group's entry has it.
+
+            **One of those groups keeps the float floor: one withheld
+            on account of** ``convergence_norm="interface"`` (its
+            bounds under that norm are not in 0.4.0; run it under
+            ``"mixed"`` or ``"l2"`` for a diagnostic run that reports
+            them).  Its ``"precision_limited"`` is reported as for
+            every group -- the residual is at or below its float floor
+            at the state the step returned -- and its entry has a
+            further key, ``"residual_precision_floor"`` : float, that
+            floor in the residual's units (tolerances;
+            :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
+            times the pass's evaluation count), NaN where it could not
+            be measured (the reason then says why).  Under this norm
+            the floor is where the rounding of stored positions is
+            counted (``eps * |u|`` grid spacings for a position ``u``
+            spacings from zero), so the two keys are the run-time
+            reading of what ``compile()`` warns of once, on the state
+            it sees: markers that have drifted, a state write and a
+            loaded checkpoint are read where they are.  With
+            ``"precision_limited"`` ``True``, ``"residual"`` is rounding
+            rather than motion: ``"converged"`` does not say the
+            readings settled to the tolerance, and a group at
+            ``max_iterations`` may be held there by rounding alone.
+            No other group's entry has that key.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -7429,7 +7453,9 @@ class GraphManager:
           not read (experimental: any but a single-rate
           ``multilinear_grid`` group under ``"l2"`` or ``"mixed"``
           whose step passed its self-check): its bounds, estimates and
-          ``*_usable`` flags are withheld;
+          ``*_usable`` flags are withheld; a group withheld on account of
+          the interface norm still flags ``precision_limited=True``, with
+          its ``residual_precision_floor``;
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;

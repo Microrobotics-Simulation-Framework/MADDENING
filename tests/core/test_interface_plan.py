@@ -753,8 +753,13 @@ def test_a_readings_geometry_is_at_the_time_level_the_step_uses():
     np.testing.assert_array_equal(at_source[2], mapping.apply(field, None, new_pos))
     np.testing.assert_array_equal(at_source[3], mapping.apply(2.0 * field, None, old_pos))
     assert not np.allclose(at_source[3], mapping.apply(2.0 * field, None, new_pos))
-    np.testing.assert_array_equal(
-        at_source.positions[1], np.asarray(old_pos) / np.asarray(_SPACING, np.float32))
+    # The positions a delivered value's floor counts: the old state's, with
+    # zero for the one coordinate the kernel does not read (the last point
+    # is 0.2 of a spacing past the two-point hull on axis 1: clamped).
+    counted = np.asarray(old_pos) / np.asarray(_SPACING, np.float32)
+    assert counted[2, 1] > 1.0 and np.all(np.delete(counted[:, 1], 2) < 1.0), counted
+    counted[2, 1] = 0.0
+    np.testing.assert_array_equal(at_source.positions[1], counted)
 
     record = _geometry_record("consistent", "target")
     for pre_step in ({"b": {"pos": pre_pos}}, lambda name: {"b": {"pos": pre_pos}}[name]):

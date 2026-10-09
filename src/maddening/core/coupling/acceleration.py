@@ -602,6 +602,37 @@ def _part_counted(reading, value, atol: float, rtol: float):
     return active
 
 
+def _held_out_by_the_dead_band(reading, value, atol: float, rtol: float) -> bool:
+    """Does the dead band the caller declared hold the part *reading*
+    out of the norm at a state where its value *value* has a magnitude?
+
+    On the host, of concrete values: what ``compile()``'s advisory asks
+    of the state it sees (:func:`_positions_floors`).  The decision is
+    the floor's (:func:`_part_counted`); two cases are kept apart from
+    it because the advisory speaks of the steps to come:
+
+    * a group that declares **no dead band** (``atol == 0``) holds
+      nothing out, and nothing is built or asked for it;
+    * a value that is **exactly zero** at that state (a field not yet
+      computed: the commonest initial condition) has no magnitude to
+      compare with ``atol``.  The floor counts nothing for it there and
+      counts it from its first non-zero value, so the advisory asks it.
+
+    ``True`` therefore only for a value with a magnitude at or below a
+    declared ``atol`` (and, for a reading taken at an edge's source, a
+    delivered value that is too: :func:`_kept_by_what_is_delivered`):
+    the float floor of that part is 0.0 at that state, and an advisory
+    quoting a floor for it would be about a reading the norm does not
+    take.
+    """
+    if not _declares_a_band(atol):
+        return False
+    value = jnp.asarray(value)
+    if not bool(jnp.any(value != 0)):
+        return False
+    return not bool(_part_counted(reading, value, atol, rtol))
+
+
 def _part_reference(reading, value):
     """What *value*, a part's value at one state, is measured against:
     its own largest magnitude, or one unit of the kind's length scale."""
@@ -2191,9 +2222,11 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
       step started from it would hold).
 
     **The floor's own decisions, and no others.**  A part the floor
-    counts nothing for has no entry: one the dead band drops at *atol*
-    (:func:`_part_counted`, the function :func:`residual_precision_floor`
-    asks), and a delivered value none of whose positions' coordinates
+    counts nothing for has no entry: one the dead band holds out at
+    *atol* (:func:`_held_out_by_the_dead_band`, which asks
+    :func:`_part_counted`, the function :func:`residual_precision_floor`
+    asks, of a value that has a magnitude), and a delivered value none
+    of whose positions' coordinates
     the mapping kind reads -- an axis of one lattice point, points
     clamped to the hull (``_interface_plan._read_in_kernel_lengths``,
     which is where the floor takes those positions from).  The
@@ -2239,7 +2272,7 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
                          else reading.positions[0])
             if positions is None:
                 continue        # a value the floor counts no position for
-            if not bool(_part_counted(reading, jnp.asarray(reading[2]), atol, rtol)):
+            if _held_out_by_the_dead_band(reading, reading[2], atol, rtol):
                 continue        # a part the dead band drops: nothing in the floor
             resolution = float(_positions_resolution(positions))
             floors.append((

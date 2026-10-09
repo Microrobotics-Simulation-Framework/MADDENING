@@ -125,6 +125,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import math
 import warnings
 from typing import Any, Optional
 
@@ -840,13 +841,38 @@ def withheld(c: "Case") -> Optional[str]:
     return None
 
 
+#: What the report of a group withheld on account of its norm adds: the
+#: residual's float floor at the state the step returned.
+FLOOR_KEY = "residual_precision_floor"
+
+
 def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
     """*report* (one group of ``coupling_diagnostics()``) says the solve's
     outcome, no bound, no usable flag, and why, naming the edges *keys*;
-    *why* is the key of :data:`WHY` the reason must be."""
-    assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason"}, sorted(report)
+    *why* is the key of :data:`WHY` the reason must be.
+
+    A group withheld on account of its **norm** (``why="norm"``) reports
+    one thing more, the residual's float floor: ``precision_limited`` by
+    the rule of every group's report (the floor is positive and the
+    finite residual is at or below it) and the floor itself, or neither
+    where the floor could not be measured, with the reason saying which.
+    """
+    floor_kept = FLOOR_KEY in report
+    assert floor_kept == (why == "norm") or why is None, (why, sorted(report))
+    assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason",
+                           *((FLOOR_KEY,) if floor_kept else ())}, sorted(report)
     for name, want in _NOT_USABLE.items():
         got = report[name]
+        if floor_kept and name == "precision_limited":
+            floor, residual = report[FLOOR_KEY], report["residual"]
+            assert isinstance(floor, float) and isinstance(got, bool), (floor, got)
+            if floor != floor:
+                assert got is False and "is not reported either" in report["not_usable_reason"]
+            else:
+                assert got is bool(floor > 0 and math.isfinite(residual) and residual <= floor)
+                assert "residual_precision_floor is the float resolution" in (
+                    report["not_usable_reason"]), report["not_usable_reason"]
+            continue
         if want == "nan":
             assert np.isnan(got), (name, got)
         elif want == "inf":

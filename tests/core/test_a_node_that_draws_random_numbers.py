@@ -598,11 +598,16 @@ def _assert_the_report_is_the_constant_twins(group, steps=3):
         params["nodes"]["n"]["c"] = after["n"]["noise"]
         twin_after = twin.step(params=params)
         twin_report = _report(twin)
-        assert report["converged"] and twin_report["converged"]
-        assert report["iterations"] == twin_report["iterations"], (report, twin_report)
-        assert report["iterations"] >= 2
-        for name in ("residual", "amplification", "error_estimate"):
-            assert report[name] == pytest.approx(twin_report[name], rel=1e-3, abs=1e-12), name
+        assert report["converged"] and report["iterations"] >= 2, report
+        assert set(report) == set(twin_report)
+        for name, value in report.items():
+            # Verdicts and counts exactly; a float to the rounding of two
+            # programs that differ by the draw (NaN where both withhold it).
+            if isinstance(value, float):
+                assert value == pytest.approx(twin_report[name], rel=1e-3, abs=1e-12,
+                                              nan_ok=True), (name, report, twin_report)
+            else:
+                assert value == twin_report[name], (name, report, twin_report)
         np.testing.assert_allclose(np.asarray(after["p"]["a"]),
                                    np.asarray(twin_after["p"]["a"]), rtol=1e-6)
         np.testing.assert_allclose(np.asarray(after["n"]["reading"]),
@@ -618,10 +623,10 @@ def test_the_groups_report_is_that_of_the_noise_replaced_by_the_constant_it_drew
 @pytest.mark.slow
 @pytest.mark.filterwarnings("ignore:CouplingGroup solver='fori':DeprecationWarning")
 @pytest.mark.parametrize("group", [
-    _group("l2", diagnostics=True),
+    _group("l2"),
     _group("mixed", diagnostics=True, solver="fori"),
-    _group("l2", diagnostics=True, acceleration="aitken", iteration_mode="jacobi"),
-    _group("interface", diagnostics=True, acceleration="iqn-ils"),
+    _group("l2", acceleration="aitken", iteration_mode="jacobi"),
+    _group("interface", acceleration="iqn-ils"),
 ], ids=["l2", "mixed-fori", "aitken-jacobi", "interface-iqn-ils"])
 def test_the_groups_report_is_the_constant_twins_under_other_norms_and_accelerations(group):
     _assert_the_report_is_the_constant_twins(group)
@@ -792,6 +797,96 @@ def test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64(build)
             got = float(gradient["nodes"][owner][leaf])
             assert abs(central) > 1e-3, (owner, leaf, central)      # a derivative to match
             assert got == pytest.approx(central, rel=1e-6), (owner, leaf)
+
+
+def test_under_x64_the_key_stays_uint32_and_the_stream_is_drawn_in_float64():
+    """The draw takes the state's dtype; the same key gives other numbers in it."""
+    with _x64():
+        want, key_after = stream(SEED, 4, np.float64)
+        final, history = _alone().run_scan_with_history(4)
+        assert final["n"]["key"].dtype == jnp.uint32
+        assert history["n"]["noise"].dtype == jnp.float64
+        np.testing.assert_allclose(np.asarray(history["n"]["noise"]), want, rtol=1e-12)
+        np.testing.assert_array_equal(np.asarray(final["n"]["key"]), key_after)
+        # Not the float32 stream at a higher precision: other samples.
+        single, single_key = stream(SEED, 4, np.float32)
+        np.testing.assert_array_equal(single_key, key_after)
+        assert not np.any(np.isclose(want, single, rtol=1e-3))
+
+
+# ---------------------------------------------------------------------------
+# The group member in the other domains (CPL-193)
+# ---------------------------------------------------------------------------
+
+
+# Per push: tests/core/test_a_node_that_draws_random_numbers.py::test_under_x64_the_key_stays_uint32_and_the_stream_is_drawn_in_float64
+@pytest.mark.slow
+def test_a_group_member_draws_one_sample_per_step_under_x64():
+    with _x64():
+        want, key_after = stream(SEED, 4, np.float64)
+        gm = _pair(NoisySensor("n", DT, seed=SEED, amplitude=AMP, gain=G),
+                   max_iterations=200, tolerance=1e-12)
+        final, history = gm.run_scan_with_history(4)
+        assert final["n"]["key"].dtype == jnp.uint32
+        assert history["n"]["noise"].dtype == jnp.float64
+        np.testing.assert_allclose(np.asarray(history["n"]["noise"]), want, rtol=1e-12)
+        np.testing.assert_array_equal(np.asarray(final["n"]["key"]), key_after)
+        assert _report(gm)["converged"]
+        np.testing.assert_allclose(np.asarray(history["p"]["a"]), _fixed_points(want),
+                                   rtol=1e-9)
+
+
+# Per push: tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_runs_each_key_as_its_own_stream
+@pytest.mark.slow
+def test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream():
+    """``run_sweep`` (a ``vmap`` of the scan) over a batch of keys, through a group."""
+    seeds = (3, SEED, 11)
+    gm = _pair(NoisySensor("n", DT, seed=SEED, amplitude=AMP, gain=G), **_group("l2"))
+    keys = jnp.stack([jax.random.key_data(jax.random.key(s)) for s in seeds])
+    batch = {"p": {"a": jnp.zeros(3)},
+             "n": {"reading": jnp.zeros(3), "noise": jnp.zeros(3), "key": keys}}
+    final, history = gm.run_sweep(4, batch, return_history=True)
+    for i, seed in enumerate(seeds):
+        want, key_after = stream(seed, 4)
+        assert_draws(history["n"]["noise"][i], want)
+        np.testing.assert_array_equal(np.asarray(final["n"]["key"][i]), key_after)
+        np.testing.assert_allclose(np.asarray(history["p"]["a"][i]), _fixed_points(want),
+                                   rtol=1e-4)
+
+
+# Per push: tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_takes_two_draws_when_it_is_kept_and_none_when_rejected
+@pytest.mark.slow
+def test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each():
+    """``run_adaptive`` keeps two half steps: two solves, each on its own sample."""
+    want, _ = stream(SEED, 8)
+    gm = _pair(NoisySensor("n", DT, seed=SEED, amplitude=AMP, gain=G), **_group("l2"))
+    kept = []
+    with pytest.warns(UserWarning, match="Adaptive stepper hit dt_min"):
+        final, info = gm.run_adaptive(
+            4 * DT, dt_initial=4 * DT, dt_min=DT, dt_max=4 * DT,
+            callback=lambda t, dt, state: kept.append((state["n"]["noise"], state["p"]["a"])))
+    assert info["n_rejected"] >= 1 and info["n_steps"] == 4, info
+    assert _draws_consumed(final["n"]["key"]) == 8
+    assert_draws([noise for noise, _ in kept], want[1::2])
+    np.testing.assert_allclose(np.asarray([a for _, a in kept]), _fixed_points(want[1::2]),
+                               rtol=1e-4)
+
+
+# Per push: tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_continues_the_stream_in_a_fresh_graph
+@pytest.mark.slow
+def test_a_checkpoint_between_coupled_steps_continues_a_members_stream(tmp_path):
+    """``save_state`` after two coupled steps, ``load_state`` into a fresh pair."""
+    want, key_after = stream(SEED, 5)
+    group = _group("l2", predictor="linear")
+    gm = _pair(NoisySensor("n", DT, seed=SEED, amplitude=AMP, gain=G), **group)
+    gm.run_scan(2)
+    path = gm.save_state(tmp_path / "pair.npz")
+    fresh = _pair(NoisySensor("n", DT, seed=SEED + 1, amplitude=AMP, gain=G), **group)
+    fresh.load_state(path)
+    final, history = fresh.run_scan_with_history(3)
+    assert_draws(history["n"]["noise"], want[2:])
+    np.testing.assert_array_equal(np.asarray(final["n"]["key"]), key_after)
+    np.testing.assert_allclose(np.asarray(history["p"]["a"]), _fixed_points(want[2:]), rtol=1e-4)
 
 
 # ---------------------------------------------------------------------------

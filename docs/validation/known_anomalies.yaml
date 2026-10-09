@@ -16869,7 +16869,14 @@ anomalies:
       is a constant of the solve.  A node that rounds through a narrower
       dtype inside `update` is outside it.  Where a fine field is computed
       from fine fields alone the floor is larger than it needs to be, and
-      `precision_limited` is reported sooner.
+      `precision_limited` is reported sooner.  The rule is for value
+      entries: a position (a geometry field an internal edge anchors a
+      geometry-dependent mapping at, or a position part read in kernel
+      lengths) keeps its own dtype's eps, because a stored float64
+      position has float64 resolution.  That leaves one corner: a float64
+      position a member sets within the pass purely from float32 data is
+      counted finer than it is (on the pair that pins it the bound held
+      by 575x and more with the flags set).
     verification:
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_float64_field_downstream_of_a_float32_member_is_floored_at_float32"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_set_flag_stands_on_a_bound_at_or_above_the_distance_in_a_group_of_two_dtypes"
@@ -16931,3 +16938,137 @@ anomalies:
       - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_small_force_handed_on_in_other_units_is_held_to_the_criterion"
       - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_the_spectrums_weights_keep_the_reading_the_residual_keeps"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-251"
+    title: "The float floor of a coupling report does not count the rounding of a mapped edge's row sum: stalled behind a scatter-layout row of 100 entries spectral_error_bound reads 0.68 of the true distance with spectral_usable=True, behind 3e4 entries 0.002"
+    description: >
+      The float floor of `coupling_diagnostics()` counts
+      `PRECISION_FLOOR_ULPS = 4` units of `eps` per evaluation of a pass
+      (CPL-101 measured that constant on dense updates of at most six
+      entries).  A mapped edge delivers sums over its rows, and a float
+      sum of `k` terms of one sign rounds by up to `(k - 1) / 2` `eps`
+      of the sum in any order; in an in-order sum of nearly equal terms
+      (a uniform field, or any field beside a much larger common value)
+      the rounding is systematic and grows like `k`.  Nothing in the
+      floor counts it, so the pass has a fixed point of its own that far
+      from the exact one, and a group that stalls there reports a bound
+      below its true distance with `spectral_usable` and
+      `gradient_bound_usable` set.  Measured (CPU, 24-core x86-64; jax
+      0.10.2, 0.11.0 and 0.11.2; float32 with `rtol=1e-7` and float64
+      with `rtol=1e-16`) on a pair of relays that declare one evaluation
+      each: one value `x <- b + a u` fed by the conservative
+      nearest-neighbour sum of `k` values `x_j <- c_j + u_j` that each
+      read it back; loop gains 0.9 and 0.99; both schedules; six random
+      fields, four uniform ones and a ramp (44 runs per cell); the true
+      distance from the closed-form fixed point of the constants as the
+      dtype holds them.  **The scatter layout**
+      (`sparse_nearest_neighbor_mapping(mode="conservative",
+      transpose="scatter")`, a scatter-add, which is the in-order sum on
+      the CPU): the smallest bound over distance among the reports with
+      the flag set was, for rows of 3, 10, 30, 100, 300, 1000, 3000, 1e4
+      and 3e4 entries, 6.2, 3.9, 2.07, 0.68, 0.24, 0.069, 0.023, 0.0068
+      and 0.0022 under `"interface"` in float32 (6.3, 4.9, 2.09, 0.66,
+      0.22, 0.069, 0.023, 0.0067, 0.0022 under `"mixed"`; `"l2"` as
+      `"mixed"`), and 8.0, 5.0, 2.08, 0.63, 0.22, 0.068, 0.023, 0.0065,
+      0.0022 at the float64 floor: the same digits on the three jax
+      versions.  From 100 entries on, 8 to 35 of each cell's 44 flagged
+      reports read below their distance; behind the random fields alone
+      the first failure is at 1000 entries (0.74), which is why the
+      pre-merge audit that found this put the limit there.  At a
+      tolerance above the counted floor (float32, `rtol` 1e-6 to 1e-3)
+      83 of 384 flagged reports per version read below their distance,
+      35 of them with `precision_limited=False` (the residual up to 1000
+      floors, the bound down to 0.007 of the distance behind 3e4
+      entries).  **The other forms are reduced by XLA in an order of its
+      choosing**, which depends on the jax version, the dtype and the
+      operator's shape.  One row, the gather layout and the dense kind
+      alike: 1.8 at 300 entries, 1.2 at 1000 and 1.09 at 3000 behind a
+      uniform field (1.7, 1.1, 1.1 in float64), 3.7 or more at 1e4 and
+      3e4, and 4.8 or more behind the other fields: they held.  They do
+      not hold everywhere: on jax 0.10.2 in float32 the gather layout's
+      rows of 1e4 and 3e4 entries are summed in order and read 0.0068
+      and 0.0022, 28 and 29 of 44 flagged reports below their distance
+      (not in float64, not on 0.11.0 or 0.11.2); and the dense kind with
+      three rows of 3000 entries read 0.18 in float32 on the three
+      versions (13 of 28 flagged reports below their distance), 0.09 at
+      the float64 floor on jax 0.11.0, and 0.84 there with three rows of
+      300, while the gather layout of the same three-row operator held
+      (1.7 at 300 entries, 4.3 or more at 3000).  A `multilinear_grid` mapping from points to a
+      grid is the same scatter-add with as many entries on a grid node
+      as there are points within one spacing of it: with 300 and 3000
+      markers in one cell behind a uniform field the bound read 3.8 and
+      1.3 of the distance under `"mixed"` (flags set; larger counts were
+      not measured), and under `"interface"` such a group reports no
+      bound.  No release carried it: sparse mappings, the float floor's
+      flags and the interface norm's readings are new in 0.4.0's
+      development.  Found by the pre-merge audit of the interface norm
+      on static mapped edges.  **What 0.4.0 does** (a guard on the flag,
+      not a fix of the number): where an internal edge of a group
+      carries a static sparse mapping in the scatter layout whose
+      longest row is over `SCATTER_ROW_FLOOR_LIMIT = 10` entries (the
+      largest power of ten at which every measured run held by a factor
+      of two on the three versions) and the residual is not above the
+      float floor times that row's length, the report withdraws
+      `spectral_usable` and `gradient_bound_usable` with a
+      `not_usable_reason`; every number is reported as computed, and
+      `ratio_usable`, `precision_limited` and `converged` are untouched.
+      With it, over 6,235 flagged reports behind rows of more than ten
+      entries (both dtypes, tolerances from the float floor to 1e-1), no
+      report at its counted floor keeps a flag, and the 693 that keep
+      one read at least 0.9925 of their distance (20 of them below 1).
+      The price: 3,757 of the 4,430 reports whose bound was right lose
+      their flag (every one at the counted floor: all of them at 30
+      entries, 85% of those flagged at 100, 73% at 300, 70% at 1000, 48%
+      at 3000, 43% at 1e4 and 32% at 3e4 had a bound that held).  The
+      gather layout, the dense kinds and geometry-dependent mappings are
+      NOT guarded: their reports keep their flags in the failing cases
+      above.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound that reads below the true distance with its usable flag
+      set is a silent wrong result, never `minor`.  Not `critical`: it
+      needs `diagnostics=True`, a group at (or within a row's reach of)
+      its float floor, and a mapped internal edge with a row of tens of
+      entries or more; the state, the verdict `converged` and the
+      residual are not affected, and `precision_limited=True` already
+      says the residual is rounding.  `context_dependent` because
+      whether the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.coupling.sparse_mapping.StaticSparseMapping"
+      - "maddening.core.coupling.mapping.StaticLinearMapping"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Hold the group's fields in a wider dtype at the same tolerance, so
+      that the report is not at its float floor (verified: the scatter
+      pair in float64 at `rtol=1e-7`, rows of 300 and 3e4 entries, both
+      schedules, `"interface"` and `"mixed"`: 128 of 128 reports kept
+      their flags on a bound at 0.9995 of the distance or more, 1.4 or
+      more under `"interface"`).  Another layout or a dense mapping is
+      not a workaround in general: see the failing cases above.  Where
+      `precision_limited=True` behind a mapped edge with rows of more
+      than a few hundred entries, in any layout, do not rely on
+      `spectral_usable`.
+    resolution_status: "open"
+    residual_risk: >
+      Until the floor counts a mapped edge's own rounding (0.5.0: the
+      row's `(k - 1) / 2` `eps` over the cancellation of its terms,
+      which holds for any order of the sum, added to the evaluation
+      count), `spectral_error_bound` and `gradient_relative_error_bound`
+      can read too small behind a long row in every layout.  The 0.4.0
+      guard covers the scatter layout only; the gather layout on jax
+      0.10.2 (float32, rows of 1e4 and more), a dense mapping of several
+      long rows and a geometry-dependent scatter keep their flags.
+      Where the guard keeps a flag the bound can still be short by the
+      row's rounding over the residual (under an eighth in the worst
+      case; 0.75% at most measured).  The limit and the margins are
+      measurements on one CPU family; a GPU scatter-add is not the
+      in-order sum (MAP-023) and was not measured.
+    verification:
+      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_a_stalled_group_behind_a_long_scatter_row_withdraws_its_flags_and_says_why"
+      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_bound_behind_a_long_scatter_row_is_at_or_above_the_distance"
+      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_same_operator_in_the_gather_layout_keeps_its_flags_on_a_bound_that_holds"
+      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
+      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_guard_moves_no_number_of_the_report"

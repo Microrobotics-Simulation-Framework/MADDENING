@@ -245,7 +245,24 @@ the nodes), that a node's own arithmetic is no coarser than the fields
 it reads and writes, and that what enters from outside the group is a
 constant of the solve; where a fine field is in fact computed from fine
 fields alone the floor is too large, never too small.  In a group of
-one dtype nothing changes.  Under `"interface"` the entries are what that
+one dtype nothing changes.  **A position is exempt from that rule and
+keeps its own dtype's `eps`**: a geometry field that an internal edge
+anchors a geometry-dependent mapping at (under `"l2"` and `"mixed"`), a
+position part read in kernel lengths (under `"interface"`), and the
+stored rounding `eps · |u|` of the positions a value was delivered
+through.  A stored float64 position has float64 resolution, and what a
+float32 member adds to it in a pass is a rounding of the increment;
+counted at float32's `eps`, float64 positions tens of spacings from zero
+put hundreds of tolerances into the floor and read
+`precision_limited=True` where the iterate was within a thousandth of a
+tolerance of its fixed point, and float64 positions are the way out the
+float32-positions advisory names.  The corner this leaves: a float64
+position that a member *sets* within the pass purely from float32 data
+is as coarse as that data and is counted finer than it is (on a pair of
+three such markers the bound still held by hundreds, the evaluation
+count carrying the gain of the read through the scatter).  A geometry
+field anchored only by an edge from outside the group is not exempt.
+Under `"interface"` the entries are what that
 norm reads on the internal edges: what an edge delivers (mapping, then
 transform) or the source field itself where a static mapping delivers
 more entries than the source holds (see "A mapped edge is read on its

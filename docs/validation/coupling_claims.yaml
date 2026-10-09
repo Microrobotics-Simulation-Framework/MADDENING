@@ -3551,6 +3551,13 @@ claims:
     face of the hull) a fixed point in another cell than the returned
     iterate is within twice the bound wherever the flag is set, with no
     allowance for h.
+    Not behind a long row sum of a mapped edge at the float floor
+    (MADD-ANO-251, open): the floor does not count the row's rounding, the
+    bound read 0.68 to 0.002 of the distance behind scatter-layout rows of
+    100 to 3e4 entries, and the report withdraws the flag there (a row
+    over SCATTER_ROW_FLOOR_LIMIT = 10 entries with the residual not above
+    the floor times the row's length), while the gather layout and the
+    dense kinds keep theirs.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3829,6 +3836,13 @@ claims:
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
+    One more case withdraws the flag and keeps the numbers (MADD-ANO-251,
+    open): an internal edge with a static sparse mapping in the scatter
+    layout whose longest row is over SCATTER_ROW_FLOOR_LIMIT = 10 entries,
+    where the residual is not above the float floor times that row's
+    length; a flag kept behind such a row read at least 0.9925 of the
+    distance, and the same rounding in the gather layout and the dense
+    kinds is not flagged.
   oracle: the flag against each condition.
   tests:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
@@ -4159,7 +4173,7 @@ claims:
     - src/maddening/core/coupling/acceleration.py::_group_coarsest_eps
   conditions: >-
     every norm; mixed dtypes; computed in at least float32 whatever the
-    fields' dtypes (MADD-ANO-186).  The eps of every entry is that of the
+    fields' dtypes (MADD-ANO-186).  The eps of every value entry is that of the
     coarsest floating dtype among the fields of the group's members that
     hold entries, or a coarser one of the entry's own (what a transform
     that narrows delivers): a field computed from a coarser member's
@@ -4168,6 +4182,20 @@ claims:
     floor by sqrt(1 + n) and the bound read 0.92x (n = 1e3) and 0.21x
     (n = 2e4) the distance with the flags set, under every norm (0.37x and
     0.36x for a float16 and a bfloat16 value beside 2e4 float32 ones).
+    A position is exempt and keeps its own dtype's eps: a geometry field
+    an internal edge anchors a geometry-dependent mapping at (the l2 and
+    the mixed norm), a position part read in kernel lengths (the interface
+    norm), and the stored rounding eps |u| of the positions a value was
+    delivered through; a stored float64 position has float64 resolution,
+    and counted at a float32 member's eps float64 positions tens of
+    spacings from zero read precision_limited=True on a floor of hundreds
+    of tolerances with the iterate within a thousandth of one of its fixed
+    point.  The corner this leaves: a float64 position that a member sets
+    within the pass purely from float32 data is counted finer than it is;
+    on a pair of three such markers stalled at the float32 floor the bound
+    held by 575x and more with the flags set (a characterisation of one
+    pair, pinned in the slow lane).  A geometry field anchored only by an
+    edge from outside the group takes the coarsest eps.
     The rule assumes any field of the group may be downstream of its
     coarsest member, that a node's own arithmetic is no coarser than the
     fields it reads and writes, and that an input from outside the group
@@ -4210,6 +4238,9 @@ claims:
     3000 on the audited graph, and 0.57x at 1000 on the search's pair
     (MADD-ANO-212, open; the second is pinned as a strict xfail in the
     slow lane).  Jacobi holds there.
+    The floor counts evaluations and not a mapped edge's own row sum
+    (MADD-ANO-251, open): behind a row of more than ten entries it can be
+    too small in every layout, by the row's (k - 1) / 2 eps at most.
   oracle: closed form.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -4225,6 +4256,8 @@ claims:
     - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_dead_band_is_asked_of_the_side_that_is_read
     - tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_float64_field_downstream_of_a_float32_member_is_floored_at_float32
     - 'tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_set_flag_stands_on_a_bound_at_or_above_the_distance_in_a_group_of_two_dtypes'
+    - tests/core/test_the_float_floor_keeps_a_position_at_its_own_dtype.py::test_the_position_fields_are_the_ones_an_internal_edge_anchors_its_geometry_at
+    - tests/core/test_the_float_floor_keeps_a_position_at_its_own_dtype.py::test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_a_bound_that_holds
     - 'tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_every_entry_of_the_floor_is_counted_at_the_groups_coarsest_eps'
     - tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_floor_never_falls_below_the_one_each_field_had_alone
     - 'tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_group_of_one_dtype_keeps_the_floor_it_had'
@@ -4259,7 +4292,11 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
     - src/maddening/core/coupling/acceleration.py:960 (PRECISION_FLOOR_ULPS)
   conditions: >-
-    float32, n <= 6. Not claimed for float64 (x64), mixed dtypes or 16-bit
+    float32, n <= 6.
+    A mapped edge's row sum is outside what the constant was measured on:
+    it held by 3.9x for scatter-layout rows of up to 10 entries and failed
+    from 100 on (MADD-ANO-251, open).
+    Not claimed for float64 (x64), mixed dtypes or 16-bit
     floats.
   oracle: float64 evaluation of the same updates.
   tests:

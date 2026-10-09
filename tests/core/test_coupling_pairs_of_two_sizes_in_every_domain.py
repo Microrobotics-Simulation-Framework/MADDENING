@@ -914,7 +914,7 @@ def _check_diagnosed(cell) -> None:
     **A flag withdrawn for a mapped row is still a bound to hold.**  The
     dense form of the mapping is 36 entries wide, over the row limit of
     the float-floor guard, which counts a dense matrix at its width
-    (MADD-ANO-255): where a solve's residual is within the float floor
+    (MADD-ANO-257): where a solve's residual is within the float floor
     times that width the report withdraws ``spectral_usable`` with its
     reason and keeps every number.  Two cells accept there (the dense
     form under a tolerance near float32's floor), one of them on every
@@ -932,7 +932,7 @@ def _check_diagnosed(cell) -> None:
         differ = {key: (ra[key], rb[key]) for key in ra if key not in skipped
                   and not _numbers_agree(ra[key], rb[key], 1e-6 if _one_program(cell) else 2e-2)}
         assert sorted(ra) == sorted(rb) and not differ, f"{where}: (edge-mapped, twin) {differ}"
-        for_the_row = "MADD-ANO-255" in (ra.get("not_usable_reason") or "")
+        for_the_row = "MADD-ANO-257" in (ra.get("not_usable_reason") or "")
         if not ra["spectral_usable"] and not for_the_row:
             continue
         assert not for_the_row or cell.form == "matrix", (where, ra)

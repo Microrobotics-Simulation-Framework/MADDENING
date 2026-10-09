@@ -10,7 +10,7 @@ member swept before it from the same pass, so its residual is the whole
 loop's.
 
 This is the dead band's own behaviour, on plain edges, under every norm
-(MADD-ANO-252, open: no rule that only delays the exit is proved for
+(MADD-ANO-254, open: no rule that only delays the exit is proved for
 every loop, see the registry entry).  What is held here:
 
 * the defect stays visible: a strict xfail on the plain pair below;
@@ -106,7 +106,7 @@ def _held(run: list) -> bool:
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "MADD-ANO-252 (open): under Jacobi a field inside the dead band un-holds the fields "
+    "MADD-ANO-254 (open): under Jacobi a field inside the dead band un-holds the fields "
     "computed from it; the pair accepts after one pass, 4.5e5 to 7.4e5 tolerances off"))
 @pytest.mark.parametrize("norm", NORMS)
 def test_a_converged_jacobi_step_holds_the_fields_computed_from_a_dead_banded_one(norm):
@@ -182,7 +182,7 @@ def test_validate_advises_on_a_dead_band_declared_under_jacobi(norm):
     line = lines[0]
     assert line.startswith("WARNING: coupling group ['p', 'q']")
     assert "atol=1e-06" in line and "gauss-seidel" in line and "atol=0.0" in line
-    assert "MADD-ANO-252" in line
+    assert "MADD-ANO-254" in line
     assert _advisories(_uncompiled("gauss-seidel", ATOL, norm)) == []
     assert _advisories(_uncompiled("jacobi", 0.0, norm)) == []
 

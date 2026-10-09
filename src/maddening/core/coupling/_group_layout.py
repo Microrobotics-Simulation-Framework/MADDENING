@@ -155,7 +155,7 @@ def _dead_band_under_jacobi_advisories(group) -> list:
         f"(atol={group.atol!r}) with iteration_mode='jacobi': {_DEAD_BAND_UNDER_JACOBI} "
         f"a member that reads it is not held to the criterion in that pass, so the group "
         f"can report converged=True after one pass with the fields computed from it far "
-        f"from their fixed point (MADD-ANO-252).  Use iteration_mode='gauss-seidel', or "
+        f"from their fixed point (MADD-ANO-254).  Use iteration_mode='gauss-seidel', or "
         f"atol=0.0, wherever a member's output depends on a field that can fall inside "
         f"the dead band."]
 
@@ -195,7 +195,7 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 
 
 #: The longest row of a static mapping whose own rounding the float floor
-#: is taken to cover (MADD-ANO-255, open).  One limit for every static
+#: is taken to cover (MADD-ANO-257, open).  One limit for every static
 #: kind: a dense matrix, a static sparse mapping in the gather layout or
 #: in the scatter layout, a registered kind's own static class.
 #:
@@ -298,7 +298,7 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 #: with 8, 300 and 3000 markers in one cell behind a uniform field the
 #: bound read 13.8x, 3.8x and 1.3x the distance under ``"mixed"``, flags
 #: set (it held, by less than two at 3000; under ``"interface"`` such a
-#: group reports no bound).  MADD-ANO-255 records all of it.
+#: group reports no bound).  MADD-ANO-257 records all of it.
 MAPPED_ROW_FLOOR_LIMIT = 10  # units: entries of one row of a static mapping
 
 #: Why ``spectral_usable`` and ``gradient_bound_usable`` are withdrawn
@@ -314,7 +314,7 @@ _MAPPED_ROW_REASON = (
     "float floor ({floor:.3g}) times the row's length. The sum of a row rounds by more "
     "than the fixed number of ulps per evaluation the float floor counts once the row "
     "is longer than the limit, so spectral_error_bound (and the gradient bound built on "
-    "it) can read below the true distance here (MADD-ANO-255). spectral_usable and "
+    "it) can read below the true distance here (MADD-ANO-257). spectral_usable and "
     "gradient_bound_usable are therefore False; every number is reported as computed. "
     "The way out: hold the group's fields in a wider dtype at the same tolerance, so "
     "that the residual stands clear of the floor.{others}"

@@ -81,7 +81,7 @@ scatter layout on the CPU; the gather layout's float32 rows of 1e4 entries
 and more on jax 0.10.2).  ``coupling_diagnostics()`` withdraws
 ``spectral_usable`` behind a row longer than ``MAPPED_ROW_FLOOR_LIMIT``
 entries at the float floor, in either layout as behind a dense matrix
-(MADD-ANO-255), so neither layout is a way round it.
+(MADD-ANO-257), so neither layout is a way round it.
 
 Summation order
 ---------------
@@ -839,7 +839,7 @@ def sparse_nearest_neighbor_mapping(
 
         In either form a coupling report withdraws ``spectral_usable``
         behind a row of more than ten entries at the float floor
-        (MADD-ANO-255).
+        (MADD-ANO-257).
     source_ref, target_ref : optional
         Where the points come from, for serialisation, as in
         :func:`~maddening.core.coupling.mapping.rbf_mapping`.

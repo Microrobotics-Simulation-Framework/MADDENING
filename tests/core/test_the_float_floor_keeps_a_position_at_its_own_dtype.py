@@ -191,7 +191,7 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
     the edge back, ``q.x -> p.u``, is a dense matrix 30 entries wide (an
     interpolation, two non-zeros a row), which that guard counts at its
     width, and at the float floor it withdraws the flags behind a row
-    over ten entries, with its reason (MADD-ANO-255).  Every number is
+    over ten entries, with its reason (MADD-ANO-257).  Every number is
     the one it was."""
     with x64(True):
         fine = _stalled("float32", "float64")
@@ -205,7 +205,7 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
         assert not report["spectral_usable"], report
         for said in ("q.x->p.u", "a dense matrix mapping (matrix), counted at the matrix's width,",
                      "adds up 30 entries",
-                     "MADD-ANO-255", "a wider dtype"):
+                     "MADD-ANO-257", "a wider dtype"):
             assert said in report["not_usable_reason"], (said, report["not_usable_reason"])
         assert report["spectral_error_bound"] == bare["spectral_error_bound"], (report, bare)
         assert report["spectral_error_bound"] >= 10.0 * report["distance"] > 0.0, report

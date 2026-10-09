@@ -757,7 +757,7 @@ claims:
     group at its float floor behind a long row can read
     spectral_error_bound below its distance, and the report withdraws
     spectral_usable there behind a row of more than ten entries in either
-    layout, as behind a dense matrix more than ten wide (MADD-ANO-255,
+    layout, as behind a dense matrix more than ten wide (MADD-ANO-257,
     open).
   oracle: >-
     the sum over each row's own slots in 80-bit extended precision, and its
@@ -1359,7 +1359,7 @@ claims:
     entries, in either layout, the report withdraws spectral_usable at
     the float floor (the gather layout's rows of 1e4 entries and more
     were measured summed in order on jaxlib 0.10.2 as well)
-    (MADD-ANO-255, open).
+    (MADD-ANO-257, open).
     Not claimed for x64, mixed dtypes, 16-bit floats, gradients,
     vmap or sharded graphs.
   oracle: NumPy's in-order np.add.at in float32, byte for byte; the set of results of ten calls.

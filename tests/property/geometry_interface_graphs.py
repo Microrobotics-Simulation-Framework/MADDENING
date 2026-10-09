@@ -663,25 +663,29 @@ class Reference:
     def floor(self, x: Optional[dict] = None) -> float:
         """The float floor of that residual at the state *x* (the pre-step
         state by default), per evaluation: four units of each entry's resolution over what it is
-        measured against, over ``rtol``, pooled as the residual is.  The
-        resolution is the ``eps`` of **the group's coarsest dtype** (the
-        coarser of the values' and the positions': any field of a group
-        may be downstream of its coarsest member, so no entry of a
-        group's floor is counted finer) -- as it stands for a value, at
-        least ``eps |u|`` for a delivered one (the rounding of the
-        positions it was gathered at, in spacings, moves its weights),
-        and ``eps |u|`` for a position ``u`` spacings from zero."""
+        measured against, over ``rtol``, pooled as the residual is.  Two
+        rules together (``acceleration._group_coarsest_eps``):
+
+        * a **value** entry at the ``eps`` of the group's coarsest dtype
+          (the coarser of the values' and the positions': any value of a
+          group may be downstream of its coarsest member), and a
+          delivered one no finer than the rounding ``eps |u|`` in
+          spacings of the positions it was gathered at, which moves its
+          weights;
+        * a **position** ``u`` spacings from zero at ``eps |u|`` of the
+          positions' **own** dtype, whatever the values' is.
+        """
         eps_x = float(np.finfo(np.dtype(self.shape.dtype)).eps)
         eps_g = float(np.finfo(np.dtype(self.shape.geometry_dtype)).eps)
-        eps_c = max(eps_x, eps_g)       # ``acceleration._group_coarsest_eps``
+        eps_c = max(eps_x, eps_g)       # the group's coarsest: value entries
         x = self.pre if x is None else x
         total, count = 0.0, 0
         for i, value, unit in self.parts(x):
             if unit == SPACINGS:
-                eps = eps_c * float(np.max(np.abs(value)))
+                eps = eps_g * float(np.max(np.abs(value)))
             elif self.way(i) == "gather":
                 reach = float(np.max(np.abs(self.geometry(i, x[EDGES[i][0]]) / self.h)))
-                eps = max(eps_c, eps_c * reach)
+                eps = max(eps_c, eps_g * reach)
             else:
                 eps = eps_c
             total += value.size * (eps / RTOL) ** 2

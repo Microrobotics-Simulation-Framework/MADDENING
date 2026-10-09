@@ -691,6 +691,14 @@ def test_a_false_flag_names_a_lattice_plane_only_where_a_plane_rule_is_a_cause()
     assert advice not in _flags(margin=np.nan)[2]            # not measured
     assert "brings the iterate into the fixed point's cell" not in _flags(margin=0.25)[2]
 
+    # On a plane the reason is the plane's alone, whatever the gradient
+    # bound and the limit read: the report of a state at rest on a plane
+    # does not change with which side of it rounding put the Newton point.
+    resting = {_flags(margin=0.0, limit=limit, gradient_bound=gradient)
+               for limit in (0.0, 1.0) for gradient in (2e-2, np.inf, np.nan)}
+    assert len(resting) == 1 and next(iter(resting))[:2] == (False, False), resting
+    assert "can read inf on one step and a number on the next" in next(iter(resting))[2]
+
     # No estimate: the flags are False and the NaN numbers are the reason.
     assert _flags(rho=np.nan, bound=np.nan, gradient_bound=np.nan, settled=False,
                   margin=np.nan, limit=np.nan) == (False, False, None)

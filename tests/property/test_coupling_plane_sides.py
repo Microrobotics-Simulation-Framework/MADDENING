@@ -204,6 +204,38 @@ def _check_rows(structure: str) -> None:
                 assert where["p_in_cell"] and where["p_is_fixed_point"], told
 
 
+def test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step():
+    """A marker at rest at coordinate 0.0, the lower face of a lattice whose
+    origin is 0.0, its position read from the iterate: a lattice plane is
+    in the Newton-Kantorovich ball at any residual, so both flags are
+    ``False`` on every step with one reason.  (The Newton step's entry for
+    that position is rounding of either sign, which nothing absorbs at
+    exactly zero: on the steps where it is negative the Newton point is
+    outside the hull and ``gradient_relative_error_bound`` reads ``inf``.
+    ``spectral_usable`` used to follow it, on a third to a half of the
+    steps of one resting state.)"""
+    row = next(r for r in _rows_of("f32 gauss-seidel l2") if r["gradient_bound_usable"])
+    cfg = ps.as_cfg({**row["cfg"], "aF": 0.5, "bF": 0.1, "aP": 0.5, "bP": 1.0, "cP": 0.0,
+                     "quad": 0.0, "kP": 0.0, "vP": [0.0], "posP0": [0.0]})
+    assert cfg.anchors == ("target", "source") and cfg.origin == (0.0,)
+    reasons = set()
+    with precision(False):
+        gm = _graph(_structure_key(cfg))
+        ps.load(cfg, gm)
+        for _step in range(12):
+            x, _c, report = ps.step_report(cfg, gm)
+            assert float(x[ps.pos_slices(cfg)["P"]][0]) == 0.0           # at rest, on the face
+            assert report["spectral_usable"] is False, report
+            assert report["gradient_bound_usable"] is False, report
+            assert not report["precision_limited"] and np.isfinite(report["rho_spectral"])
+            margin = float(gm._state["_meta"][f"coupling_{KEY}_geometry_plane_margin"])  # noqa: SLF001
+            assert margin == 0.0
+            reasons.add(report["not_usable_reason"])
+    (reason,) = reasons
+    assert "is on a lattice plane" in reason and "no tolerance restores the flags" in reason
+    assert "at a tighter tolerance" not in reason, reason
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 

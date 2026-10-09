@@ -441,7 +441,10 @@ _CAUSE_ON_PLANE = (
     "restores the flags, or the pass itself moves it across one: the plane is inside the "
     "Newton-Kantorovich ball around the returned iterate at any residual, so the lattice "
     "cell of the fixed point is not decided (hold the position constant during the pass, or "
-    "keep it a fraction of a cell off the planes)"
+    "keep it a fraction of a cell off the planes). On a plane the Newton-Kantorovich "
+    "check's own outcome is rounding's: the Newton point falls on either side of it, so "
+    "gradient_relative_error_bound can read inf on one step and a number on the next for "
+    "the same state"
 )
 _CAUSE_IN_BALL = (
     "a lattice plane of the mapping's grid, or a face of its hull, is inside the "
@@ -513,6 +516,17 @@ def _geometry_flags(keys, *, bound: float, gradient_bound: float, rho: float,
       short of the plane, MADD-ANO-248).  A margin that is absent or not
       a number is no margin; ``inf`` is a pass that reads no position
       from the iterate.
+      A margin of zero is a position *on* a plane (or moved across one
+      by the pass), and is the whole of the reason: there the check's
+      outcome is rounding's.  Measured on a marker at rest at coordinate
+      0.0, the lower face of a lattice whose origin is 0.0: the Newton
+      step's entry for the position is rounding of the resolvent, about
+      1e-20 of either sign, which nothing absorbs at exactly zero, so the
+      Newton point was 1e-20 outside the hull on the steps where it was
+      negative -- the clamped kernel, another polynomial -- and the bound
+      read ``inf`` on 59 of those 60 steps and on none of the 53 where it
+      was positive.  The flags of such a state are ``False`` on every
+      step and its reason does not change with that reading.
     * **the limit**: where a plane is within *reach* times the bound
       (*bound* over *limit*, the step's ``geometry_plane_limit``; a limit
       that is absent or not a number counts) the Newton-Kantorovich check
@@ -555,7 +569,9 @@ def _geometry_flags(keys, *, bound: float, gradient_bound: float, rho: float,
         else:
             plane.append(_CAUSE_IN_BALL.format(reach=reach, margin=margin)
                          + ("" if precision_limited else _ADVICE_IN_BALL))
-    if math.isfinite(bound) and not bound <= limit and not math.isfinite(gradient_bound):
+    on_a_plane = margin <= 0.0
+    if (math.isfinite(bound) and not bound <= limit and not math.isfinite(gradient_bound)
+            and not on_a_plane):
         plane.append(_CAUSE_LIMIT.format(
             reach=reach, bound=bound, limit=limit,
             check=_CHECK_NOT_COMPUTED if gradient_bound != gradient_bound
@@ -567,6 +583,9 @@ def _geometry_flags(keys, *, bound: float, gradient_bound: float, rho: float,
         own.append(_CAUSE_GRADIENT_INF)
     spectral_usable = not smooth and not plane
     gradient_bound_usable = spectral_usable and not own
+    if on_a_plane:
+        # What the gradient bound read there is not a cause: see above.
+        own = []
     if gradient_bound_usable or rho != rho:
         return spectral_usable, gradient_bound_usable, None
     stem = _GEOMETRY_FLAGS_STEM.format(keys=list(keys)) if plane else ""

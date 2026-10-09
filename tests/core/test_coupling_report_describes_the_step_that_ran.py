@@ -488,7 +488,10 @@ def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_a
     gm = G.graph(group=True)
     gm.step()
     first = report(gm)
-    assert "not_usable_reason" not in first and first["spectral_error_bound"] != "nan"
+    # Nothing is withheld; the one reason is the cause of its flags (the
+    # solve stops on the float floor), which names no geometry.
+    assert "geometry" not in first.get("not_usable_reason", "")
+    assert first["spectral_error_bound"] != "nan"
     assert first["rho_spectral"] != "nan" and first["gradient_relative_error_bound"] != "nan"
     slot = f"coupling_{G.GROUP}_geometry_gap"
     gap = np.asarray(gm._state["_meta"][slot])
@@ -513,4 +516,4 @@ def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_a
         if key != "not_usable_reason":
             assert value == WITHHELD.get(key, first[key]), key
     gm.step()
-    assert report(gm) == want and "not_usable_reason" not in want
+    assert report(gm) == want and "written" not in want.get("not_usable_reason", "")

@@ -113,13 +113,16 @@ def test_an_uncompiled_graph_s_text_names_the_geometry_too():
 # ---------------------------------------------------------------------------
 
 
-def test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_no_reason(grouped):
+def test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_the_floors_reason_alone(grouped):
     """The diagnostics read this group's geometry: the report is any other
-    group's, on every printer."""
+    group's, on every printer, with the cause of its ``False`` flags."""
     report = grouped.coupling_diagnostics()[G.GROUP]
-    assert "not_usable_reason" not in report
     # At its tolerance the solve stops on the float floor: the report says
-    # so, as it does for the static twin, and prints that caveat.
+    # so, as it does for the static twin, and prints that caveat.  That is
+    # the one cause of its flags, and the reason names it and no plane.
+    reason = report["not_usable_reason"]
+    assert reason.startswith("spectral_usable is False") and "float floor" in reason
+    assert "lattice plane" not in reason and "tighter tolerance does not lower" in reason
     assert report["ratio_usable"] is True and report["precision_limited"] is True
     for bound in ("rho_spectral", "spectral_error_bound", "gradient_relative_error_bound",
                   "error_estimate"):

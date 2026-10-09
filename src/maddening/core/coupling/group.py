@@ -141,6 +141,27 @@ class CouplingGroup:
         out of ``residual`` and no ``tolerance`` can contradict the
         resulting ``converged=True``.  That is why the default asserts
         nothing and why raising it is a claim about *your* units.
+
+        Under ``convergence_norm="interface"`` an edge read at its source
+        (a static mapping onto more entries than its field holds) has two
+        quantities, the field and what the edge delivers, and its reading
+        leaves the norm only where **both** are at or below ``atol``.
+
+        **Under** ``iteration_mode="jacobi"`` **a field inside the dead
+        band also un-holds, for a pass or more, the fields computed from
+        it.**  Every member reads the previous iterate, so with ``p``
+        dropped the residual of ``p <- f(q)``, ``q <- g(p)`` tests only
+        that ``q`` agrees with the ``p`` it was computed from.  Measured
+        on a pair whose three forces of 1e-8 are inside ``atol = 1e-6``
+        and are amplified by the member that reads them: ``converged=True``
+        after one pass on every other step, 4.5e5 to 7.4e5 tolerances from
+        the fixed point, under all three norms (two to four passes and
+        5e5 to 6.3e5 where the dropped member carries state); Gauss-Seidel
+        held at 0.5 to 4.9 in both sweep orders.  ``validate()`` and
+        ``compile()`` say so for every group that sets ``atol > 0`` under
+        Jacobi (MADD-ANO-248, open).  Use Gauss-Seidel, or leave ``atol``
+        at 0, wherever a member's output depends on a field that can fall
+        inside the band.
     rtol : float
         Relative change demanded of every field above the dead band,
         under the ``"mixed"`` and ``"interface"`` norms.  Read **only**

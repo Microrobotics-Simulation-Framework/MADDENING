@@ -374,18 +374,23 @@ def _norm(group, new: dict, old: dict, weights_from_new: bool = False) -> float:
 
 
 def floor_of(r: Record) -> float:
-    """``FLOOR_ULPS * m`` units of each field's own ``eps`` per entry, in the
-    norm's units: ``sqrt(sum eps**2)`` under L2, the RMS of ``eps / rtol``
-    under the mixed norm."""
+    """``FLOOR_ULPS * m`` units of ``eps`` per entry, in the norm's units:
+    ``sqrt(sum eps**2)`` under L2, the RMS of ``eps / rtol`` under the
+    mixed norm, with ``eps`` that of the coarsest dtype among the pair's
+    fields (a field computed from a coarser member's output carries its
+    rounding: in the mixed-dtype domain the float64 member's entries are
+    counted at float32's)."""
     l2 = r.group.convergence_norm == "l2"
     rtol = 1.0 if l2 else float(r.group.rtol)
+    coarsest = max(_eps(np.asarray(v).dtype) for n in ("a", "b") for v in r.state[n].values()
+                   if np.asarray(v).size)
     total, count = 0.0, 0
     for n in ("a", "b"):
         for v in r.state[n].values():
             if not float(np.max(np.abs(_f64(v)))) > float(r.group.atol):
                 continue
             size = np.asarray(v).size
-            total += size * (_eps(np.asarray(v).dtype) / rtol) ** 2
+            total += size * (coarsest / rtol) ** 2
             count += size
     if count == 0:
         return 0.0
@@ -1235,7 +1240,8 @@ def _precision_limited(run: DomainRun):
 
 @check("CPL-100")
 def _the_floor_formula(run: DomainRun):
-    """The floor is 4 m eps per entry in the norm's units, each field at its own dtype."""
+    """The floor is 4 m eps per entry in the norm's units, every entry at the eps of
+    the group's coarsest dtype."""
     problems = []
     for r in _reported(run.main + run.plain):
         if not r.finite:

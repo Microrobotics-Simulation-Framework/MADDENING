@@ -671,20 +671,17 @@ def _check_claim(cell, count=None) -> None:
 def _floor(cell) -> float:
     """The float floor of the pair's residual per evaluation, from the rule:
     ``4 eps / rtol`` pooled over the entries the norm reads -- an edge that
-    expands at its source field's entries and that field's own eps, any
-    other at the entries it delivers and the coarser of the delivered
-    dtype's eps and its source's."""
+    expands at its source field's entries, any other at the entries it
+    delivers -- every entry at the eps of the coarsest dtype among the
+    pair's fields (which is at least the delivered dtype's and its
+    source's: the pair's edges deliver one member's dtype or the other's)."""
     d, shape = cell.domain, cell.shape
-    dtype = {sg_name: (d.dtype_a if name == "a" else d.dtype_b)
-             for sg_name, name in cell.names.items()}
     sizes = sg.node_sizes(shape)
+    eps = max(_eps(d.dtype_a), _eps(d.dtype_b))
     total = count = 0.0
     for e in sg.edges_of(shape):
         n_source, n_delivered = sizes[e.src][0], sizes[e.dst][1]
-        if sg.side_of(n_source, n_delivered) == "source":
-            n, eps = n_source, _eps(dtype[e.src])
-        else:
-            n, eps = n_delivered, max(_eps(dtype[e.dst]), _eps(dtype[e.src]))
+        n = n_source if sg.side_of(n_source, n_delivered) == "source" else n_delivered
         total += n * eps * eps
         count += n
     return PRECISION_FLOOR_ULPS * math.sqrt(total / count) / cell.rtol

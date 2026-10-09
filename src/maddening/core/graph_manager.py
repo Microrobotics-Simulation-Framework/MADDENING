@@ -2523,7 +2523,12 @@ class GraphManager:
 
         ``HeatNode`` uses it for two rods coupled end to end past their
         coupled-pair Fourier limit (MADD-ANO-050).
+
+        The group's own settings are advised on first, whatever its
+        members: a dead band declared under Jacobi
+        (``_group_layout._dead_band_under_jacobi_advisories``).
         """
+        own = _group_layout._dead_band_under_jacobi_advisories(group)
         members = {
             name: self._nodes[name] for name in sorted(group.nodes)
             if name in self._nodes
@@ -2534,7 +2539,7 @@ class GraphManager:
             if callable(hook) and not any(hook is h for h in hooks):
                 hooks.append(hook)
         if not hooks:
-            return []
+            return own
         # How many values arrive at each (node, input) from anywhere in the
         # graph: a hook reasoning about "this input is that node's value"
         # needs to know nothing else writes to it.
@@ -2551,7 +2556,7 @@ class GraphManager:
             feeds=dict(feeds),
             live_params=dict((self.params or {}).get("nodes") or {}),
         )
-        out: list[str] = []
+        out: list[str] = list(own)
         for hook in hooks:
             out.extend(hook(**context))
         return out

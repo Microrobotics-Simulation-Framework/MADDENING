@@ -119,6 +119,47 @@ def _reads_mapping_weights(group, plan) -> bool:
         or (group.atol > 0 and plan.band_reads_beyond_the_state()))
 
 
+#: The start of the advisory about a dead band under Jacobi
+#: (:func:`_dead_band_under_jacobi_advisories`); the test configuration
+#: filters ``compile()``'s copy of it by this text.
+_DEAD_BAND_UNDER_JACOBI = "a field inside the dead band leaves the residual, and under Jacobi"
+
+
+def _dead_band_under_jacobi_advisories(group) -> list:
+    """``WARNING:`` lines for a group that declares a dead band under Jacobi.
+
+    A field at or below ``atol`` leaves the residual.  Under Jacobi every
+    member reads the previous iterate, so with ``p`` dropped the residual
+    of a pair ``p <- f(q)``, ``q <- g(p)`` is ``|g(p_k) - q_k|``: it
+    tests that ``q`` agrees with the ``p`` it was computed from, and
+    nothing tests ``p = f(q)`` in that pass.  A kept field can then be
+    returned with ``converged=True`` far from its fixed point: a pair
+    whose three forces of 1e-8 fall inside ``atol = 1e-6`` and are
+    amplified by the member that reads them accepted after one pass on
+    every other step, 4.5e5 to 7.4e5 tolerances off, under all three
+    norms; where the dropped member carries state it accepted after two
+    to four passes, 5e5 to 6.3e5 off, on every step after the first
+    (CPU, jaxlib 0.11.0).  Gauss-Seidel held on the same pairs in both
+    sweep orders (0.5 to 4.9 tolerances), and so does ``atol = 0``.
+
+    Not refused: where no kept member's output depends on a field that
+    can fall inside the band, the configuration is sound, and only the
+    caller knows.  Static: the group's two settings.  Read by
+    ``GraphManager._coupling_group_advisories`` (``validate()``, and
+    ``compile()`` as a ``UserWarning``).
+    """
+    if not (group.atol > 0 and group.iteration_mode == "jacobi"):
+        return []
+    return [
+        f"WARNING: coupling group {sorted(group.nodes)} declares a dead band "
+        f"(atol={group.atol!r}) with iteration_mode='jacobi': {_DEAD_BAND_UNDER_JACOBI} "
+        f"a member that reads it is not held to the criterion in that pass, so the group "
+        f"can report converged=True after one pass with the fields computed from it far "
+        f"from their fixed point (MADD-ANO-248).  Use iteration_mode='gauss-seidel', or "
+        f"atol=0.0, wherever a member's output depends on a field that can fall inside "
+        f"the dead band."]
+
+
 def _floor_needs_the_step(group, interface_edges) -> bool:
     """Can the float floor of *group*'s residual be measured only by the
     step that solved it, whatever weights the graph holds?

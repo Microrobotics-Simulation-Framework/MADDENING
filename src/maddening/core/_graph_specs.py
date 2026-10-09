@@ -427,6 +427,45 @@ def _apply_edge(edge: EdgeSpec, value, params, geom=None):
     return _delivered(edge, value, None if params is None else params.mappings, geom)
 
 
+#: ``CouplingGroup.iteration_mode`` as ``validate()`` writes it.
+_ITERATION_MODE_NAMES = {"gauss-seidel": "Gauss-Seidel", "jacobi": "Jacobi"}
+
+
+def _iteration_mode_name(group) -> str:
+    """The schedule *group* iterates in, as ``validate()`` names it."""
+    mode = group.iteration_mode
+    return _ITERATION_MODE_NAMES.get(mode, str(mode))
+
+
+def _self_edge_message(edge: EdgeSpec, group, reads_flux: bool) -> str:
+    """What ``validate()`` says about *edge*, an edge from a node to itself.
+
+    *group* is the coupling group that holds the node, or ``None``, and
+    that alone decides which of its own values the node reads.  The two
+    sentences are ``GraphManager.add_edge``'s own, so the line, the
+    docstring and the guides say one thing.  *reads_flux*: the source is a
+    boundary flux, which is iterated inside a group like any other edge
+    and cannot be read outside one: a flux is not kept from one step to
+    the next, so the step raises (MADD-ANO-157).  The line must not say
+    "reads the previous step" of an edge that will not trace.
+    """
+    head = (f"edge {edge.source_node}.{edge.source_field} -> "
+            f"{edge.target_node}.{edge.target_field} is from node "
+            f"'{edge.source_node}' to itself. ")
+    if group is not None:
+        return (head + f"With the node in a coupling group ({sorted(group.nodes)}) "
+                "the edge is iterated with the group and at convergence the node "
+                "reads its new value, so the term is implicit.")
+    if reads_flux:
+        return (head + "Outside a coupling group it is a back edge, and its source "
+                "is a boundary flux, which cannot be read there: the previous step's "
+                "flux is not kept, and the step raises instead of reading it "
+                "(MADD-ANO-157). Put the node in a group, or carry the quantity in "
+                "a state field.")
+    return (head + "Outside a coupling group it is a back edge: the node reads its "
+            "state of the previous step, so the term the edge carries is explicit.")
+
+
 def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:
     """Each node's timestep as ``compile()`` schedules it.
 

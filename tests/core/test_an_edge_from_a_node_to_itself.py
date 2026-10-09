@@ -394,16 +394,30 @@ def test_a_graph_whose_only_remark_is_that_line_compiles_and_steps_with_warnings
 
 
 def test_the_guides_show_the_lines_validate_gives():
-    """The quickstart's rod and the coupling guide's ``a``, with any line breaks taken out."""
+    """The quickstart's two rods and the coupling guide's ``a``, read from the library.
+
+    Each guide prints the lines whole; a line break in the page is taken
+    as the space it stands for.
+    """
     def text(path):
         return " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
 
-    quickstart = text("docs/user_guide/quickstart.md")
-    for group in (None, ["rod"]):
-        assert _says("temperature", "heat_source", "rod", group=group) in quickstart
-    guide = text("docs/developer_guide/coupling_algorithm_guide.md")
-    for line in (_says("x"), _says("x", group=["a"]), _says("q", flux=True)):
-        assert line in guide
+    def rod(grouped):
+        gm = GraphManager()
+        gm.add_node(HeatNode("rod", DT, n_cells=4, thermal_diffusivity=0.1))
+        gm.add_edge("rod", "rod", "temperature", "heat_source", transform=_loss)
+        if grouped:
+            gm.add_coupling_group(["rod"], max_iterations=50)
+        return gm
+
+    for path, graphs in (
+            ("docs/user_guide/quickstart.md", (rod(False), rod(True))),
+            ("docs/developer_guide/coupling_algorithm_guide.md",
+             (_built(), _built({}), _built(node=FluxRate, field="q")))):
+        page = text(path)
+        for gm in graphs:
+            (line,) = gm.validate()
+            assert line.startswith("INFO: edge ") and line in page, (path, line)
 
 
 # ---------------------------------------------------------------------------
@@ -448,12 +462,11 @@ def _pair(neighbour, groups, order=("a", "b"), self_edge_last=False, group_kw=No
 
 _ORDERS = (("a", "b"), ("b", "a"))
 #: Of the 40 graphs, the ones stepped on every push: the eight with no group
-#: (an uncoupled step compiles in a few hundredths of a second) and five
-#: grouped ones that hold each neighbour and each grouping, among them the
-#: group of one inside the loop ``a -> b -> a`` and the group of both.
+#: (an uncoupled step compiles in a few hundredths of a second) and four
+#: grouped ones, one for each grouping, among them the group of one inside
+#: the loop ``a -> b -> a`` and the group of both.
 _LEVEL_PER_PUSH = (
     *((neighbour, "no group", order) for neighbour in _NEIGHBOUR_EDGES for order in _ORDERS),
-    ("none", "[a]", ("b", "a")),
     ("b->a", "[b]", ("a", "b")),
     ("both", "[a]", ("b", "a")),
     ("both", "[a, b]", ("a", "b")),
@@ -462,7 +475,7 @@ _LEVEL_PER_PUSH = (
 
 
 # Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group
-# (the 13 graphs of _LEVEL_PER_PUSH; the other 27 are the slow ones)
+# (the 12 graphs of _LEVEL_PER_PUSH; the other 28 are the slow ones)
 @pytest.mark.parametrize("neighbour, groups, order", _cells(
     _LEVEL_PER_PUSH, tuple(_NEIGHBOUR_EDGES), tuple(_GROUPS), _ORDERS))
 def test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group(
@@ -588,7 +601,9 @@ def test_each_convergence_norm_stops_at_the_implicit_value(norm):
         assert _x(gm) == pytest.approx(IMPLICIT, abs=CLOSE)
 
 
-@pytest.mark.parametrize("solver", ["ift", "fori"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_implicit[ift]
+# (the same three caps under the solver that is not deprecated, and strict_convergence)
+@pytest.mark.parametrize("solver", ["ift", pytest.param("fori", marks=pytest.mark.slow)])
 def test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_implicit(solver):
     """A pass reads the previous iterate, and the first pass the previous step.
 

@@ -6347,11 +6347,13 @@ claims:
     through the edge steps as x (1 - k dt)).  With the node in a coupling
     group (... a group of that one node is enough) the edge is iterated
     with the group and at convergence the node reads its new value, so the
-    term is implicit (x / (1 + k dt)).  Nothing else decides it, and
-    neither validate() nor compile() remarks on it; format_graph() says
-    which beside the edge."
+    term is implicit (x / (1 + k dt)).  Nothing else decides it.
+    validate() says which in an INFO: line for the edge and format_graph()
+    beside the edge; compile() raises no warning for it."
   sources:
     - src/maddening/core/graph_manager.py::GraphManager.add_edge
+    - src/maddening/core/graph_manager.py::GraphManager.validate
+    - src/maddening/core/_graph_specs.py::_self_edge_message
     - src/maddening/core/graph_manager.py::GraphManager.add_coupling_group
     - src/maddening/core/coupling/group.py::CouplingGroup (nodes)
     - docs/user_guide/quickstart.md#an-edge-from-a-node-to-itself
@@ -6377,8 +6379,21 @@ claims:
     term is implicit over the group's step and not its own sub-step, under
     each boundary_interpolation (MADD-ANO-027).  An edge from the node's
     own boundary flux is iterated inside a group; outside one it cannot be
-    read (CPL-186, MADD-ANO-157).  auto_couple() groups loops of two or
-    more nodes and leaves the edge explicit.  Not tested: an interface
+    read (CPL-186, MADD-ANO-157), and validate()'s line for it says that
+    and not that it reads the previous step.  auto_couple() groups loops
+    of two or more nodes and leaves the edge explicit.  validate() gives
+    one INFO: line for each edge from a node to itself, in the order the
+    edges were added and after its lines for loops of two or more nodes:
+    the edge, the node and add_edge's sentence for where the node is, with
+    the group's members when it is in one; an edge whose source field does
+    not exist has its ERROR and no such line.  The line for an edge
+    outside a group is also logged at INFO, as a staggered loop's is.  A
+    graph whose only lines are these compiles and steps with warnings
+    turned into errors, and POST /graph/validate returns the lines as they
+    are.  The line validate() gives a loop of two or more nodes that a
+    coupling group iterates names that group's iteration_mode (it named
+    Gauss-Seidel for a Jacobi group in every release to 0.3.1).  Not
+    tested: an interface
     mapping or a geometry on the edge, waveform_iterations above one, a
     term nonlinear in the value read.  Not claimed for mixed dtypes,
     16-bit floats, vmap, a checkpoint restart or sharded graphs.
@@ -6406,6 +6421,15 @@ claims:
     - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took
     - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_from_a_nodes_own_flux_is_iterated_inside_a_group
     - tests/core/test_an_edge_from_a_node_to_itself.py::test_auto_couple_puts_no_group_around_a_node_whose_only_loop_is_its_own_edge
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_says_which_of_its_own_values_the_node_reads_through_the_edge
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_gives_each_edge_to_itself_its_own_line_after_the_lines_for_longer_loops
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_to_itself_from_a_field_that_does_not_exist_has_its_error_and_no_line
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_line_for_an_edge_outside_a_group_is_logged_as_a_staggered_loop_is
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_graph_whose_only_remark_is_that_line_compiles_and_steps_with_warnings_as_errors
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_tells_an_edge_from_a_nodes_own_flux_outside_a_group_that_it_cannot_be_read
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_guides_show_the_lines_validate_gives
+    - tests/api/test_graph_endpoint_validation.py::test_validate_reports_an_edge_from_a_node_to_itself_and_the_graph_still_compiles_and_steps
+    - tests/core/test_coupling.py::TestCouplingValidation::test_cycle_covered_by_group_names_the_groups_iteration_mode
     - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_ball_position_to_table
     - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_spring_position_to_anchor
     - tests/core/test_schedule.py::TestIdentifyBackEdges::test_self_loop_is_back_edge
@@ -6421,9 +6445,18 @@ claims:
     or any finite state".  Decided: the behaviour stays, with no warning,
     because a group around the node is how the term is made implicit; it is
     stated in add_edge, add_coupling_group, CouplingGroup and two guides.
-    validate() names every loop of two or more nodes ("cycle detected",
-    "handled by iterative coupling") and has no line for a self-loop in
-    either place.
+    validate() named every loop of two or more nodes ("cycle detected",
+    "handled by iterative coupling") and had no line for a self-loop in
+    either place (detect_cycles drops an edge from a node to itself); it
+    has one since 0.4.0, approved 2026-10-08 for parity with longer loops,
+    and that line is how a user learns which reading an edge has.  The
+    wide products of the test module (the 40 graphs, schedule by solver by
+    acceleration, scheme by precision of the gradient, the other order of
+    a grouped additive edge, the fori solver at a cap) run whole in the
+    slow lane; every push runs a part of each that holds every schedule,
+    solver, interpolation, precision and grouping, with aitken, fixed and
+    IQN-ILS.  IQN-IMVJ around an edge to itself, and the gradient through
+    an accelerated group, are checked in the slow lane only.
   domains:
     f32: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
     f64: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value

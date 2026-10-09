@@ -160,6 +160,18 @@ class MultilinearGridMapping:
         points = (self.n_points,)
         return (grid, points) if self.mode == "consistent" else (points, grid)
 
+    def geometry_length_scale(self) -> tuple:
+        """The kind's own length scale on each coordinate axis of the
+        geometry: the grid spacing.
+
+        The unit ``convergence_norm="interface"`` measures a position in
+        where it reads this mapping at its source (a scatter of a few
+        points onto a larger grid): a point that moves by one spacing
+        moves its deposit by one cell, wherever the origin of the
+        coordinates is.
+        """
+        return self.spacing
+
     def accepts_geometry_shape(self, shape) -> bool:
         """Whether a geometry of *shape* can be read: ``(n_points, d)``,
         or ``(n_points,)`` on a one-dimensional grid."""

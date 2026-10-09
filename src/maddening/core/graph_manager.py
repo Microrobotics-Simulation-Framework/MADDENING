@@ -2471,7 +2471,7 @@ class GraphManager:
             issues.extend(_group_layout._flux_edge_coupling_errors(
                 group, self._nodes, plan, self._state,
             ))
-            issues.extend(_group_layout._geometry_edge_coupling_errors(group, plan))
+            issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._nodes, plan))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
 
@@ -2636,6 +2636,19 @@ class GraphManager:
                 self._state, self._nodes)
             for g in self._coupling_groups
         }
+        # Positions an interface reading rests on (read in grid spacings,
+        # or what a delivered value is computed at), held in a dtype that
+        # cannot resolve the group's tolerance where they are
+        # (experimental; a float32 coordinate far from zero).  A warning:
+        # the step is built as it would be without it.  On the count the
+        # report's floor is committed with below; a group under another
+        # norm, or without such positions, has nothing to say.
+        for g in self._coupling_groups:
+            evaluations, _declared = _group_layout._group_evaluations(
+                g, self._nodes, schedule, self._edges)
+            for warning_text in _group_layout._unresolved_position_warnings(
+                    g, interface_plans["+".join(sorted(g.nodes))], self._state, evaluations):
+                warnings.warn(warning_text, UserWarning, stacklevel=2)
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,
@@ -2780,8 +2793,9 @@ class GraphManager:
                     if _group_layout._reads_mapping_weights(g, interface_plans[key]):
                         # The residual's float floor per evaluation, which
                         # the step measures where the interface norm reads
-                        # a mapped edge (its delivered value depends on the
-                        # weights the step ran with); NaN reads as "not
+                        # an edge through its mapping (the delivered value
+                        # depends on the weights the step ran with; an edge
+                        # read at its source does not); NaN reads as "not
                         # measured".  Same condition as the write in
                         # ``_run_coupled_block_impl``.
                         meta[f"coupling_{key}_reading_floor"] = jnp.array(
@@ -3159,12 +3173,12 @@ class GraphManager:
         }
         # What the report's float floor rests on, as the step was built:
         # each group's structural evaluation count, whether every member
-        # declared it, and its internal edges as they were declared
-        # (``coupling_diagnostics``; ``InterfacePlan.declared_edges``).
+        # declared it, and its internal edges in the order its norm sums
+        # them (``coupling_diagnostics``; ``InterfacePlan.norm_edges``).
         self._committed_floor_inputs = {
             "+".join(sorted(g.nodes)): (
                 *_group_layout._group_evaluations(g, self._nodes, self._schedule, self._edges),
-                interface_plans["+".join(sorted(g.nodes))].declared_edges())
+                interface_plans["+".join(sorted(g.nodes))].norm_edges())
             for g in self._coupling_groups
         }
         self._committed_geometry_edges = {
@@ -4477,9 +4491,12 @@ class GraphManager:
               since -- a node rebuilt with another declared count -- does
               not move the report of a step that already ran, and a group
               a member of which was removed since has no entry.  Under
-              ``convergence_norm="interface"`` with an interface mapping
-              on an internal edge the entries are what the edges deliver,
-              which depends on the mapping weights the step ran with
+              ``convergence_norm="interface"`` the entries are what that
+              norm reads on each internal edge: the value the edge
+              delivers, or the source field itself where a static mapping
+              delivers more entries than the source holds.  A value
+              delivered through an interface mapping
+              depends on the mapping weights the step ran with
               (``params["mappings"]``, which a caller may override for one
               step): the step measures that group's floor itself and the
               report reads it, so a ``params`` override, or an edit of the
@@ -4546,7 +4563,11 @@ class GraphManager:
               the "fields" are what that norm reads: the value each
               internal edge *delivers* -- its source value through the
               edge's interface mapping, with the weights the step ran
-              with, and then its transform -- over its own magnitude,
+              with, and then its transform -- or, where a static mapping
+              delivers more entries than its source field holds, that
+              source field itself (the compact side: a group's verdict
+              does not depend on the size of a grid a few values are
+              scattered onto), each over its own magnitude,
               and the spectrum is taken on that reading (the Jacobian
               of the reading's own iteration, ``Phi' G'`` for ``F = G o
               Phi``, applied through state tangents, so no mapping or
@@ -5111,19 +5132,30 @@ class GraphManager:
                     # A member removed since the step: its state, which the
                     # floor is measured on, is gone, and so is this report.
                     continue
-                # Where the group's norm reads a mapped edge, what that edge
-                # delivers depends on the mapping weights the step ran with
-                # (``params["mappings"]``, which a caller may override for
-                # one step), so the step measured the floor per evaluation
+                # Where the group's norm reads an edge through its mapping
+                # (as delivered; an edge read at its source is the stored
+                # field), what that edge delivers depends on the mapping
+                # weights the step ran with (``params["mappings"]``, which
+                # a caller may override for one step), so the step measured
+                # the floor per evaluation
                 # itself (``reading_floor``) and the count multiplies it in
                 # the slot's own dtype, as the function does.  A slot that
                 # is absent or was never written (a state this build's
                 # step did not produce) falls back to the graph's own
                 # weights, which is what a ``params=None`` step runs with.
                 measured_floor = meta.get(f"coupling_{key}_reading_floor")
+                floor_unserved = False
                 if measured_floor is not None and np.isfinite(np.asarray(measured_floor)):
                     unit = np.asarray(measured_floor)
                     floor = float(unit * np.asarray(evaluations, unit.dtype))
+                elif _group_layout._floor_needs_the_step(group, internal_edges):
+                    # An edge read as delivered at its target's pre-step
+                    # geometry (experimental): outside the step that state
+                    # is gone, so there is nothing to fall back to.  Not
+                    # reported, with the reason, rather than measured on
+                    # a state the reading was not taken at.
+                    floor = float("nan")
+                    floor_unserved = True
                 else:
                     # On the state the step left, not on whatever has been
                     # written to it since (``_keep_state_for_reports``).
@@ -5191,6 +5223,14 @@ class GraphManager:
                         "gradient_bound_usable": False,
                         "precision_limited": False,
                         "not_usable_reason": _group_layout._WRITTEN_BEFORE_SAVE_REASON,
+                    })
+                if floor_unserved:
+                    result[key].update({
+                        "spectral_error_bound": float("nan"),
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "precision_limited": False,
+                        "not_usable_reason": _group_layout._FLOOR_NEEDS_THE_STEP_REASON,
                     })
                 geometry_keys = self._committed_geometry_edges.get(key, ())
                 geometry_reason = (self._committed_geometry_refusals.get(key)

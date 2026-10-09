@@ -1873,7 +1873,10 @@ claims:
     of its boundary fluxes"; "a field that is not float32 or float64, or
     whose shape is not the mapping's geometry_shape"; "an edge with a
     sharded node at either end"; and convergence_norm="interface" on a
-    coupling group with a geometry-dependent mapping on an internal edge.
+    coupling group with a geometry-dependent mapping on an internal edge,
+    where the mapping is not a multilinear_grid or the group sub-cycles
+    (the norm reads a multilinear_grid edge of a single-rate group:
+    MAP-050).
   sources:
     - docs/user_guide/geometry_dependent_mappings.md (What is refused)
     - src/maddening/core/_graph_specs.py (_geometry_edge_issues)
@@ -1884,9 +1887,13 @@ claims:
     shape; int32, uint32, bool, float16, bfloat16 and key fields, and
     float32 and float64 accepted; four other shapes; a sharded node, or a
     node wrapping one, at either end; the interface norm on a group whose
-    internal edge reads a geometry of either anchor, and in the differential
-    and time-level harnesses' interface-norm cases, with the same group
-    compiling under the l2 norm.
+    internal edge reads a geometry of either anchor through a kind other
+    than multilinear_grid, and in the differential and time-level
+    harnesses' interface-norm cases (that kind), with the same group
+    compiling under the l2 norm; the interface norm on a sub-cycled pair
+    joined by a multilinear_grid gather and scatter, with the same pair
+    accepted at one rate and under the l2 and mixed norms; each message
+    names the edge and which of the two it is.
   oracle: >-
     the RuntimeError from compile() and the ERROR: issue from validate(),
     with the phrase that says what is wrong and the edge's key; a graph
@@ -1902,6 +1909,8 @@ claims:
     - 'tests/core/test_geometry_edge_refusals.py::test_the_interface_norm_on_a_group_with_a_geometry_edge_is_refused_at_compile'
     - 'tests/property/test_differential_geometry_edges.py::test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile'
     - 'tests/property/test_geometry_time_levels.py::test_the_interface_norm_case_is_refused_at_compile'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_a_sub_cycled_group_with_a_geometry_edge_is_refused_under_the_interface_norm'
+    - 'tests/core/test_interface_plan.py::test_the_interface_norm_refuses_a_sub_cycled_group_and_another_kind_by_name'
   status: verified
   domains:
     f32: 'tests/core/test_geometry_edge_refusals.py::test_a_well_formed_geometry_edge_compiles_and_steps'
@@ -1912,7 +1921,7 @@ claims:
     grad: n/a
     vmap: n/a
     multi_rate: n/a
-    sub_cycled: n/a
+    sub_cycled: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_sub_cycled_group_with_a_geometry_edge_is_refused_under_the_interface_norm'
     predictors_warm_starts: n/a
     adaptive: n/a
     checkpoint_restart: n/a
@@ -1982,8 +1991,10 @@ claims:
   claim: >-
     "IQN's automatic interface set includes a source-anchored geometry that
     is internal to the group, since it is part of the iterate." The
-    interface norm does not read a geometry, and is refused for such a group
-    (the compile-time refusal row).
+    interface norm reads the geometry of a multilinear_grid edge too
+    (MAP-050), by a rule of its own: the set an accelerator acts on is
+    the fields the pass reads from the iterate, whichever side of an edge
+    the norm reads.
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - src/maddening/core/coupling/_interface_plan.py (InterfacePlan.iqn_fields)
@@ -2671,6 +2682,9 @@ claims:
     reason's text, and the same graph's unwithheld report as the control.
   tests:
     - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
+    - 'tests/core/test_geometry_edge_refusals.py::test_what_a_narrowed_report_withholds_at_a_loose_tolerance_was_usable_and_finite'
+    - 'tests/core/test_geometry_edge_refusals.py::test_what_a_narrowed_report_withholds_at_a_tight_tolerance_was_a_residual_at_its_floor'
+    - 'tests/core/test_geometry_edge_refusals.py::test_the_same_group_with_a_static_mapping_reports_its_bounds_and_no_reason'
     - 'tests/core/test_geometry_edge_refusals.py::test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed'
     - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
   status: verified
@@ -2736,12 +2750,16 @@ claims:
 - id: MAP-048
   area: geometry-dependent mapping diagnostics
   claim: >-
-    Narrowed: a group "that uses the interface norm". An internal
-    geometry edge under convergence_norm="interface" "is refused at
-    compile()" (MAP-035); a group under that norm with a geometry-dependent
-    mapping on an edge entering it from outside compiles, "reports its
+    Narrowed: a group "that uses the interface norm" "reports its
     solve" and withholds every bound, and its not_usable_reason names the
-    norm.
+    norm: with a geometry-dependent mapping on an edge entering it from
+    outside, and with a multilinear_grid mapping on an internal edge (the
+    solve's criterion reads that geometry, MAP-050; the analysis behind
+    the bounds does not yet). The report never raises: where the float
+    floor could only have been measured by the step (an edge read at its
+    target's pre-step positions) and the state carries none, it is not
+    reported. An internal geometry edge of another kind, or in a sub-cycled
+    group, "is refused at compile()" (MAP-033).
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
@@ -2749,15 +2767,24 @@ claims:
   conditions: >-
     a float32 pair joined by static mappings under the interface norm, with
     a multilinear_grid edge into one member from a third node that holds
-    the positions, without diagnostics. The steps compiled (jit) by the
-    graph. Not claimed for float64 (x64), mixed dtypes, 16-bit dtypes,
-    gradients, vmap, multi-rate graphs, sub-cycled groups, predictors,
-    run_adaptive, checkpoints or sharded graphs.
+    the positions, without diagnostics; a float64 pair with float32
+    positions joined by a multilinear_grid scatter anchored at its source
+    and gather anchored at its target, before a step, after one, from a
+    checkpoint (save_state, load_state: the recorded floor and the state
+    come back to the bit) and on a state whose recorded floor is not a
+    number, without diagnostics on every push and with them in the slow
+    lane (three kinds of pair; the state returned is the one the same
+    group returns without diagnostics, to 1e-12). The steps compiled (jit)
+    by the graph. Not claimed for 16-bit dtypes, gradients through the
+    report, vmap, multi-rate graphs, sub-cycled groups, predictors,
+    run_adaptive or sharded graphs.
   oracle: >-
     the ten withheld entries against the documented values and the reason's
     text.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_fallback_floor_says_it_cannot_be_served_where_only_the_step_could_measure_it'
   status: verified
   notes: >-
     Slow, run once on each JAX lane: the same graph under the mixed norm
@@ -2765,8 +2792,8 @@ claims:
     by the self-check as a constant of the pass.
   domains:
     f32: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
-    f64: narrowed
-    mixed_dtype: narrowed
+    f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
+    mixed_dtype: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
     16bit: narrowed
     jit: 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
     grad: narrowed
@@ -2775,7 +2802,206 @@ claims:
     sub_cycled: narrowed
     predictors_warm_starts: narrowed
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
+    sharded: narrowed
+
+- id: MAP-050
+  area: geometry-dependent mapping, the interface norm
+  claim: >-
+    What convergence_norm="interface" reads on an internal edge with a
+    multilinear_grid mapping, in a group that does not sub-cycle: a mapping
+    that "does not deliver more entries than it reads (a gather, a tie)" is
+    read at the delivered value, with the positions "at the time level the
+    step uses"; one that "delivers more entries (a scatter)" at "the source
+    value" and, for a source anchor, "the positions", each coordinate
+    "divided by the grid spacing" of its axis and measured against "one
+    spacing"; "A target-anchored geometry is a constant of the solve" and
+    "not a reading of a scatter anchored there". "The residual pools every
+    entry of every part into one root mean square". A solve returns "the
+    source value of a scatter and, for a source anchor, its positions" as
+    the accepted iterate holds them, and every other floating field one
+    plain pass on. A value's float floor counts the positions' dtype and
+    rounding "for a delivered one", a position counts "at eps |u| of one
+    spacing", and the step records the floor of "a gather anchored at its
+    target". "A group that reports converged=True is within K tolerances
+    of its fixed point in these readings", and "K does not see the size of
+    the grid or the place of the origin". compile() warns of each edge
+    "whose positions put that count at the tolerance or above", the count
+    being the float floor's: "4 * E * eps * max|u| >= rtol", for "a scatter
+    anchored at its source", which reads the positions, and for "a gather",
+    whose value is "interpolated at those positions".
+  sources:
+    - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What the interface norm reads on a geometry edge)'
+    - 'docs/user_guide/geometry_dependent_mappings.md (What convergence_norm="interface" reads on a geometry edge)'
+    - 'docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)'
+    - 'src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.parts'
+    - 'src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.geometry_at'
+    - 'src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.read'
+    - 'src/maddening/core/coupling/acceleration.py::coupling_residual_interface'
+    - 'src/maddening/core/coupling/acceleration.py::residual_precision_floor'
+    - 'src/maddening/core/coupling/acceleration.py::_positions_floors'
+    - 'src/maddening/core/coupling/acceleration.py::_positions_resolution'
+    - 'src/maddening/core/coupling/_group_layout.py::_unresolved_position_warnings'
+    - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping.geometry_length_scale'
+  conditions: >-
+    solver="ift", one rate, atol=0 unless said; a pair whose two internal
+    edges are a scatter and a gather, two gathers or two scatters of the
+    multilinear_grid kind, each anchored at its source or at its target,
+    the positions moving with the iterate by up to 0.15 of a cell from the
+    middle of one (no marker crosses a lattice plane); grids of one and two
+    axes (spacings 4 to 1). The reading edge by edge with no graph compiled
+    (24 cells: the residual of two states to 1e-9 of the float64 reference
+    and at least 1e-4 from every reading the rule is not; the floor on the
+    four combinations of float32 and float64 values and positions; a
+    non-finite position; an atol above every magnitude). The solve on four
+    compiled pairs on every push (5 markers, 120 grid points, Gauss-Seidel
+    and Jacobi, float32 and float64) and in the slow lane on every kind,
+    anchor and schedule: the pass a plain iteration stops on, its residual
+    and the state it returns against the reference's own loop. The claim
+    under every stock acceleration (aitken and iqn-ils on every push; all
+    five in the slow lane on 5 to 60 markers against 1.2e2 to 1.2e5 grid
+    points, the quasi-Newton ones to 1.2e4; float32 values with float64
+    positions on the larger grids). K measured on 30 markers from 1.2e2 to
+    1.2e6 grid points (slow; 1.2e2 and 1.2e4 on every push), and the same
+    problem 1000 spacings from the origin (float64). The marker-side twin
+    (the scatter inside the grid node, the positions on a plain edge in
+    spacings) on a float64 pair on every push. The geometry search's nine
+    cells under this norm (a gather alone, a scatter alone and both, the
+    other direction a static matrix) against the numerical float64
+    reference: the reported residual and the state returned (one cell on
+    every push). For positions their dtype resolves to the tolerance: the
+    claim is stated for a group compile() does not warn of. It warns
+    (UserWarning, never a refusal) of each edge whose reading rests on
+    stored positions - a scatter anchored at its source, which reads them
+    as a part of their own, and a gather (a mapping read as delivered) at
+    either anchor, whose value is computed at them - where what those
+    positions put into the float floor of that part by themselves is the
+    criterion's threshold or more, 4 E eps max|u| >= rtol, u in the spacing
+    of its own axis, eps of the dtype the positions are stored in, E the
+    group's structural evaluation count (float32 at rtol=1e-4: from 210
+    spacings from zero where every node reads the previous iterate, 105
+    for a Gauss-Seidel pair), on the state compile() is called with and on
+    no later write (a gather anchored at its target: at the target's
+    positions in that state). For a delivered value the count is a worst
+    case (a field that varies by its own size across one cell), and it is
+    that part's whole floor only where the positions' rounding is coarser
+    than the value's own (from one spacing out, for positions no wider
+    than the value). Tested two thousandths either side of that distance
+    at rtol=1e-4 and 1e-3, on one and two axes and both signs, for pairs
+    of scatters, of gathers and of one of each; in float64 at rtol=1e-12;
+    with the far markers on one node of the pair only, on every kind and
+    anchor (the edges warned of are the ones whose positions that node
+    stores); silent for a float64 geometry beside float32 values, a
+    scatter anchored at its target and the other two norms; and in every
+    domain of the battery below by the dtype of the member that stores
+    the positions. Under the threshold the positions still enter the
+    floor, so a residual can be at its floor without the warning. The
+    steps compiled (jit) by the graph. In the every-domain battery (5
+    markers on 40 grid points, the lattice centred on zero, the markers
+    moving by up to 1/32 of a cell a step): a two-way pair on every push
+    in float32, with a float32 member beside a float64 one, as a member
+    of a vmap batch (against the same scenario stepped alone: the same
+    verdict and pass count, the state to four eps of each field; to the
+    bit on that pair, one ulp of one entry apart on two gather-only pairs
+    of the slow lane), in a multi-rate graph whose group runs at one rate (against the
+    pair at one rate, to the bit, and on the base steps it fires on),
+    under predictor="quadratic" (the loop started at the guess, five
+    steps) and across a checkpoint restart; every kind and schedule in
+    each of those domains and in float64 in the slow lane, with aitken
+    and iqn-ils once per domain. A scan and forward and reverse
+    derivatives through the solve are exercised in the slow lane only, on
+    three kinds of pair. Not claimed for another mapping kind or a
+    sub-cycled group (refused: MAP-033), for the bounds (withheld:
+    MAP-048), 16-bit dtypes, gradients, run_adaptive or sharded graphs.
+  oracle: >-
+    a float64 NumPy restatement of the pass with a stencil of its own
+    (checked against the rational-arithmetic kernel reference), of the
+    reading (the parts, what each is measured against, the pooled count),
+    of the plain loop's exit, of the fixed point and of K (central
+    differences of the pass on its compact readings); the marker-side twin,
+    whose plain edges are read as plain edges always were; the numerical
+    float64 reference of the coupling searches with the reading written as
+    a function of its flat iterate; fourteen seeded faults of the library
+    (the test module's docstring lists eleven with their first signal).
+    For the advisory: the rule restated in NumPy from the stored positions
+    (four roundings of the farthest coordinate per evaluation, over rtol)
+    and from the kinds and anchors (which edges rest on which node's
+    positions), the library's own floor of the compiled state over a sweep
+    of nine distances on three kinds of pair, and seeded faults (the
+    notes). In the battery: the same reference with every number as its
+    member stores it, started from the state each step started from, and
+    the marker-side twin built in the domain.
+  tests:
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_residual_of_two_states_is_the_rules'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_float_floor_counts_each_part_at_its_own_resolution'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_a_non_finite_position_fails_the_criterion_and_a_dead_band_does_not_hide_one'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_a_converged_group_is_within_K_tolerances_in_the_compact_readings'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_same_problem_a_thousand_spacings_from_the_origin_reports_the_same'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_refining_the_grid_under_fixed_markers_does_not_grow_K'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_an_edge_mapped_scatter_reports_what_its_marker_side_twin_reports'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_kept_fields_are_the_ones_a_part_holds_whole'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_step_records_the_floor_of_a_reading_at_a_pre_step_geometry'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_threshold'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_same_positions_held_in_float64_compile_silently'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_float64_positions_warn_at_their_own_distance_and_are_not_told_to_widen'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_an_edge_is_warned_of_for_the_positions_its_reading_rests_on_and_no_others'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_other_norms_measure_positions_against_their_own_size_and_are_not_warned'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_whole_problem_translated_far_from_zero_warns_and_translated_back_does_not'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distances'
+    - 'tests/property/test_coupling_geometry_search_under_the_interface_norm.py::test_what_a_group_with_a_geometry_edge_reports_under_the_interface_norm_per_push'
+    - 'tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_reports_as_its_static_mapping_under_the_interface_norm'
+    - 'tests/core/test_interface_plan.py::test_the_parts_of_a_geometry_edges_reading'
+    - 'tests/core/test_interface_plan.py::test_a_readings_geometry_is_at_the_time_level_the_step_uses'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_reports_what_its_marker_side_twin_reports'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graphs_pair_with_geometry_edges_is_the_pair_at_one_rate'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_sub_cycled_pair_with_geometry_edges_is_refused_under_the_interface_norm'
+    - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_compile_warns_of_far_markers_by_the_dtype_of_the_member_that_stores_them'
+  status: verified
+  notes: >-
+    Measured (jaxlib 0.11.0, CPU, float64, rtol=1e-4). K on a two-way pair
+    of 30 markers under Gauss-Seidel, at 1.2e2, 1.2e3, 1.2e4, 1.2e5 and
+    1.2e6 grid points: 1.93, 2.01, 1.91, 1.93, 2.07, with the returned
+    state 0.48, 0.87, 0.53, 0.54, 0.54 tolerances from the fixed point
+    after 13, 11, 11, 11, 12 passes; on a scatter-only pair under Jacobi:
+    4.50, 4.31, 4.65, 4.65, 5.13 (0.86, 0.79, 0.71, 0.71, 0.80 tolerances;
+    24, 21, 22, 22, 27 passes). The same problem 1000 spacings from the
+    origin: the same passes on four draws (12, 7, 15, 14), the residual
+    equal to 2.6e-10 to 1.9e-9 of itself, K equal to four digits. The
+    slow sweep's worst distance over K tolerances: 0.40 (30 configurations
+    at three or four sizes). In this family the positions settle with the
+    values, so a position measured against its own magnitude changes the
+    residual's number and not the pass a plain loop stops on: the two
+    properties hold for the library and do not by themselves tell that
+    fault; the edge-by-edge residual, the plain loop's residual, the
+    search and the plan's pins do. Seeded faults: fourteen, each caught by
+    two per-push instruments or more. The advisory, on a scatter-only pair
+    under Jacobi and a two-way pair under Gauss-Seidel in float32 at twelve
+    distances from 32 to 5032 spacings: warned exactly where its number
+    (the positions' floor by themselves, in tolerances) is one or more
+    (from 222 and 132 spacings; 0.87 at 182 and 92); an unwarned group's
+    floor 0.11 to 0.71; the passes of the same pair in float64 (24 and 12)
+    up to 2.1 and 6.0 times the threshold, 26 and 13 passes at 3.0 and 9.8
+    times, the cap of 400 at 24 times on the first pair and 25 passes at
+    48 times on the second. The two pairs stop at residuals of 0.25 and
+    0.48, at or under their floors at 0.44 and 0.87 of the threshold and
+    above them at 0.15 and 0.30.
+    Seeded faults of the advisory: seventeen, each caught by its per-push
+    cases and nine also by the sweep.
+  domains:
+    f32: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
+    f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
+    mixed_dtype: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    16bit: narrowed
+    jit: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
+    grad: narrowed
+    vmap: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    multi_rate: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    sub_cycled: narrowed
+    predictors_warm_starts: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
+    adaptive: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does'
     sharded: narrowed
 - id: MAP-049
   area: geometry-dependent mapping diagnostics

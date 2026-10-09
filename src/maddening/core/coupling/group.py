@@ -106,7 +106,13 @@ class CouplingGroup:
         group's internal edges *deliver* only: each edge's source
         field through the edge's interface mapping and then its
         transform, the value the step hands the target (both
-        converged when the norm <= 1.0).
+        converged when the norm <= 1.0).  A mapped edge is read on its
+        compact side: where a static mapping delivers more entries
+        than its source field holds (a few values scattered onto a
+        grid), the norm reads the source field itself, before the
+        mapping and the transform, so the grid's size does not dilute
+        the criterion; a mapping onto as many entries or fewer is
+        read as delivered.
         What ``"interface"`` returns: a field an internal edge
         delivers as it is (no mapping, no transform) is measured whole
         and is returned as the accepted iterate holds it; every other
@@ -117,6 +123,9 @@ class CouplingGroup:
         within the reported residual of it on what the edges deliver;
         a field the norm does not measure meets no criterion of its
         own.  Use ``"mixed"`` or ``"l2"`` where every field must.
+        (The source field of a mapping read on its compact side, at
+        the source, is measured whole as well and is returned as the
+        accepted iterate holds it.)
     atol : float
         Dead band, in each field's own units: a field whose magnitude
         does not exceed ``atol`` counts as being at zero, **leaves the
@@ -152,9 +161,9 @@ class CouplingGroup:
         gradient-error bound (``gradient_relative_error_bound``,
         ``gradient_bound_usable``), which cost ``9`` Jacobian-vector
         products for the spectrum (``18`` under the interface norm with
-        a mapping or a transform on an internal edge, or a field that
+        a transform, or a mapping read as delivered, on an internal edge, or a field that
         more than one internal edge reads, whose report takes
-        a second spectrum on the reading the edges deliver) and ``11 + 4 k + 5 n_p + 2 k n_p``
+        a second spectrum on the norm's own reading of the edges) and ``11 + 4 k + 5 n_p + 2 k n_p``
         more for the bound per group per step (plus one linearisation and ``k``
         reverse-mode products where the state has more than ``k``
         entries; ``k <= 8``, ``n_p`` the probes: every entry of a

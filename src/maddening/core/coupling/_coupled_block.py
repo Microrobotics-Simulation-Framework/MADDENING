@@ -17,7 +17,8 @@ from maddening.core.coupling.acceleration import (
     _field_reference,
     _has_entries,
     _interface_readings,
-    _reading_eps,
+    _part_reference,
+    _part_resolution,
     float_fields_of,
     residual_precision_floor,
     spectral_rate_settled,
@@ -33,7 +34,7 @@ from maddening.core._graph_specs import (
     _node_fluxes,
     _node_update,
 )
-from maddening.core.coupling._interface_plan import interface_plan
+from maddening.core.coupling._interface_plan import KERNEL_LENGTH, interface_plan
 from maddening.core.coupling._group_layout import (
     _group_accel_fields,
     _group_dividers,
@@ -758,11 +759,17 @@ def _run_coupled_block_impl(
         res_dtype = _group_residual_dtype(s_new, group_node_names)
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
-                # Each internal edge as the step delivers it: through its
-                # mapping, with this step's weights, then its transform.
+                # Each internal edge on its compact side (the plan's
+                # records): as the step delivers it -- through its mapping,
+                # with this step's weights, then its transform -- or at its
+                # source where a mapping delivers more entries.  A
+                # geometry-dependent mapping is read with the geometry the
+                # step uses: each iterate's own for a source anchor, the
+                # target's pre-step state (``_pre``, the same at every
+                # pass) for a target anchor.
                 return coupling_residual_interface(
                     s_new, s_old, plan,
-                    group.atol, group.rtol, mappings=step_mappings,
+                    group.atol, group.rtol, mappings=step_mappings, pre_step=_pre,
                 ).astype(res_dtype)
             if use_mixed_norm:
                 return coupling_residual_mixed(
@@ -1362,32 +1369,38 @@ def _run_coupled_block_impl(
                     w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
-            # Under ``convergence_norm="interface"`` the norm reads what
-            # each internal edge *delivers* -- its source value through the
-            # mapping, then the transform -- once per edge.  With a mapping
-            # or a transform on an internal edge, or a field that more than
-            # one internal edge reads, that is not the read fields weighted
-            # once each, and the report's spectral analysis is taken on the
-            # reading (``_interface_spectral_rate_at``); the raw source
-            # fields' weights above measured a different norm.  Static
-            # (``_reading_is_the_fields``): every other group keeps the
-            # analysis it had.
+            # Under ``convergence_norm="interface"`` the norm reads each
+            # internal edge once, on its compact side: what the edge
+            # *delivers* -- its source value through the mapping, then the
+            # transform -- or the source value itself where a static
+            # mapping delivers more entries than the source holds.  With a
+            # transform, or a mapping read as delivered, on an internal
+            # edge, or a field that more than one internal edge reads, that
+            # is not the read fields weighted once each, and the report's
+            # spectral analysis is taken on the reading
+            # (``_interface_spectral_rate_at``); the raw source fields'
+            # weights above measured a different norm.  Static
+            # (``_reading_is_the_fields``): every other group -- one whose
+            # mapped edges are all read at their source among them -- keeps
+            # the analysis in the state's weights.
             # (An edge whose source field has no entries is not read, so it
             # cannot make the reading another norm: ``entry_fields``.)
             transformed_reading = use_interface_norm and not _reading_is_the_fields(
                 plan, entry_fields)
             def _reading_parts(s_star):
-                """The interface norm's reading at ``s_star``, as ``(source dtype,
-                value)`` per edge: what each internal edge delivers, in the order
+                """The interface norm's reading at ``s_star``, one
+                ``PartReading`` per part: what the norm reads on each
+                internal edge (the delivered value, or the source's where
+                the edge is read at its source -- with a geometry-dependent
+                mapping's positions as a part of their own), in the order
                 and by the rules ``coupling_residual_interface`` sums them
                 (``_interface_readings``, which both iterate)."""
-                return [(source_dtype, jnp.asarray(v))
-                        for _e, source_dtype, v in _interface_readings(
-                            plan, s_star, mappings=report_mappings)]
+                return list(_interface_readings(
+                    plan, s_star, mappings=report_mappings, pre_step=_pre))
 
             def _reading_values(s_star):
-                """The delivered values alone."""
-                return [v for _source_dtype, v in _reading_parts(s_star)]
+                """The readings alone."""
+                return [jnp.asarray(r[2]) for r in _reading_parts(s_star)]
 
             def _reading(x_full):
                 """``Phi(x)``: the reading as one flat vector."""
@@ -1396,12 +1409,15 @@ def _run_coupled_block_impl(
                 return jnp.concatenate([jnp.ravel(v).astype(work) for v in vals])
 
             def _reading_reference(x_full):
-                """At each entry of the reading, its edge's ``max|Phi_e(x)|``."""
-                vals = _reading_values(_embed(x_full))
+                """At each entry of the reading, what its part is measured
+                against (``_part_reference``): its own ``max|Phi_e(x)|``, or
+                one unit for positions read in a kind's length scale."""
+                parts = _reading_parts(_embed(x_full))
+                vals = [jnp.asarray(r[2]) for r in parts]
                 work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
                 return jnp.concatenate([
-                    jnp.broadcast_to(_field_reference(v, v), (v.size,)).astype(work)
-                    for v in vals])
+                    jnp.broadcast_to(_part_reference(r, v), (v.size,)).astype(work)
+                    for r, v in zip(parts, vals)])
 
             def _reading_weights(x_full, zero_field_weight=None):
                 """``(weights, scale)`` of the reading at ``x_full``, entry by entry.
@@ -1412,18 +1428,24 @@ def _run_coupled_block_impl(
                 a dead-banded edge keeping its own magnitude's), times a
                 common power of two that keeps every reciprocal normal.
                 """
-                vals = _reading_values(_embed(x_full))
+                read = _reading_parts(_embed(x_full))
+                vals = [jnp.asarray(r[2]) for r in read]
                 work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
                 top = jnp.array(False)
-                for v in vals:
+                for r, v in zip(read, vals):
                     top = jnp.logical_or(
-                        top, _field_reference(v, v) * jnp.finfo(v.dtype).tiny > 1.0)
+                        top, _part_reference(r, v) * jnp.finfo(v.dtype).tiny > 1.0)
                 parts = []
-                for v in vals:
-                    ref = _field_reference(v, v)
+                for r, v in zip(read, vals):
+                    ref = _part_reference(r, v)
                     k = jnp.where(top, 16.0, 1.0).astype(v.dtype)
                     if zero_field_weight is None:
-                        active = jnp.logical_and(ref > group.atol, ref > 0)
+                        # The dead band is of a part measured against its own
+                        # magnitude; positions in a kind's length scale are
+                        # always read (``_part_scaled_change``).
+                        active = jnp.logical_and(
+                            jnp.logical_or(ref > group.atol, r.part.unit == KERNEL_LENGTH),
+                            ref > 0)
                         inv = jnp.where(active, k / jnp.where(active, ref, 1.0), 0.0)
                     else:
                         scaled = ref >= jnp.finfo(v.dtype).tiny
@@ -1433,16 +1455,18 @@ def _run_coupled_block_impl(
                 return jnp.concatenate(parts), jnp.where(top, 16.0, 1.0).astype(work)
 
             def _reading_resolution(x_full, scale, evaluations):
-                """The reading's float resolution per entry, each edge's value at
-                its own eps -- its dtype's, or its source field's where that is
-                coarser (``_reading_eps``, as ``residual_precision_floor`` takes
-                it) -- in the reading's weights' units (``_residual_resolution``),
-                for a pass that rounds like ``evaluations``."""
+                """The reading's float resolution per entry, each part's value at
+                its own resolution over what it is measured against -- its
+                dtype's eps, or its source field's (or its geometry's) where
+                that is coarser (``_part_resolution``, as
+                ``residual_precision_floor`` takes it) -- in the reading's
+                weights' units (``_residual_resolution``), for a pass that
+                rounds like ``evaluations``."""
                 parts = _reading_parts(_embed(x_full))
-                work = _analysis_dtype(jnp.result_type(*[v.dtype for _src, v in parts]))
+                work = _analysis_dtype(jnp.result_type(*[jnp.asarray(r[2]).dtype for r in parts]))
                 eps = jnp.concatenate([
-                    jnp.full((v.size,), _reading_eps(source_dtype, v), work)
-                    for source_dtype, v in parts])
+                    jnp.full((jnp.asarray(r[2]).size,), _part_resolution(r), work)
+                    for r in parts])
                 return (scale * evaluations.astype(work)) * _residual_resolution(eps)
 
             def _geometry_gap_at(x_sg, check_weights, resolution, coarsest_eps):
@@ -1699,8 +1723,8 @@ def _run_coupled_block_impl(
                         spectral_rate_settled(rho_spec, spec_resid), grad_bound,
                         jnp.full_like(grad_bound, jnp.nan))
                     # The report's triple, on the interface norm's own
-                    # reading: each internal edge's delivered value over its
-                    # own magnitude -- the coordinates ``residual`` and the
+                    # reading: what the norm reads on each internal edge over
+                    # its own magnitude -- the coordinates ``residual`` and the
                     # floor are measured in (``_interface_spectral_rate_at``).
                     x_sg = jax.lax.stop_gradient(x_star_full)
                     read_w, read_scale = _reading_weights(x_sg)
@@ -2324,12 +2348,17 @@ def _run_coupled_block_impl(
             # The residual's float floor per evaluation, at the state this
             # step returns and with the mapping weights it ran with.  The
             # report takes every other group's floor from the returned
-            # state alone (``coupling_diagnostics``); a mapped edge's
-            # delivered value also depends on ``params["mappings"]``, which
+            # state alone (``coupling_diagnostics``); the delivered value of
+            # a mapped edge the norm reads as delivered (not one it reads
+            # at its source) also depends on ``params["mappings"]``, which
             # a caller may override for one step and which the graph no
-            # longer holds afterwards -- so the step measures it, once,
+            # longer holds afterwards -- or, for a geometry-dependent
+            # mapping anchored at its target, on the target's pre-step
+            # geometry (``_pre``), which the returned state does not hold
+            # -- so the step measures it, once,
             # after the solve, by the function the report calls.  Only its
-            # dead-band and finiteness tests read the values, so it carries
+            # dead-band and finiteness tests read the values (and a
+            # position's size, behind ``stop_gradient``), so it carries
             # no derivative.  It is the floor of the state the step leaves,
             # as every other group's is: ``run_adaptive*`` keeps the last
             # half step's (``_fold_kept_half_step_reports`` does not fold it).
@@ -2337,7 +2366,7 @@ def _run_coupled_block_impl(
                 residual_precision_floor(
                     {nn: result[nn] for nn in group_node_names}, group_node_names,
                     "interface", group.atol, group.rtol, plan,
-                    evaluations=1.0, mappings=report_mappings,
+                    evaluations=1.0, mappings=report_mappings, pre_step=_pre,
                 ), dtype=res_dtype)
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {

@@ -519,6 +519,215 @@ gm.add_edge("spring2", "body", "spring_force", "force", additive=True)
 
 The first additive edge sets the initial value; subsequent additive edges accumulate via addition.
 
+## A node that draws random numbers
+
+`update()` is a pure function, so a noise node cannot keep a generator on
+`self` or call `numpy.random`: whatever decides the next sample has to be
+in the node's state.  In 0.4.0 the form that goes through every door of
+the framework is the key's **raw data**:
+
+- `initial_state()` returns `jax.random.key_data(jax.random.key(seed))`:
+  a `uint32` array, of shape `(2,)` for JAX's default generator;
+- `update()` wraps it (`jax.random.wrap_key_data`), splits, draws from the
+  sub-key, and returns the new key's data in the state;
+- the seed is a constructor parameter, kept as a Python `int`.
+
+```python
+import pathlib
+import tempfile
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from maddening import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.params import ParamSpec
+
+
+class NoisySensor(SimulationNode):
+    """reading = signal + amplitude * N(0, 1), a new sample each time it fires."""
+
+    def __init__(self, name, timestep, seed=0, amplitude=1.0):
+        super().__init__(name, timestep, seed=int(seed), amplitude=float(amplitude))
+
+    def initial_state(self):
+        return {"reading": jnp.zeros(()),
+                "key": jax.random.key_data(jax.random.key(self.params["seed"]))}
+
+    def param_specs(self):
+        return {**super().param_specs(),
+                "seed": ParamSpec(trainable=False, description="PRNG seed")}
+
+    def boundary_input_spec(self):
+        return {"signal": BoundaryInputSpec(shape=(), default=0.0,
+                                            description="the measured quantity")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        key, sub = jax.random.split(jax.random.wrap_key_data(state["key"]))
+        noise = jax.random.normal(sub, (), state["reading"].dtype)
+        signal = boundary_inputs.get("signal", jnp.zeros((), noise.dtype))
+        return {"reading": signal + p["amplitude"] * noise,
+                "key": jax.random.key_data(key)}
+
+
+def build(seed):
+    gm = GraphManager()
+    gm.add_node(NoisySensor("sensor", 0.01, seed=seed, amplitude=0.1))
+    gm.compile()
+    return gm
+
+
+_, history = build(7).run_scan_with_history(5)
+_, again = build(7).run_scan_with_history(5)
+_, other = build(8).run_scan_with_history(5)
+readings = np.asarray(history["sensor"]["reading"])
+assert len(set(readings.tolist())) == 5                      # a new sample each step
+assert np.array_equal(readings, np.asarray(again["sensor"]["reading"]))   # same seed
+assert not np.array_equal(readings, np.asarray(other["sensor"]["reading"]))
+assert history["sensor"]["key"].shape == (5, 2)              # the key after every step
+
+gm = build(7)
+assert "seed" not in gm.params["nodes"]["sensor"]            # no parameter of the graph
+assert gm.to_dict()["nodes"][0]["params"]["seed"] == 7       # and rebuilt from a config
+
+# A checkpoint holds the key data: a fresh graph that loads it goes on
+# with the stream where the saved one stood.
+gm.run_scan(3)
+with tempfile.TemporaryDirectory() as tmp:
+    path = gm.save_state(pathlib.Path(tmp) / "sensor.npz")
+    resumed = build(0)
+    resumed.load_state(path)
+_, tail = resumed.run_scan_with_history(2)
+assert np.allclose(np.asarray(tail["sensor"]["reading"]), readings[3:])
+```
+
+Test the *properties* of the stream, as the snippet does (a new draw each
+firing, the same stream from the same seed), and not drawn values: JAX
+does not promise the same numbers for a key from one release to the next,
+and the same key gives other numbers in `float64` than in `float32`.  For
+a generator other than the default, pass the same `impl=` to
+`jax.random.key` and to `jax.random.wrap_key_data`.
+
+### What holds through each door
+
+Each row is pinned by `tests/core/test_a_node_that_draws_random_numbers.py`
+(the REST rows by `tests/api/test_a_node_that_draws_random_numbers_over_rest.py`,
+USD by `tests/usd/test_usd_a_node_that_draws_random_numbers.py`).
+
+| Door | What holds |
+|------|------------|
+| `step`, `run_scan`, `run_scan_with_history` | A new sample each time the node fires; the same seed gives the same stream; the history holds the key data after every step. |
+| `run_sweep`, `jax.vmap`, `jax.jit` | A batch of keys (shape `(batch, 2)`) runs each one as its own stream, equal to its unbatched run. `run_sweep` leaves the graph's own key where it was. |
+| `save_state` / `load_state`, with or without a manifest | The key data is written as `uint32`; a fresh graph that loads it continues the stream. |
+| `to_dict` / `from_dict`, USD | A config holds the node and not its state: it carries the seed, and the rebuilt graph draws the stream from its first sample. So does `reset_state()`. |
+| `get_node_state` / `set_node_state` | Carry the key data; a recorded state written back resumes the stream there. |
+| A coupling group | One sample per step, the same on every pass of the solve (below). |
+| A multi-rate graph | A slow node draws when it fires (below); a slow group draws one sample per solve it applies; a sub-cycled member draws once per sub-step, the same on every pass. |
+| `run_adaptive`, `run_adaptive_scan` | Two draws per accepted step, none for a rejected attempt; the error estimate reads the noise as error (below). |
+| `jax.grad` | The derivative at a fixed key (below), plain and through a coupling group under `solver="ift"`. |
+| `maddening.sysid` | A record holds the key data of every sample, so `windowed_loss` replays the recorded draws and is exactly zero at the parameters that made the record. The seed is not a leaf of `gm.params`. |
+| `verify_node` | The battery accepts the key leaf as it draws it (below). |
+| FMU export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an `EVOLVING` / `PROVISIONAL` one with `include_evolving=True`); the seed is not an FMU parameter. |
+| REST | `GET /graph/state/{node}` returns the key data as a list of integers; a `PUT` of it and the checkpoint routes resume the stream; a write that is not key data is a 400 naming the field. |
+
+### Three behaviours that surprise
+
+**A coupling-group member draws one sample per step, not one per pass.**
+Every pass of a group's solve calls each member's `update` with the state
+the step *started* from, so the key a member wraps is the same on every
+pass and so is the sample.  The solvers iterate floating fields only: an
+integer leaf is never relaxed, extrapolated by a predictor or entered in a
+residual, and the state a step returns holds the key one pass computes
+from the pre-step state.  So the key advances once per step, however many
+passes the solve takes, under either schedule, any acceleration, both
+solvers and all three norms, and through the return rule of
+`convergence_norm="interface"` (which recomputes some fields by one more
+pass).  It could not be otherwise: a new sample on every pass would change
+the map between passes, and an iteration on a map that changes has no
+fixed point to converge to.  The group converges to the fixed point *of
+that step's sample*, and `coupling_diagnostics()` reports what it would
+with the noise replaced by the constant it drew.  A sub-cycled member
+takes several sub-steps per pass and draws once in each, again the same on
+every pass.
+
+**A slow node's stream advances at its own rate.**  On a multi-rate graph
+a node at divider 4 draws one sample per four base steps and holds it in
+between.  Until 0.5.0 its `update` is still *computed* on every base step
+and the result kept only on the steps it fires on: the draws in between
+are made from the held key and discarded, so they cost a draw and change
+nothing.  (A slow coupling group is not computed on the steps it does not
+fire on.)
+
+**Noise is differentiated at a fixed key.**  The key is not a function of
+any parameter, so `jax.grad` of a loss is the derivative of *this
+realisation*: with respect to the amplitude it is the sample drawn, and a
+parameter upstream of the sensor is differentiated with the samples held
+fixed.  It is not the gradient of an expectation; for that, average the
+loss over a batch of keys (`run_sweep`).
+
+Adaptive stepping needs more care than a surprise.  Each attempt of
+`run_adaptive` takes one full step and two half steps from the same state:
+an accepted attempt keeps its two half steps, so the key advances twice
+per accepted step, and a rejected attempt is discarded whole, so the retry
+draws the same samples again.  The error estimate compares the full step
+with the half steps over the floating fields, and a field that holds a
+sample differs between them by the noise itself.  That reads as
+truncation error: unless the noise is below the tolerances, every step is
+rejected down to `dt_min` and accepted there by force (`run_adaptive`
+warns that it hit `dt_min`).  Step a graph that holds a noise node at a
+fixed timestep.
+
+### Declaring the seed
+
+Store the seed as `int(seed)` in the node's `params` and declare it
+`ParamSpec(trainable=False)` in `param_specs()`, as above.  It is then:
+
+- in `to_dict()` and in a USD stage, so a graph rebuilt from either has
+  the same stream;
+- not in `gm.params` (an integer whose spec is not trainable is
+  structural), so the trainable mask, `fim` and the fitters have no leaf
+  to move, and it is not an FMU parameter.
+
+Two spellings put it among the parameters instead, and a fit is then
+handed a leaf whose gradient is zero: a seed stored as a `float`, and a
+spec left at the default `ParamSpec()`, which is trainable and makes the
+graph promote the integer to a float leaf.  `verify_node`'s
+`params_effective` fails both, naming `seed`.  To run another stream,
+build the node with another seed, or write key data with
+`set_node_state`.
+
+`verify_node` needs no recipe for the default generator.  It draws an
+integer field over its dtype's whole range, and every pair of `uint32`
+words is valid key data, so each drawn state is one `update` can split.
+The checks that say something about a noise node are `deterministic` and
+`jit_consistent` (the sample is a function of the state) and
+`params_effective` (the amplitude is read; the seed is not a leaf).  For a
+generator whose key data is not arbitrary words, pass a `state_strategy`
+that builds each key from a drawn seed
+(`st.integers(...).map(lambda s: jax.random.key_data(jax.random.key(s)))`).
+
+### What does not work in 0.4.0
+
+A **typed** key leaf (`jax.random.key(seed)` itself in the state) steps,
+scans and runs inside a coupling group, and then fails at two doors:
+
+- `save_state` raises `TypeError: JAX array with PRNGKey dtype cannot be
+  converted to a NumPy array`, so the graph has no checkpoint
+  (MADD-ANO-171);
+- the REST server refuses to add such a node (`400`: `its state holds a
+  PRNG key ('key'), which has no JSON form, so no reply could carry the
+  state`), and cannot return the state of a graph handed to it with one.
+
+0.5.0 settles it: a typed key is to be written as its key data and
+rewrapped on load.  Until then keep the raw data, as above.
+
+A state may hold floating, integer, unsigned and boolean leaves in any
+graph.  A complex leaf steps in a plain graph and is refused inside a
+coupling group, at the first step (`TypeError: cannot carry a leaf of
+dtype complex64 through the coupling solver`).
+
 ## Non-state arrays and sharded execution
 
 ```{versionadded} v0.2
@@ -640,6 +849,16 @@ sub-cycled member under `boundary_interpolation="linear"`.  `compile()`
 refuses both, naming the edge and the setting that works (`"mixed"` or
 `"l2"`; `"constant"`).
 
+### A node reading itself
+A term you would rather wire than write into `update` can be an edge from
+the node to itself.  Outside a coupling group the node reads its own value
+from the previous step (the term is explicit); in a coupling group, one of
+that node alone included, the edge is iterated with the group (implicit
+once it has converged).  `gm.validate()` says which in an `INFO:` line for
+the edge.  The two numbers, and what a cap, a stiff term or
+a sub-cycled member does to them, are in
+[An edge from a node to itself](coupling_algorithm_guide.md#an-edge-from-a-node-to-itself).
+
 ### Dirichlet-Neumann coupling
 The classic partitioned approach — one node gets a value BC, the other gets a flux BC:
 <!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
@@ -744,6 +963,7 @@ python scripts/check_transforms.py
 - [ ] `SimulationNode` subclass with `initial_state()` and `update()`
 - [ ] `update()` is JAX-traceable (jit, grad, vmap compatible)
 - [ ] If `update()` branches on the node's own state (contact, threshold, stick-slip), its gradient behaviour across the switch is stated in `NodeMeta.limitations` and pinned by a test ([Events inside `update()`](#events-inside-update-what-the-gradient-means), MADD-ANO-021)
+- [ ] If `update()` draws random numbers, the key's raw data is in the state and the seed is an `int` constructor parameter declared `trainable=False` ([A node that draws random numbers](#a-node-that-draws-random-numbers))
 - [ ] `boundary_input_spec()` overridden (declares expected boundary inputs)
 - [ ] `compute_boundary_fluxes()` overridden if node exposes flux quantities
 - [ ] Additive inputs marked with `coupling_type="additive"` in spec

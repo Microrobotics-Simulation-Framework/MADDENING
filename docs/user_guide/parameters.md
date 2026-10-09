@@ -1035,5 +1035,9 @@ trainable parameter while its step reads the parameter directly.
   recompile.
 * `static_data` (meshes, precomputed operators): constants baked into the
   compiled step by design.
+* A random seed: an `int` constructor parameter declared
+  `ParamSpec(trainable=False)`, so it is rebuilt from a config and is no
+  leaf a fit can move.  See [A node that draws random
+  numbers](../developer_guide/node_authoring.md#a-node-that-draws-random-numbers).
 * Anything in `state`: the adaptive error norm, history logging and
   coupling residuals would see it.

@@ -5848,6 +5848,7 @@ claims:
     - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps
     - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps
     - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_from_a_nodes_own_flux_reads_the_previous_step_outside_a_group
   status: failing
   finding: >-
     Three of the five fail to trace with a bare KeyError naming the flux.
@@ -5857,8 +5858,10 @@ claims:
     member.q -> reader raise (coupling/_coupled_block.py::_run_coupled_block_impl._resolve_value and
     graph_manager.py::GraphManager._build_step_fn's _resolve_and_update_node).  A back edge reads the old state, which
     holds no flux, so an ungrouped ring a.q -> b, b -> a raises when built
-    b, a and steps when built a, b.  Reproducers: the three strict xfails
-    cited.  Since 0.1.0 (MADD-ANO-156, MADD-ANO-157).
+    b, a and steps when built a, b.  An edge from a node's own flux is
+    always such a back edge outside a group, whatever the build order
+    (CPL-193).  Reproducers: the four strict xfails cited.  Since 0.1.0
+    (MADD-ANO-156, MADD-ANO-157).
   domains:
     f32: n/a
     f64: n/a
@@ -6452,3 +6455,218 @@ claims:
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-two-way-sparse-jacobi-small-b]'
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-scatter-only-matrix-gauss-seidel]'
     sharded: tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member
+
+- id: CPL-193
+  area: edges
+  claim: >-
+    An edge's "source and target may be the same node, and where the node
+    is decides which of its own values such an edge reads.  Outside a
+    coupling group it is a back edge: the node reads its state of the
+    previous step, so the term the edge carries is explicit (dx/dt = -k x
+    through the edge steps as x (1 - k dt)).  With the node in a coupling
+    group (... a group of that one node is enough) the edge is iterated
+    with the group and at convergence the node reads its new value, so the
+    term is implicit (x / (1 + k dt)).  Nothing else decides it.
+    validate() says which in an INFO: line for the edge and format_graph()
+    beside the edge; compile() raises no warning for it."
+  sources:
+    - src/maddening/core/graph_manager.py::GraphManager.add_edge
+    - src/maddening/core/graph_manager.py::GraphManager.validate
+    - src/maddening/core/_graph_specs.py::_self_edge_message
+    - src/maddening/core/graph_manager.py::GraphManager.add_coupling_group
+    - src/maddening/core/coupling/group.py::CouplingGroup (nodes)
+    - docs/user_guide/quickstart.md#an-edge-from-a-node-to-itself
+    - docs/developer_guide/coupling_algorithm_guide.md#an-edge-from-a-node-to-itself
+  conditions: >-
+    The edge's source is a state field, and the term it carries is linear
+    in the value read: dx/dt = -k x alone, and beside a neighbour joined by
+    no edge, one edge either way or both, with the neighbour in no group,
+    its own or the node's, in either build order (40 graphs); an additive
+    edge to itself beside another edge into the same input, in either
+    order.  Groups of the node alone and of two nodes; Gauss-Seidel and
+    Jacobi, solver ift and fori, every acceleration, the l2, mixed and
+    interface norms, a quadratic predictor; float32 and float64; one step
+    and three by run_scan; jax.grad in the start value and in the rate; a
+    multi-rate graph (rate divider 2, in no group and in a group of
+    itself); run_adaptive, each step it tries.  "At convergence" is part
+    of the claim: max_iterations=1 returns the explicit value, a cap of n
+    returns the first n corrections of 1 - k dt + (k dt)^2 - ..., and the
+    plain iteration converges only for |k dt| < 1 (aitken and iqn-ils
+    reach 1 / (1 + k dt) at k dt = 1.5; a cap that was reached is in the
+    diagnostics or raised by strict_convergence, as for any group).  A
+    sub-cycled member reads the group's iterate at every sub-step, so its
+    term is implicit over the group's step and not its own sub-step, under
+    each boundary_interpolation (MADD-ANO-027).  An edge from the node's
+    own boundary flux is iterated inside a group; outside one it cannot be
+    read (CPL-186, MADD-ANO-157), and validate()'s line for it says that
+    and not that it reads the previous step.  auto_couple() groups loops
+    of two or more nodes and leaves the edge explicit.  validate() gives
+    one INFO: line for each edge from a node to itself, in the order the
+    edges were added and after its lines for loops of two or more nodes:
+    the edge, the node and add_edge's sentence for where the node is, with
+    the group's members when it is in one; an edge whose source field does
+    not exist has its ERROR and no such line.  The line for an edge
+    outside a group is also logged at INFO, as a staggered loop's is.  A
+    graph whose only lines are these compiles and steps with warnings
+    turned into errors, and POST /graph/validate returns the lines as they
+    are.  The line validate() gives a loop of two or more nodes that a
+    coupling group iterates names that group's iteration_mode (it named
+    Gauss-Seidel for a Jacobi group in every release to 0.3.1).  Not
+    tested: an interface
+    mapping or a geometry on the edge, waveform_iterations above one, a
+    term nonlinear in the value read.  Not claimed for mixed dtypes,
+    16-bit floats, vmap, a checkpoint restart or sharded graphs.
+  oracle: >-
+    float64 closed forms: x (1 - k dt) and x / (1 + k dt), their powers
+    over several steps and their derivatives in x and in the rate; the
+    partial sums of the series at a cap; for the two-node graphs the
+    linear system the documented rule gives (an edge is read at the new
+    level when its two ends are members of one group or its source runs
+    earlier in the step, at the previous step's otherwise), with the
+    self-edge's level decided by its node's group alone; on two shipped
+    nodes, the bounce and the stretch each reading implies.
+  tests:
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_delivers
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_every_schedule_solver_and_acceleration_makes_the_term_implicit
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_each_convergence_norm_stops_at_the_implicit_value
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_implicit
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_past_k_dt_of_one_the_term_is_implicit_only_under_an_acceleration
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_predictor_only_moves_where_the_iteration_starts
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_on_a_multi_rate_graph_each_node_reads_its_own_value_at_its_own_rate
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_sub_cycled_member_reads_its_own_value_at_the_end_of_the_groups_step
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_run_adaptive_takes_each_of_its_steps_by_the_same_rule
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_from_a_nodes_own_flux_is_iterated_inside_a_group
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_auto_couple_puts_no_group_around_a_node_whose_only_loop_is_its_own_edge
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_says_which_of_its_own_values_the_node_reads_through_the_edge
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_gives_each_edge_to_itself_its_own_line_after_the_lines_for_longer_loops
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_an_edge_to_itself_from_a_field_that_does_not_exist_has_its_error_and_no_line
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_line_for_an_edge_outside_a_group_is_logged_as_a_staggered_loop_is
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_graph_whose_only_remark_is_that_line_compiles_and_steps_with_warnings_as_errors
+    - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_tells_an_edge_from_a_nodes_own_flux_outside_a_group_that_it_cannot_be_read
+    - tests/compliance/test_validate_lines_in_the_guides.py::test_the_page_shows_each_line_validate_gives_for_the_graph_it_describes
+    - tests/api/test_graph_endpoint_validation.py::test_validate_reports_an_edge_from_a_node_to_itself_and_the_graph_still_compiles_and_steps
+    - tests/core/test_coupling.py::TestCouplingValidation::test_cycle_covered_by_group_names_the_groups_iteration_mode
+    - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_ball_position_to_table
+    - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_spring_position_to_anchor
+    - tests/core/test_schedule.py::TestIdentifyBackEdges::test_self_loop_is_back_edge
+    - tests/core/test_interface_plan.py::test_which_inputs_are_coupled_and_who_reads_whom
+  status: verified
+  notes: >-
+    Nothing documented was false before this row, and nothing said it: the
+    inspection guide's "iterated inside a coupling group or is a back edge
+    that reads the previous step's value" held, and a self-edge is the edge
+    whose half changes when a group is put around its node (0.99 against
+    0.990099 for one rod, found while writing a worked example, 2026-10-08).
+    The tests stopped below the compiled graph, and one accepted "a refusal
+    or any finite state".  Decided: the behaviour stays, with no warning,
+    because a group around the node is how the term is made implicit; it is
+    stated in add_edge, add_coupling_group, CouplingGroup and two guides.
+    validate() named every loop of two or more nodes ("cycle detected",
+    "handled by iterative coupling") and had no line for a self-loop in
+    either place (detect_cycles drops an edge from a node to itself); it
+    has one since 0.4.0, approved 2026-10-08 for parity with longer loops,
+    and that line is how a user learns which reading an edge has.  The
+    wide products of the test module (the 40 graphs, schedule by solver by
+    acceleration, scheme by precision of the gradient, an additive edge in
+    either order in each group) run whole in the slow lane; every push
+    runs a part of each that holds every schedule, solver, interpolation,
+    precision and grouping, the accelerations aitken, fixed and IQN-ILS
+    and the interface norm.  In the slow lane only: IQN-IMVJ around an
+    edge to itself, the mixed norm, the fori solver at a cap, and the
+    gradient through an accelerated group.
+  domains:
+    f32: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    f64: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
+    grad: tests/core/test_an_edge_from_a_node_to_itself.py::test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took
+    vmap: narrowed
+    multi_rate: tests/core/test_an_edge_from_a_node_to_itself.py::test_on_a_multi_rate_graph_each_node_reads_its_own_value_at_its_own_rate
+    sub_cycled: tests/core/test_an_edge_from_a_node_to_itself.py::test_a_sub_cycled_member_reads_its_own_value_at_the_end_of_the_groups_step
+    predictors_warm_starts: tests/core/test_an_edge_from_a_node_to_itself.py::test_a_predictor_only_moves_where_the_iteration_starts
+    adaptive: tests/core/test_an_edge_from_a_node_to_itself.py::test_run_adaptive_takes_each_of_its_steps_by_the_same_rule
+    checkpoint_restart: narrowed
+    sharded: narrowed
+
+- id: CPL-194
+  area: loop
+  claim: >-
+    A member of a coupling group that draws from a key held in its state
+    draws one sample per step, not one per pass.  Every pass of the solve
+    calls each member's update with the state the step started from, so the
+    key a member wraps is the same on every pass and so is the sample; the
+    solvers iterate floating fields only, so the key in the returned state
+    is the one a single pass computes from the pre-step state.  The key
+    advances once per step however many passes the solve takes, the group
+    converges to the fixed point of that step's sample, and
+    coupling_diagnostics() reports what it would with the noise replaced by
+    the constant it drew.  A sub-cycled member draws once per sub-step, the
+    same on every pass.
+  sources:
+    - docs/developer_guide/node_authoring.md#three-behaviours-that-surprise
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl.one_pass_gs
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl.one_pass_jacobi
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_substeps
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
+    - src/maddening/core/coupling/acceleration.py::float_fields_of
+  conditions: >-
+    the key's raw data (jax.random.key_data, a uint32 leaf) in a member's
+    state, wrapped, split and drawn from inside update; Gauss-Seidel and
+    Jacobi; no acceleration, Aitken, fixed relaxation, IQN-ILS and IQN-IMVJ;
+    solver="ift" and "fori"; the l2, mixed and interface norms, with the
+    interface norm's return rule (CPL-191: the pass that recomputes fields
+    starts from the pre-step state as every pass does); linear and quadratic
+    predictors and IQN-IMVJ's reused Jacobian; a group at a rate divider
+    above one on a multi-rate graph (one sample per solve it applies); a
+    sub-cycled group, with a second waveform sweep; float32, and float64
+    under x64 (the key stays uint32); a vmap of the scan (run_sweep) over a
+    batch of keys; run_adaptive (two solves per kept step, one sample each,
+    and nothing kept from a rejected attempt); a checkpoint between steps;
+    the gradient at a fixed key, against central differences, under
+    solver="ift".  Why it holds: one_pass_gs and one_pass_jacobi hand each
+    member's update _pre(nn), the pre-step state, and _run_substeps starts
+    a member's sub-steps from it; the fixed-point vector, the
+    accelerations, the predictor and the norms hold floating fields only
+    (CPL-003, CPL-070).  Not claimed for mixed dtypes, 16-bit floats or
+    sharded graphs.
+  oracle: >-
+    the stream of the same key computed outside any graph (split, draw,
+    key_data), and the same node run alone; the closed-form fixed point of
+    the linear pair for each sample; a twin group with the draw replaced by
+    a constant parameter.
+  tests:
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_step_the_interface_norm_recomputes_fields_of_advances_the_key_once
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_groups_report_is_that_of_the_noise_replaced_by_the_constant_it_drew
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_groups_report_is_the_constant_twins_under_other_norms_and_accelerations
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_slow_group_draws_one_sample_per_solve_it_applies
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_through_an_ift_group_at_a_fixed_seed_is_the_finite_difference_in_float64
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_x64
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_between_coupled_steps_continues_a_members_stream
+  status: verified
+  domains:
+    f32: 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step[gauss-seidel-none-ift-l2]'
+    f64: tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_x64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step[jacobi-aitken-fori-mixed]'
+    grad: tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_through_an_ift_group_at_a_fixed_seed_is_the_finite_difference_in_float64
+    vmap: tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream
+    multi_rate: tests/core/test_a_node_that_draws_random_numbers.py::test_a_slow_group_draws_one_sample_per_solve_it_applies
+    sub_cycled:
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass[the-sensor-sub-cycles]'
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass[the-plant-sub-cycles-two-sweeps]'
+    predictors_warm_starts:
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm[predictor-linear-interface]'
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm[gauss-seidel-iqn-imvj-ift-l2]'
+    adaptive: tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each
+    checkpoint_restart: tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_between_coupled_steps_continues_a_members_stream
+    sharded: narrowed

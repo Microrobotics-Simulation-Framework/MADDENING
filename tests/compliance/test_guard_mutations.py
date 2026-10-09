@@ -803,6 +803,22 @@ MUTANTS: tuple[Mutant, ...] = (
        "            for where in sorted(allowed) if where not in found]",
        "            for where in sorted(allowed) if False]",
        PLAN_SCAN, "an allowance that outlives its function, inherited by the next one of that name"),
+    # --- SE: what validate() says of an edge from a node to itself, and of ---
+    # --- the loop a coupling group iterates (no graph compiled) --------------
+    _M("SE1", "src/maddening/core/graph_manager.py",
+       "            if e.source_node != e.target_node or id(e) in unknown_source:\n",
+       "            if True:\n",
+       ("tests/core/test_an_edge_from_a_node_to_itself.py::"
+        "test_validate_says_which_of_its_own_values_the_node_reads_through_the_edge",),
+       "validate() with no line for an edge from a node to itself, as before 0.4.0: nothing says "
+       "whether the node reads its value of the previous step or, in a group, its new one"),
+    _M("SE2", "src/maddening/core/_graph_specs.py",
+       "    return _ITERATION_MODE_NAMES.get(mode, str(mode))\n",
+       '    return "Gauss-Seidel"\n',
+       ("tests/core/test_coupling.py::TestCouplingValidation::"
+        "test_cycle_covered_by_group_names_the_groups_iteration_mode",),
+       "a loop that a Jacobi group iterates reported as handled by Gauss-Seidel, as in every "
+       "release to 0.3.1"),
 )
 
 

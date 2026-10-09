@@ -38,11 +38,15 @@ What is held:
 * a held body's transfer as a static sparse mapping, built from the same
   weights, delivers what the geometry edge delivers, and reads a field
   stored flat;
+* on a kink of the interpolant the two samplers take the same slope with
+  respect to a position, except exactly on an outermost cell centre;
 * (slow) under ``convergence_norm="interface"`` a closed loop is as close
   to its fixed point at 256 x 256 cells as at 16 x 16 when point-sized
   fields cross its internal edges, whether the node or the edge does the
   sampling, and drifts away as the grid grows when the grid itself
-  crosses a plain edge.
+  crosses a plain edge;
+* (slow) inside a group the two point-sized wirings have different fixed
+  points, by one step of the body's motion.
 
 Seeded faults in ``src/maddening/core/coupling/grid_mapping.py`` that
 this module catches (run with ``plans/tools/mutants.py``; the list is in
@@ -567,6 +571,44 @@ def test_the_gradients_agree_in_float32_with_a_point_on_a_cell_centre():
         assert np.max(np.abs(a - b)) <= 1e-5 * np.max(np.abs(b))
 
 
+def test_on_a_kink_the_two_samplers_take_the_same_slope_except_on_the_hulls_faces():
+    """With respect to a position: on an interior cell-centre plane both
+    take the slope of the cell above; exactly on an outermost cell centre
+    the kernel takes the whole interior slope and a node that clamps with
+    ``jnp.clip`` half of it; strictly outside, both are zero."""
+    with precision("float64"):
+        mesh = MESHES[2]
+        top = mesh.shape[0] - 1.0
+        s = np.array([[2.0, 1.0], [0.0, 1.3], [top, 2.2], [-0.7, 1.3], [1.42, 2.1]])
+        field = jnp.asarray(rough_field(mesh))
+        mapping = multilinear_grid_mapping(
+            origin=mesh.at(np.zeros(3)), spacing=mesh.cell, shape=mesh.shape, n_points=len(s),
+            mode="consistent", layout="shaped")
+
+        nudge = np.array([1e-6, 0.0])
+        places = jnp.asarray(np.stack([mesh.at(s), mesh.at(s + nudge), mesh.at(s - nudge)]))
+
+        def slopes(sample):
+            """d(first component at each point) / d(that point's x), on the
+            kink, just above it and just below it."""
+            one = jax.grad(lambda points: jnp.sum(sample(points)[:, 0]))
+            return np.asarray(jax.jit(jax.vmap(one))(places))[:, :, 0]
+
+        on_node, _, _ = slopes(lambda points: sample_at_cell_centres(field, points, mesh))
+        on_kernel, above, below = slopes(lambda points: mapping.apply(field, None, points))
+    assert abs(above[0] - below[0]) > 0.1, "premise: the slope jumps at the interior plane"
+    for got in (on_node, on_kernel):
+        assert got[0] == pytest.approx(above[0], rel=1e-9)      # an interior centre: the cell above
+        assert got[3] == 0.0                                    # strictly outside
+        assert got[4] == pytest.approx(above[4], rel=1e-9)      # inside a cell: no kink
+    # The hull's two faces: the interior one-sided slope, or half of it.
+    assert on_kernel[1] == pytest.approx(above[1], rel=1e-9)
+    assert on_kernel[2] == pytest.approx(below[2], rel=1e-9)
+    assert on_node[1] == pytest.approx(0.5 * above[1], rel=1e-9)
+    assert on_node[2] == pytest.approx(0.5 * below[2], rel=1e-9)
+    assert abs(above[1]) > 0.1 and abs(below[2]) > 0.1
+
+
 # ---------------------------------------------------------------------------
 # 4. The time level, and points held by a third node
 # ---------------------------------------------------------------------------
@@ -721,8 +763,8 @@ def test_a_held_bodys_static_sparse_mapping_delivers_what_the_geometry_edge_deli
 #: weights; the points sit a sixth of a cell from a cell centre at every
 #: size (see :func:`loop_points`), which makes that 0.63.
 RESPONSE, DRAG, MASS = 1.0, 1.2, 5.0
-#: Small enough that the body moves a hundredth of the finest cell in the
-#: step: the three sizes are then one problem.
+#: Small enough that the body moves under two hundredths of the finest
+#: cell in the step: the three sizes are then one problem.
 LOOP_DT = 2e-4
 LOOP_SIZES = (16, 64, 256)
 RTOL, TIGHT_RTOL = 1e-4, 1e-11
@@ -908,3 +950,25 @@ def test_point_sized_readings_keep_a_converged_loop_near_its_fixed_point_at_ever
     assert whole[2] / whole[0] >= (LOOP_SIZES[2] / LOOP_SIZES[0]) / 3.0, table
     passes = [row["iterations"] for row in seen["grid handed whole"]]
     assert passes[0] > passes[1] > passes[2], f"it stops earlier as the grid grows: {passes}"
+
+
+# Per push: tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_loop_on_mapped_edges_converges_within_a_tolerance_of_its_fixed_point (the mapped loop against its own tight solve)
+@pytest.mark.slow
+def test_inside_a_group_the_port_moves_the_sampling_by_one_step_of_the_bodys_motion():
+    """A plain edge that carries the points reads the iterate, so the old
+    fluid sampled at the body's end-of-step positions; the target-anchored
+    edge reads the positions from before the step.  The two loops have
+    different fixed points, first order in the step: measured 2.2e-4 of
+    the value at ``LOOP_DT`` and 2.2e-3 at ten times it (16 cells a side,
+    jax 0.10.2, 0.11.0 and 0.11.2)."""
+    gaps = []
+    with precision("float64"):
+        for factor in (1, 10):
+            case = dataclasses.replace(loop_case(LOOP_SIZES[0]), dt=factor * LOOP_DT)
+            node = solve_once(case, "in the fluid node", TIGHT_RTOL)
+            edge = solve_once(case, "on the edges", TIGHT_RTOL)
+            assert node["converged"] and edge["converged"]
+            gaps.append(float(np.sqrt(np.mean((node["seen"] - edge["seen"]) ** 2))
+                              / np.max(np.abs(edge["seen"]))))
+    assert 1e-4 < gaps[0] < 5e-4, gaps                 # far above the tight tolerance, 1e-11
+    assert 8.0 < gaps[1] / gaps[0] < 12.0, gaps        # first order in the step

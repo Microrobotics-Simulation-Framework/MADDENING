@@ -363,7 +363,8 @@ def _read_in_kernel_lengths(mapping, geom):
     declared: Any = getattr(mapping, "geometry_coordinates_read", None)
     if not callable(declared):
         return lengths
-    return jnp.where(declared(geom), lengths, jnp.zeros((), lengths.dtype))
+    read: Any = declared(geom)
+    return jnp.where(read, lengths, jnp.zeros((), lengths.dtype))
 
 
 @dataclass(frozen=True)

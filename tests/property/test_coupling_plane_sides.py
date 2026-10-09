@@ -15,6 +15,20 @@ inside the Newton-Kantorovich ball around the iterate
 (``_bounds._kantorovich_ball_plane_margin`` has the argument and its five
 assumptions).
 
+``spectral_error_bound`` **has the same hole and the same rule.**  It is a
+bound to the fixed point of the polynomial the pass is in the iterate's
+lattice cells, and with that fixed point past a plane -- the iterate and
+the Newton point both short of it -- the pass has no fixed point there: the
+flag stood on a bound 17 to 1,294 times under the distance where the next
+cell expands.  So every row scores **both** flags, with a fourth point
+beside the three: the fixed point of the iterate's polynomial piece
+(``plane_sides.cell_fixed_point``), which the rule's argument puts in the
+iterate's cell wherever a flag stands.  The cases of that audit are
+constructed, not drawn (``tests/property/plane_placed.py``): the curvature
+from the kernel alone on a two-dimensional lattice and from a member's
+quadratic response on a one-dimensional one, with the next cell expanding
+or contracting at 0.99 and 0.999.
+
 **The instrument** (``tests/property/plane_sides.py``): a NumPy reference
 of the pass that does not import the library's kernel, a *constructive*
 placement of the fixed point at a chosen signed distance from a plane, and
@@ -47,6 +61,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import numpy as np
 import pytest
 
+from tests.property import plane_placed as pp
 from tests.property import plane_sides as ps
 from tests.property.sysid_transform_grid import precision
 
@@ -132,8 +147,13 @@ def test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited
     assert {c.mode for c in cfgs} == {"gauss-seidel", "jacobi"}
     assert {c.norm for c in cfgs} == {"l2", "mixed"}
     assert sum(r["structure"].startswith("audited") for r in rows) == 5
-    # No row asks for a flag on a fixed point across a plane.
-    assert not any(r["gradient_bound_usable"] and r["row"] != "k=* N=*" for r in rows)
+    # No row asks for a flag on a fixed point across a plane: neither flag.
+    assert not any((r["gradient_bound_usable"] or r["spectral_usable"])
+                   and r["row"] != "k=* N=*" for r in rows)
+    # An honest report that loses both flags to a plane in the ball (the
+    # rule's price), from more than one structure.
+    assert len({r["structure"] for r in drawn if r["row"] == "k=* N=*"
+                and not r["on_a_plane"] and not r["spectral_usable"]}) >= 2
 
 
 def _check_rows(structure: str) -> None:
@@ -164,17 +184,24 @@ def _check_rows(structure: str) -> None:
             assert ps.wrong_numbers(cfg, x, c, report, where) == [], told
             assert bool(report["gradient_bound_usable"]) == row["gradient_bound_usable"], told
             assert bool(report["spectral_usable"]) == row["spectral_usable"], told
+            margin = slots["plane_margin"]
             if not ps.moving(cfg):
                 # Every position a constant of the pass: nothing to cross.
-                assert slots["plane_margin"] == np.inf == slots["plane_limit"], told
+                assert margin == np.inf == slots["plane_limit"], told
             if row["gradient_bound_usable"]:
-                assert slots["plane_margin"] > 1.0 and "not_usable_reason" not in report, told
-            elif row["spectral_usable"]:
-                # The gradient's flag alone: the reason names the ball, the
-                # numbers stay, and the margin is the step's.
-                assert not slots["plane_margin"] > 1.0, told
-                assert "Newton-Kantorovich ball" in report["not_usable_reason"], told
-                assert np.isfinite(report["gradient_relative_error_bound"]), told
+                assert margin > 1.0 and "not_usable_reason" not in report, told
+            if not margin > 1.0:
+                # A plane in the ball: both flags, the reason names the
+                # plane, the numbers stay, and the margin is the step's.
+                assert not report["spectral_usable"], told
+                assert not report["gradient_bound_usable"], told
+                assert "lattice plane" in report["not_usable_reason"], told
+                assert np.isfinite(report["spectral_error_bound"]), told
+            elif ps.moving(cfg) and where["p_ok"] and not where["on_a_plane"]:
+                # The rule's argument, on the reference: with no plane in
+                # the ball the fixed point of the iterate's polynomial is in
+                # the iterate's cell, and is the pass's.
+                assert where["p_in_cell"] and where["p_is_fixed_point"], told
 
 
 def _slug(name: str) -> str:
@@ -195,7 +222,8 @@ def test_the_audited_positions_within_a_rounding_of_a_plane_lose_the_gradient_fl
     with its flag set; and a Gauss-Seidel sweep that reads a position a
     third of a resolution from a plane (the float32 pass evaluates one
     cell, exact arithmetic the other: MADD-ANO-239, whose ``rho_spectral``
-    stays flagged)."""
+    is no longer flagged either: a position within the window of a plane
+    is on it, the margin is zero and both flags go)."""
     _check_rows(SLOW_STRUCTURE)
 
 
@@ -203,7 +231,9 @@ def test_the_audited_bounds_were_flagged_and_far_under_the_error():
     """The three audited rows of MADD-ANO-248 as the audit recorded them:
     the reference's gradient error is 15 to 70,000 times the bound the
     report still carries, the fixed point is across a plane the Newton point
-    is short of, and the flag is what changed."""
+    is short of, and the flags are what changed (the spectral one too: on
+    these three its bound happened to hold, within twice, in a next cell
+    that contracts as the first does; the rule cannot know the next cell)."""
     worst = {}
     for row in _rows_of("audited: the gradient bound short of a plane"):
         cfg = ps.as_cfg(row["cfg"])
@@ -212,10 +242,192 @@ def test_the_audited_bounds_were_flagged_and_far_under_the_error():
             where = ps.sides(cfg, x, c)
             score = ps.score(cfg, x, c, report)
         assert where["row"] == "k!=* N!=*", (row["name"], where)
-        assert not report["gradient_bound_usable"] and report["spectral_usable"], row["name"]
+        assert not report["gradient_bound_usable"], row["name"]
+        assert not report["spectral_usable"], row["name"]
         worst[row["name"]] = score["grad_err"] / float(report["gradient_relative_error_bound"])
     assert len(worst) == 3
     assert min(worst.values()) > 10 and max(worst.values()) > 5e4, worst
+
+
+# ---------------------------------------------------------------------------
+# Per push: the fixed point of the iterate's polynomial placed past a plane
+# ---------------------------------------------------------------------------
+
+_PLACED_GRAPHS: dict = {}
+
+
+def _placed(mo: pp.Model):
+    """``(report, slots, where)`` of one step of *mo* on its structure's graph."""
+    key = mo.structure()
+    if key not in _PLACED_GRAPHS:
+        gm = pp.build(mo)
+        gm.compile()
+        _PLACED_GRAPHS[key] = gm
+    gm = _PLACED_GRAPHS[key]
+    pp.load(mo, gm)
+    x, c, report, slots = pp.step_report(mo, gm)
+    return report, slots, pp.located(mo, x, c)
+
+
+#: ``kind -> (name, arguments of the construction, what the row is)``.
+#: ``short``: the returned iterate and the Newton point both before the
+#: plane, the fixed point of their cell's polynomial past it (this audit's
+#: case), with the next cell expanding (the iterate ends two cells on) or
+#: contracting at 0.999 or 0.99 (a fixed point of its own in the next
+#: cell); ``crossed``: the Newton point past the plane too; ``near``: the
+#: fixed point in the iterate's cell with the plane in the ball (an honest
+#: report that loses its flags); ``clear``: no plane in the ball.
+CONSTRUCTED = {
+    "kernel": (pp.kernel_curvature, [
+        ("the next cell expands", dict(s=2e-6), "short"),
+        ("the next cell expands, twice the curvature", dict(s=2e-6, Q=1.0), "short"),
+        ("the next cell contracts at 0.999", dict(s=2e-6, after=(0.999,)), "short"),
+        ("the next cell contracts at 0.99", dict(s=2e-6, after=(0.99,)), "short"),
+        ("the Newton point crosses", dict(s=5e-6), "crossed"),
+        ("the fixed point just inside the cell", dict(s=-2e-3), "near"),
+        ("the fixed point deep inside the cell", dict(s=-5e-2), "clear"),
+    ]),
+    "member": (pp.member_curvature, [
+        ("the next cell expands", dict(s=1e-6), "short"),
+        ("the next cell contracts at 0.999", dict(s=1e-6, after=(0.999,)), "short"),
+        ("the next cell contracts at 0.99", dict(s=1e-6, after=(0.99,)), "short"),
+        ("the Newton point crosses", dict(s=2e-5), "crossed"),
+        ("the fixed point just inside the cell", dict(s=-4e-4), "near"),
+        ("the fixed point deep inside the cell", dict(s=-5e-2), "clear"),
+    ]),
+}
+
+
+def _check_constructed(curvature: str, dtype: str) -> dict:
+    """Row by row: the construction is the row it says it is (by the
+    reference), no flagged number is wrong, and the flags are the rule's --
+    both withdrawn with the reason wherever the plane is in the ball, both
+    standing where it is not.  Returns the distance over the bound per row."""
+    make, rows = CONSTRUCTED[curvature]
+    ratios = {}
+    with precision(dtype == "float64"):
+        for name, arguments, kind in rows:
+            mo = make(dtype=dtype, **arguments)
+            report, slots, where = _placed(mo)
+            told = (curvature, dtype, name, where, slots, {k: report.get(k) for k in (
+                "spectral_error_bound", "spectral_usable", "gradient_relative_error_bound",
+                "gradient_bound_usable", "converged")})
+            assert where["fp_ok"] and where["p_ok"] and report["converged"], told
+            cells, past = where["cells"], where["past"]
+            if kind in ("short", "crossed"):
+                assert past["k"] < 0 < past["p"], told
+                assert not where["p_in_cell"] and cells["*"] != cells["k"], told
+                assert (cells["N"] == cells["k"]) is (kind == "short"), told
+            else:
+                assert where["p_in_cell"] and where["one_cell"] and past["p"] < 0, told
+            assert pp.wrong_numbers(report, where) == [], told
+            flagged = kind == "clear"
+            assert (slots["plane_margin"] > 1.0) is flagged, told
+            assert bool(report["spectral_usable"]) is flagged, told
+            assert bool(report["gradient_bound_usable"]) is flagged, told
+            assert np.isfinite(report["spectral_error_bound"]), told
+            if flagged:
+                assert "not_usable_reason" not in report, told
+            else:
+                assert "Newton-Kantorovich ball" in report["not_usable_reason"], told
+            ratios[name] = where["distance"] / float(report["spectral_error_bound"])
+    # What the withdrawn flag stood on: where the next cell expands the
+    # pass's fixed point is two cells on, tens to hundreds of bounds away.
+    assert ratios["the next cell expands"] > 10.0, ratios
+    assert ratios["the fixed point deep inside the cell"] <= 1.001, ratios
+    return ratios
+
+
+@pytest.mark.parametrize("curvature, dtype", [("kernel", "float64"), ("member", "float32")])
+def test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane(curvature, dtype):
+    """The audited construction (MADD-ANO-248, the spectral flag): the
+    iterate and the Newton point in one lattice cell, the Newton-Kantorovich
+    check reading that cell's small ``h``, and that cell's polynomial with
+    its fixed point past the plane.  Both flags are withdrawn whatever the
+    next cell does -- expanding (the bound tens of times under the
+    distance), contracting at 0.999 or at 0.99 -- and stand with the fixed
+    point deep in the cell."""
+    _check_constructed(curvature, dtype)
+
+
+# Per push: tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane
+@pytest.mark.slow
+@pytest.mark.parametrize("curvature, dtype", [("kernel", "float32"), ("member", "float64")])
+def test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane_in_the_other_dtype(
+        curvature, dtype):
+    _check_constructed(curvature, dtype)
+
+
+#: The placement sweep's structures: the member-curvature pair with the
+#: fixed point of the first cell's polynomial at a chosen signed distance
+#: from the plane.  The three in which the next cell expands are where an
+#: audit found 66 of 2,700 float32 reports flagged on a bound 17 to 1,294
+#: times under the distance.
+PLACED_SWEEP = {
+    "gauss-seidel marker first": dict(),
+    "gauss-seidel grid first": dict(order=("G", "M")),
+    "jacobi": dict(mode="jacobi", max_iterations=200),
+    "mixed norm": dict(norm="mixed"),
+    "aitken": dict(acceleration="aitken"),
+    "origin 20": dict(origin=20.0),
+    "strong curvature": dict(Q=8.0, e1=0.01),
+    "the next cell expands": dict(after=(1.2, 0.5)),
+    "jacobi, mixed, the next cell expands": dict(
+        mode="jacobi", norm="mixed", max_iterations=200, after=(1.2, 0.5)),
+    "gauss-seidel grid first, the next cell expands": dict(order=("G", "M"), after=(1.2, 0.5)),
+}
+PLACED_TOLERANCES = (3e-2, 1e-2, 1e-3, 1e-4)
+
+
+def _placed_distances(mo: pp.Model) -> list:
+    """Signed distances of the cell polynomial's fixed point from the
+    plane: float resolutions of the position at the lattice's scale, and
+    fractions of a spacing."""
+    eps = float(np.finfo(np.dtype(mo.dtype)).eps)
+    top = mo.origin[0] + (mo.shape[0] - 1) * mo.spacing[0]
+    resolution = eps * max(abs(mo.origin[0]), abs(top), abs(mo.plane))
+    sizes = [k * resolution for k in (0.5, 3.0, 12.0, 100.0, 1000.0)]
+    sizes += [f * mo.spacing[0] for f in (1e-5, 1e-4, 1e-3, 1e-2, 5e-2)]
+    return [sign * size for sign in (1.0, -1.0) for size in sizes] + [0.0]
+
+
+# Per push: tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane
+@pytest.mark.slow
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("structure", sorted(PLACED_SWEEP), ids=_slug)
+def test_the_placement_sweep_finds_no_flagged_bound_under_the_distance(structure, dtype):
+    """The fixed point of the first cell's polynomial at 21 signed distances
+    from the plane, four tolerances, ten structures, both dtypes: no report
+    with a flag set has its fixed point further than twice the bound, a
+    lattice plane between the points it rests on, or the polynomial's fixed
+    point past a plane.  The realised counts are printed."""
+    knobs = dict(after=(0.9,), Q=2.0, e1=0.02, c0=0.1)
+    knobs.update(PLACED_SWEEP[structure])
+    counts = collections.Counter()
+    failures = []
+    with precision(dtype == "float64"):
+        for tolerance in PLACED_TOLERANCES:
+            base = pp.member_curvature(dtype=dtype, tolerance=tolerance, **knobs)
+            for s in _placed_distances(base):
+                mo = pp.member_curvature(dtype=dtype, tolerance=tolerance, s=s, **knobs)
+                report, slots, where = _placed(mo)
+                if not where["fp_ok"]:
+                    counts["no reference"] += 1
+                    continue
+                flags = ("both" if report["gradient_bound_usable"] else
+                         "spectral only" if report["spectral_usable"] else "none")
+                counts[("one cell" if where["one_cell"] else "across", flags)] += 1
+                bad = pp.wrong_numbers(report, where)
+                if (report["spectral_usable"] or report["gradient_bound_usable"]) and not (
+                        slots["plane_margin"] > 1.0):
+                    bad.append(f"a flag with plane_margin {slots['plane_margin']}")
+                if bad:
+                    failures.append((tolerance, s, bad, where))
+    print(f"\n[placed] {structure} {dtype}: " + ", ".join(
+        f"{key}: {count}" for key, count in sorted(counts.items(), key=str)))
+    assert not failures, failures[:3]
+    scored = sum(count for key, count in counts.items() if key != "no reference")
+    assert scored >= len(PLACED_TOLERANCES) * 10, counts
 
 
 # ---------------------------------------------------------------------------

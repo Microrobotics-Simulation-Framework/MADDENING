@@ -438,9 +438,10 @@ _CAUSE_FLOOR = (
 _CAUSE_ON_PLANE = (
     "a position the pass reads from the iterate is on a lattice plane of the mapping's "
     "grid or on a face of its hull (within {ulps:g} float resolutions), where no tolerance "
-    "restores the flags, or the pass itself moves it across one: the lattice cell of the "
-    "fixed point is not decided there (hold the position constant during the pass, or keep "
-    "it a fraction of a cell off the planes)"
+    "restores the flags, or the pass itself moves it across one: the plane is inside the "
+    "Newton-Kantorovich ball around the returned iterate at any residual, so the lattice "
+    "cell of the fixed point is not decided (hold the position constant during the pass, or "
+    "keep it a fraction of a cell off the planes)"
 )
 _CAUSE_IN_BALL = (
     "a lattice plane of the mapping's grid, or a face of its hull, is inside the "

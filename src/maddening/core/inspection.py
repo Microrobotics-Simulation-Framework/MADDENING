@@ -1348,9 +1348,11 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
     estimate = d.get("error_estimate")
     bound = d.get("spectral_error_bound")
     # Every number is there and only flags are withdrawn: a group with a
-    # geometry-dependent mapping whose bound reaches a lattice plane (both
-    # flags), or with a plane inside the Kantorovich ball around the
-    # iterate (the gradient's alone); experimental.  The caveats below
+    # geometry-dependent mapping, whose report gives every cause of a
+    # False flag (a lattice plane inside the Kantorovich ball around the
+    # iterate or within the bound's reach: both flags; the float floor;
+    # an estimate that did not settle; a gradient bound that is not
+    # finite: the gradient's alone); experimental.  The caveats below
     # still apply.
     flags_only = bool(reason) and all(
         isinstance(v, float) and not math.isnan(v) for v in (estimate, bound))

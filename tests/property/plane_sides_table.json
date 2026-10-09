@@ -221,7 +221,7 @@
    "row": "k=* N=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 0.00016199756882295802,
    "cfg": {
     "N": [
@@ -361,7 +361,7 @@
    "row": "k=* N=*",
    "on_a_plane": true,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 2.96409035005496e-06,
    "cfg": {
     "N": [
@@ -501,7 +501,7 @@
    "row": "k=* N=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 2.3003821070233244e-13,
    "cfg": {
     "N": [
@@ -641,7 +641,7 @@
    "row": "k!=* N=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 2.8954616482224083e-12,
    "cfg": {
     "N": [
@@ -711,7 +711,7 @@
    "row": "k=* N=*",
    "on_a_plane": true,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 3.9968028886505635e-15,
    "cfg": {
     "N": [
@@ -851,7 +851,7 @@
    "row": "k=* N=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 3.4727776210274897e-13,
    "cfg": {
     "N": [
@@ -921,7 +921,7 @@
    "row": "k=* N!=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 3.0752289603697136e-11,
    "cfg": {
     "N": [
@@ -991,7 +991,7 @@
    "row": "k!=* N=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 3.4150460237469815e-13,
    "cfg": {
     "N": [
@@ -1061,7 +1061,7 @@
    "row": "k!=* N!=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "fixed_point_spacings_from_a_plane": 2.8610447344590284e-13,
    "cfg": {
     "N": [
@@ -1131,7 +1131,7 @@
    "row": "k!=* N!=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "cfg": {
     "N": [
      6
@@ -1201,7 +1201,7 @@
    "row": "k!=* N!=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "cfg": {
     "N": [
      6
@@ -1271,7 +1271,7 @@
    "row": "k!=* N!=*",
    "on_a_plane": false,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "cfg": {
     "N": [
      6
@@ -1341,7 +1341,7 @@
    "row": "k!=* N=*",
    "on_a_plane": true,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "cfg": {
     "N": [
      3,
@@ -1423,7 +1423,7 @@
    "row": "k!=* N=*",
    "on_a_plane": true,
    "gradient_bound_usable": false,
-   "spectral_usable": true,
+   "spectral_usable": false,
    "cfg": {
     "N": [
      7

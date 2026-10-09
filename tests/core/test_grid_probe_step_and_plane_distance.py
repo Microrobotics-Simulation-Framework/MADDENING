@@ -590,3 +590,107 @@ def test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor(dtype
         assert abs(w[1] * delta[1]) > 0.1 * eta                 # the entry's move counts
         assert eta * 1.02 < radius <= 3.0 * eta * 1.01, (radius, eta)
         assert _bounds.GEOMETRY_PLANE_REACH == 2.0
+
+
+# ---------------------------------------------------------------------------
+# The report's reading of the two slots: both flags, and every cause
+# ---------------------------------------------------------------------------
+
+def _flags(**changed):
+    """``_geometry_flags`` of an honest report (both flags stand) with
+    *changed* inputs."""
+    from maddening.core.coupling import _group_layout       # noqa: PLC0415
+
+    inputs = dict(bound=1e-3, gradient_bound=2e-2, rho=0.5, arnoldi_residual=1e-9,
+                  settled=True, precision_limited=False, declared=False, limit=1.0,
+                  margin=3.0, reach=2.0, ulps=8.0, fraction=0.05, steps=8)
+    inputs.update(changed)
+    return _group_layout._geometry_flags(["M.y->G.deposit"], **inputs)   # noqa: SLF001
+
+
+def test_both_flags_of_a_geometry_group_need_the_plane_margin_over_one():
+    """The spectral flag as the gradient's (MADD-ANO-248): a margin at one,
+    under it, not a number or absent withdraws both, whatever the limit and
+    the gradient bound read; over one, and ``inf`` (no position read from
+    the iterate), both stand."""
+    above = float(np.nextafter(1.0, 2.0))
+    for margin in (above, 3.0, np.inf):
+        for limit in (np.inf, 1.0, 0.0, np.nan, None):
+            assert _flags(margin=margin, limit=limit) == (True, True, None), (margin, limit)
+    for margin in (1.0, 0.99, 1e-30, 0.0, -1.0, np.nan, None):
+        for limit in (np.inf, 1.0, 0.0):
+            for gradient in (2e-2, np.inf, np.nan):
+                spectral, gradient_flag, reason = _flags(
+                    margin=margin, limit=limit, gradient_bound=gradient)
+                assert (spectral, gradient_flag) == (False, False), (margin, limit, gradient)
+                assert "Newton-Kantorovich ball" in reason and "M.y->G.deposit" in reason
+
+
+def test_the_limit_rule_stays_beside_the_margin_and_neither_implies_the_other():
+    """A margin over one with the bound over the limit: the flags stand on
+    a Newton-Kantorovich check that passed, and are withdrawn where it did
+    not (``inf``) or was not computed (NaN, an absent limit included) --
+    the measured half of the margin's one unproved assumption.  A bound
+    under the limit with a margin under one is withdrawn by the margin."""
+    assert _flags(margin=1.5, limit=1e-4) == (True, True, None)
+    for limit in (1e-4, 0.0, np.nan, None):
+        for gradient, told in ((np.inf, "did not pass (it is inf)"),
+                               (np.nan, "was not computed (it is NaN)")):
+            spectral, gradient_flag, reason = _flags(
+                margin=1.5, limit=limit, gradient_bound=gradient)
+            assert (spectral, gradient_flag) == (False, False), (limit, gradient)
+            assert "within 2 times spectral_error_bound of a lattice plane" in reason
+            assert told in reason and "Newton-Kantorovich ball" not in reason, reason
+    spectral, _gradient, reason = _flags(margin=0.5, limit=1.0)
+    assert spectral is False and "times spectral_error_bound of a" not in reason
+
+
+def test_a_false_flag_names_a_lattice_plane_only_where_a_plane_rule_is_a_cause():
+    """Every cause of a ``False`` flag of a step that computed the estimate,
+    and nothing else: the float floor, an estimate that did not settle, a
+    bound that is not finite, a gradient bound that was not computed (NaN)
+    or did not certify (``inf``).  No plane is named with them, and no
+    tighter tolerance is suggested where none restores the flag (a
+    position on a plane; a residual at its floor).  With no estimate (a
+    NaN radius) the numbers say so and there is no reason."""
+    spectral, gradient, reason = _flags(precision_limited=True)
+    assert (spectral, gradient) == (False, False)
+    assert "float floor" in reason and "update_evaluations" in reason
+    assert "lattice plane" not in reason and "M.y->G.deposit" not in reason
+    assert _flags(precision_limited=True, declared=True) == (True, True, None)
+
+    spectral, gradient, reason = _flags(settled=False, arnoldi_residual=0.3)
+    assert (spectral, gradient) == (False, False)
+    assert "did not settle" in reason and "0.3" in reason and "8 Krylov steps" in reason
+    assert "lattice plane" not in reason and "no tolerance changes that" in reason
+
+    spectral, gradient, reason = _flags(bound=np.inf, settled=False)
+    assert (spectral, gradient) == (False, False) and "spectral_error_bound is inf" in reason
+    assert "did not settle" not in reason and "lattice plane" not in reason
+
+    for value, told, other in ((np.nan, "was not computed (NaN)", "is inf"),
+                               (np.inf, "is inf", "was not computed")):
+        spectral, gradient, reason = _flags(gradient_bound=value)
+        assert (spectral, gradient) == (True, False), value
+        assert reason.startswith("gradient_bound_usable is False (spectral_usable stands)")
+        assert told in reason and other not in reason and "lattice plane" not in reason
+
+    # Both kinds of cause: each named.
+    spectral, gradient, reason = _flags(precision_limited=True, margin=0.25,
+                                        gradient_bound=np.inf)
+    assert (spectral, gradient) == (False, False)
+    for told in ("float floor", "0.25 radii of that ball", "has a cause of its own",
+                 "gradient_relative_error_bound is inf"):
+        assert told in reason, (told, reason)
+    # A tighter tolerance: said for a plane in the ball above the floor only.
+    advice = "at a tighter tolerance the plane leaves it"
+    assert advice in _flags(margin=0.25)[2]
+    assert advice not in reason                              # at the float floor
+    assert advice not in _flags(margin=0.0)[2]               # on a plane
+    assert "no tolerance restores the flags" in _flags(margin=0.0)[2]
+    assert advice not in _flags(margin=np.nan)[2]            # not measured
+    assert "brings the iterate into the fixed point's cell" not in _flags(margin=0.25)[2]
+
+    # No estimate: the flags are False and the NaN numbers are the reason.
+    assert _flags(rho=np.nan, bound=np.nan, gradient_bound=np.nan, settled=False,
+                  margin=np.nan, limit=np.nan) == (False, False, None)

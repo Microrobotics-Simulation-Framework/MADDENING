@@ -482,17 +482,27 @@ def plane_limit_resolution(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) 
     return worst / 2.0
 
 
+def withheld(reason) -> bool:
+    """Is *reason* that of a report whose bounds are withheld whole (the
+    diagnostics do not read the group's geometry, or the step failed its
+    self-check)?  Any other reason is the cause of a ``False`` flag on a
+    report whose numbers are all there."""
+    return reason is not None and "do not read a moving geometry" in reason
+
+
 def without_plane_limit(gm: GraphManager) -> dict:
-    """The report of *gm*'s last step with the lattice-plane criterion
-    out of it (the slot read as ``inf``): what ``spectral_usable`` said
-    before the criterion existed."""
+    """The report of *gm*'s last step with the two lattice-plane rules
+    out of it (the limit and the margin read as ``inf``): what
+    ``spectral_usable`` said before either existed."""
     slot = f"coupling_{KEY}_geometry_plane_limit"
+    margin = f"coupling_{KEY}_geometry_plane_margin"
     kept = gm._state                                               # noqa: SLF001
     if slot not in kept.get("_meta", {}):
         return dict(gm.coupling_diagnostics()[KEY])
     try:
-        gm._state = {**kept, "_meta": {**kept["_meta"], slot: np.asarray(        # noqa: SLF001
-            np.inf, np.asarray(kept["_meta"][slot]).dtype)}}
+        clear = np.asarray(np.inf, np.asarray(kept["_meta"][slot]).dtype)
+        gm._state = {**kept, "_meta": {**kept["_meta"], slot: clear,             # noqa: SLF001
+                                       margin: clear}}
         return dict(gm.coupling_diagnostics()[KEY])
     finally:
         gm._state = kept                                           # noqa: SLF001

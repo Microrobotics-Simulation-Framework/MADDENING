@@ -117,8 +117,15 @@ class Cfg:
 # --------------------------------------------------------------------------
 # independent reference kernel (numpy, complex-capable)
 # --------------------------------------------------------------------------
-def _stencil(cfg: Cfg, pos):
-    """indices (m, 2**d) and weights (m, 2**d) of own multilinear stencil."""
+def _stencil(cfg: Cfg, pos, piece=None):
+    """indices (m, 2**d) and weights (m, 2**d) of own multilinear stencil.
+
+    With *piece* (the cell signature of every coordinate, as
+    :func:`cells_of` gives it) the weights are that lattice cell's
+    polynomial continued past its planes -- the polynomial piece the kernel
+    is in that cell, as a function of every position: outside the hull the
+    clamped constant, inside it the cell's own weights with the fraction
+    left to run below zero and above one."""
     pos = np.asarray(pos).reshape(cfg.m, cfg.d)
     lo, hi, fr = [], [], []
     for a in range(cfg.d):
@@ -126,8 +133,13 @@ def _stencil(cfg: Cfg, pos):
         u = (pos[:, a] - cfg.origin[a]) / cfg.spacing[a]
         ur = u.real
         top = n - 1
-        cl = np.where(ur < 0, 0.0, np.where(ur > top, float(top), u))
-        base = np.clip(np.floor(cl.real), 0, max(n - 2, 0))
+        if piece is None:
+            cl = np.where(ur < 0, 0.0, np.where(ur > top, float(top), u))
+            base = np.clip(np.floor(cl.real), 0, max(n - 2, 0))
+        else:
+            sig = np.asarray(piece).reshape(cfg.m, cfg.d)[:, a]
+            cl = np.where(sig < 0, 0.0, np.where(sig > n - 2, float(top), u))
+            base = np.clip(sig, 0, max(n - 2, 0)).astype(float)
         fr.append(cl - base)
         i0 = base.astype(int)
         lo.append(i0)
@@ -145,13 +157,13 @@ def _stencil(cfg: Cfg, pos):
     return np.stack(idx, 1), np.stack(w, 1)
 
 
-def ref_gather(cfg, f, pos):
-    idx, w = _stencil(cfg, pos)
+def ref_gather(cfg, f, pos, piece=None):
+    idx, w = _stencil(cfg, pos, piece)
     return np.sum(w * np.asarray(f)[idx], axis=1)
 
 
-def ref_scatter(cfg, y, pos):
-    idx, w = _stencil(cfg, pos)
+def ref_scatter(cfg, y, pos, piece=None):
+    idx, w = _stencil(cfg, pos, piece)
     y = np.asarray(y)
     out = np.zeros(cfg.size, dtype=np.result_type(w.dtype, y.dtype))
     np.add.at(out, idx, w * y[:, None])
@@ -237,21 +249,30 @@ def _upd_P(cfg, pre, sampled):
     return new
 
 
-def ref_pass(cfg: Cfg, x, c, sweep=None):
+def ref_pass(cfg: Cfg, x, c, sweep=None, piece=None):
     """One pass of the group: x the incoming iterate (flat), c the pre-step
-    state (flat).  Time levels as the algorithm guide's table."""
+    state (flat).  Time levels as the algorithm guide's table.  With
+    *piece* (``{node: cell signatures}`` of the positions the pass reads
+    from the iterate or builds, :func:`piece_at`) every stencil at such a
+    position is that cell's polynomial continued (:func:`_stencil`): the
+    polynomial piece of the pass, as a map of the whole space."""
+    piece = piece or {}
     it, pre = unpack(cfg, x), unpack(cfg, c)
     g_anchor, s_anchor = cfg.anchors
     sweep = sweep or cfg.sweep or cfg.order
     cur = {"F": dict(it["F"]), "P": dict(it["P"])}      # what a reader sees
 
     def do_F(view):
-        geom = view["P"]["pos"] if s_anchor == "source" else pre["F"]["pos"]
-        return _upd_F(cfg, pre["F"], ref_scatter(cfg, view["P"]["x"], geom))
+        if s_anchor == "source":
+            return _upd_F(cfg, pre["F"], ref_scatter(cfg, view["P"]["x"], view["P"]["pos"],
+                                                     piece.get("P")))
+        return _upd_F(cfg, pre["F"], ref_scatter(cfg, view["P"]["x"], pre["F"]["pos"]))
 
     def do_P(view):
-        geom = view["F"]["pos"] if g_anchor == "source" else pre["P"]["pos"]
-        return _upd_P(cfg, pre["P"], ref_gather(cfg, view["F"]["x"], geom))
+        if g_anchor == "source":
+            return _upd_P(cfg, pre["P"], ref_gather(cfg, view["F"]["x"], view["F"]["pos"],
+                                                    piece.get("F")))
+        return _upd_P(cfg, pre["P"], ref_gather(cfg, view["F"]["x"], pre["P"]["pos"]))
 
     if cfg.mode == "jacobi":
         new = {"F": do_F(cur), "P": do_P(cur)}
@@ -263,7 +284,38 @@ def ref_pass(cfg: Cfg, x, c, sweep=None):
     return pack(cfg, new)
 
 
-def jac(cfg, x, c, wrt="x"):
+def piece_at(cfg, x) -> dict:
+    """The polynomial piece of the pass at *x*: the lattice cell of every
+    position the pass reads from the iterate (a source-anchored geometry's
+    holder), for :func:`ref_pass`."""
+    g, s = cfg.anchors
+    readers = [n for n, anchor in (("P", s), ("F", g)) if anchor == "source"]
+    return {n: cells_of(cfg, x[pos_slices(cfg)[n]]) for n in readers}
+
+
+def cell_fixed_point(cfg, x, c, iters=80, tol=1e-13):
+    """``(x_p, ok)``: the fixed point of the polynomial piece the pass is at
+    *x* (:func:`piece_at`), by Newton from *x* on that polynomial, wherever
+    it lies -- in the cells of *x*, where it is a fixed point of the pass,
+    or past one of their planes, where it is not."""
+    piece = piece_at(cfg, x)
+    y = np.asarray(x, float).copy()
+    eye = np.eye(y.size)
+    for _ in range(iters):
+        try:
+            step = np.linalg.solve(eye - jac(cfg, y, c, piece=piece),
+                                   ref_pass(cfg, y, c, piece=piece).real - y)
+        except np.linalg.LinAlgError:
+            return y, False
+        y = y + step
+        if not np.all(np.isfinite(y)):
+            return y, False
+        if float(np.max(np.abs(step) / (1.0 + np.abs(y)))) < tol:
+            return y, True
+    return y, False
+
+
+def jac(cfg, x, c, wrt="x", piece=None):
     """dF/dx (or dF/dc) by complex step: exact inside a lattice cell."""
     n = x.size
     h = 1e-30
@@ -272,7 +324,7 @@ def jac(cfg, x, c, wrt="x"):
         if wrt == "x":
             xp = x.astype(complex)
             xp[j] += 1j * h
-            cols.append(ref_pass(cfg, xp, c.astype(complex)).imag / h)
+            cols.append(ref_pass(cfg, xp, c.astype(complex), piece=piece).imag / h)
         else:
             cp = c.astype(complex)
             cp[j] += 1j * h
@@ -684,11 +736,17 @@ def sides(cfg: Cfg, x, c) -> dict:
         xn = x + np.linalg.solve(np.eye(n) - J, fx - x)
     except np.linalg.LinAlgError:
         xn = fx
+    # The fixed point of the polynomial the pass is at the iterate: in the
+    # iterate's cells it is a fixed point of the pass (the reference's own,
+    # where the plain iteration went to it); past a plane it is not one.
+    xp, p_ok = cell_fixed_point(cfg, x, c)
     k_same = n_same = built_same = True
+    p_in_cell = bool(p_ok)
     nearest_res = nearest_frac = np.inf
     fp_frac = np.inf
     for _node, sl in pos_slices(cfg).items():
         at_fp = cells_of(cfg, xs[sl])
+        p_in_cell = p_in_cell and bool(np.all(cells_of(cfg, xp[sl]) == cells_of(cfg, x[sl])))
         k_same = k_same and bool(np.all(cells_of(cfg, x[sl]) == at_fp))
         n_same = n_same and bool(np.all(cells_of(cfg, xn[sl]) == at_fp))
         built_same = built_same and bool(np.all(cells_of(cfg, fx[sl]) == at_fp))
@@ -701,6 +759,9 @@ def sides(cfg: Cfg, x, c) -> dict:
     row = f"k{'=' if k_same else '!='}* N{'=' if n_same else '!='}*"
     return {"fp_ok": bool(ok), "row": row, "k_same": k_same, "n_same": n_same,
             "built_same": built_same, "one_piece": k_same and n_same and built_same,
+            "p_ok": bool(p_ok), "p_in_cell": p_in_cell,
+            "p_is_fixed_point": bool(p_ok and np.max(np.abs(xp - xs)) <= 1e-8 * max(
+                1.0, float(np.max(np.abs(xs))))),
             "nearest_resolutions": nearest_res, "nearest_spacings": nearest_frac,
             "fixed_point_spacings": fp_frac,
             "on_a_plane": nearest_res < PLANE_RESOLUTIONS}
@@ -715,7 +776,13 @@ def wrong_numbers(cfg: Cfg, x, c, rep, where: dict) -> list:
       cell's Jacobian the floats evaluated is rounding's, MADD-ANO-239);
       the distance to the fixed point within ``spectral_error_bound / (1 -
       h)`` in one cell (``h`` how far the Jacobian moves on the way) and
-      within twice the bound across a plane (MAP-049);
+      within twice the bound across a plane, which only positions that
+      are constants of the pass can have between them (MAP-049); and, as
+      the gradient's, never set unless the iterate, the Newton point, the
+      positions the pass builds and the fixed point are in one lattice
+      cell, off every plane: with the fixed point of the cell's polynomial
+      past a plane the bound is to a point the pass does not have
+      (MADD-ANO-248);
     * ``gradient_bound_usable``: the implicit derivative's relative error,
       worst resolved constant, within ``gradient_relative_error_bound``;
       and never set unless the iterate, the Newton point, the positions the
@@ -737,15 +804,20 @@ def wrong_numbers(cfg: Cfg, x, c, rep, where: dict) -> list:
         if not (where["k_same"] and where["built_same"]) and sc["dist"] > 2 * bound * 1.001:
             bad.append(f"twice spectral_error_bound {bound:.6g} across a plane, the distance "
                        f"{sc['dist']:.6g}")
-    if rep["gradient_bound_usable"] and moving(cfg):
+    for flag in ("spectral_usable", "gradient_bound_usable"):
+        if not (rep[flag] and moving(cfg)):
+            continue
         # The rule's own statement: one lattice cell, off every plane.  (A
         # plane between two points that are both within the window of it
         # is rounding's to place: not asked.)
         if not where["one_piece"] and not where["on_a_plane"]:
-            bad.append(f"gradient_bound_usable is set on row {where['row']} (the positions the "
+            bad.append(f"{flag} is set on row {where['row']} (the positions the "
                        f"pass builds in the fixed point's cell: {where['built_same']})")
+        if where.get("p_ok") and not where["p_in_cell"] and not where["on_a_plane"]:
+            bad.append(f"{flag} is set with the fixed point of the iterate's polynomial "
+                       f"piece past a lattice plane (row {where['row']})")
         if where["nearest_resolutions"] < PLANE_RESOLUTIONS / 2:
-            bad.append(f"gradient_bound_usable is set with a position "
+            bad.append(f"{flag} is set with a position "
                        f"{where['nearest_resolutions']:.3g} float resolutions from a plane")
     if rep["gradient_bound_usable"] and (where["one_piece"] or not moving(cfg)):
         if sc["grad_err"] > grad * 1.02 + 1e-9:

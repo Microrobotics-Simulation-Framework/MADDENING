@@ -222,17 +222,43 @@ def _geometry_plane_limit(step_pure, x_star, consts, readers, weights, unit):
       it would on a smooth map.
 
     Where ``B > limit`` a plane is within reach, and the report keeps the
-    flag only if the step certified the linearisation across it: the
-    gradient bound's Newton-Kantorovich check
-    (:func:`_gradient_error_bound_at`) takes the pass's Jacobian at
-    ``x_k`` and at the Newton point ``x_k + delta`` -- across whatever
-    plane the predicted fixed point is beyond -- and is finite only where
-    the resolvent applied to the difference is under one half.  A screen
-    alone would withdraw the flag of nearly every step of a group with
-    many points (one of them is always near a plane); the check alone
-    would withdraw it wherever a smooth nonlinearity fails Kantorovich
-    far from any plane, which the bound's documented conditions already
-    cover.
+    flags only if the gradient bound's Newton-Kantorovich check
+    (:func:`_gradient_error_bound_at`) passed: it takes the pass's
+    Jacobian at ``x_k`` and at the Newton point ``x_k + delta`` and is
+    finite only where the resolvent applied to the difference is under
+    one half.  A screen alone would withdraw the flag of nearly every
+    step of a group with many points (one of them is always near a
+    plane); the check alone would withdraw it wherever a smooth
+    nonlinearity fails Kantorovich far from any plane, which the bound's
+    documented conditions already cover.
+
+    **This rule is not enough alone, and it is not the proved one.**  The
+    check sees a plane only where the Newton point is *across* it.  With
+    the fixed point of the cell's polynomial just past a plane that the
+    iterate and the Newton point are both short of, the check compares
+    two Jacobians of one cell, reads a small ``h`` and passes, and the
+    pass has no fixed point in that cell: ``spectral_usable`` stood on a
+    bound 17 to 1,294 times under the distance (MADD-ANO-248).  And the
+    two bullets above take ``B`` to be at least the Newton step, which
+    the Krylov compression behind ``B`` does not guarantee.  So both
+    flags stand on the margin of
+    :func:`_kantorovich_ball_plane_margin`, which is a statement about
+    the Newton step itself, and this rule stays beside it for the one
+    thing that argument assumes and the step measures: with a plane
+    within reach of the bound, a Newton-Kantorovich check that did not
+    pass (``h >= 1/2``, the bound ``inf``) or was not computed (NaN)
+    withdraws the flags whatever the margin reads
+    (``_group_layout._geometry_flags``).  Neither implies the other: an
+    entry the Newton step hardly moves, with a plane between one Newton
+    step and twice the bound away, has a margin over one and a bound
+    over this limit.
+
+    **Which weights.**  The limit is in the units of the bound, so ``D``
+    here is the *spectrum's* weights: a field in the norm's dead band
+    keeps its own magnitude's weight (the caller's ``atol`` where it is
+    exactly zero).  The margin is a statement about the Newton step in
+    the group's norm, so its ``D`` is the *norm's* weights, where such a
+    field has weight zero and counts as on a plane.
 
     A position that is a constant of the pass (a target-anchored edge of
     ``update``, a node outside the group) does not move between the
@@ -975,8 +1001,23 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     is away (experimental): over one, the iterate, the Newton point and the
     fixed point are in one polynomial piece of the pass.
 
-    **Why the gradient's flag needs it.**  The gradient bound is the
-    smooth theory's: it takes the pass's Jacobian at the returned iterate
+    **Why both flags need it.**  ``spectral_error_bound`` is the
+    linearisation's distance to a fixed point: the fixed point ``x_p`` of
+    the polynomial ``p`` the pass is in the lattice cells of the returned
+    iterate.  That is a fixed point of the *pass* only where it lies in
+    those cells.  With ``x_p`` past a lattice plane the pass there is
+    another polynomial, with another fixed point or none nearby, and the
+    bound is to a point the pass does not have: an iterate and a Newton
+    point both short of a plane, ``x_p`` a few millionths of a spacing
+    past it, the next cell expanding, and the pass's fixed point two
+    cells on, 17 to 1,294 bounds away with ``spectral_usable`` set
+    (MADD-ANO-248).  The Newton-Kantorovich check cannot see it: both
+    its Jacobians are one cell's.  The conclusion below -- ``x_p`` is in
+    the iterate's cells, hence a fixed point of the pass, within ``t* <=
+    2 eta`` of the iterate -- is exactly what the bound needs.
+
+    The gradient bound is the
+    smooth theory's too: it takes the pass's Jacobian at the returned iterate
     ``x_k`` and at the Newton point ``x_N = x_k + delta`` and bounds the
     Jacobian at the fixed point ``x*`` from the two.  A
     geometry-dependent mapping is another polynomial of the positions
@@ -985,8 +1026,8 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     short of, both are one cell's, the check reads no change (``h`` near
     0), and the gradient of the fixed point is the other cell's.  The
     bound was 15 to 70,000 times under the reference's error with its
-    flag set (MADD-ANO-248).  So the flag does not stand on what the
-    check reads; it stands where no plane is in the ball at all.
+    flag set (MADD-ANO-248).  So neither flag stands on what the
+    check reads; they stand where no plane is in the ball at all.
 
     **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``,
     *moved* ``= |D delta|`` entry by entry and *radius* ``= eta + floor``
@@ -1044,10 +1085,22 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     and 2 the pass *is* ``p`` at the three points, ``x_p`` is a fixed
     point of the pass, both Jacobians the bound takes and the one it
     bounds are ``p``'s, and the bound is the smooth one.  Where it is not,
-    a plane is in the ball and ``gradient_bound_usable`` is withdrawn
-    whatever ``h`` reads.  No point is sampled to speak for a plane it is
-    not at: the ball is covered by a distance, and the two evaluations
-    answer only for themselves.
+    a plane is in the ball and ``spectral_usable`` and
+    ``gradient_bound_usable`` are withdrawn whatever ``h`` reads
+    (``_group_layout._geometry_flags``).  No point is sampled to speak
+    for a plane it is not at: the ball is covered by a distance, and the
+    two evaluations answer only for themselves.
+
+    **What the rule cannot know, and costs.**  It does not look past the
+    plane: a next cell that contracts as the first does would have kept
+    the bound within twice (it did, on three audited cases), and one
+    that expands does not; with ``x_p`` past the plane the flags go in
+    both.  A position *at rest on* a lattice plane or a hull face, read
+    from the iterate, has margin zero on every step, moving or not: the
+    rule cannot know it is still.  Assumption 3 is taken, not proved:
+    the step measures ``h`` on one secant, and the report also withdraws
+    the flags where that reads 1/2 or more with a plane within reach of
+    the bound (:func:`_geometry_plane_limit`).
 
     Returns a scalar in the weights' dtype: ``inf`` with no reader, NaN
     where a position, a move or the radius is not a number.

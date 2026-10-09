@@ -281,3 +281,116 @@ def test_the_state_a_step_replaces_is_not_read_while_it_holds_a_tracer():
 
     jax.grad(loss)(_scaled(1.0))
     assert len(seen) == 1 and "a.x" in str(seen[0].message)
+
+
+# ---------------------------------------------------------------------------
+# A loop that writes a state before every step is not asked at every step
+# ---------------------------------------------------------------------------
+# The check reads every field of every group twice on the host, which costs
+# several times a small graph's step (a three-entry pair's loop of
+# set_node_state and step: 45 microseconds without the check, 170 with it at
+# every step).  A write, or a few, is asked at the next step every time; in an
+# unbroken run of steps that each follow a write (or compile()) the check is
+# made at the first eight, at each power of two after that and at every 128th
+# from there on.
+
+
+_ONE = _scaled(1.0)
+
+
+def _counted_reads(monkeypatch):
+    """How many times the groups' fields are read on the host from here on
+    (``GraphManager`` reads the function from ``_reports`` at each call)."""
+    from maddening.core.coupling import _reports
+
+    reads = []
+    real = _reports._underflow_range_fields
+
+    def counted(groups, state):
+        reads.append(len(groups))
+        return real(groups, state)
+
+    monkeypatch.setattr(_reports, "_underflow_range_fields", counted)
+    return reads
+
+
+def test_the_positions_of_a_run_at_which_the_check_is_made():
+    from maddening.core.coupling._reports import _underflow_check_due
+
+    asked = [run for run in range(1, 700) if _underflow_check_due(run)]
+    assert asked == [1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128, 256, 384, 512, 640]
+
+
+def test_a_loop_that_writes_before_every_step_is_asked_a_bounded_number_of_times(monkeypatch):
+    gm = _leaky_pair(1.0)
+    reads = _counted_reads(monkeypatch)
+    gm.step()
+    assert len(reads) == 2                              # the first step after compile()
+    del reads[:]
+    for _ in range(300):
+        gm.set_node_state("a", {"x": _ONE})
+        gm.step()
+    # The step after compile() was the run's first.  Two reads (the state
+    # the step starts from, the one it leaves) at steps 2 to 8, 16, 32,
+    # 64, 128 and 256 of the run: 12 of these 300.
+    assert len(reads) == 2 * 12
+    # A run of steps without a write reads nothing at all.
+    del reads[:]
+    for _ in range(5):
+        gm.step()
+    assert reads == []
+
+
+def test_a_step_that_follows_no_write_ends_the_run():
+    """After a plain step, the next write is the first of a new run and is
+    asked at the step that follows it, however long the run before."""
+    gm = _leaky_pair(1.0)
+    gm.step()
+    for _ in range(20):                                 # the run stands at 20: not asked
+        _write(gm, 1.0)
+        assert _recorded(gm.step) == []
+    assert _recorded(gm.step) == []                     # no write before this one
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1
+
+
+def test_a_write_into_the_range_inside_a_long_run_is_warned_of_at_the_next_asked_step():
+    """What the bound costs: a state written into the range at a step of
+    the run that is not asked (the 9th to the 15th) is warned of when the
+    run reaches the next asked one (the 16th), if it is still there."""
+    gm = _leaky_pair(1.0)
+    gm.step()                                           # the run's first step
+    for _ in range(9):
+        _write(gm, 1.0)
+        assert _recorded(gm.step) == []
+    for position in range(11, 16):
+        _write(gm, 1e-33)
+        assert _recorded(gm.step) == [], position
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1                 # the 16th
+
+
+def test_compile_starts_a_new_run():
+    """The first step after every ``compile()`` is asked, wherever a run
+    of writes stood when the graph was compiled again."""
+    gm = _leaky_pair(1.0)
+    gm.step()
+    for _ in range(12):
+        _write(gm, 1.0)
+        gm.step()
+    _write(gm, 1e-33)
+    gm._dirty = True                                    # noqa: SLF001
+    gm.compile()
+    assert len(_recorded(gm.step)) == 1
+
+
+def test_a_group_already_warned_of_is_not_read_again(monkeypatch):
+    gm = _leaky_pair(1.0)
+    gm.step()
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1
+    reads = _counted_reads(monkeypatch)
+    for _ in range(3):
+        _write(gm, 1e-33)
+        assert _recorded(gm.step) == []
+    assert reads == []

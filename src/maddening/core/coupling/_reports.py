@@ -107,6 +107,32 @@ class _CouplingDiagnostics(dict):
         return dict.__contains__(self, self._resolve(key))
 
 
+# In an unbroken run of write-then-step (a state write before every
+# step), the positions at which the underflow-range check is made: every
+# one of the first few, then each power of two, then one in every so many.
+_UNDERFLOW_RUN_ALWAYS = 8
+_UNDERFLOW_RUN_EVERY = 128
+
+
+def _underflow_check_due(run: int) -> bool:
+    """Is the underflow-range check made at the *run*-th step (from 1) of
+    an unbroken run of steps that each follow a state write?
+
+    The check reads every field of every coupled group twice on the host,
+    which costs several times a small graph's step (measured: a
+    three-entry pair's loop of ``set_node_state`` and ``step`` went from
+    45 to 170 microseconds, one of 100,000 entries from 0.6 to 1.1 ms).
+    One write, or a few, is asked at the next step, every time.  A loop
+    that writes before every step is asked at its first
+    ``_UNDERFLOW_RUN_ALWAYS`` steps, at each power of two after that and
+    at every ``_UNDERFLOW_RUN_EVERY``-th from there on: a number of checks
+    that grows with the logarithm of the loop's length and then by one in
+    ``_UNDERFLOW_RUN_EVERY`` steps, instead of one per step.
+    """
+    return (run <= _UNDERFLOW_RUN_ALWAYS or run % _UNDERFLOW_RUN_EVERY == 0
+            or (run < _UNDERFLOW_RUN_EVERY and run & (run - 1) == 0))
+
+
 def _underflow_range_fields(groups, state) -> dict[str, list]:
     """``{group key: [(node, field, magnitude, dtype), ...]}``, smallest first.
 

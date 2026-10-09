@@ -129,7 +129,10 @@ class UnderflowRangeWarning(PrecisionLimitWarning):
     state that step starts from and the one it returns, and warns at most
     once per group, naming the field, its magnitude and the threshold.  An
     exactly zero field never warns; a state that decays into the range
-    through the nodes' own updates is not checked again.
+    through the nodes' own updates is not checked again.  A loop that
+    writes a state before every step is not asked at every step (the check
+    costs several times a small graph's step): at the first eight steps of
+    such a run, at each power of two after that and at every 128th.
     The remedy is to write the field in units where it is of order one.
     Float32 thresholds: ``tiny / eps`` is about ``9.9e-32``; bfloat16
     ``1.5e-36``; float16 ``0.0625`` (its normal range starts at ``6.1e-5``);

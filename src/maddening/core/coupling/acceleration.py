@@ -21,6 +21,7 @@ from maddening.core._pow2_frame import pow2_frame, pow2_rescue
 from maddening.core.coupling._interface_plan import (
     KERNEL_LENGTH,
     InterfacePlan,
+    _position_lattices,
     interface_records,
 )
 
@@ -438,7 +439,7 @@ def coupling_residual_mixed(
 
 
 def _interface_readings(interface_edges, *states, mappings=None, pre_step=None,
-                        band: bool = False):
+                        band: bool = False, lattices=None):
     """What ``convergence_norm="interface"`` reads on each internal edge, at each of *states*.
 
     **The one definition of how an interface edge is read: on its compact
@@ -491,8 +492,19 @@ def _interface_readings(interface_edges, *states, mappings=None, pre_step=None,
     declares a dead band (``atol > 0``): the source-field part of an edge
     read at its source then carries what the edge delivers as well
     (``PartReading.delivered``), for :func:`_kept_by_what_is_delivered`.
+
+    ``lattices`` names, for each geometry field, the mappings of the
+    edges that read it (``_interface_plan._position_lattices``): where a
+    position is rounded is the largest over them
+    (``PartReading.positions``, which only the float floor reads).
+    ``None`` takes them from *interface_edges*, which is every reader
+    but one's case; :func:`_positions_floors` reads one edge at a time
+    and hands the group's.
     """
-    for record in interface_records(interface_edges, states[0]):
+    records = interface_records(interface_edges, states[0])
+    if lattices is None:
+        lattices = _position_lattices(records)
+    for record in records:
         node, field = record.source
         source = states[0][node][field]
         # Decided on the state handed, not on ``record.source_kind`` (the
@@ -500,7 +512,8 @@ def _interface_readings(interface_edges, *states, mappings=None, pre_step=None,
         # pass keeps each field's dtype kind.
         if not _is_float_leaf(source):
             continue            # an integer interface field cannot carry a norm
-        for reading in record.read(states, mappings, pre_step, band=band):
+        for reading in record.read(states, mappings, pre_step, band=band,
+                                   lattices=lattices):
             if not _has_entries(reading[2]):
                 continue        # no entries: not read (``_has_entries``)
             yield reading
@@ -649,12 +662,16 @@ def _part_resolution(reading, state_index: int = 0, group_eps: Optional[float] =
     :func:`_reading_eps`, the coarsest of the value's dtype, its source
     field's and, where it was delivered through a geometry-dependent
     mapping, the geometry's.  Such a delivered value also carries the
-    rounding of the positions it was computed at: a position ``u``
-    lengths from zero is stored to ``eps * |u|`` lengths, which moves a
-    kernel weight by as much, so the resolution is at least ``eps``
-    times the largest position in lengths.  A part that *is* positions,
-    in lengths, is measured against one length: its resolution is
-    ``eps`` of the geometry's dtype times its own largest magnitude.
+    rounding of the positions it was computed at: a position is rounded
+    at the larger of its own magnitude and of the coordinate the kernel
+    forms from it (``PartReading.positions``, from
+    ``_interface_plan._rounded_at``), ``r`` lengths say, to ``eps * r``
+    lengths, which moves a kernel weight by as much, so the resolution
+    is at least ``eps`` times the largest such ``r``.  A part that *is*
+    positions, in lengths, is measured against one length: its
+    resolution is ``eps`` of the geometry's dtype times the largest
+    ``r`` of its own entries (:func:`_positions_resolution` in both
+    cases: one function, one magnitude).
 
     *group_eps* is the coarsest ``eps`` among the group's floating fields
     (:func:`_group_coarsest_eps`), which no **value** entry of a group's
@@ -675,7 +692,10 @@ def _part_resolution(reading, state_index: int = 0, group_eps: Optional[float] =
     positions = reading.positions[state_index]
     eps_floor = 0.0 if group_eps is None else float(group_eps)
     if reading.part.unit == KERNEL_LENGTH:
-        return _positions_resolution(value)
+        # Where the part's positions are rounded, not what the residual
+        # reads of them (``value``: no origin subtracted): the two differ
+        # wherever the kernel's own coordinate is the larger.
+        return _positions_resolution(positions)
     if positions is None:
         return max(_reading_eps(source_dtype, value), eps_floor)
     positions = jnp.asarray(positions)
@@ -686,24 +706,36 @@ def _part_resolution(reading, state_index: int = 0, group_eps: Optional[float] =
     # units: dimensionless -- each eps is relative to a magnitude.  Taken
     # as it stands, the positions' is the resolution of a value computed
     # from positions of that dtype, over the value's own magnitude, like
-    # the value's own eps it is compared with; times the positions' size
-    # in the kind's lengths (``_positions_resolution``) it is their
-    # stored rounding in lengths, which is what moves a kernel weight.
+    # the value's own eps it is compared with; times the magnitude the
+    # positions are rounded at in the kind's lengths
+    # (``_positions_resolution``) it is their rounding in lengths, which
+    # is what moves a kernel weight.
     static = max(_reading_eps(source_dtype, value), eps_geometry)
     return jnp.maximum(static, _positions_resolution(positions))
 
 
 def _positions_resolution(positions):
-    """The rounding *positions* are stored with, in the lengths they are given in.
+    """The rounding of stored positions, in the lengths they are given
+    in, from the magnitude *positions* each of them is rounded at.
 
-    ``eps`` of their dtype times their largest magnitude: a position
-    ``u`` lengths from zero is stored to ``eps * |u|`` lengths.  The one
-    term through which stored positions enter the float floor
-    (:func:`_part_resolution`): the whole resolution of a part that is
-    positions, and what a value delivered through a geometry-dependent
-    mapping is no finer than.  ``compile()``'s advisory about positions
-    a dtype cannot resolve (:func:`_positions_floors`) is this number
-    and no other.  Traced where the positions are, with no derivative.
+    ``eps`` of their dtype times the largest of those magnitudes.
+    *positions* is ``PartReading.positions``: per coordinate, the larger
+    of the stored position's own magnitude (``u`` lengths from the
+    coordinates' zero: stored to ``eps * |u|``) and of the coordinate
+    the kernel forms from it in the same dtype (for ``multilinear_grid``
+    the lattice coordinate ``(x - origin) / spacing``: a weight is
+    resolved to ``eps`` of *that*), the largest over the lattices that
+    read the position (``_interface_plan._rounded_at``, where the
+    comparison is made and why).
+
+    **The one term through which stored positions enter the float
+    floor** (:func:`_part_resolution`): the whole resolution of a part
+    that is positions, and what a value delivered through a
+    geometry-dependent mapping is no finer than.  ``compile()``'s
+    advisory about positions a dtype cannot resolve
+    (:func:`_positions_floors`) is this number of the same magnitudes
+    and no other, so the advisory and the floor cannot locate a rounding
+    differently.  Traced where the positions are, with no derivative.
 
     Always the positions' own dtype, inside a group's floor too: the
     group's coarsest eps (:func:`_group_coarsest_eps`) is for value
@@ -712,8 +744,8 @@ def _positions_resolution(positions):
     not of the position.
     """
     positions = jnp.asarray(positions)
-    # units: dimensionless -- eps is relative to a position's own
-    # magnitude; the product is in the lengths the positions are given in.
+    # units: dimensionless -- eps is relative to the magnitude a position
+    # is rounded at; the product is in the lengths the positions are in.
     eps = float(jnp.finfo(positions.dtype).eps)
     return eps * jax.lax.stop_gradient(jnp.max(jnp.abs(positions)))
 
@@ -2285,8 +2317,11 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
     ``positions`` of a delivered part are the ones the floor counts:
     zero in place of a coordinate the kind does not read.
 
-    ``positions`` are those positions in lengths, ``holder`` the
-    ``(node, field)`` they are stored in, and ``resolution`` is
+    ``positions`` are the magnitudes those positions are rounded at, in
+    lengths (``PartReading.positions``: for each coordinate the larger
+    of the stored position's and of the kernel's own coordinate's, over
+    every lattice of *interface_edges* that reads the field), ``holder``
+    the ``(node, field)`` they are stored in, and ``resolution`` is
     :func:`_positions_resolution` of them: the whole resolution
     :func:`residual_precision_floor` counts for every entry of a
     positions part, and for a delivered value the term it takes the
@@ -2313,14 +2348,18 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
     advisory).
     """
     floors = []
-    for record in interface_records(interface_edges, state):
+    records = interface_records(interface_edges, state)
+    # The group's lattices, as the floor's own reading of the whole group
+    # takes them: an edge read by itself must not lose the others'.
+    lattices = _position_lattices(records)
+    for record in records:
         if record.anchor is None or not record.read_from_state:
             continue
         side, field = record.anchor
         holder = ((record.source if side == "source" else record.target)[0], field)
-        for reading in _interface_readings([record.edge], state, pre_step=state):
-            positions = (reading[2] if reading.part.unit == KERNEL_LENGTH
-                         else reading.positions[0])
+        for reading in _interface_readings([record.edge], state, pre_step=state,
+                                           lattices=lattices):
+            positions = reading.positions[0]
             if positions is None:
                 continue        # a value the floor counts no position for
             if _held_out_by_the_dead_band(reading, reading[2], atol, rtol):

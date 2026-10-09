@@ -186,13 +186,19 @@ class MultilinearGridMapping:
         * for a coordinate **outside the hull on its axis by more than
           its rounding can cross**: the kernel clamps it to the face,
           where its weights are exactly 0 and 1.  "More than its
-          rounding can cross" is ``sqrt(eps)`` of the coordinate's own
-          distance from zero, both in spacings: 2,900 roundings of a
-          float32 position (6.7e7 of a float64 one), which is more than
-          the residual's float floor counts for a pass of up to 724
-          evaluations (``PRECISION_FLOOR_ULPS`` each).  A coordinate
-          nearer the face than that is read: its rounding can bring it
-          inside, where the weights move with it.
+          rounding can cross" is ``sqrt(eps)`` of the magnitude the
+          coordinate is rounded at, both in spacings: 2,900 roundings of
+          a float32 position (6.7e7 of a float64 one), which is more
+          than the residual's float floor counts for a pass of up to 724
+          evaluations (``PRECISION_FLOOR_ULPS`` each).  That magnitude
+          is the larger of the coordinate's own distance from zero (it
+          is stored to ``eps`` of that) and of its lattice coordinate
+          (:meth:`geometry_kernel_coordinates`: the stencil forms it in
+          the geometry's dtype, to ``eps`` of *that*; beyond the last
+          point of a long grid it is the larger one wherever the
+          coordinates' zero is).  A coordinate nearer the face than
+          that is read: its rounding can bring it inside, where the
+          weights move with it.
 
         ``True`` for every other coordinate, a non-finite one included
         (it fails the interface criterion by itself).  The arithmetic is
@@ -220,10 +226,43 @@ class MultilinearGridMapping:
             top = jnp.asarray(self.shape[a] - 1, T)
             outside = jnp.maximum(jnp.maximum(-u, u - top), jnp.zeros((), T))
             p = pow2_host_factor(self.spacing[a], T)
-            reach = jnp.abs(cols[:, a] * jnp.asarray(p, T)) / jnp.asarray(self.spacing[a] * p, T)
+            stored = jnp.abs(cols[:, a] * jnp.asarray(p, T)) / jnp.asarray(self.spacing[a] * p, T)
+            # Both in spacings: where the stored coordinate rounds, and
+            # where the stencil's own difference from the origin does.
+            reach = jnp.maximum(stored, jnp.abs(u))
             # ``~(outside > ...)``: a NaN on either side reads as "read".
             read.append(jnp.logical_not(outside > slack * reach))
         return jnp.stack(read, axis=1).reshape(geom.shape)
+
+    def geometry_kernel_coordinates(self, geom):
+        """The **lattice coordinate** of every coordinate of *geom*: its
+        distance from the grid's first point on its axis, in spacings
+        (``(x - origin[a]) / spacing[a]``).  The geometry's shape and
+        dtype.
+
+        What the stencil forms from a stored position, in the positions'
+        dtype, before it takes a cell and a weight from it
+        (:meth:`_stencil`; the arithmetic here is the stencil's own,
+        :meth:`_lattice_coordinates`).  **It is where the kernel
+        rounds.**  The difference ``x - origin`` is taken in the
+        geometry's dtype, so a weight is resolved to ``eps`` times the
+        lattice coordinate's magnitude, whatever the stored position's
+        distance from the coordinates' zero: float32 markers within 4
+        spacings of zero on a grid whose first point is 8000 spacings
+        away have weights resolved to ``eps * 8000`` = 9.5e-4 of a cell,
+        not to ``eps * 4``.  No choice of the coordinates' origin changes
+        a lattice coordinate.
+
+        Read by ``convergence_norm="interface"``: the float floor of a
+        reading that rests on stored positions counts a position's
+        rounding at the larger of its own magnitude and this one's
+        (``_interface_plan._rounded_at``, the one place the two are
+        compared).  Optional for a kind: one that declares none has a
+        position's rounding counted at its stored magnitude alone.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        return jnp.stack(self._lattice_coordinates(cols), axis=1).reshape(geom.shape)
 
     def accepts_geometry_shape(self, shape) -> bool:
         """Whether a geometry of *shape* can be read: ``(n_points, d)``,

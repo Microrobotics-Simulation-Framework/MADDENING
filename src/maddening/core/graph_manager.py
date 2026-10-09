@@ -5057,14 +5057,24 @@ class GraphManager:
             further key, ``"residual_precision_floor"`` : float, that
             floor in the residual's units (tolerances;
             :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
-            times the pass's evaluation count), NaN where it could not
-            be measured (the reason then says why).  Under this norm
+            times the pass's **structural** evaluation count, with
+            ``diagnostics=True`` as without: the same floor either
+            way), NaN where it could not be measured (the reason then
+            says why: the state the step returned is not finite, or
+            the floor was not recorded).  Under this norm
             the floor is where the rounding of stored positions is
-            counted (``eps * |u|`` grid spacings for a position ``u``
-            spacings from zero), so the two keys are the run-time
+            counted: ``eps`` of their dtype times the larger of a
+            position's distance from the coordinates' zero and of its
+            lattice coordinate (the distance from the grid's first
+            point, which the mapping forms in the positions' dtype),
+            in grid spacings.  So the two keys are the run-time
             reading of what ``compile()`` warns of once, on the state
             it sees: markers that have drifted, a state write and a
-            loaded checkpoint are read where they are.  With
+            loaded checkpoint are read where they are.  The floor is
+            **pooled** over every entry the norm reads, as the residual
+            is, where ``compile()``'s advisory quotes one part by
+            itself: compare the floor with ``"residual"`` and with one.
+            With
             ``"precision_limited"`` ``True``, ``"residual"`` is rounding
             rather than motion: ``"converged"`` does not say the
             readings settled to the tolerance, and a group at
@@ -5247,7 +5257,16 @@ class GraphManager:
                     continue
                 evaluations, declared, internal_edges = committed
                 measured = float(meta.get(f"coupling_{key}_pass_evaluations", float("nan")))
-                if math.isfinite(measured):
+                # Experimental: a group withheld on account of the
+                # interface norm keeps the structural count, so that its
+                # floor is the same with diagnostics on or off (the
+                # measured count weights a read of positions by their
+                # distance from the coordinates' zero, which that floor
+                # already counts: ``_reports_the_structural_count``).
+                structural = _group_layout._reports_the_structural_count(
+                    group, self._committed_geometry_refusals.get(key)
+                    if self._committed_geometry_edges.get(key, ()) else None)
+                if math.isfinite(measured) and not structural:
                     evaluations = max(evaluations, measured)
                 if any(nn not in self._state for nn in group.nodes):
                     # A member removed since the step: its state, which the

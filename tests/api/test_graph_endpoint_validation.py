@@ -102,6 +102,28 @@ def test_add_edge_checks_nodes_and_fields():
     assert c.post("/sim/step").status_code == 200
 
 
+def test_validate_reports_an_edge_from_a_node_to_itself_and_the_graph_still_compiles_and_steps():
+    """``POST /graph/validate`` returns ``validate()``'s list as it is.
+
+    An edge from a node to itself draws one ``INFO:`` line, which says
+    which of its own values the node reads.  It is not an error: the graph
+    compiles and steps over REST as it did before the line existed.
+    """
+    gm = _spring()
+    c = _client(gm)
+    assert c.post("/graph/validate").json() == {"issues": []}
+    r = c.post("/graph/edges", json={"source_node": "s", "target_node": "s",
+                                     "source_field": "position",
+                                     "target_field": "anchor_position"})
+    assert r.status_code == 201, r.text
+    assert c.post("/graph/validate").json() == {"issues": [
+        "INFO: edge s.position -> s.anchor_position is from node 's' to itself. Outside a "
+        "coupling group it is a back edge: the node reads its state of the previous step, so "
+        "the term the edge carries is explicit."]}
+    assert c.post("/graph/compile").status_code == 200
+    assert c.post("/sim/step").status_code == 200
+
+
 def test_checkpoint_endpoints_stay_under_the_root(tmp_path):
     gm = _spring()
     c = _client(gm, checkpoint_root=tmp_path / "ck")

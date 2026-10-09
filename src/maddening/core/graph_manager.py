@@ -1700,6 +1700,19 @@ class GraphManager:
     ) -> None:
         """Add a data-dependency edge between two nodes.
 
+        ``source`` and ``target`` may be the same node, and where the node
+        is decides which of its own values such an edge reads.  Outside a
+        coupling group it is a back edge: the node reads its state of the
+        previous step, so the term the edge carries is explicit
+        (``dx/dt = -k x`` through the edge steps as ``x (1 - k dt)``).
+        With the node in a coupling group (:meth:`add_coupling_group`; a
+        group of that one node is enough) the edge is iterated with the
+        group and at convergence the node reads its new value, so the term
+        is implicit (``x / (1 + k dt)``).  Nothing else decides it.
+        :meth:`validate` says which in an ``INFO:`` line for the edge and
+        :meth:`format_graph` beside the edge; :meth:`compile` raises no
+        warning for it.
+
         ``mapping`` (a :class:`maddening.core.coupling.mapping.Mapping`)
         transfers the source field onto the target interface before
         ``transform`` is applied; its weights are snapshotted into
@@ -2146,12 +2159,16 @@ class GraphManager:
         repeatedly until convergence or *max_iterations*.
         All edges between nodes in the group use current-iteration
         values rather than staggered (previous-timestep) values.
+        A member's edge to itself is one of them: it is iterated with the
+        group, which makes the term it carries implicit (see
+        :meth:`add_edge`), and a group of one node is allowed for this.
 
         Parameters
         ----------
         nodes : sequence of str
             Node names forming the coupling group.  Must all exist in
-            the graph and should form (part of) a cycle.
+            the graph and should form (part of) a cycle; one node with an
+            edge to itself is a cycle.
         max_iterations : int
             Maximum iterations per timestep.
         tolerance : float
@@ -2274,10 +2291,43 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     def validate(self) -> list[str]:
-        """Check graph integrity.  Returns a list of warning/error strings."""
+        """Check graph integrity.  Returns a list of warning/error strings.
+
+        Each string starts with ``ERROR``, ``WARNING`` or ``INFO:``.
+        :meth:`compile` refuses a graph with an ``ERROR`` and emits each
+        ``WARNING`` as a warning; an ``INFO:`` line is neither, and a graph
+        that draws only those is valid.  The ``INFO:`` lines say how the
+        graph will be stepped: that it is multi-rate, how each loop of two
+        or more nodes is closed (iterated by the coupling group that holds
+        it, in that group's ``iteration_mode``, or staggered), and, one
+        line per edge from a node to itself, which of its own values the
+        node reads through that edge (see :meth:`add_edge`).  That line,
+        and :meth:`format_graph` beside the edge, are how to learn which
+        of the two readings such an edge has: outside a coupling group
+
+        ``INFO: edge a.x -> a.u is from node 'a' to itself. Outside a
+        coupling group it is a back edge: the node reads its state of the
+        previous step, so the term the edge carries is explicit.``
+
+        (also sent to this module's logger at ``INFO``, as the line for a
+        staggered loop is), and with the node in a group
+
+        ``INFO: edge a.x -> a.u is from node 'a' to itself. With the node
+        in a coupling group (['a']) the edge is iterated with the group
+        and at convergence the node reads its new value, so the term is
+        implicit.``
+
+        naming the group's members.  An edge from a node's own boundary
+        flux outside a group is told that it cannot be read there
+        (MADD-ANO-157) instead.
+        """
         self._recover_from_escaped_tracers()
         issues: list[str] = []
         node_names = set(self._nodes.keys())
+        # What the checks below found each edge's source to be, for the
+        # lines about edges from a node to itself at the end.
+        flux_sourced: set[int] = set()
+        unknown_source: set[int] = set()
 
         # Edge endpoint checks
         for e in self._edges:
@@ -2300,7 +2350,9 @@ class GraphManager:
                             ).keys()
                             if e.source_field in flux_keys:
                                 is_flux_field = True
+                                flux_sourced.add(id(e))
                     if not is_flux_field:
+                        unknown_source.add(id(e))
                         issues.append(
                             f"ERROR: source field '{e.source_field}' not in state of node '{e.source_node}'. "
                             f"Available: {list(self._state[e.source_node].keys())}"
@@ -2484,11 +2536,14 @@ class GraphManager:
         for cyc in cycles:
             # Check if cycle is covered by a coupling group
             cyc_set = set(cyc)
-            covered = any(cyc_set <= g.nodes for g in self._coupling_groups)
-            if covered:
+            covering = next(
+                (g for g in self._coupling_groups if cyc_set <= g.nodes), None)
+            if covering is not None:
+                # The schedule the group iterates in: this line said
+                # "(Gauss-Seidel)" of every group, a Jacobi one included.
                 issues.append(
                     f"INFO: cycle {' -> '.join(cyc)} handled by iterative "
-                    f"coupling (Gauss-Seidel)."
+                    f"coupling ({_graph_specs._iteration_mode_name(covering)})."
                 )
             else:
                 # Uncovered cycles are handled by staggering (back-edges
@@ -2506,6 +2561,25 @@ class GraphManager:
                 )
                 logger.info(msg)
                 issues.append(f"INFO: {msg}")
+
+        # An edge from a node to itself.  ``detect_cycles`` never returns
+        # one (the adjacency it walks holds no edge from a node to
+        # itself), so no line above names it, and it is the one edge whose
+        # reading a coupling group around a single node changes.  One
+        # ``INFO:`` line per such edge, in the order the edges were added,
+        # after the lines for the longer loops.  An edge whose source field
+        # does not exist has its ``ERROR`` above and reads nothing.
+        for e in valid_edges:
+            if e.source_node != e.target_node or id(e) in unknown_source:
+                continue
+            group = next(
+                (g for g in self._coupling_groups if e.source_node in g.nodes), None)
+            msg = _graph_specs._self_edge_message(e, group, id(e) in flux_sourced)
+            if group is None:
+                # A back edge, like the staggered edge of a longer loop:
+                # logged as that line is, and never a warning.
+                logger.info(msg)
+            issues.append(f"INFO: {msg}")
 
         return issues
 

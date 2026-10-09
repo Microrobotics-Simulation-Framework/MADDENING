@@ -425,7 +425,8 @@ def _kernel_magnitude(mappings, geom):
         kernel = jnp.abs(jnp.asarray(formed(geom))).astype(geom.dtype)
         declared: Any = getattr(mapping, "geometry_coordinates_read", None)
         if callable(declared):
-            kernel = jnp.where(declared(geom), kernel, jnp.zeros((), geom.dtype))
+            read: Any = declared(geom)
+            kernel = jnp.where(read, kernel, jnp.zeros((), geom.dtype))
         # units: the kind's lengths (dimensionless multiples of a spacing)
         out = jnp.maximum(out, kernel)
     return out

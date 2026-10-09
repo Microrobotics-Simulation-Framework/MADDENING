@@ -305,7 +305,15 @@ state, per read, every step -- scales each node's own count by
 along the chain, never goes below the structural count, and the report
 reads that count from the step (`coupling_<key>_pass_evaluations`), or the
 structural one `compile()` snapshotted -- never the graph as it stands when
-`coupling_diagnostics()` is called.  Magnitudes add, so the count is a
+`coupling_diagnostics()` is called.  (One group keeps the structural count
+either way: one with a `multilinear_grid` edge under the interface norm,
+whose floor is the only number its report builds on the count in 0.4.0.
+The gain of a read of positions is taken against the positions' own
+magnitude, so it grows with their distance from the coordinates' zero,
+which that norm's floor already counts in spacings; under `"l2"` and
+`"mixed"` the same gain is in the count, and reads float64 positions
+beside float32 values as precision-limited from a hundred spacings out.)
+Magnitudes add, so the count is a
 bound and can be useless as one: a ten-link chain `3 c_(j-1) - 2 c_(j-2)
 + c` reads 1.1e7x its true distance, usable, and a sub-cycled member,
 counted as undamped sub-steps, 1.5e3x-9.6e4x.  A composite map's error grows with its evaluations: explicit

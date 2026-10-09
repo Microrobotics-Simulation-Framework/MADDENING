@@ -347,3 +347,118 @@ def test_the_coarse_grid_advisory_of_a_geometry_is_validates_alone():
             gm.set_node_state("b", state)
             gm.step()                      # traced again; the advisory is not raised here
         assert any(advisory in issue and issue.startswith("WARNING") for issue in gm.validate())
+
+
+# ---------------------------------------------------------------------------
+# A node's timestep: read once, by add_node
+# ---------------------------------------------------------------------------
+
+
+def _chain(timestep=1.0):
+    gm = GraphManager()
+    gm.add_node(Cell("a", timestep))
+    gm.add_node(Cell("b", timestep))
+    gm.add_edge("a", "b", "x", "u")
+    return gm
+
+
+def _timestep_errors(gm) -> list:
+    return [i for i in gm.validate() if i.startswith("ERROR: node ") and "delta_t" in i]
+
+
+@pytest.mark.parametrize("written", [2.0, 0.5, 0.0, float("nan"), "fast", None],
+                         ids=repr)
+def test_a_delta_t_written_after_add_node_is_an_error_of_validate_and_compile(written):
+    """``add_node`` keeps the timestep it read and the graph steps at it; a
+    ``delta_t`` written on the node afterwards is not followed.  It used to
+    be silent; ``validate()`` now has an ``ERROR`` line that names the node
+    and both values, so the next ``compile()`` refuses the graph, and the
+    line goes when ``delta_t`` is written back."""
+    gm = _chain()
+    gm.compile()
+    gm.step()
+    assert not _timestep_errors(gm)
+    node = gm._nodes["b"].node
+    node.delta_t = written
+    (line,) = _timestep_errors(gm)
+    assert line.startswith(f"ERROR: node 'b' has delta_t = {written!r}, but the graph "
+                           f"registered the timestep 1.0 for it")
+    assert "remove_node" in line and "write delta_t back to 1.0" in line
+    gm.add_node(Cell("c", 1.0))          # anything that makes compile() due
+    with pytest.raises(RuntimeError, match="node 'b' has delta_t = "):
+        gm.compile()
+    node.delta_t = 1.0
+    assert not _timestep_errors(gm)
+    gm.compile()
+
+
+def test_the_graph_steps_at_the_registered_timestep_and_to_dict_writes_that_one():
+    """After such a write the running graph is unchanged (its
+    ``timestep``, its schedule, every step), and ``to_dict()`` writes the
+    timestep the graph runs: the config used to carry the written value,
+    so the graph loaded from it ran another step (or did not load: 0.0).
+    The node's own ``to_dict()`` is the node's descriptor and says what
+    the node says."""
+    gm, twin = _chain(), _chain()
+    for g in (gm, twin):
+        g.compile()
+        g.step()
+    node = gm._nodes["b"].node
+    node.delta_t = 2.0
+    assert gm.timestep == twin.timestep == 1.0
+    assert not gm.is_multirate
+    for g in (gm, twin):
+        g.run_scan(3)
+        g.step()
+    assert _apart(_x(gm), _x(twin)) == 0.0
+    config = gm.to_dict()
+    assert [n["timestep"] for n in config["nodes"]] == [1.0, 1.0]
+    assert config == twin.to_dict()
+    assert node.to_dict()["timestep"] == 2.0
+    # ... and the graph loaded from the config steps as the running one.
+    loaded = GraphManager.from_dict(config, {"Cell": Cell})
+    assert loaded.timestep == 1.0 and not _timestep_errors(loaded)
+    for g in (loaded, twin):
+        g.reset_state()
+        g.compile()
+        g.run_scan(2)
+    assert _apart(_x(loaded), _x(twin)) == 0.0
+
+
+def test_a_wrapper_that_steps_its_node_at_another_timestep_is_not_an_error():
+    """The rule is asked of the node the graph holds.  A wrapper may
+    advance the node it wraps at a step of its own (one that sub-steps
+    it), so the two differing is not a write after ``add_node``."""
+
+    class Twice(SimulationNode):
+        def __init__(self, inner):
+            super().__init__(inner.name, 2 * inner.delta_t)
+            self._inner = inner
+
+        def initial_state(self):
+            return self._inner.initial_state()
+
+        def boundary_input_spec(self):
+            return self._inner.boundary_input_spec()
+
+        def update(self, state, boundary_inputs, dt):
+            half = self._inner.update(state, boundary_inputs, dt / 2)
+            return self._inner.update(half, boundary_inputs, dt / 2)
+
+    gm = GraphManager()
+    gm.add_node(Twice(Cell("a", 1.0)))
+    assert not _timestep_errors(gm)
+    gm.compile()
+    assert gm.timestep == 2.0
+
+
+def test_a_surrogate_dataset_is_labelled_with_the_timestep_its_samples_were_stepped_at():
+    """Another reader of the attribute: the dataset generator labelled its
+    samples with the node's ``delta_t``, which a write after ``add_node``
+    makes another number than the step the samples were taken at."""
+    from maddening.surrogates.dataset import DatasetGenerator
+
+    gm = _chain()
+    gm.compile()
+    gm._nodes["b"].node.delta_t = 2.0
+    assert DatasetGenerator.from_graph(gm, "b", 3).dt == 1.0

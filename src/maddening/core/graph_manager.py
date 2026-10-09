@@ -1627,7 +1627,17 @@ class GraphManager:
         return self._nodes[name].node
 
     def add_node(self, node: SimulationNode) -> None:
-        """Register a node and initialise its state."""
+        """Register a node and initialise its state.
+
+        The node's ``delta_t`` is read here, once, and kept as the
+        timestep the graph steps it at (a value that is not a finite
+        number above zero is refused).  Writing ``node.delta_t``
+        afterwards changes nothing the graph does: :meth:`validate`
+        reports it as an ``ERROR`` naming both values, so the next
+        :meth:`compile` refuses the graph, and :meth:`to_dict` writes
+        the timestep the graph runs.  To change a node's timestep, add
+        a node constructed with the new one in its place.
+        """
         # Into the state that is kept: added to a traced one (right after
         # ``jax.grad`` of a loss that stepped the graph), the node's state
         # was lost when the next entry point put the graph back.
@@ -2340,6 +2350,9 @@ class GraphManager:
         # lines about edges from a node to itself at the end.
         flux_sourced: set[int] = set()
         unknown_source: set[int] = set()
+
+        # A node's ``delta_t`` written after ``add_node`` read it.
+        issues.extend(_graph_specs._timestep_drift_issues(self._nodes))
 
         # Edge endpoint checks
         for e in self._edges:
@@ -6869,6 +6882,14 @@ class GraphManager:
         nodes = []
         for name, spec in self._nodes.items():
             d = spec.node.to_dict()
+            if "timestep" in d:
+                # The timestep the graph registered for the node and
+                # steps it at, which is the node's ``delta_t`` unless
+                # that was written after ``add_node`` read it
+                # (``validate()`` says so): the config then ran another
+                # step than the graph it was written from, or did not
+                # load.
+                d["timestep"] = spec.timestep
             if spec.accepts_params:
                 d["params"] = self.effective_node_params(name)
             nodes.append(d)

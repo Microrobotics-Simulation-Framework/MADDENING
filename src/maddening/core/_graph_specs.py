@@ -665,6 +665,41 @@ def _self_edge_message(edge: EdgeSpec, group, reads_flux: bool) -> str:
             "state of the previous step, so the term the edge carries is explicit.")
 
 
+def _timestep_drift_issues(nodes) -> list[str]:
+    """``validate()``'s ``ERROR`` lines for the nodes whose ``delta_t`` is
+    no longer the timestep the graph registered for them.
+
+    ``add_node`` reads a node's ``delta_t`` once (it refuses one that is
+    not a finite number above zero) and keeps it as the node's timestep:
+    the step, the multi-rate schedule and :attr:`GraphManager.timestep`
+    use that value.  ``delta_t`` written on the node afterwards changes
+    none of them, so the graph went on stepping at the registered value
+    while the node, and every reader of the attribute, said another.
+
+    Asked of the node the graph holds, not of a node that one wraps: a
+    wrapper may advance its node at another step than its own (one that
+    sub-steps it).
+    """
+    issues = []
+    for name, spec in nodes.items():
+        written = getattr(spec.node, "delta_t", spec.timestep)
+        try:
+            same = float(written) == float(spec.timestep)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            issues.append(
+                f"ERROR: node {name!r} has delta_t = {written!r}, but the graph "
+                f"registered the timestep {spec.timestep!r} for it when it was added and "
+                f"steps it at that: a node's timestep is read once, by add_node, and a "
+                f"delta_t written afterwards is not followed. Construct the node with "
+                f"the timestep it should have and add that node in its place "
+                f"(remove_node, then add_node and its edges again; or edit its "
+                f"\"timestep\" in to_dict() and load that with from_dict), or write "
+                f"delta_t back to {spec.timestep!r}.")
+    return issues
+
+
 def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:
     """Each node's timestep as ``compile()`` schedules it.
 

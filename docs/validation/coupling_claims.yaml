@@ -524,7 +524,7 @@ claims:
     held at 0.5 to 4.9 in both sweep orders, and so does atol = 0.  The oracle
     below is claimed under Gauss-Seidel, and under Jacobi only where no kept
     member's output depends on a dead-banded field; validate() and compile()
-    advise on atol > 0 under Jacobi (MADD-ANO-248, open; pinned as a strict
+    advise on atol > 0 under Jacobi (MADD-ANO-252, open; pinned as a strict
     xfail with its controls in tests/core/test_the_dead_band_under_jacobi.py).
     Under "interface" the reading of an edge read at its source is dropped
     only where both the source field and what the edge delivers are at or
@@ -1563,7 +1563,7 @@ claims:
     records its floor in the step (the band depends on the step's weights).
     Positions read in a mapping kind's length scale are always read.  Under
     Jacobi a field that is dropped un-holds the fields computed from it
-    (CPL-011, MADD-ANO-248).
+    (CPL-011, MADD-ANO-252).
     convergence_norm="interface"; state edges (a flux edge is refused at
     compile: CPL-075), with or without an interface mapping and a transform;
     an edge whose source field is not floating, or whose reading has no
@@ -3552,7 +3552,7 @@ claims:
     iterate is within twice the bound wherever the flag is set, with no
     allowance for h.
     Not behind a long row sum of a mapped edge at the float floor
-    (MADD-ANO-251, open): the floor does not count the row's rounding, the
+    (MADD-ANO-255, open): the floor does not count the row's rounding, the
     bound read 0.68 to 0.002 of the distance behind scatter-layout rows of
     100 to 3e4 entries, 0.18 behind a dense matrix of three rows of 3000
     and 0.007 behind a gather-layout row of 1e4 on jax 0.10.2, and the
@@ -3840,7 +3840,7 @@ claims:
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
-    One more case withdraws the flag and keeps the numbers (MADD-ANO-251,
+    One more case withdraws the flag and keeps the numbers (MADD-ANO-255,
     open): an internal edge with a static mapping of any kind (a dense
     matrix, a sparse mapping in the gather or the scatter layout, a
     registered kind's own static class) whose longest row is over
@@ -4238,7 +4238,7 @@ claims:
     (MADD-ANO-212, open; the second is pinned as a strict xfail in the
     slow lane).  Jacobi holds there.
     The floor counts evaluations and not a mapped edge's own row sum
-    (MADD-ANO-251, open): behind a row of more than ten entries it can be
+    (MADD-ANO-255, open): behind a row of more than ten entries it can be
     too small in every static mapping kind, by the row's (k - 1) / 2 eps
     at most, and the report withdraws spectral_usable there for every
     such kind.
@@ -4299,7 +4299,7 @@ claims:
     entries in every static mapping kind, failed from 100 entries on in
     the scatter layout, and at longer rows in the gather layout (1e4, jax
     0.10.2) and the dense kinds (three rows of 300 at the float64 floor)
-    (MADD-ANO-251, open).
+    (MADD-ANO-255, open).
     Not claimed for float64 (x64), mixed dtypes or 16-bit
     floats.
   oracle: float64 evaluation of the same updates.

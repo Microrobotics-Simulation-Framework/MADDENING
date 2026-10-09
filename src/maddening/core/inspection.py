@@ -1350,7 +1350,7 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
     # Every number is there and only the spectral flags are withdrawn: a
     # group with a geometry-dependent mapping whose bound reaches a
     # lattice plane (experimental), or one at its float floor behind a
-    # long row of a static mapping (MADD-ANO-251).  The caveats below
+    # long row of a static mapping (MADD-ANO-255).  The caveats below
     # still apply.
     flags_only = bool(reason) and all(
         isinstance(v, float) and not math.isnan(v) for v in (estimate, bound))

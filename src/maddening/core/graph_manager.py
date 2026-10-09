@@ -3259,7 +3259,7 @@ class GraphManager:
         # a static mapping (a dense matrix, a sparse one in either layout,
         # a registered kind's own class), as the step was built: what the
         # report's guard on the float floor reads
-        # (``_group_layout._mapped_rows``, MADD-ANO-251).
+        # (``_group_layout._mapped_rows``, MADD-ANO-255).
         self._committed_mapped_rows = {
             key: _group_layout._mapped_rows(plan)
             for key, plan in interface_plans.items()
@@ -4980,7 +4980,7 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
-            **A long row of a static mapping** (MADD-ANO-251, open).
+            **A long row of a static mapping** (MADD-ANO-255, open).
             The float floor counts a fixed number of ``eps`` per
             evaluation, and a static mapping adds a row's entries up,
             which rounds by more than that once the row is long,
@@ -5406,7 +5406,7 @@ class GraphManager:
                 # evaluation, and a static mapping adds a row's entries
                 # up (a dense matrix, a sparse one in either layout),
                 # which rounds by more than that once the row is long
-                # (MADD-ANO-251, open).  Where the residual does not
+                # (MADD-ANO-255, open).  Where the residual does not
                 # stand clear of the floor such a row would give it, the
                 # flags that rest on the floor are withdrawn, with the
                 # reason; the numbers stay as computed.  Asked only of a
@@ -7572,7 +7572,7 @@ class GraphManager:
           having certified its linearisation across it (experimental):
           ``spectral_usable`` is withdrawn and the numbers are kept;
         * ``not_usable_reason`` for a group at its float floor behind a
-          long row of a static mapping of any kind (MADD-ANO-251):
+          long row of a static mapping of any kind (MADD-ANO-255):
           ``spectral_usable`` is withdrawn and the numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /

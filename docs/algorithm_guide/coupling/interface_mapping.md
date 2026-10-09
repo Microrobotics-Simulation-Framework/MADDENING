@@ -759,7 +759,7 @@ built.  The two forms hold the same matrix, and agree with one another
 and with the dense conservative kind to rounding.
 
 **The order of the sum and a coupling report's float floor**
-(MADD-ANO-251, open).  "To rounding" is `(k + 2) eps` of a row of `k`
+(MADD-ANO-255, open).  "To rounding" is `(k + 2) eps` of a row of `k`
 entries, and an in-order sum of `k` terms of one sign reaches a good
 part of it where the terms are nearly equal: the rounding is then
 systematic and grows like `k`.  The float floor of

@@ -16699,7 +16699,7 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-248"
+  - anomaly_id: "MADD-ANO-252"
     title: "Under iteration_mode=\"jacobi\" a field inside the dead band un-holds the fields computed from it: a pair reports converged=True after one pass 4.5e5 to 7.4e5 tolerances from its fixed point"
     description: >
       A field whose magnitude is at or below a group's `atol` leaves the
@@ -16775,7 +16775,7 @@ anomalies:
       - "tests/core/test_the_dead_band_under_jacobi.py::test_validate_advises_on_a_dead_band_declared_under_jacobi"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-249"
+  - anomaly_id: "MADD-ANO-253"
     title: "The float floor of a group of mixed dtypes took each field at its own dtype's eps: a float64 field downstream of a float32 member diluted it and spectral_error_bound read 0.21x the true distance with the flags set"
     description: >
       The residual's float floor (`residual_precision_floor`, and the
@@ -16844,7 +16844,7 @@ anomalies:
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_steps_analysis_counts_every_entry_at_the_groups_coarsest_eps"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-250"
+  - anomaly_id: "MADD-ANO-254"
     title: "The dead band of an interface edge read at its source was asked of the source field alone: forces of 1e-8 handed on as 17 to 520 left the norm at atol=1e-6 and a Jacobi pair accepted after one pass 34% to 74% from its fixed point"
     description: >
       Under `convergence_norm="interface"` an edge whose static mapping
@@ -16867,7 +16867,7 @@ anomalies:
       decided by one function for the residual, the float floor and the
       spectrum's weights; the reading, its scale and its floor stay the
       source field's; nothing is built for a group with `atol == 0`.
-      What a dropped field does under Jacobi in general is MADD-ANO-248.
+      What a dropped field does under Jacobi in general is MADD-ANO-252.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16892,14 +16892,14 @@ anomalies:
       read by the residual (the mapping and the transform, the size of
       the target field).  A reading both of whose quantities are inside
       the band is dropped as before, and under Jacobi a dropped field
-      un-holds the fields computed from it (MADD-ANO-248, open).
+      un-holds the fields computed from it (MADD-ANO-252, open).
     verification:
       - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_source_reading_leaves_the_norm_only_where_field_and_delivered_are_both_inside"
       - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_small_force_handed_on_in_other_units_is_held_to_the_criterion"
       - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_the_spectrums_weights_keep_the_reading_the_residual_keeps"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-251"
+  - anomaly_id: "MADD-ANO-255"
     title: "The float floor of a coupling report does not count the rounding of a mapped edge's row sum: stalled behind a scatter-layout row of 100 entries spectral_error_bound reads 0.68 of the true distance with spectral_usable=True, behind 3e4 entries 0.002"
     description: >
       The float floor of `coupling_diagnostics()` counts

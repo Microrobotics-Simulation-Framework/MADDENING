@@ -158,7 +158,7 @@ class StaticLinearMapping:
     report's float floor does not count that sum's rounding, and
     ``coupling_diagnostics()`` withdraws ``spectral_usable`` at the
     float floor of a group with such a mapping more than ten entries
-    wide on an internal edge, whatever the weights are (MADD-ANO-251).
+    wide on an internal edge, whatever the weights are (MADD-ANO-255).
     """
     H: Any
     kind: str = "matrix"

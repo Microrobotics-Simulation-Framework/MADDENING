@@ -196,12 +196,12 @@ class _Markers(SimulationNode):
                 "pos": (state["pos"] + move).astype(held)}
 
 
-def build(pair: Pair, *, norm: str = "interface"):
+def build(pair: Pair, *, norm: str = "interface", markers=_Markers):
     """``(graph, advisories)``: *pair* compiled, and the texts of the
     position advisories ``compile()`` gave."""
     gm = GraphManager()
     gm.add_node(_Grid("grid", 0.01, pair))
-    gm.add_node(_Markers("markers", 0.01, pair))
+    gm.add_node(markers("markers", 0.01, pair))
     grid = dict(origin=tuple(pair.origin * h for h in pair.spacing), spacing=pair.spacing,
                 shape=pair.lattice, n_points=pair.m)
     gm.add_edge("markers", "grid", "f", "deposit",
@@ -618,6 +618,51 @@ def test_float64_positions_written_far_from_zero_leave_the_floor_where_it_was(an
     assert same_reports(report(other), again), (report(other), again)
     assert again["converged"] is True, again
     assert again["residual_precision_floor"] == pytest.approx(VALUES_ALONE[anchors], rel=1e-5)
+
+
+class _MarkersMovedInTheFieldsDtype(_Markers):
+    """The markers, with the move computed in the FIELD's dtype and added
+    to the positions as they are held: the positions then carry the
+    field's rounding of the move."""
+
+    def update(self, state, boundary_inputs, dt):
+        p = self._pair
+        kf, bf, gf = p.markers_update
+        sampled = boundary_inputs.get("sampled", jnp.zeros(p.m, p.dtype))
+        held, coarse = state["pos"].dtype, jnp.dtype(p.dtype)
+        along = jnp.zeros(len(p.lattice), coarse).at[0].set(p.spacing[0])
+        move = (jnp.asarray(p.drift, coarse)
+                + jnp.asarray(p.push, coarse) * sampled)[:, None] * along
+        return {"f": (kf * state["f"] + bf + gf * sampled).astype(p.dtype),
+                "pos": (state["pos"] + move.astype(held)).astype(held)}
+
+
+def test_the_floor_does_not_count_a_move_computed_in_float32_into_float64_positions():
+    """The corner of counting a position at its own dtype (CPL-100 states
+    it for a position a member sets from coarser data): float64 positions
+    whose 950-spacing move the node computes in float32 carry float32's
+    rounding of the MOVE, up to 3 tolerances at ``rtol=1e-5``.  The pair
+    reads ``converged=True``, a residual of 0.0 and the floor of its
+    value parts, 0.078, with its positions 1.8 to 2.9 tolerances from
+    the float64 fixed point.  A characterisation, pinned so that a change
+    of the rule shows: the same node with the move computed in float64
+    is within a hundredth of a tolerance (the test above)."""
+    pair = dataclasses.replace(DRIFTING, pos_dtype="float64")
+    gm, advisories = build(pair, markers=_MarkersMovedInTheFieldsDtype)
+    assert advisories == []
+    worst = 0.0
+    for step in range(4):
+        pre = stored(gm)
+        gm.step()
+        d = _checked(pair, gm, pre)
+        assert d["converged"] is True and d["residual"] == 0.0, (step, d)
+        assert d["residual_precision_floor"] == pytest.approx(
+            VALUES_ALONE[pair.anchors], rel=1e-5), (step, d)
+        star = fixed_point(pair, pre)
+        off = np.max(np.abs(stored(gm)["markers"]["pos"] - star["markers"]["pos"]))
+        worst = max(worst, float(off) / pair.spacing[0] / pair.rtol)
+    one_rounding = 0.5 * float(np.spacing(np.float32(pair.drift))) / pair.rtol
+    assert 1.0 < worst <= 1.1 * one_rounding, (worst, one_rounding)
 
 
 def _written_and_loaded(anchors, tmp_path):

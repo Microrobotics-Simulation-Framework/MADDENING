@@ -329,7 +329,11 @@ names the edge and says what to do.
     the solve and the report's floor all take the positions at
     float64's rounding (the floor is then the float32 values' own, as
     above; hold the group's fields in float64 too for a floor at
-    float64's);
+    float64's).  Compute the positions' update in float64 as well: a
+    move computed in float32 and added to float64 positions carries
+    float32's rounding of the move, which the floor does not count (a
+    950-spacing move left them 1.8 to 2.9 tolerances off at
+    `rtol=1e-5`, with `converged=True` and a floor of 0.078);
   - use coordinates local to the grid, so that the positions are small
     numbers (the origin of the coordinates near the markers);
   - loosen `rtol`.

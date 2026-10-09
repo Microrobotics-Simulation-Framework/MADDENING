@@ -2771,7 +2771,11 @@ claims:
     with the scatter anchored at its target) with precision_limited
     False where the residual is above it, beside the float32-positions
     pair's 7 to 8 tolerances at 100 spacings and 337 to 390 at 5000 with
-    precision_limited True; positions written 7000 spacings out with set_node_state
+    precision_limited True; not counted by that floor: the rounding of a
+    move the node computes in float32 and adds to float64 positions (a
+    950-spacing move leaves them 1.8 to 2.9 tolerances from the float64
+    fixed point with converged=True, residual 0.0 and the floor at 0.078;
+    pinned as a characterisation); positions written 7000 spacings out with set_node_state
     (no warning; the next step's floor over 100 times the one before, the
     flag True), and a checkpoint of that state loaded into a graph
     compiled near zero, whose state, report and next step equal those of
@@ -2815,6 +2819,7 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_that_drift_beside_float32_fields_keep_the_floor_of_the_values'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_far_from_zero_beside_float32_fields_are_not_flagged'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_written_far_from_zero_leave_the_floor_where_it_was'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_floor_does_not_count_a_move_computed_in_float32_into_float64_positions'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_positions_written_or_loaded_far_from_zero_are_flagged_by_the_next_step'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_written_state_in_float64_is_not_flagged'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_floor_of_a_report_no_step_measured_is_not_reported_and_says_why'

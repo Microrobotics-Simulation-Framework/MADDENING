@@ -619,11 +619,12 @@ def _held_out_by_the_dead_band(reading, value, atol: float, rtol: float) -> bool
       counts it from its first non-zero value, so the advisory asks it.
 
     ``True`` therefore only for a value with a magnitude at or below a
-    declared ``atol`` (and, for a reading taken at an edge's source, a
-    delivered value that is too: :func:`_kept_by_what_is_delivered`):
-    the float floor of that part is 0.0 at that state, and an advisory
-    quoting a floor for it would be about a reading the norm does not
-    take.
+    declared ``atol``: the float floor of that part is 0.0 at that state,
+    and an advisory quoting a floor for it would be about a reading the
+    norm does not take.  (The parts the advisory asks are positions,
+    which are always read, and delivered values, which the band asks by
+    their own magnitude; a reading taken at an edge's source, whose band
+    also asks what the edge delivers, rests on no stored position.)
     """
     if not _declares_a_band(atol):
         return False
@@ -2266,8 +2267,7 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
             continue
         side, field = record.anchor
         holder = ((record.source if side == "source" else record.target)[0], field)
-        for reading in _interface_readings([record.edge], state, pre_step=state,
-                                           band=_declares_a_band(atol)):
+        for reading in _interface_readings([record.edge], state, pre_step=state):
             positions = (reading[2] if reading.part.unit == KERNEL_LENGTH
                          else reading.positions[0])
             if positions is None:

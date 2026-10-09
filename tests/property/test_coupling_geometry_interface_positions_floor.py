@@ -846,7 +846,9 @@ def test_the_kernel_says_which_coordinates_a_transfer_depends_on():
         just_out = top + 0.5 * math.sqrt(eps) * (top / 0.5) * 0.5      # half the slack
         well_out = top + 4.0 * math.sqrt(eps) * (top / 0.5) * 0.5      # four times it
         x = np.asarray([55.2, 50.0, top, just_out, well_out, 20.0])
-        geom = jnp.asarray(np.stack([x, np.full(6, 2.0)], axis=1), dtype)
+        # On the one lattice point of the second axis, beside it and far from it.
+        y = np.asarray([2.0, 0.0, 1e-9, -1e-3, 2.0, 0.0])
+        geom = jnp.asarray(np.stack([x, y], axis=1), dtype)
         read = np.asarray(mapping.geometry_coordinates_read(geom))
         assert read.shape == (6, 2) and read.dtype == bool
         assert read[:, 0].tolist() == [True, True, True, True, False, False], (dtype, read)

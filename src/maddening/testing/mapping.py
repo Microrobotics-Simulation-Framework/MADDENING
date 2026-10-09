@@ -58,6 +58,19 @@ eps * gain * max|field|``, with ``gain`` the largest absolute row sum of
 the operator), so they mean the same for a selection matrix and for a
 kernel interpolant with large cancelling weights.
 
+At the underflow end a tolerance stops shrinking.  The delivery flushes:
+a result below the smallest normal number of its dtype (``tiny``) is
+zero and an operand below it is read as zero, where the float64
+reference of a check keeps both.  One flush moves one value by less than
+``tiny`` *in the units of that value*, whatever the operator's gain: the
+delivered value itself, after the edge's transform; each product and
+partial sum of the mapping's row, which the transform then scales; each
+source value as it is read, which the operator carries.  No comparison
+is tighter than what those flushes can cost the values it compares, and
+every comparison is exactly the rounding tolerance wherever that is the
+larger of the two: at any magnitude where ``eps * gain * max|field|`` is
+more than a few ``tiny``.
+
 Requires ``hypothesis >= 6.165``; install the ``[verify]`` extra.
 """
 
@@ -75,6 +88,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
 
+from maddening.core._pow2_frame import pow2_host_factor
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.coupling.mapping import Mapping, _params_contract_problem
@@ -161,6 +175,66 @@ def _magnitude_floor(dtype: Any) -> float:
     normal range, and their rounding no longer shrinks with the field."""
     info = jnp.finfo(np.dtype(dtype))
     return float(info.tiny) / float(info.eps)
+
+
+def _tiny(dtype: Any) -> float:
+    """The smallest normal number of *dtype*: what one flush to zero
+    costs, at most, in a value of that dtype."""
+    dtype = np.dtype(dtype)
+    if not jnp.issubdtype(dtype, jnp.floating):
+        dtype = np.dtype(np.float32)
+    return float(jnp.finfo(dtype).tiny)
+
+
+def _flush_cost(subject: "_Subject", gain: float, delivered: Any, field: Any, *,
+                transposed: bool = False) -> float:
+    """What flushes to zero can cost ONE value the edge delivers, in the
+    units of that value.
+
+    A delivered value is ``scale * sum_j w_ij x_j``, and each operation
+    that computes it may flush (a result below ``tiny`` is zero, an
+    operand below ``tiny`` is read as zero), which moves the value
+    flushed by less than ``tiny`` of its dtype:
+
+    * the delivered value itself, in delivered units: ``tiny``;
+    * the ``n_source`` products and the ``n_source - 1`` partial sums of
+      the mapping's row, which the transform then scales:
+      ``|scale| * (2 n_source - 1) * tiny``;
+    * each source value as it is read, in the field's dtype, which the
+      operator carries: ``gain * tiny``.
+
+    Only the last shrinks with the gain.  A floor that is the gain times
+    a few ``tiny`` is therefore below one flush of the delivered value
+    for an edge whose transform scales down, and below the flushes of
+    the row's products for a mapping whose weights are small -- and a
+    check with such a floor fails an honest edge on a draw that reaches
+    the underflow end (a scalar of ``4.9e-38`` on a field of ``16``,
+    through an edge that converts N to kN).
+
+    Twice the sum is returned.  The rounding of the same value is
+    allowed for separately, a tolerance is the larger of the two
+    allowances and not their sum (:func:`_allowed`), and the larger of
+    two is at least half of both together.
+
+    With ``transposed`` the value is one of ``scale * apply_T(y)``: a
+    column of the same operator, ``n_target`` terms, whose absolute sum
+    is at most ``n_target`` times the gain.
+    """
+    lead = subject.target_lead if transposed else subject.source_lead
+    terms = int(np.prod(lead, dtype=np.int64))
+    carried = terms * gain if transposed else gain
+    return 2.0 * (_tiny(delivered) * (1.0 + abs(subject.scale) * (2 * terms - 1))
+                  + _tiny(field) * carried)
+
+
+def _allowed(rounding: float, flushes: float) -> float:
+    """The tolerance of a comparison: what rounding can cost it, and never
+    less than what flushes to zero can (:func:`_flush_cost`, times the
+    values compared).  Every tolerance of the battery is taken here, so
+    the underflow end is allowed for in one place; wherever the rounding
+    is the larger -- any field of ordinary magnitude -- the tolerance is
+    that value, unchanged to the last bit."""
+    return max(rounding, flushes)
 
 
 def _x64() -> bool:
@@ -594,8 +668,11 @@ def _mapping_structure(subject: _Subject, sampling: _Sampling, channels: int | N
         # result (to rounding: a scatter-add on an accelerator may differ
         # in its last bits between runs).
         again = subject.deliver(jnp.asarray(x), geom)
-        tol = rounding_units * _eps(out.dtype) * gain(geom) * max(
-            _amax(x), _magnitude_floor(sampling.dtype))
+        g = gain(geom)
+        tol = _allowed(
+            rounding_units * _eps(out.dtype) * g * max(
+                _amax(x), _magnitude_floor(sampling.dtype)),
+            2.0 * _flush_cost(subject, g, out.dtype, sampling.dtype))
         assert float(np.max(np.abs(_np(again) - _np(out)), initial=0.0)) <= tol, (
             "two calls on the same field, weights and geometry gave different results: "
             "the mapping keeps something between calls")
@@ -628,7 +705,20 @@ def _mapping_linearity(subject: _Subject, sampling: _Sampling, rounding_units: f
         # The combination a x + b y is formed in the field's dtype.
         eps = _eps(dx.dtype, xj.dtype, *_geom_dtype(geom))
         size = abs(float(a_t)) * _amax(x) + abs(float(b_t)) * _amax(y)
-        tol = rounding_units * eps * gain(geom) * max(size, _magnitude_floor(dx.dtype))
+        g = gain(geom)
+        # Three deliveries are compared, two of them times a scalar.  And
+        # the combination is formed in arithmetic that flushes too: its
+        # two products and its sum, each field value as it is read, and a
+        # scalar below tiny, which is read as zero and takes its whole
+        # term with it (such a draw says nothing about that term).
+        weight = abs(float(a_t)) + abs(float(b_t))
+        tiny = _tiny(xj.dtype)
+        unread = sum(abs(float(c)) * _amax(v) for c, v in ((a_t, x), (b_t, y))
+                     if abs(float(c)) < tiny)
+        flushes = (1.0 + weight) * _flush_cost(subject, g, dx.dtype, xj.dtype) \
+            + 2.0 * g * ((3.0 + weight) * tiny + unread)
+        tol = _allowed(
+            rounding_units * eps * g * max(size, _magnitude_floor(dx.dtype)), flushes)
         gap = float(np.max(np.abs(left - right), initial=0.0))
         assert gap <= tol, (
             f"what the edge delivers is not linear in the value: delivered(a x + b y) "
@@ -656,9 +746,12 @@ def _mapping_consistent(subject: _Subject, sampling: _Sampling, rounding_units: 
         g = gain(geom)
         eps = _eps(dtype, *subject.weight_dtypes(), *_geom_dtype(geom))
         constant = jnp.full(subject.source_lead, dtype.type(c), dtype)
-        out = _np(subject.fast(constant, geom)).astype(np.float64)
+        delivered = subject.fast(constant, geom)
+        out = _np(delivered).astype(np.float64)
         expected = subject.scale * float(dtype.type(c))
-        tol = rounding_units * eps * g * max(abs(float(c)), _magnitude_floor(dtype))
+        flushes = _flush_cost(subject, g, delivered.dtype, dtype)
+        tol = _allowed(
+            rounding_units * eps * g * max(abs(float(c)), _magnitude_floor(dtype)), flushes)
         gap = float(np.max(np.abs(out - expected), initial=0.0))
         assert gap <= tol, (
             f"a constant field {float(c):.6g} is not reproduced: the delivered values "
@@ -679,7 +772,7 @@ def _mapping_consistent(subject: _Subject, sampling: _Sampling, rounding_units: 
                        _magnitude_floor(dtype))
             # The coordinates are cast to the field's dtype before the
             # transfer, so the reference carries that rounding too.
-            tol = rounding_units * eps * max(g, abs(subject.scale)) * size
+            tol = _allowed(rounding_units * eps * max(g, abs(subject.scale)) * size, flushes)
             gap = float(np.max(np.abs(out - subject.scale * f_t), initial=0.0))
             assert gap <= tol, (
                 f"the monomial with exponents {powers} of the coordinates is not "
@@ -711,6 +804,7 @@ def _mapping_conservative(subject: _Subject, sampling: _Sampling, rounding_units
         out = subject.fast(jnp.asarray(x), geom)
         eps = _eps(out.dtype, *subject.weight_dtypes(), *_geom_dtype(geom))
         g = gain(geom)
+        flush = _flush_cost(subject, g, out.dtype, np.asarray(x).dtype)
         sent = np.asarray(x, np.float64).reshape(-1)
         received = _np(out).astype(np.float64).reshape(-1)
         xs = xt = None
@@ -727,7 +821,9 @@ def _mapping_conservative(subject: _Subject, sampling: _Sampling, rounding_units
             size = float(np.sum(np.abs(m_t * f_t))) * g * max(
                 _amax(x), _magnitude_floor(out.dtype))
             size = max(size, abs(subject.scale) * float(np.sum(np.abs(m_s * f_s * sent))))
-            tol = rounding_units * eps * size
+            # Every received value enters the total with its weight.
+            tol = _allowed(rounding_units * eps * size,
+                           float(np.sum(np.abs(m_t * f_t))) * flush)
             gap = abs(total_out - subject.scale * total_in)
             what = "the total" if not any(powers) else (
                 f"the moment with exponents {powers} of the coordinates")
@@ -753,20 +849,35 @@ def _mapping_adjoint(subject: _Subject, sampling: _Sampling, rounding_units: flo
         xj, yj = jnp.asarray(x), jnp.asarray(y)
         out = subject.fast(xj, geom)
         back = subject.fast_transpose(yj, geom)
-        left = float(np.sum(_np(out).astype(np.float64) * np.asarray(y, np.float64)))
-        right = subject.scale * float(
-            np.sum(np.asarray(x, np.float64) * _np(back).astype(np.float64)))
+        # Both sides are products of two fields, and the reference is
+        # float64: the product of two float64 fields near either end of
+        # the range leaves it (an infinite or a zero inner product, and a
+        # tolerance that is one or the other).  So x, and what was
+        # delivered of it, are framed by one exact power of two, y and its
+        # transpose by another: the comparison is the unframed one to the
+        # last bit wherever that was in range, and stays in range.
+        p = pow2_host_factor(_amax(x), np.float64)
+        q = pow2_host_factor(_amax(y), np.float64)
+        x_framed, y_framed = np.asarray(x, np.float64) * p, np.asarray(y, np.float64) * q
+        left = float(np.sum((_np(out).astype(np.float64) * p) * y_framed))
+        right = subject.scale * float(np.sum(x_framed * (_np(back).astype(np.float64) * q)))
         eps = _eps(out.dtype, back.dtype, *_geom_dtype(geom))
         floor = _magnitude_floor(out.dtype)
-        size = gain(geom) * max(_amax(x), floor) * max(
-            float(np.sum(np.abs(np.asarray(y, np.float64)))), floor)
-        tol = rounding_units * eps * size
+        g = gain(geom)
+        x_sum, y_sum = float(np.sum(np.abs(x_framed))), float(np.sum(np.abs(y_framed)))
+        size = g * max(_amax(x) * p, floor * p) * max(y_sum, floor * q)
+        # Every delivered value enters the left side times its y, every
+        # transposed value the right side times its x.
+        flushes = y_sum * (_flush_cost(subject, g, out.dtype, xj.dtype) * p) + x_sum * (
+            _flush_cost(subject, g, back.dtype, yj.dtype, transposed=True) * q)
+        tol = _allowed(rounding_units * eps * size, flushes)
         gap = abs(left - right)
         assert gap <= tol, (
             f"apply_T is not the adjoint of what the edge delivers: <delivered(x), y> = "
-            f"{left:.9g} and "
+            f"{left / p / q:.9g} and "
             + (f"scale * <x, apply_T(y)> = " if subject.scale != 1.0 else "<x, apply_T(y)> = ")
-            + f"{right:.9g} differ by {gap:.3g}, {gap / tol * rounding_units:.3g} "
+            + f"{right / p / q:.9g} differ by {gap / p / q:.3g}, "
+            f"{gap / tol * rounding_units:.3g} "
             f"rounding units where {rounding_units:g} are allowed.  A pair of edges "
             f"built on apply and apply_T then exchanges different amounts of work in "
             f"the two directions.{subject.what_transform()}")
@@ -838,9 +949,16 @@ def _mapping_geometry_derivative(subject: _Subject, sampling: _Sampling,
             # The positions' dtype cannot hold this stencil at this point.
             counts["unresolved"] += 1
             raise _Kink
-        size = gain(geom) * max(_amax(x), _magnitude_floor(xj.dtype)) * float(
-            np.sum(np.abs(np.asarray(r, np.float64))))
-        noise = rounding_units * eps * size
+        g = gain(geom)
+        r_sum = float(np.sum(np.abs(np.asarray(r, np.float64))))
+        size = g * max(_amax(x), _magnitude_floor(xj.dtype)) * r_sum
+        # One evaluation of phi: every delivered value times its r, and
+        # the functional's own row of n_target products and their sums
+        # (an r below tiny, read as zero, takes its term with it).
+        n_t = int(np.prod(subject.target_lead, dtype=np.int64))
+        flushes = r_sum * _flush_cost(subject, g, xj.dtype, xj.dtype) + 2.0 * _tiny(
+            xj.dtype) * (2 * n_t - 1 + n_t * g * _amax(x))
+        noise = _allowed(rounding_units * eps * size, flushes)
         central, central_half = (f_2 - f_m2) / (2 * h), (f_1 - f_m1) / h
         derivative = float(_np(gradient(xj, rj, geom_j))[index])
         # Third differences over the two four-point halves of the stencil.
@@ -930,8 +1048,11 @@ def _mapping_outside_hull(subject: _Subject, sampling: _Sampling, rounding_units
         out, expected = subject.fast(xj, outside), subject.fast(xj, clamped)
         assert bool(np.all(np.isfinite(_np(out)))), (
             "the delivered field is not finite for finite positions at or outside the hull")
-        tol = rounding_units * _eps(out.dtype, geom_np.dtype) * gain(clamped) * max(
-            _amax(x), _magnitude_floor(out.dtype))
+        g = gain(clamped)
+        tol = _allowed(
+            rounding_units * _eps(out.dtype, geom_np.dtype) * g * max(
+                _amax(x), _magnitude_floor(out.dtype)),
+            2.0 * _flush_cost(subject, g, out.dtype, xj.dtype))
         gap = float(np.max(np.abs(_np(out).astype(np.float64)
                                   - _np(expected).astype(np.float64)), initial=0.0))
         assert gap <= tol, (
@@ -977,8 +1098,11 @@ def _mapping_dtype(subject: _Subject, sampling: _Sampling, rounding_units: float
         if wide.itemsize <= dtype.itemsize:
             return
         reference = _np(subject.deliver(jnp.asarray(np.asarray(x, wide)), geom))
-        tol = rounding_units * _eps(dtype, *subject.weight_dtypes(), *_geom_dtype(geom)) * (
-            gain(geom) * max(_amax(x), _magnitude_floor(dtype)))
+        g = gain(geom)
+        tol = _allowed(
+            rounding_units * _eps(dtype, *subject.weight_dtypes(), *_geom_dtype(geom)) * (
+                g * max(_amax(x), _magnitude_floor(dtype))),
+            _flush_cost(subject, g, out.dtype, dtype))
         gap = float(np.max(np.abs(_np(out).astype(np.float64)
                                   - reference.astype(np.float64)), initial=0.0))
         assert gap <= tol, (
@@ -1007,8 +1131,11 @@ def _mapping_jit(subject: _Subject, sampling: _Sampling, rounding_units: float,
         assert eager.dtype == jitted.dtype and eager.shape == jitted.shape, (
             f"jit changes the result's type: {eager.dtype}{tuple(eager.shape)} eagerly, "
             f"{jitted.dtype}{tuple(jitted.shape)} compiled")
-        tol = rounding_units * _eps(eager.dtype, *_geom_dtype(geom)) * gain(geom) * max(
-            _amax(x), _magnitude_floor(eager.dtype))
+        g = gain(geom)
+        tol = _allowed(
+            rounding_units * _eps(eager.dtype, *_geom_dtype(geom)) * g * max(
+                _amax(x), _magnitude_floor(eager.dtype)),
+            2.0 * _flush_cost(subject, g, eager.dtype, xj.dtype))
         gap = float(np.max(np.abs(_np(eager).astype(np.float64)
                                   - _np(jitted).astype(np.float64)), initial=0.0))
         assert gap <= tol, (

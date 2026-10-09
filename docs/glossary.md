@@ -21,7 +21,10 @@ Node
 Edge
    A typed, unit-aware connection between two nodes that carries a named
    field (e.g. `magnetic_force`, `orientation`). Edges encode the
-   data-dependency graph the {term}`Graph step` walks.
+   data-dependency graph the {term}`Graph step` walks. An edge may also
+   run from a node to itself: it then reads the node's value from the
+   previous step, or, with the node in a coupling group, is iterated with
+   the group.
 
 Graph step
    One full traversal of a MADDENING node graph that advances simulation time

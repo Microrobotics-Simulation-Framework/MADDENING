@@ -44,6 +44,28 @@ The side is a function of the edge's mapping alone (the sizes it
 declares, which ``add_edge`` holds its two ends to), so every plan of a
 group, and a bare edge described on its own, decide it alike.
 
+**A reading is one or more parts** (:attr:`InterfaceEdge.parts`, one
+:class:`ReadingPart` each), and every consumer iterates them
+(:meth:`InterfaceEdge.read`, through ``acceleration._interface_readings``):
+the residual, its float floor, the pooled count, the spectral analysis's
+reading and the fields a solve returns as it accepted them
+(:attr:`InterfaceEdge.measured_whole`).  Every edge without a geometry
+has one part, measured against its own magnitude.  A geometry-dependent
+mapping (experimental) is read by the same side rule:
+
+* on its ``"delivered"`` side (a gather, a tie): what the step delivers,
+  the source field through the mapping **at the geometry the step uses**
+  (:meth:`InterfaceEdge.geometry_at`), then the transform.  One part;
+* on its ``"source"`` side (a scatter: a few points onto a large grid):
+  **the mapping's inputs**.  The source field as stored, and -- where the
+  geometry moves with the iterate (a source anchor) -- the positions, a
+  part of their own measured **in units of the mapping kind's own length
+  scale** (``geometry_length_scale()``; the grid spacing per axis for
+  ``multilinear_grid``) and not against their own magnitude, which
+  depends on where the origin of the coordinates is.  A target-anchored
+  geometry is the target's pre-step state, the same at every pass: a
+  constant of the solve, with no residual, and no part.
+
 The exact model and the numerical reference of the test suite
 (``tests/property/coupled_topologies.py``, ``coupling_reference.py``) are
 oracles and do not import this module.
@@ -56,6 +78,7 @@ from typing import Any, Optional
 
 import jax.numpy as jnp
 
+from maddening.core._pow2_frame import pow2_host_factor
 from maddening.core.edge import _delivered
 
 #: What an edge's source is, in the state its plan was built from
@@ -93,6 +116,17 @@ OUTBOUND = "outbound"
 #: then the transform), or the source field itself, before both.
 DELIVERED = "delivered"
 SOURCE = "source"
+#: A third thing a part of a reading can be (:attr:`ReadingPart.what`,
+#: beside the two sides): the geometry a geometry-dependent mapping read
+#: at its source takes from the iterate.
+GEOMETRY = "geometry"
+
+#: What a part of a reading is measured against (:attr:`ReadingPart.unit`):
+#: its own largest magnitude, as every field of every norm is; or one unit
+#: of the mapping kind's own length scale, the part's value being already
+#: expressed in it.
+OWN_MAGNITUDE = "own_magnitude"
+KERNEL_LENGTH = "kernel_length"
 
 
 def is_internal(edge, members) -> bool:
@@ -243,15 +277,133 @@ def _norm_side(edge) -> str:
     state -- so the plans built by ``validate()``, by ``compile()`` and
     at trace, and a bare edge described for the report, cannot differ.
 
-    A geometry-dependent mapping stays ``"delivered"``: ``compile()``
-    refuses one inside a group under the interface norm
+    A geometry-dependent mapping is decided by the same sizes (a
+    ``multilinear_grid`` scatter of a few points onto a larger grid is
+    read at its ``"source"``; its gather, and a tie, as ``"delivered"``),
+    provided its kind declares the length scale a reading at its source
+    needs (``geometry_length_scale``: :func:`_kernel_lengths`).  A kind
+    that declares none has no reading there and stays ``"delivered"``;
+    ``compile()`` refuses it inside a group under the interface norm
     (``_geometry_edge_coupling_errors``), so nothing reads it.
     """
     mapping = edge.mapping
-    if mapping is None or getattr(mapping, "needs_geometry", False):
+    if mapping is None:
+        return DELIVERED
+    if getattr(mapping, "needs_geometry", False) and not callable(
+            getattr(mapping, "geometry_length_scale", None)):
         return DELIVERED
     source_lead, target_lead = _mapping_leads(mapping)
     return SOURCE if _entries(target_lead) > _entries(source_lead) else DELIVERED
+
+
+def _kernel_lengths(mapping) -> tuple:
+    """The length scale of *mapping*'s kind on each coordinate axis of its geometry.
+
+    What the kind declares (``geometry_length_scale()``): for
+    ``multilinear_grid`` the grid spacing per axis.  The one unit a
+    position is measured in by the interface norm; a user-supplied length
+    is not offered.
+    """
+    declared: Any = getattr(mapping, "geometry_length_scale", None)
+    if not callable(declared):
+        raise TypeError(
+            f"mapping {mapping!r} declares no geometry_length_scale(): the interface "
+            f"norm cannot measure its geometry (a position is measured in units of the "
+            f"mapping kind's own length scale)")
+    lengths: Any = declared()
+    return tuple(float(h) for h in lengths)
+
+
+def _in_kernel_lengths(mapping, geom):
+    """The geometry *geom* of *mapping*, each coordinate over the kind's
+    length scale on its axis (:func:`_kernel_lengths`).
+
+    The same shape and dtype as *geom* (``(points, axes)``, or
+    ``(points,)`` on one axis).  Each axis is divided in a static
+    power-of-two frame of its length, as the kernel divides it, so the
+    quotient is exact in the frame at any spacing.  No origin is
+    subtracted: a difference of two readings does not see it, and the
+    rounding of a stored position is relative to the position itself.
+    """
+    lengths = _kernel_lengths(mapping)
+    geom = jnp.asarray(geom)
+    cols = geom if geom.ndim >= 2 else geom[:, None]
+    if cols.shape[-1] != len(lengths):
+        raise ValueError(
+            f"mapping {mapping!r} declares {len(lengths)} length scale(s) for a geometry "
+            f"of shape {tuple(geom.shape)}")
+    dtype = geom.dtype
+    scaled = []
+    for axis, length in enumerate(lengths):
+        frame = pow2_host_factor(length, dtype)
+        scaled.append((cols[..., axis] * jnp.asarray(frame, dtype))
+                      / jnp.asarray(length * frame, dtype))
+    return jnp.stack(scaled, axis=-1).reshape(geom.shape)
+
+
+@dataclass(frozen=True)
+class ReadingPart:
+    """One part of what the interface norm reads on an edge.
+
+    Attributes
+    ----------
+    what : str
+        ``"delivered"`` (what the edge hands its target), ``"source"``
+        (the source field as stored) or ``"geometry"`` (the positions a
+        mapping read at its source takes from the iterate).
+    field : tuple of str
+        ``(node, field)``: the state field of the iterate the part is
+        read from.
+    whole : bool
+        Is the part that field, entry for entry (as stored, or each
+        entry over a constant)?  Then the norm measures the field whole
+        and a solve returns it as the iterate it accepted holds it
+        (:attr:`InterfaceEdge.measured_whole`).
+    unit : str
+        ``"own_magnitude"``: the part's change is measured against its
+        own largest magnitude, and a part within the dead band
+        (``atol``) leaves the norm.  ``"kernel_length"``: the part is
+        already expressed in the mapping kind's length scale and its
+        change is measured against one unit of it; the dead band, a
+        statement about a quantity's magnitude, does not apply to a
+        position.
+    """
+
+    what: str
+    field: tuple
+    whole: bool
+    unit: str
+
+
+class PartReading(tuple):
+    """One part of an edge's reading at one or more states.
+
+    The tuple ``(edge, source_dtype, value, ...)``: the edge, the dtype
+    of the stored field the part is read from at the first state, and
+    the part's value at each state, in the unit it is measured in.  It
+    also carries
+
+    * ``part``: the :class:`ReadingPart` (what the value is measured
+      against);
+    * ``positions``: per state, the positions (in the kind's length
+      scale) a value delivered through a geometry-dependent mapping was
+      computed at -- its rounding carries theirs -- and ``None`` for
+      every other part.
+    """
+
+    part: ReadingPart
+    positions: tuple
+
+    def __new__(cls, edge, source_dtype, values, part, positions):
+        self = super().__new__(cls, (edge, source_dtype, *values))
+        self.part = part
+        self.positions = tuple(positions)
+        return self
+
+    @property
+    def values(self) -> tuple:
+        """The part's value at each state."""
+        return tuple(self[2:])
 
 
 @dataclass(frozen=True, eq=False)
@@ -294,7 +446,7 @@ class InterfaceEdge:
         Whether the edge applies a transform after the mapping.
     norm_side : str
         The side the interface norm reads the edge on (:func:`_norm_side`):
-        ``"source"`` where a static mapping delivers more entries than the
+        ``"source"`` where a mapping delivers more entries than the
         field it reads holds, ``"delivered"`` otherwise.
     """
 
@@ -312,22 +464,23 @@ class InterfaceEdge:
     has_transform: bool
     norm_side: str
 
-    def reading(self, value, mappings=None):
-        """What the interface norm reads on this edge for *value* at its source.
+    def reading(self, value, mappings=None, geom=None):
+        """What the interface norm reads of *value*, this edge's source field.
 
         On the delivered side: *value* through the mapping, with the
         weights in *mappings* (``params["mappings"]``, ``None`` for the
-        mapping's own), then the transform -- the step's edge rule.  On
-        the source side: *value* itself, through neither.  Read by
-        ``acceleration._interface_readings`` (the residual, its float
-        floor and its eps, and the spectral analysis's reading).
+        mapping's own) and, for a geometry-dependent mapping, at the
+        geometry *geom* (:meth:`geometry_at`), then the transform -- the
+        step's edge rule.  On the source side: *value* itself, through
+        neither.  The first part of the edge's reading (:attr:`parts`);
+        :meth:`read` evaluates all of them.
 
         The source side was decided on the sizes the mapping declares; a
         *value* that does not have them is refused rather than read on a
         side its own size would not have chosen.
         """
         if self.norm_side == DELIVERED:
-            return _delivered(self.edge, value, mappings)
+            return _delivered(self.edge, value, mappings, geom)
         if self.norm_side == SOURCE:
             source_lead, _target_lead = _mapping_leads(self.mapping)
             shape = tuple(int(n) for n in jnp.shape(value))
@@ -344,18 +497,62 @@ class InterfaceEdge:
             f"{self.norm_side!r}")
 
     @property
-    def reads_source_as_is(self) -> bool:
-        """Is the norm's reading of this edge its source field, unchanged?
+    def parts(self) -> tuple:
+        """The parts of the norm's reading of this edge (:class:`ReadingPart`).
 
-        On the source side: always.  On the delivered side: an edge with
-        no mapping and no transform.  Read by
-        ``_group_layout._reading_is_the_fields`` (which spectral analysis
-        the report takes).
+        **The one statement of what is read on an edge, and against
+        what.**  Delivered side: one part, what the edge delivers
+        (whole only where the edge has no mapping and no transform).
+        Source side: the source field as stored; and, for a
+        geometry-dependent mapping whose geometry is a field of the
+        source (a source anchor), that field in the kind's length scale.
+        A target-anchored geometry is the target's pre-step state, a
+        constant of the solve: it is no part.  Static.
         """
+        if self.norm_side == DELIVERED:
+            whole = self.mapping is None and not self.has_transform
+            return (ReadingPart(DELIVERED, self.source, whole, OWN_MAGNITUDE),)
         if self.norm_side == SOURCE:
-            return True
-        return (self.norm_side == DELIVERED and self.mapping is None
-                and not self.has_transform)
+            parts = [ReadingPart(SOURCE, self.source, True, OWN_MAGNITUDE)]
+            if self.anchor is not None and self.anchor[0] == "source":
+                parts.append(ReadingPart(
+                    GEOMETRY, (self.source[0], self.anchor[1]), True, KERNEL_LENGTH))
+            return tuple(parts)
+        raise ValueError(
+            f"edge {self.key!r}: the interface norm has no reading on side "
+            f"{self.norm_side!r}")
+
+    @property
+    def measured_whole(self) -> tuple:
+        """``((node, field), ...)``: the state fields this edge's reading
+        holds whole (:attr:`ReadingPart.whole`).
+
+        The source field of an edge with no mapping and no transform or
+        of one read at its source, and the geometry field a mapping read
+        at its source takes from the iterate.  Read by
+        ``_group_layout._fields_the_interface_norm_misses`` (the return
+        rule keeps exactly these as the accepted iterate holds them).
+        """
+        return tuple(part.field for part in self.parts if part.whole)
+
+    @property
+    def reads_source_as_is(self) -> bool:
+        """Is the norm's reading of this edge its source field, unchanged,
+        and nothing else?
+
+        On the source side: where the source field is the only part.
+        A geometry-dependent mapping read at its source with a
+        source-anchored geometry reads the positions too, in another
+        unit, so its reading is not "the field as it is".  On the
+        delivered side: an edge with no mapping and no transform.  Read
+        by ``_group_layout._reading_is_the_fields`` (which spectral
+        analysis the report takes).
+        """
+        if self.norm_side not in (DELIVERED, SOURCE):
+            return False
+        parts = self.parts
+        return (len(parts) == 1 and parts[0].whole and parts[0].field == self.source
+                and parts[0].unit == OWN_MAGNITUDE)
 
     @property
     def reads_through_mapping(self) -> bool:
@@ -368,6 +565,96 @@ class InterfaceEdge:
         :meth:`InterfacePlan.mapped_keys`.
         """
         return self.norm_side == DELIVERED and self.mapping is not None
+
+    @property
+    def reads_pre_step_geometry(self) -> bool:
+        """Is this edge read as delivered through a mapping whose geometry
+        is the target's pre-step state (a target anchor)?
+
+        The state a solve returns does not hold that geometry, so
+        nothing computed from the returned state alone can repeat the
+        reading.  Read by
+        :meth:`InterfacePlan.norm_reads_beyond_the_state`.
+        """
+        return (self.reads_through_mapping and self.anchor is not None
+                and self.anchor[0] == "target")
+
+    @property
+    def reads_weights_of_the_step(self) -> bool:
+        """Is this edge read through a mapping that holds weights (which a
+        caller may override for one step)?
+
+        Every static mapping read as delivered.  A geometry-dependent
+        kind without weights (``multilinear_grid``: its entry of
+        ``params["mappings"]`` is ``{}``) reads none.
+        """
+        if not self.reads_through_mapping:
+            return False
+        if self.mapping_form != NEEDS_GEOMETRY:
+            return True
+        held = getattr(self.mapping, "params_pytree", None)
+        return True if held is None else bool(held())
+
+    def geometry_at(self, state, pre_step=None):
+        """The geometry this edge's mapping is read with at the iterate *state*.
+
+        **The time level of a reading's geometry, in the one place it is
+        written** (contract B of the geometry guide): a source-anchored
+        geometry is the geometry field of the same state the value is
+        read from, so it moves with the iterate; a target-anchored one is
+        the field of the target's **pre-step** state, the same at every
+        pass, which is what the target's ``update`` is resolved with.
+        *pre_step* gives a member's pre-step state (a callable of the
+        member's name, or a ``{name: state}`` dict); a reading that needs
+        it outside a step, where it no longer exists, is refused.
+        """
+        if self.anchor is None:
+            raise ValueError(f"edge {self.key!r} names no geometry")
+        side, field = self.anchor
+        if side == "source":
+            return state[self.source[0]][field]
+        if pre_step is None:
+            raise ValueError(
+                f"edge {self.key!r}: the interface norm reads what this edge delivers "
+                f"at the pre-step {self.target[0]}.{field} (a target-anchored geometry), "
+                f"which only the step that solved the group holds")
+        held: Any = (pre_step(self.target[0]) if callable(pre_step)
+                     else pre_step[self.target[0]])
+        return held[field]
+
+    def read(self, states, mappings=None, pre_step=None) -> tuple:
+        """This edge's reading at each of *states*: one :class:`PartReading` per part.
+
+        *states* are ``{node: {field: value}}`` dicts (one for a floor,
+        two successive iterates for a residual); *mappings* the weights
+        the step ran with; *pre_step* the members' pre-step states
+        (:meth:`geometry_at`).  Read by
+        ``acceleration._interface_readings``, the one generator the
+        residual, its float floor and the spectral analysis's reading
+        iterate.
+        """
+        node, field = self.source
+        stored = tuple(s[node][field] for s in states)
+        source_dtype = jnp.asarray(stored[0]).dtype
+        out = []
+        for part in self.parts:
+            positions = (None,) * len(states)
+            if part.what == GEOMETRY:
+                g_node, g_field = part.field
+                held = tuple(s[g_node][g_field] for s in states)
+                values = tuple(_in_kernel_lengths(self.mapping, g) for g in held)
+                out.append(PartReading(self.edge, jnp.asarray(held[0]).dtype, values,
+                                       part, positions))
+                continue
+            if part.what == DELIVERED and self.anchor is not None:
+                geoms = tuple(self.geometry_at(s, pre_step) for s in states)
+                values = tuple(self.reading(v, mappings, g) for v, g in zip(stored, geoms))
+                if callable(getattr(self.mapping, "geometry_length_scale", None)):
+                    positions = tuple(_in_kernel_lengths(self.mapping, g) for g in geoms)
+            else:
+                values = tuple(self.reading(v, mappings) for v in stored)
+            out.append(PartReading(self.edge, source_dtype, values, part, positions))
+        return tuple(out)
 
     @property
     def read_from_state(self) -> bool:
@@ -548,10 +835,41 @@ class InterfacePlan:
         interface norm such a group's float floor depends on the mapping
         weights the step ran with, so the step records it.  An edge read
         at its source (:attr:`InterfaceEdge.reads_through_mapping`) does
-        not count: its reading is the stored field, whatever the weights.
+        not count: its reading is the stored field, whatever the weights;
+        nor does a geometry-dependent mapping that holds none
+        (:attr:`InterfaceEdge.reads_weights_of_the_step`).
         """
-        return any(rec.reads_through_mapping and rec.source_kind == FLOATING
+        return any(rec.reads_weights_of_the_step and rec.source_kind == FLOATING
                    for rec in self.internal)
+
+    def norm_reads_beyond_the_state(self) -> bool:
+        """Does the norm read, on an internal edge with a floating source,
+        something the state a solve returns does not hold?
+
+        Either the weights of a mapping the edge is read through
+        (:meth:`norm_reads_mapping_weights`: ``params["mappings"]``,
+        which a caller may override for one step), or the pre-step
+        geometry of a target-anchored mapping read as delivered
+        (:attr:`InterfaceEdge.reads_pre_step_geometry`).  The float floor
+        of such a group's residual cannot be taken from the returned
+        state alone, so the step records it.  Read by
+        ``_group_layout._reads_mapping_weights`` (who owns the
+        ``reading_floor`` slot) and by the report's fallback floor
+        (``_group_layout._floor_needs_the_step``).
+        """
+        return self.norm_reads_mapping_weights() or any(
+            rec.reads_pre_step_geometry and rec.source_kind == FLOATING
+            for rec in self.internal)
+
+    def measured_whole(self) -> frozenset:
+        """``{(node, field)}``: the state fields the norm measures whole on
+        an internal edge (:attr:`InterfaceEdge.measured_whole`).
+
+        The fields a solve returns as the iterate it accepted holds
+        them; every other floating field is recomputed by one plain
+        pass.  Read by ``_group_layout._fields_the_interface_norm_misses``.
+        """
+        return frozenset(field for rec in self.internal for field in rec.measured_whole)
 
     def mapped_keys(self) -> tuple:
         """The keys of the internal edges the norm reads through a mapping,
@@ -598,7 +916,8 @@ class InterfacePlan:
         """The internal edges whose mapping reads a geometry, as declared.
 
         Read by ``_group_layout._geometry_edge_coupling_errors``: the
-        interface norm does not read a moving geometry and refuses them.
+        interface norm reads the geometry of the ``multilinear_grid``
+        kind in a group that does not sub-cycle, and refuses the rest.
         """
         return [r for r in self._declared(INTERNAL) if r.anchor is not None]
 

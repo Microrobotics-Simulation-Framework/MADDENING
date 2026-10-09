@@ -77,6 +77,8 @@ from maddening.core.coupling.acceleration import PRECISION_FLOOR_ULPS
 from tests.core import coupling_domain_sizes as cs
 from tests.core import coupling_domains as cd
 from tests.property import coupled_graphs as cg
+from tests.property import geometry_graphs as gg
+from tests.property import geometry_interface_graphs as gi
 from tests.property import interface_side_graphs as sg
 
 #: A predicted pass count is asserted where every estimate the reference's
@@ -721,8 +723,11 @@ def _slots_agree(a, b, rel: float) -> bool:
 
 
 def _same_graph(a, b) -> list:
-    """What differs between two snapshots of one graph: members, report, ``_meta``."""
-    out = [f"{n}.x" for n in ("a", "b") if not cd.bitwise(a.x(n), b.x(n))]
+    """What differs between two snapshots of one graph: members (every
+    field each holds), report, ``_meta``."""
+    out = [f"{n}.{f}" for n in ("a", "b") for f in sorted(set(a.state[n]) | set(b.state[n]))
+           if f not in a.state[n] or f not in b.state[n]
+           or not cd.bitwise(a.state[n][f], b.state[n][f])]
     out += [f"report[{k}]" for k in sorted(set(a.report) | set(b.report))
             if k not in a.report or k not in b.report
             or not _numbers_agree(a.report[k], b.report[k], 0.0)]
@@ -753,7 +758,7 @@ def _check_restart(cell) -> None:
             f"{_same_graph(a, b)}")
 
 
-def _same_member(where: str, member, alone) -> None:
+def _same_member(where: str, member, alone, ulps: float = 0.0) -> None:
     """A member of a ``vmap`` batch is its own unbatched solve.
 
     The state, the verdict, the pass count and every integer slot to the
@@ -764,10 +769,33 @@ def _same_member(where: str, member, alone) -> None:
     twenty values a reading; the cells of every push agree to the bit).
     A member that kept iterating with its batch, or stopped with it,
     would differ by passes, not by bits.
+
+    *ulps* (the pairs with geometry edges): the state to that many ``eps``
+    of each field's largest entry instead of to the bit, the verdict and
+    the pass count still exact.  The batched step and the unbatched one
+    are two programs, and a member that adds a product to a bias, or an
+    edge that sums two weighted samples, is compiled with a fused
+    multiply-add in one and not in the other (measured: one float32 ulp
+    of one entry of ``x`` on the two gather-only pairs of the seven
+    ``vmap`` cells, the other five to the bit; jaxlib 0.11.0, CPU; the
+    same pass counts and the same residual to the bit).
     """
     for name in ("a", "b"):
-        assert cd.bitwise(member.x(name), alone.x(name)), (
-            f"{where}: {name}.x differs from its unbatched solve's")
+        assert sorted(member.state[name]) == sorted(alone.state[name]), where
+        for field in member.state[name]:
+            got, want = member.state[name][field], alone.state[name][field]
+            if not ulps:
+                assert cd.bitwise(got, want), (
+                    f"{where}: {name}.{field} differs from its unbatched solve's")
+                continue
+            assert got.dtype == want.dtype and got.shape == want.shape, (where, name, field)
+            bound = ulps * float(cd.finfo(want.dtype).eps) * float(np.max(np.abs(want)))
+            worst = float(np.max(np.abs(got.astype(np.float64) - want.astype(np.float64))))
+            assert worst <= bound, (
+                f"{where}: {name}.{field} is {worst:.3e} from its unbatched solve's "
+                f"(bound {bound:.3e})")
+    for key in ("converged", "iterations"):
+        assert member.report[key] == alone.report[key], (where, key)
     assert sorted(member.report) == sorted(alone.report), where
     assert sorted(member.meta) == sorted(alone.meta), where
     differ = {key: (member.report[key], alone.report[key]) for key in member.report
@@ -1080,3 +1108,656 @@ def test_a_batch_with_more_members_than_the_large_field_has_entries(cell):
     if cell.kind == "two-way":
         _check_twin(cell, count=BATCH)
     _forget(cell)
+
+
+# ---------------------------------------------------------------------------
+# A pair coupled through a multilinear_grid scatter and gather (experimental)
+# ---------------------------------------------------------------------------
+# The pairs above are coupled through static mappings.  Here the markers
+# and the grid of ``tests/property/geometry_interface_graphs.py``: the
+# mapping reads positions that move with the iterate, and under the
+# interface norm a scatter is read at its inputs -- the marker values, and
+# for a source anchor the positions in grid spacings -- and a gather as
+# delivered (MAP-050).  That module runs float32 and float64 pairs at one
+# rate, unbatched; this section runs the pair in every domain the norm
+# accepts it in (``coupling_domain_sizes.GEO_ACCEPTED``) and asserts the
+# refusal in the one it does not (a sub-cycled group).
+#
+# The oracles are that module's, with every number as its member stores it
+# (``coupling_domain_sizes.GeoStored``): the exact float64 statement of the
+# reading -- the pass a plain iteration stops on, its residual, the fields
+# a solve returns as its accepted iterate holds them and the others one
+# plain pass on, the distance to the fixed point against ``K`` -- and the
+# marker-side twin, whose plain edges carry the marker values and the
+# positions in spacings.  What a domain adds is asserted as for the static
+# pairs: a member of a batch against its own unbatched solve, the base
+# steps a multi-rate graph's group fires on and the same pair at one rate,
+# a predictor's guess as the loop's first iterate, the graph a checkpoint
+# brings back.
+#
+# Unlike the static pairs' members these have a memory: the positions
+# integrate from the pre-step state.  So each solve's reference is handed
+# the state its step started from (``GeoStored.from_state``), and the
+# markers are written after ``compile()`` (as every step's state is; the
+# advisory about positions a dtype cannot resolve is asked of the state
+# ``compile()`` sees, and has a test of its own below).
+
+
+def _g(label, kind="two-way", anchors=("source", "target"), schedule="gauss-seidel",
+       acceleration="none", small="a", **kw) -> cs.GeoCell:
+    return cs.GeoCell(label, kind, anchors, schedule, acceleration, small, **kw)
+
+
+#: The geometry cells of every push: the two-way pair (a scatter read at
+#: its source with its positions, a gather anchored at its target) once in
+#: each accepted domain, the member that holds the markers' values and the
+#: schedule rotated.  Every other kind, anchor and acceleration in every
+#: domain is the slow lane's product.
+GEO_PUSH = (
+    _g("f32"),
+    _g("mixed_dtype", schedule="jacobi"),
+    _g("vmap"),
+    _g("multi_rate"),
+    _g("predictors_warm_starts", schedule="jacobi", small="b"),
+    _g("checkpoint_restart", anchors=("source", "source"), small="b"),
+)
+#: Whose marker-side twin is compiled on every push.
+GEO_TWINNED = (_g("f32"),)
+assert set(GEO_TWINNED) <= set(GEO_PUSH)
+# The batch's and the multi-rate graph's cells are the float32 cell in
+# another domain: each is compared with that cell's own solves.
+assert {dataclasses.replace(c, label="f32") for c in GEO_PUSH
+        if c.domain.vmap or c.domain.multirate} == {GEO_PUSH[0]}
+GEO_ANCHORS = (("source", "target"), ("target", "source"), ("source", "source"),
+               ("target", "target"))
+GEO_ACCELERATIONS = ("aitken", "iqn-ils")
+
+
+def _geo_product() -> list:
+    """The slow lane's cells: every accepted domain x kind x schedule, the
+    anchors and the member that holds ``p`` rotated; this file's own
+    tuples, and no other table's length."""
+    cells = []
+    for i, label in enumerate(cs.GEO_ACCEPTED):
+        for j, kind in enumerate(gi.KINDS):
+            for k, schedule in enumerate(SCHEDULES):
+                cells.append(_g(label, kind, GEO_ANCHORS[(i + j + k) % len(GEO_ANCHORS)], schedule,
+                                small="ab"[(i + j) % 2]))
+    return [c for c in cells if c not in GEO_PUSH]
+
+
+GEO_PRODUCT = _geo_product()
+#: The claim under an acceleration, slow: in each accepted domain, one of
+#: the two (a quasi-Newton history carried through a predictor's sequence
+#: and a restart among them).
+GEO_ACCELERATED = tuple(
+    _g(label, "two-way", GEO_ANCHORS[i % 2], SCHEDULES[i % 2],
+       GEO_ACCELERATIONS[i % len(GEO_ACCELERATIONS)], "ab"[i % 2])
+    for i, label in enumerate(cs.GEO_ACCEPTED))
+#: The twins of the slow lane: a domain each (the sequences of a predictor
+#: and of a restart are not twinned: :func:`_check_geo_twin`).
+GEO_TWINNED_SLOW = (
+    _g("f64", anchors=("source", "source"), schedule="jacobi", small="b"),
+    _g("f64", anchors=("target", "target")),
+    _g("vmap", small="b"),
+    _g("multi_rate"),
+    _g("mixed_dtype", schedule="jacobi"),
+)
+#: What the reference's residual and a returned field are held to: tight
+#: where every member holds float64; elsewhere the float32 allowances of
+#: ``test_coupling_geometry_interface_norm.py``.
+GEO_TIGHT = 1e-8
+GEO_ALLOWED = {True: 1.02, False: 1.10}
+
+
+@dataclasses.dataclass
+class GeoRun:
+    built: cs.GeoBuilt
+    #: One reference per solve, each started where its solve started.
+    refs: list
+    solves: list
+    straight: list
+    saved: object = None
+    loaded: object = None
+
+
+_GEO_RUNS: dict = {}
+
+
+#: A pass count is asserted where every estimate the reference's loop
+#: compared was at least this factor from the threshold: beside a float32
+#: member the residual carries the positions' rounding (half the float
+#: floor is what it is held to), which the margin must clear.  The same
+#: number for a float64 pair, so that every domain runs the same scenarios.
+GEO_MARGIN = 1.3
+#: ``(loop gain of the values with the positions held, sign of the round
+#: trip)`` of a geometry cell's scenarios.  Lower than :data:`GAINS`: a
+#: plain loop's estimates fall by its contraction from pass to pass, so
+#: the margin of its exit is at most the root of one over it, and under
+#: Jacobi a loop gain of 0.6 (0.77 a pass) cannot reach :data:`GEO_MARGIN`.
+GEO_GAINS = ((0.25, 1.0), (0.15, -1.0))
+
+
+def _geo_chain_margins(cell, draw) -> list:
+    """The margins of a sequence's steps on the reference's own chain: each
+    step started from the state the reference returns for the last
+    (through the predictor's guess where the domain has one); those of the
+    steps the domain checks (a restart's: the ones after the checkpoint)."""
+    whole = cs.geo_measured_whole(cell)
+    returned, margins = [], []
+    for k, move in enumerate(MOVES):
+        ref = cs.GeoStored(cell, draw, scale=move)
+        if returned:
+            ref.from_state(returned[-1])
+        start = _geo_guess(k, returned, ref.pre) if cell.domain.predictor else None
+        exit_ = ref.plain_exit(start=start)
+        if not exit_["converged"]:
+            return []
+        returned.append(ref.returned(exit_["state"], whole))
+        margins.append(exit_["margin"])
+    return margins[2:] if cell.domain.restart else margins
+
+
+def _geo_decided(cell, draw) -> bool:
+    """Is *draw*'s exit decided with margin, in the reference's own float64
+    arithmetic (the same answer on every platform)?  From the pre-step
+    state; and, for a sequence, on :data:`PREDICTED_STEPS` of the steps
+    the domain checks, with a little to spare for the graph's own rounding
+    of the states they start from."""
+    if cs.GeoStored(cell, draw).plain_exit()["margin"] < GEO_MARGIN:
+        return False
+    if not _sequenced(cell):
+        return True
+    return sum(m >= 1.01 * GEO_MARGIN for m in _geo_chain_margins(cell, draw)) >= PREDICTED_STEPS
+
+
+def _geo_draws(cell) -> list:
+    """The cell's scenarios: for each loop gain of :data:`GEO_GAINS` (the
+    first, for a sequence) the first candidate whose exit is decided with
+    margin (:func:`_geo_decided`).  The margin of a plain loop is set by
+    its contraction more than by its seed, so the candidates step the gain
+    down from the nominal one by 3% at a time, a seed each."""
+    out = []
+    for gain, sign in (GEO_GAINS[:1] if _sequenced(cell) else GEO_GAINS):
+        for seed in range(36):
+            draw = gi.Draw(seed, gain * (1.0 - 0.03 * (seed % 9)), cs.GEO_PULL, sign)
+            if _geo_decided(cell, draw):
+                break
+        else:
+            raise AssertionError(f"{cell.id}: no candidate decides its exit with margin")
+        out.append(draw)
+    return out
+
+
+def _geo_batch(gm, refs, params) -> list:
+    """Every scenario as one member of a ``jax.vmap`` of the step, each
+    started from its own reference's pre-step state."""
+    import jax  # noqa: PLC0415
+
+    if id(gm) not in cd._VMAPPED:  # noqa: SLF001
+        cd._VMAPPED[id(gm)] = (  # noqa: SLF001
+            gm, jax.jit(jax.vmap(gm._raw_step_fn, in_axes=(0, None, 0))))  # noqa: SLF001
+    step = cd._VMAPPED[id(gm)][1]  # noqa: SLF001
+    starts = []
+    for ref in refs:
+        ref.start(gm)
+        # A tree of its own: the graph writes the next scenario's start
+        # into the containers it holds.
+        starts.append(jax.tree.map(lambda v: v, gm._state))  # noqa: SLF001
+    for name in ("a", "b"):
+        assert not cd.bitwise(starts[0][name]["x"], starts[-1][name]["x"]), (
+            "fixture premise: the scenarios of a batch start from their own states")
+    new = step(cd._stack(starts), gm._default_external_inputs(), cd._stack(params))  # noqa: SLF001
+    return [cd._solve(gm, p, jax.tree.map(lambda v, i=i: v[i], new),  # noqa: SLF001
+                      pre=cd._members(gm, starts[i]))  # noqa: SLF001
+            for i, p in enumerate(params)]
+
+
+def _geo_run(cell, twin: bool = False) -> GeoRun:
+    """The cell's graph (or its twin's), built and stepped once per session."""
+    key = (cell, twin)
+    if key in _GEO_RUNS:
+        return _GEO_RUNS[key]
+    d = cell.domain
+    with cd.entered(d):
+        draws = _geo_draws(cell)
+        if _sequenced(cell):
+            refs = [cs.GeoStored(cell, draws[0], scale=move) for move in MOVES]
+        else:
+            refs = [cs.GeoStored(cell, draw) for draw in draws]
+        first = refs[0]
+        built = (cs.build_geometry_twin(cell, first.pre["p"]["pos"]) if twin
+                 else cs.build_geometry(cell))
+        # The markers are not in the state ``compile()`` saw: nothing to say.
+        assert not built.advisories, built.advisories
+        gm = built.gm
+        params = [ref.params(gm) for ref in refs]
+        straight, saved, loaded = [], None, None
+        if d.restart:
+            straight, solves, saved, loaded = cs.restart_pairs(built, params, start=first.write)
+            refs = refs[len(refs) - len(solves):]
+        elif d.predictor:
+            first.start(gm)
+            solves = [cd._one(d, gm, p) for p in params]  # noqa: SLF001
+        elif d.vmap:
+            solves = _geo_batch(gm, refs, params)
+        else:
+            solves = []
+            for ref, p in zip(refs, params):
+                ref.start(gm)
+                solves.append(cd._one(d, gm, p))  # noqa: SLF001
+        cd.assert_in_domain(d, gm, solves)
+        for ref, s in zip(refs, solves):
+            ref.from_state(cs.geo_state_of(cell, s, pre=True))
+    # The premise: the pair is the cell's, its two edges of the kind.
+    mapped = [e for e in gm._edges if e.mapping is not None]  # noqa: SLF001
+    assert [e.mapping.kind for e in mapped] == ["multilinear_grid"] * (1 if twin else 2), cell.id
+    order = [n for n in gm.schedule if n in ("a", "b")]
+    assert order == [cell.names["p"], cell.names["q"]], (cell.id, order)
+    _GEO_RUNS[key] = GeoRun(built, refs, solves, straight, saved, loaded)
+    return _GEO_RUNS[key]
+
+
+def _geo_forget(cell) -> None:
+    for key in [k for k in _GEO_RUNS if k[0] == cell]:
+        del _GEO_RUNS[key]
+
+
+def _geo_guess(k: int, returned: list, before: dict) -> dict:
+    """:func:`_guess` for members of two fields: the predictor
+    extrapolates every field the earlier steps returned."""
+    if k < 2:
+        return before
+    if k == 2:
+        weights = ((2.0, 1), (-1.0, 0))
+    else:
+        weights = ((3.0, k - 1), (-3.0, k - 2), (1.0, k - 3))
+    return {n: {f: sum(w * returned[i][n][f] for w, i in weights) for f in ("x", "pos")}
+            for n in ("p", "q")}
+
+
+def _geo_starts(cell, run: GeoRun) -> list:
+    """The iterate each solve's loop started from: the state before the
+    step (``None``: the reference's own pre-step state), or a predictor's
+    guess from the states the earlier steps returned."""
+    if not cell.domain.predictor:
+        return [None] * len(run.solves)
+    returned = [cs.geo_state_of(cell, s) for s in run.solves]
+    before = [cs.geo_state_of(cell, s, pre=True) for s in run.solves]
+    return [_geo_guess(k, returned, before[k]) for k in range(len(run.solves))]
+
+
+def _geo_scale(cell, field: str, value) -> float:
+    """What a field is compared against: a value its own size, a position one spacing."""
+    return min(cell.shape.spacing) if field == "pos" else float(np.max(np.abs(value)))
+
+
+def _check_geo_reference(cell) -> None:
+    """The plain iteration of a geometry *cell* against the exact reference
+    of the rule: the pass it stops on, its residual, the state it returns,
+    and the claim."""
+    assert cell.acceleration == "none", cell
+    run = _geo_run(cell)
+    exact, whole = cell.exact, cs.geo_measured_whole(cell)
+    predicted, told_apart, kept_apart = 0, set(), False
+    for k, (s, ref, start) in enumerate(zip(run.solves, run.refs, _geo_starts(cell, run))):
+        r, x = s.report, cs.geo_state_of(cell, s)
+        where = f"{cell.id}, solve {k}"
+        plain = ref.plain_exit(start=start)
+        assert plain["converged"], f"{where}: fixture premise: the reference converges"
+        assert r["converged"] is True, (where, r)
+        if plain["margin"] >= GEO_MARGIN:
+            predicted += 1
+            assert r["iterations"] == plain["iterations"], (
+                f"{where}: the step took {r['iterations']} passes; the plain loop on the "
+                f"rule's readings stops after {plain['iterations']} (margin "
+                f"{plain['margin']:.3g})")
+        else:
+            assert abs(r["iterations"] - plain["iterations"]) <= 1, (where, r, plain)
+        accepted = plain["state"]
+        after = ref.one_pass(accepted)
+        if r["iterations"] == plain["iterations"]:
+            allowed = (GEO_TIGHT * plain["residual"] if exact
+                       else 0.05 * plain["residual"] + 0.5 * ref.floor(accepted))
+            assert abs(r["residual"] - plain["residual"]) <= allowed, (
+                f"{where}: reported residual {r['residual']!r}; the rule's readings give "
+                f"{plain['residual']!r} (allowed {allowed:.2e})")
+            for rule in ("delivered", "no-positions", "own-magnitude"):
+                other = ref.residual(after, accepted, rule)
+                if abs(other - plain["residual"]) > 1.5 * allowed:
+                    told_apart.add(rule)
+            want = ref.returned(accepted, whole)
+            for name in ("p", "q"):
+                for field in ("x", "pos"):
+                    bound = (GEO_TIGHT if exact else 2e-5) * _geo_scale(
+                        cell, field, want[name][field])
+                    worst = float(np.max(np.abs(x[name][field] - want[name][field])))
+                    assert worst <= bound, (
+                        f"{where}: {cell.names[name]}.{field} is {worst:.3e} from what the "
+                        f"rule returns (bound {bound:.3e}; kept whole: {whole})")
+                    gap = float(np.max(np.abs(after[name][field] - accepted[name][field])))
+                    kept_apart |= (name, field) in whole and gap > 100.0 * bound
+        distance, K = ref.distance(x), ref.K(whole)
+        assert distance <= GEO_ALLOWED[exact] * K, (
+            f"{where}: converged=True at {distance:.3f} tolerances from the fixed point in "
+            f"the rule's readings; K = {K:.3f}")
+    # Premise: the residual of the readings the rule is not differs by more
+    # than the comparison allows.  Every edge read as delivered, wherever
+    # there is a scatter; and, where every member holds float64 and a
+    # scatter is anchored at its source, the scatter without its positions
+    # and the positions over their own magnitude.  (Beside a float32
+    # member the allowance is half the float floor, and the positions'
+    # share of this family's residual at exit is under it: those two are
+    # told apart by ``test_coupling_geometry_interface_norm.py``, edge by
+    # edge.)
+    ways = list(zip(gi.WAYS[cell.kind], cell.anchors))
+    needed = {"delivered"} if any(way == "scatter" for way, _anchor in ways) else set()
+    if exact and ("scatter", "source") in ways:
+        needed |= {"no-positions", "own-magnitude"}
+    assert needed <= told_apart, (
+        f"{cell.id}: fixture premise: the readings {sorted(needed - told_apart)} give the "
+        f"residual of the rule, to what the comparison allows")
+    if whole and exact:
+        assert kept_apart, (
+            f"{cell.id}: fixture premise: a kept field's accepted iterate and one pass on "
+            f"agree to what the comparison allows")
+    # Every scenario started from the pre-step state was chosen with margin;
+    # so were some of a sequence's steps (``_geo_decided``).
+    need = PREDICTED_STEPS if _sequenced(cell) else len(run.solves)
+    assert predicted >= need, f"{cell.id}: {predicted} pass counts predicted, of {need}"
+
+
+def _check_geo_claim(cell) -> None:
+    """MAP-050's claim on *cell*: every solve converges, within ``K`` tolerances."""
+    run = _geo_run(cell)
+    whole = cs.geo_measured_whole(cell)
+    for k, (s, ref) in enumerate(zip(run.solves, run.refs)):
+        assert s.report["converged"] is True, (cell.id, k, s.report)
+        distance, K = ref.distance(cs.geo_state_of(cell, s)), ref.K(whole)
+        assert distance <= GEO_ALLOWED[cell.exact] * K, (
+            f"{cell.id}, solve {k}: converged=True at {distance:.3f} tolerances from the "
+            f"fixed point in the rule's readings; K = {K:.3f}")
+
+
+def _check_geo_slot(cell) -> None:
+    """The step records the floor of a gather anchored at its target (its
+    positions are the pre-step state, which the returned state does not
+    hold), with the dtypes of the members in it; a pair with no such edge
+    owns no slot."""
+    run = _geo_run(cell)
+    key = f"coupling_{cd.KEY}_reading_floor"
+    owned = any(way == "gather" and anchor == "target"
+                for way, anchor in zip(gi.WAYS[cell.kind], cell.anchors))
+    for ref, s in zip(run.refs, run.solves):
+        if not owned:
+            assert key not in s.meta, (cell.id, key, s.meta[key])
+            continue
+        want = ref.floor(cs.geo_state_of(cell, s))
+        assert key in s.meta and float(s.meta[key]) == pytest.approx(want, rel=1e-4), (
+            f"{cell.id}: the slot holds {s.meta.get(key)!r}; the rule's floor is {want!r}")
+    for s in list(run.straight) + [s for s in (run.saved, run.loaded) if s]:
+        assert (key in s.meta) == owned, (cell.id, key)
+
+
+def _check_geo_twin(cell) -> None:
+    """The edge-mapped pair reports what its marker-side twin reports:
+    the verdict and the pass count, the residual, and the state -- but the
+    positions the scatter reads, which the edge-mapped graph's norm
+    measures whole and keeps while the twin carries them through a
+    transform and returns them one pass on: within the last pass's step.
+
+    Not asked of a sequence (a predictor's, a restart's): after their
+    first step the two graphs start from positions a tolerance apart,
+    and from then on they are two problems.  Each step of a sequence is
+    held to the reference, started where the graph's own last step
+    stopped.
+    """
+    assert cell.kind == "two-way" and not _sequenced(cell), cell
+    mapped, twin = _geo_run(cell), _geo_run(cell, twin=True)
+    exact = cell.exact
+    assert len(mapped.solves) == len(twin.solves) > 0
+    for k, (s, t, ref) in enumerate(zip(mapped.solves, twin.solves, mapped.refs)):
+        where = f"{cell.id}, solve {k}"
+        ra, rb = s.report, t.report
+        assert ra["converged"] is True and rb["converged"] is True, (where, ra, rb)
+        assert ra["iterations"] == rb["iterations"] > 2, (where, ra, rb)
+        xa, xb = cs.geo_state_of(cell, s), cs.geo_state_of(cell, t)
+        allowed = (1e-9 * ra["residual"] if exact
+                   else 0.05 * ra["residual"] + 0.5 * ref.floor(xa))
+        assert abs(ra["residual"] - rb["residual"]) <= allowed, (where, ra, rb)
+        for name in ("p", "q"):
+            for field in ("x", "pos"):
+                scale = _geo_scale(cell, field, xb[name][field])
+                worst = float(np.max(np.abs(xa[name][field] - xb[name][field])))
+                if (name, field) == ("p", "pos") and cell.anchors[0] == "source":
+                    assert worst <= 10.0 * gi.RTOL * scale, (where, worst)
+                    continue
+                assert worst <= (1e-9 if exact else 1e-3) * scale, (
+                    f"{where}: {cell.names[name]}.{field} is {worst:.3e} from the twin's")
+        # The pinned marker: the unit entry of the twin's position edge.
+        assert np.all(xa["p"]["pos"][0] == ref.pre["p"]["pos"][0]), where
+
+
+def _check_geo_batch(cell) -> None:
+    """Each member of the ``vmap`` domain's batch is its own unbatched
+    solve: the same scenario of the same pair, stepped alone (the float32
+    domain's cell, a graph of its own built the same way)."""
+    run, plain = _geo_run(cell), _geo_run(dataclasses.replace(cell, label="f32"))
+    assert [r.draw for r in run.refs] == [r.draw for r in plain.refs], cell.id
+    passes = set()
+    for k, (s, alone) in enumerate(zip(run.solves, plain.solves)):
+        _same_member(f"{cell.id}: member {k} of the batch", s, alone, ulps=4.0)
+        passes.add(s.report["iterations"])
+    if cell.acceleration == "none":
+        assert len(passes) > 1, (
+            f"{cell.id}: fixture premise: the members of the batch stop on different passes")
+
+
+def _check_geo_one_rate(cell) -> None:
+    """A multi-rate graph's pair is the same pair at one rate, to the bit."""
+    run, plain = _geo_run(cell), _geo_run(dataclasses.replace(cell, label="f32"))
+    for k, (s, t) in enumerate(zip(run.solves, plain.solves)):
+        assert not _group_differs(s, t), (
+            f"{cell.id}: solve {k} differs from the one-rate pair's: {_group_differs(s, t)}")
+
+
+def _check_geo_firing(cell) -> None:
+    """:func:`_check_firing` for a pair whose markers were written after
+    ``compile()``: on the base step between two solves the members -- the
+    positions among them -- the report and every slot are the last solve's."""
+    run = _geo_run(cell)
+    gm, p = run.built.gm, run.solves[0].params
+    with cd.entered(cell.domain):
+        run.refs[0].start(gm)
+        shots = []
+        for _ in range(6):
+            gm.step(params=p)
+            shots.append(cd._solve(gm, p))  # noqa: SLF001
+    fired = [bool(_group_differs(a, b)) for a, b in zip(shots, shots[1:])]
+    assert fired == [False, True, False, True, False], (cell.id, fired)
+    assert not _same_graph(shots[1], run.solves[0]), (
+        f"{cell.id}: the pair of base steps the harness reads holds another solve: "
+        f"{_same_graph(shots[1], run.solves[0])}")
+    # The positions moved with each solve (the members have a memory here).
+    moved = [name for name in ("a", "b")
+             if not cd.bitwise(shots[1].state[name]["pos"], shots[3].state[name]["pos"])]
+    assert moved, f"{cell.id}: fixture premise: a second solve moves the markers"
+
+
+def _check_geo_restart(cell) -> None:
+    """A checkpoint brings back the positions with the rest: the report,
+    the floor's slot (or its absence) and the next step."""
+    run = _geo_run(cell)
+    assert run.saved is not None and run.straight, cell.id
+    assert not _same_graph(run.saved, run.loaded), (
+        f"{cell.id}: the loaded graph differs from the checkpointed one: "
+        f"{_same_graph(run.saved, run.loaded)}")
+    for k, (a, b) in enumerate(zip(run.straight, run.solves)):
+        assert not _same_graph(a, b), (
+            f"{cell.id}: step {k} after the restart differs from the uninterrupted run's: "
+            f"{_same_graph(a, b)}")
+    # Premise: the checkpoint was written away from where the run started.
+    started = run.refs[0].layout["q"]["index"] * np.asarray(cell.shape.spacing)
+    held = np.asarray(run.saved.state[cell.names["q"]]["pos"], np.float64)
+    assert np.max(np.abs(held - started)) > 1e-3 * min(cell.shape.spacing), cell.id
+
+
+def check_geometry(cell) -> None:
+    """Every check a geometry cell admits."""
+    d = cell.domain
+    if cell.acceleration == "none":
+        _check_geo_reference(cell)
+    else:
+        _check_geo_claim(cell)
+    _check_geo_slot(cell)
+    if d.restart:
+        _check_geo_restart(cell)
+    if d.vmap:
+        _check_geo_batch(cell)
+    if d.multirate and cell.acceleration == "none":
+        _check_geo_firing(cell)
+
+
+@pytest.mark.parametrize("cell", GEO_PUSH, ids=_ids(GEO_PUSH))
+def test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does(cell):
+    """MAP-050 in every domain that accepts the pair: the pass count, the
+    residual and the state a solve returns are the exact reference's under
+    the rule (a scatter at its source value and its source's positions in
+    grid spacings, a gather as delivered), and a converged pair is within
+    ``K`` tolerances.  With what the domain adds: the floor's slot, a
+    member of a batch against its unbatched solve, the base steps a group
+    fires on, a predictor's guess, a restart."""
+    check_geometry(cell)
+
+
+@pytest.mark.parametrize("cell", GEO_TWINNED, ids=_ids(GEO_TWINNED))
+def test_a_pair_with_geometry_edges_reports_what_its_marker_side_twin_reports(cell):
+    _check_geo_twin(cell)
+
+
+_GEO_RATES = [c for c in GEO_PUSH if c.domain.multirate
+              and dataclasses.replace(c, label="f32") in GEO_PUSH]
+assert len(_GEO_RATES) == 1
+
+
+@pytest.mark.parametrize("cell", _GEO_RATES, ids=_ids(_GEO_RATES))
+def test_a_multi_rate_graphs_pair_with_geometry_edges_is_the_pair_at_one_rate(cell):
+    _check_geo_one_rate(cell)
+
+
+def _refused_graph(cell, **group_kw):
+    return cs.geometry_group(cell, cs.geometry_graph(cell), **group_kw)
+
+
+@pytest.mark.parametrize("kind", gi.KINDS)
+def test_a_sub_cycled_pair_with_geometry_edges_is_refused_under_the_interface_norm(kind):
+    """The one domain of the battery the norm does not read such a pair
+    in: ``compile()`` refuses, naming both edges and the reason.  The same
+    graph under ``"mixed"`` compiles, and so does the pair at one rate
+    under the interface norm (every other cell of this section)."""
+    (label,) = cs.GEO_REFUSED
+    cell = _g(label, kind, GEO_ANCHORS[gi.KINDS.index(kind)])
+    with cd.entered(cell.domain):
+        refused = _refused_graph(cell)
+        gg.assert_interface_norm_refused(refused.compile, list(cell.keys), "sub-cycled")
+        other = _refused_graph(cell, convergence_norm="mixed")
+        other.compile()
+        assert other._committed_coupling_groups[cd.KEY].subcycling  # noqa: SLF001
+
+
+def _geo_owed(cell, pre: dict) -> dict:
+    """``{library edge key: member that stores the positions}``: the
+    advisories ``compile()`` owes *cell* with its markers at *pre*.
+
+    The rule restated (``geometry_interface_graphs.positions_behind`` and
+    ``positions_floor``): an edge whose reading rests on stored positions
+    -- a scatter anchored at its source, a gather at either anchor --
+    where four roundings per evaluation of the farthest coordinate, in the
+    dtype of the member that stores it, are the tolerance or more."""
+    shape = cell.shape
+    E = gi.EVALUATIONS[shape.schedule]
+    owed = {}
+    for i, (src, dst) in enumerate(gi.EDGES):
+        behind = gi.positions_behind(shape).get(f"{src}.x->{dst}.u")
+        if behind is None:
+            continue
+        holder = behind[0]
+        dtype = str(jnp.dtype(cell.dtypes[holder]))
+        if E * gi.positions_floor(pre[holder]["pos"], shape.spacing, dtype) >= 1.0:
+            owed[cell.keys[i]] = cell.names[holder]
+    return owed
+
+
+#: The pairs the advisory is asked of in each domain: the two-way pair with
+#: the markers' values on either member; two gathers each anchored at its
+#: source (so each member's positions are behind one edge); and a scatter
+#: anchored at its target (no reading of positions: never warned of)
+#: beside a gather anchored at its source, both on the positions of ``a``.
+_GEO_ADVISED = (("two-way", ("source", "target"), "a"), ("two-way", ("source", "target"), "b"),
+                ("gather-only", ("source", "source"), "a"),
+                ("two-way", ("target", "source"), "b"))
+
+
+@pytest.mark.parametrize("label", cs.GEO_ACCEPTED)
+def test_compile_warns_of_far_markers_by_the_dtype_of_the_member_that_stores_them(label):
+    """In every domain: with the markers in the state ``compile()`` sees,
+    three thousand spacings from zero, it warns once for each edge whose
+    reading rests on positions a float32 member stores -- a part of a
+    scatter's reading, or what a gather's value is delivered at -- naming
+    the member, and says nothing of a float64 member's (the mixed-dtype
+    domain has one of each), of a scatter anchored at its target, nor of
+    any pair near zero.  The graph is compiled either way."""
+    seen = set()
+    for kind, anchors, small in _GEO_ADVISED:
+        for origin in (cs.GEO_ORIGIN, 3000.0):
+            cell = _g(label, kind, anchors, small=small, origin=origin)
+            with cd.entered(cell.domain):
+                ref = cs.GeoStored(cell, gi.Draw(0, GEO_GAINS[0][0], cs.GEO_PULL))
+                built = cs.build_geometry(cell, placed={n: ref.pre[n]["pos"] for n in "pq"})
+            owed = _geo_owed(cell, ref.pre)
+            said = {}
+            for text in built.advisories:
+                (key,) = [k for k in cell.keys if repr(k) in text]
+                assert key not in said, built.advisories
+                said[key] = text
+            assert sorted(said) == sorted(owed), (cell.id, sorted(said), owed)
+            for key, member in owed.items():
+                assert f"float32 positions {member}.pos" in said[key], (cell.id, said[key])
+            assert built.gm._compiled_step is not None, cell.id  # noqa: SLF001
+            if origin == cs.GEO_ORIGIN:
+                assert not owed, (cell.id, owed)
+            seen.add(len(owed))
+    # Premise: pairs with both edges warned of and with one (the scatter
+    # anchored at its target is silent; so is a float64 member's edge in
+    # the mixed-dtype domain); none where every member holds float64.
+    d = cd.DOMAINS[label]
+    every_float64 = all(jnp.dtype(t) == jnp.dtype(jnp.float64) for t in d.dtypes)
+    assert seen == ({0} if every_float64 else {0, 1, 2}), (label, seen)
+
+
+# Slow: a graph compiled per cell (two for a batch), a hundred and twenty cells.
+# Per push: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does
+@pytest.mark.slow
+@pytest.mark.parametrize("cell", GEO_PRODUCT, ids=_ids(GEO_PRODUCT))
+def test_every_kind_anchor_and_schedule_of_a_pair_with_geometry_edges_in_every_domain(cell):
+    """Domain x kind x schedule, the anchors rotated: every check the cell admits."""
+    check_geometry(cell)
+    _geo_forget(cell)
+
+
+# Slow: a graph compiled per cell.
+# Per push: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_stops_where_the_rules_reference_does
+@pytest.mark.slow
+@pytest.mark.parametrize("cell", GEO_ACCELERATED, ids=_ids(GEO_ACCELERATED))
+def test_a_converged_accelerated_pair_with_geometry_edges_is_within_K_tolerances(cell):
+    check_geometry(cell)
+    _geo_forget(cell)
+
+
+# Slow: two graphs compiled per cell.
+# Per push: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_with_geometry_edges_reports_what_its_marker_side_twin_reports
+@pytest.mark.slow
+@pytest.mark.parametrize("cell", GEO_TWINNED_SLOW, ids=_ids(GEO_TWINNED_SLOW))
+def test_a_pair_with_geometry_edges_reports_what_its_twin_reports_in_the_other_domains(cell):
+    _check_geo_twin(cell)
+    _geo_forget(cell)

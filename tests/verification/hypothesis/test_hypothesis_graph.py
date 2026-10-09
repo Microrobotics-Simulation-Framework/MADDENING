@@ -193,42 +193,71 @@ class TestRandomValidTopologies:
 # ---------------------------------------------------------------------------
 
 class TestSelfEdgeHandling:
-    """Self-edges (source==target same node) should not cause undefined behavior."""
+    """An edge from a node to itself is accepted, and says which of the node's
+    own values it reads.
+
+    Outside a coupling group it is a back edge: the node reads the value it
+    had a step ago.  In a coupling group (one of that node alone is enough)
+    it is iterated with the group, and at convergence the node reads its new
+    value.  ``validate()`` says which in one ``INFO:`` line for the edge,
+    and ``compile()`` raises no warning in either case.
+    Two shipped nodes here; the closed forms across solvers, schedules,
+    rates, gradients and precisions are in
+    ``tests/core/test_an_edge_from_a_node_to_itself.py``.
+    """
 
     def test_self_edge_ball_position_to_table(self):
-        """A ball whose position feeds back to its own table_position."""
+        """A ball whose table is its own position: the one it had a step ago.
+
+        It falls below where it was, so it lands on that height and
+        bounces: after one step it is at 5.0 again, moving up at
+        ``0.8 * 9.81 * 0.01``.  (With no edge it is at 4.999019 moving
+        down, and a ball reading its *new* position is never below it.)
+        """
         gm = GraphManager()
         gm.add_node(BallNode(name="b", timestep=0.01, initial_position=5.0))
-        # This is technically a self-loop; it should either be rejected
-        # or produce a valid (non-crashing) result
         gm.add_edge("b", "b", "position", "table_position")
-        # Either compile raises or step works without crash
-        try:
-            gm.compile()
-            state = gm.step()
-            # If it doesn't raise, output must still be finite
-            assert jnp.isfinite(state["b"]["position"])
-            assert jnp.isfinite(state["b"]["velocity"])
-        except (RuntimeError, ValueError):
-            pass  # rejection is also acceptable
+        assert gm.validate() == [
+            "INFO: edge b.position -> b.table_position is from node 'b' to itself. "
+            "Outside a coupling group it is a back edge: the node reads its state of the "
+            "previous step, so the term the edge carries is explicit."]
+        gm.compile()
+        state = gm.step()
+        assert float(state["b"]["position"]) == 5.0
+        assert float(state["b"]["velocity"]) == pytest.approx(0.8 * 9.81 * 0.01, rel=1e-6)
 
-    def test_self_edge_spring_position_to_anchor(self):
-        """A spring whose position feeds back to its own anchor."""
+    @pytest.mark.parametrize("grouped", [False, True], ids=["no group", "a group of the node"])
+    def test_self_edge_spring_position_to_anchor(self, grouped):
+        """A spring anchored to its own position, at rest, with a rest length.
+
+        Outside a group the anchor is the position of a step ago, the one
+        the update starts from, so the spring is stretched by its rest
+        length exactly: ``v = dt k rest / m``.  In a group of the one node
+        the anchor is the new position, so the stretch holds the step's own
+        displacement as well: ``v = dt k rest / (m - dt**2 k)``.
+        """
+        dt, k, rest = 0.01, 10.0, 0.5
         gm = GraphManager()
         gm.add_node(SpringDamperNode(
-            name="s", timestep=0.01, stiffness=10.0, damping=1.0,
+            name="s", timestep=dt, stiffness=k, damping=1.0, rest_length=rest,
             initial_position=2.0,
         ))
         gm.add_edge("s", "s", "position", "anchor_position")
-        try:
-            gm.compile()
-            state = gm.step()
-            # Self-referencing spring: force depends on (pos - pos - rest_length)
-            # = -rest_length, which is constant. Should be finite.
-            assert jnp.isfinite(state["s"]["position"])
-            assert jnp.isfinite(state["s"]["velocity"])
-        except (RuntimeError, ValueError):
-            pass
+        if grouped:
+            gm.add_coupling_group(["s"], max_iterations=50)
+        edge = "INFO: edge s.position -> s.anchor_position is from node 's' to itself. "
+        assert gm.validate() == [edge + (
+            "With the node in a coupling group (['s']) the edge is iterated with the group "
+            "and at convergence the node reads its new value, so the term is implicit."
+            if grouped else
+            "Outside a coupling group it is a back edge: the node reads its state of the "
+            "previous step, so the term the edge carries is explicit.")]
+        gm.compile()
+        state = gm.step()
+        velocity = dt * k * rest / (1.0 - dt**2 * k) if grouped else dt * k * rest
+        # The two differ by a part in a thousand.
+        assert float(state["s"]["velocity"]) == pytest.approx(velocity, rel=2e-5)
+        assert float(state["s"]["position"]) == pytest.approx(2.0 + dt * velocity, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

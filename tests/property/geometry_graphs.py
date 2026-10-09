@@ -754,28 +754,42 @@ def build(graph: GGraph, *, compile: bool = True) -> GraphManager:
 #   ``not_usable_reason`` saying which of the two it is
 #   (:func:`withheld`, :func:`assert_not_diagnosed`);
 # * ``convergence_norm="interface"`` on a group with a geometry-dependent
-#   mapping on an internal edge is refused by ``compile()``
-#   (``INTERFACE_NORM_READS_GEOMETRY = False``,
-#   :func:`assert_interface_norm_refused`).
+#   mapping on an internal edge **solves and reports its criterion** for
+#   the ``multilinear_grid`` kind in a group that does not sub-cycle
+#   (``INTERFACE_NORM_KINDS``; the instruments of that reading are
+#   ``tests/property/geometry_interface_graphs.py`` and its test module),
+#   and its report withholds every bound with the norm named
+#   (:func:`withheld` returns ``"norm"``; ``INTERFACE_BOUNDS_READ_GEOMETRY
+#   = False``).  For another kind (``test_geom_matrix`` here) and for a
+#   sub-cycled group it is still refused by ``compile()``
+#   (:func:`interface_norm_refused`, :func:`assert_interface_norm_refused`).
 #
-# Nothing was deleted: set ``INTERFACE_NORM_READS_GEOMETRY = True`` when a
-# later stage makes the interface norm read the geometry, and the cases
-# that ran it run again.
-#
-# Waiting for that stage too: ``RELAY_INTERFACE_CASES`` (defined after
-# ``case``, below), the interface norm over source-anchored geometry edges,
-# whose relay twin (``relay_twin``) has the edge-mapped graph's interface
-# reading.  ``tests/property/test_interface_reading_twins.py`` asserts each
-# refused today and its relay twin reporting; with the switch set it
-# compares the two reports as it compares a static mapping's today.
+# **What the norm reads on a geometry edge** (the decision of 2026-10-07):
+# a gather as delivered; a scatter at its inputs, the source value and --
+# for a source anchor -- the positions in units of the grid spacing.  The
+# relay twin (``relay_twin``) moves a mapping onto the *delivered* side of
+# the reading, so it states the rule for a gather and not for a scatter;
+# the node-inlined twin carries the raw source and weighs a geometry by
+# its own magnitude, so it states it for neither.  ``RELAY_INTERFACE_CASES``
+# (defined after ``case``, below) wait for the stage that reports bounds
+# under this norm: ``tests/property/test_interface_reading_twins.py``
+# asserts what each does today.
 # =============================================================================
 
 #: Whether coupling diagnostics account for a moving geometry at all (the
 #: ``multilinear_grid`` kind on a single-rate group under ``"l2"`` or
 #: ``"mixed"``: see :func:`withheld`).
 DIAGNOSTICS_READ_GEOMETRY = True
-#: Whether the interface norm reads a geometry (and compiles over one).
-INTERFACE_NORM_READS_GEOMETRY = False
+#: The flavours of this harness whose geometry the interface norm's
+#: criterion reads (the library's ``multilinear_grid`` kind), in a group
+#: that does not sub-cycle.
+INTERFACE_NORM_KINDS = ("multilinear",)
+#: Whether the *bounds* of a group under the interface norm read a
+#: geometry (a later stage: its report withholds them today).
+INTERFACE_BOUNDS_READ_GEOMETRY = False
+#: What each refusal of the interface norm over a geometry edge says.
+REFUSED = {"kind": "only for the 'multilinear_grid' kind",
+           "sub-cycled": "in a sub-cycled group"}
 #: What a report still says about a group whose bounds are withheld.
 SOLVE_OUTCOME = ("iterations", "total_iterations", "residual", "converged")
 _NOT_USABLE = {"amplification": "nan", "error_estimate": "nan", "ratio_usable": False,
@@ -791,11 +805,25 @@ WHY = {"kind": "other than 'multilinear_grid'",
        "self-check-unevaluated": "could not be compared with a finite difference of the pass"}
 
 
-def interface_norm_refused(knobs) -> bool:
-    """Whether a group with these knobs and a geometry-dependent mapping on
-    an internal edge is refused at compile (phase 1)."""
-    return (not INTERFACE_NORM_READS_GEOMETRY and knobs is not None
-            and dict(knobs).get("convergence_norm") == "interface")
+def interface_norm_refused(knobs, kind: str = "geom_matrix",
+                           sub_cycled: bool = False) -> Optional[str]:
+    """Why a group with these knobs and a geometry-dependent mapping of
+    flavour *kind* on an internal edge is refused at compile (a key of
+    :data:`REFUSED`), or ``None`` where it compiles: the interface norm
+    reads the geometry of the ``multilinear_grid`` kind in a group that
+    does not sub-cycle."""
+    if knobs is None or dict(knobs).get("convergence_norm") != "interface":
+        return None
+    if kind not in INTERFACE_NORM_KINDS:
+        return "kind"
+    return "sub-cycled" if sub_cycled else None
+
+
+def refused(c: "Case") -> Optional[str]:
+    """:func:`interface_norm_refused` of a two-body case."""
+    knobs = c.knobs or {}
+    return interface_norm_refused(
+        c.knobs, c.kind, bool(c.dt_f != c.dt_p and knobs.get("subcycling")))
 
 
 def withheld(c: "Case") -> Optional[str]:
@@ -807,6 +835,8 @@ def withheld(c: "Case") -> Optional[str]:
         return "kind"
     if c.dt_f != c.dt_p and dict(c.knobs or {}).get("subcycling"):
         return "sub-cycled"
+    if dict(c.knobs or {}).get("convergence_norm") == "interface":
+        return None if INTERFACE_BOUNDS_READ_GEOMETRY else "norm"
     return None
 
 
@@ -834,19 +864,21 @@ def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
     assert np.isfinite(report["residual"]) and int(report["iterations"]) >= 1, report
 
 
-def assert_interface_norm_refused(make, keys) -> None:
+def assert_interface_norm_refused(make, keys, why: str = "kind") -> None:
     """``make()`` builds and compiles a graph whose group uses the interface
-    norm over the geometry edges *keys*: a ``RuntimeError`` from ``compile()``
-    naming each edge and the norms that work."""
+    norm over the geometry edges *keys* in a setting the norm does not read
+    (*why*, a key of :data:`REFUSED`): a ``RuntimeError`` from ``compile()``
+    naming each edge, the reason and the norms that work."""
     import pytest  # noqa: PLC0415
 
-    with pytest.raises(RuntimeError) as refused:
+    with pytest.raises(RuntimeError) as refusal:
         make()
-    message = str(refused.value)
+    message = str(refusal.value)
     for phrase in ("convergence_norm='interface'", "geometry-dependent mapping",
-                   "does not read a moving geometry in 0.4.0",
+                   REFUSED[why], "in 0.4.0",
                    "Use convergence_norm='mixed' or 'l2'", *keys):
         assert phrase in message, (phrase, message)
+    assert not any(text in message for name, text in REFUSED.items() if name != why), message
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1063,79 @@ def two_body(c: Case) -> GGraph:
         edges.append(GEdge("P", "R", "q", "q"))
     groups = [] if c.group is None else [(("F", "P"), c.knobs)]
     return GGraph(nodes, edges, groups)
+
+
+#: What ``compile()`` says of positions the interface norm reads that
+#: their dtype cannot resolve to the tolerance (its advisory's own words).
+POSITIONS_ADVISORY = "cannot be resolved to this tolerance"
+
+
+def positions_advisories_owed(c: Case) -> dict:
+    """``{edge key: body that stores the positions}``: the advisories
+    ``compile()`` owes the edge-mapped graph of *c*.
+
+    Restated from the case, not read from the library.  Under the
+    interface norm, in a ``multilinear`` case:
+
+    * the up edge (four points scattered onto more cells) is read at its
+      source, and anchored there its positions are read in grid spacings
+      (anchored at its target they are no part of the reading: nothing
+      is owed);
+    * the down edge (the cells gathered at four points) is read as
+      delivered: a value computed at the positions of the body its anchor
+      names (:func:`holder`), either anchor.
+
+    An advisory is owed for such an edge where four roundings of the
+    farthest coordinate of those positions per evaluation of the pass
+    (each body declares one: two for the pair under Gauss-Seidel, one
+    under Jacobi) are ``rtol`` of a spacing or more -- the rule of
+    ``geometry_interface_graphs.positions_floor``.
+    """
+    knobs = dict(c.knobs or {})
+    if (c.kind != "multilinear" or knobs.get("convergence_norm") != "interface"
+            or refused(c)):
+        return {}
+    dtype = np.dtype(c.geom_dtype or c.dtype)
+    evaluations = 1.0 if knobs.get("iteration_mode", "gauss-seidel") == "jacobi" else 2.0
+    owed = {}
+    for edge, key, asked in (("down", "F.x->P.u", c.down is not None),
+                             ("up", "P.x->F.u", c.up == "source")):
+        if not asked:
+            continue
+        body = holder(c, edge)
+        held = np.asarray(np.asarray(geometry_fields(c)[body]["pos"], dtype), np.float64)
+        reach = float(np.max(np.abs(held / np.asarray(_grid_of(c)[1]))))
+        if 4.0 * evaluations * float(np.finfo(dtype).eps) * reach >= float(knobs["rtol"]):
+            owed[key] = body
+    return owed
+
+
+def positions_advisory_owed(c: Case) -> bool:
+    """Does ``compile()`` owe the edge-mapped graph of *c* an advisory
+    about unresolved positions (:func:`positions_advisories_owed`)?"""
+    return bool(positions_advisories_owed(c))
+
+
+def build_edge_mapped(c: Case) -> GraphManager:
+    """:func:`build` of :func:`two_body` of *c*, holding ``compile()`` to
+    its advisories about unresolved positions: said once for each edge
+    :func:`positions_advisories_owed` names, of that edge and of the
+    positions of the body that stores them, and for no other edge.  Any
+    other warning stays what it was."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.filterwarnings("always", f".*{POSITIONS_ADVISORY}", UserWarning)
+        gm = build(two_body(c))
+    owed = positions_advisories_owed(c)
+    said = {}
+    for text in (str(w.message) for w in caught):
+        assert POSITIONS_ADVISORY in text, text
+        (key,) = [k for k in ("F.x->P.u", "P.x->F.u") if repr(k) in text]
+        assert key not in said, (key, text)
+        said[key] = text
+    assert sorted(said) == sorted(owed), (sorted(said), owed)
+    for key, body in owed.items():
+        assert f"positions {body}.pos" in said[key], said[key]
+    return gm
 
 
 def graphs(c: Case) -> tuple:

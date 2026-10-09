@@ -813,7 +813,14 @@ def _check_batch(cell, count=None) -> None:
     with cd.entered(cell.domain):
         for k, s in enumerate(run.solves):
             (alone,) = cd.run(cd.DOMAINS["f32"], gm, [s.params])
-            _same_member(f"{cell.id}: member {k} of the batch", s, alone)
+            # To a few roundings, not to the bit: the batched step and the
+            # unbatched one are two compiled programs, and which of them
+            # fuses a multiply-add depends on the processor as well (CPL-096
+            # claims "a few ulps").  A slow-lane runner returned one float32
+            # ulp of one entry on the sparse two-way pair under jaxlib 0.10.2
+            # where every other run had the pair to the bit.  The verdict
+            # and the pass count stay exact.
+            _same_member(f"{cell.id}: member {k} of the batch", s, alone, ulps=4.0)
             passes.add(s.report["iterations"])
     if cell.acceleration == "none":
         assert len(passes) > 1, (

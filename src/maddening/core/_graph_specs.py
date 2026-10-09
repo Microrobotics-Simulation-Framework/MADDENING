@@ -214,6 +214,12 @@ def _traceable_geometry(edge: EdgeSpec, field: str, value):
     kernel unasked and every sample of a grid it could not resolve came
     back wrong; a program is traced again when a dtype changes, so asking
     here cannot be bypassed.  Host-side: nothing is added to the program.
+
+    The shape rule is asked with them, for the same reason (a program is
+    traced again when a shape changes): a geometry written with another
+    shape after ``compile()`` reached a mapping kind that does not check
+    its own (``geom @ field`` broadcast a row written for a matrix), where
+    ``compile()`` refuses that state by name.
     """
     dtype = getattr(value, "dtype", None)
     if str(dtype) not in _GEOMETRY_DTYPES:
@@ -222,6 +228,13 @@ def _traceable_geometry(edge: EdgeSpec, field: str, value):
             f"{dtype} in the state being stepped; a geometry must be a float32 or "
             f"float64 array.  compile() checks the state it is given: a state write "
             f"made after it, or an update that returns another dtype, is checked here.")
+    if not _geometry_shape_read(edge.mapping, np.shape(value)):
+        raise ValueError(
+            f"edge {edge.key}: its geometry field {field!r} now has shape "
+            f"{tuple(int(n) for n in np.shape(value))} in the state being stepped, but "
+            f"mapping {edge.mapping!r} reads a geometry of shape "
+            f"{tuple(getattr(edge.mapping, 'geometry_shape', ()))}.  compile() checks the "
+            f"state it is given: a state write made after it is checked here.")
     problems = getattr(edge.mapping, "geometry_dtype_problems", None)
     if callable(problems):
         found: Any = problems(dtype)
@@ -233,6 +246,21 @@ def _traceable_geometry(edge: EdgeSpec, field: str, value):
                 f"compile() checks the state it is given: a state write made after it, "
                 f"or an update that returns another dtype, is checked here.")
     return value
+
+
+def _geometry_shape_read(mapping, shape) -> bool:
+    """Does *mapping* read a geometry of *shape*?
+
+    Its ``accepts_geometry_shape`` where it has one (the multilinear kind
+    takes ``(n_points,)`` on a one-axis grid), otherwise its
+    ``geometry_shape`` exactly.  The one rule ``validate()`` applies at
+    ``compile()`` and :func:`_traceable_geometry` where a program is traced.
+    """
+    shape = tuple(int(n) for n in shape)
+    accepts = getattr(mapping, "accepts_geometry_shape", None)
+    if callable(accepts):
+        return bool(accepts(shape))
+    return shape == tuple(getattr(mapping, "geometry_shape", ()))
 
 
 _GEOMETRY_ANCHORS = ("source", "target")
@@ -296,6 +324,178 @@ def _mapping_field_leads(mapping) -> Optional[tuple[tuple, tuple]]:
         return None
     source_lead, target_lead = shapes()
     return (tuple(int(n) for n in source_lead), tuple(int(n) for n in target_lead))
+
+
+# ------------------------------------------------------------------
+# The shape an edge's target declares, asked of every traced state
+# ------------------------------------------------------------------
+
+
+class _EdgeSourceRule(NamedTuple):
+    """What ``compile()`` asked of one edge's source field, kept so that
+    every program traced afterwards asks it of the state it is handed
+    (:func:`_refuse_edge_sources`)."""
+
+    edge: EdgeSpec
+    #: The shape the target's ``BoundaryInputSpec`` declares for the input
+    #: this edge feeds; ``None`` where ``validate()`` compares none
+    #: (:func:`_edge_declared_shape`, or an input the target does not
+    #: declare).
+    declared: Optional[tuple]
+    #: ``(source lead, target lead)`` of the edge's mapping
+    #: (:func:`_edge_mapping_leads`); ``None`` without one.
+    leads: Optional[tuple[tuple, tuple]]
+    #: The source can only be a field of its node's state: the node has
+    #: no flux hook that could supply it instead (``compile()`` refuses
+    #: an edge whose source is neither).
+    held: bool
+
+
+def _edge_mapping_leads(mapping) -> Optional[tuple[tuple, tuple]]:
+    """The leading axes *mapping* reads and the ones it delivers, for the
+    shape rule: its ``field_shapes()`` where it declares them
+    (:func:`_mapping_field_leads`), otherwise axis 0 in (of any length:
+    ``add_edge`` and the kernel ask ``n_source``) and ``n_target`` out.
+    ``None`` for an edge without a mapping."""
+    if mapping is None:
+        return None
+    leads = _mapping_field_leads(mapping)
+    if leads is not None:
+        return leads
+    return ((-1,), (int(mapping.n_target),))
+
+
+def _edge_declared_shape(edge: EdgeSpec, spec) -> Optional[tuple]:
+    """The shape ``validate()`` holds the field *edge* delivers to, given
+    *spec*, the ``BoundaryInputSpec`` of the input it feeds; ``None``
+    where it compares none: a transform may reshape on the fly, and a
+    negative dimension in the spec is symbolic."""
+    if edge.transform is not None:
+        return None
+    declared = tuple(spec.shape)
+    if not all(d >= 0 for d in declared):
+        return None
+    return declared
+
+
+def _edge_shape_issue(edge: EdgeSpec, value, declared: Optional[tuple],
+                      leads: Optional[tuple[tuple, tuple]]) -> Optional[str]:
+    """``validate()``'s ``WARNING[shape]`` line for *edge* reading *value*
+    at its source, or ``None``.
+
+    The one rule ``validate()`` applies at ``compile()`` (which raises
+    the line as a :class:`~maddening.warnings.ShapeMismatchError`) and
+    :func:`_refuse_edge_sources` where a program is traced: the source
+    field's shape, with the leading axes its mapping reads replaced by
+    the ones it delivers, is the shape the target declares.  It reads a
+    shape and nothing else, so *value* may be a tracer.
+    """
+    if declared is None or value is None:
+        return None
+    shape = tuple(int(d) for d in getattr(value, "shape", ()))
+    if leads is not None and shape:
+        shape = leads[1] + shape[len(leads[0]):]
+    if shape == declared:
+        return None
+    return (
+        f"WARNING[shape]: edge "
+        f"{edge.source_node}.{edge.source_field} -> "
+        f"{edge.target_node}.{edge.target_field}: "
+        f"source shape {shape} disagrees with "
+        f"target BoundaryInputSpec shape {declared} "
+        f"and no transform is set"
+    )
+
+
+def _edge_source_rules(edges, nodes, *, fields: bool = True) -> tuple[_EdgeSourceRule, ...]:
+    """The rules of *edges* to ask again where a program is traced.
+
+    Called on the host when a step program is built (and per call by a
+    reader of the edges that is not a step): each target's
+    ``boundary_input_spec()`` is asked here, never inside a trace, so the
+    check itself adds nothing to a program.  Nothing here reads a state:
+    a scan builds its step when it is called, on whatever state was
+    written since ``compile()``.  ``fields=False`` leaves out the rule
+    that a source is still a field of its node's state (*held*; see
+    :func:`_refuse_edge_sources`).
+    """
+    rules = []
+    specs: dict[str, dict] = {}
+    for edge in edges:
+        declared = None
+        target = nodes.get(edge.target_node)
+        if target is not None:
+            if edge.target_node not in specs:
+                # A spec's ``default`` may be built with jax.numpy: on
+                # the host even when the caller is being traced.
+                with jax.ensure_compile_time_eval():
+                    specs[edge.target_node] = target.node.boundary_input_spec()
+            spec = specs[edge.target_node].get(edge.target_field)
+            if spec is not None:
+                declared = _edge_declared_shape(edge, spec)
+        source = nodes.get(edge.source_node)
+        held = (
+            fields and source is not None
+            and (type(source.node).compute_boundary_fluxes
+                 is SimulationNode.compute_boundary_fluxes))
+        if declared is not None or held:
+            rules.append(_EdgeSourceRule(
+                edge, declared, _edge_mapping_leads(edge.mapping), held))
+    return tuple(rules)
+
+
+def _refuse_edge_sources(rules: Sequence[_EdgeSourceRule], state, *,
+                         doing: str = "stepped") -> None:
+    """Raise if *state*, which a program is about to be traced for, breaks
+    a rule ``compile()`` asked of an edge's source field.
+
+    ``compile()`` holds every edge's source to the shape its target
+    declares (:func:`_edge_shape_issue`) on the state it is given, and a
+    state write is not a recompile: a field written with one entry for
+    three (``set_node_state``) was broadcast into every entry of the
+    node that reads it, where ``compile()`` refuses that state.  A
+    program is traced again whenever a shape changes, so asking here
+    cannot be bypassed.  The same ``ExceptionGroup`` of
+    :class:`~maddening.warnings.ShapeMismatchError` as ``compile()``,
+    with ``validate()``'s line for every edge that breaks the rule.
+
+    A *held* source that is no longer a field of its node's state is a
+    ``KeyError`` naming the edge (it was a ``KeyError`` raised by
+    whatever read the field first, naming nothing).
+
+    Host-side, on shapes and keys only: nothing is added to the program,
+    and a step that is not traced again does not come here.  The dtype
+    half of ``compile()``'s rule is not asked: a node's update may widen
+    a field (float32 to float64 under x64), which ``compile()`` accepts
+    as the state the graph produced.
+    """
+    asked_here = (f"compile() checks the state it is given: a state write made "
+                  f"after it is checked here, where a program is traced for the "
+                  f"state being {doing}")
+    lines = []
+    for rule in rules:
+        edge = rule.edge
+        fields = state.get(edge.source_node)
+        if fields is None:
+            continue
+        if edge.source_field not in fields:
+            if rule.held:
+                raise KeyError(
+                    f"edge {edge.source_node}.{edge.source_field} -> "
+                    f"{edge.target_node}.{edge.target_field}: source field "
+                    f"{edge.source_field!r} is not in the state of node "
+                    f"{edge.source_node!r} (available: {list(fields)}).  {asked_here}.")
+            continue
+        line = _edge_shape_issue(edge, fields[edge.source_field], rule.declared, rule.leads)
+        if line is not None:
+            lines.append(line)
+    if lines:
+        from maddening.warnings import ExceptionGroup, ShapeMismatchError  # noqa: PLC0415
+        raise ExceptionGroup(
+            "edge validation failed",
+            [ShapeMismatchError(f"{line}.  {asked_here}; the graph steps again "
+                                f"once the field has the shape compile() accepts.")
+             for line in lines])
 
 
 
@@ -362,8 +562,7 @@ def _geometry_edge_issues(edges, nodes, state) -> list[str]:
             continue
         shape = tuple(int(n) for n in np.shape(value))
         want = tuple(getattr(e.mapping, "geometry_shape", ()))
-        accepts = getattr(e.mapping, "accepts_geometry_shape", None)
-        if not (accepts(shape) if callable(accepts) else shape == want):
+        if not _geometry_shape_read(e.mapping, shape):
             issues.append(
                 f"ERROR: edge {e.key}: geometry field {holder}.{field} has shape {shape}, "
                 f"but mapping {e.mapping!r} reads a geometry of shape {want}.")
@@ -464,6 +663,41 @@ def _self_edge_message(edge: EdgeSpec, group, reads_flux: bool) -> str:
                 "a state field.")
     return (head + "Outside a coupling group it is a back edge: the node reads its "
             "state of the previous step, so the term the edge carries is explicit.")
+
+
+def _timestep_drift_issues(nodes) -> list[str]:
+    """``validate()``'s ``ERROR`` lines for the nodes whose ``delta_t`` is
+    no longer the timestep the graph registered for them.
+
+    ``add_node`` reads a node's ``delta_t`` once (it refuses one that is
+    not a finite number above zero) and keeps it as the node's timestep:
+    the step, the multi-rate schedule and :attr:`GraphManager.timestep`
+    use that value.  ``delta_t`` written on the node afterwards changes
+    none of them, so the graph went on stepping at the registered value
+    while the node, and every reader of the attribute, said another.
+
+    Asked of the node the graph holds, not of a node that one wraps: a
+    wrapper may advance its node at another step than its own (one that
+    sub-steps it).
+    """
+    issues = []
+    for name, spec in nodes.items():
+        written = getattr(spec.node, "delta_t", spec.timestep)
+        try:
+            same = float(written) == float(spec.timestep)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            issues.append(
+                f"ERROR: node {name!r} has delta_t = {written!r}, but the graph "
+                f"registered the timestep {spec.timestep!r} for it when it was added and "
+                f"steps it at that: a node's timestep is read once, by add_node, and a "
+                f"delta_t written afterwards is not followed. Construct the node with "
+                f"the timestep it should have and add that node in its place "
+                f"(remove_node, then add_node and its edges again; or edit its "
+                f"\"timestep\" in to_dict() and load that with from_dict), or write "
+                f"delta_t back to {spec.timestep!r}.")
+    return issues
 
 
 def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:

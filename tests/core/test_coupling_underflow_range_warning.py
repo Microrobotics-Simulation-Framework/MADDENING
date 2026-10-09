@@ -132,3 +132,278 @@ def test_the_field_scan_lists_exactly_the_nonzero_finite_fields_below_tiny_over_
     bf_thr = float(jnp.finfo(jnp.bfloat16).tiny) / float(jnp.finfo(jnp.bfloat16).eps)
     assert listed(b=([0.5 * bf_thr], jnp.bfloat16)) == [("b", "bfloat16")]
     assert listed(b=([4.0 * bf_thr], jnp.bfloat16)) == []
+
+
+# ---------------------------------------------------------------------------
+# The check is due again after a state write, and reads the state a step
+# starts from as well as the one it leaves
+# ---------------------------------------------------------------------------
+# It used to be asked once per compile, of the first stepped state alone: a
+# state written into the range afterwards (set_node_state, a loaded
+# checkpoint, reset_state) stepped unwarned (a float32 pair written at 1e-37
+# returned 25% off with converged=True), and a state already below ``tiny``
+# at compile was flushed to exactly zero by the first step, which never warns.
+
+
+def _scaled(scale):
+    """``[1, 2, 3] * scale`` in float32, multiplied on the host: XLA would
+    flush a subnormal product to zero before the state existed."""
+    return jnp.asarray(np.asarray([1.0, 2.0, 3.0]) * float(scale), jnp.float32)
+
+
+class _Leaky(SimulationNode):
+    """``x <- x / 4 + u / 4``: linear in its state, so a small state stays small."""
+
+    def __init__(self, name, x0=0.0):
+        super().__init__(name, 1.0, x0=float(x0))
+
+    def initial_state(self):
+        return {"x": _scaled(self.params["x0"])}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(3,), dtype=jnp.float32, description="u")}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": jnp.float32(0.25) * state["x"] + jnp.float32(0.25) * boundary_inputs["u"]}
+
+
+def _leaky_pair(x0):
+    gm = GraphManager()
+    gm.add_node(_Leaky("a", x0))
+    gm.add_node(_Leaky("b", x0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], max_iterations=60, tolerance=1e-5)
+    gm.compile()
+    return gm
+
+
+def _write(gm, scale):
+    for name in ("a", "b"):
+        gm.set_node_state(name, {"x": _scaled(scale)})
+
+
+def _set_node_state(gm, scale, tmp_path):
+    _write(gm, scale)
+
+
+def _load_state(gm, scale, tmp_path):
+    donor = _leaky_pair(1.0)
+    donor.step()
+    _write(donor, scale)
+    gm.load_state(donor.save_state(tmp_path / "written.npz"))
+
+
+_WRITES = {"set_node_state": _set_node_state, "load_state": _load_state}
+
+
+@pytest.mark.parametrize("scale", [1e-33, 1e-37])
+@pytest.mark.parametrize("door", sorted(_WRITES))
+def test_a_state_written_into_the_range_after_the_first_step_warns_at_the_next_step(
+        door, scale, tmp_path):
+    gm = _leaky_pair(1.0)
+    assert _recorded(gm.step) == []                    # of order one: nothing to say
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UnderflowRangeWarning)   # the donor's own steps
+        _WRITES[door](gm, scale, tmp_path)
+    raised = _recorded(gm.step)
+    assert len(raised) == 1
+    msg = str(raised[0].message)
+    assert "'a+b'" in msg and "float32 subnormal range" in msg and "Rescale" in msg
+    # Still once per group: neither a later step nor a later write repeats it.
+    assert _recorded(gm.step) == []
+    _write(gm, scale)
+    assert _recorded(gm.step) == []
+
+
+def test_reset_state_onto_an_initial_state_in_the_range_warns_at_the_next_step():
+    gm = _leaky_pair(1e-33)
+    _write(gm, 1.0)                                     # the first step starts of order one
+    assert _recorded(gm.step) == []
+    gm.reset_state()
+    assert len(_recorded(gm.step)) == 1
+
+
+@pytest.mark.parametrize("scale", [1.0, 2.0 ** -90, 0.0])
+def test_a_written_state_outside_the_range_does_not_warn(scale):
+    gm = _leaky_pair(1.0)
+    gm.step()
+    _write(gm, scale)
+    assert _recorded(lambda: [gm.step() for _ in range(2)]) == []
+
+
+@pytest.mark.parametrize("scale", [1e-38, 1e-41])
+def test_a_state_below_tiny_at_compile_warns_although_the_first_step_flushes_it(scale):
+    """The state the first step starts from is read as well as the one it
+    leaves: below ``tiny`` the nodes' products are flushed to exactly zero
+    (XLA's CPU backend), and an exactly zero field never warns."""
+    gm = _leaky_pair(scale)
+    # On the host: XLA reads a subnormal as zero.
+    before = float(np.max(np.abs(np.asarray(gm.get_node_state("a")["x"]))))
+    assert 0.0 < before < THRESHOLD
+    raised = _recorded(gm.step)
+    assert len(raised) == 1
+    assert f"has magnitude {before:.3g}, inside the float32 subnormal range" in str(
+        raised[0].message)
+
+
+def test_a_write_made_under_a_transform_leaves_the_check_pending():
+    gm = _leaky_pair(1.0)
+    gm.step()
+
+    def loss(x):
+        gm.set_node_state("a", {"x": x})
+        return jnp.sum(gm.run_scan(1)["a"]["x"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        jax.grad(loss)(_scaled(1e-33))
+        gm.get_node_state("a")                          # the graph is put back, untraced
+    assert _recorded(gm.step) == []                     # ... to a state of order one
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1
+
+
+def test_the_state_a_step_replaces_is_not_read_while_it_holds_a_tracer():
+    """A stepper that stores an untraced state over a traced one (the
+    check pending) reads the stored state only: the replaced one cannot be
+    brought to the host."""
+    gm = _leaky_pair(1.0)
+    gm.step()
+    stepped = {name: dict(fields) for name, fields in gm._state.items()}   # noqa: SLF001
+    stepped["a"]["x"] = _scaled(1e-33)
+    seen = []
+
+    def loss(x):
+        gm.set_node_state("a", {"x": x})                # traced, and the check is due
+        seen.extend(_recorded(lambda: gm._store_state(stepped)))            # noqa: SLF001
+        return jnp.sum(x)
+
+    jax.grad(loss)(_scaled(1.0))
+    assert len(seen) == 1 and "a.x" in str(seen[0].message)
+
+
+# ---------------------------------------------------------------------------
+# A graph written to before every step is not asked at every step
+# ---------------------------------------------------------------------------
+# The check reads every field of every group twice on the host, which costs
+# several times a small graph's step (a three-entry pair's loop of
+# set_node_state and step: 45 microseconds without the check, 150 with it at
+# every step).  After a compile() the first eight checks that writes make due
+# are made at the step after the write; from then on a due check waits until
+# 1024 stepper calls have stored a state since the previous check.
+
+from maddening.core.coupling import _reports
+
+FREE, SPACING = _reports._UNDERFLOW_FREE_CHECKS, _reports._UNDERFLOW_CHECK_SPACING
+_ONE = _scaled(1.0)
+
+
+def _counted_reads(monkeypatch):
+    """How many times the groups' fields are read on the host from here on
+    (``GraphManager`` reads the function from ``_reports`` at each call)."""
+    reads = []
+    real = _reports._underflow_range_fields
+
+    def counted(groups, state):
+        reads.append(len(groups))
+        return real(groups, state)
+
+    monkeypatch.setattr(_reports, "_underflow_range_fields", counted)
+    return reads
+
+
+def _spent(gm):
+    """*gm* after the checks of its compile that are made at once: its
+    first step, and ``FREE`` writes each followed by a step."""
+    gm.step()
+    for _ in range(FREE):
+        _write(gm, 1.0)
+        gm.step()
+    return gm
+
+
+def test_the_numbers_the_bound_is_stated_with():
+    assert (FREE, SPACING) == (8, 1024)
+
+
+def test_a_loop_that_writes_before_every_step_is_read_a_bounded_number_of_times(monkeypatch):
+    gm = _leaky_pair(1.0)
+    reads = _counted_reads(monkeypatch)
+    gm.step()
+    assert len(reads) == 2                              # the first step after compile()
+    del reads[:]
+    for _ in range(FREE + SPACING + 20):
+        gm.set_node_state("a", {"x": _ONE})
+        gm.step()
+    # Two reads (the state the step starts from, the one it leaves) at each
+    # of the first eight steps, and at the one 1024 steps after the eighth.
+    assert len(reads) == 2 * (FREE + 1)
+    # Steps without a write read nothing at all.
+    del reads[:]
+    for _ in range(5):
+        gm.step()
+    assert reads == []
+
+
+def test_a_check_that_is_not_made_at_once_stays_due_and_is_made_within_the_spacing():
+    """What the bound costs: once the first checks of a compile are spent,
+    a state written into the range by a loop that writes before every step
+    is warned of when 1024 steps have been stored since the last check, not
+    at the step after the write."""
+    gm = _spent(_leaky_pair(1.0))
+    for step in range(1, SPACING):
+        _write(gm, 1e-33)
+        assert _recorded(gm.step) == [], step
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1
+
+
+def test_a_check_left_due_is_made_without_another_write(monkeypatch):
+    """A check that waited is made when the spacing has passed, whether or
+    not the graph was written to again in between."""
+    gm = _spent(_leaky_pair(1.0))
+    reads = _counted_reads(monkeypatch)
+    _write(gm, 1.0)
+    for _ in range(SPACING - 1):
+        gm.step()
+    assert reads == []
+    gm.step()
+    assert len(reads) == 2
+    for _ in range(3):
+        gm.step()
+    assert len(reads) == 2
+
+
+def test_a_write_long_after_the_last_check_is_asked_at_the_next_step():
+    """A graph written to now and then (1024 stored steps or more apart)
+    is asked at the step after every write, however many it has had."""
+    gm = _spent(_leaky_pair(1.0))
+    for _ in range(SPACING):
+        gm.step()
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1
+
+
+def test_compile_brings_the_first_checks_back():
+    """The first step after every ``compile()`` is asked, and so are the
+    writes that follow it, whatever was spent before."""
+    gm = _spent(_leaky_pair(1.0))
+    _write(gm, 1e-33)
+    assert _recorded(gm.step) == []                     # due, and waiting
+    _write(gm, 1e-33)
+    gm._dirty = True                                    # noqa: SLF001
+    gm.compile()
+    assert len(_recorded(gm.step)) == 1
+
+
+def test_a_group_already_warned_of_is_not_read_again(monkeypatch):
+    gm = _leaky_pair(1.0)
+    gm.step()
+    _write(gm, 1e-33)
+    assert len(_recorded(gm.step)) == 1
+    reads = _counted_reads(monkeypatch)
+    for _ in range(3):
+        _write(gm, 1e-33)
+        assert _recorded(gm.step) == []
+    assert reads == []

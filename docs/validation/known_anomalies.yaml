@@ -16699,6 +16699,242 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-248"
+    title: "A geometry written with another shape after compile() was broadcast by a mapping kind that does not check its own shape"
+    description: >
+      The shape rule for the geometry of a geometry-dependent mapping --
+      the mapping's `geometry_shape`, or what its
+      `accepts_geometry_shape` takes -- was asked only by `validate()`,
+      which `compile()` runs on the state it is given.  A state write is
+      not a recompile.  The `multilinear_grid` kernel checks the shape it
+      is handed; a kind registered with `needs_geometry=True` whose
+      `apply` does not (one that computes `geom @ field` on a geometry of
+      shape `(2, 3)`) was handed whatever `set_node_state` had written:
+      one row of shape `(3,)` or `(1, 3)` in place of the matrix made the
+      product a scalar or a one-entry vector, which the target's update
+      broadcast into both of its entries, with no error or warning, where
+      `compile()` refuses that state by name.  Geometry-dependent
+      mappings are new in 0.4.0; no release has this.  Resolved before
+      release: the shape rule is asked with the dtype rules at every
+      geometry read of a traced program (a program is traced again
+      whenever a shape changes), including the interpolated read of a
+      sub-cycled group member, by the rule `validate()` applies.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: finite values computed from a geometry of a shape the
+      mapping was not built for.  It needs a mapping kind of the
+      caller's own that does not check the geometry it is handed, and an
+      in-process `set_node_state` after `compile()` that changes the
+      field's shape (`PUT /graph/state` and `load_state` refuse a field
+      of another shape).
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.coupling.mapping.register_mapping"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `set_node_state` itself still accepts the write; the refusal comes
+      from the next entry point that traces a step, and the graph steps
+      again once a geometry of the compiled shape is written back.  The
+      shape `compile()` holds every edge's source field to (its target's
+      `BoundaryInputSpec`) is asked at a trace too (MADD-ANO-250); the
+      dtype it holds one to is not.
+    verification:
+      - "tests/core/test_geometry_edge_refusals.py::test_g8_holds_for_a_geometry_written_after_compile"
+      - "tests/core/test_geometry_edge_refusals.py::test_g8_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group"
+      - "tests/core/test_geometry_edge_refusals.py::test_the_shape_asked_after_compile_is_the_one_compile_accepts"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-249"
+    title: "The underflow-range warning was asked once per compile, of the first stepped state alone: a state written into the range later, or already below tiny, stepped unwarned"
+    description: >
+      `UnderflowRangeWarning` (new in 0.4.0) tells that a coupled group
+      holds a field below `finfo(dtype).tiny / finfo(dtype).eps`, where a
+      node's own arithmetic loses resolution and, below `tiny`, XLA's CPU
+      backend flushes its products to zero.  `GraphManager` asked it once
+      per `compile()`, of the first state a step stored.  Two cases went
+      unwarned.  A state written into the range after that step
+      (`set_node_state`, a checkpoint loaded with `load_state`, `PUT
+      /graph/state`, `reset_state` onto such an initial state): a float32
+      pair whose fields were written at 1e-37 returned 25% off the float64
+      answer with `converged=True` (`iterations` at `max_iterations` and
+      a residual of exactly 0.0 under the mixed and L2 norms).  And a
+      state already below `tiny` when the graph was compiled: its first
+      step flushed every entry to exactly zero, and an exactly zero field
+      never warns, so a pair started at 3e-38 read `converged=True`,
+      residual 0.0, on a state of zeros.  The warning is new in 0.4.0; no
+      release has it.  Resolved before release: the check is due again
+      at the first step after every such write, and reads the state that
+      step starts from as well as the one it returns.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The numbers lost in that range are lost in every release (the
+      nodes' arithmetic and XLA's flush to zero); what was missing is the
+      one signal the library gives of it.  It needs fields held in units
+      where they are below about 1e-31 in float32.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.graph_manager.GraphManager.reset_state"
+      - "maddening.warnings.UnderflowRangeWarning"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A state that decays into the range through the nodes' own updates
+      is not checked again (the check reads every group field on the
+      host, and is kept out of the step loop), and a group is warned of
+      once in a graph's life.  The check costs several times a small
+      graph's step, so a graph written to before every step is not asked
+      at every one: the first eight checks that writes make due after a
+      `compile()` are made at the next step, and from then on a due
+      check waits until 1024 stepper calls have stored a state since the
+      previous check.  A state written into the range in between is
+      warned of then, if it is still in the range.
+    verification:
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_state_written_into_the_range_after_the_first_step_warns_at_the_next_step"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_reset_state_onto_an_initial_state_in_the_range_warns_at_the_next_step"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_state_below_tiny_at_compile_warns_although_the_first_step_flushes_it"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_written_state_outside_the_range_does_not_warn"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_loop_that_writes_before_every_step_is_read_a_bounded_number_of_times"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_check_that_is_not_made_at_once_stays_due_and_is_made_within_the_spacing"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-250"
+    title: "A state field written with another shape after compile() was broadcast into the node that reads it: the shape compile() holds an edge to was asked once"
+    description: >
+      `compile()` refuses an edge whose source field has not the shape
+      its target's `BoundaryInputSpec` declares (`ShapeMismatchError`), on
+      the state it is given.  `GraphManager.set_node_state` takes any
+      layout and is not a recompile, so a source written afterwards with
+      a shape that broadcasts into the declared one was delivered as it
+      was and broadcast by the target's update, with no error or warning:
+      two nodes `a -> b` of three entries each, `a.x` written as one
+      entry, and the next `step()` or `run_scan()` returned `b.x`
+      computed from that one entry in all three, where `compile()`
+      refuses that state by the edge's name.  The same through a mapping
+      (a `(4, 1)` source for a `(4, 3)` field read into `(2, 3)`), with a
+      scalar, in a multi-rate graph, for a member of a coupling group
+      that reads its partner through a transform, and through `run`,
+      `run_scan_with_history`, `run_sweep`, `run_adaptive`,
+      `run_adaptive_scan`, `resolve_boundary_inputs` and the step
+      function handed a state.  (A source that does not broadcast INTO
+      its target's shape changed the target's own shape or failed to
+      broadcast, and was loud already: MADD-ANO-220.)  `load_state` and
+      `PUT /graph/state/{node}` refuse a field of another shape, so only
+      the in-process write is a door.  Measured at the tags with one
+      reproducer: v0.1.0 (silent; `compile()` had no shape rule at all,
+      so a graph BUILT that way was broadcast too), v0.2.0 (`compile()`
+      warns, the write is silent), v0.2.1, v0.3.0 and v0.3.1
+      (`compile()` refuses, the write is silent).  Resolved in 0.4.0:
+      every step program asks the rule of the state it is traced for, on
+      the host (a program is traced again whenever a shape changes, so
+      it cannot be bypassed, and a step that is not traced again pays
+      nothing), and raises the `ExceptionGroup` of `ShapeMismatchError`
+      that `compile()` raises, with `validate()`'s line for each edge;
+      `resolve_boundary_inputs` asks it of the state it reads.  A source
+      field dropped from the state, which was a bare `KeyError` from
+      whatever read it first, is a `KeyError` naming the edge.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: finite values computed from a source broadcast into a
+      field it was not declared for.  It needs an in-process
+      `set_node_state` after `compile()` that changes the shape of a
+      field an edge reads to one that broadcasts into the declared
+      shape; the REST and checkpoint doors refuse such a write.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.graph_manager.GraphManager.run_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On 0.2.0 to 0.3.1 call `validate()` (or `compile()`) after a
+      `set_node_state` that may have changed a field's shape: both name
+      the edge.  Write fields with the shape `initial_state()` gives them.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `set_node_state` itself still accepts the write (tests and callers
+      write other layouts on purpose); the refusal comes from the next
+      entry point that traces a program, and the graph runs again once
+      the field has the shape `compile()` accepts.  What `compile()`
+      does not hold to a shape is not held at a trace either: an edge
+      with a `transform=`, an input declared with a symbolic (negative)
+      dimension, an input its target does not declare, and a flux
+      output.  The dtype half of the rule (`DtypeMismatchError`) is not
+      asked at a trace, because a node's update may widen float32 to
+      float64 under x64: an integer written into a floating-point field
+      an edge reads is stepped, and `validate()` names it.
+    verification:
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_source_written_with_another_shape_is_refused_where_the_next_program_is_traced"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_group_members_source_written_with_another_shape_is_refused"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_trace_refuses_exactly_the_shapes_validate_names"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_shape_compile_accepts_is_not_refused_at_a_trace"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_source_field_dropped_from_the_state_is_named_by_its_edge"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_the_check_adds_nothing_to_the_step_program"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-251"
+    title: "A node's delta_t written after add_node was neither followed nor reported: the graph kept its timestep and to_dict() wrote the new one"
+    description: >
+      `add_node` reads a node's `delta_t` once and keeps it as the
+      timestep the graph steps the node at (the step, the multi-rate
+      schedule and `GraphManager.timestep` use that value).  A `delta_t`
+      written on the node afterwards changed none of them, and nothing
+      said so: `validate()` and `compile()` were silent, and
+      `to_dict()` wrote the node's attribute.  A rod added at 1.0 and
+      written to 2.0 went on stepping at 1.0 while its config said 2.0,
+      so the graph loaded from the config ran another step than the one
+      it was saved from; written to 0.0, the config said 0.0 (which the
+      released versions load, and 0.4.0's `from_dict` refuses).  The
+      surrogate dataset generator labelled its samples with the
+      attribute too.  Measured at the tags with one reproducer: v0.1.0,
+      v0.2.1 and v0.3.1 each step at 1.0, write 2.0 and load a graph
+      that steps at 2.0.  Resolved in 0.4.0: `validate()` has an `ERROR`
+      line naming the node, the written value and the registered one
+      and saying what to do, so the next `compile()` refuses the graph;
+      `to_dict()` writes the timestep the graph runs; the dataset
+      generator reads it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a saved configuration that runs another timestep than the
+      graph it was written from.  It needs an attribute write on a node
+      that is already in a graph; no method of the library writes
+      `delta_t` after the constructor.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.core.graph_manager.GraphManager.validate"
+      - "maddening.core.node.SimulationNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Do not write `delta_t` on a node after `add_node`; construct the
+      node with the timestep it should have.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A written `delta_t` is still not followed, by design: the error
+      says to add a node constructed with the new timestep in its place.
+      A graph that is already compiled keeps stepping after the write
+      until `validate()` or `compile()` is called.  The rule is asked of
+      the node the graph holds, not of a node that one wraps (a wrapper
+      may step its node at another timestep than its own).  The
+      experimental surrogate-replacement route still builds its
+      surrogate with the replaced node's attribute.
+    verification:
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_a_delta_t_written_after_add_node_is_an_error_of_validate_and_compile"
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_the_graph_steps_at_the_registered_timestep_and_to_dict_writes_that_one"
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_a_wrapper_that_steps_its_node_at_another_timestep_is_not_an_error"
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_a_surrogate_dataset_is_labelled_with_the_timestep_its_samples_were_stepped_at"
+    github_issue: null
+
   - anomaly_id: "MADD-ANO-252"
     title: "Under iteration_mode=\"jacobi\" a field inside the dead band un-holds the fields computed from it: a pair reports converged=True after one pass 4.5e5 to 7.4e5 tolerances from its fixed point"
     description: >

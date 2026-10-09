@@ -3327,8 +3327,9 @@ claims:
     largest magnitude, which has no natural zero, so a group that solves the
     position of a marker near coordinate zero is outside this condition
     whatever its physics (one marker 5e-4 from zero is weighted by 2,008,
-    and rho_spectral read 0.245 for 0.153 in float32, pinned as a
-    characterisation); such a group carries no flag in 0.4.0 (MAP-049), and
+    and rho_spectral read 0.245 for 0.153 in float32, measured by an audit's
+    reproducer, where one float32 rounding of a product moves the radius
+    between 0.078 and 0.238: no test pins a number that ill-conditioned); such a group carries no flag in 0.4.0 (MAP-049), and
     convergence_norm="interface", which measures a position in lattice
     spacings, is the norm to prefer for it.  (A sub-cycled member's interpolated boundary value lost a loop
     below a field's rounding from the products: MADD-ANO-222, resolved.)

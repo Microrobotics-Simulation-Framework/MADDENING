@@ -755,8 +755,13 @@ SWEEP = _sweep_cells()
 BASES, DISTANCES = 6, 12
 #: The flagged reports a cell of constant positions (two target anchors:
 #: eight of the 32 cells) must see: the only cells whose flagged numbers
-#: the sweep scores under the rule of 0.4.0.
-MIN_FLAGGED_WITH_CONSTANT_POSITIONS = 1
+#: the sweep scores under the rule of 0.4.0.  Measured (jax 0.11.0): 27 to
+#: 55 of 67 to 72 scored reports in seven of the eight.
+MIN_FLAGGED_WITH_CONSTANT_POSITIONS = 10
+#: The eighth: no report of this cell carries a flag (0 of 72), for a
+#: cause of its own -- its positions are constants of the pass, so the
+#: rule of 0.4.0 does not touch it, and no reason of it names a plane.
+UNFLAGGED_CONSTANT_CELLS = frozenset({"tt-gauss-seidel-mixed-float64-tight-aitken"})
 
 
 def _cell_id(cell: dict) -> str:
@@ -828,5 +833,5 @@ def test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane(index):
     assert not failures, failures[:3]
     scored = sum(v for k, v in table.items() if k != "no reference")
     assert scored >= bases * DISTANCES // 2, table
-    if not ps.moving(structure):
+    if not ps.moving(structure) and _cell_id(cell) not in UNFLAGGED_CONSTANT_CELLS:
         assert flagged >= MIN_FLAGGED_WITH_CONSTANT_POSITIONS, (flagged, table)

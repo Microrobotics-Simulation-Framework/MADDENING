@@ -2716,20 +2716,62 @@ claims:
   area: geometry-dependent mapping diagnostics
   claim: >-
     Narrowed: a group "that uses the interface norm" "reports its
-    solve" and withholds every bound, and its not_usable_reason names the
-    norm: with a geometry-dependent mapping on an edge entering it from
-    outside, and with a multilinear_grid mapping on an internal edge (the
-    solve's criterion reads that geometry, MAP-050; the analysis behind
-    the bounds does not yet). The report never raises: where the float
-    floor could only have been measured by the step (an edge read at its
-    target's pre-step positions) and the state carries none, it is not
-    reported. An internal geometry edge of another kind, or in a sub-cycled
-    group, "is refused at compile()" (MAP-033).
+    solve" and withholds every bound and estimate, and its
+    not_usable_reason names the norm: with a geometry-dependent mapping on
+    an edge entering it from outside, and with a multilinear_grid mapping
+    on an internal edge (the solve's criterion reads that geometry,
+    MAP-050; the analysis behind the bounds is "not reported under this
+    norm in 0.4.0", and "a diagnostic run of the same group under "mixed"
+    or "l2" reports them"). Such an entry keeps the residual's float
+    floor: "residual_precision_floor is the floor of the state the step
+    returned and precision_limited is True where the residual is at or
+    below it, the rule of every group's report", on every step, "so
+    markers that drift, a state write and a loaded checkpoint are read
+    where they are": the run-time reading of what compile() warns of once
+    (MAP-050). The report never raises: where the float floor could only
+    have been measured by the step (an edge read at its target's pre-step
+    positions) and the state carries none, neither key is reported and
+    the reason says so. An internal geometry edge of another kind, or in a
+    sub-cycled group, "is refused at compile()" (MAP-033).
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
     - 'src/maddening/core/coupling/_group_layout.py::_geometry_diagnostics_refusal'
+    - 'src/maddening/core/coupling/_group_layout.py::_floor_reading_of_a_norm_withheld_report'
+    - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
   conditions: >-
+    The floor's reading (float32 Gauss-Seidel pair of 4 markers on 8000
+    grid points, a scatter and a gather, rtol=1e-5, without diagnostics;
+    jaxlib 0.11.0, CPU): compiled 6 spacings from zero (no advisory; it
+    starts at 10.5) with the markers carried 950 spacings a step by their
+    own update, the reported floor equals the rule restated in NumPy from
+    the stored states to 2e-5 on each of four steps (117 to 557
+    tolerances over eight in the audit's run), precision_limited is True
+    on each, and the positions are over a tolerance from the float64 fixed
+    point (2.9 to 20 tolerances: one float32 rounding of them there is 6
+    to 46); the same pair in float64 reads a floor under 1e-4 tolerances
+    within 1e-3 of its fixed point; float64 positions beside float32
+    values are counted at float32's rounding (CPL-100: flagged, with these
+    positions a thousandth of a tolerance off: the conservative
+    direction); positions written 7000 spacings out with set_node_state
+    (no warning; the next step's floor over 100 times the one before, the
+    flag True), and a checkpoint of that state loaded into a graph
+    compiled near zero, whose state, report and next step equal those of
+    the graph never reloaded to the bit (the group can run to its cap
+    there with converged=False, one position alternating between two
+    neighbouring float32 numbers a pass, 49 tolerances apart: the report
+    says precision_limited=True beside a floor of 546): on a gather
+    anchored at its target (the floor recorded by the step) and at its
+    source (measured on the returned state) on every push, the other two
+    anchor pairs in the slow lane; more markers than grid entries on all
+    four anchor pairs. precision_limited is True wherever the residual is
+    at or below the floor, which a pass that settles exactly (residual
+    0.0) is in any dtype and which a converged residual often is under
+    the advisory's distance: the floor's size against the tolerance is
+    the reading. The same pair under "mixed" and "l2" has neither the key
+    nor a reason. Other reasons a geometry group is withheld for (another
+    kind, a sub-cycled group, a failed self-check) keep precision_limited
+    False and no floor key. Then, as before:
     a float32 pair joined by static mappings under the interface norm, with
     a multilinear_grid edge into one member from a third node that holds
     the positions, without diagnostics; a float64 pair with float32
@@ -2750,8 +2792,21 @@ claims:
     - 'tests/property/test_coupling_geometry_search.py::test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_report_of_such_a_group_withholds_every_bound_and_says_why'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_fallback_floor_says_it_cannot_be_served_where_only_the_step_could_measure_it'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_markers_that_drift_past_what_their_dtype_resolves_are_flagged_at_every_step'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_same_drift_in_float64_reads_a_floor_far_under_the_tolerance'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_beside_float32_fields_are_counted_at_the_groups_coarsest_dtype'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_positions_written_or_loaded_far_from_zero_are_flagged_by_the_next_step'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_written_state_in_float64_is_not_flagged'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_floor_of_a_report_no_step_measured_is_not_reported_and_says_why'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_other_norms_reports_are_what_they_were'
+    - 'tests/core/test_geometry_edge_refusals.py::test_a_group_with_a_geometry_edge_reports_its_solve_and_no_bound_with_the_reason'
   status: verified
   notes: >-
+    Seeded faults of the floor's reading (a scratch copy of src/): eight,
+    each caught by the per-push tests above (the flag of the state
+    compile() saw, the floor not a number, the reading withheld with the
+    bounds, kept for every reason, the pre-step state's floor, an
+    unmeasured floor reported as measured, the printed flag, the reason).
     Slow, run once on each JAX lane: the same graph under the mixed norm
     with diagnostics reports its bounds, the outside node's positions moved
     by the self-check as a constant of the pass.
@@ -2774,27 +2829,43 @@ claims:
   area: geometry-dependent mapping, the interface norm
   claim: >-
     What convergence_norm="interface" reads on an internal edge with a
-    multilinear_grid mapping, in a group that does not sub-cycle: a mapping
-    that "does not deliver more entries than it reads (a gather, a tie)" is
+    multilinear_grid mapping, in a group that does not sub-cycle, "by the
+    entry counts the mapping declares, never by its mode": a mapping
+    that "does not deliver more entries than it reads" ("a gather onto M
+    <= N points, a scatter of M >= N points") is
     read at the delivered value, with the positions "at the time level the
-    step uses"; one that "delivers more entries (a scatter)" at "the source
+    step uses"; one that "delivers more entries" ("a scatter of M < N
+    points", "a gather onto M > N points") at "the source
     value" and, for a source anchor, "the positions", each coordinate
     "divided by the grid spacing" of its axis and measured against "one
     spacing"; "A target-anchored geometry is a constant of the solve" and
     "not a reading of a scatter anchored there". "The residual pools every
     entry of every part into one root mean square". A solve returns "the
-    source value of a scatter and, for a source anchor, its positions" as
+    source value of an edge that delivers more entries than it reads and,
+    for a source anchor, its positions" as
     the accepted iterate holds them, and every other floating field one
     plain pass on. A value's float floor counts the positions' dtype and
-    rounding "for a delivered one", a position counts "at eps |u| of one
-    spacing", and the step records the floor of "a gather anchored at its
-    target". "A group that reports converged=True is within K tolerances
-    of its fixed point in these readings", and "K does not see the size of
-    the grid or the place of the origin". compile() warns of each edge
+    rounding "for a delivered one" ("the positions u it depends on": not a
+    coordinate "on an axis of one lattice point", nor one "of a point
+    clamped to the hull from further out than its rounding can cross"), a
+    position counts "at eps |u| of one
+    spacing", and the step records the floor of "a delivered value anchored
+    at its target". For a delivered value eps |u| "assumes a field that
+    varies across one cell by about the size of the value delivered": "it
+    is early for a smoother field and it does not see a value far smaller
+    than the field's variation across a cell". "A group that reports
+    converged=True is within K tolerances
+    of its fixed point in these readings", "to first order in the
+    distance", and "K does not see the size of
+    the grid or the place of the origin"; "a lattice plane ends it".
+    compile() warns of each edge
     "whose positions put that count at the tolerance or above", the count
-    being the float floor's: "4 * E * eps * max|u| >= rtol", for "a scatter
-    anchored at its source", which reads the positions, and for "a gather",
-    whose value is "interpolated at those positions".
+    being the float floor's: "4 * E * eps * max|u| >= rtol", for "a mapping
+    that delivers more entries than it reads, anchored at its source",
+    which reads the positions, and for "a mapping that does not deliver
+    more entries than it reads", whose value is "computed at those
+    positions", "where the floor counts that part". "It is asked once":
+    the report reads the floor at every step (MAP-048).
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What the interface norm reads on a geometry edge)'
     - 'docs/user_guide/geometry_dependent_mappings.md (What convergence_norm="interface" reads on a geometry edge)'
@@ -2834,11 +2905,34 @@ claims:
     cells under this norm (a gather alone, a scatter alone and both, the
     other direction a static matrix) against the numerical float64
     reference: the reported residual and the state returned (one cell on
-    every push). For positions their dtype resolves to the tolerance: the
-    claim is stated for a group compile() does not warn of. It warns
+    every push). For positions their dtype resolves to the tolerance where
+    they are at the step: the claim is stated for a step whose reported
+    residual_precision_floor is under one (the report's run-time reading,
+    MAP-048). compile() asks the same of the state it is called with,
+    once, and of nothing later: markers that drift, a state write and a
+    loaded checkpoint are read by the report alone. The claim is first
+    order in the distance, within the lattice cells of the fixed point: a
+    float64 Gauss-Seidel pair at rtol=1e-4 whose one point gathers a field
+    of slope -0.05 per cell on one side of a lattice plane and 0.999 on
+    the other, the point's position being a constant plus the value it
+    gathers and the fixed point 3.8e-5 of a spacing on the first side
+    (K = 0.95), started half a unit off: the first pass throws the
+    position 0.025 of a spacing across the plane, the next moves it by
+    0.63 tolerances, and the step reports converged=True (residual 0.63)
+    250 tolerances from the fixed point; started a tenth off, 50
+    tolerances. With one slope on both sides, with the first pass landing
+    short of the plane, or with the far cell contracting at 0.5, the same
+    pair is within 0.63 tolerances (pinned with its controls; the solver
+    is not changed: the estimate behind converged is CPL-041's, which is
+    not a bound). With more markers than grid entries (40 on 12) the
+    gather is the edge read at its source and the scatter the one read as
+    delivered, on every anchor pair: the parts, the advisories and the
+    reported floor.
+    compile() warns
     (UserWarning, never a refusal) of each edge whose reading rests on
-    stored positions - a scatter anchored at its source, which reads them
-    as a part of their own, and a gather (a mapping read as delivered) at
+    stored positions - a mapping that delivers more entries than it reads,
+    anchored at its source, which reads them
+    as a part of their own, and a mapping read as delivered at
     either anchor, whose value is computed at them - where what those
     positions put into the float floor of that part by themselves is the
     criterion's threshold or more, 4 E eps max|u| >= rtol, u in the spacing
@@ -2846,12 +2940,49 @@ claims:
     group's structural evaluation count (float32 at rtol=1e-4: from 210
     spacings from zero where every node reads the previous iterate, 105
     for a Gauss-Seidel pair), on the state compile() is called with and on
-    no later write (a gather anchored at its target: at the target's
-    positions in that state). For a delivered value the count is a worst
-    case (a field that varies by its own size across one cell), and it is
+    no later write (a delivered value anchored at its target: at the
+    target's positions in that state). The parts asked are the parts the
+    floor counts, by the floor's own functions: not a delivered value the
+    dead band drops (atol above its magnitude: the group's floor is 0.0;
+    a value that is exactly zero at compile() is asked, with a dead band
+    or without), and not a delivered value for a coordinate its mapping
+    does not read (an axis of one lattice point; a point outside the hull
+    by more than sqrt(eps) of its own distance from zero, whose weights
+    are exactly 0 and 1); positions that are a part are asked of every
+    coordinate, as the criterion reads them (one on an axis of one
+    lattice point included, in the spacing declared for it). The true
+    alarms beside each stay (pinned), and the audit's threshold, anchor
+    and message sweeps re-run with these rules differ only where the far
+    marker is outside the hull. For a delivered value the count is an
+    assumption (a field that varies across one cell by about the size of
+    the value delivered), not a bound, and it is off in both directions.
+    Early for a smoother field: on two float32 pairs of gathers at
+    rtol=1e-4 it reaches the tolerance at 132 and 222 spacings, where the
+    pairs take float64's passes with readings 0.027 and 0.040 of a
+    tolerance from float64's at the worst entry, and 1.4 at 48 and 24
+    times the threshold. Late or silent for a value delivered far smaller
+    than the field's variation across a cell: a float32 gather of a ramp
+    near its zero, 100 spacings out (count 0.96, no advisory), reports
+    converged=True 7.3 and 23 tolerances from its fixed point at ratios
+    of 250 and 2500, the exact residual of the returned state 6.3 and
+    22.5 tolerances beside 0.35 and 0.49 reported and a floor of 0.78; at
+    10 spacings (count 0.097) and 2500, 2.8 tolerances; with float64
+    positions every row is within 0.5, and at ratios of 1.7 and 25 the
+    float32 rows are within 0.3 (MADD-ANO-247, open; pinned as a strict
+    xfail with those controls). A count taken from the delivery's own
+    sensitivity to the positions (a Jacobian-vector product per lattice
+    axis) was measured and not built: at the floor's four roundings per
+    evaluation it is 14 to 110 times the measured distance, so it warns
+    at ratios of 1.7 and 25 and on the smooth pairs from 332 spacings,
+    where float32 and float64 agree to a few hundredths of a tolerance.
+    The count is
     that part's whole floor only where the positions' rounding is coarser
     than the value's own (from one spacing out, for positions no wider
-    than the value). Tested two thousandths either side of that distance
+    than the value). The advisory speaks of the dtype the positions are
+    stored in; the report's floor counts every entry at the group's
+    coarsest dtype (CPL-100), so float64 positions beside float32 fields
+    compile silently and read precision_limited=True where the residual
+    is at or below float32's count. Tested two thousandths either side of that distance
     at rtol=1e-4 and 1e-3, on one and two axes and both signs, for pairs
     of scatters, of gathers and of one of each; in float64 at rtol=1e-12;
     with the far markers on one node of the pair only, on every kind and
@@ -2923,6 +3054,19 @@ claims:
     - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graphs_pair_with_geometry_edges_is_the_pair_at_one_rate'
     - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_sub_cycled_pair_with_geometry_edges_is_refused_under_the_interface_norm'
     - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_compile_warns_of_far_markers_by_the_dtype_of_the_member_that_stores_them'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_gather_near_a_fields_zero_is_not_warned_of_and_float64_positions_hold_it'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_count_holds_where_the_field_varies_by_about_the_value_delivered'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_advisory_states_what_its_count_assumes_and_claims_no_worst_case'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_with_more_markers_than_grid_entries_the_gather_is_read_at_its_source'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_with_fewer_markers_the_scatter_is_the_edge_read_at_its_source'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_delivered_value_inside_the_dead_band_is_not_warned_of'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_value_that_is_zero_at_compile_is_still_asked_under_a_dead_band'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_kernel_says_which_coordinates_a_transfer_depends_on'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_coordinate_on_an_axis_of_one_lattice_point_puts_nothing_into_a_delivered_value'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_points_clamped_to_the_hull_put_nothing_into_a_delivered_value'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_true_alarms_beside_a_one_point_axis_and_a_clamped_point_stay'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_jump_across_a_lattice_plane_into_a_slow_cell_reads_converged_far_from_the_fixed_point'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_within_one_lattice_cell_or_a_cell_of_a_like_rate_the_claim_holds'
   status: verified
   notes: >-
     Measured (jaxlib 0.11.0, CPU, float64, rtol=1e-4). K on a two-way pair
@@ -2953,7 +3097,10 @@ claims:
     0.48, at or under their floors at 0.44 and 0.87 of the threshold and
     above them at 0.15 and 0.30.
     Seeded faults of the advisory: seventeen, each caught by its per-push
-    cases and nine also by the sweep.
+    cases and nine also by the sweep. Seeded faults of the floor's
+    decisions, the count's wording, the side rule and the pin of
+    MADD-ANO-247 (the test module's per-push tests): thirteen, each
+    caught.
   domains:
     f32: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'
     f64: 'tests/property/test_coupling_geometry_interface_norm.py::test_a_plain_iteration_stops_where_the_reference_s_loop_does'

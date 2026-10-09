@@ -4186,7 +4186,15 @@ claims:
     entries' magnitude, and the exact residual of a stalled pair read 5.7
     and 45 floors above a reported 0.0 at fields 100 and 1000 times the
     difference, under either schedule (MADD-ANO-247, open; pinned as a
-    strict xfail).
+    strict xfail).  A value delivered through a multilinear_grid mapping
+    (experimental; MAP-050) also counts the rounding of the positions it
+    depends on, eps |u| for positions u grid spacings from zero, which
+    assumes a field that varies across a cell by about the size of the
+    value delivered: a gather that samples a field near its zero is the
+    same anomaly entered through the positions (the exact residual of the
+    returned float32 state 6.3 and 22.5 tolerances beside 0.35 and 0.49
+    reported and a floor of 0.78, 100 spacings from zero; pinned as a
+    strict xfail with its controls).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the floor is the
     members' state's, each position field at its own dtype's eps, with
@@ -6361,7 +6369,11 @@ claims:
     the fields computed from it (CPL-011).
     an affine pass (linear nodes, linear static mappings, affine edge
     transforms; for a mapping that reads a moving geometry the claim is
-    MAP-050's, to first order), above the residual's float floor; float32
+    MAP-050's, to first order and within the lattice cells of the fixed
+    point: an iterate thrown across a lattice plane into a cell where the
+    pass contracts at 0.999 read converged=True 250 tolerances from a
+    fixed point in the cell it came from, K = 0.95 there), above the
+    residual's float floor; float32
     and float64;
     pairs whose two mapped internal edges gather, scatter, or one of each,
     5 to 60 values against 1e2 to 1e5 (a million in the slow lane), and

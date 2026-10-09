@@ -286,12 +286,19 @@ names the edge and says what to do.
   float floor of the residual at the state that step returned (in
   tolerances; the positions enter it at their rounding there), and
   `precision_limited`, `True` where the residual is at or below it, by
-  the rule of every group's report.  A float32 Gauss-Seidel pair at
+  the rule of every group's report.  **Read the floor's size against
+  the tolerance.**  A floor of one or more says that rounding alone is
+  the tolerance asked, which is what `compile()` warns of for the state
+  it sees; `precision_limited=True` beside a floor far under one (a
+  float64 group whose pass settled exactly, with a residual of 0.0) is
+  harmless.  A float32 Gauss-Seidel pair at
   `rtol=1e-5` compiled 6 spacings from zero (the advisory starts at
   10.5) whose markers then drift 950 spacings a step reports
   `converged=True` and `residual=0.0` on every step with its positions
-  3 to 20 tolerances from the fixed point: its report reads
-  `precision_limited=True` and a floor of 117 to 557 tolerances.  A
+  3 to 20 tolerances from the fixed point (one float32 rounding of a
+  position there is 6 to 46 tolerances): its report reads
+  `precision_limited=True` and a floor of 117 to 557 tolerances, where
+  the same pair in float64 reads a floor of a millionth of one.  A
   pair like it without the drift, 7000 spacings out (written there, or
   loaded from a checkpoint: the two behave alike to the bit), can run to
   its cap with `converged=False` and a residual of 14.8: one marker's

@@ -17,6 +17,8 @@ target node, and `field` is a state field of that node.
 
 ## An example
 
+*Porting a node that samples a cell-centred grid itself?  See the worked example [Moving a node's own sampling onto an edge](moving_a_sampling_onto_an_edge.md).*
+
 A row of markers drifts across a one-dimensional grid.  One edge samples
 the grid's field at the markers (a *gather*, `mode="consistent"`); the
 other deposits the markers' values back on the grid (a *scatter*,

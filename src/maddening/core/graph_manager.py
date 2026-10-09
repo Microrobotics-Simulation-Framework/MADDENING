@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
+    SPECTRAL_KRYLOV_STEPS,
+    SPECTRAL_SETTLED_FRACTION,
     convergence_criterion,
     float_fields_of,
     reported_converged,
@@ -5212,60 +5214,37 @@ class GraphManager:
                         "not_usable_reason": geometry_reason,
                     })
                     continue
-                plane_limit = (meta.get(f"coupling_{key}_geometry_plane_limit")
-                               if geometry_keys else None)
-                reported_bound = result[key]["spectral_error_bound"]
-                if (plane_limit is not None and math.isfinite(reported_bound)
-                        and not reported_bound <= float(plane_limit)
-                        and not math.isfinite(grad_bound)):
-                    # Experimental: the bound is the linearisation at the
-                    # returned iterate, and a multilinear stencil is
-                    # another polynomial across a lattice plane.  Where a
-                    # position the pass reads from the iterate is within
-                    # the bound's reach of one
-                    # (``_bounds._geometry_plane_limit``; a limit that is
-                    # not a number counts), the fixed point may be in
-                    # another cell, and the linearisation stands only if
-                    # the step certified it across the Newton step to the
-                    # fixed point: the Newton-Kantorovich check of the
-                    # gradient bound, which takes the pass's Jacobian at
-                    # both ends and is what a finite
-                    # ``gradient_relative_error_bound`` records.  Without
-                    # that the flag is withdrawn and the numbers stay,
-                    # with the reason (MADD-ANO-242).
+                if geometry_keys and "not_usable_reason" not in result[key]:
+                    # Experimental: the flags of a group whose pass reads a
+                    # moving geometry are a smooth group's and two
+                    # lattice-plane rules, each withdrawing both: no plane
+                    # in the Newton-Kantorovich ball around the returned
+                    # iterate (the step's ``geometry_plane_margin`` over
+                    # one; absent or not a number counts as none), and,
+                    # with a plane within the bound's reach
+                    # (``geometry_plane_limit``), a Newton-Kantorovich
+                    # check that passed.  ``_group_layout._geometry_flags``
+                    # has the rule and why each half is needed
+                    # (MADD-ANO-242, MADD-ANO-248).  The numbers stay; a
+                    # ``False`` flag of a step that computed the estimate
+                    # carries every cause.
+                    usable, gradient_usable, reason = _group_layout._geometry_flags(
+                        geometry_keys,
+                        bound=result[key]["spectral_error_bound"],
+                        gradient_bound=grad_bound, rho=rho_spec,
+                        arnoldi_residual=spec_resid,
+                        settled=bool(spectral_rate_settled(rho_spec, spec_resid)),
+                        precision_limited=precision_limited, declared=bool(declared),
+                        limit=meta.get(f"coupling_{key}_geometry_plane_limit"),
+                        margin=meta.get(f"coupling_{key}_geometry_plane_margin"),
+                        reach=_bounds.GEOMETRY_PLANE_REACH, ulps=_bounds.GEOMETRY_PLANE_ULPS,
+                        fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS)
                     result[key].update({
-                        "spectral_usable": False,
-                        "gradient_bound_usable": False,
-                        "not_usable_reason": _group_layout._geometry_plane_reason(
-                            geometry_keys, reported_bound, float(plane_limit),
-                            _bounds.GEOMETRY_PLANE_REACH),
+                        "spectral_usable": usable,
+                        "gradient_bound_usable": gradient_usable,
                     })
-                if plane_limit is not None and result[key]["gradient_bound_usable"]:
-                    # Experimental: the gradient's flag does not stand on
-                    # that check.  It takes the Jacobian at the iterate
-                    # and at the Newton point; the gradient of the fixed
-                    # point is the Jacobian's *there*, and a fixed point
-                    # just past a plane the Newton point stops short of is
-                    # in a cell neither was taken in (the bound was 15 to
-                    # 70,000 times under the error, MADD-ANO-248).  The
-                    # flag stands only where no lattice plane is in the
-                    # Newton-Kantorovich ball around the iterate at all:
-                    # the step stored how many radii of that ball the
-                    # nearest plane is away
-                    # (``_bounds._kantorovich_ball_plane_margin``, with
-                    # the argument; a margin that is absent or not a
-                    # number counts as none).  At one or under the
-                    # gradient's flag is withdrawn whatever the check
-                    # read; the numbers stay, and ``spectral_usable`` is
-                    # the rule's above.
-                    margin = meta.get(f"coupling_{key}_geometry_plane_margin")
-                    margin = float("nan") if margin is None else float(margin)
-                    if not margin > 1.0:
-                        result[key].update({
-                            "gradient_bound_usable": False,
-                            "not_usable_reason": _group_layout._geometry_ball_plane_reason(
-                                geometry_keys, margin, _bounds.GEOMETRY_PLANE_REACH),
-                        })
+                    if reason is not None:
+                        result[key]["not_usable_reason"] = reason
         return result
 
     # ------------------------------------------------------------------

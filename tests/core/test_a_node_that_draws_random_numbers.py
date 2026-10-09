@@ -524,7 +524,7 @@ _EVERY_CELL = tuple(
 
 
 def _cell_id(cell):
-    return "-".join(str(v) for v in cell.values())
+    return "-".join(f"{k}-{v}" if k == "predictor" else str(v) for k, v in cell.items())
 
 
 def _assert_one_sample_per_step(cell, steps=5):

@@ -6337,3 +6337,81 @@ claims:
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-two-way-sparse-jacobi-small-b]'
       - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-scatter-only-matrix-gauss-seidel]'
     sharded: tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member
+- id: CPL-193
+  area: loop
+  claim: >-
+    A member of a coupling group that draws from a key held in its state
+    draws one sample per step, not one per pass.  Every pass of the solve
+    calls each member's update with the state the step started from, so the
+    key a member wraps is the same on every pass and so is the sample; the
+    solvers iterate floating fields only, so the key in the returned state
+    is the one a single pass computes from the pre-step state.  The key
+    advances once per step however many passes the solve takes, the group
+    converges to the fixed point of that step's sample, and
+    coupling_diagnostics() reports what it would with the noise replaced by
+    the constant it drew.  A sub-cycled member draws once per sub-step, the
+    same on every pass.
+  sources:
+    - docs/developer_guide/node_authoring.md#three-behaviours-that-surprise
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl.one_pass_gs
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl.one_pass_jacobi
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_substeps
+    - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
+    - src/maddening/core/coupling/acceleration.py::float_fields_of
+  conditions: >-
+    the key's raw data (jax.random.key_data, a uint32 leaf) in a member's
+    state, wrapped, split and drawn from inside update; Gauss-Seidel and
+    Jacobi; no acceleration, Aitken, fixed relaxation, IQN-ILS and IQN-IMVJ;
+    solver="ift" and "fori"; the l2, mixed and interface norms, with the
+    interface norm's return rule (CPL-191: the pass that recomputes fields
+    starts from the pre-step state as every pass does); linear and quadratic
+    predictors and IQN-IMVJ's reused Jacobian; a group at a rate divider
+    above one on a multi-rate graph (one sample per solve it applies); a
+    sub-cycled group, with a second waveform sweep; float32, and float64
+    under x64 (the key stays uint32); a vmap of the scan (run_sweep) over a
+    batch of keys; run_adaptive (two solves per kept step, one sample each,
+    and nothing kept from a rejected attempt); a checkpoint between steps;
+    the gradient at a fixed key, against central differences, under
+    solver="ift".  Why it holds: one_pass_gs and one_pass_jacobi hand each
+    member's update _pre(nn), the pre-step state, and _run_substeps starts
+    a member's sub-steps from it; the fixed-point vector, the
+    accelerations, the predictor and the norms hold floating fields only
+    (CPL-003, CPL-070).  Not claimed for mixed dtypes, 16-bit floats or
+    sharded graphs.
+  oracle: >-
+    the stream of the same key computed outside any graph (split, draw,
+    key_data), and the same node run alone; the closed-form fixed point of
+    the linear pair for each sample; a twin group with the draw replaced by
+    a constant parameter.
+  tests:
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_step_the_interface_norm_recomputes_fields_of_advances_the_key_once
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_groups_report_is_that_of_the_noise_replaced_by_the_constant_it_drew
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_groups_report_is_the_constant_twins_under_other_norms_and_accelerations
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_slow_group_draws_one_sample_per_solve_it_applies
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_x64
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each
+    - tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_between_coupled_steps_continues_a_members_stream
+  status: verified
+  domains:
+    f32: 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step[gauss-seidel-none-ift-l2]'
+    f64: tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_x64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step[jacobi-aitken-fori-mixed]'
+    grad: 'tests/core/test_a_node_that_draws_random_numbers.py::test_the_gradient_at_a_fixed_seed_is_the_finite_difference_in_float64[through-an-ift-group]'
+    vmap: tests/core/test_a_node_that_draws_random_numbers.py::test_a_sweep_of_a_group_runs_each_members_key_as_its_own_stream
+    multi_rate: tests/core/test_a_node_that_draws_random_numbers.py::test_a_slow_group_draws_one_sample_per_solve_it_applies
+    sub_cycled:
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass[the-sensor-sub-cycles]'
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_sub_cycled_member_draws_once_per_sub_step_and_the_same_on_every_pass[the-plant-sub-cycles-two-sweeps]'
+    predictors_warm_starts:
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm[predictor-linear-interface]'
+      - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm[gauss-seidel-iqn-imvj-ift-l2]'
+    adaptive: tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each
+    checkpoint_restart: tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_between_coupled_steps_continues_a_members_stream
+    sharded: narrowed

@@ -12099,9 +12099,15 @@ anomalies:
       - "maddening.core.simulation.checkpoint.save_state"
     affected_versions: ">=0.1.0"
     workaround: >
-      Hold the key's raw data instead (`jax.random.key_data(key)`, a uint32
-      array, rewrapped with `jax.random.wrap_key_data` where it is used), or
-      a legacy `jax.random.PRNGKey`, which is a uint32 array already.
+      Hold the key's raw data in the state instead: `initial_state` returns
+      `jax.random.key_data(jax.random.key(seed))`, a uint32 array, and
+      `update` wraps it (`jax.random.wrap_key_data`), splits, draws from the
+      sub-key and returns the new key's data.  That convention is documented,
+      and pinned door by door (stepping, scans and sweeps, checkpoints,
+      configs, coupling groups, multi-rate graphs, adaptive stepping,
+      gradients, FMU export, REST), in
+      docs/developer_guide/node_authoring.md, "A node that draws random
+      numbers".  A legacy `jax.random.PRNGKey` is a uint32 array already.
       Deferred to 0.5.0.
     resolution_status: "open"
     residual_risk: >
@@ -12110,6 +12116,7 @@ anomalies:
       Until then a graph with a typed key leaf has no checkpoint.
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart"
+      - "tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_continues_the_stream_of_a_typed_key_leaf"
     github_issue: null
   - anomaly_id: "MADD-ANO-172"
     title: "reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform"

@@ -778,27 +778,41 @@ digits on jax 0.10.2, 0.11.0 and 0.11.2):
 | float32, `"mixed"` | 6.3 | 4.9 | 2.09 | 0.66 | 0.22 | 0.069 | 0.023 | 0.0067 | 0.0022 |
 | float64 floor, `"interface"` | 8.0 | 5.0 | 2.08 | 0.63 | 0.22 | 0.068 | 0.023 | 0.0065 | 0.0022 |
 
-In 0.4.0 the report therefore withdraws `spectral_usable` and
-`gradient_bound_usable`, with a reason, where an internal edge carries a
-scatter-layout row longer than 10 entries and the residual is not above
-the float floor times the row's length; the numbers are reported as
-computed, and the floor itself is corrected in 0.5.0 (a row's own
-`(k - 1) / 2` `eps`, which holds for any order of the sum, counted with
-the evaluations).
-
-The gather layout and the dense kinds are **not** counted by that rule,
-and the same rounding is in them: XLA reduces a row in an order of its
-own, which depends on the jax version, the dtype and the shape.  One row
-behind a uniform field held by 1.8x at 300 entries, 1.2x at 1000 and
-1.09x at 3000 in both forms, and by 3.7x or more at 1e4 and 3e4; but
+The gather layout and the dense kinds carry the same rounding: XLA
+reduces a row in an order of its own, which depends on the jax version,
+the dtype and the shape.  Rows of up to 100 entries held by 2.2x or more
+in both forms (one, three and sixteen rows; float32; the three versions
+alike), and one row behind a uniform field held by 1.8x at 300 entries,
+1.2x at 1000 and 1.09x at 3000, and by 3.7x or more at 1e4 and 3e4; but
 jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries and
 more in order (0.0068 and 0.0022, as the scatter layout), and a dense
-mapping with three rows of 3000 entries read 0.18 of the distance in
+matrix of three rows of 3000 entries read 0.18 of the distance in
 float32 on the three versions (0.09 at the float64 floor), all with the
-flags set.  A wider dtype at the same tolerance takes the report off
-its float floor in every layout: the same pair in float64 at
-`rtol=1e-7` kept its flags on a bound at 0.9995 of the distance or
-more.
+flags set.
+
+In 0.4.0 the report therefore withdraws `spectral_usable` and
+`gradient_bound_usable`, with a reason, where an internal edge carries a
+static mapping of any kind with a row longer than 10 entries and the
+residual is not above the float floor times the row's length; the
+numbers are reported as computed, and the floor itself is corrected in
+0.5.0 (a row's own `(k - 1) / 2` `eps`, which holds for any order of the
+sum, counted with the evaluations).  A row is the entries one delivered
+value adds up, whatever the weights are (they are a parameter a step may
+be handed): the valid slots of a sparse row in either layout, and the
+**width** of a dense matrix, so a dense selection matrix is counted at
+its width although its sums are exact.  The limit is the scatter
+layout's (30 entries hold by 2.07x, 100 do not hold): which rows the
+other forms sum in order is XLA's to choose, so they are not given a
+limit of their own.  A wider dtype at the same tolerance takes the
+report off its float floor in every kind: the scatter pair in float64 at
+`rtol=1e-7` kept its flags on a bound at 0.9995 of the distance or more.
+
+A geometry-dependent mapping is not counted.  A `multilinear_grid`
+gather adds up at most `2^d` entries; its conservative form is a
+scatter-add with as many entries on a grid node as there are markers in
+its support, a number decided in the step: with 8, 300 and 3000 markers
+in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3
+times the distance under `"mixed"`, flags set.
 
 The reverse-mode derivative of a gather with respect to the *field* is
 itself a scatter-add.  On a GPU a gradient with respect to the source

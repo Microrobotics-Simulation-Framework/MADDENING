@@ -446,27 +446,45 @@ step (`gradient_relative_error_bound` is not finite), `spectral_usable` and
 returned iterate, and across a lattice plane the stencil is another polynomial: the fixed point
 may be in a cell where the pass contracts at another rate.
 
-**A long row of a sparse mapping in the scatter layout** keeps its numbers and loses its flags
-at the float floor (MADD-ANO-251, open).  `transpose="scatter"` adds a target's row up one entry
-after another, and an in-order sum of `k` terms of one sign rounds by up to `(k - 1) / 2` units of
-`eps`, systematically where the terms are nearly equal (a uniform field); the float floor counts a
-fixed number of units per evaluation.  Where an internal edge of the group carries such a mapping
-with a row longer than 10 entries (`SCATTER_ROW_FLOOR_LIMIT`, a measured constant) and the residual
-is not above the float floor times the row's length, `spectral_usable` and `gradient_bound_usable`
-are `False`, every number is reported as computed, and `not_usable_reason` names the edge, the
-row's length and the way out: a wider dtype at the same tolerance.  Measured on a float32 pair
-stalled behind one row (a uniform field), `spectral_error_bound` read 0.68 of the true distance
-behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4, on jax 0.10.2, 0.11.0 and 0.11.2 alike;
-rows of up to 10 entries held by 3.9x or more.
+**A long row of a static mapping** keeps its numbers and loses its flags at the float floor
+(MADD-ANO-251, open).  A mapped edge delivers sums over its rows, and a float sum of `k` terms of
+one sign rounds by up to `(k - 1) / 2` units of `eps`, systematically where the terms are nearly
+equal (a uniform field) and the sum is taken in order; the float floor counts a fixed number of
+units per evaluation.  Where an internal edge of the group carries a static mapping of any kind (a
+dense matrix, a sparse mapping in the gather layout or in the scatter layout, a registered kind's
+own static class) with a row longer than 10 entries (`MAPPED_ROW_FLOOR_LIMIT`, a measured constant)
+and the residual is not above the float floor times the row's length, `spectral_usable` and
+`gradient_bound_usable` are `False`, every number is reported as computed, and `not_usable_reason`
+names the edge, how its mapping is applied, the row's length and the way out: a wider dtype at the
+same tolerance.
 
-**The guard counts that layout only, and the same rounding is in the others.**  The gather layout
-and the dense kinds are summed in an order XLA chooses, which depends on the jax version, the dtype
-and the operator's shape, and their reports keep their flags.  Measured on the same pair: one row
-behind a uniform field held by 1.8x at 300 entries and by 1.09x at 3000; the gather layout's rows
-of 1e4 entries and more are summed in order on jax 0.10.2 in float32 and read 0.002 to 0.007 of the
-distance; a dense mapping with three rows of 3000 entries read 0.18 of it on every jax version.
-At a float floor (`precision_limited=True`) behind a row of more than a few hundred entries, in any
-layout, do not rely on `spectral_usable`: read the bound in a wider dtype.
+**What you see.**  A float32 group whose mapping adds up a few hundred entries a row has the two
+flags withdrawn on every step at an `rtol` of 1e-4 or tighter: the float floor there is 0.005 of
+the threshold per evaluation, so 300 entries reach past a residual at the threshold itself.  The
+same group in float64 keeps its flags (its floor times such a row reaches a residual only at an
+`rtol` near 1e-12).  A row is the entries one delivered value adds up, whatever the weights are,
+since they are a parameter a step may be handed: a sparse layout's valid slots, and a dense
+matrix's **width**.  A dense selection or interpolation matrix more than ten entries wide is
+therefore counted although each of its rows holds one or two non-zeros and its sum is exact; a
+sparse mapping of the same operator is counted at those one or two entries and keeps its flags.
+`converged`, `residual`, `precision_limited`, `ratio_usable` and every number are as they were.
+
+**Why every kind is counted.**  Measured on a float32 pair stalled behind a uniform field (the
+smallest `spectral_error_bound` over the true distance among the reports that set the flag, before
+the guard): the scatter layout, which adds a row up one entry after another, read 0.68 behind 100
+entries, 0.24 behind 300 and 0.002 behind 3e4, on jax 0.10.2, 0.11.0 and 0.11.2 alike.  The gather
+layout and the dense kinds are summed in an order XLA chooses, which depends on the jax version,
+the dtype and the operator's shape: one row of either held at every length on jax 0.11 (1.8x at
+300 entries, 1.09x at 3000), but jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries
+and more in order (0.002 to 0.007 of the distance), and a dense matrix of three rows of 3000
+entries read 0.18 on every version.  Rows of up to 10 entries held by 3.9x or more in every kind.
+
+**Not counted: a geometry-dependent mapping.**  A `multilinear_grid` gather adds up at most `2^d`
+entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in
+a grid node's support, a number decided in the step, so the guard does not count it: with 8, 300
+and 3000 markers in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3 times the
+distance under `"mixed"`, flags set (it held, by less than the factor of two the limit is taken
+at; larger counts were not measured).  Under `"interface"` such a group reports no bound.
 
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in

@@ -279,9 +279,9 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
-        # Per group key, ``(edge key, longest row)`` of the internal edges
-        # that carry a static sparse mapping in the scatter layout.
-        self._committed_scatter_rows: dict[str, tuple] = {}
+        # Per group key, ``(edge key, what, longest row)`` of the internal
+        # edges that carry a static mapping, of every kind.
+        self._committed_mapped_rows: dict[str, tuple] = {}
         # Per group key, the keys of the geometry-dependent mapped edges
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
@@ -3256,11 +3256,12 @@ class GraphManager:
             for g in self._coupling_groups
         }
         # Per group key, the longest row of each internal edge that carries
-        # a static sparse mapping in the scatter layout, as the step was
-        # built: what the report's guard on the float floor reads
-        # (``_group_layout._scatter_rows``, MADD-ANO-251).
-        self._committed_scatter_rows = {
-            key: _group_layout._scatter_rows(plan)
+        # a static mapping (a dense matrix, a sparse one in either layout,
+        # a registered kind's own class), as the step was built: what the
+        # report's guard on the float floor reads
+        # (``_group_layout._mapped_rows``, MADD-ANO-251).
+        self._committed_mapped_rows = {
+            key: _group_layout._mapped_rows(plan)
             for key, plan in interface_plans.items()
         }
         self._committed_geometry_edges = {
@@ -4979,31 +4980,39 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
-            **A long row of a sparse mapping in the scatter layout**
-            (MADD-ANO-251, open).  The float floor counts a fixed number
-            of ``eps`` per evaluation, and a static sparse mapping in the
-            scatter layout (``transpose="scatter"``) adds a target's row
-            up one entry after another, which rounds by more than that
-            once the row is long, systematically behind a uniform field:
-            a float32 pair stalled behind one row read
+            **A long row of a static mapping** (MADD-ANO-251, open).
+            The float floor counts a fixed number of ``eps`` per
+            evaluation, and a static mapping adds a row's entries up,
+            which rounds by more than that once the row is long,
+            systematically behind a uniform field: a float32 pair
+            stalled behind one row in the scatter layout read
             ``"spectral_error_bound"`` at 0.68 of its true distance
-            behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4.
-            Where an internal edge of the group carries such a mapping
-            with a row longer than ``SCATTER_ROW_FLOOR_LIMIT`` (10, a
-            measured constant) and ``"residual"`` is not above the float
-            floor times the row's length, ``"spectral_usable"`` and
+            behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4; a
+            dense matrix of three rows of 3000 entries read 0.18; the
+            gather layout's rows of 1e4 entries read 0.007 on jax
+            0.10.2.  Where an internal edge of the group carries a
+            static mapping of any kind (a dense matrix, a sparse mapping
+            in either layout, a registered kind's own static class) with
+            a row longer than ``MAPPED_ROW_FLOOR_LIMIT`` (10, a measured
+            constant) and ``"residual"`` is not above the float floor
+            times the row's length, ``"spectral_usable"`` and
             ``"gradient_bound_usable"`` are ``False``, every number is
             reported as computed, and the entry has a
-            ``"not_usable_reason"`` naming the edge, the row's length and
-            the way out (a wider dtype at the same tolerance).  **Only
-            that layout is counted.**  The gather layout and the dense
-            kinds are summed in an order XLA chooses, and their reports
-            keep their flags: measured, the gather layout's rows of 1e4
-            entries and more read as the scatter layout's do on jax
-            0.10.2 in float32, and a dense mapping with three rows of
-            3000 entries read 0.18 of its distance on every jax version.
-            At a float floor behind a row of more than a few hundred
-            entries, in any layout, read the bound in a wider dtype.
+            ``"not_usable_reason"`` naming the edge, how its mapping is
+            applied, the row's length and the way out (a wider dtype at
+            the same tolerance).  A row is the entries one delivered
+            value adds up whatever the weights are: a sparse layout's
+            valid slots, and a dense matrix's **width** (its weights are
+            a parameter a step may be handed, so a selection matrix is
+            counted at its width too).  In practice a float32 group
+            whose mapping adds up a few hundred entries a row has these
+            two flags withdrawn at any ``rtol`` of about 1e-4 or
+            tighter; the same group in float64 keeps them.  **Not
+            counted:** a geometry-dependent mapping, whose rows are
+            decided in the step (a ``multilinear_grid`` scatter adds up
+            as many entries on a grid node as there are markers in its
+            support: measured at 13.8, 3.8 and 1.3 times the distance
+            with 8, 300 and 3000 markers under ``"mixed"``, flags set).
 
             **A group that resolves a geometry-dependent mapping**
             (experimental: an edge into a member, from inside the group
@@ -5394,22 +5403,23 @@ class GraphManager:
                             _bounds.GEOMETRY_PLANE_REACH),
                     })
                 # The float floor counts a fixed number of ulps per
-                # evaluation, and a sparse mapping in the scatter layout
-                # adds a row's entries up in order, which rounds by more
-                # than that once the row is long (MADD-ANO-251, open).
-                # Where the residual does not stand clear of the floor
-                # such a row would give it, the flags that rest on the
-                # floor are withdrawn, with the reason; the numbers stay
-                # as computed.  Asked only of a flag that is still set.
-                scatter_reason = (
-                    _group_layout._scatter_row_reason(
-                        self._committed_scatter_rows.get(key, ()), residual, floor)
+                # evaluation, and a static mapping adds a row's entries
+                # up (a dense matrix, a sparse one in either layout),
+                # which rounds by more than that once the row is long
+                # (MADD-ANO-251, open).  Where the residual does not
+                # stand clear of the floor such a row would give it, the
+                # flags that rest on the floor are withdrawn, with the
+                # reason; the numbers stay as computed.  Asked only of a
+                # flag that is still set.
+                row_reason = (
+                    _group_layout._mapped_row_reason(
+                        self._committed_mapped_rows.get(key, ()), residual, floor)
                     if result[key]["spectral_usable"] else None)
-                if scatter_reason is not None:
+                if row_reason is not None:
                     result[key].update({
                         "spectral_usable": False,
                         "gradient_bound_usable": False,
-                        "not_usable_reason": scatter_reason,
+                        "not_usable_reason": row_reason,
                     })
         return result
 
@@ -7562,9 +7572,8 @@ class GraphManager:
           having certified its linearisation across it (experimental):
           ``spectral_usable`` is withdrawn and the numbers are kept;
         * ``not_usable_reason`` for a group at its float floor behind a
-          long row of a sparse mapping in the scatter layout
-          (MADD-ANO-251): ``spectral_usable`` is withdrawn and the
-          numbers are kept;
+          long row of a static mapping of any kind (MADD-ANO-251):
+          ``spectral_usable`` is withdrawn and the numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

@@ -3554,10 +3554,14 @@ claims:
     Not behind a long row sum of a mapped edge at the float floor
     (MADD-ANO-251, open): the floor does not count the row's rounding, the
     bound read 0.68 to 0.002 of the distance behind scatter-layout rows of
-    100 to 3e4 entries, and the report withdraws the flag there (a row
-    over SCATTER_ROW_FLOOR_LIMIT = 10 entries with the residual not above
-    the floor times the row's length), while the gather layout and the
-    dense kinds keep theirs.
+    100 to 3e4 entries, 0.18 behind a dense matrix of three rows of 3000
+    and 0.007 behind a gather-layout row of 1e4 on jax 0.10.2, and the
+    report withdraws the flag there for every static mapping kind (a row
+    over MAPPED_ROW_FLOOR_LIMIT = 10 entries, a dense matrix counted at
+    its width, with the residual not above the floor times the row's
+    length).  A geometry-dependent mapping's rows are decided in the step
+    and are not counted (a multilinear_grid scatter read 1.3x its
+    distance with 3000 markers in a cell, flag set).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3837,12 +3841,15 @@ claims:
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
     One more case withdraws the flag and keeps the numbers (MADD-ANO-251,
-    open): an internal edge with a static sparse mapping in the scatter
-    layout whose longest row is over SCATTER_ROW_FLOOR_LIMIT = 10 entries,
-    where the residual is not above the float floor times that row's
-    length; a flag kept behind such a row read at least 0.9925 of the
-    distance, and the same rounding in the gather layout and the dense
-    kinds is not flagged.
+    open): an internal edge with a static mapping of any kind (a dense
+    matrix, a sparse mapping in the gather or the scatter layout, a
+    registered kind's own static class) whose longest row is over
+    MAPPED_ROW_FLOOR_LIMIT = 10 entries, where the residual is not above
+    the float floor times that row's length.  A row is the entries one
+    delivered value adds up whatever the weights are: a sparse layout's
+    valid slots, a dense matrix's width.  A flag kept behind such a row
+    read at least 0.9925 of the distance.  A geometry-dependent
+    mapping's rows are not counted.
   oracle: the flag against each condition.
   tests:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
@@ -4232,7 +4239,9 @@ claims:
     slow lane).  Jacobi holds there.
     The floor counts evaluations and not a mapped edge's own row sum
     (MADD-ANO-251, open): behind a row of more than ten entries it can be
-    too small in every layout, by the row's (k - 1) / 2 eps at most.
+    too small in every static mapping kind, by the row's (k - 1) / 2 eps
+    at most, and the report withdraws spectral_usable there for every
+    such kind.
   oracle: closed form.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -4286,8 +4295,11 @@ claims:
   conditions: >-
     float32, n <= 6.
     A mapped edge's row sum is outside what the constant was measured on:
-    it held by 3.9x for scatter-layout rows of up to 10 entries and failed
-    from 100 on (MADD-ANO-251, open).
+    behind one-signed fields it held by 3.9x or more for rows of up to 10
+    entries in every static mapping kind, failed from 100 entries on in
+    the scatter layout, and at longer rows in the gather layout (1e4, jax
+    0.10.2) and the dense kinds (three rows of 300 at the float64 floor)
+    (MADD-ANO-251, open).
     Not claimed for float64 (x64), mixed dtypes or 16-bit
     floats.
   oracle: float64 evaluation of the same updates.

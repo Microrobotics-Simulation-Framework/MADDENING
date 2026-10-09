@@ -16953,36 +16953,77 @@ anomalies:
       versions (13 of 28 flagged reports below their distance), 0.09 at
       the float64 floor on jax 0.11.0, and 0.84 there with three rows of
       300, while the gather layout of the same three-row operator held
-      (1.7 at 300 entries, 4.3 or more at 3000).  A `multilinear_grid` mapping from points to a
-      grid is the same scatter-add with as many entries on a grid node
-      as there are points within one spacing of it: with 300 and 3000
-      markers in one cell behind a uniform field the bound read 3.8 and
-      1.3 of the distance under `"mixed"` (flags set; larger counts were
+      (1.7 at 300 entries, 4.3 or more at 3000).
+      Short rows of the reduced forms (one, three and sixteen rows of 3,
+      10, 30 and 100 entries; two random fields, two uniform ones and a
+      ramp; `"interface"`; the same digits on the three versions): in
+      float32 the gather layout read 6.5, 4.9, 3.4 and 2.8 times the
+      distance and the dense kind 6.5, 4.9, 2.24 and 2.8; the float64
+      floor was measured for the long rows above. They held by a factor
+      of two up to 100 entries. **Fields whose terms cancel** are
+      MADD-ANO-247's mechanism, reached through the field's signs in
+      place of the mapping's: a delivered value is no finer than the
+      terms it was added up from, whatever the row's length and the
+      order of the sum. On the same pairs with `b = 0` and a field that
+      alternates in sign, a cancellation `sum |t| / |sum t|` of 3 or
+      less left every kind holding by two (3.7 at 10 entries, the
+      scatter layout 2.14 at 30), and a cancellation of 25 read 1.26 at
+      10 entries in every kind and 0.80 behind a dense matrix of three
+      rows of ten entries, flags set. The limit below is not taken on
+      those runs: no row length answers for a field's signs. A
+      `multilinear_grid` mapping from points to a grid is the same
+      scatter-add with as many entries on a grid node as there are
+      points within one spacing of it, a number decided in the step:
+      with 8, 300 and 3000 markers in one cell behind a uniform field
+      the bound read 13.8, 3.8 and 1.3 of the distance under `"mixed"`
+      (flags set; it held, by less than two at 3000; larger counts were
       not measured), and under `"interface"` such a group reports no
-      bound.  No release carried it: sparse mappings, the float floor's
-      flags and the interface norm's readings are new in 0.4.0's
-      development.  Found by the pre-merge audit of the interface norm
-      on static mapped edges.  **What 0.4.0 does** (a guard on the flag,
-      not a fix of the number): where an internal edge of a group
-      carries a static sparse mapping in the scatter layout whose
-      longest row is over `SCATTER_ROW_FLOOR_LIMIT = 10` entries (the
-      largest power of ten at which every measured run held by a factor
-      of two on the three versions) and the residual is not above the
-      float floor times that row's length, the report withdraws
-      `spectral_usable` and `gradient_bound_usable` with a
-      `not_usable_reason`; every number is reported as computed, and
-      `ratio_usable`, `precision_limited` and `converged` are untouched.
-      With it, over 6,235 flagged reports behind rows of more than ten
-      entries (both dtypes, tolerances from the float floor to 1e-1), no
-      report at its counted floor keeps a flag, and the 693 that keep
-      one read at least 0.9925 of their distance (20 of them below 1).
-      The price: 3,757 of the 4,430 reports whose bound was right lose
-      their flag (every one at the counted floor: all of them at 30
-      entries, 85% of those flagged at 100, 73% at 300, 70% at 1000, 48%
-      at 3000, 43% at 1e4 and 32% at 3e4 had a bound that held).  The
-      gather layout, the dense kinds and geometry-dependent mappings are
-      NOT guarded: their reports keep their flags in the failing cases
-      above.
+      bound. Its gather adds up at most `2^d` entries. No release
+      carried it: sparse mappings, the float floor's flags and the
+      interface norm's readings are new in 0.4.0's development. Found by
+      the pre-merge audit of the interface norm on static mapped edges.
+      **What 0.4.0 does** (a guard on the flag, not a fix of the
+      number): where an internal edge of a group carries a static
+      mapping of any kind (a dense matrix, a static sparse mapping in
+      the gather layout or in the scatter layout, a registered kind's
+      own static class) whose longest row is over
+      `MAPPED_ROW_FLOOR_LIMIT = 10` entries and the residual is not
+      above the float floor times that row's length, the report
+      withdraws `spectral_usable` and `gradient_bound_usable` with a
+      `not_usable_reason` that names the edge, how its mapping is
+      applied, the row and the limit; every number is reported as
+      computed, and `ratio_usable`, `precision_limited` and `converged`
+      are untouched. A row is the entries one delivered value adds up
+      whatever the weights are, since they are a parameter a step may be
+      handed: the valid slots of a sparse row in either layout; the
+      **width** of a dense matrix, so a dense selection matrix is
+      counted at its width although its sums are exact; and for a
+      registered kind's own class the entries of its source side (its
+      `apply` is its author's, and nothing was measured on it). One
+      limit for every kind: the largest power of ten at which every
+      measured run behind fields that do not cancel held by a factor of
+      two on the three versions. The scatter layout sets it (30 entries
+      hold by 2.07, 100 do not); the reduced forms held by two up to 100
+      entries, but which rows XLA sums in order is its own to choose, so
+      they are not given a limit of their own. With the guard, over
+      10,805 flagged reports behind rows of more than ten entries (the
+      three kinds, both dtypes, tolerances from the float floor to
+      1e-1), no report at its counted floor keeps a flag, and the 693
+      that keep one read at least 0.9925 of their distance (20 of them
+      below 1). **The price:** 8,185 of the 8,858 reports whose bound
+      was right lose their flag. At the counted floor every flag behind
+      a row over ten entries is withdrawn, so the price there is the
+      share that was right: 2,551 of 4,123 (62%) in the scatter layout,
+      2,164 of 2,246 (96%) in the gather layout and 2,264 of 2,324 (97%)
+      behind a dense matrix, which is to say that behind the reduced
+      forms nearly every flag the guard withdraws stood on a bound that
+      held. Above the counted floor (measured for the scatter layout):
+      1,206 of 1,879. In practice a float32 group whose mapping adds up
+      a few hundred entries a row has both flags withdrawn at any `rtol`
+      of about 1e-4 or tighter (the floor is 0.005 of the threshold per
+      evaluation there), and the same group in float64 keeps them. A
+      geometry-dependent mapping is NOT counted: the `multilinear_grid`
+      scatter above keeps its flags.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -17006,29 +17047,46 @@ anomalies:
       pair in float64 at `rtol=1e-7`, rows of 300 and 3e4 entries, both
       schedules, `"interface"` and `"mixed"`: 128 of 128 reports kept
       their flags on a bound at 0.9995 of the distance or more, 1.4 or
-      more under `"interface"`).  Another layout or a dense mapping is
-      not a workaround in general: see the failing cases above.  Where
-      `precision_limited=True` behind a mapped edge with rows of more
-      than a few hundred entries, in any layout, do not rely on
-      `spectral_usable`.
+      more under `"interface"`; one row of 300 entries in the gather
+      layout and behind a dense matrix likewise keeps its flags on a
+      bound that holds). The same long row in another layout or as a
+      dense matrix is not a workaround: every static kind is counted
+      alike. A dense matrix that holds a selection or an interpolation
+      (one or two non-zeros a row) can be held as a sparse mapping
+      instead, whose rows are counted at those entries (verified on a
+      selection 40 entries wide: the dense form loses its flags at the
+      float floor, the sparse form keeps them, on the same bound). Where
+      a flag is withdrawn, `precision_limited`, `residual` and the bound
+      itself are still reported.
     resolution_status: "open"
     residual_risk: >
       Until the floor counts a mapped edge's own rounding (0.5.0: the
       row's `(k - 1) / 2` `eps` over the cancellation of its terms,
       which holds for any order of the sum, added to the evaluation
       count), `spectral_error_bound` and `gradient_relative_error_bound`
-      can read too small behind a long row in every layout.  The 0.4.0
-      guard covers the scatter layout only; the gather layout on jax
-      0.10.2 (float32, rows of 1e4 and more), a dense mapping of several
-      long rows and a geometry-dependent scatter keep their flags.
-      Where the guard keeps a flag the bound can still be short by the
-      row's rounding over the residual (under an eighth in the worst
-      case; 0.75% at most measured).  The limit and the margins are
-      measurements on one CPU family; a GPU scatter-add is not the
-      in-order sum (MAP-023) and was not measured.
+      can read too small behind a long row in every kind; in 0.4.0 their
+      flags no longer say usable there, behind any static mapping. Not
+      covered by the guard: a geometry-dependent scatter (a
+      `multilinear_grid` mapping from points to a grid: the bound held
+      by 1.3 with 3000 markers in a cell, and larger counts were not
+      measured); a row of ten entries or fewer behind a field whose
+      terms cancel (MADD-ANO-247: 1.26 of the distance at ten entries
+      with a cancellation of 25); a registered kind's own static class,
+      which is counted at its source side's entries and was not
+      measured. Where the guard keeps a flag the bound can still be
+      short by the row's rounding over the residual (under an eighth in
+      the worst case; 0.75% at most measured). The guard is conservative
+      behind the gather layout, a dense matrix and above all a dense
+      selection or interpolation matrix, where it withdraws flags whose
+      bound held. The limit and the margins are measurements on one CPU
+      family; a GPU scatter-add is not the in-order sum (MAP-023) and
+      was not measured.
     verification:
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_a_stalled_group_behind_a_long_scatter_row_withdraws_its_flags_and_says_why"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_bound_behind_a_long_scatter_row_is_at_or_above_the_distance"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_same_operator_in_the_gather_layout_keeps_its_flags_on_a_bound_that_holds"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_guard_moves_no_number_of_the_report"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_stalled_group_behind_a_long_row_withdraws_its_flags_and_says_why"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_long_row_is_at_or_above_the_distance"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_row_within_the_limit_keeps_its_flags_on_a_bound_that_holds"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_every_static_mapping_on_an_internal_edge_is_counted"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_dense_row_is_the_matrix_width_whatever_its_weights"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_guard_moves_no_number_of_the_report"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less_than_two"

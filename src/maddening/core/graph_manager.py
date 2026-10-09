@@ -5053,8 +5053,8 @@ class GraphManager:
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
             says which case it is; besides the lattice-plane case above,
-            a long scatter row and a checkpoint saved after a state
-            write, no other group's entry has it.  The values are
+            a long row of a static mapping and a checkpoint saved after
+            a state write, no other group's entry has it.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step

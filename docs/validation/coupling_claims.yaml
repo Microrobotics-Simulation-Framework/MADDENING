@@ -593,10 +593,19 @@ claims:
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
     at most 64 entries, one per larger constant)"; arnoldi_spectral_radius "costs n_steps + 1
-    Jacobian-vector products, with or without v_extra".
+    Jacobian-vector products, with or without v_extra".  The factorisations
+    after them are "small in one dimension only (a QR of an n x 2k matrix,
+    linear solves in k x k, and the singular values of k x n matrices, one
+    per probe, n being the group's floating entries)": no value the step
+    declares has n * n entries, and the work and the memory grow in
+    proportion to n (0.44 s and 0.73 GB per step at n = 1e5 in float32
+    against 2.2 ms and 0.28 GB without diagnostics; 3.9 s and 1.9 GB at 1e6:
+    CPU, 4 cores, jax 0.11.0).
   sources:
     - src/maddening/core/coupling/group.py:116 (CouplingGroup, diagnostics)
     - src/maddening/core/coupling/acceleration.py::arnoldi_spectral_radius
+    - src/maddening/core/coupling/acceleration.py::_largest_singular_value
+    - docs/user_guide/inspection.md#coupling-convergence
     - src/maddening/core/coupling/_bounds.py::_gradient_error_bound_at
     - src/maddening/core/coupling/_group_layout.py::_reading_is_the_fields
   conditions: solver="ift", diagnostics=True.
@@ -607,6 +616,10 @@ claims:
     - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_nine_more_products
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is
+    - 'tests/core/test_spectral_norm_takes_singular_values_only.py::test_a_step_with_diagnostics_declares_nothing_quadratic_in_the_group'
+    - tests/core/test_spectral_norm_takes_singular_values_only.py::test_the_norm_declares_nothing_larger_than_its_matrix
+    - tests/core/test_spectral_norm_takes_singular_values_only.py::test_the_norm_is_the_two_norm_of_jax_bit_for_bit
+    - 'tests/core/test_spectral_norm_takes_singular_values_only.py::test_a_step_with_diagnostics_on_a_large_group_runs_in_a_capped_address_space'
   status: verified
   domains:
     f32: n/a

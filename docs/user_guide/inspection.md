@@ -383,9 +383,26 @@ pass's radius to eight digits and a few parts in ten thousand from the one exact
 that group.  Beside the solve, the step runs 9 Jacobian-vector products for the spectrum (18 under
 `convergence_norm="interface"` with a transform, or a mapping that does not deliver more entries
 than it reads, on an internal edge, or a field more than one internal edge reads) and `11 + 4 k + 5 n_p + 2 k n_p` more for the gradient bound
-(`k <= 8`, `n_p` the probed constants), then small dense factorisations (QR, linear solves, an
-SVD) and one non-symmetric eigenvalue solve of a matrix of at most 9 x 9.  The eigenvalue solve
-runs in LAPACK on the host; on a GPU backend it is a device round trip in every step.  Measured
+(`k <= 8`, `n_p` the probed constants), then dense factorisations that are small in one dimension
+only (a QR of an `n x 2k` matrix, linear solves in `k x k`, and the singular values of `k x n`
+matrices, one per probe, `n` being the group's floating entries) and one non-symmetric eigenvalue
+solve of a matrix of at most 9 x 9.  The eigenvalue solve runs in LAPACK on the host; on a GPU
+backend it is a device round trip in every step.  **The work and the memory grow in proportion to
+the group's entries, and the factor is large**: each product is a pass of the group, and the
+factorisations hold a few hundred floats per entry.  Measured on a pair of 3 values and `n` grid
+cells in float32, 14 passes per step (CPU, 4 cores, jax 0.11.0; the pair of
+`tests/core/test_spectral_norm_takes_singular_values_only.py`):
+
+| group entries `n` | step, diagnostics off | step, diagnostics on | peak memory, off | on |
+|---|---|---|---|---|
+| 1e3 | 0.24 ms | 8.5 ms | 0.28 GB | 0.61 GB |
+| 1e4 | 0.34 ms | 31 ms | 0.27 GB | 0.62 GB |
+| 1e5 | 2.2 ms | 0.44 s | 0.28 GB | 0.73 GB |
+| 1e6 | 23 ms | 3.9 s | 0.31 GB | 1.9 GB |
+
+So on a large group take the report every so often (a second graph with `diagnostics=True`, or a
+restart from a checkpoint), not in every step.  The first step also compiles the analysis: about
+6 s more here.  Measured
 once on a two-spring pair in float32 (an RTX A2000 laptop GPU, jax 0.11.0,
 `benchmarks/results/gpu_eigvals_probe/RESULT.md`): a step takes 0.3 ms with diagnostics off and
 6 to 8 ms with them on, about 4 ms of it the eigenvalue solve; on CPU the same diagnostics-on step

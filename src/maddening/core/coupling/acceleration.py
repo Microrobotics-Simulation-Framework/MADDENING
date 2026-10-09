@@ -1152,7 +1152,31 @@ def _spectral_norm(A):
     :func:`_lapack_input` withholds the matrix (what the SVD of a
     non-finite matrix returns where it returns)."""
     safe, ok = _lapack_input(A)
-    return jnp.where(ok, jnp.linalg.norm(safe, ord=2, axis=(-2, -1)), jnp.nan)
+    return jnp.where(ok, _largest_singular_value(safe), jnp.nan)
+
+
+def _largest_singular_value(A):
+    """The largest singular value per matrix (the last two axes), from
+    the singular values alone.
+
+    ``jnp.linalg.norm(A, ord=2)`` is ``max(svd(A, compute_uv=False))``
+    with ``full_matrices=True``, and the lowered SVD then declares the
+    full ``U`` (``m x m``) and ``V^T`` (``n x n``) as outputs although
+    nobody reads them: on the ``(probes, k, n)`` tensors of the bounds
+    (``k`` Krylov directions against a group of ``n`` entries) that asks
+    for ``probes * n * n`` floats, 160 GB at ``n = 1e5`` in float32, and
+    the step raised ``RESOURCE_EXHAUSTED`` with ``diagnostics=True``.
+    The same call with ``full_matrices=False`` is the same LAPACK
+    routine on the same matrix (values only), declares
+    ``min(m, n)``-sized outputs, and returns the same singular values
+    bit for bit (pinned on every jaxlib CI runs by
+    ``tests/core/test_spectral_norm_takes_singular_values_only.py``).
+    Its working memory is the matrix and ``O(min(m, n)^2)``; its time is
+    ``O(max(m, n) min(m, n)^2)``.  ``initial=0`` is the norm of a matrix
+    with no rows or columns, as ``jnp.linalg.norm`` has it.
+    """
+    values = jnp.linalg.svd(A, full_matrices=False, compute_uv=False)
+    return jnp.max(values, axis=-1, initial=0)
 
 
 #: Backends on which ``jax.numpy.linalg.eigvals`` of a non-symmetric

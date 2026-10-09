@@ -479,7 +479,7 @@ _GEOMETRY_SOLVED_REASON = (
     "spectral_usable and gradient_bound_usable are False on every step, because a lattice "
     "plane of the mapping's grid within reach of the solve makes the pass another "
     "polynomial, with another fixed point or none, and three independent audits each found "
-    "a flag set beside a wrong number there (MADD-ANO-248). The numbers are reported as "
+    "a flag set beside a wrong number there (MADD-ANO-252). The numbers are reported as "
     "computed, uncertified. The flags are available where every position is fixed during "
     "the pass (a target-anchored geometry read by update, or positions held by a node "
     "outside the group); no convergence_norm restores them for this group in 0.4.0."
@@ -552,7 +552,7 @@ def _geometry_flags(keys, *, solved, bound: float, gradient_bound: float, rho: f
     a plane is within reach of the bound; a margin of the
     Newton-Kantorovich ball to the nearest plane), and an independent
     audit of each found ``spectral_usable`` set beside a bound far under
-    the distance (MADD-ANO-248).  The last: the margin's argument takes
+    the distance (MADD-ANO-252).  The last: the margin's argument takes
     the cell's polynomial to satisfy Newton-Kantorovich (``h <= 1/2``),
     and a cell whose polynomial has no fixed point at all (a saddle-node
     with a gap of 1e-5 to 1e-8), where the step's own check had failed

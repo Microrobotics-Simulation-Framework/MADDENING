@@ -417,7 +417,7 @@ def plane_limit_reference(cell: Cell, ref: cr.PassReference, x, norm: cr.Norm) -
     the pass builds from it, is within eight float resolutions of a plane
     (``GEOMETRY_PLANE_ULPS``: ``eps`` of *cell*'s dtype times the largest
     coordinate of the lattice's axis, or the coordinate's own magnitude
-    where that is larger; MADD-ANO-248); ``inf`` where the pass reads no
+    where that is larger; MADD-ANO-252); ``inf`` where the pass reads no
     position from the iterate."""
     origin, spacing, shape = cell.grid
     x = np.asarray(x, np.float64)
@@ -542,7 +542,7 @@ def held_numbers(cell: Cell, d: dict, before: dict, meta: dict) -> tuple:
     hold to the reference.
 
     A cell whose positions are constants of the pass: the report's flags.
-    A cell that solves positions has no flag in 0.4.0 (MADD-ANO-248) and
+    A cell that solves positions has no flag in 0.4.0 (MADD-ANO-252) and
     its numbers are reported as computed; the searches keep holding them
     on the reports the withdrawn lattice-plane rules flagged -- a smooth
     group's flags (*before*: :func:`without_plane_limit`), the stored

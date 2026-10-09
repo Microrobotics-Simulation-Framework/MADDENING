@@ -369,7 +369,7 @@ def test_the_plane_limit_is_not_a_number_where_it_cannot_be_evaluated():
 
 # ---------------------------------------------------------------------------
 # A position within a few float resolutions of a plane is on it
-# (``_bounds.GEOMETRY_PLANE_ULPS``, ``_plane_resolution``; MADD-ANO-248)
+# (``_bounds.GEOMETRY_PLANE_ULPS``, ``_plane_resolution``; MADD-ANO-252)
 # ---------------------------------------------------------------------------
 
 #: Lattices whose plane the position sits beside: at a position of order
@@ -458,7 +458,7 @@ def test_the_window_is_taken_at_the_position_the_pass_builds_too():
 
 # ---------------------------------------------------------------------------
 # The lattice-plane margin of the Kantorovich ball around the iterate
-# (``_bounds._kantorovich_ball_plane_margin``; MADD-ANO-248)
+# (``_bounds._kantorovich_ball_plane_margin``; MADD-ANO-252)
 # ---------------------------------------------------------------------------
 
 
@@ -613,7 +613,7 @@ def _flags(**changed):
 
 
 def test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read():
-    """The rule of 0.4.0 (MADD-ANO-248): with a position the pass reads
+    """The rule of 0.4.0 (MADD-ANO-252): with a position the pass reads
     from the iterate, both flags are ``False`` at every margin, limit,
     bound and gradient bound -- the readings that set them under the three
     earlier rules included -- and the reason is one sentence, the same at
@@ -638,7 +638,7 @@ def test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read():
     for told in ("solves position(s) ['M.pos']", "edge(s) ['M.y->G.deposit']",
                  "0.4.0 does not certify a bound for such a group",
                  "spectral_usable and gradient_bound_usable are False on every step",
-                 "makes the pass another polynomial", "MADD-ANO-248",
+                 "makes the pass another polynomial", "MADD-ANO-252",
                  "reported as computed, uncertified",
                  "a target-anchored geometry read by update",
                  "positions held by a node outside the group",

@@ -2074,7 +2074,7 @@ claims:
     MAP-049: where the pass reads a position from the iterate, or builds one
     and reads it in the same pass, spectral_usable and gradient_bound_usable
     are False on every step in 0.4.0, whatever the numbers read (MAP-049,
-    MADD-ANO-248): the numbers are reported as computed, uncertified, and
+    MADD-ANO-252): the numbers are reported as computed, uncertified, and
     not_usable_reason names the positions and says so; where every position
     is a constant of the pass the flags are any other group's, and a False
     one of a step that computed the estimate carries every cause in
@@ -3046,7 +3046,7 @@ claims:
     - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
     - 'src/maddening/core/inspection.py::_coupling_flags'
   conditions: >-
-    THE RULE OF 0.4.0 (MADD-ANO-248). Three rules in turn set a flag from
+    THE RULE OF 0.4.0 (MADD-ANO-252). Three rules in turn set a flag from
     these numbers, and an independent audit of each found spectral_usable
     beside a wrong number near a lattice plane; the last on a cell whose
     polynomial has no fixed point (a saddle-node, affine members), where the
@@ -3099,7 +3099,7 @@ claims:
     both short of the plane, the cell polynomial's fixed point just past
     it, the next cell expanding; an audit's constructed cases, and 66 of
     2,700 float32 reports of its placement sweep). BOTH FLAGS
-    (MADD-ANO-248) therefore stand on the margin: still a run-time
+    (MADD-ANO-252) therefore stand on the margin: still a run-time
     criterion, and an argument with five stated assumptions
     (_kantorovich_ball_plane_margin): the kernel is one polynomial between
     planes; no member has a kink of its own in the ball; Newton-Kantorovich
@@ -3120,7 +3120,7 @@ claims:
     fixed point's lattice cells), a row whose flag stands, a row with a
     plane in the ball and all three in one cell (an honest report
     withdrawn), a row within three float resolutions of a plane, and the
-    three audited cases of MADD-ANO-248 (bounds 15x to 70,000x under the
+    three audited cases of MADD-ANO-252 (bounds 15x to 70,000x under the
     error, now unflagged); in every row every number whose flag is set is
     scored (rho_spectral, spectral_error_bound, the gradient bound), both
     flags are the pinned ones, neither stands on a row with a plane

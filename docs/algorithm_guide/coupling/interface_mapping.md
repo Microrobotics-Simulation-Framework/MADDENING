@@ -1214,7 +1214,7 @@ $x_N$ are in one cell, $h$ reads near zero, and the pass has no fixed
 point in that cell.  The flags stood there: on a gradient bound 15 to
 70,000 times under the error, and, where the next cell expands and the
 pass's fixed point is two cells on, on a `spectral_error_bound` 17 to
-1,294 times under the distance (MADD-ANO-248).
+1,294 times under the distance (MADD-ANO-252).
 
 **Why no flag stands on the margin in 0.4.0.**  The argument needs
 assumption 3, the Newton-Kantorovich condition for the smooth piece $p$,

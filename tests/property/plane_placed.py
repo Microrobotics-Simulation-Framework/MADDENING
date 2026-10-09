@@ -1,6 +1,6 @@
 """A geometry group whose fixed point is placed beside a lattice plane *by
 solving for its constants*: the pair of the audit that found the spectral
-flag standing on a bound far under the distance (MADD-ANO-248).
+flag standing on a bound far under the distance (MADD-ANO-252).
 
 **The pair.**  A grid member ``G`` and one marker ``M``.  ``G.x`` is the
 marker's multilinear deposit at the marker's position, read from the iterate

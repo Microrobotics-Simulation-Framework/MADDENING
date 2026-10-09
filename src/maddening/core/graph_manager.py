@@ -5357,7 +5357,7 @@ class GraphManager:
                     # where the step recorded so.
                     # ``_group_layout._geometry_flags`` is the one place
                     # that decides, and says why (MADD-ANO-242,
-                    # MADD-ANO-248).  The numbers stay; a ``False`` flag
+                    # MADD-ANO-252).  The numbers stay; a ``False`` flag
                     # of a step that computed the estimate carries its
                     # reason.
                     usable, gradient_usable, reason = _group_layout._geometry_flags(

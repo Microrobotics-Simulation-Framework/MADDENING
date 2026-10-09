@@ -155,7 +155,7 @@ names the edge and says what to do.
   17 to 1,294 times under it, and a gradient bound 15 to 70,000 times
   under the true error; and last, 34 to 1,874 times under it on a
   `converged` solve in a cell whose polynomial has no fixed point at
-  all (MADD-ANO-248).  A sharper rule is left to a later release; until
+  all (MADD-ANO-252).  A sharper rule is left to a later release; until
   then the numbers of such a group are an estimate and not a
   certificate.  Away from lattice planes they are usually right: an
   audit of the example above over 300 steps found no wrong number among

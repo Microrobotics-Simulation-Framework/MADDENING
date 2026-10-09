@@ -166,7 +166,7 @@ GEOMETRY_PLANE_REACH = 2.0  # units: spectral_error_bound
 #: evaluated is not decided by the position's value there: an iterate 4.7
 #: resolutions before a plane with its fixed point 0.7 past it kept both
 #: flags on a gradient bound 25x under the reference's error
-#: (MADD-ANO-248).  The resolution is the mapping's
+#: (MADD-ANO-252).  The resolution is the mapping's
 #: (``_plane_resolution``): ``eps`` of the position's dtype times the
 #: largest coordinate magnitude of the lattice's axis, or the position's
 #: own where that is larger.
@@ -232,7 +232,7 @@ def _geometry_plane_limit(step_pure, x_star, consts, readers, weights, unit):
     Newton-Kantorovich check where ``B > limit``, then beside the margin
     of :func:`_kantorovich_ball_plane_margin`) it was audited three
     times, and each audit found ``spectral_usable`` set beside a bound
-    far under the distance (MADD-ANO-248): with the fixed point of the
+    far under the distance (MADD-ANO-252): with the fixed point of the
     cell's polynomial just past a plane that the iterate and the Newton
     point are both short of, the check compares two Jacobians of one
     cell and passes; and where the cell's polynomial has no fixed point
@@ -1008,7 +1008,7 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     point both short of a plane, ``x_p`` a few millionths of a spacing
     past it, the next cell expanding, and the pass's fixed point two
     cells on, 17 to 1,294 bounds away with ``spectral_usable`` set
-    (MADD-ANO-248).  The Newton-Kantorovich check cannot see it: both
+    (MADD-ANO-252).  The Newton-Kantorovich check cannot see it: both
     its Jacobians are one cell's.  The conclusion below -- ``x_p`` is in
     the iterate's cells, hence a fixed point of the pass, within ``t* <=
     2 eta`` of the iterate -- is exactly what the bound needs.
@@ -1023,7 +1023,7 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     short of, both are one cell's, the check reads no change (``h`` near
     0), and the gradient of the fixed point is the other cell's.  The
     bound was 15 to 70,000 times under the reference's error with its
-    flag set (MADD-ANO-248).  So what the check reads says nothing of
+    flag set (MADD-ANO-252).  So what the check reads says nothing of
     a plane; the margin asks whether one is in the ball at all.
 
     **The argument**, with ``D`` the *weights*, ``eta = ||D delta||_2``,
@@ -1095,7 +1095,7 @@ def _kantorovich_ball_plane_margin(readers, x_k, f_k, f_newton, weights, moved, 
     was under the limit of :func:`_geometry_plane_limit`, and
     ``spectral_usable`` stood on a bound 34 to 1,874 times under the
     distance to the pass's only fixed point, one cell on
-    (MADD-ANO-248).  It was the third audit in a row to find a flag set
+    (MADD-ANO-252).  It was the third audit in a row to find a flag set
     beside a wrong number near a lattice plane, so in 0.4.0 a group with
     a reader has neither flag, whatever the margin reads
     (``_group_layout._geometry_flags``), and the margin is stored and

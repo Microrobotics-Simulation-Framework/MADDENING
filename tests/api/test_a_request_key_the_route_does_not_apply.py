@@ -5,7 +5,7 @@ another graph than the body asked for.
 (``transform``, ``additive``, units, a ``mapping``, a ``geometry``), and the
 route passes none of them: a body carrying one was answered 201 with a plain
 edge added, and the graph stepped differently from the one the body
-described (MADD-ANO-249).  ``POST /graph/nodes`` has the same shape: its
+described (MADD-ANO-253).  ``POST /graph/nodes`` has the same shape: its
 ``params`` is optional, so a misspelt ``params`` (or the constructor's
 arguments written beside ``type``) was a 201 on a node built from its
 defaults.  Both are now a 422 that names the key, and add nothing.

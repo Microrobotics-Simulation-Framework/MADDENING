@@ -27,7 +27,7 @@ geometry held by a node outside the group.
 in the next lattice cell, and the spectrum is taken at the returned
 iterate.  In 0.4.0 a group whose pass reads a position from the iterate
 has neither ``spectral_usable`` nor ``gradient_bound_usable``, on any
-report, and keeps its numbers (MADD-ANO-248); every example of every
+report, and keeps its numbers (MADD-ANO-252); every example of every
 search here is held to that (``geometry_cells.rule_violations``).  The
 numbers stay scored on the reports the withdrawn lattice-plane rules
 flagged (``geometry_cells.held_numbers``: ``seen["spectral_usable"]`` and
@@ -250,7 +250,7 @@ def test_a_sweep_that_updates_the_holder_first_has_no_geometry_column():
         seen = GS_SEARCH.observe(case)
         report = seen["report"]
         # The radius is what is read here.  The report carries no flag
-        # (MADD-ANO-248: the positions this sweep reads are the ones the
+        # (MADD-ANO-252: the positions this sweep reads are the ones the
         # pass has built, so the group solves them) and is never withheld.
         assert seen["scored"] and not gc.withheld(seen["reason"]), seen
         assert cell.iterate_reads and not seen["rule"], seen
@@ -608,7 +608,7 @@ def test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_
 
 
 def test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push():
-    """The gradient bound on plane draws (MADD-ANO-248): against the
+    """The gradient bound on plane draws (MADD-ANO-252): against the
     reference's error wherever it is held (``geometry_cells.held_numbers``),
     and never held with the fixed point in another lattice cell than the
     returned iterate; no report of this pair carries a flag.  The draws that
@@ -1119,7 +1119,7 @@ def test_the_hunt_finds_no_flag_on_a_fixed_point_beyond_twice_the_bound_across_a
         kind = "across" if seen["crossed"] else "same"
         counts[kind] += 1
         counts[f"{kind}_before"] += seen["usable_before"]
-        # The gradient's flag (MADD-ANO-248): it stood wherever the spectral
+        # The gradient's flag (MADD-ANO-252): it stood wherever the spectral
         # one did on a finite bound; it now needs no plane in the
         # Kantorovich ball.  Never across a plane, its bound held wherever
         # it is set, and the honest ones (same cell) it costs are counted.

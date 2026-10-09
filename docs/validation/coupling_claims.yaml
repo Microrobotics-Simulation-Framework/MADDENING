@@ -3379,7 +3379,7 @@ claims:
     the returned iterate's positions are in: the pass's Jacobian is another
         in the next cell (0.28 at the iterate against 0.97 at a fixed point 2e-4
     of a spacing past a plane, measured). So where the group solves
-    positions rho_spectral carries no flag in 0.4.0 (MAP-049, MADD-ANO-248);
+    positions rho_spectral carries no flag in 0.4.0 (MAP-049, MADD-ANO-252);
     where every position is a constant of the pass no plane can come between
     the iterate and the fixed point.
   oracle: eigenvalues of the matrix; NaN where documented.
@@ -3504,7 +3504,7 @@ claims:
     inside the Newton-Kantorovich ball), and each left spectral_usable on a
     bound far under the distance: 0.13 times it; 17 to 1,294 times under;
     and 34 to 1,874 times under in a cell whose polynomial has no fixed
-    point (MADD-ANO-248). So in 0.4.0 a group that solves positions (its
+    point (MADD-ANO-252). So in 0.4.0 a group that solves positions (its
     pass reads one from the iterate, or builds one and reads it in the same
     pass) has spectral_usable False on every step, whatever the bound reads,
     and the bound is reported uncertified; a group whose positions are all
@@ -3866,7 +3866,7 @@ claims:
     a relative error of 1.134 with those probes in it (MADD-ANO-234,
     resolved).
     A GROUP THAT SOLVES POSITIONS (a geometry edge read from the iterate, or
-    from the state the same pass has built; MAP-049, MADD-ANO-248): the
+    from the state the same pass has built; MAP-049, MADD-ANO-252): the
     Newton-Kantorovich check takes the Jacobian at the iterate and at the
     Newton point and cannot see a lattice plane beyond both (the bound read
     15x to 70,000x under the error with the flag set), and the rule that

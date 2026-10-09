@@ -853,7 +853,7 @@ class AddEdgeRequest(BaseModel):
     # also takes ``transform``, ``additive``, units, a ``mapping`` and a
     # ``geometry``; the route passes none of them, and a body carrying one
     # was answered 201 with a plain edge added: another graph than the one
-    # asked for, which steps differently (MADD-ANO-249).  A key the route
+    # asked for, which steps differently (MADD-ANO-253).  A key the route
     # does not apply is a 422 that names it.
     model_config = ConfigDict(extra="forbid")
 

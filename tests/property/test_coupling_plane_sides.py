@@ -1,7 +1,7 @@
 """The lattice-plane table of a group with a geometry edge: every reported
 number whose flag is set, against an independent reference, with the
 returned iterate, the Newton point and the fixed point on every combination
-of sides of a lattice plane (MADD-ANO-248, MAP-049, CPL-093).
+of sides of a lattice plane (MADD-ANO-252, MAP-049, CPL-093).
 
 ``gradient_relative_error_bound`` is the smooth theory's bound: it takes the
 pass's Jacobian at the returned iterate and at the Newton point.  A
@@ -347,7 +347,7 @@ def test_the_audited_positions_within_a_rounding_of_a_plane_lose_the_gradient_fl
 
 
 def test_the_audited_bounds_were_flagged_and_far_under_the_error():
-    """The three audited rows of MADD-ANO-248 as the audit recorded them:
+    """The three audited rows of MADD-ANO-252 as the audit recorded them:
     the reference's gradient error is 15 to 70,000 times the bound the
     report still carries, the fixed point is across a plane the Newton point
     is short of, and the flags are what changed (the spectral one too: on
@@ -456,7 +456,7 @@ def _check_constructed(curvature: str, dtype: str) -> dict:
 
 @pytest.mark.parametrize("curvature, dtype", [("kernel", "float64"), ("member", "float32")])
 def test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane(curvature, dtype):
-    """The audited construction (MADD-ANO-248, the spectral flag): the
+    """The audited construction (MADD-ANO-252, the spectral flag): the
     iterate and the Newton point in one lattice cell, the Newton-Kantorovich
     check reading that cell's small ``h``, and that cell's polynomial with
     its fixed point past the plane.  Neither flag is set whatever the
@@ -700,7 +700,7 @@ def _check_the_saddle_node(name: str) -> None:
 
 @pytest.mark.parametrize("name", SADDLE_NODE_PER_PUSH)
 def test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point(name):
-    """The case that ended the plane rules (MADD-ANO-248): the returned
+    """The case that ended the plane rules (MADD-ANO-252): the returned
     iterate ``converged`` in a lattice cell whose polynomial has no fixed
     point, the pass's only fixed point one cell on and tens to hundreds of
     bounds away.  The step's Newton-Kantorovich check had failed, the

@@ -753,6 +753,9 @@ claims:
     dense product exactly; an infinity at index 0 with padded slots pointing
     there.  The mapping alone: what a graph with sparse edges does is
     MAP-015.
+    That (k + 2) eps is not in the float floor of a coupling report: a
+    group at its float floor behind a long row can read
+    spectral_error_bound below its distance (MADD-ANO-251, open).
   oracle: >-
     the sum over each row's own slots in 80-bit extended precision, and its
     sum of magnitudes for the bound; the dense matrix the rows scatter into,
@@ -1349,6 +1352,12 @@ claims:
     jaxlib 0.11.0 with the CUDA 12 plugin, 2026-10-05) and are not run by
     any test.  Not claimed for x64, mixed dtypes, 16-bit floats, gradients,
     vmap or sharded graphs.
+    The in-order sum is what a coupling report's float floor does not
+    count: behind a scatter-layout row of more than
+    SCATTER_ROW_FLOOR_LIMIT = 10 entries the report withdraws
+    spectral_usable at the float floor, and the gather layout's float32
+    rows of 1e4 entries and more were measured summed in order on jaxlib
+    0.10.2 as well, unguarded (MADD-ANO-251, open).
   oracle: NumPy's in-order np.add.at in float32, byte for byte; the set of results of ten calls.
   tests:
     - tests/core/test_sparse_mapping.py::test_a_scatter_add_with_repeated_indices_is_the_in_order_sum_on_the_cpu

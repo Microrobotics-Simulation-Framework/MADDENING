@@ -3551,6 +3551,13 @@ claims:
     face of the hull) a fixed point in another cell than the returned
     iterate is within twice the bound wherever the flag is set, with no
     allowance for h.
+    Not behind a long row sum of a mapped edge at the float floor (MADD-
+    ANO-251, open): the floor does not count the row's rounding, the bound
+    read 0.68 to 0.002 of the distance behind scatter-layout rows of 100
+    to 3e4 entries, and the report withdraws the flag there (a row over
+    SCATTER_ROW_FLOOR_LIMIT = 10 entries with the residual not above the
+    floor times the row's length), while the gather layout and the dense
+    kinds are not guarded.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -3829,6 +3836,13 @@ claims:
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
+    One more case withdraws the flag and keeps the numbers (MADD-ANO-251,
+    open): an internal edge with a static sparse mapping in the scatter
+    layout whose longest row is over SCATTER_ROW_FLOOR_LIMIT = 10 entries,
+    where the residual is not above the float floor times that row's
+    length; a flag kept behind such a row read at least 0.9925 of the
+    distance, and the same rounding in the gather layout and the dense
+    kinds is not flagged.
   oracle: the flag against each condition.
   tests:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
@@ -4202,6 +4216,9 @@ claims:
     3000 on the audited graph, and 0.57x at 1000 on the search's pair
     (MADD-ANO-212, open; the second is pinned as a strict xfail in the
     slow lane).  Jacobi holds there.
+    The floor counts evaluations and not a mapped edge's own row sum
+    (MADD-ANO-251, open): behind a row of more than ten entries it can be
+    too small in every layout, by the row's (k - 1) / 2 eps at most.
   oracle: closed form.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -4253,6 +4270,9 @@ claims:
   conditions: >-
     float32, n <= 6. Not claimed for float64 (x64), mixed dtypes or 16-bit
     floats.
+    The constant is not claimed to cover a mapped edge's row sum:
+    measured, it held by 3.9x for scatter-layout rows of up to 10 entries
+    and not from 100 on (MADD-ANO-251, open).
   oracle: float64 evaluation of the same updates.
   tests:
     - tests/core/test_coupling_precision_floor.py::test_the_floor_has_headroom_over_a_dense_updates_evaluation_error

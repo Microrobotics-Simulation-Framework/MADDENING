@@ -40,7 +40,11 @@ class EdgeValidationError(Exception):
     every detected problem and raises a single
     :class:`ExceptionGroup` whose ``.exceptions`` contains one
     :class:`ShapeMismatchError` or :class:`DtypeMismatchError` per
-    problem.  Catch :class:`EdgeValidationError` (or the more specific
+    problem.  The shape rule is asked again, and raised the same way,
+    wherever a step is traced for a state written after ``compile()``
+    (``set_node_state`` with another shape); the dtype rule is asked by
+    ``compile()`` and ``validate()`` only.  Catch
+    :class:`EdgeValidationError` (or the more specific
     subclasses) inside an ``except*`` to handle them uniformly::
 
         try:
@@ -55,7 +59,9 @@ class EdgeValidationError(Exception):
 
 class ShapeMismatchError(EdgeValidationError):
     """Edge brings a field whose runtime shape disagrees with the
-    target node's :attr:`BoundaryInputSpec.shape`."""
+    target node's :attr:`BoundaryInputSpec.shape`: at ``compile()``, or
+    where a step is traced for a state written with another shape after
+    it."""
 
 
 class DtypeMismatchError(EdgeValidationError):
@@ -117,9 +123,18 @@ class UnderflowRangeWarning(PrecisionLimitWarning):
     the accelerators, the report) works in power-of-two frames and keeps
     its own resolution down to ``tiny``; a node's ``update`` does not.
 
-    ``GraphManager`` checks each coupled group once, on the first step after
-    every ``compile()``, and warns at most once per group, naming the field,
-    its magnitude and the threshold.  An exactly zero field never warns.
+    ``GraphManager`` checks each coupled group on the first step after
+    every ``compile()`` and after every write of node states that is not a
+    step's (``set_node_state``, ``load_state``, ``reset_state``), on the
+    state that step starts from and the one it returns, and warns at most
+    once per group, naming the field, its magnitude and the threshold.  An
+    exactly zero field never warns; a state that decays into the range
+    through the nodes' own updates is not checked again.  A graph that is
+    written to before every step is not asked at every step (the check
+    costs several times a small graph's step): the first eight checks
+    that writes make due after a ``compile()`` are made at the next step,
+    and from then on a due check is made once 1024 stepper calls have
+    stored a state since the previous one.
     The remedy is to write the field in units where it is of order one.
     Float32 thresholds: ``tiny / eps`` is about ``9.9e-32``; bfloat16
     ``1.5e-36``; float16 ``0.0625`` (its normal range starts at ``6.1e-5``);

@@ -109,11 +109,9 @@ Execution order
   previous step's value.  An edge from a node to itself is one or the
   other by whether the node is in a group, which makes the term it
   carries implicit or explicit, and `gm.validate()` says which in an
-  `INFO:` line for the edge (`INFO: edge a.x -> a.u is from node 'a' to
-  itself. Outside a coupling group it is a back edge: ...`, or `... With
-  the node in a coupling group (['a']) the edge is iterated with the
-  group ...`): see
-  [An edge from a node to itself](quickstart.md#an-edge-from-a-node-to-itself).
+  `INFO:` line for the edge: see
+  [An edge from a node to itself](quickstart.md#an-edge-from-a-node-to-itself),
+  which shows both lines.
 - **Coupling groups**: members, solver, acceleration, iteration mode, the
   norm with the tolerance it actually reads (`tolerance` for `"l2"`,
   `atol`/`rtol` for `"mixed"` and `"interface"`), `max_iterations`,

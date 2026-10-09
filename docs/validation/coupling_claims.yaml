@@ -6427,7 +6427,7 @@ claims:
     - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_line_for_an_edge_outside_a_group_is_logged_as_a_staggered_loop_is
     - tests/core/test_an_edge_from_a_node_to_itself.py::test_a_graph_whose_only_remark_is_that_line_compiles_and_steps_with_warnings_as_errors
     - tests/core/test_an_edge_from_a_node_to_itself.py::test_validate_tells_an_edge_from_a_nodes_own_flux_outside_a_group_that_it_cannot_be_read
-    - tests/core/test_an_edge_from_a_node_to_itself.py::test_the_guides_show_the_lines_validate_gives
+    - tests/compliance/test_validate_lines_in_the_guides.py::test_the_page_shows_each_line_validate_gives_for_the_graph_it_describes
     - tests/api/test_graph_endpoint_validation.py::test_validate_reports_an_edge_from_a_node_to_itself_and_the_graph_still_compiles_and_steps
     - tests/core/test_coupling.py::TestCouplingValidation::test_cycle_covered_by_group_names_the_groups_iteration_mode
     - tests/verification/hypothesis/test_hypothesis_graph.py::TestSelfEdgeHandling::test_self_edge_ball_position_to_table

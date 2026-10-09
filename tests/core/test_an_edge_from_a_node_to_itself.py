@@ -49,7 +49,6 @@ import itertools
 import logging
 import re
 import warnings
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -73,10 +72,11 @@ CLOSE = 1e-11
 EXPLICIT = 1.0 - K * DT             # 0.99
 IMPLICIT = 1.0 / (1.0 + K * DT)     # 0.990099...
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 #: What ``validate()`` says after naming the edge.  Written out here, not
 #: read from the library: the two sentences of ``add_edge``'s docstring,
-#: and the one for a flux that cannot be read (MADD-ANO-157).
+#: and the one for a flux that cannot be read (MADD-ANO-157).  The copies
+#: of these lines in the two guides are held to the library by
+#: ``tests/compliance/test_validate_lines_in_the_guides.py``.
 READS_THE_PREVIOUS_STEP = (
     "Outside a coupling group it is a back edge: the node reads its state of the previous "
     "step, so the term the edge carries is explicit.")
@@ -391,33 +391,6 @@ def test_a_graph_whose_only_remark_is_that_line_compiles_and_steps_with_warnings
         gm.compile()
         gm.step()
     assert _x(gm) == pytest.approx(EXPLICIT if group is None else IMPLICIT, abs=5e-7)
-
-
-def test_the_guides_show_the_lines_validate_gives():
-    """The quickstart's two rods and the coupling guide's ``a``, read from the library.
-
-    Each guide prints the lines whole; a line break in the page is taken
-    as the space it stands for.
-    """
-    def text(path):
-        return " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
-
-    def rod(grouped):
-        gm = GraphManager()
-        gm.add_node(HeatNode("rod", DT, n_cells=4, thermal_diffusivity=0.1))
-        gm.add_edge("rod", "rod", "temperature", "heat_source", transform=_loss)
-        if grouped:
-            gm.add_coupling_group(["rod"], max_iterations=50)
-        return gm
-
-    for path, graphs in (
-            ("docs/user_guide/quickstart.md", (rod(False), rod(True))),
-            ("docs/developer_guide/coupling_algorithm_guide.md",
-             (_built(), _built({}), _built(node=FluxRate, field="q")))):
-        page = text(path)
-        for gm in graphs:
-            (line,) = gm.validate()
-            assert line.startswith("INFO: edge ") and line in page, (path, line)
 
 
 # ---------------------------------------------------------------------------

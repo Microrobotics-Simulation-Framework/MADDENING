@@ -304,8 +304,9 @@ def test_a_source_field_at_exactly_zero_stays_out_whatever_is_delivered():
 # ---------------------------------------------------------------------------
 
 #: What a converged step of this pair is held to here, in tolerances of
-#: each field's own magnitude.  Measured with no dead band on jax 0.10.2,
-#: 0.11.0 and 0.11.2: 0.9 to 7.5 (float64) over six steps.
+#: each field's own magnitude.  Measured with no dead band on jax 0.11.0:
+#: 0.9 to 7.5 (float64) over six steps; the tests below hold it on 0.10.2
+#: and 0.11.2 as well.
 PROMISE = 25.0
 
 

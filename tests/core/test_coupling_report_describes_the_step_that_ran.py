@@ -488,9 +488,11 @@ def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_a
     gm = G.graph(group=True)
     gm.step()
     first = report(gm)
-    # Nothing is withheld; the one reason is the cause of its flags (the
-    # solve stops on the float floor), which names no geometry.
-    assert "geometry" not in first.get("not_usable_reason", "")
+    # Nothing is withheld; the one reason is the cause of its flags: the
+    # group solves the markers' positions, so it has none in 0.4.0.
+    assert first["not_usable_reason"].startswith(
+        "the group solves position(s) ['markers.pos']")
+    assert first["spectral_usable"] is False and first["gradient_bound_usable"] is False
     assert first["spectral_error_bound"] != "nan"
     assert first["rho_spectral"] != "nan" and first["gradient_relative_error_bound"] != "nan"
     slot = f"coupling_{G.GROUP}_geometry_gap"
@@ -512,6 +514,7 @@ def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_a
     loaded = report(gm)
     assert "written" in loaded["not_usable_reason"]
     assert "geometry" not in loaded["not_usable_reason"]
+    assert "solves position" not in loaded["not_usable_reason"]
     for key, value in loaded.items():
         if key != "not_usable_reason":
             assert value == WITHHELD.get(key, first[key]), key

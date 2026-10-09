@@ -491,21 +491,76 @@ def withheld(reason) -> bool:
 
 
 def without_plane_limit(gm: GraphManager) -> dict:
-    """The report of *gm*'s last step with the two lattice-plane rules
-    out of it (the limit and the margin read as ``inf``): what
-    ``spectral_usable`` said before either existed."""
+    """The report of *gm*'s last step as a group whose positions were all
+    constants of the pass would carry it (the limit and the margin read
+    as ``inf``, no position recorded as solved): a smooth group's flags,
+    what ``spectral_usable`` said before any lattice-plane rule existed."""
     slot = f"coupling_{KEY}_geometry_plane_limit"
     margin = f"coupling_{KEY}_geometry_plane_margin"
     kept = gm._state                                               # noqa: SLF001
+    solved = gm._committed_geometry_solved                         # noqa: SLF001
     if slot not in kept.get("_meta", {}):
         return dict(gm.coupling_diagnostics()[KEY])
     try:
         clear = np.asarray(np.inf, np.asarray(kept["_meta"][slot]).dtype)
         gm._state = {**kept, "_meta": {**kept["_meta"], slot: clear,             # noqa: SLF001
                                        margin: clear}}
+        gm._committed_geometry_solved = {**solved, KEY: ()}        # noqa: SLF001
         return dict(gm.coupling_diagnostics()[KEY])
     finally:
         gm._state = kept                                           # noqa: SLF001
+        gm._committed_geometry_solved = solved                     # noqa: SLF001
+
+
+#: What the one reason of a group that solves positions says (the rule of
+#: 0.4.0, ``_group_layout._geometry_flags``).
+SOLVED_REASON = ("solves position(s)", "0.4.0 does not certify a bound for such a group",
+                 "fixed during the pass")
+
+
+def rule_violations(cell: Cell, d: dict) -> list:
+    """What report *d* of *cell* has that the rule of 0.4.0 does not allow,
+    as text.  A cell whose pass reads a position from the iterate
+    (:attr:`Cell.iterate_reads`): no flag, on any report, and where the
+    numbers are there the one reason.  A cell whose positions are
+    constants of the pass: no reason that names a lattice plane."""
+    reason = d.get("not_usable_reason") or ""
+    bad = []
+    if cell.iterate_reads:
+        if d["spectral_usable"] or d["gradient_bound_usable"]:
+            bad.append(f"a flag is set in a group that solves positions: {cell!r}")
+        computed = isinstance(d["rho_spectral"], float) and math.isfinite(d["rho_spectral"])
+        if computed and not withheld(reason) and not all(t in reason for t in SOLVED_REASON):
+            bad.append(f"the reason is not the rule's: {reason[:160]!r}")
+    elif "lattice plane" in reason or SOLVED_REASON[0] in reason:
+        bad.append(f"a reason of constant positions names a plane or a solve: {reason[:160]!r}")
+    return bad
+
+
+def held_numbers(cell: Cell, d: dict, before: dict, meta: dict) -> tuple:
+    """``(spectral, gradient)``: which numbers of report *d* the searches
+    hold to the reference.
+
+    A cell whose positions are constants of the pass: the report's flags.
+    A cell that solves positions has no flag in 0.4.0 (MADD-ANO-248) and
+    its numbers are reported as computed; the searches keep holding them
+    on the reports the withdrawn lattice-plane rules flagged -- a smooth
+    group's flags (*before*: :func:`without_plane_limit`), the stored
+    margin over one, and, with the bound over the stored limit, a finite
+    gradient bound.  The numbers are bit for bit what they were, so this
+    is the set that was scored when a flag stood on it, and the searches'
+    floors keep counting it.  It is the instrument's choice of what to
+    score, not a claim that a flag could stand there.
+    """
+    if not cell.iterate_reads:
+        return bool(d["spectral_usable"]), bool(d["gradient_bound_usable"])
+    margin = float(meta.get("geometry_plane_margin", math.nan))
+    limit = float(meta.get("geometry_plane_limit", math.nan))
+    bound = float(d["spectral_error_bound"])
+    gradient = float(d["gradient_relative_error_bound"])
+    clear = margin > 1.0 and (bound <= limit or math.isfinite(gradient))
+    return (bool(before["spectral_usable"] and clear),
+            bool(before["gradient_bound_usable"] and clear))
 
 
 def observe(cell: Cell, case: Case, trio: tuple, *, values: Optional[dict] = None,
@@ -514,7 +569,16 @@ def observe(cell: Cell, case: Case, trio: tuple, *, values: Optional[dict] = Non
     scores of what it reported.  *values*: the numbers, where they are
     not ``values_of(case, cell)``.  With *across* the example is scored
     whether or not the fixed point is in the returned iterate's lattice
-    cells (:func:`observe_plane`)."""
+    cells (:func:`observe_plane`).
+
+    ``spectral_usable`` and ``gradient_usable`` of the result say whether
+    the number is **held to the reference** (:func:`held_numbers`): the
+    report's flags for a cell whose positions are constants of the pass,
+    and for a cell that solves positions, which has no flag in 0.4.0, the
+    reports the withdrawn lattice-plane rules flagged.  The report's own
+    flags are in ``report`` and its reason in ``reason``; ``rule`` lists
+    what the report has that the rule of 0.4.0 does not allow
+    (:func:`rule_violations`), and :meth:`Search.observe` fails on any."""
     gm, twin, ref = trio
     values = values_of(case, cell) if values is None else values
     ref = bound_reference(ref, twin, values)
@@ -525,11 +589,13 @@ def observe(cell: Cell, case: Case, trio: tuple, *, values: Optional[dict] = Non
                  if not math.isnan(d["error_estimate"]) or "not_usable_reason" not in d
                  else math.nan)
         before = without_plane_limit(gm)
+    held_spectral, held_gradient = held_numbers(cell, d, before, meta)
     out = dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0, plane=0.0,
                plane_before=0.0, usable_before=bool(before["spectral_usable"]), crossed=False,
                near_before=False,
-               spectral_usable=bool(d["spectral_usable"]),
-               gradient_usable=bool(d["gradient_bound_usable"]),
+               spectral_usable=held_spectral,
+               gradient_usable=held_gradient,
+               rule=rule_violations(cell, d),
                floor_reported=math.isfinite(floor), referenced=False, near=False,
                scored=False, finite=False,
                reason=d.get("not_usable_reason"),
@@ -695,7 +761,7 @@ def observe_plane(cell: Cell, case: PlaneCase, trio: tuple) -> dict:
     if values is None:
         return dict(bound=0.0, radius=0.0, radius_strict=0.0, gradient=0.0, floor=0.0,
                     plane=0.0, plane_before=0.0, usable_before=False, crossed=False,
-                    near_before=False, spectral_usable=False,
+                    near_before=False, spectral_usable=False, rule=[],
                     gradient_usable=False, floor_reported=False, referenced=False,
                     near=False, scored=False, finite=False, placed=False, reason=None,
                     report={})
@@ -750,7 +816,12 @@ class Search:
     def observe(self, case: Case) -> dict:
         if case not in self._seen:
             look = observe_plane if isinstance(case, PlaneCase) else observe
-            self._seen[case] = look(self.cells[case.cell], case, self._built(case.cell))
+            seen = look(self.cells[case.cell], case, self._built(case.cell))
+            # The rule of 0.4.0, on every example of every search: no flag
+            # where the pass reads a position from the iterate, no lattice
+            # plane in a reason where it reads none.
+            assert not seen["rule"], (case, seen["rule"], seen["report"])
+            self._seen[case] = seen
         return self._seen[case]
 
     def run(self, name: str, indices, *, profile=None, fail: bool = True,

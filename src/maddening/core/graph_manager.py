@@ -4990,32 +4990,27 @@ class GraphManager:
             the bounds stand where the two agree to
             ``GEOMETRY_GAP_TOLERANCE``.  The spectrum is taken at the
             returned iterate, and a multilinear stencil is another
-            polynomial across a lattice plane, so both flags have two
-            more conditions wherever the pass reads a position from the
-            iterate (a member's source-anchored geometry, or the
-            target-anchored one of a member that computes fluxes).
-            *No lattice plane of the mapping's grid, and no face of its
-            hull, inside the Newton-Kantorovich ball around the returned
-            iterate*: the step stores how many radii of that ball the
-            nearest one is from such a position, and at one or under
-            (or with the slot absent or not a number) both flags are
-            ``False``.  With a plane in the ball the fixed point of the
-            polynomial the pass is in the iterate's lattice cells may
-            lie past it, where the pass is another polynomial:
-            ``"spectral_error_bound"`` and
-            ``"gradient_relative_error_bound"`` would then describe a
-            point the pass does not have.  *And, where a plane is
-            within twice* ``"spectral_error_bound"`` *of such a
-            position, a Newton-Kantorovich check that passed*
-            (``"gradient_relative_error_bound"`` finite).  Every number
-            is reported as computed, and the entry has a
-            ``"not_usable_reason"`` giving every cause of each ``False``
-            flag of a step that computed the estimate -- a plane rule,
-            the float floor, an estimate that did not settle (more
+            polynomial across a lattice plane, where the fixed point of
+            the polynomial the pass is in the iterate's lattice cells
+            need not be the pass's.  So in 0.4.0 a group that *solves*
+            positions -- its pass reads one from the iterate, or builds
+            one and reads it in the same pass (a member's
+            source-anchored geometry, or the target-anchored one of a
+            member that computes fluxes) -- has ``"spectral_usable"``
+            and ``"gradient_bound_usable"`` ``False`` on every step,
+            whatever its numbers read: every number is reported as
+            computed, uncertified, and the entry's
+            ``"not_usable_reason"`` names the positions and says so.
+            Where every position is fixed during the pass (a
+            target-anchored geometry read by ``update``, positions held
+            by a node outside the group) the flags are any other
+            group's, and a ``False`` one of a step that computed the
+            estimate has a ``"not_usable_reason"`` giving every cause
+            -- the float floor, an estimate that did not settle (more
             independent interface scalars than its eight Krylov steps),
             a gradient bound that was not computed (NaN) or did not
-            certify (``inf``).  A marker resting exactly on a lattice
-            plane, its position solved by the group, therefore has
+            certify (``inf``) -- none of which names a lattice plane.
+            A marker whose position the group solves therefore has
             neither flag on any step.  Any other such group, and one
             whose step failed that check, reports the solve's own
             ``"iterations"``,
@@ -7528,10 +7523,9 @@ class GraphManager:
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;
-        * ``not_usable_reason`` for a group with a geometry-dependent
-          mapping whose bound reaches a lattice plane without the step
-          having certified its linearisation across it (experimental):
-          ``spectral_usable`` is withdrawn and the numbers are kept;
+        * ``not_usable_reason`` for a group that solves the positions of
+          a geometry-dependent mapping (experimental): it has no usable
+          flag in 0.4.0 and its numbers are kept, uncertified;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

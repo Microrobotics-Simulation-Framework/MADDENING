@@ -25,9 +25,16 @@ geometry held by a node outside the group.
 
 **Across a lattice plane** (MAP-049).  The stencil is another polynomial
 in the next lattice cell, and the spectrum is taken at the returned
-iterate: where a position the pass reads from the iterate is within twice
-the bound of a plane, the report withdraws ``spectral_usable`` and
-``gradient_bound_usable`` and keeps the numbers.  **Per push:** plane
+iterate.  In 0.4.0 a group whose pass reads a position from the iterate
+has neither ``spectral_usable`` nor ``gradient_bound_usable``, on any
+report, and keeps its numbers (MADD-ANO-248); every example of every
+search here is held to that (``geometry_cells.rule_violations``).  The
+numbers stay scored on the reports the withdrawn lattice-plane rules
+flagged (``geometry_cells.held_numbers``: ``seen["spectral_usable"]`` and
+``seen["gradient_usable"]`` below say *scored*, and the report's own flags
+are in ``seen["report"]``), and on the report's own flags in the cells
+whose positions are constants of the pass (both edges target-anchored:
+:data:`CONSTANT_CELLS`).  **Per push:** plane
 draws (``geometry_cells.PlaneCase``: a fixed point a drawn 1e-6 to 1e-2 of
 a spacing from a lattice plane or a face of the hull) on the per-push pair
 at a looser tolerance, where the iterate stops a plane away from its fixed
@@ -126,6 +133,10 @@ USABLE_FLOOR = 0.25
 SCORED_FLOOR = 0.5
 
 SEARCH = gc.Search(CELLS)
+#: The cells whose positions are constants of the pass (both edges read
+#: their target's pre-step positions): the only ones whose reports carry a
+#: flag in 0.4.0.  The slow hunt must see flagged reports in each.
+CONSTANT_CELLS = tuple(i for i, c in enumerate(CELLS) if not c.iterate_reads)
 
 
 def _held(name: str, fractions: dict) -> None:
@@ -163,6 +174,10 @@ def test_the_reported_radius_has_the_geometry_term_in_it(seed):
     seen = SEARCH.observe(case)
     report = seen["report"]
     assert seen["scored"] and seen["spectral_usable"] and seen["gradient_usable"], seen
+    # The pair solves the markers' positions: the numbers are held to the
+    # reference below, and the report carries no flag.
+    assert CELLS[case.cell].iterate_reads
+    assert report["spectral_usable"] is False and report["gradient_bound_usable"] is False
     true, without = report["rho_true"], report["rho_without_geometry"]
     assert abs(without - true) >= least * true, (
         f"premise: the geometry moves the radius by {abs(without - true) / true:.3g}")
@@ -199,7 +214,7 @@ def test_the_reported_radius_has_the_geometry_term_in_it_under_gauss_seidel(seed
     case, least = GS_RADIUS_SEEDS[seed]
     seen = GS_SEARCH.observe(case)
     report = seen["report"]
-    assert seen["scored"] and seen["spectral_usable"] and (seen["reason"] is None or "spectral_usable stands" in seen["reason"]), seen
+    assert seen["scored"] and seen["spectral_usable"] and not gc.withheld(seen["reason"]), seen
     true, without = report["rho_true"], report["rho_without_geometry"]
     assert abs(without - true) >= least * true, (without, true)
     assert abs(report["rho_spectral"] - true) <= 1e-9 * true, report
@@ -223,13 +238,12 @@ def test_a_sweep_that_updates_the_holder_first_has_no_geometry_column():
         case = Case(1, seed, 0.7, 0.2)
         seen = GS_SEARCH.observe(case)
         report = seen["report"]
-        # The radius is what is read here.  Its flag stands, or is
-        # withdrawn with the gradient's by a lattice plane in the
-        # Kantorovich ball (MADD-ANO-248: the positions this sweep reads
-        # are the ones the pass has built, a reader of that rule); the
-        # report is never withheld.
+        # The radius is what is read here.  The report carries no flag
+        # (MADD-ANO-248: the positions this sweep reads are the ones the
+        # pass has built, so the group solves them) and is never withheld.
         assert seen["scored"] and not gc.withheld(seen["reason"]), seen
-        assert seen["spectral_usable"] or "Newton-Kantorovich ball" in seen["reason"], seen
+        assert cell.iterate_reads and not seen["rule"], seen
+        assert report["spectral_usable"] is False, seen
         _gm, twin, ref = GS_SEARCH._built(1)                # noqa: SLF001
         values = gc.values_of(case, cell)
         ref = gc.bound_reference(ref, twin, values)
@@ -288,9 +302,8 @@ def _per_push_draws() -> list:
 
 def test_the_self_check_passes_on_every_per_push_draw_with_a_margin():
     """No draw's report is withheld by the self-check.  (A draw far from
-    its fixed point can lose ``spectral_usable`` to the lattice-plane rule
-    of MAP-049 -- a cap reached with a bound that spans a lattice cell and
-    no certified linearisation -- which is another reason, and keeps the
+    its fixed point has no flag, as every report of this pair, which solves
+    the markers' positions: that is another reason, and keeps the
     numbers.)"""
     draws = _per_push_draws()
     assert len(draws) >= 20
@@ -364,7 +377,11 @@ def test_the_report_withholds_the_bounds_where_the_step_s_gap_is_over_the_tolera
     keys = [e.key for e in gm._edges]                      # noqa: SLF001
     with gc.precision(cell.dtype == "float64"):
         _pre, _state, honest, meta = gc.run_once(gm, gc.values_of(case, cell))
-        assert "not_usable_reason" not in honest and honest["spectral_usable"] is True
+        # Under the tolerance nothing is withheld: the numbers stand, with
+        # the one reason of a pair that solves the markers' positions.
+        assert not gc.withheld(honest["not_usable_reason"]) and not gc.rule_violations(
+            cell, honest), honest
+        assert math.isfinite(honest["spectral_error_bound"])
         kept = gm._state                                   # noqa: SLF001
         try:
             allowed = _bounds.GEOMETRY_GAP_TOLERANCE
@@ -501,12 +518,11 @@ def test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane():
     the marker before the plane at 1.0 and its fixed point after it.  The
     spectrum at the returned iterate is right about the cell the iterate
     is in (``rho_spectral`` is the reference's radius there) and the bound
-    built on it is several times under the true distance.  Before the
-    criterion ``spectral_usable`` was set on it; now a plane is within
-    twice the bound, the step's Newton-Kantorovich check did not certify
-    the linearisation across it, and the flag is withdrawn with the
-    numbers kept and the reason.  The same graph with the fixed point in
-    the middle of a cell keeps its flag and holds its bound."""
+    built on it is several times under the true distance.  Before any
+    lattice-plane rule ``spectral_usable`` was set on it.  The pair solves
+    the marker's position, so in 0.4.0 it has no flag, with the numbers
+    kept and the reason; the same graph with the fixed point in the middle
+    of a cell has none either, and its bound holds."""
     seen = _pinned(PINNED_ACROSS)
     report = seen["report"]
     assert seen["referenced"] and seen["crossed"] and report["converged"], seen
@@ -515,22 +531,23 @@ def test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane():
     assert report["distance"] > 2.0 * report["spectral_error_bound"] > 0.0
     assert report["spectral_error_bound"] > report["plane_limit"] >= 0.0
     assert not math.isfinite(report["gradient_relative_error_bound"])
-    # The fix.
+    # The rule: no flag, and the number is not among those held either.
+    assert PINNED_CELL.iterate_reads and not seen["rule"], seen
+    assert report["spectral_usable"] is False and report["gradient_bound_usable"] is False
     assert seen["spectral_usable"] is False and seen["gradient_usable"] is False
     assert seen["plane"] == 0.0
     reason = seen["reason"]
-    assert "lattice plane" in reason and "P.x->F.u" in reason and "F.x->P.u" in reason
-    # The plane's cause: the pass moves the position across it (the margin
-    # is zero, and that is the whole reason), or it is in the ball and in
-    # reach of the bound without a passed check (the bound is then told).
-    assert ("is on a lattice plane" in reason
-            or f"{report['spectral_error_bound']:.3g}" in reason), reason
+    assert all(told in reason for told in gc.SOLVED_REASON), reason
+    assert "['P.pos']" in reason and "P.x->F.u" in reason and "F.x->P.u" in reason
     assert "do not read a moving geometry" not in reason       # the numbers are reported
     assert math.isfinite(report["rho_spectral"]) and math.isfinite(report["residual"])
 
     control = _pinned(PINNED_MID_CELL)
     assert control["referenced"] and not control["crossed"] and control["scored"], control
-    assert control["spectral_usable"] is True and (control["reason"] is None or "spectral_usable stands" in control["reason"]), control
+    assert not control["rule"] and control["reason"] == reason, control
+    assert control["report"]["spectral_usable"] is False
+    # Its number is held, and holds.
+    assert control["spectral_usable"] is True, control
     assert control["report"]["plane_limit"] > control["report"]["spectral_error_bound"]
     assert control["near"] and 0.0 < control["bound"] <= gc.THRESHOLD["bound"], control
 
@@ -580,11 +597,10 @@ def test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_
 
 
 def test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push():
-    """The gradient's flag on plane draws (MADD-ANO-248): its bound against
-    the reference's error wherever it is set, and never set with the fixed
-    point in another lattice cell than the returned iterate -- the flag
-    stands only with no plane inside the Newton-Kantorovich ball around the
-    iterate (``_bounds._kantorovich_ball_plane_margin``).  The draws that
+    """The gradient bound on plane draws (MADD-ANO-248): against the
+    reference's error wherever it is held (``geometry_cells.held_numbers``),
+    and never held with the fixed point in another lattice cell than the
+    returned iterate; no report of this pair carries a flag.  The draws that
     put the fixed point just past a plane the Newton point stops short of
     are the table's (``test_coupling_plane_sides.py``): these have it 1e-6
     of a spacing or more from the plane."""
@@ -599,18 +615,18 @@ def test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_pl
     assert not flagged, flagged[:3]
 
 
-def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified():
+def test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read():
     """The report's side, on the per-push graph with the three slots the
-    two lattice-plane rules read replaced.  The limit: the flags stand with
-    the bound at the limit, and over it where the gradient bound is finite
-    (the Newton-Kantorovich check passed); over the limit without that both
-    are withdrawn, the numbers kept, and the reason tells a bound that was
-    not computed (NaN) from one that did not certify (``inf``); a limit that
-    is not a number or absent counts as a plane in reach, ``inf`` as none.
-    The margin: over one both flags stand; at one, under it, not a number or
-    absent **both** are withdrawn, whatever the limit and the gradient bound
-    read (MADD-ANO-248).  A flag that is ``False`` for a cause that is not a
-    plane carries that cause and names no plane."""
+    withdrawn lattice-plane rules read replaced.  The pair solves the
+    markers' positions: at every limit, margin and gradient bound -- the
+    readings both flags stood on included, and a slot that is absent --
+    the numbers are the honest report's, both flags are ``False`` and the
+    reason is the same one, on every printer.  **The control**, the same
+    report read as that of a group whose positions are constants of the
+    pass (the record ``compile()`` committed emptied): both flags stand
+    where both slots read ``inf``, the gradient's has its own cause and
+    names no plane, and any other reading of a slot -- a number, NaN,
+    absent -- sets no flag (fail closed)."""
     case, _least = RADIUS_SEEDS["the-geometry-lowers-the-radius"]
     cell = CELLS[case.cell]
     gm, _twin, _ref = SEARCH._built(case.cell)             # noqa: SLF001
@@ -620,12 +636,18 @@ def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is
     both = ("spectral_usable", "gradient_bound_usable")
     with gc.precision(cell.dtype == "float64"):
         _pre, _state, honest, meta = gc.run_once(gm, gc.values_of(case, cell))
-        assert "not_usable_reason" not in honest and honest["spectral_usable"] is True
-        assert honest["gradient_bound_usable"] is True
+        assert honest["spectral_usable"] is False and honest["gradient_bound_usable"] is False
+        told = honest["not_usable_reason"]
+        assert all(part in told for part in gc.SOLVED_REASON) and "['P.pos']" in told, told
+        assert all(e.key in told for e in gm._edges)                       # noqa: SLF001
         bound = honest["spectral_error_bound"]
+        assert math.isfinite(bound) and math.isfinite(honest["gradient_relative_error_bound"])
         kept = gm._state                                   # noqa: SLF001
+        solved = gm._committed_geometry_solved             # noqa: SLF001
+        assert solved[gc.KEY] == ("P.pos",)
         dtype = meta["geometry_plane_limit"].dtype
         under = float(np.nextafter(np.asarray(bound, dtype), np.asarray(0, dtype)))
+        # The reading the withdrawn rules set both flags on.
         assert float(kept["_meta"][margin_slot]) > 1.0
         absent = object()
 
@@ -641,71 +663,67 @@ def test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is
             gm._state = {**kept, "_meta": meta_now}                    # noqa: SLF001
             return dict(gm.coupling_diagnostics()[gc.KEY])
 
-        def flags_withdrawn(report, flags=both):
-            """The numbers are the honest report's; *flags* are False."""
-            rest = {k: v for k, v in honest.items()
-                    if k not in (*flags, "gradient_relative_error_bound")}
-            assert {k: report[k] for k in rest} == rest, report
-            assert all(report[flag] is False for flag in flags), report
-            (row,) = list(gm.coupling_report())
-            return report["not_usable_reason"], row["flags"]
+        def numbers(report):
+            return {k: v for k, v in report.items()
+                    if k not in (*both, "gradient_relative_error_bound", "not_usable_reason")}
 
+        above = float(np.nextafter(np.asarray(1.0, dtype), np.asarray(2.0, dtype)))
+        limits = (bound, math.inf, 2.0 * bound, under, 0.0, math.nan, None)
+        margins = (above, 26.0, math.inf, 1.0, 0.5, 0.0, math.nan, None)
         try:
-            for limit in (bound, math.inf, 2.0 * bound):
-                assert report_with(limit) == honest, limit
-                # The gradient's own cause, and no plane named with it.
-                for gradient, told in ((math.inf, "did not pass"), (math.nan, "not computed")):
-                    reason, printed = flags_withdrawn(
-                        report_with(limit, gradient), ("gradient_bound_usable",))
-                    assert reason.startswith("gradient_bound_usable is False (spectral_usable "
-                                             "stands)") and told in reason, reason
-                    assert "lattice plane" not in reason and "tolerance" not in reason, reason
-                    assert any(f.startswith("gradient_bound_usable=False") for f in printed)
-                    assert not any(f.startswith("spectral_usable=False") for f in printed)
-            # A plane in reach, certified: the flag stands.
-            for limit in (under, 0.0, math.nan):
-                assert report_with(limit) == honest, limit
-            # A plane in reach, not certified: the limit missing counts too.
-            for limit in (under, 0.0, math.nan, None):
-                for gradient, told in ((math.inf, "did not pass (it is inf)"),
-                                       (math.nan, "was not computed (it is NaN)")):
-                    reason, printed = flags_withdrawn(report_with(limit, gradient))
-                    assert "lattice plane" in reason and f"{bound:.3g}" in reason, reason
-                    assert told in reason, reason
-                    assert all(e.key in reason for e in gm._edges)         # noqa: SLF001
-                    assert any(f.startswith("spectral_usable=False") and "lattice plane" in f
-                               for f in printed), printed
-            # The margin of the Kantorovich ball, whatever the limit and the
-            # gradient bound read: over one both flags stand.
-            above = float(np.nextafter(np.asarray(1.0, dtype), np.asarray(2.0, dtype)))
-            for margin in (above, 26.0, math.inf):
-                for limit in (math.inf, 0.0):
-                    assert report_with(limit, margin=margin) == honest, (margin, limit)
-            # At one, under it, not a number or absent: both are withdrawn.
-            for margin, told, advised in (
-                    (1.0, "inside the Newton-Kantorovich ball", True),
-                    (0.5, "0.5 radii of that ball", True),
-                    (0.0, "is on a lattice plane", False),
-                    (math.nan, "was not measured", False),
-                    (None, "was not measured", False)):
-                for limit in (math.inf, 2.0 * bound, 0.0):
-                    reason, printed = flags_withdrawn(report_with(limit, margin=margin))
-                    assert "Newton-Kantorovich ball" in reason and told in reason, reason
-                    assert "lattice plane" in reason, reason
-                    # A tighter tolerance is suggested only where one can help.
-                    assert ("at a tighter tolerance the plane leaves it" in reason) is advised
-                    assert all(e.key in reason for e in gm._edges)         # noqa: SLF001
-                    assert any(f.startswith("spectral_usable=False") and "ball" in f
-                               for f in printed), printed
-            # The self-check's failure is the whole report's; the plane's is not added to it.
+            for limit in limits:
+                for margin in margins:
+                    for gradient in (None, math.inf, math.nan):
+                        report = report_with(limit, gradient, margin)
+                        assert numbers(report) == numbers(honest), (limit, margin, gradient)
+                        assert report["spectral_usable"] is False, (limit, margin, gradient)
+                        assert report["gradient_bound_usable"] is False
+                        assert report["not_usable_reason"] == told, (limit, margin, gradient)
+            report_with(math.inf, None, math.inf)
+            (row,) = list(gm.coupling_report())
+            assert f"spectral_usable=False: {told}" in row["flags"], row["flags"]
+            # The self-check's failure is the whole report's; the rule's is not added to it.
             gm._state = {**kept, "_meta": {**kept["_meta"],                # noqa: SLF001
-                                           limit_slot: np.asarray(0.0, dtype),
-                                           gradient_slot: np.asarray(math.inf, dtype),
                                            f"coupling_{gc.KEY}_geometry_gap":
                                                np.asarray(1.0, dtype)}}
-            assert "lattice plane" not in gm.coupling_diagnostics()[gc.KEY]["not_usable_reason"]
+            withheld = gm.coupling_diagnostics()[gc.KEY]["not_usable_reason"]
+            assert gc.withheld(withheld) and gc.SOLVED_REASON[0] not in withheld
+
+            # The control: read as constants of the pass.
+            gm._committed_geometry_solved = {**solved, gc.KEY: ()}         # noqa: SLF001
+            standing = report_with(math.inf, None, math.inf)
+            assert numbers(standing) == numbers(honest)
+            assert standing["spectral_usable"] is True and standing["gradient_bound_usable"] is True
+            assert "not_usable_reason" not in standing
+            for gradient, said in ((math.inf, "did not pass"), (math.nan, "not computed")):
+                report = report_with(math.inf, gradient, math.inf)
+                assert report["spectral_usable"] is True
+                assert report["gradient_bound_usable"] is False
+                reason = report["not_usable_reason"]
+                assert reason.startswith("gradient_bound_usable is False (spectral_usable "
+                                         "stands)") and said in reason, reason
+                assert "lattice plane" not in reason and "tolerance" not in reason, reason
+                (row,) = list(gm.coupling_report())
+                assert any(f.startswith("gradient_bound_usable=False") for f in row["flags"])
+                assert not any(f.startswith("spectral_usable=False") for f in row["flags"])
+            for limit, margin in ((math.inf, 26.0), (math.inf, above), (math.inf, 0.0),
+                                  (math.inf, math.nan), (math.inf, None), (2.0 * bound, math.inf),
+                                  (0.0, math.inf), (math.nan, math.inf), (None, math.inf),
+                                  (None, None)):
+                report = report_with(limit, None, margin)
+                assert numbers(report) == numbers(honest), (limit, margin)
+                assert report["spectral_usable"] is False, (limit, margin)
+                assert report["gradient_bound_usable"] is False, (limit, margin)
+                reason = report["not_usable_reason"]
+                assert "did not record" in reason and "lattice plane" not in reason, reason
+            # No record at all of what the pass solves: no flag either.
+            gm._committed_geometry_solved = {}                             # noqa: SLF001
+            report = report_with(math.inf, None, math.inf)
+            assert report["spectral_usable"] is False and "did not record" in report[
+                "not_usable_reason"]
         finally:
             gm._state = kept                               # noqa: SLF001
+            gm._committed_geometry_solved = solved         # noqa: SLF001
     assert dict(gm.coupling_diagnostics()[gc.KEY]) == honest
 
 
@@ -858,7 +876,7 @@ def test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded(am
     seen = _sign_changing("jacobi", amplitude)
     assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
     report = seen["report"]
-    assert seen["spectral_usable"] and (seen["reason"] is None or "spectral_usable stands" in seen["reason"]), seen
+    assert seen["spectral_usable"] and not gc.withheld(seen["reason"]) and not seen["rule"], seen
     assert report["spectral_error_bound"] >= report["distance"] > 0.0, report
     assert 0.0 < report["geometry_gap"] <= HONEST_GAP, report
 
@@ -873,7 +891,7 @@ def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded(ampli
     seen = _sign_changing("gauss-seidel", amplitude)
     report = seen["report"]
     assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
-    assert seen["spectral_usable"] and (seen["reason"] is None or "spectral_usable stands" in seen["reason"]), seen
+    assert seen["spectral_usable"] and not gc.withheld(seen["reason"]) and not seen["rule"], seen
     assert report["spectral_error_bound"] >= report["distance"] > 0.0, report
     assert 0.0 < report["geometry_gap"] <= _bounds.GEOMETRY_GAP_TOLERANCE, report
 
@@ -904,7 +922,7 @@ def test_a_gauss_seidel_group_whose_gather_samples_a_sign_changing_field_is_boun
     seen = _sign_changing("gauss-seidel", amplitude)
     report = seen["report"]
     assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
-    assert seen["spectral_usable"] and (seen["reason"] is None or "spectral_usable stands" in seen["reason"]), seen
+    assert seen["spectral_usable"] and not gc.withheld(seen["reason"]) and not seen["rule"], seen
     if report["spectral_error_bound"] < report["distance"]:
         raise SameFieldCancellationInAGather(
             f"the bound is {report['spectral_error_bound'] / report['distance']:.3g} of the "
@@ -981,7 +999,10 @@ def test_a_product_that_misses_the_geometry_term_of_a_weak_deposit_is_at_the_che
     with gc.precision(False):
         honest_gm = gc.build(cell, cell.knobs, cell.dtype)
         _pre, _state, honest, honest_meta = gc.run_once(honest_gm, weak)
-    assert honest["spectral_usable"] is True and "not_usable_reason" not in honest, honest
+    # Not withheld: the numbers stand (the pair solves the markers'
+    # positions, so its flags are False with the rule's reason).
+    assert not gc.withheld(honest.get("not_usable_reason")), honest
+    assert not gc.rule_violations(cell, honest) and math.isfinite(honest["rho_spectral"])
     assert 0.0 < float(honest_meta["geometry_gap"]) <= HONEST_GAP
 
     real = _graph_specs._traceable_geometry                # noqa: SLF001
@@ -1005,7 +1026,7 @@ def test_a_product_that_misses_the_geometry_term_of_a_weak_deposit_is_at_the_che
     # The limit: under the tolerance, so the report stands, on a radius an
     # eighth of the honest pass's.
     assert gap < _bounds.GEOMETRY_GAP_TOLERANCE
-    assert "not_usable_reason" not in d and d["spectral_usable"] is True, d
+    assert not gc.withheld(d.get("not_usable_reason")) and not gc.rule_violations(cell, d), d
     assert d["rho_spectral"] < 0.2 * honest["rho_spectral"], (d, honest)
 
 

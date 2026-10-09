@@ -10,20 +10,30 @@ lattice plane, so the bound describes the fixed point only where all three
 are in one polynomial piece -- and the flag stood wherever the two sampled
 Jacobians agreed, which they do when the fixed point is just past a plane
 the Newton point stops short of: a bound 15 to 70,000 times under the
-error, flagged usable.  The flag now stands only where no lattice plane is
-inside the Newton-Kantorovich ball around the iterate
-(``_bounds._kantorovich_ball_plane_margin`` has the argument and its five
-assumptions).
+error, flagged usable.
 
-``spectral_error_bound`` **has the same hole and the same rule.**  It is a
+``spectral_error_bound`` **has the same hole.**  It is a
 bound to the fixed point of the polynomial the pass is in the iterate's
 lattice cells, and with that fixed point past a plane -- the iterate and
 the Newton point both short of it -- the pass has no fixed point there: the
 flag stood on a bound 17 to 1,294 times under the distance where the next
-cell expands.  So every row scores **both** flags, with a fourth point
+cell expands.  And a rule that asked for no plane inside the
+Newton-Kantorovich ball around the iterate
+(``_bounds._kantorovich_ball_plane_margin``) kept the flag on a cell whose
+polynomial has no fixed point at all: 34 to 1,874 times under.
+
+**The rule of 0.4.0** (``_group_layout._geometry_flags``): a group whose
+pass reads a position from the iterate, or builds one and reads it in the
+same pass, has **neither flag, on any step**, with one reason; the numbers
+stay as computed, and the stored limit and margin are still the numbers
+their definitions give.  A group whose positions are constants of the pass
+keeps a smooth group's flags, and no reason of its report names a lattice
+plane.  So every test here holds a report to that, row by row, and keeps
+scoring the *numbers* on the rows where they were scored when a flag stood
+on them (the table's ``*_number_holds``), with a fourth point
 beside the three: the fixed point of the iterate's polynomial piece
-(``plane_sides.cell_fixed_point``), which the rule's argument puts in the
-iterate's cell wherever a flag stands.  The cases of that audit are
+(``plane_sides.cell_fixed_point``), which the margin's argument puts in the
+iterate's cell wherever the margin is over one.  The cases of that audit are
 constructed, not drawn (``tests/property/plane_placed.py``): the curvature
 from the kernel alone on a two-dimensional lattice and from a member's
 quadratic response on a one-dimensional one, with the next cell expanding
@@ -137,6 +147,33 @@ def _rows_of(structure: str) -> list:
     return [row for row in TABLE["rows"] if row["structure"] == structure]
 
 
+def _not_the_rule_of_a_group_that_solves_positions(report: dict) -> list:
+    """What the report of a group whose pass reads a position from the
+    iterate has that the rule of 0.4.0 does not allow, as text: a flag, or
+    (where the step computed its estimate) another reason than the rule's."""
+    bad = []
+    if report["spectral_usable"] or report["gradient_bound_usable"]:
+        bad.append("a flag is set in a group that solves positions")
+    if np.isfinite(report["rho_spectral"]):
+        reason = report.get("not_usable_reason", "")
+        if not ("solves position(s)" in reason and "fixed during the pass" in reason
+                and "0.4.0 does not certify a bound for such a group" in reason):
+            bad.append(f"the reason is not the rule's: {reason[:160]!r}")
+    return bad
+
+
+def _names_a_lattice_plane(report: dict) -> bool:
+    return "lattice plane" in report.get("not_usable_reason", "")
+
+
+def _scored_as(report: dict, spectral: bool, gradient: bool) -> dict:
+    """*report* with its flags replaced, for the instruments that score
+    every number whose flag is set: the numbers of a group that solves
+    positions carry no flag, and are still held to the reference on the
+    rows where they were when one stood on them."""
+    return {**report, "spectral_usable": bool(spectral), "gradient_bound_usable": bool(gradient)}
+
+
 #: The two audited cases of a position within a rounding of a plane are on
 #: lattices of their own (two axes; an origin forty spacings out with a
 #: quasi-Newton acceleration): two more compiles, run in the slow lane.
@@ -153,9 +190,10 @@ PER_PUSH = {row["name"] for row in TABLE["rows"] if row["structure"] != SLOW_STR
 def test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited_cases():
     """What the per-push table can express, so that it cannot lose a row
     without a test failing: the four combinations of sides, each from more
-    than one structure where it is reachable; a row whose gradient flag
-    stands (the rule does not withdraw everything); a row within a few float
-    resolutions of a plane; float32 and float64, both schedules, both norms."""
+    than one structure where it is reachable; rows whose flags stand (the
+    positions that are constants of the pass) and none on any other; rows
+    whose numbers are still scored; a row within a few float resolutions of
+    a plane; float32 and float64, both schedules, both norms."""
     rows = TABLE["rows"]
     control = [r for r in rows if "constant of the pass" in r["structure"]]
     # Positions that are constants of the pass: a plane between the
@@ -163,6 +201,8 @@ def test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited
     assert {r["row"] for r in control} == {"k=* N=*", "k!=* N=*"}
     assert all(r["gradient_bound_usable"] and r["spectral_usable"] for r in control)
     rows = [r for r in rows if r not in control]
+    # A position read from the iterate: no row asks for a flag.
+    assert not any(r["gradient_bound_usable"] or r["spectral_usable"] for r in rows)
     drawn = [r for r in rows if not r["structure"].startswith("audited")]
     by_row = collections.Counter(r["row"] for r in drawn)
     assert set(by_row) == set(ps.ROWS), by_row
@@ -172,8 +212,12 @@ def test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited
         told = {(c.dtype, c.mode, c.norm) for c in (
             ps.as_cfg(r["cfg"]) for r in rows if r["row"] == name and r["name"] in PER_PUSH)}
         assert len(told) >= 3, (name, told)
-    assert any(r["gradient_bound_usable"] and r["row"] == "k=* N=*" for r in drawn)
-    assert any(not r["gradient_bound_usable"] and r["row"] == "k=* N=*" for r in drawn)
+    # The numbers are still held to the reference on a row of each drawn
+    # structure, and both are on each of them.
+    held = [r for r in drawn if r["gradient_number_holds"]]
+    assert {r["structure"] for r in held} == {r["structure"] for r in drawn}
+    assert all(r["spectral_number_holds"] and r["row"] == "k=* N=*" for r in held)
+    assert any(not r["gradient_number_holds"] and r["row"] == "k=* N=*" for r in drawn)
     assert any(r["on_a_plane"] for r in drawn)
     cfgs = [ps.as_cfg(r["cfg"]) for r in rows]
     assert all(ps.moving(c) for c in cfgs) and not any(
@@ -182,21 +226,23 @@ def test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited
     assert {c.mode for c in cfgs} == {"gauss-seidel", "jacobi"}
     assert {c.norm for c in cfgs} == {"l2", "mixed"}
     assert sum(r["structure"].startswith("audited") for r in rows) == 5
-    # No row asks for a flag on a fixed point across a plane: neither flag.
-    assert not any((r["gradient_bound_usable"] or r["spectral_usable"])
+    # No row scores a number on a fixed point across a plane.
+    assert not any((r["gradient_number_holds"] or r["spectral_number_holds"])
                    and r["row"] != "k=* N=*" for r in rows)
-    # An honest report that loses both flags to a plane in the ball (the
-    # rule's price), from more than one structure.
+    # A report with every point in one cell and a plane in the
+    # Newton-Kantorovich ball (a margin at or under one), from more than
+    # one structure.
     assert len({r["structure"] for r in drawn if r["row"] == "k=* N=*"
-                and not r["on_a_plane"] and not r["spectral_usable"]}) >= 2
+                and not r["on_a_plane"] and not r["spectral_number_holds"]}) >= 2
 
 
 def _check_rows(structure: str) -> None:
     """Row by row: the sides are the pinned ones (the instrument still
-    expresses the row), every number whose flag is set holds against the
-    reference, and the gradient flag is the pinned one -- withdrawn on every
-    row that has a plane between two of the three points, standing on the
-    row that has none in the ball."""
+    expresses the row); the flags are the pinned ones -- none on a row whose
+    pass reads a position from the iterate, with the rule's reason, both on
+    the rows of constant positions, with no lattice plane named; and every
+    number the row scores holds against the reference, as it did when a
+    flag stood on it."""
     rows = _rows_of(structure)
     assert rows
     for row in rows:
@@ -221,19 +267,25 @@ def _check_rows(structure: str) -> None:
             assert bool(report["spectral_usable"]) == row["spectral_usable"], told
             margin = slots["plane_margin"]
             if not ps.moving(cfg):
-                # Every position a constant of the pass: nothing to cross.
+                # Every position a constant of the pass: nothing to cross,
+                # a smooth group's flags, and no lattice plane in a reason.
                 assert margin == np.inf == slots["plane_limit"], told
-            if row["gradient_bound_usable"]:
-                assert margin > 1.0 and "not_usable_reason" not in report, told
-            if not margin > 1.0:
-                # A plane in the ball: both flags, the reason names the
-                # plane, the numbers stay, and the margin is the step's.
-                assert not report["spectral_usable"], told
-                assert not report["gradient_bound_usable"], told
-                assert "lattice plane" in report["not_usable_reason"], told
-                assert np.isfinite(report["spectral_error_bound"]), told
-            elif ps.moving(cfg) and where["p_ok"] and not where["on_a_plane"]:
-                # The rule's argument, on the reference: with no plane in
+                assert not _names_a_lattice_plane(report), told
+                if row["gradient_bound_usable"]:
+                    assert "not_usable_reason" not in report, told
+                continue
+            # A position read from the iterate: no flag, the rule's reason,
+            # and the numbers as computed.
+            assert _not_the_rule_of_a_group_that_solves_positions(report) == [], told
+            assert np.isfinite(report["spectral_error_bound"]), told
+            # The numbers the row scores, held as when a flag stood on them.
+            assert ps.wrong_numbers(cfg, x, c, _scored_as(
+                report, row["spectral_number_holds"], row["gradient_number_holds"]),
+                where) == [], told
+            if row["gradient_number_holds"]:
+                assert margin > 1.0, told
+            if margin > 1.0 and where["p_ok"] and not where["on_a_plane"]:
+                # The margin's argument, on the reference: with no plane in
                 # the ball the fixed point of the iterate's polynomial is in
                 # the iterate's cell, and is the pass's.
                 assert where["p_in_cell"] and where["p_is_fixed_point"], told
@@ -241,15 +293,15 @@ def _check_rows(structure: str) -> None:
 
 def test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step():
     """A marker at rest at coordinate 0.0, the lower face of a lattice whose
-    origin is 0.0, its position read from the iterate: a lattice plane is
-    in the Newton-Kantorovich ball at any residual, so both flags are
-    ``False`` on every step with one reason.  (The Newton step's entry for
+    origin is 0.0, its position read from the iterate: both flags are
+    ``False`` on every step with one reason, the rule's, and the stored
+    margin is zero on every step.  (The Newton step's entry for
     that position is rounding of either sign, which nothing absorbs at
     exactly zero: on the steps where it is negative the Newton point is
     outside the hull and ``gradient_relative_error_bound`` reads ``inf``.
     ``spectral_usable`` used to follow it, on a third to a half of the
     steps of one resting state.)"""
-    row = next(r for r in _rows_of("f32 gauss-seidel l2") if r["gradient_bound_usable"])
+    row = next(r for r in _rows_of("f32 gauss-seidel l2") if r["gradient_number_holds"])
     cfg = ps.as_cfg({**row["cfg"], "aF": 0.5, "bF": 0.1, "aP": 0.5, "bP": 1.0, "cP": 0.0,
                      "quad": 0.0, "kP": 0.0, "vP": [0.0], "posP0": [0.0]})
     assert cfg.anchors == ("target", "source") and cfg.origin == (0.0,)
@@ -267,8 +319,8 @@ def test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step
             assert margin == 0.0
             reasons.add(report["not_usable_reason"])
     (reason,) = reasons
-    assert "is on a lattice plane" in reason and "no tolerance restores the flags" in reason
-    assert "at a tighter tolerance" not in reason, reason
+    assert "solves position(s) ['P.pos']" in reason, reason
+    assert "fixed during the pass" in reason and "tighter tolerance" not in reason, reason
 
 
 def _slug(name: str) -> str:
@@ -367,9 +419,11 @@ CONSTRUCTED = {
 
 def _check_constructed(curvature: str, dtype: str) -> dict:
     """Row by row: the construction is the row it says it is (by the
-    reference), no flagged number is wrong, and the flags are the rule's --
-    both withdrawn with the reason wherever the plane is in the ball, both
-    standing where it is not.  Returns the distance over the bound per row."""
+    reference), the stored margin is over one only with the fixed point
+    deep in the cell, the flags are the rule's -- none on any row, the
+    marker's position being read from the iterate, with its reason -- and
+    the numbers of the deep row hold as when its flags stood.  Returns the
+    distance over the bound per row."""
     make, rows = CONSTRUCTED[curvature]
     ratios = {}
     with precision(dtype == "float64"):
@@ -387,16 +441,11 @@ def _check_constructed(curvature: str, dtype: str) -> dict:
                 assert (cells["N"] == cells["k"]) is (kind == "short"), told
             else:
                 assert where["p_in_cell"] and where["one_cell"] and past["p"] < 0, told
-            assert pp.wrong_numbers(report, where) == [], told
-            flagged = kind == "clear"
-            assert (slots["plane_margin"] > 1.0) is flagged, told
-            assert bool(report["spectral_usable"]) is flagged, told
-            assert bool(report["gradient_bound_usable"]) is flagged, told
+            clear = kind == "clear"
+            assert (slots["plane_margin"] > 1.0) is clear, told
+            assert _not_the_rule_of_a_group_that_solves_positions(report) == [], told
             assert np.isfinite(report["spectral_error_bound"]), told
-            if flagged:
-                assert "not_usable_reason" not in report, told
-            else:
-                assert "Newton-Kantorovich ball" in report["not_usable_reason"], told
+            assert pp.wrong_numbers(_scored_as(report, clear, clear), where) == [], told
             ratios[name] = where["distance"] / float(report["spectral_error_bound"])
     # What the withdrawn flag stood on: where the next cell expands the
     # pass's fixed point is two cells on, tens to hundreds of bounds away.
@@ -410,10 +459,11 @@ def test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane(curva
     """The audited construction (MADD-ANO-248, the spectral flag): the
     iterate and the Newton point in one lattice cell, the Newton-Kantorovich
     check reading that cell's small ``h``, and that cell's polynomial with
-    its fixed point past the plane.  Both flags are withdrawn whatever the
+    its fixed point past the plane.  Neither flag is set whatever the
     next cell does -- expanding (the bound tens of times under the
-    distance), contracting at 0.999 or at 0.99 -- and stand with the fixed
-    point deep in the cell."""
+    distance), contracting at 0.999 or at 0.99 -- nor with the fixed
+    point deep in the cell, where the bound holds: the group solves the
+    marker's position."""
     _check_constructed(curvature, dtype)
 
 
@@ -464,10 +514,10 @@ def _placed_distances(mo: pp.Model) -> list:
 @pytest.mark.parametrize("structure", sorted(PLACED_SWEEP), ids=_slug)
 def test_the_placement_sweep_finds_no_flagged_bound_under_the_distance(structure, dtype):
     """The fixed point of the first cell's polynomial at 21 signed distances
-    from the plane, four tolerances, ten structures, both dtypes: no report
-    with a flag set has its fixed point further than twice the bound, a
-    lattice plane between the points it rests on, or the polynomial's fixed
-    point past a plane.  The realised counts are printed."""
+    from the plane, four tolerances, ten structures, both dtypes: the
+    marker's position is read from the iterate in every one, so no report
+    has a flag and each carries the rule's reason, on either side of the
+    plane and at any distance.  The realised counts are printed."""
     knobs = dict(after=(0.9,), Q=2.0, e1=0.02, c0=0.1)
     knobs.update(PLACED_SWEEP[structure])
     counts = collections.Counter()
@@ -485,9 +535,9 @@ def test_the_placement_sweep_finds_no_flagged_bound_under_the_distance(structure
                          "spectral only" if report["spectral_usable"] else "none")
                 counts[("one cell" if where["one_cell"] else "across", flags)] += 1
                 bad = pp.wrong_numbers(report, where)
-                if (report["spectral_usable"] or report["gradient_bound_usable"]) and not (
-                        slots["plane_margin"] > 1.0):
-                    bad.append(f"a flag with plane_margin {slots['plane_margin']}")
+                bad += _not_the_rule_of_a_group_that_solves_positions(report)
+                if slots["plane_margin"] == np.inf or slots["plane_limit"] == np.inf:
+                    bad.append(f"a slot of a pass with no reader: {slots}")
                 if bad:
                     failures.append((tolerance, s, bad, where))
     print(f"\n[placed] {structure} {dtype}: " + ", ".join(
@@ -495,6 +545,177 @@ def test_the_placement_sweep_finds_no_flagged_bound_under_the_distance(structure
     assert not failures, failures[:3]
     scored = sum(count for key, count in counts.items() if key != "no reference")
     assert scored >= len(PLACED_TOLERANCES) * 10, counts
+
+
+# ---------------------------------------------------------------------------
+# The cell whose polynomial has no fixed point: the case that ended the rules
+# ---------------------------------------------------------------------------
+
+#: The pair of the third audit (``benchmarks/results/audit_040_p4_21/
+#: plane_margin/repro_r3e_bottleneck_kernel_only.py``): one marker ``M`` on a
+#: one-dimensional lattice of six points (origin 0, spacing 1/2), affine
+#: members, the only nonlinearity the scatter's own (a value times a weight):
+#:
+#:     ``M:  pos' = pos_pre + V + w . G.x      y' = cy + wy . G.x``
+#:     ``G:  x'   = scatter(y' at pos')``
+#:
+#: With ``t = (pos - 1) / (1/2)`` the marker's coordinate in the cell between
+#: the lattice points 1 and 3/2, the pass is the quadratic map
+#: ``t' = e1 + y (1/4 + t/2)``, ``y' = 3/4 + y (-1/8 + 3 t/4)``, whose
+#: Jacobian at ``(1/2, 1)`` has the eigenvalues 1 and -1/4: a saddle-node.
+#: With ``e1 = gap / 0.6 > 0`` that cell's polynomial has **no fixed point**;
+#: the iterate creeps towards the bottleneck in the middle of the cell, the
+#: solve's estimate falls under the tolerance before it gets there, and the
+#: pass's only fixed point is one cell on, at ``t = 3/2 + e1``, ``y = 2``.
+_SADDLE_W = (0.125, 0.125, 0.125, 0.375, 0.375, 0.375)
+_SADDLE_WY = (-0.125, -0.125, -0.125, 0.625, 0.625, 0.625)
+_SADDLE_POINTS, _SADDLE_SPACING, _SADDLE_START = 6, 0.5, -0.25
+
+#: ``id -> (dtype, add_node order, norm, acceleration, gap, tolerance)``:
+#: float32 and float64, both sweep orders, both norms and Aitken.  Each is
+#: a report the audit recorded (float32; float64 for the first sweep order)
+#: or the same construction in the other dtype, with ``converged=True``.
+SADDLE_NODE = {
+    "float32-marker-first-l2": ("float32", ("M", "G"), "l2", "none", 1e-6, 1e-2),
+    "float64-marker-first-l2": ("float64", ("M", "G"), "l2", "none", 1e-6, 1e-2),
+    "float32-marker-first-mixed": ("float32", ("M", "G"), "mixed", "none", 1e-6, 1e-2),
+    "float64-marker-first-mixed": ("float64", ("M", "G"), "mixed", "none", 1e-6, 1e-2),
+    "float32-grid-first-l2": ("float32", ("G", "M"), "l2", "none", 1e-6, 1e-2),
+    "float64-grid-first-l2": ("float64", ("G", "M"), "l2", "none", 1e-6, 1e-2),
+    "float32-marker-first-l2-aitken": ("float32", ("M", "G"), "l2", "aitken", 1e-6, 3e-3),
+    "float64-marker-first-l2-aitken": ("float64", ("M", "G"), "l2", "aitken", 1e-6, 3e-3),
+}
+SADDLE_NODE_PER_PUSH = ("float32-marker-first-l2", "float64-marker-first-l2")
+
+
+def _saddle_node_graph(dtype, order, norm, acceleration, gap, tolerance):
+    """The pair as a graph, and the offset ``e1`` of its bottleneck."""
+    import jax.numpy as jnp
+    from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
+    from maddening.core.graph_manager import GraphManager
+    from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+    kind = jnp.dtype(dtype)
+    n, h = _SADDLE_POINTS, _SADDLE_SPACING
+    e1 = gap / 0.6
+    t0, y0 = 0.5 + _SADDLE_START, 1.0 + _SADDLE_START
+    x0 = np.zeros(n)
+    x0[2], x0[3] = y0 * (1.0 - t0), y0 * t0
+    pos0 = 1.0 + h * t0
+
+    class Grid(SimulationNode):
+        def initial_state(self):
+            return {"x": jnp.asarray(x0, kind)}
+
+        def boundary_input_spec(self):
+            return {"deposit": BoundaryInputSpec(shape=(n,), dtype=kind)}
+
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            return {"x": boundary_inputs.get("deposit", state["x"]) + 0 * state["x"]}
+
+    class Marker(SimulationNode):
+        def initial_state(self):
+            return {"pos": jnp.full((1, 1), pos0, kind), "y": jnp.full((1,), y0, kind)}
+
+        def boundary_input_spec(self):
+            return {"field": BoundaryInputSpec(shape=(n,), dtype=kind)}
+
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            p = {**self.params, **(params or {})}
+            field = boundary_inputs.get("field", jnp.zeros((n,), kind))
+            return {"pos": state["pos"] + p["v"] + p["w"] @ field,
+                    "y": p["cy"] + (p["wy"] @ field) * jnp.ones((1,), kind)}
+
+    made = {"G": Grid("G", 0.01),
+            "M": Marker("M", 0.01, v=np.asarray(1.0 + h * e1 - pos0, kind),
+                        w=np.asarray(_SADDLE_W, kind), wy=np.asarray(_SADDLE_WY, kind),
+                        cy=np.asarray(0.75, kind))}
+    gm = GraphManager()
+    for name in order:
+        gm.add_node(made[name])
+    gm.add_edge("G", "M", "x", "field")
+    gm.add_edge("M", "G", "y", "deposit", geometry=("source", "pos"),
+                mapping=multilinear_grid_mapping(
+                    mode="conservative", origin=[0.0], spacing=[h], shape=[n], n_points=1))
+    knobs = {"tolerance": tolerance} if norm == "l2" else {"rtol": tolerance}
+    gm.add_coupling_group(["G", "M"], solver="ift", diagnostics=True, convergence_norm=norm,
+                          iteration_mode="gauss-seidel", acceleration=acceleration,
+                          max_iterations=3000, **knobs)
+    return gm, e1
+
+
+def _saddle_node_pass(x, e1):
+    """The pass at ``x = (G.x, M.pos, M.y)`` in NumPy, marker first: a hat
+    function for the scatter, nothing of the library's."""
+    n, h = _SADDLE_POINTS, _SADDLE_SPACING
+    pos = 1.0 + h * e1 + np.dot(_SADDLE_W, x[:n])
+    y = 0.75 + np.dot(_SADDLE_WY, x[:n])
+    cell = int(np.clip(np.floor(pos / h), 0, n - 2))
+    t = pos / h - cell
+    field = np.zeros(n)
+    field[cell], field[cell + 1] = y * (1.0 - t), y * t
+    return np.concatenate([field, [pos, y]])
+
+
+def _check_the_saddle_node(name: str) -> None:
+    dtype, order, norm, acceleration, gap, tolerance = SADDLE_NODE[name]
+    n, h = _SADDLE_POINTS, _SADDLE_SPACING
+    with precision(dtype == "float64"):
+        gm, e1 = _saddle_node_graph(dtype, order, norm, acceleration, gap, tolerance)
+        gm.compile()
+        gm.step()
+        report = dict(gm.coupling_diagnostics()["G+M"])
+        meta = gm._state["_meta"]                                      # noqa: SLF001
+        margin, limit = (float(meta[f"coupling_G+M_geometry_plane_{slot}"])
+                         for slot in ("margin", "limit"))
+        grid, marker = gm.get_node_state("G"), gm.get_node_state("M")
+        x = np.concatenate([np.asarray(part, np.float64).ravel()
+                            for part in (grid["x"], marker["pos"], marker["y"])])
+    # The pass's only fixed point, one lattice cell on from the iterate's.
+    star = np.zeros(n + 2)
+    star[3], star[4], star[n], star[n + 1] = 2.0 * (0.5 - e1), 2.0 * (0.5 + e1), 1.75 + h * e1, 2.0
+    assert np.max(np.abs(_saddle_node_pass(star, e1) - star)) < 1e-12
+    weight = np.concatenate([np.full(n, 1.0 / np.max(np.abs(x[:n]))), 1.0 / np.abs(x[n:])])
+    unit = 1.0 if norm == "l2" else 1.0 / (tolerance * np.sqrt(n + 2))
+    distance = float(unit * np.linalg.norm(weight * (x - star)))
+    bound, gradient = (float(report[k]) for k in (
+        "spectral_error_bound", "gradient_relative_error_bound"))
+    told = (name, report, margin, limit, distance)
+    assert report["converged"] is True, told
+    assert 1.0 < x[n] < 1.5 < star[n] < 2.0, told
+    # The rule: no flag, its reason; the numbers as computed.
+    assert report["spectral_usable"] is False and report["gradient_bound_usable"] is False, told
+    assert _not_the_rule_of_a_group_that_solves_positions(report) == [], told
+    assert "solves position(s) ['M.pos']" in report["not_usable_reason"], told
+    assert "['M.y->G.deposit']" in report["not_usable_reason"], told
+    # What the number is worth, and what every withdrawn rule read here: a
+    # bound far under the distance, a margin over one, the step's own
+    # Newton-Kantorovich check failed, and a bound under the limit (the
+    # Aitken cells end beside the limit, 0.079 under 0.094 in float32 and
+    # 0.098 over it in float64: not pinned there).
+    assert np.isfinite(bound) and distance > 10.0 * bound, told
+    assert margin > 1.0 and gradient == np.inf, told
+    assert bound <= limit or acceleration == "aitken", told
+
+
+@pytest.mark.parametrize("name", SADDLE_NODE_PER_PUSH)
+def test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point(name):
+    """The case that ended the plane rules (MADD-ANO-248): the returned
+    iterate ``converged`` in a lattice cell whose polynomial has no fixed
+    point, the pass's only fixed point one cell on and tens to hundreds of
+    bounds away.  The step's Newton-Kantorovich check had failed, the
+    stored margin is over one and the bound under the stored limit, so
+    every earlier rule kept ``spectral_usable``; the group solves the
+    marker's position, so in 0.4.0 it has neither flag, and says why."""
+    _check_the_saddle_node(name)
+
+
+# Per push: tests/property/test_coupling_plane_sides.py::test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point
+@pytest.mark.slow
+@pytest.mark.parametrize("name", sorted(set(SADDLE_NODE) - set(SADDLE_NODE_PER_PUSH)))
+def test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point_in_the_other_cells(name):
+    """Both sweep orders, the mixed norm and Aitken, in float32 and float64."""
+    _check_the_saddle_node(name)
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +753,10 @@ def _sweep_cells() -> list:
 
 SWEEP = _sweep_cells()
 BASES, DISTANCES = 6, 12
+#: The flagged reports a cell of constant positions (two target anchors:
+#: eight of the 32 cells) must see: the only cells whose flagged numbers
+#: the sweep scores under the rule of 0.4.0.
+MIN_FLAGGED_WITH_CONSTANT_POSITIONS = 1
 
 
 def _cell_id(cell: dict) -> str:
@@ -547,13 +772,17 @@ def test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane(index):
     """Six drawn pairs a cell, the fixed point of each placed on a lattice
     plane and then at twelve signed distances from it: every flagged number
     of every example against the reference, the realised table printed.
-    With two target anchors every position is a constant of the pass: the
-    rule withdraws nothing there, and the gradient's flag is the spectral
-    one's wherever the bound is finite."""
+    With a source anchor the pass reads a position from the iterate: no
+    flag on any report, and the rule's reason.  With two target anchors
+    every position is a constant of the pass: the flags are a smooth
+    group's (the gradient's is the spectral one's wherever the bound is
+    finite), no reason names a lattice plane, and the cell must see flagged
+    reports, so that these eight cells are what the sweep scores."""
     cell = SWEEP[index]
     structure = ps.Cfg(**cell)
     rng = np.random.default_rng([SEED, index])
     table = collections.Counter()
+    flagged = 0
     failures = []
     with precision(cell["dtype"] == "float64"):
         bases = 0
@@ -578,7 +807,12 @@ def test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane(index):
                          "spectral only" if report["spectral_usable"] else "none")
                 table[(where["row"], "on a plane" if where["on_a_plane"] else "off", flags)] += 1
                 bad = ps.wrong_numbers(case, x, c, report, where)
-                if not ps.moving(case):
+                if ps.moving(case):
+                    bad += _not_the_rule_of_a_group_that_solves_positions(report)
+                else:
+                    flagged += bool(report["spectral_usable"])
+                    if _names_a_lattice_plane(report):
+                        bad.append("a lattice plane in the reason of constant positions")
                     finite = np.isfinite(float(report["gradient_relative_error_bound"]))
                     if bool(report["gradient_bound_usable"]) != bool(
                             report["spectral_usable"] and finite):
@@ -594,3 +828,5 @@ def test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane(index):
     assert not failures, failures[:3]
     scored = sum(v for k, v in table.items() if k != "no reference")
     assert scored >= bases * DISTANCES // 2, table
+    if not ps.moving(structure):
+        assert flagged >= MIN_FLAGGED_WITH_CONSTANT_POSITIONS, (flagged, table)

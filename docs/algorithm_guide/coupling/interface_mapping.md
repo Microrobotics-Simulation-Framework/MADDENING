@@ -1133,11 +1133,26 @@ $x_k$'s positions.  `spectral_error_bound` is the distance to the fixed
 point $x_p$ of $p$, and $x_p$ is a fixed point of $F$ only where it lies
 in those cells.  Past a plane $F$ is another polynomial, with another
 fixed point or none nearby, and the bound is then to a point the pass
-does not have.  So `spectral_usable` and `gradient_bound_usable` have two
-more conditions for such a group, each of which withdraws **both** and
-keeps the numbers.
+does not have.
 
-**No lattice plane in the Newton-Kantorovich ball.**  The step stores,
+**The rule of 0.4.0.**  A group whose pass reads a position from the
+iterate, or builds one and reads it in the same pass (a member's
+source-anchored geometry; the target-anchored geometry of a member that
+computes fluxes: `InterfacePlan.geometry_iterate_reads`), has **neither
+flag**: `spectral_usable` and `gradient_bound_usable` are `False` on
+every step, whatever its numbers read, the numbers are kept as computed,
+and `not_usable_reason` names the positions and says so.  A group whose
+positions are all constants of the pass (a target-anchored geometry read
+by `update`, positions held by a node outside the group) has a smooth
+group's flags: no plane can come between its iterate and its fixed
+point.  One function decides (`_group_layout._geometry_flags`), from what
+`compile()` committed; it sets a flag for constant positions only where
+the step's two stored numbers below both read $\infty$, so a state that
+this build's step did not write sets none.  The two numbers are defined
+next, and then why no flag stands on them.
+
+**The margin of the Newton-Kantorovich ball (a stored number,
+`geometry_plane_margin`).**  The step stores,
 with `diagnostics=True` and $\eta = \lVert D\delta \rVert_2$ the Newton
 step in the group's norm,
 
@@ -1154,10 +1169,9 @@ through the resolvent, $D_j$ the **norm's** weight (zero for a field in
 the norm's dead band, which then counts as on a plane), and $d_j$ taken
 as zero where the position the pass *builds* at $x_k$ or at the Newton
 point $x_N = x_k + \delta$ (what a Gauss-Seidel sweep reads after its
-holder's update) is not strictly inside the cell of $x_{k,j}$.  Both
-flags stand only where $\mathrm{margin} > 1$; a margin that is absent or
-not a number is none, and a pass that reads no position from the iterate
-has $\mathrm{margin} = \infty$.  The argument, with its assumptions:
+holder's update) is not strictly inside the cell of $x_{k,j}$.  A pass
+that reads no position from the iterate has $\mathrm{margin} = \infty$.
+What a margin over one says, under five assumptions:
 
 1. *the kernel*: between two positions with no lattice plane and no face
    of the hull between them the mapping is one polynomial of the
@@ -1200,16 +1214,32 @@ $x_N$ are in one cell, $h$ reads near zero, and the pass has no fixed
 point in that cell.  The flags stood there: on a gradient bound 15 to
 70,000 times under the error, and, where the next cell expands and the
 pass's fixed point is two cells on, on a `spectral_error_bound` 17 to
-1,294 times under the distance (MADD-ANO-248).  Three things the rule
-does not do.  It does not look past the plane: a next cell that
-contracts as the first does keeps the bound within twice, one that
-expands does not, and the flags go in both.  It cannot know a position
-is at rest: a marker *on* a lattice plane or a hull face, read from the
-iterate, has $\mathrm{margin} = 0$ on every step.  And it costs honest
-reports beside a plane, by design: the ball is as wide as the solve is
-loose.
+1,294 times under the distance (MADD-ANO-248).
 
-**The limit, beside it.**  The step also stores
+**Why no flag stands on the margin in 0.4.0.**  The argument needs
+assumption 3, the Newton-Kantorovich condition for the smooth piece $p$,
+and the step does not prove it: it measures $h$ on one secant, and the
+radius of the ball does not use the measured value.  An audit built a
+cell whose polynomial has **no fixed point**: one marker on a
+one-dimensional lattice, affine members, the only nonlinearity the
+scatter's own, the pass a saddle-node with a gap of $10^{-5}$ to
+$10^{-8}$.  The iterate creeps towards the bottleneck, the solve reports
+`converged`, and the pass's only fixed point is one cell on.  The step's
+own check had failed there (`gradient_relative_error_bound` was `inf`),
+the margin read 2.8 to 186 and the bound was under the limit below, so
+both rules kept `spectral_usable`, on a bound 34 to 1,874 times under
+the distance.  It was the third audit in a row to find a flag set beside
+a wrong number near a lattice plane, each on the rule that closed the
+one before, so 0.4.0 certifies nothing for a group that solves
+positions, and a rule that does is left to a later release (it has to
+establish assumption 3, not take it).  The margin stays a stored number:
+it equals its definition (in float64; within 5% in float32 for a
+position nine to three hundred float resolutions from a plane), a marker
+*on* a lattice plane or a hull face has $\mathrm{margin} = 0$ on every
+step, and so has a position field of zero weight in the norm.
+
+**The limit (a stored number, `geometry_plane_limit`).**  The step also
+stores
 
 $$
 \mathrm{limit} = \frac{u}{2}\,\min_j D_j\, d_j
@@ -1220,37 +1250,31 @@ further than $d_j$), here with $D_j$ the **spectrum's** weight (a field
 in the norm's dead band keeps its own magnitude's) and $u$ the norm's
 constant (1 under `"l2"`, $1/(\mathrm{rtol}\sqrt{n})$ under `"mixed"`),
 so that the limit is in the units of `spectral_error_bound`.  Where the
-bound $B > \mathrm{limit}$ a plane is within $2B$ of a position, and the
-flags are kept only where the Newton-Kantorovich check passed:
-`gradient_relative_error_bound` is finite only where
-$\lVert (I - J(x_k))^{-1} (J(x_k + \delta) - J(x_k)) \rVert < 1/2$.  This
-is the measured half of assumption 3: with a plane in reach of the bound
-and $h$ reading one half or more (the bound `inf`), or not computed
-(NaN), nothing certifies that $p$ has a fixed point within the ball.
-Neither rule implies the other.  An entry the Newton step hardly moves,
-with a plane between $\eta$ and $2B$ away, has a margin over one and a
-bound over the limit; and a bound under the limit does not put the ball
-clear of the planes, because $B$ is not proved to be at least $\eta$
-(the Krylov compression behind it can fall short).  The limit alone
-left the hole above open; the margin alone would stand on an $h$ the
-step measured to be too large.  A position that is a constant of the
-pass is in neither minimum.
+bound $B > \mathrm{limit}$ a plane is within $2B$ of a position.  As a
+rule for the flags it came before the margin: alone (a bound 0.13 times
+the distance, MADD-ANO-242), then with the gradient bound's
+Newton-Kantorovich check required where $B > \mathrm{limit}$, then
+beside the margin.  It does not put the ball clear of the planes,
+because $B$ is not proved to be at least $\eta$ (the Krylov compression
+behind it can fall short), and with the plane beyond $2B$ it does not
+look at a failed check, which is where the case above sat.  A position
+that is a constant of the pass is in neither minimum, and both numbers
+read $\infty$ where every position is one.
 
-**Every cause is reported.**  Where a flag of such a group is `False`
-and the step computed the estimate, `not_usable_reason` gives each
-cause: a plane in the ball (with the margin), a position on a plane, a
-margin that was not measured, a plane in reach without a passed check
-(telling a gradient bound that was not computed, NaN, from one that did
-not certify, `inf`), the float floor with members that do not declare
-their evaluations, an estimate that did not settle (more independent
-interface scalars than its eight Krylov steps: no flag is set for such a
-group at all, with or without a geometry), a bound that is not finite.
-A plane is named only where a plane rule is a cause, and a tighter
-tolerance is suggested only where one can help: not on a plane, and not
-at the float floor.
+**Every cause is reported.**  A group that solves positions has one
+reason, the rule's.  Where a flag of a group whose positions are
+constants of the pass is `False` and the step computed the estimate,
+`not_usable_reason` gives each cause: the float floor with members that
+do not declare their evaluations, an estimate that did not settle (more
+independent interface scalars than its eight Krylov steps: no flag is
+set for such a group at all, with or without a geometry), a bound that
+is not finite, a gradient bound that was not computed (NaN) told from
+one that did not certify (`inf`), and a record of the pass's positions
+that this build's step did not write.  None of them names a lattice
+plane.
 
 **On a plane.**  A position within eight float resolutions of a lattice
-plane has distance zero in both rules: `eps` of its dtype times the
+plane has distance zero in both numbers: `eps` of its dtype times the
 largest coordinate of the lattice's axis, or the position's own
 magnitude (or its offset's from the lattice origin) where that is
 larger.  The kernel decides the cell from the rounded quotient of that
@@ -1258,9 +1282,9 @@ offset by the spacing, and a position a member builds is the rounding of
 the terms it was built from: one moved to 2e-9 from a face at zero, from
 0.1, is in float32 the rounding of a sum of order 0.1, and the float64
 reference has it 1e-8 on the other side.  So the scale is the lattice's.
-Both flags are withdrawn there (the margin is zero): `rho_spectral` is
+The margin is zero there: `rho_spectral` is
 then the radius of the cell the float pass evaluated, which may not be
-exact arithmetic's (MADD-ANO-239), and it is no longer flagged.  The
+exact arithmetic's (MADD-ANO-239), and it carries no flag.  The
 Newton-Kantorovich check's own outcome is rounding's on a plane.  A
 marker at rest at coordinate 0.0, the lower face of a lattice whose
 origin is 0.0, has a Newton step of about 1e-20 of either sign in its
@@ -1268,8 +1292,8 @@ position (rounding of the resolvent, which nothing absorbs at exactly
 zero); on the steps where it is negative the Newton point is outside the
 hull, in the clamped kernel, and `gradient_relative_error_bound` reads
 `inf` (59 of 60 such steps measured, none of 53 with the other sign).
-`spectral_usable` used to follow that reading from step to step; the
-report of such a state is now the same on every step.
+The flags and the reason of a group that solves positions do not follow
+that reading: the report of such a state is the same on every step.
 
 **Everywhere else they do not.**  A coupling group whose pass resolves a
 geometry-dependent mapping (on an edge into a member, from inside the

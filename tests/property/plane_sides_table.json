@@ -1,5 +1,5 @@
 {
- "note": "Drawn by the sweep's generator (tests/property/plane_sides.py, seed 465) and pinned; the audited rows are the audit's own cases (benchmarks/results/audit_040_p4_17/mapping).",
+ "note": "Drawn by the sweep's generator (tests/property/plane_sides.py, seed 465) and pinned; the audited rows are the audit's own cases (benchmarks/results/audit_040_p4_17/mapping). spectral_usable and gradient_bound_usable are the flags the report carries: False on every row whose pass reads a position from the iterate (the rule of 0.4.0). spectral_number_holds and gradient_number_holds mark the rows on which the number itself is held to the reference (the rows whose flag stood under the withdrawn margin rule).",
  "rows": [
   {
    "name": "f32 jacobi mixed, positions constant of the pass: a plane between the pre-step position and the fixed point's",
@@ -8,6 +8,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": true,
    "spectral_usable": true,
+   "spectral_number_holds": true,
+   "gradient_number_holds": true,
    "fixed_point_spacings_from_a_plane": 2.4990910726163662e-05,
    "cfg": {
     "N": [
@@ -80,6 +82,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": true,
    "spectral_usable": true,
+   "spectral_number_holds": true,
+   "gradient_number_holds": true,
    "fixed_point_spacings_from_a_plane": 1.882069717940027e-05,
    "cfg": {
     "N": [
@@ -150,8 +154,10 @@
    "structure": "f32 gauss-seidel l2",
    "row": "k=* N=*",
    "on_a_plane": false,
-   "gradient_bound_usable": true,
-   "spectral_usable": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": false,
+   "spectral_number_holds": true,
+   "gradient_number_holds": true,
    "fixed_point_spacings_from_a_plane": 0.1373606459404032,
    "cfg": {
     "N": [
@@ -222,6 +228,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 0.00016199756882295802,
    "cfg": {
     "N": [
@@ -292,6 +300,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 0.0001455998952160087,
    "cfg": {
     "N": [
@@ -362,6 +372,8 @@
    "on_a_plane": true,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 2.96409035005496e-06,
    "cfg": {
     "N": [
@@ -430,8 +442,10 @@
    "structure": "f64 jacobi l2",
    "row": "k=* N=*",
    "on_a_plane": false,
-   "gradient_bound_usable": true,
-   "spectral_usable": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": false,
+   "spectral_number_holds": true,
+   "gradient_number_holds": true,
    "fixed_point_spacings_from_a_plane": 0.12467125926791806,
    "cfg": {
     "N": [
@@ -502,6 +516,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 2.3003821070233244e-13,
    "cfg": {
     "N": [
@@ -572,6 +588,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 2.5579538487363607e-13,
    "cfg": {
     "N": [
@@ -642,6 +660,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 2.8954616482224083e-12,
    "cfg": {
     "N": [
@@ -712,6 +732,8 @@
    "on_a_plane": true,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 3.9968028886505635e-15,
    "cfg": {
     "N": [
@@ -780,8 +802,10 @@
    "structure": "f64 jacobi mixed aitken",
    "row": "k=* N=*",
    "on_a_plane": false,
-   "gradient_bound_usable": true,
-   "spectral_usable": true,
+   "gradient_bound_usable": false,
+   "spectral_usable": false,
+   "spectral_number_holds": true,
+   "gradient_number_holds": true,
    "fixed_point_spacings_from_a_plane": 0.09569369554230933,
    "cfg": {
     "N": [
@@ -852,6 +876,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 3.4727776210274897e-13,
    "cfg": {
     "N": [
@@ -922,6 +948,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 3.0752289603697136e-11,
    "cfg": {
     "N": [
@@ -992,6 +1020,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 3.4150460237469815e-13,
    "cfg": {
     "N": [
@@ -1062,6 +1092,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "fixed_point_spacings_from_a_plane": 2.8610447344590284e-13,
    "cfg": {
     "N": [
@@ -1132,6 +1164,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "cfg": {
     "N": [
      6
@@ -1202,6 +1236,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "cfg": {
     "N": [
      6
@@ -1272,6 +1308,8 @@
    "on_a_plane": false,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "cfg": {
     "N": [
      6
@@ -1342,6 +1380,8 @@
    "on_a_plane": true,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "cfg": {
     "N": [
      3,
@@ -1424,6 +1464,8 @@
    "on_a_plane": true,
    "gradient_bound_usable": false,
    "spectral_usable": false,
+   "spectral_number_holds": false,
+   "gradient_number_holds": false,
    "cfg": {
     "N": [
      7

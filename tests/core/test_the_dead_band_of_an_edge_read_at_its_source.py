@@ -219,6 +219,13 @@ def test_a_source_reading_leaves_the_norm_only_where_field_and_delivered_are_bot
         assert float(residual) > 0.1 and float(floor) > 0.0
         assert _bits(residual) == _bits(want), (float(residual), float(want))
         assert _bits(floor) == _bits(want_floor), (float(floor), float(want_floor))
+        # The floor is an RMS, so it shows a dropped reading only where
+        # nothing else is read: the scatter alone has a floor exactly
+        # where its reading is kept.
+        alone = residual_precision_floor(new, names, "interface", ATOL, 1e-3, both[:1])
+        unbanded = residual_precision_floor(new, names, "interface", 0.0, 1e-3, both[:1])
+        assert float(unbanded) > 0.0
+        assert _bits(alone) == (_bits(unbanded) if KEPT[quadrant] else _bits(jnp.zeros_like(alone)))
 
 
 def test_the_quadrants_are_the_ones_their_names_say():
@@ -347,17 +354,53 @@ def test_a_kept_reading_holds_both_fields_to_the_promise_in_every_quadrant(
         assert report["converged"], report
 
 
-def test_the_report_takes_the_decision_the_residual_took():
+@pytest.mark.parametrize("plain_back", [False, True], ids=["reading", "fields"])
+def test_the_spectrums_weights_keep_the_reading_the_residual_keeps(plain_back, monkeypatch):
+    """The weights the step hands its spectral analysis (read where the
+    step passes them, in ``_coupled_block``): the three entries of ``p``,
+    whose reading the band keeps for what the scatter delivers, carry
+    ``1 / max|p|`` and not zero, in the analysis on the fields (the grid
+    returns through a plain edge) and in the one on the reading (through
+    a gather).  Asked of the source field alone they were zero."""
+    from maddening.core.coupling import _coupled_block  # noqa: PLC0415
+
+    seen = []
+    target = "_spectral_rate_at" if plain_back else "_interface_spectral_rate_at"
+    real = getattr(_coupled_block, target)
+
+    def recorder(*args, **kwargs):
+        seen.append(np.asarray(args[3] if plain_back else args[5]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_coupled_block, target, recorder)
+    size, gain = QUADRANTS["field inside, delivered above"]
+    with x64(True):
+        gm = build(size, gain, schedule="jacobi", atol=ATOL, diagnostics=True,
+                   plain_back=plain_back)
+        gm._raw_step_fn(gm._state, gm._resolve_external_inputs(None), None)       # noqa: SLF001
+    assert len(seen) == 1, "the patch takes effect: the step's one analysis of this kind"
+    # ``p`` comes first: the group's sweep, and the norm's edge order.
+    assert seen[0].size >= M + 1
+    assert np.all(seen[0][:M] > 1e6), seen[0][:M]      # 1 / max|p|, p of order 1e-8
+
+
+# Per push: tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_the_spectrums_weights_keep_the_reading_the_residual_keeps
+@pytest.mark.slow
+@pytest.mark.parametrize("plain_back", [False, True], ids=["reading", "fields"])
+def test_the_report_takes_the_decision_the_residual_took(plain_back):
     """With diagnostics on, the audited pair's kept reading is in the
     spectrum's weights and in the floor: the bound is a few tolerances,
     as with no dead band (asked of the source alone, the weights put the
     whole of ``p`` into the dead-banded share and the bound read 1.9e6 to
-    3.7e6), and the floor the step recorded is the one the report uses."""
+    3.7e6).  Both analyses: on the norm's reading (the grid returns
+    through a gather, read as delivered) and on the fields themselves
+    (it returns whole through a plain edge)."""
     size, gain = QUADRANTS["field inside, delivered above"]
     with x64(True):
         reports = {}
         for atol in (ATOL, 0.0):
-            gm = build(size, gain, schedule="jacobi", atol=atol, diagnostics=True)
+            gm = build(size, gain, schedule="jacobi", atol=atol, diagnostics=True,
+                       plain_back=plain_back)
             gm.step()
             gm.step()
             reports[atol] = dict(gm.coupling_diagnostics()[KEY])

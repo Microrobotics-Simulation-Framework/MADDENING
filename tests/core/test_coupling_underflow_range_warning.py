@@ -359,6 +359,22 @@ def test_a_check_that_is_not_made_at_once_stays_due_and_is_made_within_the_spaci
     assert len(_recorded(gm.step)) == 1
 
 
+def test_a_check_left_due_is_made_without_another_write(monkeypatch):
+    """A check that waited is made when the spacing has passed, whether or
+    not the graph was written to again in between."""
+    gm = _spent(_leaky_pair(1.0))
+    reads = _counted_reads(monkeypatch)
+    _write(gm, 1.0)
+    for _ in range(SPACING - 1):
+        gm.step()
+    assert reads == []
+    gm.step()
+    assert len(reads) == 2
+    for _ in range(3):
+        gm.step()
+    assert len(reads) == 2
+
+
 def test_a_write_long_after_the_last_check_is_asked_at_the_next_step():
     """A graph written to now and then (1024 stored steps or more apart)
     is asked at the step after every write, however many it has had."""

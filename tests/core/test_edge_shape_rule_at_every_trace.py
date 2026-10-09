@@ -470,6 +470,11 @@ def test_a_source_field_dropped_from_the_state_is_named_by_its_edge(entry):
     with pytest.raises(KeyError, match=r"edge a\.x -> b\.u: source field 'x' is not in the "
                                        r"state of node 'a' \(available: \['y'\]\)"):
         _ENTRIES[entry](gm)
+    # ``resolve_boundary_inputs`` keeps the ``KeyError`` its reader documents
+    # (a source that is not in the state is looked up among the fluxes).
+    with pytest.raises(KeyError) as bare:
+        gm.resolve_boundary_inputs("b")
+    assert bare.value.args == ("x",)
     gm.set_node_state("a", {"x": jnp.ones(3, jnp.float32)})
     _ENTRIES[entry](gm)
 

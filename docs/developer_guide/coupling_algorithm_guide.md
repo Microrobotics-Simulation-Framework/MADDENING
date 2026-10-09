@@ -356,7 +356,8 @@ flushed to exactly zero by the step), and issues one `UnderflowRangeWarning`
 the remedy: write the field in units where it is of order one.  An exactly
 zero field never warns, and a group is warned of once.  The check runs on
 the host and does not change the compiled step; a state that decays into the
-range through the nodes' own updates is not re-checked.  It fires at the first step rather than in
+range through the nodes' own updates is not re-checked.  It fires at a step
+rather than in
 `coupling_diagnostics()` because the remedy is a decision about the model's
 units, every caller steps whether or not it reads the report, and the
 report is read in loops, where a per-call read of every group field would

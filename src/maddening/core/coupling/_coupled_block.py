@@ -1662,10 +1662,16 @@ def _run_coupled_block_impl(
                 # (so times their common scale), for a pass that rounds
                 # like ``pass_evals`` single ones.  In a group of one dtype
                 # this is each field's own eps, the constant it always was.
+                def _entry_eps(dtype):
+                    own = float(jnp.finfo(dtype).eps)
+                    # units: dimensionless -- both eps are relative to a
+                    # field's own magnitude (the weights' coordinates).
+                    return own if map_eps is None else max(own, map_eps)
+
                 resolution = (weight_scale * pass_evals) * _residual_resolution(_flatten_full({
                     nn: {fld: jnp.full(
                         jnp.shape(template_state[nn][fld]),
-                        max(float(jnp.finfo(template_state[nn][fld].dtype).eps), map_eps or 0.0),
+                        _entry_eps(template_state[nn][fld].dtype),
                         template_state[nn][fld].dtype)
                         for fld in float_fields[nn]}
                     for nn in group_node_names

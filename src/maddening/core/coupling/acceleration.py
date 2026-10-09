@@ -548,6 +548,8 @@ def _part_resolution(reading, state_index: int = 0, group_eps: Optional[float] =
     if positions is None:
         return max(_reading_eps(source_dtype, value), eps_floor)
     positions = jnp.asarray(positions)
+    # units: dimensionless -- two eps, each relative to a value's own
+    # magnitude: the geometry's dtype's and the group's coarsest.
     eps_geometry = max(float(jnp.finfo(positions.dtype).eps), eps_floor)
     # units: dimensionless -- each eps is relative to a magnitude.  Taken
     # as it stands, the positions' is the resolution of a value computed
@@ -578,8 +580,11 @@ def _positions_resolution(positions, eps_floor: float = 0.0):
     dtype and passes none.
     """
     positions = jnp.asarray(positions)
-    return max(float(jnp.finfo(positions.dtype).eps), float(eps_floor)) * jax.lax.stop_gradient(
-        jnp.max(jnp.abs(positions)))
+    # units: dimensionless -- two eps, each relative to a position's own
+    # magnitude (the positions' dtype's and the floor handed in); the
+    # product below is in the lengths the positions are given in.
+    eps = max(float(jnp.finfo(positions.dtype).eps), float(eps_floor))
+    return eps * jax.lax.stop_gradient(jnp.max(jnp.abs(positions)))
 
 
 def _group_coarsest_eps(state, node_names) -> Optional[float]:
@@ -639,6 +644,9 @@ def _group_coarsest_eps(state, node_names) -> Optional[float]:
         for value in (state.get(node) or {}).values():
             if _is_float_leaf(value) and _has_entries(value):
                 eps = float(jnp.finfo(jnp.asarray(value).dtype).eps)
+                # units: dimensionless -- each eps is relative to its own
+                # field's magnitude, the coordinates every norm measures
+                # a field in; the largest is the coarsest resolution.
                 coarsest = eps if coarsest is None else max(coarsest, eps)
     return coarsest
 
@@ -2028,6 +2036,8 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
                     # is at least the field's own: every field read here is
                     # one of the fields it is taken over.
                     own = float(jnp.finfo(v.dtype).eps)
+                    # units: dimensionless -- both eps are relative to a
+                    # field's own magnitude.
                     values.append((v, own if group_eps is None else max(own, group_eps), None))
     values = [entry for entry in values if _has_entries(entry[0])]
     if not values:

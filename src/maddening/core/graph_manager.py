@@ -279,6 +279,9 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
+        # Per group key, ``(edge key, longest row)`` of the internal edges
+        # that carry a static sparse mapping in the scatter layout.
+        self._committed_scatter_rows: dict[str, tuple] = {}
         # Per group key, the keys of the geometry-dependent mapped edges
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
@@ -3178,6 +3181,14 @@ class GraphManager:
                 interface_plans["+".join(sorted(g.nodes))].norm_edges())
             for g in self._coupling_groups
         }
+        # Per group key, the longest row of each internal edge that carries
+        # a static sparse mapping in the scatter layout, as the step was
+        # built: what the report's guard on the float floor reads
+        # (``_group_layout._scatter_rows``, MADD-ANO-251).
+        self._committed_scatter_rows = {
+            key: _group_layout._scatter_rows(plan)
+            for key, plan in interface_plans.items()
+        }
         self._committed_geometry_edges = {
             key: tuple(r.key for r in plan.resolved_geometry_edges())
             for key, plan in interface_plans.items()
@@ -4894,6 +4905,32 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
+            **A long row of a sparse mapping in the scatter layout**
+            (MADD-ANO-251, open).  The float floor counts a fixed number
+            of ``eps`` per evaluation, and a static sparse mapping in the
+            scatter layout (``transpose="scatter"``) adds a target's row
+            up one entry after another, which rounds by more than that
+            once the row is long, systematically behind a uniform field:
+            a float32 pair stalled behind one row read
+            ``"spectral_error_bound"`` at 0.68 of its true distance
+            behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4.
+            Where an internal edge of the group carries such a mapping
+            with a row longer than ``SCATTER_ROW_FLOOR_LIMIT`` (10, a
+            measured constant) and ``"residual"`` is not above the float
+            floor times the row's length, ``"spectral_usable"`` and
+            ``"gradient_bound_usable"`` are ``False``, every number is
+            reported as computed, and the entry has a
+            ``"not_usable_reason"`` naming the edge, the row's length and
+            the way out (a wider dtype at the same tolerance).  **Only
+            that layout is counted.**  The gather layout and the dense
+            kinds are summed in an order XLA chooses, and their reports
+            keep their flags: measured, the gather layout's rows of 1e4
+            entries and more read as the scatter layout's do on jax
+            0.10.2 in float32, and a dense mapping with three rows of
+            3000 entries read 0.18 of its distance on every jax version.
+            At a float floor behind a row of more than a few hundred
+            entries, in any layout, read the bound in a wider dtype.
+
             **A group that resolves a geometry-dependent mapping**
             (experimental: an edge into a member, from inside the group
             or outside it, added with ``add_edge(..., geometry=...)``)
@@ -4932,9 +4969,9 @@ class GraphManager:
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
-            says which case it is; besides the lattice-plane case above
-            and a checkpoint saved after a state write, no other
-            group's entry has it.
+            says which case it is; besides the lattice-plane case above,
+            a long scatter row and a checkpoint saved after a state
+            write, no other group's entry has it.
 
             **One of those groups keeps the float floor: one withheld
             on account of** ``convergence_norm="interface"`` (its
@@ -5310,6 +5347,24 @@ class GraphManager:
                         "not_usable_reason": _group_layout._geometry_plane_reason(
                             geometry_keys, reported_bound, float(plane_limit),
                             _bounds.GEOMETRY_PLANE_REACH),
+                    })
+                # The float floor counts a fixed number of ulps per
+                # evaluation, and a sparse mapping in the scatter layout
+                # adds a row's entries up in order, which rounds by more
+                # than that once the row is long (MADD-ANO-251, open).
+                # Where the residual does not stand clear of the floor
+                # such a row would give it, the flags that rest on the
+                # floor are withdrawn, with the reason; the numbers stay
+                # as computed.  Asked only of a flag that is still set.
+                scatter_reason = (
+                    _group_layout._scatter_row_reason(
+                        self._committed_scatter_rows.get(key, ()), residual, floor)
+                    if result[key]["spectral_usable"] else None)
+                if scatter_reason is not None:
+                    result[key].update({
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "not_usable_reason": scatter_reason,
                     })
         return result
 
@@ -7463,6 +7518,10 @@ class GraphManager:
           mapping whose bound reaches a lattice plane without the step
           having certified its linearisation across it (experimental):
           ``spectral_usable`` is withdrawn and the numbers are kept;
+        * ``not_usable_reason`` for a group at its float floor behind a
+          long row of a sparse mapping in the scatter layout
+          (MADD-ANO-251): ``spectral_usable`` is withdrawn and the
+          numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

@@ -234,6 +234,20 @@ class MultilinearGridMapping:
             read.append(jnp.logical_not(outside > slack * reach))
         return jnp.stack(read, axis=1).reshape(geom.shape)
 
+    def geometry_lattice(self) -> tuple:
+        """``(origin, spacing, shape)``: the lattice the stencil forms its
+        coordinates on.
+
+        Two mappings on one lattice round a position alike whatever
+        their modes -- a gather and the scatter that is its transpose --
+        so ``convergence_norm="interface"`` counts a position they both
+        read once (``_interface_plan._position_lattices``), and says
+        "several lattices" only of mappings whose lattices differ.
+        Optional for a kind: mappings of one that declares none are
+        each taken for a lattice of their own.
+        """
+        return (self.origin, self.spacing, self.shape)
+
     def geometry_kernel_coordinates(self, geom):
         """The **lattice coordinate** of every coordinate of *geom*: its
         distance from the grid's first point on its axis, in spacings

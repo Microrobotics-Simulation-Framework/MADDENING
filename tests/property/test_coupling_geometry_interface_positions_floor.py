@@ -15,9 +15,18 @@ merged, and one condition of the claim:
   rule of every group's report.  The oracle is the rule restated in NumPy
   from the stored numbers: four roundings per evaluation of every entry a
   part holds, a value at the group's coarsest ``eps``, positions at their
-  own dtype's ``eps`` times their distance from zero in spacings, pooled.
+  own dtype's ``eps`` times the magnitude they are rounded at, pooled.
   So float64 positions beside float32 fields put only float64's
-  ``eps |u|`` into the floor.
+  ``eps`` into the floor.
+* **A position is rounded at the larger of its distance from the
+  coordinates' zero and of its lattice coordinate.**  The kernel forms
+  ``(x - origin) / spacing`` in the positions' dtype, so its weights are
+  resolved to ``eps`` of that, whatever the stored position's own size.
+  Counted from zero alone, float32 markers near zero on a grid whose
+  first point is 8000 spacings away read a floor under one, no advisory
+  and ``converged=True`` 2 to 20 tolerances from the float64 fixed point.
+  The floor and the advisory take the same magnitude, with diagnostics on
+  or off.
 * **The count is an assumption for a delivered value.**  It takes the
   field to vary across a cell by about the size of the value delivered.
   A gather that samples a field near its zero is moved by more, and the
@@ -30,10 +39,12 @@ merged, and one condition of the claim:
   dead band drops, a coordinate on an axis of one lattice point and a
   point clamped to the hull put nothing into the floor and are not
   warned of; the true alarms beside each stay.
-* **The claim is first order, and a lattice plane ends it.**  A group
-  whose iterate jumps a plane into a cell where its pass contracts slowly
-  can report ``converged=True`` far from a fixed point in the cell it
-  came from: constructed and pinned with its numbers.
+* **The verdict is a local statement.**  It reads the contraction the
+  last passes showed, and holds to first order where the pass keeps that
+  rate to its fixed point.  A lattice plane is one way to lose it (an
+  iterate thrown into a cell where the pass contracts slowly); a kernel
+  that is nonlinear in the positions inside ONE cell, on two or three
+  axes, is another.  Both are constructed and pinned with their numbers.
 
 Nothing here imports the library's kernel, plan or norm for an oracle:
 the stencil (one axis, clamped), the parts, the pooling and the pass are
@@ -62,6 +73,8 @@ SCATTER, GATHER = "markers.f->grid.deposit", "grid.x->markers.sampled"
 #: Evaluations a pass of a Gauss-Seidel pair rounds like (the second
 #: member reads the first from the same pass): the structural count.
 EVALUATIONS = 2.0
+#: The same of a Jacobi pair: every member reads the previous iterate.
+JACOBI_EVALUATIONS = 1.0
 #: ``PRECISION_FLOOR_ULPS``, restated: roundings counted per evaluation.
 ULPS = 4.0
 ADVISORY = "cannot be resolved to this tolerance"
@@ -110,6 +123,11 @@ class Pair:
     f0: float = 0.7
     offsets: Optional[tuple] = None      # the markers, in spacings from ``u0``
     across: float = 0.0                  # every marker's second coordinate (lengths)
+    schedule: str = "gauss-seidel"       # or "jacobi"
+    #: The gather's own lattice origin, in spacings, where it is not the
+    #: scatter's (two edges reading one position field on two lattices).
+    gather_origin: Optional[float] = None
+    diagnostics: bool = False
 
     @property
     def lattice(self) -> tuple:
@@ -122,6 +140,29 @@ class Pair:
     @property
     def holds_gp(self) -> bool:
         return self.anchors[0] == "target" or self.anchors[1] == "source"
+
+    @property
+    def evaluations(self) -> float:
+        """The pass's structural evaluation count."""
+        return JACOBI_EVALUATIONS if self.schedule == "jacobi" else EVALUATIONS
+
+    def origin_of(self, edge: str) -> float:
+        """The lattice origin of *edge*'s mapping, in spacings."""
+        if edge == GATHER and self.gather_origin is not None:
+            return self.gather_origin
+        return self.origin
+
+    def lattices_of(self, field: str) -> tuple:
+        """The origins (in spacings) of the lattices of the edges that
+        read the position field *field* (``"pos"`` or ``"gp"``), each
+        once: where a position is rounded is the largest over them."""
+        scatter_at = "pos" if self.anchors[0] == "source" else "gp"
+        gather_at = "pos" if self.anchors[1] == "target" else "gp"
+        origins = []
+        for edge, at in ((SCATTER, scatter_at), (GATHER, gather_at)):
+            if at == field and self.origin_of(edge) not in origins:
+                origins.append(self.origin_of(edge))
+        return tuple(origins)
 
     def start_positions(self) -> np.ndarray:
         """``(m, d)``: what both nodes hold at ``compile()``, as stored."""
@@ -202,17 +243,21 @@ def build(pair: Pair, *, norm: str = "interface", markers=_Markers):
     gm = GraphManager()
     gm.add_node(_Grid("grid", 0.01, pair))
     gm.add_node(markers("markers", 0.01, pair))
-    grid = dict(origin=tuple(pair.origin * h for h in pair.spacing), spacing=pair.spacing,
-                shape=pair.lattice, n_points=pair.m)
+    def grid(edge):
+        return dict(origin=tuple(pair.origin_of(edge) * h for h in pair.spacing),
+                    spacing=pair.spacing, shape=pair.lattice, n_points=pair.m)
+
     gm.add_edge("markers", "grid", "f", "deposit",
-                mapping=multilinear_grid_mapping(mode="conservative", **grid),
+                mapping=multilinear_grid_mapping(mode="conservative", **grid(SCATTER)),
                 geometry=(pair.anchors[0], "pos" if pair.anchors[0] == "source" else "gp"))
     gm.add_edge("grid", "markers", "x", "sampled",
-                mapping=multilinear_grid_mapping(mode="consistent", **grid),
+                mapping=multilinear_grid_mapping(mode="consistent", **grid(GATHER)),
                 geometry=(pair.anchors[1], "pos" if pair.anchors[1] == "target" else "gp"))
     tolerance = {"tolerance": 1e-6} if norm == "l2" else {"rtol": pair.rtol, "atol": pair.atol}
+    knobs = {"diagnostics": True} if pair.diagnostics else {}
     gm.add_coupling_group(["grid", "markers"], convergence_norm=norm,
-                          iteration_mode="gauss-seidel", max_iterations=pair.cap, **tolerance)
+                          iteration_mode=pair.schedule, max_iterations=pair.cap,
+                          **tolerance, **knobs)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         gm.compile()
@@ -274,32 +319,53 @@ def positions_eps(pair: Pair) -> float:
     return float(np.finfo(np.dtype(pair.geometry_dtype)).eps)
 
 
-def coordinates_read(pair: Pair, positions: np.ndarray) -> np.ndarray:
-    """Which coordinates a delivered value depends on: not one on an axis
+def coordinates_read(pair: Pair, positions: np.ndarray, origin: Optional[float] = None
+                     ) -> np.ndarray:
+    """Which coordinates a value delivered through a lattice whose first
+    point is *origin* spacings from zero depends on: not one on an axis
     of one lattice point, and not one outside the hull by more than
-    ``sqrt(eps)`` of its own distance from zero (both in spacings)."""
+    ``sqrt(eps)`` of the magnitude it is rounded at (the larger of its
+    own distance from zero and of its lattice coordinate, in spacings)."""
+    origin = pair.origin if origin is None else origin
     eps = float(np.finfo(np.dtype(pair.geometry_dtype)).eps)
     read = np.ones(positions.shape, bool)
     for a, count in enumerate(pair.lattice):
         q = positions[:, a] / pair.spacing[a]
-        u = q - pair.origin
+        u = q - origin
         outside = np.maximum(np.maximum(-u, u - (count - 1)), 0.0)
-        read[:, a] = (count >= 2) & ~(outside > math.sqrt(eps) * np.abs(q))
+        rounded_at = np.maximum(np.abs(q), np.abs(u))
+        read[:, a] = (count >= 2) & ~(outside > math.sqrt(eps) * rounded_at)
     return read
+
+
+def rounded_at(pair: Pair, positions: np.ndarray, field: str) -> np.ndarray:
+    """The magnitude each coordinate of the position field *field* is
+    rounded at, in spacings: the larger of its distance from the
+    coordinates' zero and of its lattice coordinate (its distance from
+    the grid's first point: what the kernel forms in the positions'
+    dtype) wherever the kernel reads it; the largest over the lattices
+    that read the field."""
+    q = np.abs(positions / np.asarray(pair.spacing))
+    out = q
+    for origin in pair.lattices_of(field):
+        lattice = np.where(coordinates_read(pair, positions, origin), np.abs(
+            positions / np.asarray(pair.spacing) - origin), 0.0)
+        out = np.maximum(out, np.maximum(q, lattice))
+    return out
 
 
 def floor_parts(pair: Pair, pre: dict, post: dict) -> list:
     """``[(entries, resolution), ...]`` of the reading at the state *post*
     a step returned from *pre*: every entry of a part at one resolution.
     A value is at the group's coarsest ``eps``; positions, as a part and
-    as what a delivered value was computed at, are at their own."""
+    as what a delivered value was computed at, are at their own dtype's
+    ``eps`` times the largest magnitude they are rounded at."""
     eps, eps_p = coarsest_eps(pair), positions_eps(pair)
-    h = np.asarray(pair.spacing)
 
-    def reach(positions, delivered):
-        q = np.abs(positions / h)
-        if delivered:
-            q = np.where(coordinates_read(pair, positions), q, 0.0)
+    def reach(positions, field, delivered_by=None):
+        q = rounded_at(pair, positions, field)
+        if delivered_by is not None:
+            q = np.where(coordinates_read(pair, positions, pair.origin_of(delivered_by)), q, 0.0)
         return float(np.max(q))
 
     parts = []
@@ -308,18 +374,20 @@ def floor_parts(pair: Pair, pre: dict, post: dict) -> list:
         parts.append((pair.m, eps))
         if pair.anchors[0] == "source":
             parts.append((post["markers"]["pos"].size,
-                          eps_p * reach(post["markers"]["pos"], False)))
+                          eps_p * reach(post["markers"]["pos"], "pos")))
     else:                               # read as delivered
-        at = post["markers"]["pos"] if pair.anchors[0] == "source" else pre["grid"]["gp"]
-        parts.append((pair.n, max(eps, eps_p * reach(at, True))))
+        at, field = ((post["markers"]["pos"], "pos") if pair.anchors[0] == "source"
+                     else (pre["grid"]["gp"], "gp"))
+        parts.append((pair.n, max(eps, eps_p * reach(at, field, SCATTER))))
     # The gather, n entries onto m points.
     if pair.m > pair.n:                 # read at its source
         parts.append((pair.n, eps))
         if pair.anchors[1] == "source":
-            parts.append((post["grid"]["gp"].size, eps_p * reach(post["grid"]["gp"], False)))
+            parts.append((post["grid"]["gp"].size, eps_p * reach(post["grid"]["gp"], "gp")))
     else:                               # read as delivered
-        at = post["grid"]["gp"] if pair.anchors[1] == "source" else pre["markers"]["pos"]
-        parts.append((pair.m, max(eps, eps_p * reach(at, True))))
+        at, field = ((post["grid"]["gp"], "gp") if pair.anchors[1] == "source"
+                     else (pre["markers"]["pos"], "pos"))
+        parts.append((pair.m, max(eps, eps_p * reach(at, field, GATHER))))
     return parts
 
 
@@ -327,26 +395,26 @@ def floor_of(pair: Pair, pre: dict, post: dict) -> float:
     """The residual's float floor at *post*, in tolerances."""
     parts = floor_parts(pair, pre, post)
     pooled = math.sqrt(sum(n * r * r for n, r in parts) / sum(n for n, _r in parts))
-    return ULPS * EVALUATIONS * pooled / pair.rtol
+    return ULPS * pair.evaluations * pooled / pair.rtol
 
 
 # -- the pass on one axis, in float64 ---------------------------------------
 
 
-def _stencil(pair: Pair, positions: np.ndarray):
+def _stencil(pair: Pair, positions: np.ndarray, edge: str):
     n, h = pair.lattice[0], pair.spacing[0]
-    u = np.clip(positions[:, 0] / h - pair.origin, 0.0, n - 1.0)
+    u = np.clip(positions[:, 0] / h - pair.origin_of(edge), 0.0, n - 1.0)
     base = np.clip(np.floor(u), 0, n - 2).astype(np.int64)
     return base, u - base
 
 
 def _gather(pair, x, positions):
-    base, w = _stencil(pair, positions)
+    base, w = _stencil(pair, positions, GATHER)
     return (1.0 - w) * x[base] + w * x[base + 1]
 
 
 def _scatter(pair, f, positions):
-    base, w = _stencil(pair, positions)
+    base, w = _stencil(pair, positions, SCATTER)
     out = np.zeros(pair.lattice[0])
     np.add.at(out, base, (1.0 - w) * f)
     np.add.at(out, base + 1, w * f)
@@ -354,8 +422,9 @@ def _scatter(pair, f, positions):
 
 
 def one_pass(pair: Pair, x: dict, pre: dict) -> dict:
-    """One Gauss-Seidel pass (the grid, then the markers) from the iterate
-    *x*; a target-anchored geometry is the target's pre-step state."""
+    """One pass from the iterate *x*: Gauss-Seidel (the grid, then the
+    markers, which read the grid this pass built) or Jacobi (both read
+    *x*); a target-anchored geometry is the target's pre-step state."""
     kx, bx, gx = pair.grid_update
     kf, bf, gf = pair.markers_update
     h = pair.spacing[0]
@@ -364,8 +433,9 @@ def one_pass(pair: Pair, x: dict, pre: dict) -> dict:
     grid = {"x": kx * pre["grid"]["x"] + bx + gx * deposit}
     if pair.holds_gp:
         grid["gp"] = pre["grid"]["gp"] + (pair.drift + pair.push * np.mean(deposit)) * h
-    at = grid["gp"] if pair.anchors[1] == "source" else pre["markers"]["pos"]
-    sampled = _gather(pair, grid["x"], at)
+    read = x["grid"] if pair.schedule == "jacobi" else grid
+    at = read["gp"] if pair.anchors[1] == "source" else pre["markers"]["pos"]
+    sampled = _gather(pair, read["x"], at)
     markers = {"f": kf * pre["markers"]["f"] + bf + gf * sampled,
                "pos": pre["markers"]["pos"] + ((pair.drift + pair.push * sampled) * h)[:, None]}
     return {"grid": grid, "markers": markers}
@@ -871,11 +941,25 @@ def test_the_advisory_states_what_its_count_assumes_and_claims_no_worst_case():
     for phrase in ("assumes a field that varies across one cell by about the size of the value "
                    "delivered", "the warning is then early", "a field sampled near its zero",
                    "MADD-ANO-247", "asked once, of the state compile() sees",
-                   "precision_limited and residual_precision_floor"):
+                   "the report's residual_precision_floor is the reading at every step",
+                   "(precision_limited)"):
         assert phrase in text, (phrase, text)
     for text in advisories:
         assert "worst case" not in text and "resolves this tolerance" not in text, text
-        assert "count is under the tolerance within" in text, text
+        assert "lattices that read these positions" not in text, text      # one lattice here
+        # 400 spacings from the grid's first point, where float32 allows
+        # 105 at this tolerance: no change of coordinates is offered.
+        assert "No choice of the coordinates' origin brings this count under" in text, text
+        assert "coordinates local to the grid" not in text, text
+    # The same markers a few spacings from their grid's first point, 400
+    # from zero: there a change of coordinates is what the message offers.
+    _gm, advisories = build(dataclasses.replace(far, origin=395.0))
+    assert warned(advisories) == {SCATTER: "part", GATHER: "delivered"}
+    for text in advisories:
+        assert "use coordinates local to the grid" in text, text
+        assert "count is under the tolerance within 105 spacings of zero and of the grid's " \
+            "first point" in text, text
+        assert "No choice of the coordinates' origin" not in text, text
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1111,7 @@ def test_a_coordinate_on_an_axis_of_one_lattice_point_puts_nothing_into_a_delive
     read = Pair(anchors=("source", "target"), **flat)
     _gm, advisories = build(read)
     assert warned(advisories) == {SCATTER: "part"}
-    assert "2000 spacings from zero (axis 1, spacing 0.001)" in advisories[0], advisories[0]
+    assert "2000 spacings from zero (axis 1, spacing 0.001;" in advisories[0], advisories[0]
 
 
 def test_the_true_alarms_beside_a_one_point_axis_and_a_clamped_point_stay():
@@ -1067,7 +1151,390 @@ def test_points_clamped_to_the_hull_put_nothing_into_a_delivered_value():
 
 
 # ---------------------------------------------------------------------------
-# The claim is first order: a lattice plane ends it
+# E. Where a position is rounded: the larger of its own magnitude and its
+#    lattice coordinate's
+# ---------------------------------------------------------------------------
+
+#: Four markers within 4 spacings of the coordinates' zero (0.31, 1.47,
+#: 2.63 and 3.29), pushed a twentieth of a spacing per unit sampled.
+NEAR_ZERO = dict(u0=0.31, offsets=(0.0, 1.16, 2.32, 2.98), push=0.05)
+#: ``(schedule, rtol, origin of the control)``: the tolerance at which a
+#: float32 pair's value parts alone read a floor of a quarter to a half,
+#: and a grid whose first point is near enough for the positions' count
+#: to stay under one (``rtol / (4 E eps)`` is 10.5 spacings under
+#: Gauss-Seidel at 1e-5 and 6.3 under Jacobi at 3e-6).
+SCHEDULES = {"gauss-seidel": (1e-5, -5.0), "jacobi": (3e-6, -2.0)}
+
+
+def _first_point_far(schedule: str, cells: int = 8000, **changes) -> Pair:
+    """The markers of ``NEAR_ZERO`` on a grid of ``2 cells + 1`` points
+    centred on the coordinates' zero: its first point is *cells* spacings
+    away, which is each marker's lattice coordinate to within four."""
+    rtol, _near = SCHEDULES[schedule]
+    return dataclasses.replace(
+        Pair(n=2 * cells + 1, origin=-float(cells), rtol=rtol, schedule=schedule, **NEAR_ZERO),
+        **changes)
+
+
+def _counts(pair: Pair, pre: dict) -> dict:
+    """``{edge key: count}``: what the positions put into the floor of
+    each part that rests on them, by itself, in tolerances, at the state
+    ``compile()`` sees -- the rule's own number for the advisory (the
+    usual proportion: the scatter read at its source, the gather as
+    delivered)."""
+    assert pair.m < pair.n
+    eps = positions_eps(pair)
+    scale = ULPS * pair.evaluations * eps / pair.rtol
+    out = {}
+    if pair.anchors[0] == "source":
+        out[SCATTER] = scale * float(np.max(rounded_at(pair, pre["markers"]["pos"], "pos")))
+    at, field = ((pre["grid"]["gp"], "gp") if pair.anchors[1] == "source"
+                 else (pre["markers"]["pos"], "pos"))
+    read = coordinates_read(pair, at, pair.origin_of(GATHER))
+    out[GATHER] = scale * float(np.max(np.where(read, rounded_at(pair, at, field), 0.0)))
+    return out
+
+
+def _stepped(pair: Pair):
+    """``(report, advisories, distance)``: *pair* compiled and stepped
+    once, its report checked against the rule, the advisories checked
+    against the rule's own counts (an edge is warned of exactly where its
+    count is one or more), and the pooled distance of the returned state
+    from the float64 fixed point, in tolerances."""
+    gm, advisories = build(pair)
+    pre = stored(gm)
+    counts = _counts(pair, pre)
+    assert sorted(warned(advisories)) == sorted(k for k, c in counts.items() if c >= 1.0), (
+        counts, advisories)
+    gm.step()
+    d = _checked(pair, gm, pre)
+    star = fixed_point(pair, pre)
+    return d, advisories, scaled_change(pair, stored(gm), star, pre, reference=star)
+
+
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+@pytest.mark.parametrize("schedule", sorted(SCHEDULES))
+def test_markers_near_zero_on_a_grid_whose_first_point_is_far_are_flagged(schedule, anchors):
+    """The kernel forms ``(x - origin) / spacing`` in the positions' dtype:
+    float32 markers within 4 spacings of zero on a grid of 16001 points
+    centred there have weights resolved to ``eps * 8000`` of a cell.  The
+    floor counts that (623 tolerances under Gauss-Seidel at ``rtol=1e-5``
+    with the markers holding the positions; counted from zero alone it
+    was 0.26 to 0.50, ``precision_limited=False``, no advisory), the
+    advisory is given for each edge whose reading rests on the positions,
+    and the report's floor is the rule restated from the stored numbers.
+    Beside it the same local problem on a grid whose first point is a few
+    spacings away: silent, a floor under one, and within a tolerance of
+    the float64 fixed point."""
+    far = _first_point_far(schedule, anchors=anchors)
+    d, advisories, _distance = _stepped(far)
+    assert d["converged"] is True, d
+    assert d["residual_precision_floor"] > 100.0 and d["precision_limited"] is True, d
+    assert GATHER in warned(advisories), advisories
+    for text in advisories:
+        assert "from the grid's first point (axis 0, spacing 0.5;" in text, text
+        assert "No choice of the coordinates' origin brings this count under" in text, text
+        assert "coordinates local to the grid" not in text and "in float64 (" in text, text
+    _rtol, near_origin = SCHEDULES[schedule]
+    near = dataclasses.replace(far, n=41, origin=near_origin)
+    d, advisories, distance = _stepped(near)
+    assert advisories == [] and d["converged"] is True, (advisories, d)
+    assert d["residual_precision_floor"] < 1.0 and distance < 1.0, (d, distance)
+
+
+# Per push: tests/property/test_coupling_geometry_interface_positions_floor.py::test_markers_near_zero_on_a_grid_whose_first_point_is_far_are_flagged
+@pytest.mark.slow
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[2:], ids="-".join)
+@pytest.mark.parametrize("schedule", sorted(SCHEDULES))
+def test_markers_near_zero_on_a_far_grid_are_flagged_on_the_other_anchors(schedule, anchors):
+    d, advisories, _distance = _stepped(_first_point_far(schedule, anchors=anchors))
+    assert d["residual_precision_floor"] > 100.0 and d["precision_limited"] is True, d
+    assert GATHER in warned(advisories), advisories
+
+
+@pytest.mark.parametrize("schedule", sorted(SCHEDULES))
+def test_no_report_reads_a_floor_under_one_with_the_state_tolerances_off(schedule):
+    """The claim the floor guards (MAP-050): a group whose report reads a
+    floor under one and ``converged=True`` is within K tolerances of its
+    fixed point, K about one for these loops.  Over grids whose first
+    point is 5 to 50000 spacings from float32 markers near zero, against
+    the float64 fixed point of the pass: wherever the returned state is
+    more than a tolerance off, the floor is one or more.  And the state
+    IS off on the longer grids (the premise: the alarm is a true one):
+    counted from zero alone every row read a floor of a quarter to a
+    half."""
+    worst = 0.0
+    for cells in (5, 1000, 8000, 50_000):
+        d, _advisories, distance = _stepped(_first_point_far(schedule, cells))
+        assert d["converged"] is True, (cells, d)
+        assert d["residual_precision_floor"] >= 1.0 or distance <= 1.0, (cells, d, distance)
+        if cells >= 1000:
+            assert d["precision_limited"] is True, (cells, d)
+            worst = max(worst, distance)
+    assert worst > 2.0, worst
+
+
+def test_one_problem_in_two_coordinate_systems_reads_one_floor():
+    """The same grid and markers with the coordinates' zero at the grid's
+    first point (the markers 8000 spacings out) and with it at the
+    markers (the remedy the advisory used to name): the lattice
+    coordinates are the same, so the floor is the same to rounding and
+    both are warned of on both edges.  Counted from zero alone the two
+    read 623 and 0.26."""
+    at_the_grid = Pair(n=16001, origin=0.0, **{**NEAR_ZERO, "u0": 8000.31})
+    at_the_markers = Pair(n=16001, origin=-8000.0, **NEAR_ZERO)
+    floors = []
+    for pair in (at_the_grid, at_the_markers):
+        d, advisories, _distance = _stepped(pair)
+        assert warned(advisories) == {SCATTER: "part", GATHER: "delivered"}, advisories
+        assert d["precision_limited"] is True, d
+        floors.append(d["residual_precision_floor"])
+    assert floors[0] == pytest.approx(floors[1], rel=1e-5) and floors[1] > 600.0, floors
+
+
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+def test_float64_positions_on_a_grid_whose_first_point_is_far_are_quiet(anchors):
+    """The remedy that is left where the lattice coordinate is what
+    rounds: the same pair with its positions in float64 and its fields in
+    float32 compiles silently, reads the floor of its value parts alone,
+    and is within a tolerance of the float64 fixed point."""
+    pair = _first_point_far("gauss-seidel", anchors=anchors, pos_dtype="float64")
+    d, advisories, distance = _stepped(pair)
+    assert advisories == [] and d["converged"] is True, (advisories, d)
+    assert d["residual_precision_floor"] == pytest.approx(VALUES_ALONE[anchors], rel=1e-5), d
+    assert distance < 1.0, distance
+
+
+def test_positions_two_edges_read_on_two_lattices_are_rounded_at_the_largest():
+    """A scatter and a gather that read the markers' positions on two
+    lattices, the gather's first point 8000 spacings away and the
+    scatter's five: the positions part of the scatter is counted at the
+    gather's lattice coordinate too (the largest over the lattices that
+    read the field), so both edges are warned of and the floor is the
+    rule's.  With one lattice for both, five spacings away, neither is."""
+    two = Pair(n=16001, origin=-5.0, gather_origin=-8000.0, **NEAR_ZERO)
+    gm, advisories = build(two)
+    pre = stored(gm)
+    counts = _counts(two, pre)
+    assert counts[SCATTER] == pytest.approx(counts[GATHER]) and counts[SCATTER] > 500.0, counts
+    assert warned(advisories) == {SCATTER: "part", GATHER: "delivered"}, advisories
+    for text in advisories:
+        assert "the largest over the 2 lattices that read these positions" in text, text
+    gm.step()
+    d = _checked(two, gm, pre)
+    assert d["residual_precision_floor"] > 500.0, d
+    one = dataclasses.replace(two, gather_origin=None)
+    assert build(one)[1] == []
+
+
+def test_a_point_just_past_the_last_lattice_point_of_a_long_grid_is_read():
+    """A coordinate is "not read" only where it is outside the hull by
+    more than its rounding can cross, and beyond the last point of a long
+    grid that rounding is the lattice coordinate's: on 8000 float32
+    spacings it is 9.5e-4 of a cell wherever the coordinates' zero is.
+    With the zero at the grid's last point, a marker a ten-thousandth of
+    a spacing past it was taken to be clamped for good (its own distance
+    from zero is tiny) and put nothing into the value gathered there; it
+    is read, and warned of.  The same marker 30 spacings past the face is
+    not."""
+    top = dict(n=8001, origin=-8000.0, m=3, anchors=("target", "target"))
+    mapping = multilinear_grid_mapping((-4000.0,), (0.5,), (8001,), n_points=3, mode="consistent")
+    geom = jnp.asarray(np.asarray([[-1.0], [5e-5], [15.0]]), "float32")
+    assert np.asarray(mapping.geometry_coordinates_read(geom))[:, 0].tolist() == [
+        True, True, False]
+    lattice = np.asarray(mapping.geometry_kernel_coordinates(geom))[:, 0]
+    assert lattice.dtype == np.float32 and lattice.tolist() == [7998.0, 8000.0, 8030.0]
+    # ... and through the floor: every marker past the face, by 1e-4 of a
+    # spacing (read) and by 30 (not read).
+    just_past = Pair(u0=1e-4, offsets=(0.0, 1e-4, 2e-4), push=0.0, **top)
+    gm, advisories = build(just_past)
+    assert warned(advisories) == {GATHER: "delivered"}, advisories
+    pre = stored(gm)
+    gm.step()
+    assert _checked(just_past, gm, pre)["residual_precision_floor"] > 100.0
+    well_past = Pair(u0=30.0, offsets=(0.0, 1.0, 2.0), push=0.0, **top)
+    gm, advisories = build(well_past)
+    assert advisories == []
+    pre = stored(gm)
+    gm.step()
+    assert _checked(well_past, gm, pre)["residual_precision_floor"] < 1.0
+
+
+def test_the_advisory_quotes_one_part_and_says_the_reports_floor_is_pooled():
+    """The number in the message is what the positions put into the floor
+    of one part by itself; the report's floor is one RMS over every entry
+    the norm reads.  The message says so, with the part's entry count,
+    and says which number to compare with what."""
+    far = Pair(u0=400.0, n=1000, rtol=1e-4)
+    gm, advisories = build(far)
+    pre = stored(gm)
+    counts = _counts(far, pre)
+    for key, text in zip(warned(advisories), advisories):
+        said = float(text.split("which is ")[1].split(" times the tolerance")[0])
+        assert said == pytest.approx(counts[key], rel=5e-3), (key, said, counts)
+        for phrase in ("times the tolerance for this part by itself",
+                       "it is pooled, one RMS over every entry the group's norm reads",
+                       f"(this part's {far.m} among them)",
+                       "Compare this number with one", "the report's floor with its residual"):
+            assert phrase in text, (phrase, text)
+    gm.step()
+    d = _checked(far, gm, pre)
+    # Three parts of four entries, two of them at the positions' count:
+    # pooled, the floor is under the number either advisory quotes.
+    assert d["residual_precision_floor"] < min(counts.values()), (d, counts)
+
+
+# ---------------------------------------------------------------------------
+# F. The floor is the same with diagnostics on and off
+# ---------------------------------------------------------------------------
+
+#: ``(fields' dtype, positions' dtype)``.
+DTYPES = {"float64-positions": ("float32", "float64"), "float32": ("float32", None),
+          "float64": ("float64", None)}
+
+
+def _with_and_without_diagnostics(dtypes: str, anchors: tuple, out: float):
+    """One pair *out* spacings from zero (the grid's first point two
+    spacings before the markers), stepped once with ``diagnostics=True``
+    and once without: the two reports, the evaluation count the step
+    measured, and whether the two returned states are the same bits."""
+    dtype, pos_dtype = DTYPES[dtypes]
+    base = Pair(n=41, origin=out - 2.0, dtype=dtype, pos_dtype=pos_dtype, anchors=anchors,
+                **{**NEAR_ZERO, "u0": out + 0.31})
+    reports, states, measured = [], [], None
+    for diagnostics in (False, True):
+        pair = dataclasses.replace(base, diagnostics=diagnostics)
+        gm, _advisories = build(pair)
+        pre = stored(gm)
+        gm.step()
+        reports.append(_checked(pair, gm, pre))
+        states.append({(n, f): np.asarray(v).tobytes() for n in ("grid", "markers")
+                       for f, v in gm.get_node_state(n).items()})
+        if diagnostics:
+            measured = float(gm._state["_meta"][f"coupling_{KEY}_pass_evaluations"])  # noqa: SLF001
+    return reports[0], reports[1], measured, states[0] == states[1]
+
+
+def _same_floor_either_way(dtypes, anchors, out):
+    plain, diagnosed, measured, same_state = _with_and_without_diagnostics(dtypes, anchors, out)
+    assert same_state
+    assert diagnosed["residual_precision_floor"] == pytest.approx(
+        plain["residual_precision_floor"], rel=1e-6), (plain, diagnosed)
+    assert diagnosed["precision_limited"] is plain["precision_limited"], (plain, diagnosed)
+    for d in (plain, diagnosed):        # no bound either way, in 0.4.0
+        assert math.isnan(d["spectral_error_bound"]) and not d["spectral_usable"], d
+    return plain, measured
+
+
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+@pytest.mark.parametrize("dtypes", ["float64-positions", "float32"])
+def test_an_evaluation_count_a_step_measured_does_not_enter_the_floor_of_the_report(
+        dtypes, anchors):
+    """With ``diagnostics=True`` the step records an evaluation count
+    that weights a read of positions by their distance from zero (147
+    and 1339 a thousand spacings out, against a structural 2), and the
+    report multiplied the floor by it: float64 positions beside float32
+    values read 5.7 and 64 tolerances and ``precision_limited=True``
+    where the same state, to the bit, read 0.078 and 0.095 without
+    diagnostics.  The report of a group withheld on account of the
+    interface norm takes the structural count whatever that slot holds.
+    Here the slot is written beside the state a step without diagnostics
+    returned (the slow table below runs the step that writes it): the
+    report does not move."""
+    dtype, pos_dtype = DTYPES[dtypes]
+    pair = Pair(n=41, origin=998.0, dtype=dtype, pos_dtype=pos_dtype, anchors=anchors,
+                **{**NEAR_ZERO, "u0": 1000.31})
+    gm, _advisories = build(pair)
+    pre = stored(gm)
+    gm.step()
+    plain = _checked(pair, gm, pre)
+    meta = dict(gm._state["_meta"])                                           # noqa: SLF001
+    meta[f"coupling_{KEY}_pass_evaluations"] = jnp.asarray(1339.0, jnp.float32)
+    gm._state = {**gm._state, "_meta": meta}                                   # noqa: SLF001
+    assert same_reports(report(gm), plain), (report(gm), plain)
+    _checked(pair, gm, pre)
+    if dtypes == "float64-positions":
+        assert plain["residual_precision_floor"] == pytest.approx(
+            VALUES_ALONE[anchors], rel=1e-5), plain
+    else:
+        assert plain["residual_precision_floor"] > 50.0 and plain["precision_limited"] is True
+
+
+def test_a_measured_count_still_enters_the_floor_of_a_group_whose_bounds_are_reported():
+    """The control of the rule above: the same slot beside the same pair
+    under ``"mixed"``, whose report builds its bound on the floor, moves
+    that report (the measured count is that floor's count there, as it
+    is for every group without a geometry edge)."""
+    gm, _advisories = build(Pair(n=41), norm="mixed")
+    gm.step()
+    plain = report(gm)
+    assert plain["precision_limited"] is False, plain
+    meta = dict(gm._state["_meta"])                                           # noqa: SLF001
+    meta[f"coupling_{KEY}_pass_evaluations"] = jnp.asarray(1e6, jnp.float32)
+    gm._state = {**gm._state, "_meta": meta}                                   # noqa: SLF001
+    assert report(gm)["precision_limited"] is True
+
+
+# Per push: tests/property/test_coupling_geometry_interface_positions_floor.py::test_an_evaluation_count_a_step_measured_does_not_enter_the_floor_of_the_report
+@pytest.mark.slow
+@pytest.mark.parametrize("out", [0.0, 100.0, 1000.0, 5000.0, 20000.0])
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+@pytest.mark.parametrize("dtypes", sorted(DTYPES))
+def test_the_floor_is_the_same_with_diagnostics_on_at_every_distance(dtypes, anchors, out):
+    """The thirty rows, each stepped with ``diagnostics=True`` and
+    without: three dtype pairings, the positions held by the markers or
+    by the grid node, 0 to 20000 spacings from zero.  The state is the
+    same to the bit, and so are the floor and the flag, while the count
+    the step measured grows with the distance (the premise).  The
+    float64-positions rows read the value parts' floor at every distance
+    and are never flagged for it; the float32 rows from 100 spacings out
+    are precision-limited, with diagnostics and without."""
+    plain, measured = _same_floor_either_way(dtypes, anchors, out)
+    if out >= 1000.0:
+        assert measured > 50.0 * EVALUATIONS, measured       # premise: the count did grow
+    if dtypes == "float64-positions":
+        assert plain["residual_precision_floor"] == pytest.approx(
+            VALUES_ALONE[anchors], rel=1e-5), plain
+    if dtypes == "float32" and out >= 100.0:
+        assert plain["precision_limited"] is True, plain
+    if dtypes == "float64":
+        assert plain["residual_precision_floor"] < 1e-4, plain
+
+
+# ---------------------------------------------------------------------------
+# G. A state that is not finite: the reason says so
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+def test_after_a_step_on_a_non_finite_position_the_reason_says_the_state_is_not_finite(anchors):
+    """A position written NaN, then a step: the residual is ``inf``, the
+    group is not converged, and the floor is not a number.  The entry
+    carries both keys (``precision_limited`` ``False``,
+    ``residual_precision_floor`` NaN) and its reason says the floor could
+    not be measured because the state is not finite -- not that the
+    flags "are not reported until the group steps" (the group has
+    stepped), and not that the floor "is reported" beside a NaN."""
+    pair = Pair(n=41, anchors=anchors)
+    gm, _advisories = build(pair)
+    name, field = ("markers", "pos") if anchors[0] == "source" else ("grid", "gp")
+    state = dict(gm.get_node_state(name))
+    broken = np.array(state[field])
+    broken.flat[1] = np.nan
+    gm.set_node_state(name, {**state, field: jnp.asarray(broken, state[field].dtype)})
+    gm.step()
+    d = report(gm)
+    assert d["converged"] is False and d["residual"] == math.inf, d
+    assert d["precision_limited"] is False and math.isnan(d["residual_precision_floor"]), d
+    reason = d["not_usable_reason"]
+    assert "could not be measured, because the state this step returned is not finite" in reason
+    assert "(residual is inf)" in reason, reason
+    assert "until the group steps" not in reason and "float floor is reported" not in reason
+    assert "is not reported either" not in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# The verdict is local: a lattice plane, or one cell of two or three axes
 # ---------------------------------------------------------------------------
 
 _PLANE = 6           # the lattice point the field's slope changes at
@@ -1178,3 +1645,97 @@ def test_within_one_lattice_cell_or_a_cell_of_a_like_rate_the_claim_holds(left, 
     plane contracting at 0.5: ``converged=True`` within a tolerance."""
     out = _across_a_plane(left, right, c0, 0.5)
     assert out["report"]["converged"] is True and out["distance"] < 1.0, out
+
+
+# -- inside one cell ---------------------------------------------------------
+
+
+class _CubicHost(SimulationNode):
+    """Holds the eight corner values of ONE lattice cell on three axes and
+    one probe position ``(v, v, v)`` for the value ``v`` it is handed."""
+
+    def __init__(self, name, timestep, corners, start):
+        super().__init__(name, timestep)
+        self._corners, self._start = corners, start
+
+    def initial_state(self):
+        return {"x": jnp.asarray(self._corners), "gp": jnp.full((1, 3), self._start)}
+
+    def boundary_input_spec(self):
+        return {"d": BoundaryInputSpec(shape=(1,), dtype=jnp.float64)}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": state["x"], "gp": jnp.broadcast_to(boundary_inputs["d"][:, None], (1, 3))}
+
+
+def _inside_one_cell(creep: float, start: Optional[float] = None, rtol: float = 1e-4):
+    """``v <- q(v)``, ``q`` the trilinear interpolant of one cell along
+    its diagonal: the cubic ``q(v) = v - C (v - 0.25) ((v - 0.6)**2 +
+    creep**2)``, whose only real fixed point is ``v* = 0.25`` (``q' =
+    -0.05`` there) and which moves by ``C creep**2`` of the distance when
+    it passes 0.6.  One step of the library from *start* (by default the
+    start whose first pass lands on 0.6), against that fixed point."""
+    star, slow, slope = 0.25, 0.6, -0.05
+    C = (1.0 - slope) / ((star - slow) ** 2 + creep ** 2)
+    q = np.poly1d([1.0, 0.0]) - C * np.poly1d([1.0, -star]) * np.poly1d(
+        [1.0, -2.0 * slow, slow * slow + creep * creep])
+    roots = (q - np.poly1d([1.0, 0.0])).roots
+    assert [round(float(r.real), 9) for r in roots if abs(r.imag) < 1e-9] == [star]
+    power = q.coeffs[::-1]              # a0..a3: the diagonal's Bernstein form
+    bernstein = [sum(math.comb(i, j) / math.comb(3, j) * power[j] for j in range(i + 1))
+                 for i in range(4)]
+    corners = np.asarray([bernstein[bin(index).count("1")] for index in range(8)])
+    if start is None:
+        start = max(float(r.real) for r in (q - slow).roots
+                    if abs(r.imag) < 1e-12 and 0.0 < r.real < 1.0 and abs(r.real - slow) > 0.05)
+    gm = GraphManager()
+    gm.add_node(_CubicHost("grid", 0.01, corners, start))
+    gm.add_node(_Relay("markers", 0.01, start))
+    gm.add_edge("grid", "markers", "x", "sampled", geometry=("source", "gp"),
+                mapping=multilinear_grid_mapping((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (2, 2, 2),
+                                                 n_points=1, mode="consistent"))
+    gm.add_edge("markers", "grid", "f", "d")
+    gm.add_coupling_group(["grid", "markers"], convergence_norm="interface", rtol=rtol,
+                          iteration_mode="gauss-seidel", max_iterations=50)
+    gm.compile()
+    gm.step()
+    f = float(gm.get_node_state("markers")["f"][0])
+    gp = np.asarray(gm.get_node_state("grid")["gp"])[0]
+    return dict(report=report(gm), start=start, returned=f, inside=bool(np.all((gp > 0) & (gp < 1))),
+                distance=abs(f - star) / (rtol * star), rate=1.0 - C * creep * creep,
+                K=1.0 / (1.0 - slope))
+
+
+def test_inside_one_cell_of_three_axes_a_pass_that_creeps_reads_converged_far_from_the_fixed_point():
+    """No lattice plane is needed.  Inside a cell the kernel is multilinear
+    of degree ``d`` in the positions, so on two or three axes the pass's
+    contraction varies within the cell.  One point in a lattice of ONE
+    cell (2 x 2 x 2: no interior plane, and no iterate leaves the hull)
+    at ``(v, v, v)`` for the value ``v`` it gathers: the pass is a cubic
+    with one real fixed point, 0.25, where it contracts at 0.05
+    (``K = 0.95``), and it creeps at 0.9999 past 0.6.  Started at 0.8088
+    the first pass lands on 0.6, the next moves by 0.61 tolerances, and
+    the step reports ``converged=True`` after one counted pass, 14,000
+    tolerances from the only fixed point, with the start, the accepted
+    iterate, the returned state and the fixed point in one cell.  The
+    verdict reads the contraction the last passes showed; it says
+    nothing of a fixed point the pass does not reach at that rate."""
+    out = _inside_one_cell(0.0035)
+    assert out["start"] == pytest.approx(0.808758, abs=1e-6) and out["inside"], out
+    assert out["rate"] == pytest.approx(0.999895, abs=1e-6), out
+    assert out["report"]["converged"] is True and out["report"]["residual"] < 1.0, out
+    assert out["returned"] == pytest.approx(0.6, abs=1e-6), out
+    assert out["K"] == pytest.approx(1.0 / 1.05)
+    assert 12_000.0 < out["distance"] < 16_000.0, out
+
+
+@pytest.mark.parametrize("creep, start", [(0.2, 0.8088), (0.0035, 0.30)],
+                         ids=["no-creep", "started-beside-the-fixed-point"])
+def test_inside_one_cell_a_pass_that_keeps_its_rate_holds_the_claim(creep, start):
+    """The controls: the same cell with a pass that does not creep (it
+    contracts at 0.74 where the other did at 0.9999), and the creeping
+    pass started 0.05 from its fixed point: ``converged=True`` within a
+    tolerance."""
+    out = _inside_one_cell(creep, start)
+    assert out["report"]["converged"] is True and out["inside"], out
+    assert out["distance"] < 1.0, out

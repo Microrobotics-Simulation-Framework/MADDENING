@@ -469,9 +469,11 @@ def _position_lattices(records) -> dict:
 
     Only kinds that declare a length scale (``geometry_length_scale``:
     the ones the interface norm reads a geometry of).  Two edges on one
-    field are usually a gather and a scatter on the same grid; where
-    they are on different lattices, a position's rounding is counted at
-    the largest magnitude over them (:func:`_rounded_at`).  Read by
+    field are usually a gather and a scatter on the same grid, which is
+    one lattice (the kind's ``geometry_lattice()`` says so; mappings of
+    a kind that declares none are each taken for their own); where they
+    are on different lattices, a position's rounding is counted at the
+    largest magnitude over them (:func:`_rounded_at`).  Read by
     ``acceleration._interface_readings`` (the floor) and through it by
     ``acceleration._positions_floors`` (``compile()``'s advisory), from
     the same records, so the two cannot count different lattices.
@@ -483,10 +485,11 @@ def _position_lattices(records) -> dict:
             continue
         side, field = record.anchor
         holder = ((record.source if side == "source" else record.target)[0], field)
-        held = lattices.setdefault(holder, [])
-        if not any(mapping is record.mapping for mapping in held):
-            held.append(record.mapping)
-    return {holder: tuple(held) for holder, held in lattices.items()}
+        declared: Any = getattr(record.mapping, "geometry_lattice", None)
+        lattice = ((getattr(record.mapping, "kind", None), declared()) if callable(declared)
+                   else id(record.mapping))
+        lattices.setdefault(holder, {}).setdefault(lattice, record.mapping)
+    return {holder: tuple(held.values()) for holder, held in lattices.items()}
 
 
 @dataclass(frozen=True)

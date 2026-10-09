@@ -462,7 +462,7 @@ same tolerance.
 flags withdrawn on every step at an `rtol` of 1e-4 or tighter: the float floor there is 0.005 of
 the threshold per evaluation, so 300 entries reach past a residual at the threshold itself.  The
 same group in float64 keeps its flags (its floor times such a row reaches a residual only at an
-`rtol` near 1e-12).  A row is the entries one delivered value adds up, whatever the weights are,
+`rtol` of about 1e-12 or tighter).  A row is the entries one delivered value adds up, whatever the weights are,
 since they are a parameter a step may be handed: a sparse layout's valid slots, and a dense
 matrix's **width**.  A dense selection or interpolation matrix more than ten entries wide is
 therefore counted although each of its rows holds one or two non-zeros and its sum is exact; a
@@ -477,7 +477,10 @@ layout and the dense kinds are summed in an order XLA chooses, which depends on 
 the dtype and the operator's shape: one row of either held at every length on jax 0.11 (1.8x at
 300 entries, 1.09x at 3000), but jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries
 and more in order (0.002 to 0.007 of the distance), and a dense matrix of three rows of 3000
-entries read 0.18 on every version.  Rows of up to 10 entries held by 3.9x or more in every kind.
+entries read 0.18 on every version.  Rows of up to 10 entries held by 3.9x or more in every kind,
+behind fields whose terms do not cancel: a field that changes sign within a row loses the
+cancellation's factor whatever the row's length (1.26x at 10 entries with a cancellation of 25),
+which is MADD-ANO-247's case and not this guard's.
 
 **Not counted: a geometry-dependent mapping.**  A `multilinear_grid` gather adds up at most `2^d`
 entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in

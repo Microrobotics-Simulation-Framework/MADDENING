@@ -59,6 +59,7 @@ import pytest
 from maddening.core.coupling import _group_layout
 from maddening.core.coupling._group_layout import (
     MAPPED_ROW_FLOOR_LIMIT,
+    _joined_reasons,
     _longest_row,
     _mapped_row_reason,
     _mapped_rows,
@@ -621,6 +622,17 @@ def test_the_reason_names_one_way_out_and_no_other_kind_or_layout():
             assert unsaid not in reason, (layout, unsaid, reason)
 
 
+def test_a_reason_another_rule_left_is_kept_beside_the_rows():
+    """Another rule may leave a flag of its own off, with its reason,
+    while ``spectral_usable`` stands (a geometry group with constant
+    positions whose gradient bound is not finite).  Where the row guard
+    then withdraws ``spectral_usable``, the report keeps that reason and
+    adds this one."""
+    assert _joined_reasons(None, "the row.") == "the row."
+    assert _joined_reasons("", "the row.") == "the row."
+    assert _joined_reasons("the gradient bound.", "the row.") == "the gradient bound. Also: the row."
+
+
 def test_the_limit_is_a_power_of_ten():
     """It is a measured constant (see its comment): the largest power of
     ten at which every measured run held by a factor of two, on every
@@ -854,13 +866,21 @@ def test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less
     ``multilinear_grid`` mapping from points to a grid is a scatter-add
     whose fan-in is the number of markers in a cell's support, which is
     decided in the step: no static number, so the guard does not count
-    it and the report keeps its flags.  With 3000 markers in one cell
-    behind a uniform field (float32, ``"mixed"``, loop gain 0.99) each
-    of the two grid nodes adds up 3000 entries, and the bound read 1.27
-    times the distance (3.8 with 300 markers, 13.8 with 8; jax 0.10.2
-    and 0.11.0 alike): it holds, and not by the factor of two the limit
-    is taken at.  The distance pools the markers' positions, which do
-    not move, as ``"mixed"`` reads every floating field of the members.
+    it.  With 3000 markers in one cell behind a uniform field (float32,
+    ``"mixed"``, loop gain 0.99) each of the two grid nodes adds up 3000
+    entries, and the bound read 1.27 times the distance (3.8 with 300
+    markers, 13.8 with 8; jax 0.10.2 and 0.11.0 alike): it holds, and
+    not by the factor of two the limit is taken at.  The distance pools
+    the markers' positions, which do not move, as ``"mixed"`` reads
+    every floating field of the members.
+
+    **Its flags.**  The markers' positions are a member's own state, so
+    this group solves positions, and in 0.4.0 such a group has no usable
+    flag on any step, with that rule's reason (MADD-ANO-252): the row
+    guard is not what takes them, and it is not asked.  A group whose
+    positions are constants of the pass keeps its flags behind the same
+    uncounted rows; that form was not measured.
+
     When this fails, the registry entry and the guide state other
     numbers than the tree gives."""
     k, gain, rtol = 3000, 0.99, 1e-7
@@ -889,8 +909,9 @@ def test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less
     rows = gm._committed_mapped_rows[KEY]  # noqa: SLF001
     assert [(key, row) for key, _what, row in rows] == [(BACK_EDGE, 2)]
     assert report["converged"] and report["precision_limited"], report
-    assert report["spectral_usable"] and report["gradient_bound_usable"], report
-    assert "not_usable_reason" not in report, report
+    assert not report["spectral_usable"] and not report["gradient_bound_usable"], report
+    assert "the group solves position(s)" in report["not_usable_reason"], report
+    assert ANOMALY not in report["not_usable_reason"], report
     x = np.asarray(gm.get_node_state("coarse")["x"], np.float64)
     fine = np.asarray(gm.get_node_state("fine")["x"], np.float64)
     c64 = np.asarray(c, np.float64)

@@ -963,7 +963,11 @@ def sparse_projection_1d_mapping(
     Returns
     -------
     StaticSparseMapping
-        Mode ``"conservative"``, float32 weights (as the dense kind's are).
+        Mode ``"conservative"``, float32 weights whatever
+        ``jax_enable_x64`` says: the dense kind's, bit for bit (see
+        :func:`~maddening.core.coupling.mapping.projection_1d_mapping`
+        for what that costs in a float64 graph;
+        :func:`sparse_matrix_mapping` keeps float64 values there).
 
     Raises
     ------

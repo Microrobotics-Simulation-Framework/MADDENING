@@ -185,14 +185,16 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
     the two (against the same pair with float32 positions), by a few
     percent.
 
-    **Its flags.**  This corner leaves them set: with the float-floor
-    guard on a mapped row out of reach both reports set
-    ``spectral_usable``.  The report itself has none, for another cause:
-    the edge back, ``q.x -> p.u``, is a dense matrix 30 entries wide (an
-    interpolation, two non-zeros a row), which that guard counts at its
-    width, and at the float floor it withdraws the flags behind a row
-    over ten entries, with its reason (MADD-ANO-257).  Every number is
-    the one it was."""
+    **Its flags.**  The markers' positions are recomputed in the pass,
+    so this group solves positions, and in 0.4.0 such a group has no
+    usable flag on any step, with that rule's reason (MADD-ANO-252).
+    (Before that rule the two reports set their flags, which is how this
+    corner was first pinned.)  The edge back, ``q.x -> p.u``, is a dense
+    matrix 30 entries wide, which the float-floor guard on a mapped row
+    counts at its width (MADD-ANO-257); it is asked only of a flag that
+    is still set, so its reason is not the one given here, and with its
+    limit out of reach the report is the same.  Every number is the one
+    it was."""
     with x64(True):
         fine = _stalled("float32", "float64")
         coarse = _stalled("float32", "float32")
@@ -201,12 +203,10 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
         monkeypatch.undo()
     for report, bare in zip((fine, coarse), unguarded):
         assert report["precision_limited"], report
-        assert bare["spectral_usable"] and "not_usable_reason" not in bare, bare
-        assert not report["spectral_usable"], report
-        for said in ("q.x->p.u", "a dense matrix mapping (matrix), counted at the matrix's width,",
-                     "adds up 30 entries",
-                     "MADD-ANO-257", "a wider dtype"):
-            assert said in report["not_usable_reason"], (said, report["not_usable_reason"])
+        assert not report["spectral_usable"] and not report["gradient_bound_usable"], report
+        assert "the group solves position(s)" in report["not_usable_reason"], report
+        assert "MADD-ANO-257" not in report["not_usable_reason"], report
+        assert report["not_usable_reason"] == bare["not_usable_reason"], (report, bare)
         assert report["spectral_error_bound"] == bare["spectral_error_bound"], (report, bare)
         assert report["spectral_error_bound"] >= 10.0 * report["distance"] > 0.0, report
     assert fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)

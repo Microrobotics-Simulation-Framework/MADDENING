@@ -434,17 +434,19 @@ corrects it.  After loading a checkpoint into a graph configured differently, st
 reading `coupling_diagnostics()`.
 
 **A group with a geometry-dependent mapping** (experimental, see
-[Geometry-dependent mappings](geometry_dependent_mappings.md)) reports like any other group where
+[Geometry-dependent mappings](geometry_dependent_mappings.md)) has its numbers reported where
 every such mapping is a `multilinear_grid`, the norm is `"l2"` or `"mixed"` and the group does not
 sub-cycle.  Otherwise, and on a step whose self-check of the geometry term failed, its entry has
 `iterations`, `total_iterations`, `residual` and `converged`, every bound NaN, every `*_usable`
-flag `False`, and a `not_usable_reason` that says which case it is.  One more case keeps its
-numbers: where a position the pass reads from the iterate is within twice `spectral_error_bound`
-of a lattice plane of the grid and the step did not certify its linearisation across the Newton
-step (`gradient_relative_error_bound` is not finite), `spectral_usable` and
-`gradient_bound_usable` are `False` and the reason says so.  The spectrum is taken at the
-returned iterate, and across a lattice plane the stencil is another polynomial: the fixed point
-may be in a cell where the pass contracts at another rate.
+flag `False`, and a `not_usable_reason` that says which case it is.  Its **flags** depend on
+whether the group solves the positions.  Where the pass reads a position from the iterate, or
+builds one and reads it in the same pass (a source-anchored geometry inside the group; the
+target-anchored geometry of a member that computes fluxes), `spectral_usable` and
+`gradient_bound_usable` are `False` on every step in 0.4.0: the numbers are reported as computed,
+uncertified, and the reason names the positions.  The spectrum is taken at the returned iterate,
+and across a lattice plane the stencil is another polynomial, whose fixed point may be in another
+cell or nowhere.  Where every position is fixed during the pass (a target-anchored geometry read
+by `update`, positions held by a node outside the group) the flags are those of any other group.
 
 **A long row of a static mapping** keeps its numbers and loses its flags at the float floor
 (MADD-ANO-257, open).  A mapped edge delivers sums over its rows, and a float sum of `k` terms of
@@ -488,8 +490,10 @@ set**.  Behind a field whose terms cancel, do not rely on `spectral_usable` at t
 entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in
 a grid node's support, a number decided in the step, so the guard does not count it: with 8, 300
 and 3000 markers in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3 times the
-distance under `"mixed"`, flags set (it held, by less than the factor of two the limit is taken
-at; larger counts were not measured).  Under `"interface"` such a group reports no bound.
+distance under `"mixed"` (it held, by less than the factor of two the limit is taken at; larger
+counts were not measured).  That group solves the markers' positions, and in 0.4.0 such a group
+has no usable flag whatever its rows (MADD-ANO-252); a group whose positions are constants of the
+pass keeps its flags behind the same uncounted rows, which was not measured.
 
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in

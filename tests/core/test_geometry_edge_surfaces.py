@@ -113,11 +113,18 @@ def test_an_uncompiled_graph_s_text_names_the_geometry_too():
 # ---------------------------------------------------------------------------
 
 
-def test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_no_reason(grouped):
-    """The diagnostics read this group's geometry: the report is any other
-    group's, on every printer."""
+def test_the_report_of_a_single_rate_grid_group_has_its_numbers_and_no_flag_with_the_rule_s_reason(
+        grouped):
+    """The diagnostics read this group's geometry: its numbers are any
+    other group's, on every printer.  The group solves the markers'
+    positions (the scatter is anchored at its source), so in 0.4.0 it has
+    neither flag, and the one reason says so."""
     report = grouped.coupling_diagnostics()[G.GROUP]
-    assert "not_usable_reason" not in report
+    reason = report["not_usable_reason"]
+    assert reason.startswith("the group solves position(s) ['markers.pos']"), reason
+    assert G.SCATTER in reason and "fixed during the pass" in reason
+    assert "reported as computed, uncertified" in reason
+    assert report["spectral_usable"] is False and report["gradient_bound_usable"] is False
     # At its tolerance the solve stops on the float floor: the report says
     # so, as it does for the static twin, and prints that caveat.
     assert report["ratio_usable"] is True and report["precision_limited"] is True
@@ -128,11 +135,14 @@ def test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_no_reason(gro
     assert float(grouped._state["_meta"][slot]) < 0.025  # noqa: SLF001
     (row,) = list(grouped.coupling_report())
     assert row["spectral_error_bound"] == report["spectral_error_bound"]
-    assert not any("no bound" in flag or "geometry" in flag for flag in row["flags"])
+    # Nothing is withheld: the printers show the numbers, the floor's
+    # caveat, and the rule's reason beside the flag it explains.
+    assert not any("no bound" in flag for flag in row["flags"])
     assert any(flag.startswith("precision_limited=True") for flag in row["flags"]), row["flags"]
+    assert f"spectral_usable=False: {reason}" in row["flags"], row["flags"]
     buffer = io.StringIO()
     grouped.print_coupling_report(file=buffer)
-    assert "geometry" not in buffer.getvalue()
+    assert "solves position(s) ['markers.pos']" in buffer.getvalue()
     json.loads(json_codec.dumps(dict(report)))
 
 

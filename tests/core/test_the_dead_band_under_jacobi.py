@@ -158,7 +158,7 @@ def test_the_fixture_reaches_the_one_pass_acceptance():
 # ---------------------------------------------------------------------------
 
 def _advisories(gm: GraphManager) -> list:
-    return [issue for issue in gm.validate() if _group_layout._DEAD_BAND_UNDER_JACOBI in issue]
+    return [issue for issue in gm.validate() if _group_layout._DEAD_BAND_ADVISORY in issue]
 
 
 def _uncompiled(schedule: str, atol: float, norm: str = "mixed") -> GraphManager:
@@ -175,14 +175,19 @@ def _uncompiled(schedule: str, atol: float, norm: str = "mixed") -> GraphManager
 
 @pytest.mark.parametrize("norm", NORMS)
 def test_validate_advises_on_a_dead_band_declared_under_jacobi(norm):
-    """One ``WARNING:`` line naming the group, its ``atol`` and the two
-    ways out; none under Gauss-Seidel, none at the default ``atol``."""
+    """One ``WARNING:`` line naming the group, its ``atol``, the measured
+    pair, who is not affected and the one way out (``atol=0.0``); none for
+    a pair under Gauss-Seidel, none at the default ``atol``.  (Three or
+    more members: ``test_the_dead_band_of_a_ring_of_three.py``.)"""
     lines = _advisories(_uncompiled("jacobi", ATOL, norm))
     assert len(lines) == 1
     line = lines[0]
-    assert line.startswith("WARNING: coupling group ['p', 'q']")
-    assert "atol=1e-06" in line and "gauss-seidel" in line and "atol=0.0" in line
-    assert "MADD-ANO-254" in line
+    assert line.startswith("WARNING: coupling group ['p', 'q'] " + _group_layout._DEAD_BAND_UNDER_JACOBI)
+    assert "atol=1e-06" in line and "2 members" in line
+    assert "a pair under Jacobi" in line and "4.5e5 to 7.4e5" in line
+    assert "a ring of three" not in line
+    assert "A pair under Gauss-Seidel is not affected" in line
+    assert "Set atol=0.0 (the default) on this group" in line and "MADD-ANO-254" in line
     assert _advisories(_uncompiled("gauss-seidel", ATOL, norm)) == []
     assert _advisories(_uncompiled("jacobi", 0.0, norm)) == []
 
@@ -194,9 +199,40 @@ def test_compile_warns_once_for_such_a_group():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _uncompiled("jacobi", ATOL).compile()
-    ours = [w for w in caught if _group_layout._DEAD_BAND_UNDER_JACOBI in str(w.message)]
+    ours = [w for w in caught if _group_layout._DEAD_BAND_ADVISORY in str(w.message)]
     assert len(ours) == 1 and issubclass(ours[0].category, UserWarning)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _uncompiled("gauss-seidel", ATOL).compile()
-    assert not [w for w in caught if _group_layout._DEAD_BAND_UNDER_JACOBI in str(w.message)]
+    assert _group_layout._DEAD_BAND_UNDER_JACOBI in str(ours[0].message)
+    for schedule, atol in (("gauss-seidel", ATOL), ("jacobi", 0.0)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _uncompiled(schedule, atol).compile()
+        assert not [w for w in caught if _group_layout._DEAD_BAND_ADVISORY in str(w.message)]
+
+
+def test_the_configured_filter_matches_the_jacobi_advisory_and_no_other():
+    """The test configuration ignores ``compile()``'s copy of the advisory
+    for a group under Jacobi and for no other: its pattern is the Jacobi
+    opening, which the advisory of three members under Gauss-Seidel does
+    not carry."""
+    import re
+    import tomllib
+    from pathlib import Path
+
+    from maddening.core.coupling.group import CouplingGroup
+
+    config = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    ours = [f for f in config["tool"]["pytest"]["ini_options"]["filterwarnings"]
+            if "dead band" in f]
+    assert len(ours) == 1
+    action, pattern, category = ours[0].split(":")
+    assert action == "ignore" and category == "UserWarning"
+    assert pattern.endswith(_group_layout._DEAD_BAND_UNDER_JACOBI)
+
+    def line(members, schedule):
+        (out,) = _group_layout._dead_band_advisories(
+            CouplingGroup(frozenset(members), atol=ATOL, iteration_mode=schedule))
+        return out
+
+    assert re.match(pattern, line("pq", "jacobi"))
+    assert re.match(pattern, line("pqr", "jacobi"))
+    assert not re.match(pattern, line("pqr", "gauss-seidel"))

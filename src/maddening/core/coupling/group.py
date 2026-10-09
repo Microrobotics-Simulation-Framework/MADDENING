@@ -151,21 +151,38 @@ class CouplingGroup:
         quantities, the field and what the edge delivers, and its reading
         leaves the norm only where **both** are at or below ``atol``.
 
-        **Under** ``iteration_mode="jacobi"`` **a field inside the dead
-        band also un-holds, for a pass or more, the fields computed from
-        it.**  Every member reads the previous iterate, so with ``p``
-        dropped the residual of ``p <- f(q)``, ``q <- g(p)`` tests only
-        that ``q`` agrees with the ``p`` it was computed from.  Measured
-        on a pair whose three forces of 1e-8 are inside ``atol = 1e-6``
-        and are amplified by the member that reads them: ``converged=True``
-        after one pass on every other step, 4.5e5 to 7.4e5 tolerances from
-        the fixed point, under all three norms (two to four passes and
-        5e5 to 6.3e5 where the dropped member carries state); Gauss-Seidel
-        held at 0.5 to 4.9 in both sweep orders.  ``validate()`` and
-        ``compile()`` say so for every group that sets ``atol > 0`` under
-        Jacobi (MADD-ANO-254, open).  Use Gauss-Seidel, or leave ``atol``
-        at 0, wherever a member's output depends on a field that can fall
-        inside the band.
+        **On a group of three or more members, or under**
+        ``iteration_mode="jacobi"``, **leave** ``atol`` **at** ``0.0``
+        **in 0.4.0.**  A field inside the dead band leaves the residual,
+        and the loop accepts on the first residual it measures, so a
+        change that has to cross such a field is not seen until it
+        reaches a field the norm keeps, and the group can report
+        ``converged=True`` after one pass with a kept field thousands of
+        tolerances from its fixed point (MADD-ANO-254, open).  Measured,
+        each under all three norms, with two or three forces of 1e-8
+        inside ``atol = 1e-6``:
+
+        * under Jacobi (every member reads the previous iterate, so with
+          ``p`` dropped the residual of ``p <- f(q)``, ``q <- g(p)`` tests
+          only that ``q`` agrees with the ``p`` it was computed from), a
+          pair: accepted after one pass on every other step, 4.5e5 to
+          7.4e5 tolerances off (two to four passes and 5e5 to 6.3e5 where
+          the dropped member carries state);
+        * under Gauss-Seidel, a ring of three members swept against its
+          data flow (members added A, B, C; edges A -> C -> B -> A; two
+          dropped fields in series): accepted after one pass, 4.6e3 to
+          1.8e4 tolerances off, with no acceleration, with Aitken and with
+          IQN-ILS.  The same ring swept C, B, A held.
+
+        A **pair under Gauss-Seidel** held in both sweep orders in every
+        case measured (0.5 to 4.9 tolerances).  ``validate()`` and
+        ``compile()`` say so for every group that sets ``atol > 0`` and
+        has three or more members or runs under Jacobi; the condition is
+        the member count and the schedule, not which fields the graph
+        can put inside the band.  At ``atol=0.0`` only a field that is
+        exactly zero leaves the residual, and every non-zero field,
+        however small, is measured against its own magnitude.  The dead
+        band is expected to be replaced in 0.5.0: do not tune to it.
     rtol : float
         Relative change demanded of every field above the dead band,
         under the ``"mixed"`` and ``"interface"`` norms.  Read **only**

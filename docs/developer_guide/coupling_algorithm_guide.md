@@ -648,7 +648,15 @@ not test it:
   and the bound 0.15–0.29x the kept field's distance.  It now keeps its
   own magnitude's weight in the spectrum, and its share of the residual
   — which `residual` does not contain — is measured and folded into
-  the factor (2.8–5.5x there);
+  the factor (2.8–5.5x there).  That is the *bound*; the loop's own exit
+  is another matter.  A change that has to cross a dead-banded field is
+  not in the residual until it reaches a kept one, and the loop accepts
+  on the first residual it measures: a group with `atol > 0` under
+  Jacobi, or with three or more members under Gauss-Seidel, can return
+  `converged=True` after one pass thousands of tolerances from its fixed
+  point (MADD-ANO-254, open; `compile()` warns).  Leave `atol` at `0.0`
+  on such a group in 0.4.0; a pair under Gauss-Seidel held in both sweep
+  orders in every case measured;
 * **a non-finite state reports NaN**, not a spectral radius computed at
   a state that has left float range.
 

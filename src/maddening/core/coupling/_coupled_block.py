@@ -1688,8 +1688,11 @@ def _run_coupled_block_impl(
                 # the resolution every entry of the group's floor is
                 # counted at (``_group_coarsest_eps``, the function the
                 # report's floor reads: a field computed from a coarser
-                # member's output carries that member's rounding).
-                map_eps = _group_coarsest_eps(template_state, group_node_names)
+                # member's output carries that member's rounding, and so
+                # does one computed from what an internal edge delivers in
+                # a coarser dtype -- read from the plan, abstractly).
+                map_eps = _group_coarsest_eps(
+                    template_state, group_node_names, plan, step_mappings)
                 # The residual's float resolution per entry, every field at
                 # that eps (``_residual_resolution``; a field's own where
                 # the group holds none with entries), in the weights' units

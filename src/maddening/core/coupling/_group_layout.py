@@ -119,45 +119,91 @@ def _reads_mapping_weights(group, plan) -> bool:
         or (group.atol > 0 and plan.band_reads_beyond_the_state()))
 
 
-#: The start of the advisory about a dead band under Jacobi
-#: (:func:`_dead_band_under_jacobi_advisories`); the test configuration
-#: filters ``compile()``'s copy of it by this text.
-_DEAD_BAND_UNDER_JACOBI = "a field inside the dead band leaves the residual, and under Jacobi"
+#: The sentence every advisory about a dead band carries
+#: (:func:`_dead_band_advisories`); its tests find the advisory by it.
+_DEAD_BAND_ADVISORY = "a change that has to cross a field at or below atol is not seen"
+
+#: How the advisory opens for a group under Jacobi.  The test configuration
+#: filters ``compile()``'s copy of the advisory by THIS text, so only for
+#: such a group (the domain batteries and the searches run them on
+#: purpose); the advisory of a group of three or more members under
+#: Gauss-Seidel is filtered nowhere.
+_DEAD_BAND_UNDER_JACOBI = "declares a dead band under iteration_mode='jacobi'"
+
+#: The fewest members at which a dead band is advised on under
+#: Gauss-Seidel.  A pair held in both sweep orders in every case measured;
+#: a ring of three did not (MADD-ANO-254).
+_DEAD_BAND_MEMBERS = 3
 
 
-def _dead_band_under_jacobi_advisories(group) -> list:
-    """``WARNING:`` lines for a group that declares a dead band under Jacobi.
+def _dead_band_advisories(group) -> list:
+    """The ``WARNING:`` line of a group whose dead band can hide a change.
 
-    A field at or below ``atol`` leaves the residual.  Under Jacobi every
-    member reads the previous iterate, so with ``p`` dropped the residual
-    of a pair ``p <- f(q)``, ``q <- g(p)`` is ``|g(p_k) - q_k|``: it
-    tests that ``q`` agrees with the ``p`` it was computed from, and
-    nothing tests ``p = f(q)`` in that pass.  A kept field can then be
-    returned with ``converged=True`` far from its fixed point: a pair
-    whose three forces of 1e-8 fall inside ``atol = 1e-6`` and are
-    amplified by the member that reads them accepted after one pass on
-    every other step, 4.5e5 to 7.4e5 tolerances off, under all three
-    norms; where the dropped member carries state it accepted after two
-    to four passes, 5e5 to 6.3e5 off, on every step after the first
-    (CPU, jaxlib 0.11.0).  Gauss-Seidel held on the same pairs in both
-    sweep orders (0.5 to 4.9 tolerances), and so does ``atol = 0``.
+    One line for a group with ``atol > 0`` that has **three or more
+    members, or** ``iteration_mode="jacobi"``; none for any group at the
+    default ``atol == 0``, and none for a pair under Gauss-Seidel.
 
-    Not refused: where no kept member's output depends on a field that
-    can fall inside the band, the configuration is sound, and only the
-    caller knows.  Static: the group's two settings.  Read by
+    A field at or below ``atol`` leaves the residual, and the loop
+    accepts on the first residual it measures (between its first two
+    passes).  A change that has to cross such a field on its way to a
+    field the norm keeps is therefore not seen until it arrives there:
+
+    * **under Jacobi** every member reads the previous iterate, so with
+      ``p`` dropped the residual of a pair ``p <- f(q)``, ``q <- g(p)``
+      is ``|g(p_k) - q_k|``: nothing in that pass tests ``p = f(q)``.  A
+      pair whose three forces of 1e-8 fall inside ``atol = 1e-6`` and
+      are amplified by the member that reads them accepted after one
+      pass on every other step, 4.5e5 to 7.4e5 tolerances off, under
+      all three norms; where the dropped member carries state it
+      accepted after two to four passes, 5e5 to 6.3e5 off, on every
+      step after the first;
+    * **on three or more members under Gauss-Seidel** a member swept
+      before the one it reads still reads the previous pass.  A ring of
+      three swept against its data flow (members added A, B, C; edges
+      A -> C -> B -> A; two fields of 1e-8 inside ``atol = 1e-6`` in
+      series between the change and the one kept field) accepted after
+      one pass with the kept field 4.6e3 to 1.8e4 tolerances off, under
+      all three norms, with no acceleration, with Aitken and with
+      IQN-ILS: the change needs three passes to reach the kept field.
+
+    (CPU, jaxlib 0.11.0.)  A PAIR under Gauss-Seidel held on the same
+    data in both sweep orders in every case measured (0.5 to 4.9
+    tolerances), and so does ``atol = 0`` on every group: there only a
+    field that is exactly zero leaves the residual, and every non-zero
+    field, however small, is measured against its own magnitude.
+
+    Not refused, and not sharpened: the same ring swept along its data
+    flow held, and so does any group none of whose kept fields depends
+    on one that can fall inside the band, but which groups those are is
+    a criterion nobody has proved, so the condition is the member count
+    and the schedule and nothing read from the graph.  Static.  Read by
     ``GraphManager._coupling_group_advisories`` (``validate()``, and
     ``compile()`` as a ``UserWarning``).
     """
-    if not (group.atol > 0 and group.iteration_mode == "jacobi"):
+    members = len(group.nodes)
+    jacobi = group.iteration_mode == "jacobi"
+    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):
         return []
+    measured = []
+    if jacobi:
+        opening = f"{_DEAD_BAND_UNDER_JACOBI} (atol={group.atol!r}, {members} members)"
+        measured.append("a pair under Jacobi accepted after one pass 4.5e5 to 7.4e5 "
+                        "tolerances off")
+    else:
+        opening = (f"declares a dead band on {members} members (atol={group.atol!r}, "
+                   f"iteration_mode={group.iteration_mode!r})")
+    if members >= _DEAD_BAND_MEMBERS:
+        measured.append("a ring of three members under Gauss-Seidel, swept against its "
+                        "data flow, accepted after one pass 4.6e3 to 1.8e4 tolerances off")
     return [
-        f"WARNING: coupling group {sorted(group.nodes)} declares a dead band "
-        f"(atol={group.atol!r}) with iteration_mode='jacobi': {_DEAD_BAND_UNDER_JACOBI} "
-        f"a member that reads it is not held to the criterion in that pass, so the group "
-        f"can report converged=True after one pass with the fields computed from it far "
-        f"from their fixed point (MADD-ANO-254).  Use iteration_mode='gauss-seidel', or "
-        f"atol=0.0, wherever a member's output depends on a field that can fall inside "
-        f"the dead band."]
+        f"WARNING: coupling group {sorted(group.nodes)} {opening}: a field at or below atol "
+        f"leaves the residual, and {_DEAD_BAND_ADVISORY} until it reaches a field the norm "
+        f"keeps, so the group can report converged=True after one pass while a kept field "
+        f"is thousands of tolerances from its fixed point (MADD-ANO-254; measured under all "
+        f"three norms: {'; '.join(measured)}).  A pair under Gauss-Seidel is not affected in "
+        f"any case measured (it held in both sweep orders).  Set atol=0.0 (the default) on this group: "
+        f"then only a field that is exactly zero leaves the residual, and every non-zero "
+        f"field, however small, is measured against its own magnitude."]
 
 
 def _floor_needs_the_step(group, interface_edges) -> bool:

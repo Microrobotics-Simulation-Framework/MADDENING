@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
+    SPECTRAL_KRYLOV_STEPS,
+    SPECTRAL_SETTLED_FRACTION,
     convergence_criterion,
     float_fields_of,
     reported_converged,
@@ -292,6 +294,7 @@ class GraphManager:
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
         self._committed_geometry_edges: dict[str, tuple] = {}
+        self._committed_geometry_solved: dict[str, tuple] = {}
         self._committed_geometry_refusals: dict[str, Optional[str]] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
@@ -2941,6 +2944,12 @@ class GraphManager:
                             meta[f"coupling_{key}_geometry_plane_limit"] = jnp.array(
                                 jnp.nan, dtype=spec_dtype
                             )
+                            # How many radii of the Kantorovich ball
+                            # around the iterate the nearest lattice
+                            # plane is away (same condition).
+                            meta[f"coupling_{key}_geometry_plane_margin"] = jnp.array(
+                                jnp.nan, dtype=spec_dtype
+                            )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -3270,6 +3279,15 @@ class GraphManager:
         }
         self._committed_geometry_edges = {
             key: tuple(r.key for r in plan.resolved_geometry_edges())
+            for key, plan in interface_plans.items()
+        }
+        # The position fields each group's pass reads from the iterate or
+        # builds and reads in the same pass (``"node.field"``; empty: every
+        # position is a constant of the pass).  A group with one has no
+        # usable flag in 0.4.0 (``_group_layout._geometry_flags``).
+        self._committed_geometry_solved = {
+            key: tuple(sorted({f"{holder}.{fld}"
+                               for holder, fld, _mapping in plan.geometry_iterate_reads()}))
             for key, plan in interface_plans.items()
         }
         # Why each such group's report withholds its bounds whatever the
@@ -5036,19 +5054,28 @@ class GraphManager:
             the bounds stand where the two agree to
             ``GEOMETRY_GAP_TOLERANCE``.  The spectrum is taken at the
             returned iterate, and a multilinear stencil is another
-            polynomial across a lattice plane: where a position the pass
-            reads from the iterate (a member's source-anchored geometry,
-            or the target-anchored one of a member that computes fluxes)
-            is within twice ``"spectral_error_bound"`` of a lattice plane
-            of its mapping's grid or of a face of the grid's hull, and
-            the step did not certify its linearisation across the Newton
-            step to the fixed point
-            (``"gradient_relative_error_bound"`` is not finite),
-            ``"spectral_usable"`` and ``"gradient_bound_usable"`` are
-            ``False``, every number is reported as computed, and the
-            entry has a ``"not_usable_reason"`` saying so: the fixed
-            point may be in another lattice cell, where the pass
-            contracts at another rate.  Any other such group, and one
+            polynomial across a lattice plane, where the fixed point of
+            the polynomial the pass is in the iterate's lattice cells
+            need not be the pass's.  So in 0.4.0 a group that *solves*
+            positions -- its pass reads one from the iterate, or builds
+            one and reads it in the same pass (a member's
+            source-anchored geometry, or the target-anchored one of a
+            member that computes fluxes) -- has ``"spectral_usable"``
+            and ``"gradient_bound_usable"`` ``False`` on every step,
+            whatever its numbers read: every number is reported as
+            computed, uncertified, and the entry's
+            ``"not_usable_reason"`` names the positions and says so.
+            Where every position is fixed during the pass (a
+            target-anchored geometry read by ``update``, positions held
+            by a node outside the group) the flags are any other
+            group's, and a ``False`` one of a step that computed the
+            estimate has a ``"not_usable_reason"`` giving every cause
+            -- the float floor, an estimate that did not settle (more
+            independent interface scalars than its eight Krylov steps),
+            a gradient bound that was not computed (NaN) or did not
+            certify (``inf``) -- none of which names a lattice plane.
+            A marker whose position the group solves therefore has
+            neither flag on any step.  Any other such group, and one
             whose step failed that check, reports the solve's own
             ``"iterations"``,
             ``"total_iterations"``, ``"residual"`` and ``"converged"``
@@ -5062,9 +5089,9 @@ class GraphManager:
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
-            says which case it is; besides the lattice-plane case above
-            and a checkpoint saved after a state write, no other
-            group's entry has it.  The values are
+            says which case it is; besides the causes above of a group
+            with a geometry edge and a checkpoint saved after a state
+            write, no other group's entry has it.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -5384,34 +5411,36 @@ class GraphManager:
                         "not_usable_reason": geometry_reason,
                     })
                     continue
-                plane_limit = (meta.get(f"coupling_{key}_geometry_plane_limit")
-                               if geometry_keys else None)
-                reported_bound = result[key]["spectral_error_bound"]
-                if (plane_limit is not None and math.isfinite(reported_bound)
-                        and not reported_bound <= float(plane_limit)
-                        and not math.isfinite(grad_bound)):
-                    # Experimental: the bound is the linearisation at the
-                    # returned iterate, and a multilinear stencil is
-                    # another polynomial across a lattice plane.  Where a
-                    # position the pass reads from the iterate is within
-                    # the bound's reach of one
-                    # (``_bounds._geometry_plane_limit``; a limit that is
-                    # not a number counts), the fixed point may be in
-                    # another cell, and the linearisation stands only if
-                    # the step certified it across the Newton step to the
-                    # fixed point: the Newton-Kantorovich check of the
-                    # gradient bound, which takes the pass's Jacobian at
-                    # both ends and is what a finite
-                    # ``gradient_relative_error_bound`` records.  Without
-                    # that the flag is withdrawn and the numbers stay,
-                    # with the reason (MADD-ANO-242).
+                if geometry_keys and "not_usable_reason" not in result[key]:
+                    # Experimental: a group that solves the positions of a
+                    # geometry-dependent mapping (its pass reads one from
+                    # the iterate, or builds one and reads it in the same
+                    # pass) has no usable flag in 0.4.0, on any step,
+                    # whatever its numbers read; one whose positions are
+                    # constants of the pass has a smooth group's flags,
+                    # where the step recorded so.
+                    # ``_group_layout._geometry_flags`` is the one place
+                    # that decides, and says why (MADD-ANO-242,
+                    # MADD-ANO-252).  The numbers stay; a ``False`` flag
+                    # of a step that computed the estimate carries its
+                    # reason.
+                    usable, gradient_usable, reason = _group_layout._geometry_flags(
+                        geometry_keys,
+                        solved=self._committed_geometry_solved.get(key),
+                        bound=result[key]["spectral_error_bound"],
+                        gradient_bound=grad_bound, rho=rho_spec,
+                        arnoldi_residual=spec_resid,
+                        settled=bool(spectral_rate_settled(rho_spec, spec_resid)),
+                        precision_limited=precision_limited, declared=bool(declared),
+                        limit=meta.get(f"coupling_{key}_geometry_plane_limit"),
+                        margin=meta.get(f"coupling_{key}_geometry_plane_margin"),
+                        fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS)
                     result[key].update({
-                        "spectral_usable": False,
-                        "gradient_bound_usable": False,
-                        "not_usable_reason": _group_layout._geometry_plane_reason(
-                            geometry_keys, reported_bound, float(plane_limit),
-                            _bounds.GEOMETRY_PLANE_REACH),
+                        "spectral_usable": usable,
+                        "gradient_bound_usable": gradient_usable,
                     })
+                    if reason is not None:
+                        result[key]["not_usable_reason"] = reason
         return result
 
     # ------------------------------------------------------------------
@@ -6710,7 +6739,7 @@ class GraphManager:
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
                            "pass_evaluations", "reading_floor", "geometry_gap",
-                           "geometry_plane_limit"):
+                           "geometry_plane_limit", "geometry_plane_margin"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):
@@ -7604,10 +7633,9 @@ class GraphManager:
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;
-        * ``not_usable_reason`` for a group with a geometry-dependent
-          mapping whose bound reaches a lattice plane without the step
-          having certified its linearisation across it (experimental):
-          ``spectral_usable`` is withdrawn and the numbers are kept;
+        * ``not_usable_reason`` for a group that solves the positions of
+          a geometry-dependent mapping (experimental): it has no usable
+          flag in 0.4.0 and its numbers are kept, uncertified;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

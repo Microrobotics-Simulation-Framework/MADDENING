@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 import yaml
 
+from maddening.core.coupling.mapping import projection_1d_mapping
 from maddening.core.coupling.mapping_spec import (
     INLINE_POINT_LIMIT,
     MappingRebuildError,
@@ -272,6 +273,56 @@ def test_the_rebuild_gives_the_same_index_and_weights_under_either_x64_setting(
             assert edge.mapping.indices.dtype == np.int32
             expected = ("float64" if enabled and case.kind == "sparse_matrix" else "float32")
             assert str(edge.mapping.weights.dtype) == expected
+
+
+_FLOAT32_KINDS = sorted(name for name, case in CASES.items() if case.kind != "sparse_matrix")
+
+
+@pytest.mark.parametrize("written_under", [False, True], ids=["written-x64-off", "written-x64-on"])
+@pytest.mark.parametrize("name", _FLOAT32_KINDS + ["dense-projection"])
+def test_a_config_written_under_one_x64_setting_rebuilds_the_same_weights_under_the_other(
+        name, written_under, tmp_path):
+    """The nearest-neighbour and projection kinds hold float32 weights
+    under either setting (the node fields they are built from are
+    float64), so the recipe a config carries rebuilds the operator that
+    was saved, bit for bit, in a process with the other setting: the
+    sparse kinds and the dense projection they are held to."""
+    def pair():
+        if name != "dense-projection":
+            return mapped_pair(CASES[name], base_dir=tmp_path)
+        gm = mapped_pair(CASES["projection"], compile=False)
+        for edge in list(gm.edges):
+            gm.remove_edge(edge.source_node, edge.target_node, edge.source_field,
+                           edge.target_field)
+        for source, target in (("a", "b"), ("b", "a")):
+            points = node_points(gm, source, target)
+            gm.add_edge(source, target, "x", "inp", mapping=projection_1d_mapping(
+                points["source_boundaries"], points["target_boundaries"],
+                source_ref={"node": source, "field": "boundaries"},
+                target_ref={"node": target, "field": "boundaries"}))
+        gm.compile()
+        return gm
+
+    def weights(mapping):
+        return np.asarray(mapping.H if name == "dense-projection" else mapping.weights)
+
+    with x64(written_under):
+        gm = pair()
+        config = json.loads(json.dumps(gm.to_dict()))
+        saved = [weights(edge.mapping) for edge in gm.edges]
+        index = [None if name == "dense-projection" else _structure(edge.mapping)
+                 for edge in gm.edges]
+    with x64(not written_under):
+        reloaded = GraphManager.from_dict(config, REGISTRY, base_dir=tmp_path)
+        for edge, expected, structure in zip(reloaded.edges, saved, index):
+            again = weights(edge.mapping)
+            assert again.dtype == expected.dtype == np.float32
+            assert again.tobytes() == expected.tobytes()
+            if structure is not None:
+                assert _structure(edge.mapping) == structure
+        # (The step itself is not compared: its own arithmetic differs by a
+        # rounding between the two settings, whatever the weights.)
+        reloaded.step()
 
 
 def test_a_sparse_mapping_built_by_hand_has_no_recipe_and_is_refused_by_the_writers():

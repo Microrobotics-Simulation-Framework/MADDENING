@@ -138,7 +138,9 @@ class Norm:
 
     ``fields(x)`` returns the norm's reading of a flat iterate as a list
     of arrays (JAX or NumPy): a member's field under ``"l2"`` and
-    ``"mixed"``, what each internal edge delivers under ``"interface"``.
+    ``"mixed"``; under ``"interface"`` one field per internal edge, on the
+    side the norm reads it (the caller states it, by
+    ``coupled_topologies.interface_side_of``: this module knows no edge).
     Each is weighted by ``1 / (rtol max|field|)`` at the returned state
     (``rtol`` 1 under ``"l2"``); ``rms`` divides the sum of squares by the
     number of entries.
@@ -456,7 +458,7 @@ class PassReference:
         floating fields by default, which ``"interface"`` is not."""
         assert kind in ("l2", "mixed", "interface"), kind
         assert fields is not None or kind != "interface", (
-            "the interface norm reads what the internal edges deliver: pass fields=")
+            "the interface norm reads the internal edges, each on its side: pass fields=")
         return Norm(fields or self.member_fields, 1.0 if kind == "l2" else float(rtol),
                     kind != "l2")
 

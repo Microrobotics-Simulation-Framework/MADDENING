@@ -162,14 +162,15 @@ SPARSE_KINDS = MAPPING_KINDS[1:]
 LOCAL_KINDS = ("matrix-local", "sparse-local")
 
 #: Where ``convergence_norm="interface"`` reads a mapped internal edge, as
-#: **this tree's library** does it: ``"delivered"`` (every edge at the
-#: value it delivers).  The decision of 2026-10-07 is ``"compact"``: a
-#: mapping whose target is larger than its source is read at its source
-#: value, before the mapping and the transform; a tie and a smaller target
-#: at the delivered value (:meth:`LinearModel.interface_side_of`).  The
-#: library change makes this one line ``"compact"``; every reference that
-#: does not name a rule follows it.
-INTERFACE_SIDE = "delivered"
+#: **this tree's library** does it: ``"compact"`` (the decision of
+#: 2026-10-07).  A mapping whose target is larger than its source is read
+#: at its source value, before the mapping and the transform; a tie and a
+#: smaller target at the delivered value
+#: (:meth:`LinearModel.interface_side_of`).  ``"delivered"`` is the rule
+#: the library had before (every edge at the value it delivers): every
+#: reference that does not name a rule follows this line, and the
+#: comparisons under the other rule must fail wherever the two differ.
+INTERFACE_SIDE = "compact"
 
 #: The reference's working precision.  The defects it measures are of the
 #: order of the graph's own rounding, so it computes them in a precision
@@ -1114,6 +1115,56 @@ def group_in_larger_loop(topo: Topology, gi: int) -> bool:
     return sum(1 for n in topo.names if comp[n] == cid) > len(members)
 
 
+def interface_side_of(topo: Topology, i: int, rule=None) -> str:
+    """``"source"`` or ``"delivered"``: where the interface norm reads edge *i* of *topo*.
+
+    The one statement of the rule on the test side: the linear model
+    (:meth:`LinearModel.interface_side_of`) and every reference that
+    writes the norm's reading down itself (the nonlinear search's
+    ``edge_fields``) ask it here, so that no restatement can keep an
+    older rule.  *rule* is :data:`INTERFACE_SIDE` where ``None``.
+
+    Under ``"delivered"`` every edge is read at the value it delivers.
+    Under ``"compact"`` a mapped edge whose target is *larger* than its
+    source is read at its source value; a mapped edge onto a smaller
+    target, **a tie (equal sizes)** and every unmapped edge are read as
+    delivered.  A dict names the side of the edges whose mapping declares
+    one; the rest follow ``"compact"``.  The sizes are the ones the edge
+    was built with: a mapping's side is structure, like its sparsity
+    pattern.
+    """
+    e = topo.edges[i]
+    rule = INTERFACE_SIDE if rule is None else rule
+    if not e.mapped or rule == "delivered":
+        return "delivered"
+    if isinstance(rule, dict) and i in rule:
+        assert rule[i] in ("source", "delivered"), rule
+        return rule[i]
+    assert rule == "compact" or isinstance(rule, dict), rule
+    return "source" if topo.node(e.dst).n > topo.node(e.src).n else "delivered"
+
+
+def measured_whole(topo: Topology, gi: int = 0, rule=None) -> set:
+    """The members of group *gi* whose ``x`` the interface norm measures whole.
+
+    The source of an internal edge whose reading *is* its source field:
+    an edge with no mapping and no transform, or -- under the side rule
+    (:func:`interface_side_of`; *rule* ``None`` is the library's,
+    :data:`INTERFACE_SIDE`) -- a mapped edge read at its source, whatever
+    transform it carries (a source reading is before the transform).  A
+    solve under that norm returns such a field as the iterate it accepted
+    holds it and every other member one plain pass on
+    (:meth:`LinearModel.recomputed`): the reading rule and the return rule
+    meet in this set, and every test-side statement of it asks here.
+    """
+    whole = set()
+    for i in topo.internal_edges(gi):
+        e = topo.edges[i]
+        if (not e.mapped and e.transform is None) or interface_side_of(topo, i, rule) == "source":
+            whole.add(e.src)
+    return whole
+
+
 # ---------------------------------------------------------------------------
 # The float64 reference
 # ---------------------------------------------------------------------------
@@ -1469,20 +1520,21 @@ class LinearModel:
         P (F(x) - x)``: ``x`` the iterate its loop accepted, which is the
         one its report is of; ``F`` one plain pass of the group; ``P`` the
         projector onto the fields the norm does not **measure whole** --
-        every member's ``x`` but those an internal edge delivers as it
-        is, with no mapping and no transform.  Empty under the other
-        norms, which measure every field.
+        every member's ``x`` but those an internal edge reads as they
+        are: delivered with no mapping and no transform, or read at the
+        source by a static mapping onto more entries
+        (:func:`measured_whole`).  Empty under the other norms, which
+        measure every field.
 
-        The set follows the library's reading rule (``edge._delivered``
-        applies a mapping and a transform and nothing else), whatever
-        ``interface_side`` this model restates.  A later stage that
-        reads a static mapping on its compact side makes that source
-        field measured whole, and this set must then follow it.
+        The set follows the library's reading rule
+        (:data:`INTERFACE_SIDE`), whatever ``interface_side`` this model
+        restates: a field the library's norm reads at its source is
+        measured whole and kept, and a model of the other rule is then a
+        model of another library on every count.
         """
         if self.cfgs[gi].get("convergence_norm", "l2") != "interface":
             return ()
-        edges = [self.topo.edges[i] for i in self.topo.internal_edges(gi)]
-        whole = {e.src for e in edges if not e.mapped and e.transform is None}
+        whole = measured_whole(self.topo, gi)
         return tuple(m for m in self.topo.groups[gi] if m not in whole)
 
     def _recomputed_projector(self, gi: int) -> np.ndarray:
@@ -1639,25 +1691,9 @@ class LinearModel:
         return {m: x[off[m]:off[m] + self.topo.node(m).n] for m in members}
 
     def interface_side_of(self, i: int) -> str:
-        """``"source"`` or ``"delivered"``: where the interface norm reads edge *i*.
-
-        The rule (``interface_side``): under ``"delivered"`` every edge is
-        read at the value it delivers.  Under ``"compact"`` a mapped edge
-        whose target is *larger* than its source is read at its source
-        value; a mapped edge onto a smaller target, **a tie (equal
-        sizes)** and every unmapped edge are read as delivered.  A dict
-        names the side of the edges whose mapping declares one; the rest
-        follow ``"compact"``.  The sizes are the ones the edge was built
-        with: a mapping's side is structure, like its sparsity pattern.
-        """
-        e = self.topo.edges[i]
-        rule = self.interface_side
-        if not e.mapped or rule == "delivered":
-            return "delivered"
-        if isinstance(rule, dict) and i in rule:
-            assert rule[i] in ("source", "delivered"), rule
-            return rule[i]
-        return "source" if self.topo.node(e.dst).n > self.topo.node(e.src).n else "delivered"
+        """``"source"`` or ``"delivered"``: where the interface norm reads
+        edge *i* under this model's rule (:func:`interface_side_of`)."""
+        return interface_side_of(self.topo, i, self.interface_side)
 
     def norm_fields(self, gi: int, *, raw: bool = False) -> list:
         """The fields group *gi*'s norm reads: ``[(B, gamma), ...]``.

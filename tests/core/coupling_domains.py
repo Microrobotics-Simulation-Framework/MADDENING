@@ -49,6 +49,12 @@ dtype rounds them.
 A run gives one :class:`Solve` per checked step: the members' state on
 the host, the report ``coupling_diagnostics()`` gives for it, and the
 parameters it ran with.
+
+Both members of :func:`pair` have one size, so a mapped edge between them
+is a tie.  :mod:`tests.core.coupling_domain_sizes` builds, in the same
+domains and for the same :func:`run` and :func:`run_sequence`, a small
+field coupled to a large one: a mapped edge that expands and one that
+reduces.
 """
 
 from __future__ import annotations

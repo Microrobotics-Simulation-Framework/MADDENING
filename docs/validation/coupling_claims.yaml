@@ -587,9 +587,9 @@ claims:
   area: configuration
   claim: >-
     The diagnostics cost "9 Jacobian-vector products for the spectrum (18
-    under convergence_norm="interface" with a mapping or a transform on an
-    internal edge, or a field that more than one internal edge reads
-    ...) and 11 + 4 k + 5 n_p + 2 k n_p more for the bound per group per step (plus one
+    under the interface norm with a transform, or a mapping read as
+    delivered, on an internal edge, or a field that more than one internal
+    edge reads ...) and 11 + 4 k + 5 n_p + 2 k n_p more for the bound per group per step (plus one
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
     at most 64 entries, one per larger constant)"; arnoldi_spectral_radius "costs n_steps + 1
@@ -1506,27 +1506,40 @@ claims:
     between two successive iterations: for each intra-group edge, the value
     the edge delivers -- its source field through the edge's interface
     mapping and then its transform, exactly as the step hands it to the
-    target ...  Only the fields that appear on intra-group edges are
-    compared", scaled as the mixed norm.  The mapping weights are the ones
-    the step ran with (params["mappings"], a per-step override included).
+    target -- or, for an edge whose mapping delivers more entries than its
+    source field holds, the source field itself, before the mapping and the
+    transform ...  Only the fields that appear on intra-group edges are
+    compared", scaled as the mixed norm.  The mapping weights of an edge read
+    as delivered are the ones the step ran with (params["mappings"], a
+    per-step override included).
   sources:
-    - src/maddening/core/coupling/acceleration.py:461 (coupling_residual_interface)
-    - src/maddening/core/coupling/acceleration.py:402 (_interface_readings)
-    - src/maddening/core/edge.py:170 (_delivered)
-    - src/maddening/core/coupling/group.py:95 (CouplingGroup, convergence_norm)
+    - src/maddening/core/coupling/acceleration.py::coupling_residual_interface
+    - src/maddening/core/coupling/acceleration.py::_interface_readings
+    - src/maddening/core/coupling/_interface_plan.py::_norm_side
+    - src/maddening/core/edge.py::_delivered
+    - src/maddening/core/coupling/group.py::CouplingGroup (convergence_norm)
   conditions: >-
     convergence_norm="interface"; state edges (a flux edge is refused at
     compile: CPL-075), with or without an interface mapping and a transform;
-    an edge whose source field is not floating, or that delivers no entries,
-    is not read.  The dead band and the unevaluable-field rule are applied
-    to the delivered value.  The domain cells run a pair with one mapped and
-    one plain internal edge, the mapping's weights passed for the step.
+    an edge whose source field is not floating, or whose reading has no
+    entries, is not read.  The dead band and the unevaluable-field rule are
+    applied to the value that is read: the delivered one, or the source
+    field of an edge read at its source (CPL-188 states which).  The domain
+    cells run a pair with one mapped and one plain internal edge, the
+    mapping a tie (read as delivered), its weights passed for the step; the
+    source-side reading has the cells of CPL-188.
     The residual a step reports is of the iterate its loop accepted: where
-    a field is read only through a mapping or a transform the step returns
-    it one plain pass on (CPL-191), and the residual of the state returned
-    is another number; the domain cells read the accepted iterate with the
-    return rule switched off.
-  oracle: closed form over the delivered edge values, in float64.
+    a field is read only through a mapping (one read as delivered) or a
+    transform the step returns it one plain pass on (CPL-191), and the
+    residual of the state returned is another number; the domain cells read
+    the accepted iterate with the return rule switched off.
+    The three rules together: a pair with an edge read at its source and a
+    field with no entries on the member it reads (unread; read by a plain
+    or a transformed edge; or behind a mapping of none onto more entries,
+    which is read at its source and so is not read) returns and reports
+    what the pair without the field does, to the bit, on jax 0.10.2,
+    0.11.0 and 0.11.2.
+  oracle: closed form over the edge values that are read, in float64.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
     - tests/core/test_phases_5_7_8.py::TestInterfaceResidual::test_interface_residual_detects_difference
@@ -1536,10 +1549,13 @@ claims:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_that_is_not_finite_fails_the_criterion
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_an_integer_source_and_an_empty_delivery_carry_no_norm
     - tests/core/test_coupling_diagnostics_with_an_empty_field.py::test_a_group_reports_what_its_twin_without_the_field_does
+    - tests/core/test_coupling_empty_field_beside_an_edge_read_at_its_source.py::test_a_group_with_an_edge_read_at_its_source_reports_what_its_twin_without_the_field_does
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_one_pass_reports_the_change_of_what_its_edges_delivered
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_group_iterates_until_what_its_mapped_edge_delivers_has_stopped_moving
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver
     - tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_the_monolithic_reference
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_residual_reads_each_static_mapped_edge_on_its_compact_side
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_pool_counts_the_entries_of_the_side_that_is_read
   status: verified
   notes: >-
     Until MADD-ANO-195 was fixed the norm applied an edge's transform
@@ -3329,6 +3345,24 @@ claims:
     set, and spectral_error_bound held in every measured case.  The
     nonlinear search holds such a cell's units within a decade for the
     two radius scores and pins the case as a strict xfail.
+    Statement (2) asks more of the pass than the flag's margin does: it
+    is of a pass whose Jacobian such a rounding leaves standing to its
+    1e-4.  A float32 Gauss-Seidel member with a quadratic term or a
+    product, of curvature 100 over the size of the field it reads, has a
+    slope one rounding of a same-pass value moves by 2.4e-5, and
+    the float32 pass's Jacobian then has a radius up to 5e-4 of itself
+    from the one exact arithmetic gives at the returned state (5e-5 at a
+    curvature of 10, 5e-6 at 1; no larger at a change of units of six
+    decades than at one, with and without a mapping; 7e-7 under
+    saturating gains; 5e-5 under Jacobi through a
+    mapping).  rho_spectral is the float32 pass's to 2e-8 there.
+    Measured on a mapped ring of three whose members square what they
+    read: 0.404214 for 0.404298, 1.53 of statement (2)'s allowance and
+    0.3% of the flag's margin, so statement (1) held (the same on the
+    release branch before this ring's mapping was read at its source);
+    2.3 allowances on a ring with no mapping.  The nonlinear search
+    draws the "radius" score at a curvature within 10 on such a cell
+    and holds the measured draw as a test.
     Under convergence_norm="interface" "the returned state" is the iterate
     the loop accepted, of which the state returned is one plain pass on in
     the fields the norm does not measure whole (CPL-191).
@@ -3353,6 +3387,8 @@ claims:
     - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle
     - tests/core/test_coupling_spectral_estimate_rounding.py::test_a_direction_far_above_rounding_is_kept_in_float64
     - tests/core/test_coupling_spectral_estimate_rounding.py::test_the_compressed_radius_is_the_eigenvalues_not_the_squaring
+    - tests/property/test_coupling_nonlinear_search.py::test_the_radius_score_is_drawn_at_a_curve_a_float32_sweep_resolves
+    - tests/property/test_coupling_nonlinear_search.py::test_a_radius_settled_in_a_float32_sweep_is_the_radius_of_the_pass_s_own_jacobian
   status: verified
   notes: >-
     16bit domain failing on d2429a6: the spectral slots were stored in the
@@ -3400,7 +3436,11 @@ claims:
     under convergence_norm="interface" the fields are what that norm reads,
     the value each internal edge delivers: its source value through the
     edge's interface mapping (the weights the step ran with) and then its
-    transform, with the mappings linear and the transforms affine (offsets,
+    transform -- or the source value itself on an edge whose static mapping
+    delivers more entries than its source holds (CPL-188: the report of an
+    edge-mapped pair with such a scatter is its marker-side twin's, every
+    number of it, where the spectrum settles) -- with the mappings linear
+    and the transforms affine (offsets,
     scales, selections; a non-affine transform makes the map non-linear in
     the reading) (MADD-ANO-187, MADD-ANO-195), and a field that several
     internal edges read counted once for each of them, as that norm counts
@@ -3410,7 +3450,9 @@ claims:
     source's eps (MADD-ANO-211).  Where the residual is at its float floor
     the bound rests on the counted floor (CPL-092, CPL-102), which does not
     see a same-pass read that differences entries of one field
-    (MADD-ANO-212, open).
+    (MADD-ANO-212, open), nor, under convergence_norm="interface", a
+    delivered value that is itself such a difference, under either
+    schedule (MADD-ANO-247, open).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm) is not a linear F: a
     gather or a scatter is nonlinear in the positions it reads.  The bound
@@ -3482,6 +3524,8 @@ claims:
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_weights_passed_for_one_step_are_read_as_the_mapping_objects_own_are
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_random_mapped_internal_edges
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_diagnosed_edge_mapped_pair_reports_every_number_of_its_marker_side_twin
+    - tests/property/test_coupling_interface_side.py::test_a_settled_spectrum_and_its_bounds_are_the_marker_side_twin_s
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_on_a_star
     - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_an_identity_transform_on_every_edge_of_a_star_changes_no_bound
@@ -3719,7 +3763,11 @@ claims:
     does the count see a same-pass read that differences entries of one
     source field (a mapping row [1, -1] on a field at 1000 with a
     difference of order one): a Gauss-Seidel group stalled behind it read
-    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-212, open).  In
+    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-212, open).  Under
+    convergence_norm="interface" the floor's unit is the delivered
+    value's own magnitude, so a group whose norm reads such a difference
+    stalls under its bound under Jacobi too: 0.25x with the flag set at a
+    field 100 times the difference, 0.031x at 1000 (MADD-ANO-247, open).  In
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
@@ -3777,7 +3825,9 @@ claims:
     derivative only.  The resolvent is applied exactly to each probe's
     secant (MADD-ANO-142; per-entry probes MADD-ANO-143).  Its norms are
     the state's fields: under convergence_norm="interface" with an edge
-    transform, the raw source fields, before the transform.  The part of
+    transform or a mapping, the raw source fields, before either (for an
+    edge the norm reads at its source, CPL-188, that is the reading
+    itself).  The part of
     the distance that is the pass's rounding has no direction and is
     multiplied by the operator norm of the right-hand side's change over
     the directions the Jacobian reads (it took one stand-in direction and
@@ -4050,10 +4100,18 @@ claims:
   conditions: >-
     every norm; mixed dtypes; computed in at least float32 whatever the
     fields' dtypes, each field at its own dtype's eps (MADD-ANO-186).  Under
-    "interface" the entries are what each internal edge delivers (its
-    mapping, with the weights passed as `mappings`, then its transform),
-    each at the coarser of its own dtype's eps and its source field's
-    (MADD-ANO-211).
+    "interface" the entries are what that norm reads on each internal edge
+    (CPL-188): what the edge delivers (its mapping, with the weights passed
+    as `mappings`, then its transform), at the coarser of its own dtype's
+    eps and its source field's (MADD-ANO-211), or the source field itself,
+    at its own eps and with the dead band asked of it, where a static
+    mapping delivers more entries than the source holds.  The unit of a
+    delivered entry is its own field's largest magnitude: a value an edge
+    delivers as a difference of entries of one field rounds at the
+    entries' magnitude, and the exact residual of a stalled pair read 5.7
+    and 45 floors above a reported 0.0 at fields 100 and 1000 times the
+    difference, under either schedule (MADD-ANO-247, open; pinned as a
+    strict xfail).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the floor is the
     members' state's, each position field at its own dtype's eps, with
@@ -4080,6 +4138,8 @@ claims:
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol
     - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_counts_more_than_65504_entries
     - tests/property/test_coupling_targeted_search.py::test_the_floor_covers_what_the_reported_residual_misses_per_push
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_float_floor_takes_its_eps_on_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_dead_band_is_asked_of_the_side_that_is_read
   status: verified
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
@@ -5572,6 +5632,7 @@ claims:
   sources:
     - src/maddening/core/coupling/acceleration.py:354 (coupling_residual_interface, Notes)
     - src/maddening/core/coupling/_interface_plan.py::_interface_edge_order
+    - src/maddening/core/coupling/_interface_plan.py::InterfacePlan.norm_edges
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     convergence_norm="interface", any acceleration and solver; two edges
@@ -5583,6 +5644,7 @@ claims:
   tests:
     - tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
+    - tests/core/test_interface_plan.py::test_the_reports_fallback_floor_reads_the_edges_in_the_order_the_norm_sums_them
   status: verified
   notes: >-
     Failing until 0.4.0's claims fix: the norm summed in insertion order, and a
@@ -5708,7 +5770,7 @@ claims:
     holds no flux, so an ungrouped ring a.q -> b, b -> a raises when built
     b, a and steps when built a, b.  An edge from a node's own flux is
     always such a back edge outside a group, whatever the build order
-    (CPL-192).  Reproducers: the four strict xfails cited.  Since 0.1.0
+    (CPL-193).  Reproducers: the four strict xfails cited.  Since 0.1.0
     (MADD-ANO-156, MADD-ANO-157).
   domains:
     f32: n/a
@@ -5777,29 +5839,95 @@ claims:
     sharded: narrowed
 
 - id: CPL-188
-  area: precision floor
+  area: norms
   claim: >-
-    Under convergence_norm="interface" with an interface mapping on an
-    internal edge "the entries are what the edges deliver, which depends on
-    the mapping weights the step ran with (params["mappings"], which a
-    caller may override for one step): the step measures that group's floor
-    itself and the report reads it, so a params override, or an edit of the
-    weights since, does not move it either."
+    convergence_norm="interface" reads a mapped internal edge on its compact
+    side: "an internal edge whose static mapping delivers more entries than
+    its source field holds ... is read at its source value: the field
+    itself, before the mapping and so before the transform ...  A mapping
+    onto fewer entries (a gather), a tie (as many entries delivered as read)
+    and an edge with no mapping are read as delivered.  The side is decided
+    in one place, from the two sizes the mapping declares ..., and the
+    residual, the float floor and its eps, the spectral analysis and its
+    weights, the bounds and the report all read through it."  Where an edge
+    is read as delivered through a mapping, the value "depends on the mapping
+    weights the step ran with (params["mappings"], which a caller may
+    override for one step): the step measures that group's floor itself and
+    the report reads it, so a params override, or an edit of the weights
+    since, does not move it either."
   sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - src/maddening/core/coupling/_interface_plan.py::_norm_side
+    - src/maddening/core/coupling/_interface_plan.py::InterfaceEdge.reading
+    - src/maddening/core/coupling/acceleration.py::_interface_readings
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics (spectral_error_bound)
     - src/maddening/core/coupling/_group_layout.py::_reads_mapping_weights
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
-    convergence_norm="interface" and an internal edge with a mapping whose
-    source field is floating: only that group owns the `_meta` slot
-    coupling_<key>_reading_floor (the floor per evaluation, NaN until a
-    step has written it, restarted with the group's other report slots);
-    every other group's floor is taken from the returned state alone, which
-    the graph keeps across a later state write (CPL-189).  A state whose slot was never written (a checkpoint from before
-    the slot existed) is read with the graph's own weights.
+    convergence_norm="interface"; static mappings: the dense kind, the
+    sparse kind in its padded-gather and in its scatter layout, and a
+    mapping class of the caller's own, the side taken from n_source and
+    n_target (or field_shapes()) and never from the shape of the weights; a
+    geometry-dependent mapping inside the group is refused at compile
+    (MAP-048).  Exercised edge by edge, on every one of those forms:
+    expanding, reducing and tied, with and without an edge transform, in
+    float32 and float64 (the residual to the bit against a plain edge over
+    the prescribed reading; the floor's eps and its dead band on the two
+    cells where the other side gives another number).  Exercised on
+    compiled pairs against the exact reference of each rule (residual, pass
+    count and verdict of the plain iteration): the dense kind and both
+    sparse layouts, gather, scatter and both, a tie, an offset transform,
+    Gauss-Seidel and Jacobi, float32 and float64; a hub whose one field a
+    gather edge and a scatter edge both read; Aitken, fixed relaxation,
+    IQN-ILS and IQN-IMVJ only through the converged distance (CPL-192).
+    The source field of an edge read at its source is measured whole, so
+    the state a solve returns keeps it as the accepted iterate holds it
+    (the return rule, CPL-191).
+    Only a group with an edge read through its mapping, whose source field
+    is floating, owns the `_meta` slot coupling_<key>_reading_floor (the
+    floor per evaluation, NaN until a step has written it, restarted with
+    the group's other report slots); a group whose mapped edges are all
+    read at their source has no slot, and its floor, as every other
+    group's, is taken from the returned state alone, which the graph keeps
+    across a later state write (CPL-189).  A state whose slot was never
+    written (a checkpoint from before the slot existed) is read with the
+    graph's own weights; a checkpoint that carries the slot of a group that
+    does not own it (a development tree before this rule wrote one for
+    every mapped group) loads with a RuntimeWarning naming the slot, which
+    is dropped.  The source-side reading is exercised in every domain
+    below, on pairs of three values against thirty-six (6 against 600 and
+    20 against 2000 in the slow lane): two ways with the small field on
+    either member (so on the member a domain sub-steps, shards or holds in
+    float64 beside a float32 one), both edges expanding, both reducing,
+    the mapping forms and both schedules rotated over them.  Each against
+    the exact reference of the compact rule (residual, verdict, pass
+    count, the fields read at their source), against its marker-side twin
+    (state, report and _meta: to the bit wherever the two steps are one
+    program, to float32 rounding in the mixed-dtype domain), and for the
+    slot's owner and its number.  In bfloat16 and float16 at a cap of two
+    passes: the residual of the iterate the loop holds, and the twin.
+    Under vmap each member of the batch against its own unbatched solve;
+    on a multi-rate graph the base step on which the group does not fire
+    leaves report, slot and members as they were; a sub-cycled pair is the
+    pair at one rate to the bit (memoryless members: the reading is taken
+    once per pass, the fast member's field after its sub-steps); under a
+    predictor the pass count is that of the guess; after a checkpoint
+    restart the report, the slot or its absence and the next step are the
+    uninterrupted run's.  Under run_adaptive without the pass count (the
+    reported solve is its last half step's), and the residual restated on
+    a graph stepped with the return rule switched off: the state returned
+    is the accepted iterate with the gather's source one plain pass on
+    (CPL-191) and does not determine it.  In the mixed-dtype domain the
+    twin's plain edge casts, so the twin recomputes the small field the
+    pair keeps: the pair's is compared with the iterate the twin accepted,
+    to the same bound.  With a sharded member: two
+    ways through the dense kind.  The tie's cells are kept beside them.
   oracle: >-
-    residual_precision_floor of the returned state under the step's
-    weights; the documented bound formula on the reported slots.
+    the residual of a plain edge over the prescribed reading, to the bit;
+    the float64 reference of either rule on the compact system
+    (tests/property/interface_side_graphs.py), under which the other rule
+    must fail; residual_precision_floor of the returned state under the
+    step's weights; the documented bound formula on the reported slots.
   tests:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_recorded_floor_times_the_count_is_the_floor_the_report_adds
@@ -5807,27 +5935,80 @@ claims:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_replaced_group_does_not_inherit_the_recorded_floor
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_state_without_the_recorded_floor_is_read_with_the_graphs_own_weights
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_residual_reads_each_static_mapped_edge_on_its_compact_side
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_pool_counts_the_entries_of_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_float_floor_takes_its_eps_on_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_dead_band_is_asked_of_the_side_that_is_read
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_source_side_reading_takes_no_weights_the_step_ran_with
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_every_plan_a_graph_builds_of_a_group_reads_each_edge_on_the_same_side
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_group_owns_the_floor_slot_where_an_edge_is_read_through_its_mapping
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_checkpoint_that_carries_the_slot_of_a_group_that_no_longer_owns_it_loads_loudly
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_checkpoint_of_a_group_that_owns_the_slot_brings_it_back
+    - tests/core/test_interface_plan.py::test_a_static_mapping_onto_more_entries_is_read_at_its_source_and_a_tie_as_delivered
+    - tests/core/test_interface_plan.py::test_the_side_is_the_edges_own_wherever_it_is_described
+    - tests/core/test_interface_plan.py::test_only_an_edge_read_through_its_mapping_makes_the_floor_depend_on_weights
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[two-way-20-2000-matrix-gauss-seidel-float64-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[scatter-only-20-2000-sparse-gauss-seidel-float32-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[scatter-only-20-2000-sparse-transposed-jacobi-float64-offset-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_the_plain_loop_stops_where_the_reference_of_its_rule_does[tie-40-40-sparse-gauss-seidel-float64-compact]'
+    - 'tests/property/test_coupling_interface_side.py::test_a_step_is_the_models_under_its_rule[side-hub-matrix-local-float64-gauss-seidel-compact]'
+    - tests/property/test_coupling_interface_side.py::test_a_source_side_reading_does_not_carry_the_edges_transform
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_reports_what_its_marker_side_twin_reports
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_only_a_pair_with_an_edge_read_through_its_mapping_owns_the_floor_slot
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_restart_brings_back_the_report_the_floor_slot_and_the_next_step
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_each_member_of_a_batch_of_pairs_of_two_sizes_is_its_own_unbatched_solve
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_at_two_rates_is_the_pair_at_one
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graph_reads_a_pair_of_two_sizes_on_the_steps_its_group_fires
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_diagnosed_pair_of_two_sizes_reports_the_spectrum_of_its_twin
   status: verified
   domains:
     f32:
       - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f32]'
-    f64: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f64]'
-    mixed_dtype: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[mixed_dtype]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[f32-two-way-matrix-gauss-seidel]'
+    f64:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f64]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[f64-two-way-sparse-gauss-seidel]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[mixed_dtype]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[mixed_dtype-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_only_a_pair_with_an_edge_read_through_its_mapping_owns_the_floor_slot[mixed_dtype-two-way-matrix-jacobi-small-b]'
     16bit:
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[bfloat16]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[float16]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[bfloat16-two-way-matrix-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[float16-two-way-sparse-transposed-gauss-seidel]'
     jit:
       - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f32]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[f32-two-way-sparse-jacobi-small-b]'
     grad: n/a
-    vmap: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[vmap]'
-    multi_rate: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[multi_rate]'
-    sub_cycled: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[sub_cycled]'
-    predictors_warm_starts: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[predictors_warm_starts]'
-    adaptive: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[adaptive]'
-    checkpoint_restart: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[checkpoint_restart]'
-    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-188]'
+    vmap:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[vmap]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-two-way-sparse-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_each_member_of_a_batch_of_pairs_of_two_sizes_is_its_own_unbatched_solve[vmap-two-way-matrix-jacobi-small-b]'
+    multi_rate:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[multi_rate]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[multi_rate-two-way-sparse-transposed-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_multi_rate_graph_reads_a_pair_of_two_sizes_on_the_steps_its_group_fires[multi_rate-two-way-sparse-jacobi-small-b]'
+    sub_cycled:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[sub_cycled]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[sub_cycled-two-way-sparse-transposed-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_at_two_rates_is_the_pair_at_one[sub_cycled-two-way-matrix-gauss-seidel]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[predictors_warm_starts]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[predictors_warm_starts-two-way-sparse-gauss-seidel]'
+    adaptive:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[adaptive]'
+      - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_run_adaptive_steps_a_pair_of_two_sizes_as_a_plain_step_does
+    checkpoint_restart:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[checkpoint_restart]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_restart_brings_back_the_report_the_floor_slot_and_the_next_step[checkpoint_restart-two-way-sparse-transposed-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_restart_brings_back_the_report_the_floor_slot_and_the_next_step[checkpoint_restart-scatter-only-matrix-gauss-seidel]'
+    sharded:
+      - 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-188]'
+      - tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member
 
 - id: CPL-189
   area: report
@@ -5981,7 +6162,11 @@ claims:
     (to the bit under "l2" and "mixed").  One more evaluation of the pass
     per solve where a field is recomputed; none in a group whose every
     floating field is measured whole, whose compiled step is the one it
-    was.  A diverged (non-finite) accepted iterate is returned as the loop
+    was.  A static mapping onto more entries than its source holds is read
+    at its source (CPL-188): its source field is measured whole and kept,
+    and a pair whose two mapped edges both expand recomputes nothing (held
+    on compiled pairs of each kind against the reference's own loop, and
+    by the three-step relay twin).  A diverged (non-finite) accepted iterate is returned as the loop
     left it; a recomputed field that is not finite makes the residual inf
     and strict_convergence raise.  max_iterations=1 returns its single pass
     as it is.  Tested on groups whose members are linear in what they
@@ -6056,6 +6241,103 @@ claims:
     sharded: narrowed
 
 - id: CPL-192
+  area: norms
+  claim: >-
+    A coupling group that reports converged=True under
+    convergence_norm="interface" is within K tolerances of its fixed point:
+    "the distance to the fixed point in the compact readings, in the norm's
+    own weights, is at most K tolerances, with K = ||D (I - A)^-1 (I - L)
+    D^-1||_2 of the loop on its compact readings (A the pass's stationary
+    map, L its same-pass part, D dividing each reading by its own
+    magnitude) ...  K is about 1 / (1 - gain) for a normal loop and does not
+    see N", the size of a field a mapped edge delivers onto.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - src/maddening/core/coupling/_interface_plan.py::_norm_side
+    - src/maddening/core/coupling/acceleration.py::coupling_residual_interface
+    - benchmarks/results/interface_norm_dilution/RESULT.md
+  conditions: >-
+    an affine pass (linear nodes, linear static mappings, affine edge
+    transforms), above the residual's float floor; float32 and float64;
+    pairs whose two mapped internal edges gather, scatter, or one of each,
+    5 to 60 values against 1e2 to 1e5 (a million in the slow lane), and
+    relays of size ratio 1/300 to 300, a tie, and a hub whose one field a
+    gather edge and a scatter edge both read; the dense kind and the sparse
+    kind in either layout; Gauss-Seidel and Jacobi; no acceleration, Aitken,
+    fixed relaxation, IQN-ILS and IQN-IMVJ (the IQN rows up to 1e4
+    entries); loop gains 0.05 to 0.95 of either sign.  K is computed from
+    the loop's own operator, not chosen: the identity CPL-088's bound rests
+    on, applied to a residual at its threshold (the estimate a verdict
+    compares is never below the residual: CPL-048).  K is the constant of
+    the iterate the loop accepted, which the report is of.  The state a
+    solve returns is that iterate with the fields the norm does not measure
+    whole one plain pass on (CPL-191; a field read at its source is
+    measured whole and kept), and the tests hold the state returned to
+    K' = ||D [(I - A)^-1 (I - L) - P] D^-1||_2, P selecting the readings of
+    a recomputed source (Reference.K_returned; K' = K where both edges
+    scatter), and the report to the reference's own loop.  Measured before the
+    rule of CPL-188, with a scatter read as delivered: 23 to 459 tolerances
+    at 1e3 to 1e6 target entries, growing as the square root of the count;
+    with it 3.3 to 3.6 at every size.  Outside float32 and float64 at one
+    rate the claim is held on pairs of three values against thirty-six (to
+    20 against 2000 in the slow lane), plain and under each stock
+    acceleration: a float32 member beside a float64 one, a vmap of the
+    step, a multi-rate graph, a sub-cycled group, a predictor (and
+    IQN-IMVJ's Jacobian carried from step to step), a checkpoint restart,
+    run_adaptive, and a member sharded over four devices (the dense kind).
+    Not claimed for float16 or bfloat16: at a tolerance those dtypes
+    resolve the residual's float floor is 0.2 and 1.6 tolerances, so a
+    converged verdict there is not above the floor, which the claim
+    presupposes; their cells stop at a cap of two passes (CPL-188).
+  oracle: >-
+    the exact float64 fixed point of the compact system and K from the
+    loop's operator (tests/property/interface_side_graphs.py::Reference;
+    tests/property/coupled_topologies.py::LinearModel.interface_claim).
+  tests:
+    - tests/property/test_coupling_interface_side.py::test_a_converged_group_whose_edges_all_gather_is_within_K_tolerances
+    - tests/property/test_coupling_interface_side.py::test_the_gather_only_shapes_converge_within_K_tolerances
+    - tests/property/test_coupling_interface_side.py::test_the_compact_rule_itself_keeps_the_claim_on_a_scatter
+    - tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size
+    - tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_a_million_cells
+    - tests/property/test_coupling_interface_side.py::test_the_claim_over_every_configuration
+    - tests/property/test_coupling_targeted_search.py::test_a_converged_interface_quantity_is_within_K_tolerances_per_push
+    - tests/property/test_coupling_targeted_search.py::test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances
+    - tests/property/test_coupling_targeted_search.py::test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances_on_a_larger_target
+    - tests/property/test_coupling_targeted_search.py::test_a_known_side_defect_the_search_reached_is_fixed
+    - tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does
+    - tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances
+  status: verified
+  domains:
+    f32:
+      - 'tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size[two-way-sparse-jacobi-float32-none]'
+      - 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[gather-only]'
+    f64: 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[two-way]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[mixed_dtype-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[mixed_dtype-two-way-sparse-gauss-seidel-fixed-small-b]'
+    16bit: narrowed
+    jit: 'tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_readings[scatter-only]'
+    grad: n/a
+    vmap:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[vmap-gather-only-sparse-gauss-seidel]'
+    multi_rate:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[multi_rate-scatter-only-matrix-gauss-seidel]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[multi_rate-two-way-matrix-jacobi-aitken-small-b]'
+    sub_cycled:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[sub_cycled-gather-only-sparse-jacobi]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[sub_cycled-two-way-sparse-gauss-seidel-iqn-ils]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[predictors_warm_starts-two-way-matrix-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_converged_accelerated_pair_of_two_sizes_is_within_K_tolerances[predictors_warm_starts-two-way-sparse-transposed-gauss-seidel-iqn-imvj-small-b]'
+    adaptive: tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_run_adaptive_steps_a_pair_of_two_sizes_as_a_plain_step_does
+    checkpoint_restart:
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-two-way-sparse-jacobi-small-b]'
+      - 'tests/core/test_coupling_pairs_of_two_sizes_in_every_domain.py::test_a_pair_of_two_sizes_stops_where_the_compact_reference_does[checkpoint_restart-scatter-only-matrix-gauss-seidel]'
+    sharded: tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_a_pair_of_two_sizes_with_a_sharded_member
+
+- id: CPL-193
   area: edges
   claim: >-
     An edge's "source and target may be the same node, and where the node

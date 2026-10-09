@@ -1,12 +1,20 @@
 """Twins of an edge-mapped graph whose interface reading is its own.
 
-``convergence_norm="interface"`` reads what each internal edge delivers:
-the source field through the edge's mapping and then its transform.  The
-node-inlined twin of ``tests/property/test_differential_geometry_edges.py``
-moves a mapping into the *target* node, so its edges deliver the raw
-source field and its interface norm is another norm: reports of the two
-graphs under that norm can agree only loosely.  The two twins here keep
-the reading (``tests/property/geometry_graphs.py``):
+``convergence_norm="interface"`` reads a mapped internal edge on its
+compact side: as delivered (the source field through the edge's mapping
+and then its transform) where the mapping gathers or ties, and at its
+source where a static mapping delivers more entries than the source field
+holds.  The node-inlined twin of
+``tests/property/test_differential_geometry_edges.py`` moves every mapping
+into the *target* node, so its edges deliver the raw source field and its
+interface norm is another norm wherever the edge-mapped graph reads a
+delivered value: reports of the two graphs under that norm can agree only
+loosely.  The two twins here keep the reading of every edge read as
+delivered (``tests/property/geometry_graphs.py``); the two-body graph's
+scatter edge (``P -> F``, onto more entries) is read at its source in
+both graphs and stays as it is (``keep=gg.read_at_its_source``; the twin
+that moves a scatter's mapping is the marker-side twin of
+``test_coupling_interface_side.py``):
 
 * :func:`~tests.property.geometry_graphs.transform_twin` writes a static
   mapping as its edge's transform.  Same state, same reading: **every
@@ -36,8 +44,8 @@ the reading (``tests/property/geometry_graphs.py``):
   Gauss-Seidel.
 
 **What this proves on today's tree** (no geometry): the library reads a
-static mapped internal edge as the step delivers it, and both twins say
-so; a fault seeded in the library's reading (the edge read without its
+static mapped internal edge that gathers as the step delivers it, and both
+twins say so; a fault seeded in the library's reading (the edge read without its
 mapping) breaks both equalities (measured when this file was added: the
 two residuals 8.8% apart; ``docs/developer_guide/testing_standards.md``).  And that the relay
 twin is the edge-mapped graph where it has a source-anchored *moving*
@@ -63,6 +71,7 @@ import numpy as np
 import pytest
 
 from tests.property import coupled_graphs as cg
+from tests.property import coupled_topologies as ct
 from tests.property import geometry_graphs as gg
 from tests.property import test_coupling_targeted_search as linear
 
@@ -174,30 +183,41 @@ def compare(c: gg.Case, edge, twin, *, relay: bool, steps: int = 3) -> None:
             _close(ra[name], rb[name], eps, (where, name))
 
 
+def _twin_of(c: gg.Case, twin) -> gg.GGraph:
+    """*twin* of *c*'s static graph, each edge by the side the norm reads
+    it on: the gather's mapping is moved, the scatter's stays (premise:
+    the graph has one of each, so the comparison is of a moved mapping)."""
+    static = gg.static_twin(c)
+    kept = [gg.read_at_its_source(e) for e in static.edges if e.mapping is not None]
+    assert sorted(kept) == [False, ct.INTERFACE_SIDE == "compact"], kept
+    out = twin(static, keep=gg.read_at_its_source)
+    assert sum(e.mapping is not None for e in out.edges) == sum(kept)
+    return out
+
+
 def assert_reports_as_its_transform_twin(c: gg.Case) -> None:
     with gg.x64(c.needs_x64):
-        compare(c, _edge(c), gg.build(gg.transform_twin(gg.static_twin(c))), relay=False)
+        compare(c, _edge(c), gg.build(_twin_of(c, gg.transform_twin)), relay=False)
 
 
 def assert_reports_as_its_relay_twin(c: gg.Case) -> None:
     with gg.x64(c.needs_x64):
-        # One step, every field.  Under the interface norm a solve returns a
-        # field the norm measures whole as its accepted iterate holds it and
-        # every other field one plain pass on.  In the twin the relay's
-        # field is read by a plain edge, so it is kept, while the source
-        # field it relays (read by no edge there; read only through the
-        # mapping in the edge-mapped graph) is recomputed in both graphs.
-        # The states returned are equal on every field the two graphs
-        # share, which is compared; but the twin's relay field is then a
-        # pass behind its own source, and at these caps -- every case here
-        # stops unconverged -- a reader swept before the source starts the
-        # next step from a value the edge-mapped graph does not hold
-        # (measured: the residuals of the second step differ in the fourth
-        # digit at ``max_iterations=3``).  A later stage, the compact-side
-        # reading of static mappings, measures such a source field whole
-        # where the mapping is read at its source, and may restore the
-        # later steps for those edges.
-        compare(c, _edge(c), gg.build(gg.relay_twin(gg.static_twin(c))), relay=True, steps=1)
+        # Every step, every field, under the norm's two rules together.  A
+        # solve returns a field the norm measures whole as its accepted
+        # iterate holds it and every other field one plain pass on.  The
+        # scatter edge is read at its source and stays as it is in both
+        # graphs (``_twin_of``), so its source field is measured whole and
+        # kept in both.  The gather's mapping is moved into a relay: the
+        # relay's field is read by a plain edge and kept, and the source
+        # field it relays (read by no edge in the twin; only through the
+        # mapping in the edge-mapped graph) is recomputed in both.
+        # (With the return rule alone, and the scatter's mapping moved into
+        # a relay as well, the twin's second relay was a pass behind its
+        # source and the second step's residuals differed in the fourth
+        # digit at ``max_iterations=3``: the comparison was then of one
+        # step.  With the scatter read at its source the three steps agree
+        # again, in float32 and float64.)
+        compare(c, _edge(c), gg.build(_twin_of(c, gg.relay_twin)), relay=True)
 
 
 @pytest.mark.parametrize("c", STATIC_PER_PUSH, ids=repr)

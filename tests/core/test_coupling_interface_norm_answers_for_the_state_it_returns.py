@@ -535,9 +535,10 @@ def test_an_identity_mapped_group_equals_its_unmapped_twin_within_the_residual(n
     reported residual on what the edges deliver -- to the bit under the
     norms that measure the state.
 
-    (A later stage, the compact-side reading of static mappings, reads a
-    mapping between fields of one size at its source: such a field is then
-    measured whole, and the two may be equal to the bit again.)
+    (The compact-side rule reads a mapping between fields of one size as
+    delivered, like a gather: this holds under it as it is.  A mapping onto
+    more entries is read at its source, and that field is measured whole
+    and kept: ``test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py``.)
     """
     plain = [("A", "B", G, None), ("B", "A", 0.3 * G.T, None)]
     mapped = [(src, dst, gain, np.eye(2)) for src, dst, gain, _how in plain]

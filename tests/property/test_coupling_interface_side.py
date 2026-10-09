@@ -1,22 +1,24 @@
 """Instruments for "the interface norm reads a mapped edge on its compact side".
 
-``convergence_norm="interface"`` reads what each internal edge of a coupling
-group *delivers*, every entry of every delivered value pooled into one RMS.
-A mapping from a small field onto a large one (a scatter: 30 marker forces
-onto a grid of ``N`` cells) delivers ``N`` entries of which a few dozen
-change, and the criterion is diluted: measured on this tree
+``convergence_norm="interface"`` pools every entry it reads on the internal
+edges of a coupling group into one RMS.  Read as *delivered*, a mapping
+from a small field onto a large one (a scatter: 30 marker forces onto a
+grid of ``N`` cells) puts ``N`` entries into the pool of which a few dozen
+change, and the criterion is diluted: measured before the rule below
 (``benchmarks/results/interface_norm_dilution``), the marker forces of a
-converged group are 23 to 459 tolerances from their fixed point at ``N`` =
+converged group were 23 to 459 tolerances from their fixed point at ``N`` =
 1e3 to 1e6, and 3.3 at every ``N`` when both readings are marker-sized.
 
 **The decision** (maintainer, 2026-10-07): the interface norm reads a mapped
 edge on its compact side.  A mapping whose target is larger than its source
 is read at its source value, before the mapping; any other edge at the
-value it delivers, as today; a tie reads the delivered value; a mapping
-kind may declare its side.  The library does not do this yet
-(``coupled_topologies.INTERFACE_SIDE`` is ``"delivered"``).  This module is
-what the change will be held to; making that one constant ``"compact"``
-turns every expectation below over at once.
+value it delivers; a tie reads the delivered value.  The library does this
+for every static mapping (``coupled_topologies.INTERFACE_SIDE`` is
+``"compact"``; ``_interface_plan._norm_side`` is the one place), and this
+module is what it is held to.  It was written, and its failing rows
+pinned, while the constant read ``"delivered"``: every expectation follows
+the constant, and the comparisons under the *other* rule are strict
+expected failures, so each instrument is shown able to tell the two apart.
 
 **The claim scored** (:mod:`tests.property.interface_side_graphs`):
 ``converged=True`` under the interface norm implies the distance to the
@@ -31,9 +33,11 @@ What is here:
   this tree), over 5 to 60 markers, 1e2 to 1e5 cells, dense and sparse
   mappings in either layout, both schedules, both dtypes, every stock
   acceleration, loop gains 0.2 to 0.9 of either sign;
-* the claim on groups with a scatter edge, **pinned as known-failing**:
-  strict, on the sign of the claim and on a growth ratio between two sizes
-  with margin (:func:`_dilution`), never on a value;
+* the claim on groups with a scatter edge at two sizes two decades apart
+  (and at a million cells, slow).  Before the rule these rows were pinned
+  as known-failing, strictly, on a growth of the excess with the large
+  side (:func:`_dilution`, which still names that failure
+  :class:`Diluted` should it come back);
 * the reference of either rule against the library, residual, pass count
   and verdict: under the tree's rule it must agree everywhere, and under
   the other rule it must *disagree* wherever the two rules differ -- so the
@@ -42,67 +46,73 @@ What is here:
   and its ``interface_side`` option: a tie, pairs of size ratio up to 100,
   and a hub whose one field a gather edge and a scatter edge both read.
 
-**Seeded faults**, and the instrument that catches each.  "Today" rows were
-seeded in a scratch copy of ``src/`` with ``plans/tools/mutants.py`` (the
-signal is the first test that failed); "rule" rows need the rule to exist
-and are written as the change to make to it then.
+**Seeded faults**, and the instrument that catches each, as measured with
+``plans/tools/mutants.py`` in a scratch copy of ``src/`` on the tree that
+implements the rule (the signal is the first test that failed; "core" is
+``tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py``,
+"pins" ``tests/core/test_interface_plan.py``, "search" the fifth score of
+``test_coupling_targeted_search.py``).  The T rows are faults of a
+delivered reading, first seeded while the library read every edge that way;
+the R rows change the rule; the S rows make two of the places that describe
+a group's edges disagree.
 
 ====  ======================================================  ========================================================
-id    fault                                                   caught by (measured signal)
+id    fault                                                   caught by (first failing test)
 ====  ======================================================  ========================================================
-T1    today: ``_interface_readings`` yields the source        caught: ``test_the_plain_loop_stops_where_the_reference_
-      value where the delivered one is prescribed             of_its_rule_does[gather-only-...-delivered]`` (residual)
-T2    today: the pool counts the source field's entries       caught: the same test on a gather-only and a
-      (the value right, the other side's count)               scatter-only row.  A two-way row cannot see it: the
-                                                              two edges' counts swap and their sum is the same
-T3    today: a field read by two edges is read once           caught: ``test_a_step_is_the_models_under_its_rule
-                                                              [side-hub-...-delivered]``
-T4    today: ``_delivered`` applies the transform before      caught: ``test_the_plain_loop_...[...-offset-delivered]``
-      the mapping
-T5    today: the spectral analysis reads the source values    **survives** the "bound" score of
-      (``_reading_parts`` in ``_coupled_block.py``) under a   ``test_coupling_targeted_search.py`` on the cells with
-      criterion on the delivered ones                         a mapping between sizes, with and without a
-                                                              differencing gather row, and
-                                                              ``test_interface_reading_twins.py``: the bound it
-                                                              reports is another number (8.17 for 1.05 on a
-                                                              differencing row, 0.1068 for 0.1093 on a plain one)
-                                                              but seldom one below the distance.  See R4
-T6    today: the floor reads the source values                survives (expected): see below
-      (``residual_precision_floor``)
-R1    rule: delivered read where the source is prescribed     the dilution pins (they keep failing) and every
-      (today's tree)                                          ``...-compact`` row of the two comparisons
-R2    rule: the source read where delivered is prescribed     ``...[gather-only-...-compact]`` rows; the tie rows
-      (a gather, or a tie, read at its source)
-R3    rule: the source value read, the delivered value's      the dilution pins (the residual is the diluted one);
-      entry count pooled                                      ``...-compact`` residuals
-R4    rule: the tie, or the side, decided differently in      tie rows (``tie-...``, ``side-4-4``) for the criterion;
-      the criterion, the floor and the spectral weights       ``test_an_edge_mapped_graph_s_diagnostics_are_its_
-      (three enumerations: ``_interface_readings``,           marker_side_twin_s``: the twin reads the compact side
-      ``_read_fields``, ``InterfacePlan.iqn_fields``)         by construction, so every reported number of the
-                                                              edge-mapped graph must be the twin's to 1e-6 -- the
-                                                              comparison T5 has no equivalent of today
-R5    rule: the side taken from the weights' shape (a sparse  ``sparse`` against ``sparse-transposed`` rows: one
-      layout's ``(rows, k)``), or from weights seen at build  matrix, three weight shapes; every graph is built
+R1    delivered read where the source is prescribed (the      here: the scatter rows of ``..._within_K_tolerances_at_
+      rule before 2026-10-07)                                 every_size`` (``Diluted``); search; core; pins
+R2    the source read where delivered is prescribed: a tie    a tie: ``test_the_plain_loop_...[tie-40-40-...-
+      read at its source; a gather read at its source         delivered]``; a gather: ``..._edges_all_gather_is_
+                                                              within_K_tolerances``; search, core and pins for both
+R3    the source value read, the delivered value's entry      here: the scatter rows (the residual is the diluted
+      count pooled                                            one); search; core ``test_the_residual_reads_each_...``
+R4    the side decided differently in the criterion, the      the floor: core only (``test_the_float_floor_takes_its_
+      floor and the spectral analysis                         eps_on_the_side_that_is_read``: see T6).  The spectrum
+                                                              (T5): ``test_an_edge_mapped_graph_s_diagnostics_are_
+                                                              its_marker_side_twin_s`` (slow), and per push the
+                                                              diagnosed twin of core.  A source-side reading that
+                                                              is merely not counted as "the field itself" (the
+                                                              report then takes a second spectrum of the same
+                                                              numbers): pins only
+R5    the side taken from the weights' shape (a sparse        ``..._edges_all_gather_...[gather-only-60-1000-sparse-
+      layout's ``(rows, k)``)                                 jacobi-float64]``; search; core (a mapping class of
+                                                              the caller's own); pins.  Every graph here is built
                                                               with zero weights and stepped with ``params``
-R6    rule: a source-side reading taken through the edge's    rows with ``offset``: the library applies the mapping,
-      transform                                               then the transform, so a pre-mapping value has no
-                                                              offset, and an offset moves the norm's scale
-R7    rule: a hub's field read once, by one edge's rule       ``side-hub`` rows (four readings, the hub's field
-                                                              twice: once as delivered, once at the source)
+R6    a source-side reading taken through the edge's          rows with ``offset``: ``test_the_plain_loop_...[two-
+      transform                                               way-...-offset-compact]``; core; pins
+R7    a field two edges read is read once (T3)                ``test_a_step_is_the_models_under_its_rule[side-hub-
+                                                              ...-compact]``; pins
+S1    ``compile()`` describes every edge as delivered while   core only: ``test_a_group_owns_the_floor_slot_where_an_
+      the trace reads the compact side                        edge_is_read_through_its_mapping[scatter-only]`` (a
+                                                              slot seeded and never written)
+S2    the trace describes every edge as delivered             as R1, and core's fixture (a slot written that was
+                                                              never seeded)
+S3    a bare edge (the report's fallback floor, a direct      core ``test_the_residual_reads_each_...``; pins
+      call of the norm) described as delivered                ``test_the_side_is_the_edges_own_wherever_it_is_
+                                                              described``
+T2    the pool counts the source field's entries where the    ``..._edges_all_gather_...[gather-only-5-100-matrix-
+      delivered value is read                                 ...]``; search; core
+T4    ``_delivered`` applies the transform before the         ``test_the_plain_loop_...[two-way-...-offset-
+      mapping                                                 compact]``; core
+T5    the spectral analysis reads the delivered values        see R4.  Before the rule nothing caught it (the
+      (``_reading_parts`` in ``_coupled_block.py``) under a   "bound" score of the search and
+      criterion on the compact ones                           ``test_interface_reading_twins.py`` let it through)
+T6    the floor reads the source values of every edge         core only (the eps cell and the dead-band cell)
+      (``residual_precision_floor``)
 ====  ======================================================  ========================================================
 
 **What no instrument here sees.**  The float floor of the residual is
 ``PRECISION_FLOOR_ULPS * eps / rtol`` per entry the norm reads, whichever
 entries those are, so a floor taken on the other side of a mapping is the
-same number unless a reading is exactly zero or dead-banded on one side
-only (T6 survives).  IQN's ``InterfacePlan.iqn_fields`` chooses the state
-fields the accelerator works on, which the side rule does not change; a
-wrong choice there moves pass counts, not a verdict's truth, and is held
-only through the property under ``iqn-*``.  And on this tree nothing
-catches T5: a spectral analysis on another reading than the criterion's
-gives a different bound that is rarely an *understated* one, which is all
-a score against the true distance can see.  The marker-side twin is the
-instrument for it and can only run once the two graphs share a criterion.
+same number unless a reading is dead-banded on one side only or the two
+sides differ in dtype: those two cells are held edge by edge in the core
+file, and nothing in this module tells such a floor apart (T6, and the
+floor half of R4, survive here).  IQN's ``InterfacePlan.iqn_fields``
+chooses the state fields the accelerator works on, which the side rule
+does not change; a wrong choice there moves pass counts, not a verdict's
+truth, and is held only through the property under ``iqn-*``.  The
+marker-side twin holds the spectrum to the criterion's side, and has
+finite bounds to compare only on its settled rows (:data:`TWIN_SETTLED`).
 """
 
 from __future__ import annotations
@@ -124,20 +134,18 @@ from tests.property import coupled_topologies as ct
 from tests.property import interface_side_graphs as sg
 from tests.property.sysid_transform_grid import precision
 
-#: The rule this tree's library implements, and whether the decision is
-#: still to land.
+#: The rule this tree's library implements.
 RULE = ct.INTERFACE_SIDE
-AWAITING = RULE != "compact"
-DECISION = ("the interface norm reads a mapped edge on its compact side (decision of "
-            "2026-10-07): this tree still reads what a scatter delivers, every entry of "
-            "the large target pooled into the norm")
+assert sg.LIBRARY_RULE == RULE, (
+    "interface_side_graphs.measured_whole states the fields a solve keeps for another side rule")
 
 
 class Diluted(Exception):
     """A converged group with a scatter edge is further from its fixed point
     than ``K`` tolerances, by a factor that grows with the large side as the
-    measured dilution does.  Not an ``AssertionError``: the pins expect this
-    and nothing else."""
+    dilution of a delivered reading does (measured 0.63 to 1.20 of
+    ``sqrt(large / small)`` before the rule).  Not an ``AssertionError``:
+    the failure the compact side removes, named should it return."""
 
 
 def _id(shape: sg.Shape) -> str:
@@ -221,7 +229,7 @@ def test_the_compact_rule_itself_keeps_the_claim_on_a_scatter(shape, draw):
 
 
 # ---------------------------------------------------------------------------
-# 2. The claim where it fails today: a scatter edge, pinned
+# 2. The claim on a scatter edge, at sizes two and three decades apart
 # ---------------------------------------------------------------------------
 
 #: The pinned draw: a loop gain at which one pass moves the error by less
@@ -230,10 +238,11 @@ def test_the_compact_rule_itself_keeps_the_claim_on_a_scatter(shape, draw):
 PIN = sg.Draw(seed=1, gain=0.6)
 SMALL, LARGE, HUGE = 1000, 100_000, 1_000_000
 #: The least growth of the excess between two sizes that counts as the
-#: measured dilution, as a fraction of ``sqrt(large / small)`` (the entry
-#: count's growth: 10 between 1e3 and 1e5).  Measured on this tree at the
-#: pinned draw: 0.63 to 1.20 of it over the pinned rows, the same on jaxlib
-#: 0.10.2, 0.11.0 and 0.11.2; a third leaves most of a factor of two.
+#: dilution of a delivered reading, as a fraction of ``sqrt(large / small)``
+#: (the entry count's growth: 10 between 1e3 and 1e5).  Measured before the
+#: rule at the pinned draw: 0.63 to 1.20 of it over the pinned rows, the
+#: same on jaxlib 0.10.2, 0.11.0 and 0.11.2; a third leaves most of a
+#: factor of two.
 GROWTH_FRACTION = 1.0 / 3.0
 
 PINNED = (
@@ -243,18 +252,16 @@ PINNED = (
     ("scatter-only", "sparse-transposed", "jacobi", "float64", "fixed"),
 )
 
-awaiting_the_rule = pytest.mark.xfail(AWAITING, strict=True, raises=Diluted, reason=DECISION)
-
-
 def _dilution(row, small: int, large: int, draw: sg.Draw = PIN) -> None:
-    """Hold the claim at *large* cells; raise :class:`Diluted` for the known failure.
+    """Hold the claim at *small* and at *large* cells.
 
-    Three outcomes.  The claim holds at both sizes: returns (the pin's
-    strict xfail then fails, which is how it flips when the rule lands).
-    The claim fails at *large* by a factor that grew from *small* as the
-    entry count did: :class:`Diluted`.  Anything else -- a solve that did
-    not converge, a failure that does not grow with the size -- is an
-    ``AssertionError`` the pin does not expect.
+    Three outcomes.  The claim holds at both sizes: returns.  The claim
+    fails at *large* by a factor that grew from *small* as the entry
+    count did: :class:`Diluted`, the failure of a delivered reading
+    (while the library read every edge as delivered these rows were
+    strict expected failures raising exactly that).  Anything else -- a
+    solve that did not converge, a failure that does not grow with the
+    size -- is an ``AssertionError``.
     """
     kind, mapping, schedule, dtype, acceleration = row
     seen = {n: sg.run(sg.Shape(kind, n, 30, mapping, schedule, dtype, acceleration), draw)
@@ -273,7 +280,6 @@ def _dilution(row, small: int, large: int, draw: sg.Draw = PIN) -> None:
     raise Diluted(f"{row}: {lo:.3g} K tolerances at {small} cells, {hi:.3g} at {large}")
 
 
-@awaiting_the_rule
 @pytest.mark.parametrize("row", PINNED, ids=["-".join(r) for r in PINNED])
 def test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size(row):
     _dilution(row, SMALL, LARGE)
@@ -283,7 +289,6 @@ def test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_s
 # the sparse layouts only).
 # Per push: tests/property/test_coupling_interface_side.py::test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_every_size
 @pytest.mark.slow
-@awaiting_the_rule
 @pytest.mark.parametrize("row", [r for r in PINNED if r[1] != "matrix"],
                          ids=["-".join(r) for r in PINNED if r[1] != "matrix"])
 def test_a_converged_group_with_a_scatter_edge_is_within_K_tolerances_at_a_million_cells(row):
@@ -315,20 +320,14 @@ SWEEP = [(kind, acceleration, schedule) for kind in sg.KINDS
 @pytest.mark.parametrize("kind,acceleration,schedule", SWEEP,
                          ids=["-".join(row) for row in SWEEP])
 def test_the_claim_over_every_configuration(kind, acceleration, schedule):
-    """Every stock acceleration under both schedules, at every size.
-
-    Where every edge gathers the claim is asserted.  With a scatter edge it
-    is asserted once the rule has landed; until then the worst excess per
-    size is printed (the measurement, kept current) and the solves must at
-    least converge."""
+    """Every stock acceleration under both schedules, at every size: the
+    claim is asserted on every kind, and the worst excess per size is
+    printed (the measurement, kept current)."""
     worst: dict = {}
     for shape in _sweep_shapes(kind, acceleration, schedule):
         for seed, (gain, sign) in enumerate(((0.2, 1.0), (0.55, -1.0), (0.9, 1.0))):
             draw = sg.Draw(seed, gain, sign)
-            if kind == "gather-only" or not AWAITING:
-                seen = _held(shape, draw)
-            else:
-                seen = sg.run(shape, draw)
+            seen = _held(shape, draw)
             assert seen["converged"], (_id(shape), draw, seen["report"])
             worst[shape.n_large] = max(worst.get(shape.n_large, 0.0), seen["excess"])
     print(f"{kind} {acceleration} {schedule}: worst distance over K tolerances by size "
@@ -379,6 +378,13 @@ def _exit_rows():
             yield pytest.param(shape, rule, id=f"{_id(shape)}-{rule}", marks=marks)
 
 
+#: The members a solve returns as its accepted iterate holds them, by the
+#: kind of the graph's two mapped edges (``p -> q`` then ``q -> p``): the
+#: source of each edge the norm reads at its source.  A tie (``m == n``)
+#: is read as delivered on both.
+KEPT = {"two-way": ("p",), "gather-only": (), "scatter-only": ("p", "q"), "tie": ()}
+
+
 def _assert_returned(shape, seen, want) -> None:
     """The state the step returned is *want*, to the rounding of its passes."""
     close = 1e-9 if shape.dtype == "float64" else 2e-4
@@ -411,7 +417,11 @@ def test_the_plain_loop_stops_where_the_reference_of_its_rule_does(shape, rule):
         f"the step took {seen['iterations']} passes; the plain loop under the {rule} "
         f"reading stops after {expected['iterations']} (margin {expected['margin']:.3g})")
     # ... and the state returned is that iterate with the fields the norm
-    # does not measure whole one plain pass on (both, behind two mappings).
+    # does not measure whole one plain pass on: the source of a gather or
+    # a tie.  The source of a scatter is read at its source, so measured
+    # whole and kept (the two rules together; stated here from the shape).
+    kind = "tie" if shape.n_large == shape.n_small else shape.kind
+    assert seen["whole"] == KEPT[kind], (shape, seen["whole"])
     _assert_returned(shape, seen, ref.returned(expected["state"], seen["whole"]))
 
 
@@ -420,8 +430,40 @@ TWIN_SHAPES = (
     sg.Shape("two-way", 500, 6, "matrix", "jacobi", "float64"),
     sg.Shape("two-way", 2000, 20, "sparse-transposed", "gauss-seidel", "float32"),
 )
-#: The same with ``diagnostics=True`` (twelve seconds a compile: slow).
+#: The same with ``diagnostics=True`` (twelve seconds a compile: slow).  On
+#: these three the loop closes on 12 or 40 numbers, which the report's
+#: eight Krylov steps do not resolve: both graphs report
+#: ``spectral_usable=False``, an infinite ``spectral_error_bound`` and no
+#: gradient bound, so what is compared of the spectrum is the unsettled
+#: ``rho_spectral`` alone.
 TWIN_DIAGNOSED = tuple(dataclasses.replace(s, diagnostics=True) for s in TWIN_SHAPES)
+#: Diagnosed rows whose spectrum settles (three or four markers: a loop on
+#: six or eight numbers), so that ``spectral_usable`` holds in both graphs
+#: and ``spectral_error_bound`` -- and, on the rows marked, the gradient
+#: bound -- are finite numbers a spectrum taken on the wrong side moves.
+#: ``(shape, the gradient bound is reported)``.  Measured on jaxlib 0.11.0:
+#: every key agrees to 1e-7 or better in both dtypes, the gradient bound
+#: included (the scatter's weights are parameters of the step in one graph
+#: and constants of a node in the other; the bound's own norm is the raw
+#: source fields, which the two graphs share).
+#:
+#: **Not a row: float32 with the ``sparse-transposed`` layout.**  There the
+#: edge-mapped graph sums a scatter in another order than the twin's node
+#: does, the two passes differ in the last bit, and where the Krylov space
+#: is exhausted before eight steps (four markers or fewer under
+#: Gauss-Seidel) the float32 bounds amplify that rounding: measured
+#: ``spectral_error_bound`` 1.60 against 1.17 with three markers, and the
+#: gradient bound 2.9e-4 against 4.4e-4 with four, on two programs of one
+#: problem (jaxlib 0.11.0).  Both bound the distance; neither is the other
+#: to 2%.  The same layout in float64 is a row.
+TWIN_SETTLED = (
+    (sg.Shape("two-way", 500, 3, "matrix", "jacobi", "float64", diagnostics=True), True),
+    (sg.Shape("two-way", 2000, 3, "sparse", "gauss-seidel", "float64", diagnostics=True), True),
+    (sg.Shape("two-way", 2000, 4, "sparse-transposed", "jacobi", "float64", diagnostics=True),
+     False),
+    (sg.Shape("two-way", 2000, 4, "sparse", "gauss-seidel", "float32", diagnostics=True), True),
+    (sg.Shape("two-way", 500, 4, "matrix", "jacobi", "float32", diagnostics=True), False),
+)
 #: Every number of a report, to the rounding of two differently ordered
 #: float evaluations of one problem (the spectral keys come from eight
 #: Krylov steps of it).
@@ -452,7 +494,8 @@ def test_the_marker_side_twin_stops_where_the_compact_reference_does(shape):
     assert twin["excess"] <= 1.0
 
 
-def _same_reports(shape: sg.Shape) -> None:
+def _same_reports(shape: sg.Shape) -> tuple:
+    """Every key of the two reports, to :data:`TWIN_RTOL`; ``(edge-mapped, twin)``."""
     _ref, seen, twin = _twin_reports(shape)
     a, b = seen["report"], twin["report"]
     assert sorted(a) == sorted(b)
@@ -464,11 +507,14 @@ def _same_reports(shape: sg.Shape) -> None:
             same = va == vb
         else:
             va, vb = float(va), float(vb)
-            same = (math.isnan(va) and math.isnan(vb)) or abs(va - vb) <= rtol * max(
+            # Two NaNs (a bound not made) and two equal infinities (a bound
+            # on an unsettled spectrum) are the same report.
+            same = (math.isnan(va) and math.isnan(vb)) or va == vb or abs(va - vb) <= rtol * max(
                 abs(va), abs(vb))
         if not same:
             differ[key] = (va, vb)
     assert not differ, f"{_id(shape)}: (edge-mapped, twin) {differ}"
+    return a, b
 
 
 def test_the_two_rules_stop_on_different_passes_where_they_differ():
@@ -677,7 +723,6 @@ def test_a_hubs_field_is_read_once_per_edge_by_each_edges_own_rule():
                     ("s", "h"): ("source", 2), ("g", "h"): ("delivered", 4)}
 
 
-@pytest.mark.xfail(AWAITING, strict=True, raises=AssertionError, reason=DECISION)
 @pytest.mark.parametrize("shape", TWIN_SHAPES, ids=_id)
 def test_an_edge_mapped_graph_reports_what_its_marker_side_twin_reports(shape):
     """Every key of ``coupling_diagnostics()`` without diagnostics: the
@@ -688,12 +733,30 @@ def test_an_edge_mapped_graph_reports_what_its_marker_side_twin_reports(shape):
 # Slow: six graphs compiled with diagnostics.
 # Per push: tests/property/test_coupling_interface_side.py::test_an_edge_mapped_graph_reports_what_its_marker_side_twin_reports
 @pytest.mark.slow
-@pytest.mark.xfail(AWAITING, strict=True, raises=AssertionError, reason=DECISION)
 @pytest.mark.parametrize("shape", TWIN_DIAGNOSED, ids=_id)
 def test_an_edge_mapped_graph_s_diagnostics_are_its_marker_side_twin_s(shape):
     """With ``diagnostics=True``: the criterion, the float floor behind
     ``precision_limited`` and the spectral analysis each enumerate the
     edges for themselves, and the three must read one side -- the spectral
     radius, the error bound and the gradient bound of the two graphs are
-    then the same numbers."""
+    then the same numbers.  (On these rows the spectrum does not settle:
+    see :data:`TWIN_DIAGNOSED`, and the settled rows below.)"""
     _same_reports(shape)
+
+
+# Slow: ten graphs compiled with diagnostics.
+# Per push: tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py::test_a_diagnosed_edge_mapped_pair_reports_every_number_of_its_marker_side_twin
+@pytest.mark.slow
+@pytest.mark.parametrize("shape,gradient", TWIN_SETTLED, ids=[_id(s) for s, _g in TWIN_SETTLED])
+def test_a_settled_spectrum_and_its_bounds_are_the_marker_side_twin_s(shape, gradient):
+    """The same comparison where it has numbers to compare: the spectrum
+    settles in both graphs, ``spectral_error_bound`` is finite, and on the
+    rows that report a gradient bound that is finite too.  A spectral
+    analysis left on the delivered side of the scatter (the fault no
+    instrument saw while the criterion read that side too) moves these."""
+    mapped, twin = _same_reports(shape)
+    for report in (mapped, twin):
+        assert bool(report["converged"]) and bool(report["spectral_usable"]), report
+        assert math.isfinite(float(report["spectral_error_bound"])), report
+        assert bool(report["gradient_bound_usable"]) is gradient, report
+        assert math.isfinite(float(report["gradient_relative_error_bound"])) is gradient, report

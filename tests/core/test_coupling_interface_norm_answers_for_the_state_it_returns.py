@@ -1142,20 +1142,25 @@ def test_the_set_is_the_same_from_the_groups_plan_as_from_its_bare_edges():
 
 
 def test_the_set_follows_the_plans_answer_on_which_edge_reads_its_source_as_it_is():
-    """Which edge the norm reads at its source field itself is the plan's
-    to say (``InterfaceEdge.reads_source_as_is``), on whichever side it
-    reads that edge.  With that answer changed for a mapped edge -- as a
-    rule that reads a static mapping at its source would change it -- the
+    """Which fields the norm measures whole on an edge is the plan's to
+    say (``InterfaceEdge.measured_whole``: the fields the parts of its
+    reading hold entry for entry), on whichever side it reads that edge.
+    With that answer changed for a mapped edge -- as a rule that reads a
+    static mapping at its source changes it, and one that reads a
+    geometry-dependent mapping's positions too adds a second field -- the
     field is measured whole and no longer named; the rule holds no test
     of an edge's mapping or transform of its own."""
     edges = [_edge("a", "b", mapping=_MAPPED), _edge("b", "a")]
     assert _named(edges) == {"a": ("u", "w"), "b": ("w",), "c": ("u",)}
-    with mock.patch.object(_interface_plan.InterfaceEdge, "reads_source_as_is",
-                           property(lambda self: True)):
+    with mock.patch.object(_interface_plan.InterfaceEdge, "measured_whole",
+                           property(lambda self: (self.source,))):
         assert _named(edges) == {"a": ("w",), "b": ("w",), "c": ("u",)}
-    with mock.patch.object(_interface_plan.InterfaceEdge, "reads_source_as_is",
-                           property(lambda self: False)):
+    with mock.patch.object(_interface_plan.InterfaceEdge, "measured_whole",
+                           property(lambda self: ())):
         assert _named(edges) == {"a": ("u", "w"), "b": ("u", "w"), "c": ("u",)}
+    with mock.patch.object(_interface_plan.InterfaceEdge, "measured_whole",
+                           property(lambda self: (self.source, (self.source[0], "w")))):
+        assert _named(edges) == {"c": ("u",)}, "a second field of the source, held whole"
 
 
 def test_which_fields_are_floating_is_decided_on_the_state_handed_not_on_the_plans():

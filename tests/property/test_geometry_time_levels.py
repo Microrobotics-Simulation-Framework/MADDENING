@@ -201,8 +201,10 @@ def _refused_in_phase_1(name: str) -> bool:
         topo.internal(topo.edges[i]) for i in _anchors(topo, pattern).anchor)
 
 
-_GROUP_PER_PUSH = ("group, mixed anchors, interface norm" if _gg.INTERFACE_NORM_READS_GEOMETRY
-                   else "group, linear predictor")
+# (The interface norm reads the geometry of the ``multilinear_grid`` kind
+# only; these structures move a ``test_geom_matrix`` geometry, so the case
+# stays refused, by its kind.)
+_GROUP_PER_PUSH = "group, linear predictor"
 _PER_PUSH = ("forward, source anchor", "ungrouped cycle, mixed anchors, built b, a",
              _GROUP_PER_PUSH,
              "sub-cycled target, linear, target anchors", "two rates, source anchors")
@@ -305,8 +307,7 @@ def test_the_interface_norm_case_is_refused_at_compile(name):
 
 
 def test_exactly_the_interface_norm_case_is_refused_in_phase_1():
-    assert _gg.INTERFACE_NORM_READS_GEOMETRY or _REFUSED_CASES == [
-        "group, mixed anchors, interface norm"]
+    assert _REFUSED_CASES == ["group, mixed anchors, interface norm"]
 
 
 def test_the_cases_cover_every_row_of_the_table():

@@ -14,7 +14,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling import _interface_plan
-from maddening.core.coupling.acceleration import _has_entries, float_fields_of
+from maddening.core.coupling.acceleration import (
+    PRECISION_FLOOR_ULPS,
+    _has_entries,
+    _positions_floors,
+    float_fields_of,
+)
 from maddening.core.coupling.group import CouplingGroup
 
 
@@ -79,7 +84,7 @@ def _group_accel_fields(group, plan, state) -> Optional[dict]:
 
 
 def _reads_mapping_weights(group, plan) -> bool:
-    """Does *group*'s norm read a value that depends on interface-mapping weights?
+    """Does *group*'s norm read a value the state a solve returns does not determine?
 
     True under ``convergence_norm="interface"`` when an internal edge
     whose source field is floating is read through its mapping: that
@@ -88,16 +93,51 @@ def _reads_mapping_weights(group, plan) -> bool:
     its source field through weights that live in ``params["mappings"]``
     and may be overridden per step.  An edge the norm reads at its
     source (a mapping onto more entries than its field holds) is the
-    stored field, whatever the weights, and does not count.  The
+    stored field, whatever the weights, and does not count.  True also
+    where an edge is read as delivered through a geometry-dependent
+    mapping anchored at its **target**: the reading is taken at the
+    target's pre-step geometry, which the returned state does not hold
+    (such a mapping has no weights; one anchored at its source is read
+    at the returned state's own geometry and does not count).  The
     float floor of such a group's residual therefore cannot be taken
     from the returned state alone, and the step records it
     (``coupling_<key>_reading_floor``).  Static, and shared by
     ``compile()``'s seeding, the step's write and ``reset_state()``, so
     the three agree on which groups own the slot; every other group's
     ``_meta`` and compiled step are what they were.  *plan* is the
-    group's description (``InterfacePlan.norm_reads_mapping_weights``).
+    group's description (``InterfacePlan.norm_reads_beyond_the_state``).
     """
-    return group.convergence_norm == "interface" and plan.norm_reads_mapping_weights()
+    return group.convergence_norm == "interface" and plan.norm_reads_beyond_the_state()
+
+
+def _floor_needs_the_step(group, interface_edges) -> bool:
+    """Can the float floor of *group*'s residual be measured only by the
+    step that solved it, whatever weights the graph holds?
+
+    True under ``convergence_norm="interface"`` where an internal edge
+    is read as delivered at its target's pre-step geometry
+    (``InterfaceEdge.reads_pre_step_geometry``): outside the step that
+    state is gone.  The report's fallback floor
+    (``coupling_diagnostics``, for a state whose ``reading_floor`` slot
+    was never written) then has nothing to measure on and says so,
+    where a group that reads mapping weights falls back to the graph's
+    own.  *interface_edges* is the group's plan, or the bare edges the
+    report keeps (``InterfacePlan.norm_edges``).
+    """
+    return group.convergence_norm == "interface" and any(
+        record.reads_pre_step_geometry
+        for record in _interface_plan.interface_records(interface_edges))
+
+
+#: Why a report built on the float floor is withheld where the floor
+#: could only have been measured by the step (:func:`_floor_needs_the_step`).
+_FLOOR_NEEDS_THE_STEP_REASON = (
+    "the float floor of this group's residual reads what an internal edge delivers at "
+    "its target's pre-step geometry, which only the step that solved the group holds, "
+    "and this state carries no floor recorded by a step (it was not produced by one of "
+    "this graph's steps, or the recorded value is not finite); spectral_error_bound, "
+    "precision_limited and the *_usable flags are not reported until the group steps."
+)
 
 
 def _reading_is_the_fields(interface_edges, float_fields) -> bool:
@@ -157,8 +197,9 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     **measures whole**: the source field of an internal edge that delivers
     it as it is, with no mapping and no transform
     (:func:`maddening.core.edge._delivered` applies nothing else) -- an
-    edge whose reading *is* its source field, which the group's plan
-    answers (``InterfaceEdge.reads_source_as_is``).  Every
+    edge whose reading *is* its source field -- and every other field a
+    part of a reading holds entry for entry, which the group's plan
+    answers (``InterfaceEdge.measured_whole``).  Every
     other floating field could be returned from a pass before the readings
     the verdict was taken on, with ``converged=True``:
 
@@ -173,7 +214,12 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     its compact side, at the source (``_interface_plan._norm_side``): the
     reading is the source field itself, before the mapping and the
     transform, so that field is measured whole and kept, like one a plain
-    edge reads.
+    edge reads.  A geometry-dependent mapping read at its source
+    (experimental) is read at its inputs: its source field, and the
+    positions a source anchor takes from the iterate, each over a
+    constant length -- both are measured whole and kept.  A geometry its
+    target holds is the pre-step state, not a reading, and that field is
+    recomputed like any other.
 
     The return rule (``_with_nonfloat_fields_at`` in the step): a field
     measured whole keeps the accepted iterate's value, bit for bit; every
@@ -204,9 +250,9 @@ def _fields_the_interface_norm_misses(group, interface_edges, schedule, state) -
     if group.convergence_norm != "interface":
         return {}
     floats = float_fields_of(state, list(schedule))
-    whole = {record.source
+    whole = {field
              for record in _interface_plan.interface_records(interface_edges)
-             if record.reads_source_as_is}
+             for field in record.measured_whole}
     missed = {nn: tuple(f for f in floats[nn] if (nn, f) not in whole)
               for nn in schedule}
     return {nn: fields for nn, fields in missed.items() if fields}
@@ -341,8 +387,9 @@ _GEOMETRY_KIND_WHY = (
     "{kinds})"
 )
 _GEOMETRY_NORM_WHY = (
-    "under convergence_norm={norm!r} (they do under 'l2' and 'mixed', which measure the "
-    "members' state, the geometry included)"
+    "under convergence_norm={norm!r} (the solve's own criterion reads it there, but the "
+    "analysis of that reading behind the bounds is not in this stage of 0.4.0; they do "
+    "under 'l2' and 'mixed', which measure the members' state, the geometry included)"
 )
 _GEOMETRY_SUBCYCLED_WHY = (
     "in a sub-cycled group (members {members} take several sub-steps per pass, and the "
@@ -458,29 +505,208 @@ _WRITTEN_BEFORE_SAVE_REASON = (
 )
 
 
-def _geometry_edge_coupling_errors(group, plan) -> list[str]:
+#: The mapping kind whose moving geometry ``convergence_norm="interface"``
+#: reads: the one that declares the length scale a position is measured in.
+_INTERFACE_NORM_GEOMETRY_KIND = "multilinear_grid"
+
+
+def _geometry_edge_coupling_errors(group, nodes, plan) -> list[str]:
     """``ERROR:`` issues for a group setting a geometry-dependent mapping
     cannot serve (experimental; empty for every other group).
 
     ``convergence_norm="interface"`` measures the change, between
-    iterates, of what each internal edge delivers from its source field.
-    For an edge whose mapping reads a geometry that reading needs the
-    geometry of each iterate too, which the norm does not read in 0.4.0:
-    refused, naming the norms that measure the state instead.  *plan* is
-    the group's description (``InterfacePlan.geometry_edges``).
+    iterates, of what the norm reads on each internal edge.  For an edge
+    whose mapping reads a geometry that reading needs the geometry too
+    (``InterfaceEdge.parts``), and the norm reads it for the
+    ``multilinear_grid`` kind in a group that does not sub-cycle.  Two
+    settings are refused, each naming the norms that measure the state
+    instead:
+
+    * a geometry-dependent mapping of **another kind** on an internal
+      edge: a position is measured in units of the kind's own length
+      scale, and only ``multilinear_grid`` declares one in 0.4.0;
+    * a **sub-cycled** group with such an edge: the reading is one value
+      per pass (the end-of-pass iterate, at the pre-step target
+      geometry), which is not what a member that takes several sub-steps
+      per pass was handed.
+
+    *plan* is the group's description (``InterfacePlan.geometry_edges``).
     """
     if group.convergence_norm != "interface":
         return []
     names = sorted(group.nodes)
-    return [
-        f"ERROR: coupling group {names} uses convergence_norm='interface', which "
-        f"measures the values the group's internal edges carry, but edge {r.key!r} "
-        f"carries its value through a geometry-dependent mapping (geometry "
-        f"{r.anchor[0]}.{r.anchor[1]}), and the norm does not read a moving "
-        f"geometry in 0.4.0.  Use convergence_norm='mixed' or 'l2', which measure "
-        f"the members' state, the geometry included."
-        for r in plan.geometry_edges()
-    ]
+    stem = (
+        "ERROR: coupling group {names} uses convergence_norm='interface', which "
+        "measures the values the group's internal edges carry, but edge {key!r} "
+        "carries its value through a geometry-dependent mapping (geometry "
+        "{side}.{field}), {why}.  Use convergence_norm='mixed' or 'l2', which "
+        "measure the members' state, the geometry included."
+    )
+    dividers = _group_dividers(group, nodes) or {}
+    sub_cycled = sorted(nn for nn, d in dividers.items() if d > 1)
+    errors = []
+    for r in plan.geometry_edges():
+        if r.mapping_kind != _INTERFACE_NORM_GEOMETRY_KIND:
+            why = (f"of kind {str(r.mapping_kind)!r}, and the norm reads a moving geometry "
+                   f"only for the {_INTERFACE_NORM_GEOMETRY_KIND!r} kind in 0.4.0 (a "
+                   f"position is measured in units of the kind's own length scale)")
+        elif sub_cycled:
+            why = (f"and the group sub-cycles (members {sub_cycled} take several sub-steps "
+                   f"per pass): the norm does not read a moving geometry in a sub-cycled "
+                   f"group in 0.4.0")
+        else:
+            continue
+        errors.append(stem.format(names=names, key=r.key, side=r.anchor[0],
+                                  field=r.anchor[1], why=why))
+    return errors
+
+
+#: What the rounding of stored positions puts into the float floor of one
+#: part of an interface reading, taken by itself, at which ``compile()``
+#: warns: the threshold the interface criterion compares the residual
+#: with.  At or above it the rounding the floor counts for those
+#: positions is, entry for entry, the tolerance asked of the part or more.
+_POSITIONS_FLOOR_WARNED = 1.0  # units: tolerances (the residual's units under the interface norm)
+
+
+def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
+    """``UserWarning`` texts for positions an interface reading rests on
+    that their dtype cannot resolve to the group's tolerance
+    (experimental; empty for every other group).
+
+    Under ``convergence_norm="interface"`` the stored positions of a
+    geometry-dependent mapping enter the reading of an edge in one of two
+    ways (``InterfaceEdge.parts``):
+
+    * **as a part of their own**, in units of the mapping kind's length
+      scale, where the mapping is read at its source and anchored there
+      (a scatter): the criterion asks that they change by less than
+      ``rtol`` lengths;
+    * **through the value the edge delivers**, where the mapping is read
+      as delivered (a gather, a tie; either anchor): the value is
+      computed at those positions, and the criterion asks that it change
+      by less than ``rtol`` of its own magnitude.
+
+    A position ``u`` lengths from zero is stored to ``eps * |u|``
+    lengths.  That is the rounding of a positions part entry for entry;
+    and it moves a kernel weight by as much, so a delivered value by up
+    to that fraction of its own magnitude (the worst case: a field that
+    varies by its own size across one length).  The float floor of the
+    residual
+    (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`)
+    counts ``PRECISION_FLOOR_ULPS`` of those per evaluation of the pass
+    for every entry of either part.  **Warned: a part for which that
+    count reaches the tolerance**,
+
+        ``PRECISION_FLOOR_ULPS * evaluations * eps * max|u| >= rtol``,
+
+    which is where what the positions put into the floor of the part by
+    itself reaches the criterion's threshold
+    (``acceleration._positions_floors``, the floor's own arithmetic:
+    the whole floor of a positions part, and of a delivered value
+    wherever the positions' rounding is coarser than the value's own).
+    So a group that is not warned has a floor the positions leave below
+    its threshold (pooled with the other entries the norm reads they
+    contribute at most the largest part's), and one that is warned has
+    entries whose counted rounding is the tolerance asked of them or
+    more, and a floor of at least that times the root of their share of
+    the entries the norm reads: the loop can run to its cap on rounding
+    alone.
+
+    A mapping read at its source and anchored at its **target** is not
+    asked: its reading is the source field alone (the positions are the
+    pre-step state, a constant of the solve), and the floor counts no
+    position for it.  A delivered value at a target anchor is asked at
+    the target's positions in *state*: what a step started from it reads.
+
+    A warning, never a refusal, and it changes no number: where the
+    positions settle to the bit the group converges as before.
+    Measured on two float32 pairs with a scatter at ``rtol=1e-4``
+    against the same pairs in float64 (jaxlib 0.11.0, CPU): the same
+    passes up to 2 and 6 times the threshold, more passes from 3 and 10
+    times, and one of the two at its cap at 24 times.  Below the
+    threshold the positions still enter the floor: the two pairs stop at
+    residuals of 0.25 and 0.48 tolerances, which is at or under their
+    floors at 0.44 and 0.87 of the threshold (and above them at 0.15 and
+    0.30), so a residual can be at its floor without this warning; what
+    the warning marks is where the positions' rounding by itself reaches
+    the tolerance.  For a delivered value the count is a worst case: a
+    field that varies little across a cell is moved by less.
+
+    Asked of the state ``compile()`` sees; positions written afterwards
+    (``set_node_state``) are not asked again until the next
+    ``compile()``.  *evaluations* is the group's structural count
+    (:func:`_group_evaluations`, on the compiled schedule): the count a
+    step measures with ``diagnostics=True`` can be larger.
+    """
+    if group.convergence_norm != "interface":
+        return []
+    names = sorted(group.nodes)
+    rtol = float(group.rtol)
+    count = PRECISION_FLOOR_ULPS * float(evaluations)
+    out = []
+    for reading, holder, held, resolution, floor in _positions_floors(
+            plan, state, rtol, evaluations):
+        if not floor >= _POSITIONS_FLOOR_WARNED:
+            continue            # resolved (or not a number: the criterion's own failure)
+        edge, dtype = reading[0], np.dtype(held.dtype)
+        positions = np.abs(np.asarray(held, np.float64))
+        if not np.all(np.isfinite(positions)):
+            continue            # a non-finite position fails the criterion by itself
+        columns = positions.reshape(positions.shape[0], -1)
+        axis = int(np.argmax(np.max(columns, axis=0)))
+        spacing = _interface_plan._kernel_lengths(edge.mapping)[axis]
+        eps = float(np.finfo(dtype).eps)
+        node, field = holder
+        key = getattr(edge, "key", None)
+        if reading.part.unit == _interface_plan.KERNEL_LENGTH:
+            # The positions are a part of the reading.
+            subject = (
+                f"the {dtype} positions {node}.{field} read on edge {key!r} cannot be "
+                f"resolved to this tolerance. The norm measures them in grid spacings and "
+                f"asks that they change by less than rtol of one.")
+            stored = f"where a {dtype} position is stored to {resolution:.3g} spacings"
+            consequence = (
+                "Rounding alone can keep these positions from meeting the criterion (the "
+                "group then runs to max_iterations), and where it is met it says little "
+                "of them.")
+        else:
+            # The reading is a value computed at the positions.
+            subject = (
+                f"the {dtype} positions {node}.{field} that the value on edge {key!r} is "
+                f"delivered at cannot be resolved to this tolerance. The norm reads what "
+                f"the edge delivers, a value its mapping computes at those positions, and "
+                f"asks that it change by less than rtol of its own magnitude.")
+            stored = (
+                f"where a {dtype} position is stored to {resolution:.3g} spacings, a "
+                f"weight of the mapping moves by as much, and the delivered value by up "
+                f"to that fraction of its own magnitude (the worst case: a field that "
+                f"varies by its own size across one cell; a smoother one is moved by less)")
+            consequence = (
+                "Rounding alone can keep the delivered value from meeting the criterion "
+                "(the group then runs to max_iterations), and where it is met it says "
+                "little of the value's last digits.")
+        remedies = [
+            f"use coordinates local to the grid (a {dtype} position within "
+            f"{rtol / (count * eps):.3g} spacings of zero resolves this tolerance)",
+            f"loosen rtol above {count * resolution:.3g}",
+        ]
+        if dtype != np.dtype(np.float64):
+            remedies.insert(0, (
+                f"hold {node}.{field} in float64 (under jax_enable_x64; the mapping computes "
+                f"its weights in the geometry's dtype and casts them to the field's, so the "
+                f"other fields can stay as they are)"))
+        out.append(
+            f"coupling group {names} (convergence_norm='interface', rtol={rtol:g}): "
+            f"{subject} They reach "
+            f"{float(np.max(columns)):.6g} spacings from zero (axis {axis}, spacing "
+            f"{spacing:g}), {stored}; "
+            f"the residual's float floor counts {count:g} of those per pass "
+            f"(PRECISION_FLOOR_ULPS times {float(evaluations):g} evaluation(s)), which is "
+            f"{floor:.3g} times the tolerance. {consequence} "
+            f"Remedies: " + "; or ".join(remedies) + "."
+        )
+    return out
 
 
 def _flux_edge_coupling_errors(group, nodes, plan, state) -> list[str]:

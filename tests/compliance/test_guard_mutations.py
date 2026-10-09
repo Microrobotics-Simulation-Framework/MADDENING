@@ -777,7 +777,7 @@ MUTANTS: tuple[Mutant, ...] = (
     # --- IP: a coupling group's edges are enumerated in one module only, -----
     # --- tests/core/test_interface_plan_is_the_only_enumeration.py -----------
     _M("IP1", "src/maddening/core/coupling/_group_layout.py",
-       '    return group.convergence_norm == "interface" and plan.norm_reads_mapping_weights()\n',
+       '    return group.convergence_norm == "interface" and plan.norm_reads_beyond_the_state()\n',
        '    return group.convergence_norm == "interface" and any(\n'
        "        e.mapping is not None and e.source_field for e in plan.declared_edges())\n",
        PLAN_SCAN, "a second enumeration of what the interface norm reads, in the layout module"),

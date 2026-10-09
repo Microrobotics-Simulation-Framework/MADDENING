@@ -143,12 +143,17 @@ class Norm:
     ``coupled_topologies.interface_side_of``: this module knows no edge).
     Each is weighted by ``1 / (rtol max|field|)`` at the returned state
     (``rtol`` 1 under ``"l2"``); ``rms`` divides the sum of squares by the
-    number of entries.
+    number of entries.  ``fixed`` names, per field, a magnitude a field is
+    measured against instead of its own (``None``: its own): the
+    positions a geometry-dependent mapping is read at under
+    ``"interface"`` are stated in the mapping's length scale and measured
+    against one unit of it, wherever the origin is.
     """
 
     fields: Callable
     rtol: float = 1.0
     rms: bool = False
+    fixed: Optional[tuple] = None
 
     def weights(self, x_returned, also=None) -> list:
         """One weight per field; *also* is a second iterate whose magnitude
@@ -156,6 +161,9 @@ class Norm:
         out = []
         second = self.fields(also) if also is not None else None
         for k, f in enumerate(self.fields(x_returned)):
+            if self.fixed is not None and self.fixed[k] is not None:
+                out.append(1.0 / (self.rtol * float(self.fixed[k])))
+                continue
             ref = float(np.max(np.abs(np.asarray(f)))) if np.size(f) else 0.0
             if second is not None and np.size(second[k]):
                 ref = max(ref, float(np.max(np.abs(np.asarray(second[k])))))
@@ -451,7 +459,8 @@ class PassReference:
 
     # -- what a report is scored against -----------------------------------
 
-    def norm(self, kind: str, rtol: float = 1e-6, fields: Optional[Callable] = None) -> Norm:
+    def norm(self, kind: str, rtol: float = 1e-6, fields: Optional[Callable] = None,
+             fixed: Optional[tuple] = None) -> Norm:
         """The group's norm: ``"l2"`` (weights ``1 / max|field|``, a plain
         2-norm), ``"mixed"`` or ``"interface"`` (``1 / (rtol max|field|)``,
         a root mean square).  *fields* is the reading; the members'
@@ -460,7 +469,7 @@ class PassReference:
         assert fields is not None or kind != "interface", (
             "the interface norm reads the internal edges, each on its side: pass fields=")
         return Norm(fields or self.member_fields, 1.0 if kind == "l2" else float(rtol),
-                    kind != "l2")
+                    kind != "l2", fixed)
 
     def distance(self, returned, fixed: FixedPoint, norm: Norm) -> float:
         """The distance from *returned* to the fixed point in *norm* at the

@@ -348,18 +348,27 @@ def test_the_relay_twin_of_a_moving_source_anchored_geometry_steps_as_the_edge_m
 
 @pytest.mark.parametrize("c", gg.RELAY_INTERFACE_CASES, ids=repr)
 def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_builds(c):
-    """PHASE 1 (see ``geometry_graphs``), per push: the interface norm over
-    a geometry edge is refused at compile, and the relay twin -- plain
-    edges only -- is accepted.  Slow sibling:
+    """Per push (see ``geometry_graphs``): the interface norm over a geometry
+    edge of the ``test_geom_matrix`` kind is refused at compile; over the
+    ``multilinear_grid`` kind it solves, and its report withholds the
+    bounds with the norm named.  The relay twin -- plain edges only -- is
+    accepted either way.  Slow sibling:
     :func:`test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin`."""
     with gg.x64(c.needs_x64):
         keys = [e.key for e in gg.build(gg.two_body(c), compile=False).edges
                 if e.geometry is not None]
         assert len(keys) == 2, keys
-        if gg.INTERFACE_NORM_READS_GEOMETRY:
-            gg.build(gg.two_body(c))        # accepted, once diagnostics read a geometry
+        if gg.refused(c):
+            gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)), keys,
+                                             gg.refused(c))
         else:
-            gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)), keys)
+            # The ``multilinear_grid`` kind: accepted (the criterion reads
+            # its geometry); the slow sibling steps it and reads its report.
+            # Its float32 markers sit five spacings from zero under
+            # ``rtol=1e-6``, which their dtype cannot resolve there:
+            # ``compile()`` says so, and builds the graph all the same.
+            assert gg.positions_advisory_owed(c)
+            assert gg.build_edge_mapped(c)._compiled_step is not None     # noqa: SLF001
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
     assert all(e.geometry is None and e.mapping is None for e in twin.edges)
 
@@ -370,16 +379,25 @@ def test_the_interface_norm_over_a_geometry_edge_is_refused_and_its_relay_twin_b
 @pytest.mark.slow
 @pytest.mark.parametrize("c", gg.RELAY_INTERFACE_CASES, ids=repr)
 def test_the_interface_norm_over_a_geometry_edge_reports_as_its_relay_twin(c):
-    """PHASE 1 (see ``geometry_graphs``): the relay twin of a refused case
-    reports a usable spectrum today -- the report the edge-mapped graph is
-    held to once ``INTERFACE_NORM_READS_GEOMETRY`` is set, by the comparison of
-    the static cases."""
+    """The relay twin of each case reports a usable spectrum today.  The
+    edge-mapped graph of the ``multilinear_grid`` case steps, and its
+    report withholds the bounds with the norm named; the other kind is
+    refused.  The comparison of the two reports waits for the stage that
+    reports bounds under this norm (``INTERFACE_BOUNDS_READ_GEOMETRY``),
+    and then only for the gather: the relay twin moves a mapping onto the
+    delivered side of the reading, which is not where the norm reads a
+    scatter."""
     with gg.x64(c.needs_x64):
         twin = gg.build(gg.relay_twin(gg.two_body(c)))
-        if not gg.INTERFACE_NORM_READS_GEOMETRY:
+        if not gg.INTERFACE_BOUNDS_READ_GEOMETRY:
             twin.step()
             report = twin.coupling_diagnostics()[KEY]
             assert bool(report["spectral_usable"]) and np.isfinite(
                 float(report["spectral_error_bound"])), report
+            if not gg.refused(c):
+                edge = gg.build_edge_mapped(c)
+                edge.step()
+                keys = [e.key for e in edge.edges if e.geometry is not None]
+                gg.assert_not_diagnosed(edge.coupling_diagnostics()[KEY], keys, "norm")
             return
-        compare(c, gg.build(gg.two_body(c)), twin, relay=True)
+        compare(c, gg.build_edge_mapped(c), twin, relay=True)

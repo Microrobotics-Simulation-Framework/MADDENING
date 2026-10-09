@@ -5865,8 +5865,10 @@ claims:
     sparse kind in its padded-gather and in its scatter layout, and a
     mapping class of the caller's own, the side taken from n_source and
     n_target (or field_shapes()) and never from the shape of the weights; a
-    geometry-dependent mapping inside the group is refused at compile
-    (MAP-048).  Exercised edge by edge, on every one of those forms:
+    geometry-dependent mapping inside the group is read by the same rule
+    with its positions where it is a multilinear_grid (MAP-050) and
+    refused at compile otherwise (MAP-033).  Exercised edge by edge, on
+    every one of those forms:
     expanding, reducing and tied, with and without an edge transform, in
     float32 and float64 (the residual to the bit against a plain edge over
     the prescribed reading; the floor's eps and its dead band on the two
@@ -6255,7 +6257,9 @@ claims:
     - benchmarks/results/interface_norm_dilution/RESULT.md
   conditions: >-
     an affine pass (linear nodes, linear static mappings, affine edge
-    transforms), above the residual's float floor; float32 and float64;
+    transforms; for a mapping that reads a moving geometry the claim is
+    MAP-050's, to first order), above the residual's float floor; float32
+    and float64;
     pairs whose two mapped internal edges gather, scatter, or one of each,
     5 to 60 values against 1e2 to 1e5 (a million in the slow lane), and
     relays of size ratio 1/300 to 300, a tie, and a hub whose one field a

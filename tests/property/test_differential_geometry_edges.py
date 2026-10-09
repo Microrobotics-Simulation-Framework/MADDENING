@@ -237,32 +237,35 @@ def GEOMETRY_EDGE_KEYS(c: gg.Case) -> list:
 
 def _runnable(cases) -> list:
     """*cases* without those ``compile()`` refuses in phase 1."""
-    def knobs(c):       # a case, or a ``pytest.param`` holding one
-        return (c.values[0] if hasattr(c, "values") else c).knobs
-    return [c for c in cases if not gg.interface_norm_refused(knobs(c))]
+    def bare(c):        # a case, or a ``pytest.param`` holding one
+        return c.values[0] if hasattr(c, "values") else c
+    return [c for c in cases if not gg.refused(bare(c))]
 
 
 #: The cases ``compile()`` refuses in phase 1: the interface norm over a
 #: geometry edge.  Each is asserted refused, per push.
-REFUSED_IN_PHASE_1 = [c for c in PER_PUSH + SLOW if gg.interface_norm_refused(c.knobs)]
+REFUSED_IN_PHASE_1 = [c for c in PER_PUSH + SLOW if gg.refused(c)]
 
 
 @pytest.mark.parametrize("c", REFUSED_IN_PHASE_1, ids=repr)
 def test_the_interface_norm_over_a_geometry_edge_is_refused_at_compile(c):
-    """Phase 1: the norm would read what the edge delivers without its
-    geometry, so the group is refused and the message names the norms that
+    """The norm reads the geometry of the ``multilinear_grid`` kind only: a
+    position is measured in units of the kind's own length scale, which
+    the ``test_geom_matrix`` kind of these cases does not declare.  The
+    group is refused and the message names the kind and the norms that
     measure the state.  The node-inlined twin, which has plain edges only,
     compiles."""
     with gg.x64(c.needs_x64):
         gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)),
-                                         GEOMETRY_EDGE_KEYS(c))
+                                         GEOMETRY_EDGE_KEYS(c), gg.refused(c))
         gg.build(gg.inline_geometry(gg.two_body(c)))
 
 
 def test_the_phase_1_refusals_are_the_interface_norm_cases_and_only_those():
-    assert gg.INTERFACE_NORM_READS_GEOMETRY or len(REFUSED_IN_PHASE_1) == 4
+    assert len(REFUSED_IN_PHASE_1) == 4
     assert all(c.group is not None and c.down and c.up for c in REFUSED_IN_PHASE_1)
-    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1) or gg.INTERFACE_NORM_READS_GEOMETRY
+    assert all(c.kind == "geom_matrix" and gg.refused(c) == "kind" for c in REFUSED_IN_PHASE_1)
+    assert any(c in PER_PUSH for c in REFUSED_IN_PHASE_1)
 
 
 # ---------------------------------------------------------------------------
@@ -506,12 +509,17 @@ def test_a_report_s_float_floor_counts_a_source_anchored_geometry():
     c = case("floor", kind="multilinear", geom_dtype="float64", adv=0.3, **SOURCES,
              group=dict(max_iterations=80, convergence_norm="interface", rtol=1e-6,
                         diagnostics=True))
-    if not gg.INTERFACE_NORM_READS_GEOMETRY:
-        # PHASE 1 (see ``geometry_graphs``): the interface norm over a
-        # geometry edge is refused; the comparison below is a later phase's.
+    if not gg.INTERFACE_BOUNDS_READ_GEOMETRY:
+        # The criterion reads the geometry of this group and its report
+        # withholds every bound, the floor's among them (see
+        # ``geometry_graphs``); the comparison below is the bounds stage's,
+        # and its twin is the wrong one for the rule (the node-inlined twin
+        # reads a gather at its raw source).
         with gg.x64(True):
-            gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)),
-                                             GEOMETRY_EDGE_KEYS(c))
+            edge = gg.build(gg.two_body(c))
+            edge.step()
+            gg.assert_not_diagnosed(edge.coupling_diagnostics()["F+P"],
+                                    GEOMETRY_EDGE_KEYS(c), "norm")
         return
     with gg.x64(True):
         edge, inline = gg.graphs(c)
@@ -1048,11 +1056,14 @@ def test_a_frozen_geometry_equals_the_static_mapping_in_every_domain(domain, nam
 #   the pre-step state, restated here from the two snapshots and the twin's
 #   matrices under the tree's rule, and *not* under the other rule (each
 #   case has a scatter onto a larger target, so the two differ).
-# * The comparison is written and waits (strict, on the refusal): the frozen
-#   graph returns the static twin's states and verdict, and its residual is
-#   the twin's with the geometry the scatter edge reads counted in the pool
-#   (a field that does not move adds entries and no change:
-#   :func:`frozen_interface_entries`).
+# * The comparison runs for the ``multilinear_grid`` kind: the frozen graph
+#   returns the static twin's states and verdict, and its residual is the
+#   twin's with the positions a *source-anchored* scatter reads counted in
+#   the pool (positions that do not move add entries and no change:
+#   :func:`frozen_interface_entries`).  A scatter anchored at its target
+#   reads no positions (the pre-step state is a constant of the solve), so
+#   its residual is the static twin's itself.  The ``test_geom_matrix``
+#   kind is still refused (it declares no length scale).
 
 _ONE_PASS = dict(max_iterations=1, convergence_norm="interface", rtol=1e-6)
 FROZEN_INTERFACE = [
@@ -1063,7 +1074,17 @@ FROZEN_INTERFACE = [
          group=dict(_ONE_PASS, iteration_mode="jacobi"), **_FROZEN, **P_HOLDS),
     case("frozen group, matrix, interface norm, one pass", dtype="float64", group=_ONE_PASS,
          **_FROZEN, **F_HOLDS),
+    case("frozen group, multilinear, interface norm, one pass, target anchors",
+         kind="multilinear", dtype="float64", group=_ONE_PASS, **_FROZEN, **TARGETS),
+    case("frozen group, multilinear 2-D, interface norm, one pass",
+         kind="multilinear", d=2, dtype="float64", group=_ONE_PASS, **_FROZEN, **SOURCES),
 ]
+
+
+#: How closely a frozen graph's residual is its static twin's: the two
+#: sum the same numbers through another program (a kernel against a
+#: matrix), so they differ by the rounding of the fields' dtype.
+_FROZEN_RESIDUAL_RTOL = {"float64": 1e-9}
 
 
 def _one_pass_steps(gm, steps: int) -> list:
@@ -1106,19 +1127,21 @@ def frozen_interface_entries(c: gg.Case, state: dict) -> int:
 
     The decision for geometry edges: a gather is read as delivered, with
     nothing of its geometry; a scatter at its source value plus the
-    geometry it reads, which does not move here and so adds its entries to
-    the count and nothing to the sum (a field that is zero everywhere
-    leaves the norm).  The stage that makes the norm read a geometry owns
-    this function: it is the one place the two rules meet.
+    positions it reads **from its source** (a source anchor: they move
+    with the iterate), which do not move here and so add their entries to
+    the count and nothing to the sum.  Positions are measured in grid
+    spacings, not against their own magnitude, so they are counted
+    wherever they are (the dead band does not apply to them).  A scatter
+    anchored at its target reads the pre-step state, a constant of the
+    solve: no entries.  The one place the two rules meet.
     """
     extra = 0
     for which in ("down", "up"):
         n_target, n_source = gg.static_matrix(c, which).shape
-        if n_target <= n_source:
+        if n_target <= n_source or (c.down if which == "down" else c.up) != "source":
             continue
-        field = "pos" if c.kind == "multilinear" else ("A" if which == "down" else "B")
-        held = np.asarray(state[gg.holder(c, which)][field])
-        extra += int(held.size) if np.any(held != 0) else 0
+        assert c.kind == "multilinear", c
+        extra += int(np.asarray(state[gg.holder(c, which)]["pos"]).size)
     return extra
 
 
@@ -1142,13 +1165,26 @@ def test_the_static_twin_of_a_frozen_case_reports_the_interface_residual_of_the_
             f"{wrong!r}): it cannot tell them apart")
 
 
-@pytest.mark.xfail(not gg.INTERFACE_NORM_READS_GEOMETRY, strict=True, raises=RuntimeError,
-                   reason="waiting for the geometry stage: compile() refuses the interface "
-                          "norm over a geometry edge in 0.4.0")
-@pytest.mark.parametrize("c", FROZEN_INTERFACE, ids=repr)
+@pytest.mark.parametrize("c", [c for c in FROZEN_INTERFACE if gg.refused(c)], ids=repr)
+def test_a_frozen_geometry_of_another_kind_is_still_refused_under_the_interface_norm(c):
+    with gg.x64(c.needs_x64):
+        gg.assert_interface_norm_refused(lambda: gg.build(gg.two_body(c)),
+                                         GEOMETRY_EDGE_KEYS(c), "kind")
+
+
+def test_the_frozen_interface_cases_hold_both_anchors_of_a_scatter():
+    """The premise of the comparison below: a scatter anchored at its source
+    (its positions are counted) and one anchored at its target (they are
+    not), and a grid of two axes."""
+    running = [c for c in FROZEN_INTERFACE if not gg.refused(c)]
+    assert {c.up for c in running} == {"source", "target"}
+    assert {c.d for c in running} == {1, 2} and len(running) == 4
+
+
+@pytest.mark.parametrize("c", [c for c in FROZEN_INTERFACE if not gg.refused(c)], ids=repr)
 def test_a_frozen_geometry_reports_as_its_static_mapping_under_the_interface_norm(c):
     with gg.x64(c.needs_x64):
-        frozen = gg.build(gg.two_body(c))       # (refused today: the strict xfail)
+        frozen = gg.build(gg.two_body(c))
         static = gg.build(gg.static_twin(c))
         a, b = _one_pass_steps(frozen, c.steps), _one_pass_steps(static, c.steps)
     for k, ((_pre_a, post_a, ra), (pre_b, post_b, rb)) in enumerate(zip(a, b), start=1):
@@ -1157,8 +1193,9 @@ def test_a_frozen_geometry_reports_as_its_static_mapping_under_the_interface_nor
         assert bool(ra["converged"]) == bool(rb["converged"]), (c.label, k, ra, rb)
         _res, entries = static_interface_residual(c, pre_b, post_b, ct.INTERFACE_SIDE)
         extra = frozen_interface_entries(c, post_a)
+        assert (extra > 0) == (c.up == "source"), (c.label, extra)
         want = float(rb["residual"]) * np.sqrt(entries / (entries + extra))
-        assert abs(float(ra["residual"]) - want) <= 1e-9 * want, (
+        assert abs(float(ra["residual"]) - want) <= _FROZEN_RESIDUAL_RTOL[c.dtype] * want, (
             f"{c.label} step {k}: the frozen graph reports residual {ra['residual']!r}; "
             f"its static twin's {rb['residual']!r} over {entries} entries, with the "
             f"{extra} of the geometry the scatter reads, is {want!r}")

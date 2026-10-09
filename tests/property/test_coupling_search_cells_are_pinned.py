@@ -50,6 +50,7 @@ import numpy as np
 import pytest
 
 from tests.property import test_coupling_geometry_search as geometry
+from tests.property import test_coupling_geometry_search_under_the_interface_norm as geometry_interface
 from tests.property import test_coupling_nonlinear_search as nonlinear
 from tests.property import test_coupling_targeted_search as linear
 
@@ -112,6 +113,12 @@ PINNED = {
         "e7c3bf2c372b", "d6593c68e37e", "b6b80d84bf42", "26904b3f0c1a", "582f6f14f89d", "6dae87b28fab",
         "3bed1f83b716", "fca27d3445eb",
     ),
+    # (Pinned on the tree that has the cells' ``tolerance`` field: these
+    # cells were added with it, so no ``ADDED_SINCE_PINNED`` rule is theirs.)
+    "geometry-interface": (
+        "a743c3cd107e", "88385459b770", "bfc700f42464", "336f2c57e467", "5d6de56c724b", "51734d73f904",
+        "4d8aadb650e0", "f334dd682540", "e1482cf04624",
+    ),
 }
 
 #: ``{a cell's class: {a field it gained after its search was pinned: the
@@ -127,7 +134,8 @@ def searches() -> dict:
             "linear-returned": linear.RETURNED_CELLS,
             "nonlinear": nonlinear.CELLS, "geometry": geometry.CELLS,
             "geometry-gauss-seidel": geometry.GS_CELLS,
-            "geometry-plane": geometry.PLANE_CELLS}
+            "geometry-plane": geometry.PLANE_CELLS,
+            "geometry-interface": geometry_interface.CELLS}
 
 
 def plain(value):

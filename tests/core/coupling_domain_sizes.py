@@ -37,12 +37,21 @@ module's :func:`~tests.core.coupling_domains.run` and
   carrying the ``m`` values: its interface norm reads the compact side by
   construction, in any domain.
 
+**A pair coupled through a geometry-dependent mapping** (experimental; the
+last section): the markers and the grid of
+:mod:`tests.property.geometry_interface_graphs`, whose ``multilinear_grid``
+edges read positions that move with the iterate, built in a domain the
+same way (:class:`GeoCell`, :func:`build_geometry`), with that module's
+reference as the members store its numbers (:class:`GeoStored`) and its
+marker-side twin (:func:`build_geometry_twin`).
+
 Nothing here is a test.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import math
 import tempfile
 import warnings
 from pathlib import Path
@@ -56,6 +65,7 @@ from maddening.core.coupling.sparse_mapping import StaticSparseMapping, sparse_m
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from tests.core import coupling_domains as cd
+from tests.property import geometry_interface_graphs as gi
 from tests.property import interface_side_graphs as sg
 
 #: The sizes of a cell on every push: a loop on six numbers, which the
@@ -431,7 +441,7 @@ def assert_sized(built: Built, solves: list) -> None:
             cell.id, ratios)
 
 
-def restart_pairs(built: Built, params_seq: list) -> tuple:
+def restart_pairs(built, params_seq: list, start=None) -> tuple:
     """``(uninterrupted, restarted, saved, loaded)`` around a checkpoint taken
     two steps into *params_seq*.
 
@@ -440,9 +450,14 @@ def restart_pairs(built: Built, params_seq: list) -> tuple:
     and compares the states and reports itself; here both are handed back,
     ``_meta`` and all).  *saved* is the graph as the checkpoint was
     written and *loaded* the graph as the load left it, before any step.
+    *start* (a callable of the graph) writes the state the run starts
+    from, after the first reset and never after the second: what the load
+    brings back is the checkpoint's.
     """
     gm, d = built.gm, built.cell.domain
     gm.reset_state()
+    if start is not None:
+        start(gm)
     start = min(2, len(params_seq) - 1)
     for p in params_seq[:start]:
         cd._one(d, gm, p)  # noqa: SLF001
@@ -456,3 +471,309 @@ def restart_pairs(built: Built, params_seq: list) -> tuple:
         loaded = cd._solve(gm, params_seq[start - 1])  # noqa: SLF001
         restarted = [cd._one(d, gm, p) for p in params_seq[start:]]  # noqa: SLF001
     return straight, restarted, saved, loaded
+
+
+# ---------------------------------------------------------------------------
+# A pair coupled through a geometry-dependent mapping (experimental)
+# ---------------------------------------------------------------------------
+#: The markers and the grid points of a geometry cell.
+GEO_MARKERS, GEO_GRID = 5, 40
+#: How far a marker moves in a step at most, in cells.  A power of two
+#: (every member dtype stores it exactly, so both members of the
+#: mixed-dtype domain hold one number), and small enough that the five
+#: steps of a sequence leave every marker in the cell it started in (0.3
+#: to 0.7 of the way across): each pass of each step is smooth.
+GEO_PULL = 0.03125
+#: Where the lattice of a geometry cell starts, in spacings from zero: the
+#: grid is centred on zero, so the markers (0.2 to 0.8 of the way along
+#: it) are within twelve spacings of it and a float32 member resolves
+#: them to 0.06 of the tolerance per evaluation.  ("Coordinates local to
+#: the grid", the advisory's own remedy; with the lattice starting at zero
+#: the float floor of these pairs is 2.7 times that, and with it what a
+#: float32 residual can be held to.)
+GEO_ORIGIN = -GEO_GRID / 2
+#: The domains a pair with ``multilinear_grid`` edges runs in under the
+#: interface norm, and the one in which it is refused at ``compile()``.
+#: (Not built here, and not claimed: the 16-bit dtypes, ``run_adaptive``,
+#: a sharded member.)
+GEO_ACCEPTED = ("f32", "f64", "mixed_dtype", "vmap", "multi_rate", "predictors_warm_starts",
+                "checkpoint_restart")
+GEO_REFUSED = ("sub_cycled",)
+#: What ``compile()`` says of positions a dtype cannot resolve to the
+#: tolerance (its advisory's own words).
+POSITIONS_ADVISORY = "cannot be resolved to this tolerance"
+
+
+@dataclasses.dataclass(frozen=True)
+class GeoCell:
+    """One pair of markers and a grid in one domain."""
+
+    label: str                      # the domain
+    kind: str = "two-way"           # gi.KINDS
+    #: Where ``(p -> q, q -> p)`` read their positions.
+    anchors: tuple = ("source", "target")
+    schedule: str = "gauss-seidel"
+    acceleration: str = "none"
+    #: The member that is the reference's ``p`` (the markers' values of a
+    #: two-way pair).
+    small: str = "a"
+    #: The lattice's origin, in spacings from zero.
+    origin: float = GEO_ORIGIN
+
+    def __post_init__(self):
+        assert self.small in ("a", "b") and self.kind in gi.KINDS, self
+
+    @property
+    def domain(self) -> cd.Domain:
+        return cd.DOMAINS[self.label]
+
+    @property
+    def shape(self) -> gi.Shape:
+        """The reference's description of the pair, in float64
+        (:class:`GeoStored` rounds its numbers as the members store them)."""
+        return gi.Shape(self.kind, GEO_GRID, GEO_MARKERS, self.anchors, self.schedule,
+                        "float64", None, self.acceleration, origin=self.origin)
+
+    @property
+    def names(self) -> dict:
+        """The reference's ``p`` and ``q`` as members."""
+        return {"p": "a", "q": "b"} if self.small == "a" else {"p": "b", "q": "a"}
+
+    @property
+    def dtypes(self) -> dict:
+        """The dtype of the reference's ``p`` and ``q``: of the member's
+        value and of its positions."""
+        d = self.domain
+        return {n: (d.dtype_a if name == "a" else d.dtype_b) for n, name in self.names.items()}
+
+    @property
+    def exact(self) -> bool:
+        """Does every member hold float64?"""
+        return all(jnp.dtype(t) == jnp.dtype(jnp.float64) for t in self.dtypes.values())
+
+    @property
+    def keys(self) -> tuple:
+        """The library's keys of ``p -> q`` and ``q -> p``."""
+        return tuple(f"{self.names[s]}.x->{self.names[t]}.u" for s, t in gi.EDGES)
+
+    @property
+    def id(self) -> str:
+        parts = [self.label, self.kind, "-".join(a[0] for a in self.anchors), self.schedule]
+        if self.acceleration != "none":
+            parts.append(self.acceleration)
+        if self.small != "a":
+            parts.append("small-b")
+        if self.origin != GEO_ORIGIN:
+            parts.append(f"at-{self.origin:g}")
+        return "-".join(parts)
+
+
+@dataclasses.dataclass
+class GeoBuilt:
+    gm: GraphManager
+    cell: GeoCell
+    #: The advisories ``compile()`` gave about unresolved positions.
+    advisories: tuple = ()
+    twin: bool = False
+
+
+def _geo_node(cell: GeoCell, sg_name: str, *, placed=None, scattering=None):
+    """Member *sg_name* of the reference in the cell's domain: its value and
+    its positions in the member's dtype.  ``p``'s first marker is held
+    still, in every graph of a cell: the unit entry of the twin's position
+    edge (``geometry_interface_graphs.twin_reference``)."""
+    shape = cell.shape
+    name, dtype, step = _placed(cell, sg_name)
+    n, port = gi.node_sizes(shape)[sg_name]
+    lay = gi.layout_of(shape)[sg_name]
+    direction = gi.pinned(lay["direction"]) if sg_name == "p" else lay["direction"]
+    common = dict(n=n, port=port, m=shape.n_small, d=shape.d, dtype=dtype, geom_dtype=dtype,
+                  pair=lay["pair"], direction=direction, spacing=shape.spacing, placed=placed)
+    if scattering is None:
+        return gi.GeoSideNode(name, step, **common)
+    return gi.ScatteringGrid(name, step, **scattering, **common)
+
+
+def _geo_cast(cell: GeoCell, src: str, dst: str, first=None) -> dict:
+    """The transform of an edge from the reference's *src* to its *dst*:
+    *first* if given, then the cast the mixed-dtype domain needs."""
+    to = cell.dtypes[dst]
+    cast = jnp.dtype(cell.dtypes[src]) != jnp.dtype(to)
+    if first is None:
+        return {"transform": lambda v, to=to: v.astype(to)} if cast else {}
+    if not cast:
+        return {"transform": first}
+    return {"transform": lambda v, to=to, first=first: first(v).astype(to)}
+
+
+def geometry_group(cell: GeoCell, gm: GraphManager, **group_kw) -> GraphManager:
+    """*gm* with the domain's clock and the pair's group under the
+    interface norm (*group_kw* over the cell's settings), not compiled."""
+    d = cell.domain
+    if d.multirate:
+        gm.add_node(cd.Ticker("tick", cd.DT / 2))
+    kw = {**cell.shape.group, **group_kw}
+    gm.add_coupling_group([cell.names["p"], cell.names["q"]], **cd.group_kwargs(d, **kw))
+    return gm
+
+
+def _geo_compiled(cell: GeoCell, gm: GraphManager, twin: bool, group_kw: dict) -> GeoBuilt:
+    """*gm* with the domain's clock and group, compiled.  Its warnings are
+    read, not silenced: the advisories about unresolved positions are
+    handed back, and any other warning but the multi-rate domain's notice
+    is an error as everywhere in the suite."""
+    d = cell.domain
+    geometry_group(cell, gm, **group_kw)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        gm.compile()
+    texts = [str(w.message) for w in caught]
+    advisories = tuple(t for t in texts if POSITIONS_ADVISORY in t)
+    others = [t for t in texts if POSITIONS_ADVISORY not in t]
+    assert d.multirate or not others, (cell.id, others)
+    return GeoBuilt(gm, cell, advisories, twin)
+
+
+def geometry_graph(cell: GeoCell, placed=None) -> GraphManager:
+    """The pair of *cell*, its nodes and its two ``multilinear_grid`` edges,
+    with no group yet (call it inside ``cd.entered``).  *placed*
+    (``{"p": positions, "q": positions}``) starts the markers there; by
+    default they start at zero and are written after ``compile()``
+    (:meth:`GeoStored.start`), as a step's state is."""
+    shape = cell.shape
+    gm = GraphManager()
+    for sg_name in ("p", "q"):
+        gm.add_node(_geo_node(cell, sg_name, placed=(placed or {}).get(sg_name)))
+    for (src, dst), way, anchor in zip(gi.EDGES, gi.WAYS[shape.kind], shape.anchors):
+        gm.add_edge(cell.names[src], cell.names[dst], "x", "u",
+                    mapping=gi._mapping(shape, way),  # noqa: SLF001
+                    geometry=(anchor, "pos"), **_geo_cast(cell, src, dst))
+    return gm
+
+
+def build_geometry(cell: GeoCell, placed=None, **group_kw) -> GeoBuilt:
+    """The pair of *cell*, compiled; call it inside ``cd.entered``."""
+    return _geo_compiled(cell, geometry_graph(cell, placed), False, group_kw)
+
+
+def build_geometry_twin(cell: GeoCell, start_pos, **group_kw) -> GeoBuilt:
+    """The marker-side twin of a two-way *cell*
+    (``geometry_interface_graphs.marker_side_twin``, in the cell's domain).
+
+    The scatter is applied inside ``q``; ``p -> q`` is a plain edge of the
+    marker values and, for a source-anchored scatter, a second plain edge
+    of the markers' positions in grid spacings relative to *start_pos*
+    (``p``'s positions as the run starts); ``q -> p`` is the same gather
+    edge.  Every internal edge is read as a plain or a gather edge always
+    was, the positions against one spacing.
+    """
+    assert cell.kind == "two-way", cell
+    shape = cell.shape
+    at_source = shape.anchors[0] == "source"
+    reference = gi.twin_reference(shape, start_pos) if at_source else None
+    gm = GraphManager()
+    gm.add_node(_geo_node(cell, "p"))
+    gm.add_node(_geo_node(cell, "q", scattering=dict(
+        mapping=gi._mapping(shape, "scatter"), reference=reference,  # noqa: SLF001
+        anchored_at_source=at_source)))
+    p, q = cell.names["p"], cell.names["q"]
+    gm.add_edge(p, q, "x", "f", **_geo_cast(cell, "p", "q"))
+    if at_source:
+        carried = gi.in_spacings(reference, shape.spacing, cell.dtypes["p"])
+        gm.add_edge(p, q, "pos", "g", **_geo_cast(cell, "p", "q", first=carried))
+    gm.add_edge(q, p, "x", "u", mapping=gi._mapping(shape, "gather"),  # noqa: SLF001
+                geometry=(shape.anchors[1], "pos"), **_geo_cast(cell, "q", "p"))
+    return _geo_compiled(cell, gm, True, group_kw)
+
+
+class GeoStored(gi.Reference):
+    """The exact reference of ``(cell, draw)``, every number as its member holds it.
+
+    The gains, the biases and the positions are rounded in their own
+    member's dtype (the pull is a power of two: :data:`GEO_PULL`); *scale*
+    multiplies the biases (a forcing that moves from step to step).
+    ``p``'s first marker is held still, as in the cell's graphs.  Build it
+    inside ``cd.entered``.  :attr:`pre`, the state a step starts from, is
+    the reference's own until :meth:`from_state` hands it the graph's.
+    """
+
+    def __init__(self, cell: GeoCell, draw: gi.Draw, scale: float = 1.0):
+        assert draw.pull == GEO_PULL, draw
+        super().__init__(cell.shape, draw, pin_first=True)
+        self.cell = cell
+        dtype = cell.dtypes
+        self.a = {n: float(_as_stored(self.a[n], dtype[n])) for n in ("p", "q")}
+        self.b = {n: _as_stored(scale * self.b[n], dtype[n]) for n in ("p", "q")}
+        self.pre = {n: {"x": self.b[n].copy(),
+                        "pos": _as_stored(self.pre[n]["pos"], dtype[n])} for n in ("p", "q")}
+        self.__dict__.pop("fixed_point", None)
+
+    def from_state(self, pre: dict) -> "GeoStored":
+        """This reference with its step started from *pre* (``{"p", "q"}``,
+        each ``{"x", "pos"}``): what the members integrate from, and where
+        a target-anchored geometry is read."""
+        self.pre = {n: {f: np.asarray(pre[n][f], np.float64) for f in ("x", "pos")}
+                    for n in ("p", "q")}
+        self.__dict__.pop("fixed_point", None)
+        return self
+
+    def floor(self, x=None) -> float:
+        """The float floor of the residual at *x* per evaluation, each part
+        at the resolution of the members that hold it: a scatter's source
+        value at its member's eps; its positions at ``eps |u|`` of one
+        spacing; a gathered value at the coarsest of its source's eps, its
+        target's (the cast) and the eps of the member whose positions it
+        was gathered at, and at that eps times those positions' distance
+        from zero in spacings where that is more."""
+        eps = {n: float(cd.finfo(t).eps) for n, t in self.cell.dtypes.items()}
+        x = self.pre if x is None else x
+        total, count = 0.0, 0
+        for i, value, unit in self.parts(x):
+            src, dst = gi.EDGES[i]
+            if unit == gi.SPACINGS:
+                e = eps[src] * float(np.max(np.abs(value)))
+            elif self.way(i) == "gather":
+                holder = src if self.shape.anchors[i] == "source" else dst
+                reach = float(np.max(np.abs(self.geometry(i, x[src]) / self.h)))
+                e = max(eps[src], eps[dst], eps[holder], eps[holder] * reach)
+            else:
+                e = eps[src]
+            total += value.size * (e / gi.RTOL) ** 2
+            count += value.size
+        return 4.0 * math.sqrt(total / count)
+
+    def params(self, gm: GraphManager) -> dict:
+        """The graph's parameter pytree with this reference's numbers."""
+        base = gm.params
+        nodes = {name: dict(p) for name, p in base["nodes"].items()}
+        for sg_name, name in self.cell.names.items():
+            for leaf, value in (("a", self.a[sg_name]), ("b", self.b[sg_name]),
+                                ("pull", self.pull)):
+                nodes[name][leaf] = jnp.asarray(value, nodes[name][leaf].dtype)
+        return {**base, "nodes": nodes}
+
+    def start(self, gm: GraphManager) -> None:
+        """Reset *gm* and write the pre-step state: after ``compile()``, so
+        the markers are not in the state it sees."""
+        gm.reset_state()
+        self.write(gm)
+
+    def write(self, gm: GraphManager) -> None:
+        for sg_name, name in self.cell.names.items():
+            held = gm.get_node_state(name)
+            gm.set_node_state(name, {f: jnp.asarray(self.pre[sg_name][f], held[f].dtype)
+                                     for f in ("x", "pos")})
+
+
+def geo_state_of(cell: GeoCell, solve: cd.Solve, pre: bool = False) -> dict:
+    """The members' fields of *solve* as the reference names them, in float64."""
+    source = solve.pre if pre else solve.state
+    return {sg_name: {f: np.asarray(source[name][f]).astype(np.float64) for f in ("x", "pos")}
+            for sg_name, name in cell.names.items()}
+
+
+def geo_measured_whole(cell: GeoCell) -> tuple:
+    """``((reference node, field), ...)``: the fields the pair's norm
+    measures whole (``geometry_interface_graphs.measured_whole``).  A cast
+    after the mapping does not enter: a scatter is read before both."""
+    return gi.measured_whole(cell.shape)

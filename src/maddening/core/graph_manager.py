@@ -250,9 +250,18 @@ class GraphManager:
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
         # The underflow-range check (``_warn_underflow_range``): pending
-        # until the first untraced step after each compile, and the groups
-        # already warned about, which are never warned about again.
+        # until the first untraced step after each compile and after each
+        # write of node states that is not a step's (``set_node_state``,
+        # ``reset_state``), and the groups already warned about, which are
+        # never warned about again.  A graph that is written to before
+        # every step is not asked at every one of them: after the first
+        # few checks of a compile (``_underflow_free_checks``) a pending
+        # one waits until enough states have been stored since the last
+        # (``_underflow_stores_since_check``; the numbers are
+        # ``_reports._UNDERFLOW_FREE_CHECKS`` and ``_UNDERFLOW_CHECK_SPACING``).
         self._underflow_check_pending = False
+        self._underflow_free_checks = 0
+        self._underflow_stores_since_check = 0
         self._underflow_warned: set[str] = set()
         # The state-layout check of a stepped state
         # (``_store_stepped_state``): which trace of which compile the
@@ -1625,7 +1634,17 @@ class GraphManager:
         return self._nodes[name].node
 
     def add_node(self, node: SimulationNode) -> None:
-        """Register a node and initialise its state."""
+        """Register a node and initialise its state.
+
+        The node's ``delta_t`` is read here, once, and kept as the
+        timestep the graph steps it at (a value that is not a finite
+        number above zero is refused).  Writing ``node.delta_t``
+        afterwards changes nothing the graph does: :meth:`validate`
+        reports it as an ``ERROR`` naming both values, so the next
+        :meth:`compile` refuses the graph, and :meth:`to_dict` writes
+        the timestep the graph runs.  To change a node's timestep, add
+        a node constructed with the new one in its place.
+        """
         # Into the state that is kept: added to a traced one (right after
         # ``jax.grad`` of a loss that stepped the graph), the node's state
         # was lost when the next entry point put the graph back.
@@ -1718,6 +1737,10 @@ class GraphManager:
         traced input on every step.  Its ``n_source`` must equal the
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
+        Both are asked here, once, of the source node's
+        ``initial_state()`` and the target's declaration; a source field
+        written with another size afterwards (``set_node_state``) is not
+        asked again and raises where its program is traced.
         A mapping of a class other than ``StaticLinearMapping`` is a
         ``ValueError`` unless its ``params_pytree()`` is a plain dict
         from identifiers to concrete, finite, floating-point JAX arrays,
@@ -1927,6 +1950,14 @@ class GraphManager:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
         resolved = _graph_specs._ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
+        # The shape compile() holds each of these edges' sources to, asked
+        # of *state* as every step program asks it of the state it is
+        # traced for (a missing field stays the KeyError described above).
+        _graph_specs._refuse_edge_sources(
+            _graph_specs._edge_source_rules(
+                [e for e in self._edges if e.target_node == node_name], self._nodes,
+                fields=False),
+            state, doing="read")
         out: dict[str, Any] = {}
         for edge in self._edges:
             if edge.target_node != node_name:
@@ -2327,6 +2358,9 @@ class GraphManager:
         flux_sourced: set[int] = set()
         unknown_source: set[int] = set()
 
+        # A node's ``delta_t`` written after ``add_node`` read it.
+        issues.extend(_graph_specs._timestep_drift_issues(self._nodes))
+
         # Edge endpoint checks
         for e in self._edges:
             if e.source_node not in node_names:
@@ -2371,35 +2405,22 @@ class GraphManager:
 
             # Shape check: compare when both source and spec shapes are
             # concrete.  ``spec.shape == ()`` means the input is a scalar
-            # — non-scalar sources still get flagged.
+            # — non-scalar sources still get flagged.  A mapping replaces
+            # the leading axes it reads by the ones it delivers (axis 0
+            # by its n_target, unless it declares its field shapes); the
+            # rest of the shape (vector components) passes through.  No
+            # comparison when the spec leaves a dimension symbolic
+            # (negative convention) or when a transform may reshape on
+            # the fly.  The rule is ``_edge_shape_issue``'s, which every
+            # step program asks again of the state it is traced for
+            # (``_refuse_edge_sources``): a state write is not a recompile.
             source_state = self._state.get(e.source_node, {})
             src_val = source_state.get(e.source_field)
-            if src_val is not None:
-                src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
-                spec_shape = tuple(spec.shape)
-                leads = (None if e.mapping is None
-                         else _graph_specs._mapping_field_leads(e.mapping))
-                if leads is not None and src_shape:
-                    # A mapping that declares its field shapes replaces
-                    # the leading axes it reads by the ones it delivers.
-                    src_shape = leads[1] + src_shape[len(leads[0]):]
-                elif e.mapping is not None and src_shape:
-                    # The mapping changes axis 0 to its n_target; the
-                    # rest of the shape (vector components) passes through.
-                    src_shape = (int(e.mapping.n_target),) + src_shape[1:]
-                # Skip when spec leaves any dimension symbolic (negative
-                # convention) or when a transform may reshape on the fly.
-                if (e.transform is None
-                        and all(d >= 0 for d in spec_shape)
-                        and src_shape != spec_shape):
-                    issues.append(
-                        f"WARNING[shape]: edge "
-                        f"{e.source_node}.{e.source_field} -> "
-                        f"{e.target_node}.{e.target_field}: "
-                        f"source shape {src_shape} disagrees with "
-                        f"target BoundaryInputSpec shape {spec_shape} "
-                        f"and no transform is set"
-                    )
+            shape_issue = _graph_specs._edge_shape_issue(
+                e, src_val, _graph_specs._edge_declared_shape(e, spec),
+                _graph_specs._edge_mapping_leads(e.mapping))
+            if shape_issue is not None:
+                issues.append(shape_issue)
 
             # Dtype check: only when both source and spec dtypes are set.
             if src_val is not None and spec.dtype is not None:
@@ -3278,6 +3299,9 @@ class GraphManager:
 
         self._dirty = False
         self._underflow_check_pending = bool(self._coupling_groups)
+        # The check of the compiled state itself, then the writes' own.
+        self._underflow_free_checks = 1 + _reports._UNDERFLOW_FREE_CHECKS
+        self._underflow_stores_since_check = 0
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -3564,6 +3588,11 @@ class GraphManager:
             e.target_node for e in self._edges
             if e.geometry is not None and e.geometry[0] == "target")
 
+        # What compile() asked of each edge's source field (the shape its
+        # target declares), asked again of the state each program below
+        # is traced for: a state write is not a recompile.
+        edge_source_rules = _graph_specs._edge_source_rules(self._edges, nodes)
+
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None, hold=None,
@@ -3725,6 +3754,7 @@ class GraphManager:
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
             def graph_step(full_state, external_inputs, params=None):
+                _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
                 external_inputs = _graph_specs._cast_external_inputs(
                     external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
@@ -3741,6 +3771,7 @@ class GraphManager:
         if has_coupling and not is_multirate:
             # ---- Coupling groups, uniform rate ----
             def graph_step_coupled(full_state, external_inputs, params=None):
+                _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
                 external_inputs = _graph_specs._cast_external_inputs(
                     external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
@@ -3765,6 +3796,7 @@ class GraphManager:
 
         # ---- Multi-rate path (with or without coupling) ----
         def graph_step_multirate(full_state, external_inputs, params=None):
+            _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
             external_inputs = _graph_specs._cast_external_inputs(
                 external_inputs, declared_input_dtypes)
             node_params = _resolve_params(params)
@@ -4033,6 +4065,7 @@ class GraphManager:
         *inside* a trace depends on it.  What is added is the state to
         come back to: see :meth:`_recover_from_escaped_tracers`.
         """
+        replaced = self._state
         if _graph_specs._holds_tracer(new_state):
             if not self._state_traced:
                 self._state_before_trace = self._state
@@ -4045,27 +4078,58 @@ class GraphManager:
             # kept copy still describes.)
             self._state_as_reported = None
         self._state = new_state
-        if self._underflow_check_pending and not self._state_traced:
-            self._underflow_check_pending = False
-            self._warn_underflow_range(new_state)
+        if self._state_traced:
+            return
+        self._underflow_stores_since_check += 1
+        if not self._underflow_check_pending:
+            return
+        if self._underflow_free_checks > 0:
+            self._underflow_free_checks -= 1
+        elif self._underflow_stores_since_check < _reports._UNDERFLOW_CHECK_SPACING:
+            # Written to again and again: the check stays due, and is
+            # made once enough states have been stored since the last.
+            return
+        self._underflow_check_pending = False
+        self._underflow_stores_since_check = 0
+        # The state the step started from, then the one it left: a field
+        # already below ``tiny`` is flushed to exactly zero by the step,
+        # and an exactly zero field never warns.
+        if not _graph_specs._holds_tracer(replaced):
+            self._warn_underflow_range(replaced)
+        self._warn_underflow_range(new_state)
 
     def _warn_underflow_range(self, state: dict) -> None:
         """Warn once per coupled group whose fields are in the subnormal range.
 
-        Runs on the host, once per compile, on the first state a stepper
-        stores outside a transform (:meth:`_store_state`): the remedy --
+        Runs on the host, once per compile and once after each write of
+        node states that is not a step's (``set_node_state`` -- so
+        ``load_state`` and ``PUT /graph/state`` -- and ``reset_state``), on
+        the first state a stepper then stores outside a transform and on the
+        state that step started from (:meth:`_store_state`): the remedy --
         rescaling the field's units -- is a decision about the model's
         configuration, and the first step is where every caller passes,
         whether or not they ever read :meth:`coupling_diagnostics`.  It reads
-        each group field once (one device-to-host copy per compile) and
-        nothing inside the compiled step changes, so stepping and its
-        results are untouched.  A state that decays into the range after the
-        first step is not re-checked.  See
+        each group field of the two states once (two device-to-host copies
+        per compile or write) and nothing inside the compiled step changes,
+        so stepping and its results are untouched.  Those reads cost several
+        times a small graph's step, so a graph that is written to before
+        every step is not asked at every one of them: the first eight
+        checks that writes make due after a ``compile()`` are made at the
+        stepper call that follows the write, and from then on a due check
+        waits until 1024 stepper calls have stored a state since the
+        previous check (``_reports._UNDERFLOW_CHECK_SPACING``), and is
+        made then.  A group already warned about
+        is not read again.  A state that decays into the range through the
+        nodes' own updates is not re-checked.  See
         :class:`~maddening.warnings.UnderflowRangeWarning`.
         """
         from maddening.warnings import UnderflowRangeWarning  # noqa: PLC0415
 
-        for key, hits in _reports._underflow_range_fields(self._coupling_groups, state).items():
+        unwarned = [g for g in self._coupling_groups
+                    if "+".join(sorted(g.nodes)) not in self._underflow_warned]
+        if not unwarned:
+            return
+        for key, hits in _reports._underflow_range_fields(unwarned, state).items():
             if key in self._underflow_warned or not hits:
                 continue
             self._underflow_warned.add(key)
@@ -6036,6 +6100,9 @@ class GraphManager:
         has_coupling = bool(coupling_groups)
 
         params_snapshot = self.params
+        # As in ``_build_step_fn``: compile()'s rule for each edge's
+        # source field, asked of the state the program is traced for.
+        edge_source_rules = _graph_specs._edge_source_rules(self._edges, nodes_dict)
 
         from maddening.core.node import SimulationNode as _SimBase
         flux_producers = {
@@ -6106,6 +6173,7 @@ class GraphManager:
             return new_node_state
 
         def dt_step_fn(state, external_inputs, dt, params=None):
+            _graph_specs._refuse_edge_sources(edge_source_rules, state)
             external_inputs = _graph_specs._cast_external_inputs(
                 external_inputs, declared_input_dtypes)
             if params is None:
@@ -6565,6 +6633,34 @@ class GraphManager:
         remedy the recovery warning names -- lands in the state that is
         kept.  It used to land in the traced state, and the next entry
         point put the graph back over it.
+
+        Notes
+        -----
+        The write is not held to the layout of the state it replaces:
+        *state* may have other fields, shapes and dtypes (``load_state``
+        and ``PUT /graph/state/{node}``, which write through this method,
+        refuse a field of another shape and cast to the dtype the graph
+        holds).  It is not a recompile either.  A layout that differs
+        makes the next entry point trace its program again, and that
+        trace asks some of what ``compile()`` asked of the state it was
+        given, by name:
+
+        - the shape each edge's target declares for it
+          (:class:`~maddening.warnings.ShapeMismatchError` in an
+          ``ExceptionGroup``, as from ``compile()``), and that the field
+          an edge reads is still there (``KeyError``);
+        - the rules of a geometry-dependent mapping's geometry field:
+          its shape, a float32 or float64 dtype, and a dtype fine enough
+          for the mapping.
+
+        It does not ask the dtype an edge's target declares
+        (:class:`~maddening.warnings.DtypeMismatchError` at
+        ``compile()``): an integer written into a floating-point field
+        that an edge reads is stepped, cast by whatever reads it.  Nor
+        does it ask anything of a write that keeps the layout.  Call
+        :meth:`validate` after a write that may have changed a dtype;
+        the graph runs again once the fields have the shapes
+        ``compile()`` accepted.
         """
         self._recover_from_escaped_tracers()
         if name not in self._nodes:
@@ -6581,6 +6677,9 @@ class GraphManager:
             }
             self._state_traced = True
         self._state[name] = state
+        # A written state is one no step of this graph was asked about:
+        # the underflow-range check is due again at the next step.
+        self._underflow_check_pending = bool(self._coupling_groups)
 
     def _meta_reset_seeds(self, fresh: dict) -> dict:
         """``{slot: value -> seed}`` for every ``_meta`` slot ``compile()`` seeds.
@@ -6690,6 +6789,9 @@ class GraphManager:
         # tracer with it while leaving the tracer in place.
         self._state_traced = False
         self._state_before_trace = None
+        # As after ``set_node_state``: the initial state is checked at the
+        # next step, whichever state the first step after compile left.
+        self._underflow_check_pending = bool(self._coupling_groups)
 
     # ------------------------------------------------------------------
     # Observer pattern
@@ -6813,6 +6915,14 @@ class GraphManager:
         nodes = []
         for name, spec in self._nodes.items():
             d = spec.node.to_dict()
+            if "timestep" in d:
+                # The timestep the graph registered for the node and
+                # steps it at, which is the node's ``delta_t`` unless
+                # that was written after ``add_node`` read it
+                # (``validate()`` says so): the config then ran another
+                # step than the graph it was written from, or did not
+                # load.
+                d["timestep"] = spec.timestep
             if spec.accepts_params:
                 d["params"] = self.effective_node_params(name)
             nodes.append(d)

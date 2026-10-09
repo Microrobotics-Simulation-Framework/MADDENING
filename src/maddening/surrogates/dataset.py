@@ -92,7 +92,9 @@ class DatasetGenerator:
         untouched.
         """
         node_obj = gm._nodes[target_node].node
-        node_dt = node_obj.delta_t
+        # The timestep the graph steps the node at (the one it registered
+        # when the node was added), not the node's own attribute.
+        node_dt = gm._nodes[target_node].timestep
 
         # Run simulation and collect history
         _final, history = gm.run_scan_with_history(n_steps)
@@ -160,7 +162,9 @@ class DatasetGenerator:
         was and an identical second call returns an identical dataset.
         """
         node_obj = gm._nodes[target_node].node
-        node_dt = node_obj.delta_t
+        # The timestep the graph steps the node at (the one it registered
+        # when the node was added), not the node's own attribute.
+        node_dt = gm._nodes[target_node].timestep
 
         _finals, histories = gm.run_sweep(
             n_steps, initial_states_batch, return_history=True,

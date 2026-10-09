@@ -50,6 +50,7 @@ point are in the fixed point's lattice cells.
 from __future__ import annotations
 
 import collections
+import ctypes
 import functools
 import gc
 import json
@@ -89,17 +90,36 @@ def _graph(key: tuple):
     return gm
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _the_compiled_graphs_live_for_this_module_only():
-    """:func:`_graph` keeps every structure's compiled graph while this
-    module runs.  Kept for the rest of a slow-lane shard, they and the
-    programs compiled for them left the files that ran afterwards without
-    memory: the shard aborted in a later file's compile on both jax
-    lanes.  So they go when the module's last test has run."""
-    yield
+def _release_what_was_compiled() -> None:
+    """Drop the structures' graphs and every program JAX compiled, and
+    hand the freed pages back to the system."""
     _graph.cache_clear()
     gc.collect()
     jax.clear_caches()
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):          # not glibc: the pages stay with the process
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _a_slow_test_releases_what_it_compiled(request):
+    """The slow tests of this module compile a graph for every cell they
+    sweep.  Kept, those programs took the module to 6.9 GB on its own and
+    the slow-lane shard that ran it aborted in a later file's compile, on
+    both jax lanes; released after each slow test, the module peaks at
+    0.9 GB for a tenth more time.  The per-push tests keep their graphs
+    until the module ends (they share one per structure)."""
+    yield
+    if request.node.get_closest_marker("slow") is not None:
+        _release_what_was_compiled()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _the_compiled_graphs_live_for_this_module_only():
+    yield
+    _release_what_was_compiled()
 
 
 def _stepped(cfg: ps.Cfg):

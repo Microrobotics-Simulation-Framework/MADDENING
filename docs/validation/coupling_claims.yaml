@@ -3551,13 +3551,13 @@ claims:
     face of the hull) a fixed point in another cell than the returned
     iterate is within twice the bound wherever the flag is set, with no
     allowance for h.
-    Not behind a long row sum of a mapped edge at the float floor (MADD-
-    ANO-251, open): the floor does not count the row's rounding, the bound
-    read 0.68 to 0.002 of the distance behind scatter-layout rows of 100
-    to 3e4 entries, and the report withdraws the flag there (a row over
-    SCATTER_ROW_FLOOR_LIMIT = 10 entries with the residual not above the
-    floor times the row's length), while the gather layout and the dense
-    kinds are not guarded.
+    Not behind a long row sum of a mapped edge at the float floor
+    (MADD-ANO-251, open): the floor does not count the row's rounding, the
+    bound read 0.68 to 0.002 of the distance behind scatter-layout rows of
+    100 to 3e4 entries, and the report withdraws the flag there (a row
+    over SCATTER_ROW_FLOOR_LIMIT = 10 entries with the residual not above
+    the floor times the row's length), while the gather layout and the
+    dense kinds keep theirs.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
@@ -4268,11 +4268,12 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
     - src/maddening/core/coupling/acceleration.py:960 (PRECISION_FLOOR_ULPS)
   conditions: >-
-    float32, n <= 6. Not claimed for float64 (x64), mixed dtypes or 16-bit
+    float32, n <= 6.
+    A mapped edge's row sum is outside what the constant was measured on:
+    it held by 3.9x for scatter-layout rows of up to 10 entries and failed
+    from 100 on (MADD-ANO-251, open).
+    Not claimed for float64 (x64), mixed dtypes or 16-bit
     floats.
-    The constant is not claimed to cover a mapped edge's row sum:
-    measured, it held by 3.9x for scatter-layout rows of up to 10 entries
-    and not from 100 on (MADD-ANO-251, open).
   oracle: float64 evaluation of the same updates.
   tests:
     - tests/core/test_coupling_precision_floor.py::test_the_floor_has_headroom_over_a_dense_updates_evaluation_error

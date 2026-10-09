@@ -307,10 +307,11 @@ class _Readings:
 @pytest.mark.parametrize("kind", gi.KINDS)
 @pytest.mark.parametrize("anchors", ANCHORS[:2])
 def test_the_float_floor_counts_each_part_at_its_own_resolution(dtype, geom_dtype, kind, anchors):
-    """``residual_precision_floor`` over the bare edges: a value at the eps
-    of its dtype, a delivered one no finer than the positions it was
-    gathered at (their dtype, and their rounding ``eps |u|`` in spacings),
-    and a position at ``eps |u|`` of one spacing."""
+    """``residual_precision_floor`` of the pair's two members over their
+    edges: every entry at the eps of the group's coarsest dtype (the
+    coarser of the values' and the positions'), a delivered value no
+    finer than the rounding ``eps |u|`` in spacings of the positions it
+    was gathered at, and a position at ``eps |u|`` of one spacing."""
     shape = Shape(kind, 72, 4, anchors, d=2, dtype=dtype, geom_dtype=geom_dtype, origin=40.0)
     ref = Reference(shape, DRAWS[0])
     state = ref.one_pass(ref.pre)
@@ -320,8 +321,10 @@ def test_the_float_floor_counts_each_part_at_its_own_resolution(dtype, geom_dtyp
             pre_step=_as_jax(shape, ref.pre)))
     want = ref.floor(state)
     assert abs(got - want) <= 1e-5 * want, (got, want)
-    if dtype != geom_dtype and ("gather" in gi.WAYS[kind] or _source_anchored_scatter(shape)):
-        # Premise: with the positions' dtype left out the floor is another number.
+    if np.finfo(geom_dtype).eps > np.finfo(dtype).eps:
+        # Premise: where the positions are the coarser, the floor with
+        # their dtype left out is another number (where the values are
+        # the coarser, every entry is at the values' eps either way).
         same = Reference(dataclasses.replace(shape, geom_dtype=None), DRAWS[0]).floor(state)
         assert abs(same - want) > 0.2 * min(same, want), (same, want)
 

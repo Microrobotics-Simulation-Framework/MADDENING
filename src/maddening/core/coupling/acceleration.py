@@ -2338,7 +2338,9 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
 
     A geometry-dependent mapping read at its source and anchored at its
     target has no entry: its reading is the source field alone, and the
-    floor counts no position for it.
+    floor counts no position for it (the gap of MADD-ANO-252, open: the
+    kernel's own rounding of those constant positions is counted
+    nowhere).
 
     On the host, from a concrete state: Python floats.  Read through
     :func:`_interface_readings`, the generator the floor itself iterates,

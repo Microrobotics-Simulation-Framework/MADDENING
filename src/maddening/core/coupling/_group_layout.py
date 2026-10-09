@@ -1077,7 +1077,11 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     A mapping read at its source and anchored at its **target** is not
     asked: its reading is the source field alone (the positions are the
     pre-step state, a constant of the solve), and the floor counts no
-    position for it.  A delivered value at a target anchor is asked at
+    position for it.  (A gap, MADD-ANO-252, open: the kernel still forms
+    its weights from those positions in their dtype, and with no edge in
+    the group that delivers a value at them, float32 positions thousands
+    of spacings from the grid's first point are flagged by nothing.)  A
+    delivered value at a target anchor is asked at
     the target's positions in *state*: what a step started from it reads.
 
     A warning, never a refusal, and it changes no number: where the

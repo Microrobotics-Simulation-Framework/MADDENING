@@ -16661,7 +16661,10 @@ anomalies:
       development).  The floor of a value delivered through a
       `multilinear_grid` mapping counts the rounding of the positions it was
       computed at as `eps * |u|` of the value's own magnitude (`u` the
-      positions in grid spacings from zero), and `compile()`'s advisory about
+      magnitude a position is rounded at, in grid spacings: the larger of
+      its distance from the coordinates' zero and of its lattice
+      coordinate, its distance from the grid's first point), and
+      `compile()`'s advisory about
       positions a dtype cannot resolve is that count.  It assumes a field
       that varies across one lattice cell by about the size of the value
       delivered.  A gather that samples a field near its zero (markers on the
@@ -16716,9 +16719,10 @@ anomalies:
       `precision_limited` is True for such a group under the interface
       norm.  Where a geometry-dependent mapping samples a field near its
       zero, hold the positions in float64 (under `jax_enable_x64`; the
-      other fields can stay float32) or keep the origin of the coordinates
-      at the markers, and do not read `converged=True` or the advisory's
-      silence as saying the sampled values are resolved.
+      other fields can stay float32; keeping the origin of the coordinates
+      at the markers shrinks only their distance from zero, not their
+      lattice coordinate), and do not read `converged=True` or the
+      advisory's silence as saying the sampled values are resolved.
     resolution_status: "open"
     residual_risk: >
       Open in 0.4.0 and deferred to 0.5.0, with MADD-ANO-212: the measured,
@@ -17072,3 +17076,82 @@ anomalies:
       - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_same_operator_in_the_gather_layout_keeps_its_flags_on_a_bound_that_holds"
       - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
       - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_guard_moves_no_number_of_the_report"
+
+  - anomaly_id: "MADD-ANO-252"
+    title: "Under convergence_norm=\"interface\" the float floor counts no position for a multilinear_grid mapping read at its source and anchored at its target: far into a long float32 grid such a group reads a floor under one, no advisory and converged=True 2.6 to 16 tolerances from its float64 fixed point"
+    description: >
+      Experimental, new in 0.4.0's development and never released.  Under
+      `convergence_norm="interface"` an edge whose `multilinear_grid`
+      mapping delivers more entries than it reads (a scatter of a few
+      points onto a larger grid) is read at its source.  Anchored at its
+      source, the positions are a part of the reading and the float floor
+      counts their rounding where the kernel rounds them (the larger of a
+      position's distance from the coordinates' zero and of its lattice
+      coordinate, its distance from the grid's first point).  Anchored at
+      its **target**, the positions are the target's pre-step state, a
+      constant of the solve: the reading is the source value alone, and
+      the floor and `compile()`'s advisory count no position for it.  The
+      kernel still forms `(x - origin) / spacing` from those positions in
+      their dtype, so its weights carry `eps` times the lattice
+      coordinate, the same at every pass: the float32 group converges to
+      the fixed point of a slightly different deposit, and nothing says
+      so.  Where the group also holds an edge that delivers a value at
+      positions as far into the grid (the usual pair: a gather beside the
+      scatter), that edge's floor counts them and the report is flagged.
+      Where it does not, nothing is.  Constructed (four float32 markers
+      within 4 spacings of the coordinates' zero; a scatter anchored at
+      its target onto a grid centred on zero, whose node samples its own
+      field beside the markers and hands it back on a plain edge;
+      Gauss-Seidel, `rtol=1e-5`; jaxlib 0.11.0, CPU): with the grid's
+      first point 8000 and 50000 spacings away the report reads
+      `converged=True`, a residual of 0.57, `residual_precision_floor`
+      0.095, `precision_limited=False` and no advisory, with the readings
+      2.6 and 16 tolerances from the float64 fixed point (4.3 and 21 in
+      the worst entry); at 5 and 1000 spacings, 0.78 and 0.85; with the
+      positions held in float64, 0.78 at every size.  With the
+      coordinates' zero at the grid's first point and a spacing that is
+      a power of two the kernel's quotient is exact and the group is
+      0.78 off at every size: the defect needs the kernel's own
+      subtraction (or a division that rounds) far into the grid.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A converged verdict beside a float floor under one, with the state
+      tolerances from the fixed point of the problem as posed, is a
+      silent wrong result, never `minor`.  Not `critical`: it needs the
+      experimental geometry tier under the interface norm, a scatter
+      anchored at its target with no edge in the group that delivers a
+      value at those positions, float32 positions, and a grid whose
+      first point is thousands of spacings from them; no bound is
+      reported for such a group in 0.4.0, so no usable flag is set on
+      it.  `context_dependent` because what a program does with
+      `converged` is its own choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.coupling._interface_plan.InterfaceEdge.read"
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Hold the positions in float64 (under `jax_enable_x64`; the mapping
+      computes its weights in the geometry's dtype and casts them to the
+      field's, so the other fields can stay float32: verified, 0.78 of a
+      tolerance at every grid size above).  Or anchor the scatter at its
+      source (the positions are then a part of the reading and are
+      counted), or keep the grid's first point within `rtol / (4 E eps)`
+      spacings of the markers.  Moving the coordinates' origin does not
+      change a lattice coordinate.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0.  Counting it means reading the
+      target's pre-step geometry for the floor of an edge whose residual
+      does not read it (the step would record that floor, as it does for
+      a value delivered at a target anchor), which changes what the
+      documents state of a target-anchored geometry ("a constant of the
+      solve", "not asked") and the state's `_meta` for such groups.
+      Until then such a group far into a long float32 grid is not flagged
+      by the report or by `compile()`.  The same constant rounding
+      reaches a value delivered at a target anchor, where the floor does
+      count the positions.  Measured on one CPU family.
+    verification:
+      - "tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_scatter_anchored_at_its_target_far_into_a_grid_is_not_counted"

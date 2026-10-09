@@ -3081,10 +3081,20 @@ claims:
     or without), and not a delivered value for a coordinate its mapping
     does not read (an axis of one lattice point; a point outside the hull
     by more than sqrt(eps) of the magnitude it is rounded at, whose
-    weights are exactly 0 and 1: a marker 1e-4 of a spacing past the last
-    point of 8000 float32 spacings, with the coordinates' zero at that
-    point, is read and warned of, where its own distance from zero alone
-    took it for clamped; 30 spacings past, it is not read); positions that are a part are asked of every
+    weights are exactly 0 and 1: a marker one float32 rounding of its
+    lattice coordinate (4.9e-4 of a spacing) past the last point of 8000
+    spacings, and one half a spacing past it, with the coordinates' zero
+    at that point, are read and warned of, where their own distance from
+    zero alone took them for clamped; 30 spacings past, a marker is not
+    read), and not a mapping read at its source and anchored at its
+    target, whose reading is its source value alone - which leaves a gap
+    (MADD-ANO-252, open; pinned as a characterisation): the kernel still
+    forms its weights from those positions, and with no edge in the group
+    that delivers a value at them, float32 positions 8000 and 50000
+    spacings from the grid's first point read a floor of 0.095, no
+    advisory and converged=True 2.6 and 16 tolerances from the float64
+    fixed point (within 0.8 with float64 positions, and at 5 spacings);
+    positions that are a part are asked of every
     coordinate, as the criterion reads them (one on an axis of one
     lattice point included, in the spacing declared for it). The true
     alarms beside each stay (pinned), and the audit's threshold, anchor
@@ -3216,6 +3226,7 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_positions_two_edges_read_on_two_lattices_are_rounded_at_the_largest'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_point_just_past_the_last_lattice_point_of_a_long_grid_is_read'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_advisory_quotes_one_part_and_says_the_reports_floor_is_pooled'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_scatter_anchored_at_its_target_far_into_a_grid_is_not_counted'
   status: verified
   notes: >-
     Measured (jaxlib 0.11.0, CPU, float64, rtol=1e-4). K on a two-way pair

@@ -1329,24 +1329,28 @@ def test_positions_two_edges_read_on_two_lattices_are_rounded_at_the_largest():
 
 def test_a_point_just_past_the_last_lattice_point_of_a_long_grid_is_read():
     """A coordinate is "not read" only where it is outside the hull by
-    more than its rounding can cross, and beyond the last point of a long
-    grid that rounding is the lattice coordinate's: on 8000 float32
-    spacings it is 9.5e-4 of a cell wherever the coordinates' zero is.
-    With the zero at the grid's last point, a marker a ten-thousandth of
-    a spacing past it was taken to be clamped for good (its own distance
-    from zero is tiny) and put nothing into the value gathered there; it
-    is read, and warned of.  The same marker 30 spacings past the face is
-    not."""
+    more than its rounding can cross (``sqrt(eps)`` of the magnitude it
+    is rounded at: 2,900 roundings), and beyond the last point of a long
+    grid that magnitude is the lattice coordinate: on 8000 float32
+    spacings one rounding is 4.9e-4 of a cell wherever the coordinates'
+    zero is.  With the zero at the grid's last point, a marker ONE such
+    rounding past the face, and one half a spacing past it, were taken
+    to be clamped for good (measured from zero they are 5e-4 and 0.5
+    spacings out, and the slack was 1.7e-7 and 1.7e-4) and put nothing
+    into the value gathered there; they are read, and warned of.  A
+    marker 30 spacings past the face is not."""
     top = dict(n=8001, origin=-8000.0, m=3, anchors=("target", "target"))
-    mapping = multilinear_grid_mapping((-4000.0,), (0.5,), (8001,), n_points=3, mode="consistent")
-    geom = jnp.asarray(np.asarray([[-1.0], [5e-5], [15.0]]), "float32")
-    assert np.asarray(mapping.geometry_coordinates_read(geom))[:, 0].tolist() == [
-        True, True, False]
+    mapping = multilinear_grid_mapping((-4000.0,), (0.5,), (8001,), n_points=4, mode="consistent")
+    geom = jnp.asarray(np.asarray([[-1.0], [0.00025], [0.25], [15.0]]), "float32")
     lattice = np.asarray(mapping.geometry_kernel_coordinates(geom))[:, 0]
-    assert lattice.dtype == np.float32 and lattice.tolist() == [7998.0, 8000.0, 8030.0]
-    # ... and through the floor: every marker past the face, by 1e-4 of a
-    # spacing (read) and by 30 (not read).
-    just_past = Pair(u0=1e-4, offsets=(0.0, 1e-4, 2e-4), push=0.0, **top)
+    assert lattice.dtype == np.float32
+    assert lattice.tolist() == [7998.0, float(np.nextafter(np.float32(8000.0), np.float32(9e3))),
+                                8000.5, 8030.0]
+    assert np.asarray(mapping.geometry_coordinates_read(geom))[:, 0].tolist() == [
+        True, True, True, False]
+    # ... and through the floor: every marker past the face, by one
+    # rounding to a spacing (read) and by 30 spacings or more (not read).
+    just_past = Pair(u0=5e-4, offsets=(0.0, 0.5, 1.0), push=0.0, **top)
     gm, advisories = build(just_past)
     assert warned(advisories) == {GATHER: "delivered"}, advisories
     pre = stored(gm)
@@ -1382,6 +1386,120 @@ def test_the_advisory_quotes_one_part_and_says_the_reports_floor_is_pooled():
     # Three parts of four entries, two of them at the positions' count:
     # pooled, the floor is under the number either advisory quotes.
     assert d["residual_precision_floor"] < min(counts.values()), (d, counts)
+
+
+# -- what the rule leaves: a scatter anchored at its target (MADD-ANO-252) ----
+
+
+class _SamplingGrid(SimulationNode):
+    """``x <- base + 0.3 deposit``; ``s``, the sum of ``x`` at the two
+    lattice points beside each marker (sampled by the node itself, so no
+    gather is in the group); and the markers' positions ``gp``, which
+    this node holds and does not move."""
+
+    def __init__(self, name, timestep, cells, positions, pos_dtype):
+        super().__init__(name, timestep)
+        self._n = 2 * cells + 1
+        self._base = 1.0 + 0.8 * np.sin(1.7 * (np.arange(self._n) - cells))
+        self._index = np.floor(positions + cells).astype(np.int64)
+        self._positions, self._pos_dtype = positions, pos_dtype
+
+    def initial_state(self):
+        return {"x": jnp.asarray(self._base, "float32"),
+                "s": jnp.zeros(self._index.size, "float32"),
+                "gp": jnp.asarray(self._positions[:, None], self._pos_dtype)}
+
+    def boundary_input_spec(self):
+        return {"deposit": BoundaryInputSpec(shape=(self._n,), dtype=jnp.dtype("float32"))}
+
+    def update(self, state, boundary_inputs, dt):
+        x = jnp.asarray(self._base, "float32") + 0.3 * boundary_inputs["deposit"]
+        return {"x": x, "s": x[self._index] + x[self._index + 1], "gp": state["gp"]}
+
+
+class _Driven(SimulationNode):
+    def __init__(self, name, timestep, m):
+        super().__init__(name, timestep)
+        self._m = m
+
+    def initial_state(self):
+        return {"f": jnp.ones(self._m, "float32")}
+
+    def boundary_input_spec(self):
+        return {"s": BoundaryInputSpec(shape=(self._m,), dtype=jnp.dtype("float32"))}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"f": 0.5 * boundary_inputs["s"] + 0.2}
+
+
+def _scatter_anchored_at_its_target(cells: int, pos_dtype: str, rtol: float = 1e-5):
+    """Four markers within 4 spacings of zero deposit onto a grid of
+    ``2 cells + 1`` points centred there through a scatter anchored at
+    its TARGET (the grid node holds the positions); what they read comes
+    back on a plain edge.  ``(report, advisories, distance)``, the
+    distance of the two readings (the markers' value, read at the
+    scatter's source, and the plain edge's) from the float64 fixed
+    point, pooled, in tolerances."""
+    positions = np.asarray([0.31, 1.47, 2.63, 3.29])
+    grid = _SamplingGrid("grid", 0.01, cells, positions, pos_dtype)
+    gm = GraphManager()
+    gm.add_node(grid)
+    gm.add_node(_Driven("markers", 0.01, positions.size))
+    gm.add_edge("markers", "grid", "f", "deposit", geometry=("target", "gp"),
+                mapping=multilinear_grid_mapping((-float(cells),), (1.0,), (2 * cells + 1,),
+                                                 n_points=positions.size, mode="conservative"))
+    gm.add_edge("grid", "markers", "s", "s")
+    gm.add_coupling_group(["grid", "markers"], convergence_norm="interface", rtol=rtol,
+                          iteration_mode="gauss-seidel", max_iterations=60)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        gm.compile()
+    gm.step()
+    # The float64 pass on the positions as stored: f <- 0.5 s(f) + 0.2.
+    held = np.asarray(gm.get_node_state("grid")["gp"], np.float64)[:, 0]
+    u = held + cells
+    base, w = np.floor(u).astype(np.int64), u - np.floor(u)
+    index = grid._index                                                        # noqa: SLF001
+
+    def sampled(f):
+        x = np.asarray(np.asarray(grid._base, np.float32), np.float64)         # noqa: SLF001
+        x = x.copy()
+        np.add.at(x, base, 0.3 * (1.0 - w) * f)
+        np.add.at(x, base + 1, 0.3 * w * f)
+        return x[index] + x[index + 1]
+
+    f = np.ones(positions.size)
+    for _ in range(200):
+        f = 0.5 * sampled(f) + 0.2
+    star = {"f": f, "s": sampled(f)}
+    got = {"f": np.asarray(gm.get_node_state("markers")["f"], np.float64),
+           "s": np.asarray(gm.get_node_state("grid")["s"], np.float64)}
+    off = np.concatenate([(got[k] - star[k]) / (rtol * np.max(np.abs(star[k]))) for k in star])
+    return (report(gm), [str(w.message) for w in caught if ADVISORY in str(w.message)],
+            float(np.sqrt(np.mean(off ** 2))))
+
+
+def test_a_scatter_anchored_at_its_target_far_into_a_grid_is_not_counted():
+    """What the rule leaves (MADD-ANO-252, open).  An edge read at its
+    source through a mapping anchored at its TARGET has no position in
+    its reading: the positions are the target's pre-step state, a
+    constant of the solve, and the floor counts none for it.  The kernel
+    still forms its weights from them in their dtype.  With no gather at
+    those positions in the group, float32 positions 50000 spacings from
+    the grid's first point read a floor of a tenth of a tolerance, no
+    advisory and ``converged=True`` with the readings 16 tolerances from
+    the float64 fixed point (2.6 at 8000 spacings); five spacings from
+    the first point, and with float64 positions, the same group is
+    within a tolerance.  A characterisation, pinned so that a change of
+    the rule shows."""
+    d, advisories, distance = _scatter_anchored_at_its_target(50_000, "float32")
+    assert advisories == [] and d["converged"] is True, (advisories, d)
+    assert d["residual_precision_floor"] < 0.2 and d["precision_limited"] is False, d
+    assert 8.0 < distance < 32.0, distance
+    for cells, pos_dtype in ((5, "float32"), (50_000, "float64")):
+        d, advisories, distance = _scatter_anchored_at_its_target(cells, pos_dtype)
+        assert advisories == [] and d["converged"] is True, (cells, advisories, d)
+        assert distance < 1.0, (cells, pos_dtype, distance)
 
 
 # ---------------------------------------------------------------------------
@@ -1461,18 +1579,32 @@ def test_an_evaluation_count_a_step_measured_does_not_enter_the_floor_of_the_rep
 
 
 def test_a_measured_count_still_enters_the_floor_of_a_group_whose_bounds_are_reported():
-    """The control of the rule above: the same slot beside the same pair
-    under ``"mixed"``, whose report builds its bound on the floor, moves
-    that report (the measured count is that floor's count there, as it
-    is for every group without a geometry edge)."""
-    gm, _advisories = build(Pair(n=41), norm="mixed")
+    """The control of the rule above, and the pin of the count itself: the
+    same slot beside the same pair under ``"mixed"``, whose report builds
+    its bound on the floor, IS that floor's count (as for every group
+    without a geometry edge), once and not ten times.  The floor is the
+    per-evaluation floor times the larger of the structural count and
+    the slot, and ``precision_limited`` turns where that reaches the
+    residual: half the count that would, and twice it."""
+    pair = Pair(n=41)
+    gm, _advisories = build(pair, norm="mixed")
     gm.step()
     plain = report(gm)
-    assert plain["precision_limited"] is False, plain
-    meta = dict(gm._state["_meta"])                                           # noqa: SLF001
-    meta[f"coupling_{KEY}_pass_evaluations"] = jnp.asarray(1e6, jnp.float32)
-    gm._state = {**gm._state, "_meta": meta}                                   # noqa: SLF001
-    assert report(gm)["precision_limited"] is True
+    state = {name: gm.get_node_state(name) for name in ("grid", "markers")}
+    per_evaluation = float(residual_precision_floor(
+        state, ["grid", "markers"], "mixed", pair.atol, pair.rtol, (), evaluations=1.0))
+    turns_at = plain["residual"] / per_evaluation
+    # Premise: the structural count (2) leaves the residual above the floor.
+    assert plain["precision_limited"] is False and turns_at > 1.2 * EVALUATIONS, (plain, turns_at)
+
+    def with_a_count_of(count: float) -> bool:
+        meta = dict(gm._state["_meta"])                                       # noqa: SLF001
+        meta[f"coupling_{KEY}_pass_evaluations"] = jnp.asarray(count, jnp.float32)
+        gm._state = {**gm._state, "_meta": meta}                               # noqa: SLF001
+        return report(gm)["precision_limited"]
+
+    assert with_a_count_of(0.5 * turns_at) is False
+    assert with_a_count_of(2.0 * turns_at) is True
 
 
 # Per push: tests/property/test_coupling_geometry_interface_positions_floor.py::test_an_evaluation_count_a_step_measured_does_not_enter_the_floor_of_the_report

@@ -390,7 +390,15 @@ names the edge and says what to do.
   exactly 0 and 1); a mapping read at its source and anchored at its
   target, whose reading is its source value alone; and the `"l2"` and
   `"mixed"` norms, which measure positions against their own size and
-  read no delivered value.  Positions that are read themselves are
+  read no delivered value.  **The target-anchored scatter is a gap, not
+  a guarantee** (MADD-ANO-252, open): the mapping still forms its
+  weights from those positions in their dtype, and nothing counts that.
+  Beside a gather at the same positions (the usual pair) the gather's
+  floor flags the group.  With no such edge in the group, float32
+  positions 8000 and 50000 spacings from the grid's first point read a
+  floor of 0.095, no warning and `converged=True` 2.6 and 16 tolerances
+  from the float64 fixed point (constructed); hold them in float64, or
+  anchor the scatter at its source.  Positions that are read themselves are
   asked of every coordinate, because the criterion reads every
   coordinate of them, one on an axis of one lattice point included (in
   the spacing declared for that axis).  A delivered value anchored at

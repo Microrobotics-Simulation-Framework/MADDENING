@@ -1004,6 +1004,15 @@ and the topology harness runs its invariances in the same domains
 (`DOMAINS` in `test_differential_coupling_topologies.py`).  A claim about a
 dtype's edges is held at that dtype's own `tiny`, `eps` and `maxexp`.
 
+Both members of `pair` have one size, so a mapped edge between them is a
+tie.  A claim about a mapped edge that expands or reduces is lifted with
+`tests/core/coupling_domain_sizes.py`: `build(Cell(domain, kind, form,
+...))` puts the small field coupled to a large one of
+`tests/property/interface_side_graphs.py` in a domain (either member the
+small one), `Stored` is that module's exact reference with every number as
+its member stores it, and `build_twin` the same pair with the scatter
+applied inside the large member (`test_coupling_pairs_of_two_sizes_in_every_domain.py`).
+
 The cross-cutting oracles fill cells too, and a narrowed cell is
 re-examined whenever one lands: if it now runs the claim in that domain,
 the cell cites it and the domain leaves the row's clause. A parametrized

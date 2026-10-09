@@ -110,6 +110,12 @@ the iterate before it, which nothing compares.  So the step returns
   edge, or only through a mapping or a transform -- as `F(x)` holds it:
   one more evaluation of the pass, at `x`.
 
+A static mapping onto more entries than its source holds is read at its
+source (the compact-side rule, below): that reading is the source field
+itself, so the field is measured whole and kept, like one a plain edge
+reads.  A field read only through a gather, a tie or a transform is
+recomputed.
+
 One rule, whatever the schedule, the acceleration, the solver and the
 verdict (`max_iterations=1` returns its one pass as it is).  Until 0.4.0
 the step returned `x` as it was, and a one-way pair under Jacobi came
@@ -224,12 +230,17 @@ The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
 every entry the norm reads, **per evaluation**, in the norm's units —
 `4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
 `"mixed"` and `"interface"` (`residual_precision_floor`), each field at
-its own dtype's `eps`.  Under `"interface"` the entries are what the
-internal edges deliver (mapping, then transform), each at the coarser of
-its own dtype's `eps` and its source field's; where an edge is mapped,
-the delivered value depends on the weights the step ran with, so the
-step records the per-evaluation floor itself (`_meta`'s
-`coupling_<key>_reading_floor`) and the report reads that.  Four is 2.6x the sum of the two measured
+its own dtype's `eps`.  Under `"interface"` the entries are what that
+norm reads on the internal edges: what an edge delivers (mapping, then
+transform), at the coarser of its own dtype's `eps` and its source
+field's, or the source field itself, at its own `eps`, where a static
+mapping delivers more entries than the source holds (see "A mapped edge
+is read on its compact side" below).  Where an edge is read through its
+mapping, the delivered value depends on the weights the step ran with, so
+the step records the per-evaluation floor itself (`_meta`'s
+`coupling_<key>_reading_floor`) and the report reads that; a group whose
+mapped edges are all read at their source has no such slot, and its
+floor is taken from the returned state like any other group's.  Four is 2.6x the sum of the two measured
 sources of one evaluation's rounding: the evaluation error of a dense
 update `A @ u + c` near its fixed point (at most 0.72 of a unit over
 3 000 random contractions) and the disagreement between two
@@ -430,7 +441,10 @@ Under `convergence_norm="interface"` the "fields" are what that norm
 reads: the value each internal edge *delivers* -- its source value
 through the edge's interface mapping (with the weights the step ran
 with) and then its transform, exactly what the step hands the target --
-over its own magnitude.  One function gives every reader that value
+or, on an edge whose static mapping delivers more entries than its
+source field holds, that source field itself (the compact side; next
+paragraph but one), each over its own magnitude.  One function gives
+every reader that value
 (`_interface_readings` in `core/coupling/acceleration.py`, built on the
 step's own edge rule): the residual, its float floor, this analysis and
 the report.  Which edges are a group's interface, in what order, and on
@@ -459,7 +473,8 @@ fields' analysis read 0.26-0.73x the true distance with
 `spectral_usable=True` (2 to 16 leaves, Jacobi; MADD-ANO-213), so a group
 with a field that more than one internal edge reads is analysed on the
 reading too.  Only a group whose internal edges read each field once, as
-it is, keeps the analysis in the state's weights (`_reading_is_the_fields`
+it is -- no transform, and no mapping but one read at its source -- keeps
+the analysis in the state's weights (`_reading_is_the_fields`
 in `core/coupling/_group_layout.py`, static): there the two are one norm, and the
 second spectrum's nine Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
 left an edge's mapping out, a mapped edge was measured on its source
@@ -470,6 +485,67 @@ selection written as a `matrix_mapping`.  A transform that is not affine makes t
 reading, and the bound is then asymptotic, as for a non-linear map.  The
 gradient bound below keeps the state's own analysis, in the raw fields'
 weights.
+
+**A mapped edge is read on its compact side.**  The interface norm pools
+every entry it reads into one RMS, so the side of a mapping it reads
+decides how many entries an edge weighs in with.  An internal edge whose
+*static* mapping delivers **more** entries than its source field holds
+-- a scatter: 30 marker forces spread onto a grid of `N` cells -- is read
+at its **source value**: the field itself, before the mapping and so
+before the transform (the step applies the mapping, then the transform;
+a source-side reading has been through neither).  A mapping onto fewer
+entries (a gather), **a tie** (as many entries delivered as read) and an
+edge with no mapping are read as delivered.  The side is decided in one
+place, from the two sizes the mapping declares (`_norm_side` in
+`core/coupling/_interface_plan.py`; never from the shape of its weights,
+which for a sparse layout says nothing of the two sides, and never from a
+state), and the residual, the float floor and its `eps`, the spectral
+analysis and its weights, the bounds and the report all read through it.
+What the pass computes does not change: the target still receives the
+mapped value, and the mapping's weights are still constants of the step
+that a gradient reaches.  Only the norm stops reading them on such an
+edge, so a group whose mapped edges are all read at their source records
+no `reading_floor`, and where each field is read once its report's
+analysis is the state's own.  A geometry-dependent mapping inside a group
+is refused under this norm at `compile()`, as before.
+
+Read as delivered, a scatter's `N` entries -- of which about 60 change --
+add `N` to the pool's count and almost nothing to its sum, and the
+criterion loosens as the grid grows: with the grid-sized delivered value
+in the reading the interface norm gave the mixed norm's verdict from
+`N = 1e4` up.  Measured on 30 markers coupled two ways to a line of `N`
+cells (`benchmarks/results/interface_norm_dilution`; float64,
+`solver="ift"`, `rtol=1e-4`, loop gain 0.54): the error of the marker
+forces at a `converged=True` exit, in tolerances, Gauss-Seidel / Jacobi.
+
+| N | edge-mapped, interface: read as delivered (before) | edge-mapped, interface: compact side (now) | marker-side, interface | edge-mapped, mixed |
+|---|---|---|---|---|
+| 1e3 | 23 / 12 | 3.6 / 1.9 | 3.6 / 1.9 | 12 / 12 |
+| 1e4 | 39 / 39 | 3.3 / 3.3 | 3.3 / 3.3 | 39 / 39 |
+| 1e5 | 134 / 72 | 3.3 / 3.3 | 3.3 / 3.3 | 134 / 72 |
+| 1e6 | 459 / 248 | 3.3 / 3.3 | 3.3 / 3.3 | 459 / 248 |
+
+Read on the compact side the edge-mapped pair takes the passes, reports
+the residual and leaves the error of the build that applies the scatter
+inside the grid node, to the last digit, at every `N`; the mixed norm,
+which reads the grid's whole field, still stops where the diluted
+criterion did.
+
+The claim the rule is held to (CPL-192; `tests/property/test_coupling_interface_side.py`):
+`converged=True` under the interface norm implies that the distance to
+the fixed point in the compact readings, in the norm's own weights, is at
+most `K` tolerances, with `K = ‖D (I − A)⁻¹ (I − L) D⁻¹‖₂` of the loop on
+its compact readings (`A` the pass's stationary map, `L` its same-pass
+part, `D` dividing each reading by its own magnitude): the identity the
+bound above rests on, applied to a residual at its threshold.  `K` is
+about `1 / (1 − gain)` for a normal loop and does not see `N`.
+That is the iterate the loop accepted, which the report is of.  The state
+a solve returns is that iterate with every field the norm does not
+measure whole one plain pass on (the return rule above; CPL-191): a
+source field read at its source is measured whole and kept, the source of
+a gather or a tie is recomputed, and the state returned is within `K'`
+tolerances, `K' = ‖D [(I − A)⁻¹ (I − L) − P] D⁻¹‖₂` with `P` selecting the
+readings of a recomputed source (`K' = K` where both edges scatter).
 
 In either reading `1/(1 − rho)` is the resolvent's norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a
@@ -1372,8 +1448,9 @@ closed for the state a step returns** (MADD-ANO-240, MADD-ANO-241; see
 recorded:
 **do not pair the auto-detected `accelerated_fields` with
 `convergence_norm="interface"`.**  Both are the edge source fields (the
-criterion reads them as the edges deliver them, through any mapping and
-transform), so
+criterion reads them as the edges deliver them, through any transform
+and any mapping that does not expand, and as they are stored where a
+mapping delivers more entries than it reads), so
 the quasi-Newton step lands on exactly the fields the criterion then
 measures, and every other field of the group is carried out of the last
 raw pass with nothing looking at it.  Measured over the sweep, on an

@@ -583,13 +583,35 @@ class RelayedSourceNode(SimulationNode):
         return new
 
 
-def relay_twin(graph: GGraph) -> GGraph:
+def read_at_its_source(e: GEdge) -> bool:
+    """Does ``convergence_norm="interface"`` read static mapped edge *e* at
+    its source, before the mapping?
+
+    Under the compact-side rule (``coupled_topologies.INTERFACE_SIDE``):
+    where the mapping delivers more entries than its source field holds.
+    Such an edge's reading is the source field itself, so a twin that
+    moves the mapping onto the *delivered* side of the reading (a relay
+    on the source, a transform) reads something else there: the two twins
+    below leave such an edge as it is (``keep=read_at_its_source``), and
+    the twin that moves its mapping is the one with the mapping inside
+    the target (``interface_side_graphs.marker_side_twin``).
+    """
+    from tests.property import coupled_topologies as ct  # noqa: PLC0415
+
+    return (ct.INTERFACE_SIDE == "compact" and e.mapping is not None and e.geometry is None
+            and int(e.mapping.n_target) > int(e.mapping.n_source))
+
+
+def relay_twin(graph: GGraph, *, keep=None) -> GGraph:
     """*graph* with every mapped edge's mapping moved into a relay on its
     source, so that the twin's **interface reading is the edge-mapped
-    graph's**.
+    graph's** wherever the norm reads an edge as delivered.  An edge
+    *keep* names (a predicate; :func:`read_at_its_source` for a comparison
+    under the interface norm) stays as it is: read at its source, its
+    reading is not the relay's field.
 
-    ``convergence_norm="interface"`` reads what each internal edge
-    delivers: for ``S.sf -> T.tf`` through mapping ``m`` and transform
+    ``convergence_norm="interface"`` reads such an internal edge as it
+    is delivered: for ``S.sf -> T.tf`` through mapping ``m`` and transform
     ``t``, ``t(m(S.sf))``.  The node-inlined twin of
     :func:`inline_geometry` moves ``m`` into the *target*, so its edge
     delivers the raw ``S.sf`` and its interface norm is another norm: the
@@ -629,7 +651,7 @@ def relay_twin(graph: GGraph) -> GGraph:
     edges: list = []
     relayed: dict = {}
     for e in graph.edges:
-        if e.mapping is None:
+        if e.mapping is None or (keep is not None and keep(e)):
             edges.append(e)
             continue
         gfield = None
@@ -648,14 +670,19 @@ def relay_twin(graph: GGraph) -> GGraph:
     return GGraph(nodes, edges, list(graph.groups))
 
 
-def transform_twin(graph: GGraph) -> GGraph:
+def transform_twin(graph: GGraph, *, keep=None) -> GGraph:
     """*graph* with every *static* mapping written as its edge's transform:
     the same nodes, the same state, plain edges, and on each formerly
     mapped edge the transform ``v -> t(m(v))`` (the mapping with its own
-    weights, then the edge's transform ``t``).
+    weights, then the edge's transform ``t``).  An edge *keep* names (a
+    predicate; :func:`read_at_its_source` for a comparison under the
+    interface norm) stays as it is.
 
-    The interface norm reads an edge through its mapping and then its
-    transform, so the twin's reading is the edge-mapped graph's and --
+    The interface norm reads an edge as delivered, through its mapping
+    and then its transform -- unless the mapping delivers more entries
+    than its source holds, when it reads the source field and a transform
+    in the mapping's place would be read as delivered (*keep*) -- so the
+    twin's reading is the edge-mapped graph's and --
     unlike :func:`relay_twin` -- so is its state.  A mapping that reads a
     geometry cannot be written this way (a transform sees the value
     only), which is what :func:`relay_twin` is for.  The weights are
@@ -665,7 +692,7 @@ def transform_twin(graph: GGraph) -> GGraph:
     """
     edges = []
     for e in graph.edges:
-        if e.mapping is None:
+        if e.mapping is None or (keep is not None and keep(e)):
             edges.append(e)
             continue
         assert e.geometry is None, f"{e}: a geometry-dependent mapping is not a transform"

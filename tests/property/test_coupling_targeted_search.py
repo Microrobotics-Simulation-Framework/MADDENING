@@ -254,7 +254,9 @@ def _reads_a_recomputed_field(cell) -> bool:
     if cell.knobs.get("convergence_norm") != "interface":
         return False
     edges = [cell.topo.edges[i] for i in cell.topo.internal_edges(0)]
-    whole = {e.src for e in edges if not e.mapped and e.transform is None}
+    # A mapping read at its source measures its source whole
+    # (``ct.measured_whole``): the set the library's return rule keeps.
+    whole = ct.measured_whole(cell.topo, 0)
     return any(e.src not in whole for e in edges)
 
 
@@ -1592,12 +1594,12 @@ def test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_score(name)
 # =============================================================================
 #
 # ``convergence_norm="interface"`` reads a mapped internal edge on one side
-# of its mapping.  The decision of 2026-10-07 is the *compact* side (a
-# target larger than its source is read at the source; a tie and a smaller
-# target as delivered); this tree reads what every edge delivers
-# (``ct.INTERFACE_SIDE``).  A wrong side is a criterion that is diluted by
-# the large field's entry count, or measured on a scale the consumer never
-# sees, and a fifth score finds either:
+# of its mapping: the *compact* side (the decision of 2026-10-07, which the
+# library implements: ``ct.INTERFACE_SIDE``).  A target larger than its
+# source is read at the source; a tie and a smaller target as delivered.
+# A wrong side is a criterion that is diluted by the large field's entry
+# count, or measured on a scale the consumer never sees, and a fifth score
+# finds either:
 #
 # 5. *side* (``"side"``): where the group reports ``converged`` under the
 #    interface norm, the true distance to the fixed point in the compact
@@ -1611,12 +1613,15 @@ def test_a_constant_the_pass_does_not_resolve_is_not_in_the_gradient_score(name)
 # dense, dense with a local (interpolation) matrix, or sparse; the loop
 # gain; and how far from the fixed point the step starts.
 #
-# **Where it holds today** is where the two rules read the same thing: the
-# tie.  Every other cell has an edge onto a larger target and waits for the
-# rule (:data:`SIDE_AWAITING`): the per-push search runs the tie -- and one
-# cell of ratio 300 from the day ``ct.INTERFACE_SIDE`` says ``"compact"``
-# -- and what the hunt reaches on the rest today is pinned below, strict,
-# beside the dilution pins of ``test_coupling_interface_side.py``.
+# **Every cell is claimed.**  While the library read every edge as
+# delivered the claim held only where the two rules read the same thing
+# (the tie); every other cell has an edge onto a larger target
+# (:data:`SIDE_AWAITING`), the hunt over those was a strict expected
+# failure, and two cases it reached were pinned (3.73 and 4.72 ``K``
+# tolerances).  With the rule the per-push search runs the tie and one
+# cell of ratio 300, the slow hunts run every cell, and the two pinned
+# cases are held as fixed, beside the rows of
+# ``test_coupling_interface_side.py``.
 #
 # The same structures at small sizes join :data:`CELLS` (after every cell
 # the searches above index, which keep their numbers), so the four scores
@@ -1666,9 +1671,9 @@ SIDE_CANCELLING_CELLS = tuple(range(len(CELLS) + len(SIDE_DIAGNOSED),
 SIDE_CANCEL = Domain(cancel=30.0)
 CELLS = CELLS + SIDE_DIAGNOSED + SIDE_CANCELLING
 
+#: False: the library reads the compact side.  (Under a delivered-side
+#: library the cells with an edge onto a larger target were not claimed.)
 AWAITING_THE_SIDE_RULE = ct.INTERFACE_SIDE != "compact"
-SIDE_DECISION = ("the interface norm reads a mapped edge on its compact side (decision of "
-                 "2026-10-07); this tree reads what a scatter delivers")
 SIDE_CAP = 200
 _SIDE_ACCELERATIONS = (
     dict(acceleration="none"), dict(acceleration="aitken"),
@@ -1807,31 +1812,27 @@ def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances():
     assert converged >= USABLE_FLOOR
 
 
-# Slow: the cells that wait for the rule (some thirty compiles on this tree).  Strict:
-# until the rule lands the hunt must *reach* the dilution, which is what
-# shows the score can find a wrong side; afterwards these cells are claimed
-# and the test above hunts them.
+# Slow: the cells with an edge onto a larger target (some thirty compiles).
+# While the library read every edge as delivered this hunt was a strict
+# expected failure: it *reached* the dilution, which is what shows the score
+# can find a wrong side.  The test above hunts these cells too, among all;
+# this one gives them a budget of their own.
 # Per push: tests/property/test_coupling_targeted_search.py::test_a_known_side_defect_the_search_reached_is_fixed
 @pytest.mark.slow
-@pytest.mark.xfail(AWAITING_THE_SIDE_RULE, strict=True, raises=AssertionError,
-                   reason=SIDE_DECISION)
 def test_the_hunt_finds_no_interface_quantity_beyond_K_tolerances_on_a_larger_target():
     search_side(SIDE_AWAITING, dataclasses.replace(SLOW, max_examples=SLOW.max_examples // 4).seeded(
         HUNT_SEED["side-awaiting"]))
 
 
-def _known_side(case: SideCase):
-    return pytest.param(case, marks=pytest.mark.xfail(
-        AWAITING_THE_SIDE_RULE, strict=True, raises=AssertionError, reason=SIDE_DECISION))
-
-
-#: What the fifth search reaches on this tree: a converged pair whose one
-#: marker value is several ``K`` tolerances from its fixed point, the
-#: scatter onto 300 entries pooled into the norm.  Each is over the
-#: threshold by a factor of two or more on jaxlib 0.10.2, 0.11.0 and 0.11.2.
+#: What the fifth search reached while the library read every edge as
+#: delivered: a converged pair whose one marker value was several ``K``
+#: tolerances from its fixed point (3.73 and 4.72), the scatter onto 300
+#: entries pooled into the norm.  Each was over the threshold by a factor
+#: of two or more on jaxlib 0.10.2, 0.11.0 and 0.11.2; read on the compact
+#: side each is within it.
 KNOWN_SIDE = {
-    "a-scatter-onto-300-sparse": _known_side(SideCase(1, 1, 0.6, 1.0)),
-    "a-scatter-onto-300-dense-local": _known_side(SideCase(2, 3, 0.5, 1.0)),
+    "a-scatter-onto-300-sparse": SideCase(1, 1, 0.6, 1.0),
+    "a-scatter-onto-300-dense-local": SideCase(2, 3, 0.5, 1.0),
 }
 
 

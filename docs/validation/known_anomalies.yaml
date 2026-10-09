@@ -16094,6 +16094,22 @@ anomalies:
       Gauss-Seidel (under Jacobi the difference is of two floats of the
       iterate, exact in either dtype), a member that multiplies two other
       members' fields, and units 1e3 or more apart (nothing at 1e1).
+      That is where it passes the flag's margin.  Below the margin it
+      needs neither the two fields nor the units: a float32 Gauss-Seidel
+      member with a quadratic term or a product of curvature 100 over
+      the size of the field it reads has a derivative one rounding of a
+      same-pass value moves by 2.4e-5, and the float32 pass's Jacobian
+      has a radius up to 5e-4 of itself from the exact one at the
+      returned state (5e-5 at a curvature of 10; no larger at a change
+      of units of 6 decades than at 1, with and without a mapping; 100
+      random draws on each of six cells, jaxlib 0.11.2).  `rho_spectral`
+      is the float32 pass's to 2e-8 there, and CPL-087's second
+      statement (1e-4 of the radius and its movement under a rounding of
+      the Jacobian) read 1.53 of its allowance on a mapped ring of three
+      (0.404214 for 0.404298; jaxlib 0.10.2 and 0.11.2, CI and one
+      development machine, the same numbers) and 2.3 on a ring with no
+      mapping, with 0.3% of the flag's margin used: the first statement
+      held.
       `spectral_error_bound` held on every such example (at most 0.82 of
       the distance), and so did the gradient bound for the gradient the
       group computes.  The spectral keys are new in 0.4.0; no release
@@ -16135,6 +16151,7 @@ anomalies:
       work that holds each coupling flag to a stated domain.
     verification:
       - "tests/property/test_coupling_nonlinear_search.py::test_a_settled_radius_is_the_radius_where_a_same_pass_rounding_moves_the_jacobian"
+      - "tests/property/test_coupling_nonlinear_search.py::test_a_radius_settled_in_a_float32_sweep_is_the_radius_of_the_pass_s_own_jacobian"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-240"

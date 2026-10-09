@@ -1257,8 +1257,11 @@ at the source carries none.
   it was computed from, the positions' among them for a delivered one,
   and at least `eps |u|` for the positions `u` it depends on, in
   spacings from zero (their stored rounding moves a kernel weight by as
-  much); a position counts at `eps |u|` of one spacing.  Every `eps` is
-  taken no finer than the group's coarsest floating dtype's.  For a
+  much); a position counts at `eps |u|` of one spacing.  A value's `eps`
+  is taken no finer than the group's coarsest floating dtype's; the
+  `eps` of `eps |u|` is always that of the positions' own dtype, so
+  float64 positions beside float32 fields put only float64's `eps |u|`
+  into the floor.  For a
   delivered value `eps |u|` **assumes a field that varies across one
   cell by about the size of the value delivered**: it is early for a
   smoother field and it does not see a value far smaller than the

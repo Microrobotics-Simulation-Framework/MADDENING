@@ -980,11 +980,12 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     run-time reading is the report's: ``coupling_diagnostics()`` gives
     the floor of the state every step returned
     (``residual_precision_floor``) and ``precision_limited``
-    (:func:`_floor_reading_of_a_norm_withheld_report`).  The two differ
-    in one respect: the floor counts every entry at the coarsest
-    floating dtype among the group's fields (a position computed from a
-    coarser member's output may carry that member's rounding), and this
-    advisory speaks of the dtype the positions are stored in.
+    (:func:`_floor_reading_of_a_norm_withheld_report`).  The two count
+    a position alike, at the ``eps`` of the dtype it is stored in
+    (``acceleration._positions_resolution``; the group's coarsest
+    floating dtype is for the floor's value entries): float64 positions
+    beside float32 fields are silent here and put only float64's
+    ``eps |u|`` into the report's floor.
     *evaluations* is the group's structural count
     (:func:`_group_evaluations`, on the compiled schedule): the count a
     step measures with ``diagnostics=True`` can be larger.
@@ -1049,9 +1050,8 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
             remedies.insert(0, (
                 f"hold {node}.{field} in float64 (under jax_enable_x64; the mapping computes "
                 f"its weights in the geometry's dtype and casts them to the field's, so the "
-                f"other fields can stay as they are for this count; the report's "
-                f"precision_limited counts every entry at the coarsest floating dtype among "
-                f"the group's fields)"))
+                f"other fields can stay as they are: the report's floor counts a position "
+                f"at its own dtype too)"))
         out.append(
             f"coupling group {names} (convergence_norm='interface', rtol={rtol:g}): "
             f"{subject} They reach "

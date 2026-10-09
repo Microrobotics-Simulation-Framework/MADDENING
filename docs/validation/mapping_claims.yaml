@@ -2761,9 +2761,17 @@ claims:
     point (2.9 to 20 tolerances: one float32 rounding of them there is 6
     to 46); the same pair in float64 reads a floor under 1e-4 tolerances
     within 1e-3 of its fixed point; float64 positions beside float32
-    values are counted at float32's rounding (CPL-100: flagged, with these
-    positions a thousandth of a tolerance off: the conservative
-    direction); positions written 7000 spacings out with set_node_state
+    values are counted at their own dtype's rounding (CPL-100: the
+    group's coarsest eps is for value entries), so that pair reads the
+    floor of its value parts alone, 0.078 of a tolerance, on each of four
+    steps of the drift (its positions within a tenth of a tolerance of
+    the fixed point after the fourth; 53 to 262 tolerances of floor with
+    float32 positions) and, placed 100 and 5000
+    spacings out or written 7000 out and reloaded, the same floor (0.095
+    with the scatter anchored at its target) with precision_limited
+    False where the residual is above it, beside the float32-positions
+    pair's 7 to 8 tolerances at 100 spacings and 337 to 390 at 5000 with
+    precision_limited True; positions written 7000 spacings out with set_node_state
     (no warning; the next step's floor over 100 times the one before, the
     flag True), and a checkpoint of that state loaded into a graph
     compiled near zero, whose state, report and next step equal those of
@@ -2804,7 +2812,9 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_fallback_floor_says_it_cannot_be_served_where_only_the_step_could_measure_it'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_markers_that_drift_past_what_their_dtype_resolves_are_flagged_at_every_step'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_same_drift_in_float64_reads_a_floor_far_under_the_tolerance'
-    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_beside_float32_fields_are_counted_at_the_groups_coarsest_dtype'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_that_drift_beside_float32_fields_keep_the_floor_of_the_values'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_far_from_zero_beside_float32_fields_are_not_flagged'
+    - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_float64_positions_written_far_from_zero_leave_the_floor_where_it_was'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_positions_written_or_loaded_far_from_zero_are_flagged_by_the_next_step'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_written_state_in_float64_is_not_flagged'
     - 'tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_floor_of_a_report_no_step_measured_is_not_reported_and_says_why'
@@ -2989,10 +2999,13 @@ claims:
     that part's whole floor only where the positions' rounding is coarser
     than the value's own (from one spacing out, for positions no wider
     than the value). The advisory speaks of the dtype the positions are
-    stored in; the report's floor counts every entry at the group's
-    coarsest dtype (CPL-100), so float64 positions beside float32 fields
-    compile silently and read precision_limited=True where the residual
-    is at or below float32's count. Tested two thousandths either side of that distance
+    stored in, and the report's floor counts a position at that dtype
+    too (a value at the group's coarsest; CPL-100), so float64 positions
+    beside float32 fields compile silently and read the floor of their
+    value parts alone (0.078 to 0.095 of a tolerance at rtol=1e-5 under
+    Gauss-Seidel, 100 to 7000 spacings out), with
+    precision_limited True only where the residual is at or below that.
+    Tested two thousandths either side of that distance
     at rtol=1e-4 and 1e-3, on one and two axes and both signs, for pairs
     of scatters, of gathers and of one of each; in float64 at rtol=1e-12;
     with the far markers on one node of the pair only, on every kind and

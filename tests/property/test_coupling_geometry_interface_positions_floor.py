@@ -14,8 +14,10 @@ merged, and one condition of the claim:
   returned (``residual_precision_floor``) and ``precision_limited`` by the
   rule of every group's report.  The oracle is the rule restated in NumPy
   from the stored numbers: four roundings per evaluation of every entry a
-  part holds, a value at the group's coarsest ``eps``, positions at that
-  ``eps`` times their distance from zero in spacings, pooled.
+  part holds, a value at the group's coarsest ``eps``, positions at their
+  own dtype's ``eps`` times their distance from zero in spacings, pooled.
+  So float64 positions beside float32 fields put only float64's
+  ``eps |u|`` into the floor.
 * **The count is an assumption for a delivered value.**  It takes the
   field to vary across a cell by about the size of the value delivered.
   A gather that samples a field near its zero is moved by more, and the
@@ -261,7 +263,15 @@ def write_far(gm, pair: Pair, by: float) -> None:
 
 
 def coarsest_eps(pair: Pair) -> float:
+    """What a value entry is counted at: the coarsest floating dtype among
+    the group's fields, the positions' among them."""
     return max(float(np.finfo(np.dtype(d)).eps) for d in (pair.dtype, pair.geometry_dtype))
+
+
+def positions_eps(pair: Pair) -> float:
+    """What a stored position is counted at: its own dtype, whatever the
+    fields beside it are held in."""
+    return float(np.finfo(np.dtype(pair.geometry_dtype)).eps)
 
 
 def coordinates_read(pair: Pair, positions: np.ndarray) -> np.ndarray:
@@ -280,8 +290,10 @@ def coordinates_read(pair: Pair, positions: np.ndarray) -> np.ndarray:
 
 def floor_parts(pair: Pair, pre: dict, post: dict) -> list:
     """``[(entries, resolution), ...]`` of the reading at the state *post*
-    a step returned from *pre*: every entry of a part at one resolution."""
-    eps = coarsest_eps(pair)
+    a step returned from *pre*: every entry of a part at one resolution.
+    A value is at the group's coarsest ``eps``; positions, as a part and
+    as what a delivered value was computed at, are at their own."""
+    eps, eps_p = coarsest_eps(pair), positions_eps(pair)
     h = np.asarray(pair.spacing)
 
     def reach(positions, delivered):
@@ -296,18 +308,18 @@ def floor_parts(pair: Pair, pre: dict, post: dict) -> list:
         parts.append((pair.m, eps))
         if pair.anchors[0] == "source":
             parts.append((post["markers"]["pos"].size,
-                          eps * reach(post["markers"]["pos"], False)))
+                          eps_p * reach(post["markers"]["pos"], False)))
     else:                               # read as delivered
         at = post["markers"]["pos"] if pair.anchors[0] == "source" else pre["grid"]["gp"]
-        parts.append((pair.n, max(eps, eps * reach(at, True))))
+        parts.append((pair.n, max(eps, eps_p * reach(at, True))))
     # The gather, n entries onto m points.
     if pair.m > pair.n:                 # read at its source
         parts.append((pair.n, eps))
         if pair.anchors[1] == "source":
-            parts.append((post["grid"]["gp"].size, eps * reach(post["grid"]["gp"], False)))
+            parts.append((post["grid"]["gp"].size, eps_p * reach(post["grid"]["gp"], False)))
     else:                               # read as delivered
         at = post["grid"]["gp"] if pair.anchors[1] == "source" else pre["markers"]["pos"]
-        parts.append((pair.m, max(eps, eps * reach(at, True))))
+        parts.append((pair.m, max(eps, eps_p * reach(at, True))))
     return parts
 
 
@@ -491,32 +503,118 @@ def test_the_same_drift_in_float64_reads_a_floor_far_under_the_tolerance():
         assert scaled_change(pair, stored(gm), star, pre, reference=star) < 1e-3
 
 
-def test_float64_positions_beside_float32_fields_are_counted_at_the_groups_coarsest_dtype():
-    """The floor counts every entry of a group at the coarsest floating
-    dtype among its fields (CPL-100: a field computed from a coarser
-    member's output may carry that member's rounding), positions among
-    them.  So float64 positions beside float32 values are counted at
-    float32's rounding by the report -- flagged, with a floor of hundreds
-    of tolerances -- although these positions, which the markers' update
-    increments, settle to a thousandth of a tolerance, and although
-    ``compile()``'s advisory, which speaks of the dtype the positions are
-    stored in, is silent at the far state too.  The conservative
-    direction, stated in the guide; pinned so that a change of either
-    rule shows."""
+#: The floor of a float32 pair whose positions are held in float64, in
+#: tolerances: the value parts alone, at any distance (``rtol=1e-5``,
+#: Gauss-Seidel).  With the scatter anchored at its source the positions
+#: are a part of the reading, of as many entries as the two value parts
+#: have each, and put ``eps64 |u|`` into the pool where the values put
+#: ``eps32``: 0.078.  Anchored at its target there are the two value
+#: parts only: 0.095.
+VALUES_ALONE = {
+    ("source", "target"): ULPS * EVALUATIONS * float(np.finfo(np.float32).eps) * math.sqrt(
+        2.0 / 3.0) / DRIFTING.rtol,
+    ("target", "source"): ULPS * EVALUATIONS * float(np.finfo(np.float32).eps) / DRIFTING.rtol,
+}
+
+
+def test_float64_positions_that_drift_beside_float32_fields_keep_the_floor_of_the_values():
+    """A position is counted at its own dtype's ``eps`` (CPL-100: the
+    group's coarsest is for value entries).  The drifting pair with its
+    positions in float64 and its fields in float32 reads the floor of its
+    value parts on every step, 0.078 of a tolerance, where the float32
+    positions read 53 rising to 262; the positions, which the markers'
+    update increments, are within a hundredth of a tolerance of the
+    fixed point; and ``compile()``'s advisory is silent at the far state
+    too.  ``precision_limited`` is ``True`` on this pair all the same,
+    as it is with every field in float64: the pass settles exactly, and
+    a residual of 0.0 is at or below any floor.  The floor's size is the
+    reading."""
     pair = dataclasses.replace(DRIFTING, pos_dtype="float64")
     gm, advisories = build(pair)
     assert advisories == []
-    for _ in range(2):
+    for step in range(4):
         pre = stored(gm)
         gm.step()
         d = _checked(pair, gm, pre)
-    assert d["precision_limited"] is True and d["residual_precision_floor"] > 50.0, d
-    star = fixed_point(pair, pre)
+        assert d["residual_precision_floor"] == pytest.approx(
+            VALUES_ALONE[pair.anchors], rel=1e-5), (step, d)
+        assert d["converged"] is True and d["residual"] == 0.0, (step, d)
+        assert d["precision_limited"] is True, (step, d)
     post = stored(gm)
+    assert float(np.max(post["markers"]["pos"])) / pair.spacing[0] > 0.9 * 950.0 * 4
+    star = fixed_point(pair, pre)
     off = np.max(np.abs(post["markers"]["pos"] - star["markers"]["pos"])) / pair.spacing[0]
     assert off / pair.rtol < 0.1, off / pair.rtol
     far = dataclasses.replace(pair, u0=float(np.max(post["markers"]["pos"])) / pair.spacing[0])
     assert build(far)[1] == []
+
+
+@pytest.mark.parametrize("u0", [100.0, 5000.0])
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+def test_float64_positions_far_from_zero_beside_float32_fields_are_not_flagged(anchors, u0):
+    """The remedy the advisory names, read by the report: a float32 pair
+    placed 100 and 5000 spacings from zero with its positions held in
+    float64.  ``compile()`` is silent, the floor is that of the value
+    parts (0.078 or 0.095 of a tolerance, the same at both distances),
+    the residual the pair stops at is above it, so ``precision_limited``
+    is ``False``, and the state is within a tolerance of the float64
+    fixed point.  Beside it the pair with float32 positions, which IS
+    precision-limited there: warned of at ``compile()``, with a floor of
+    7 and 8 tolerances at 100 spacings and 337 and 390 at 5000."""
+    pair = Pair(u0=u0, anchors=anchors, pos_dtype="float64")
+    gm, advisories = build(pair)
+    assert advisories == []
+    pre = stored(gm)
+    gm.step()
+    d = _checked(pair, gm, pre)
+    assert d["residual_precision_floor"] == pytest.approx(VALUES_ALONE[anchors], rel=1e-5), d
+    assert d["converged"] is True and d["residual"] > d["residual_precision_floor"], d
+    assert d["precision_limited"] is False, d
+    star = fixed_point(pair, pre)
+    assert scaled_change(pair, stored(gm), star, pre, reference=star) < 1.0
+    # The same pair with its positions in float32.
+    narrow = dataclasses.replace(pair, pos_dtype=None)
+    gm, advisories = build(narrow)
+    assert GATHER in warned(advisories), advisories
+    pre = stored(gm)
+    gm.step()
+    flagged = _checked(narrow, gm, pre)
+    assert flagged["precision_limited"] is True, flagged
+    assert flagged["residual_precision_floor"] > 0.06 * u0 > 60.0 * d[
+        "residual_precision_floor"], (flagged, d)
+
+
+@pytest.mark.parametrize("anchors", ALL_ANCHORS[:2], ids="-".join)
+def test_float64_positions_written_far_from_zero_leave_the_floor_where_it_was(anchors, tmp_path):
+    """The state write and the loaded checkpoint of the float32 pair, with
+    the positions in float64: 7000 spacings out the floor is the one the
+    pair read 6 spacings out (the value parts'), under a tenth of a
+    tolerance, where float32 positions read 472 and 546; and the loaded
+    graph reads what the graph that was never reloaded reads."""
+    pair = Pair(anchors=anchors, pos_dtype="float64")
+    gm, advisories = build(pair)
+    assert advisories == []
+    pre = stored(gm)
+    gm.step()
+    near = _checked(pair, gm, pre)
+    write_far(gm, pair, 7000.0)
+    pre = stored(gm)
+    gm.step()
+    far = _checked(pair, gm, pre)
+    for d in (near, far):
+        assert d["converged"] is True, d
+        assert d["residual_precision_floor"] == pytest.approx(VALUES_ALONE[anchors], rel=1e-5), d
+    path = gm.save_state(tmp_path / "far.npz")
+    other, _ = build(pair)
+    other.load_state(path)
+    assert same_reports(report(other), far)
+    pre = stored(gm)
+    gm.step()
+    other.step()
+    again = _checked(pair, gm, pre)
+    assert same_reports(report(other), again), (report(other), again)
+    assert again["converged"] is True, again
+    assert again["residual_precision_floor"] == pytest.approx(VALUES_ALONE[anchors], rel=1e-5)
 
 
 def _written_and_loaded(anchors, tmp_path):

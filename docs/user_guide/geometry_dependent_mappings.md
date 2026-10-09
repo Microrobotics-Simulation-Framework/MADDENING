@@ -308,22 +308,28 @@ names the edge and says what to do.
   `precision_limited` is more sensitive than the
   advisory: it is `True` wherever the residual is at or below the
   pooled floor, which a converged residual often is well under the
-  advisory's distance.  And it counts every entry at the coarsest
-  floating dtype among the group's fields (a field computed from a
-  coarser member's output may carry that member's rounding), so
-  float64 positions beside float32 fields are counted at float32's
-  rounding by the report, while the advisory speaks of the dtype the
-  positions are stored in.
+  advisory's distance.  The floor counts a position at the rounding of
+  the dtype it is stored in, as the advisory does, and a value at the
+  coarsest floating dtype among the group's fields (a field computed
+  from a coarser member's output may carry that member's rounding).  So
+  float64 positions beside float32 fields put only float64's rounding
+  of their distance into it (1e-12 of a spacing 5000 spacings out):
+  the float32 pair above without its drift and with
+  its positions held in float64 reads a floor of 0.078 of a tolerance
+  (its values' share) placed 100 or 5000 spacings out or written 7000
+  out, where float32 positions read 8.1, 390 and 546, and
+  `precision_limited=False` wherever its residual is above that.
 
   The message names the edge, the node and field that store the
   positions, which of the two readings it is, the distance and the
   dtype, and three remedies:
   - hold the positions in float64.  This needs `jax_enable_x64`; the
     mapping computes its weights in the geometry's dtype and casts them to
-    the field's, so the other fields can stay float32 as far as the
-    advisory and the solve go (the report's `precision_limited` then
-    still counts float32's rounding, as above; hold the group's fields
-    in float64 for a floor at float64's);
+    the field's, so the other fields can stay float32: the advisory,
+    the solve and the report's floor all take the positions at
+    float64's rounding (the floor is then the float32 values' own, as
+    above; hold the group's fields in float64 too for a floor at
+    float64's);
   - use coordinates local to the grid, so that the positions are small
     numbers (the origin of the coordinates near the markers);
   - loosen `rtol`.

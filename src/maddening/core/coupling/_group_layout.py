@@ -469,14 +469,26 @@ def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
         keys=list(keys), why=why.format(gap=gap, allowed=allowed))
 
 
-#: The flags of a group whose pass resolves a geometry-dependent mapping
-#: and whose step passed its self-check, cause by cause
-#: (:func:`_geometry_flags`).  Each cause is one clause of the report's
-#: ``not_usable_reason``; the stem names the edges where a lattice plane
-#: is a cause.
-_GEOMETRY_FLAGS_STEM = (
-    "the group resolves geometry-dependent mapping(s) on edge(s) {keys}; "
+#: The one reason of a group that solves the positions of a
+#: geometry-dependent mapping (:func:`_geometry_flags`): neither flag is
+#: set for it in 0.4.0, on any step.
+_GEOMETRY_SOLVED_REASON = (
+    "the group solves position(s) {solved} read by geometry-dependent mapping(s) on "
+    "edge(s) {keys} (its pass reads them from the iterate, or builds them and reads them "
+    "in the same pass), and 0.4.0 does not certify a bound for such a group: "
+    "spectral_usable and gradient_bound_usable are False on every step, because a lattice "
+    "plane of the mapping's grid within reach of the solve makes the pass another "
+    "polynomial, with another fixed point or none, and three independent audits each found "
+    "a flag set beside a wrong number there (MADD-ANO-248). The numbers are reported as "
+    "computed, uncertified. The flags are available where every position is fixed during "
+    "the pass (a target-anchored geometry read by update, or positions held by a node "
+    "outside the group); no convergence_norm restores them for this group in 0.4.0."
 )
+#: The causes of a ``False`` flag of a group whose pass resolves a
+#: geometry-dependent mapping at positions that are constants of the
+#: pass (:func:`_geometry_flags`): a smooth group's, each one clause of
+#: the report's ``not_usable_reason``.  None names a lattice plane: no
+#: plane can come between the iterate and the fixed point of such a pass.
 _CAUSE_BOUND_NOT_FINITE = (
     "spectral_error_bound is {bound} (the linearised pass does not contract at the "
     "returned iterate, or the estimate could not be evaluated)"
@@ -493,48 +505,15 @@ _CAUSE_FLOOR = (
     "rests on is not checked; the residual is rounding there, and a tighter tolerance does "
     "not lower it"
 )
-_CAUSE_ON_PLANE = (
-    "a position the pass reads from the iterate is on a lattice plane of the mapping's "
-    "grid or on a face of its hull (within {ulps:g} float resolutions), where no tolerance "
-    "restores the flags, or the pass itself moves it across one: the plane is inside the "
-    "Newton-Kantorovich ball around the returned iterate at any residual, so the lattice "
-    "cell of the fixed point is not decided (hold the position constant during the pass, or "
-    "keep it a fraction of a cell off the planes). On a plane the Newton-Kantorovich "
-    "check's own outcome is rounding's: the Newton point falls on either side of it, so "
-    "gradient_relative_error_bound can read inf on one step and a number on the next for "
-    "the same state"
+#: The step's own record of which positions its pass read is missing:
+#: the state the report reads was not written by this build's step.
+_CAUSE_NOT_RECORDED = (
+    "the step did not record that every position of the group's geometry-dependent "
+    "mapping(s) on edge(s) {keys} was fixed during its pass (geometry_plane_limit and "
+    "geometry_plane_margin, which this build's step writes as inf for such a group, read "
+    "{limit:g} and {margin:g}: the state was not written by this build's step), so nothing "
+    "says which positions that step read; the flags return when the group steps"
 )
-_CAUSE_IN_BALL = (
-    "a lattice plane of the mapping's grid, or a face of its hull, is inside the "
-    "Newton-Kantorovich ball around the returned iterate ({reach:g} Newton steps plus the "
-    "float floor; the nearest plane is {margin:.3g} radii of that ball from a position the "
-    "pass reads from the iterate), so the fixed point of the lattice cell's polynomial may "
-    "lie across it, where the pass is another polynomial with another fixed point, or none"
-)
-#: Said only where the residual is above its floor: a precision-limited
-#: report has no tighter tolerance to go to.
-_ADVICE_IN_BALL = (
-    " (the ball shrinks with the residual: at a tighter tolerance the plane leaves it, "
-    "unless the fixed point is itself that close to a plane or across it, and then the "
-    "iterate follows it there)"
-)
-_CAUSE_BALL_UNMEASURED = (
-    "how far the lattice planes of the mapping's grid are from the Newton-Kantorovich ball "
-    "around the returned iterate was not measured (geometry_plane_margin is absent or not "
-    "a number: the state was not written by this build's step, or the Jacobian's range was "
-    "not captured by the step's {steps} directions, which more independent interface "
-    "scalars than that give), so the lattice cell of the fixed point is not known"
-)
-_CAUSE_LIMIT = (
-    "a position the pass reads from the iterate is within {reach:g} times "
-    "spectral_error_bound of a lattice plane of the mapping's grid or of a face of its hull "
-    "(spectral_error_bound is {bound:.3g}; no plane is within its reach up to {limit:.3g} at "
-    "this state) and the Newton-Kantorovich check behind gradient_relative_error_bound "
-    "{check}, so nothing certifies that the lattice cell's polynomial has a fixed point "
-    "within that reach"
-)
-_CHECK_NOT_PASSED = "did not pass (it is inf)"
-_CHECK_NOT_COMPUTED = "was not computed (it is NaN)"
 _CAUSE_GRADIENT_NAN = (
     "gradient_relative_error_bound was not computed (NaN): the Jacobian's range was not "
     "captured by the bound's {steps} directions (more independent interface scalars than "
@@ -546,69 +525,71 @@ _CAUSE_GRADIENT_INF = (
 )
 
 
-def _geometry_flags(keys, *, bound: float, gradient_bound: float, rho: float,
+def _geometry_flags(keys, *, solved, bound: float, gradient_bound: float, rho: float,
                     arnoldi_residual: float, settled: bool, precision_limited: bool,
-                    declared: bool, limit: Optional[float], margin: Optional[float],
-                    reach: float, ulps: float, fraction: float,
+                    declared: bool, limit, margin, fraction: float,
                     steps: int) -> tuple[bool, bool, Optional[str]]:
     """``(spectral_usable, gradient_bound_usable, reason)`` of a group whose
     pass resolves a geometry-dependent mapping the diagnostics read, from
-    what its step stored (experimental).
+    what ``compile()`` committed and its step stored (experimental).  The
+    one place the flags of such a group are decided.
 
-    Both flags are a smooth group's (*bound* finite, the estimate
-    *settled*, the floor counted where the residual is at it; and for the
-    gradient's a finite *gradient_bound*) **and two lattice-plane rules**,
-    each of which withdraws both:
+    **A group that solves positions has no flag in 0.4.0.**  *solved*
+    names the position fields the pass reads from the iterate, or builds
+    and reads in the same pass (``InterfacePlan.geometry_iterate_reads``,
+    the set the step takes ``geometry_plane_limit`` and
+    ``geometry_plane_margin`` over).  Where there is one, both flags are
+    ``False`` on every step, whatever the margin, the limit, the bounds or
+    the Newton-Kantorovich check read, and the reason is
+    :data:`_GEOMETRY_SOLVED_REASON`.  The numbers stay as computed.
 
-    * **the ball**: *margin*, the step's ``geometry_plane_margin``
-      (``_bounds._kantorovich_ball_plane_margin``, which has the
-      argument), must be over one.  Then the fixed point of the polynomial
-      the pass is in the returned iterate's lattice cells lies in those
-      cells, so it is a fixed point of the pass: what
-      ``spectral_error_bound`` is a bound *to*, and where the gradient
-      bound's Jacobians are taken.  With a plane in the ball that
-      polynomial's fixed point may be past the plane, where the pass is
-      another polynomial: both numbers then describe a point the pass
-      does not have (``spectral_usable`` stood on a bound 17 to 1,294
-      times under the distance, the iterate and the Newton point both
-      short of the plane, MADD-ANO-248).  A margin that is absent or not
-      a number is no margin; ``inf`` is a pass that reads no position
-      from the iterate.
-      A margin of zero is a position *on* a plane (or moved across one
-      by the pass), and is the whole of the reason: there the check's
-      outcome is rounding's.  Measured on a marker at rest at coordinate
-      0.0, the lower face of a lattice whose origin is 0.0: the Newton
-      step's entry for the position is rounding of the resolvent, about
-      1e-20 of either sign, which nothing absorbs at exactly zero, so the
-      Newton point was 1e-20 outside the hull on the steps where it was
-      negative -- the clamped kernel, another polynomial -- and the bound
-      read ``inf`` on 59 of those 60 steps and on none of the 53 where it
-      was positive.  The flags of such a state are ``False`` on every
-      step and its reason does not change with that reading.
-    * **the limit**: where a plane is within *reach* times the bound
-      (*bound* over *limit*, the step's ``geometry_plane_limit``; a limit
-      that is absent or not a number counts) the Newton-Kantorovich check
-      must have passed (*gradient_bound* finite).  This is the measured
-      half of the ball's one unproved assumption: that argument takes
-      ``h <= 1/2`` for the cell's polynomial, and the check is where the
-      step measures ``h``.  It does not follow from the ball (an entry
-      the Newton step hardly moves, with a plane between one Newton step
-      and twice the bound away, has a margin over one and a bound over
-      the limit), and the ball does not follow from it (the limit's reach
-      is the bound, which is not proved to be at least the Newton step).
+    Why no number sets a flag there: a multilinear stencil is one
+    polynomial inside a lattice cell and another in the next, and the
+    bounds are the linearisation at the returned iterate, which describes
+    the pass only in the cells its positions are in *there*.  Three rules
+    in turn tried to certify that the fixed point is in those cells (a
+    screen on the bound, MADD-ANO-242; the Newton-Kantorovich check where
+    a plane is within reach of the bound; a margin of the
+    Newton-Kantorovich ball to the nearest plane), and an independent
+    audit of each found ``spectral_usable`` set beside a bound far under
+    the distance (MADD-ANO-248).  The last: the margin's argument takes
+    the cell's polynomial to satisfy Newton-Kantorovich (``h <= 1/2``),
+    and a cell whose polynomial has no fixed point at all (a saddle-node
+    with a gap of 1e-5 to 1e-8), where the step's own check had failed
+    and the nearest plane was beyond the limit's reach, kept the flag on
+    a bound 34 to 1,874 times under the distance to the pass's only
+    fixed point, one cell on.  A sharper rule is not attempted in 0.4.0.
+
+    **A group whose positions are constants of the pass** (*solved* is
+    empty: a target-anchored geometry read by ``update``, positions held
+    by a node outside the group) has a smooth group's flags: *bound*
+    finite, the estimate *settled*, the floor counted where the residual
+    is at it; and for the gradient's a finite *gradient_bound*.  No plane
+    can come between the iterate and the fixed point of such a pass.  The
+    step's record must agree: it writes *limit* and *margin* as ``inf``
+    for such a group, and anything else there -- absent, not a number, a
+    finite number, or no *solved* record at all (``None``) -- sets no
+    flag (the state was not written by this build's step).
 
     *reason* is ``None`` where both flags stand, and where the step
     computed no spectral estimate (*rho* is NaN: the numbers say so
-    themselves).  Otherwise it gives every cause of each ``False`` flag:
-    a lattice plane is named only where a plane rule is a cause, a
-    gradient bound that was not computed (NaN) is told from one that did
-    not certify (``inf``), and a tighter tolerance is suggested only
-    where one can help (not on a plane, not at the float floor).
+    themselves).  Otherwise it is the one reason of a group that solves
+    positions, or every cause of each ``False`` flag of one that does
+    not: a gradient bound that was not computed (NaN) is told from one
+    that did not certify (``inf``).  No reason of a group whose positions
+    are constants names a lattice plane.
     """
     def number(value) -> float:
-        return float("nan") if value is None else float(value)
+        try:
+            return float("nan") if value is None else float(value)
+        except (TypeError, ValueError):
+            return float("nan")
 
+    if solved:
+        reason = _GEOMETRY_SOLVED_REASON.format(solved=list(solved), keys=list(keys))
+        return False, False, (None if rho != rho else reason)
     margin, limit = number(margin), number(limit)
+    recorded = solved is not None and margin == math.inf and limit == math.inf
     smooth = []
     if not math.isfinite(bound):
         smooth.append(_CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}"))
@@ -618,44 +599,26 @@ def _geometry_flags(keys, *, bound: float, gradient_bound: float, rho: float,
             steps=steps))
     if precision_limited and not declared:
         smooth.append(_CAUSE_FLOOR)
-    plane = []
-    if not margin > 1.0:
-        if margin != margin:
-            plane.append(_CAUSE_BALL_UNMEASURED.format(steps=steps))
-        elif margin <= 0.0:
-            plane.append(_CAUSE_ON_PLANE.format(ulps=ulps))
-        else:
-            plane.append(_CAUSE_IN_BALL.format(reach=reach, margin=margin)
-                         + ("" if precision_limited else _ADVICE_IN_BALL))
-    on_a_plane = margin <= 0.0
-    if (math.isfinite(bound) and not bound <= limit and not math.isfinite(gradient_bound)
-            and not on_a_plane):
-        plane.append(_CAUSE_LIMIT.format(
-            reach=reach, bound=bound, limit=limit,
-            check=_CHECK_NOT_COMPUTED if gradient_bound != gradient_bound
-            else _CHECK_NOT_PASSED))
+    if not recorded:
+        smooth.append(_CAUSE_NOT_RECORDED.format(keys=list(keys), limit=limit, margin=margin))
     own = []
     if gradient_bound != gradient_bound:
         own.append(_CAUSE_GRADIENT_NAN.format(steps=steps))
     elif not math.isfinite(gradient_bound):
         own.append(_CAUSE_GRADIENT_INF)
-    spectral_usable = not smooth and not plane
+    spectral_usable = not smooth
     gradient_bound_usable = spectral_usable and not own
-    if on_a_plane:
-        # What the gradient bound read there is not a cause: see above.
-        own = []
     if gradient_bound_usable or rho != rho:
         return spectral_usable, gradient_bound_usable, None
-    stem = _GEOMETRY_FLAGS_STEM.format(keys=list(keys)) if plane else ""
     if spectral_usable:
         told = "gradient_bound_usable is False (spectral_usable stands): " + "; ".join(own)
     else:
         told = ("spectral_usable is False, and gradient_bound_usable with it: "
-                + "; ".join(smooth + plane))
+                + "; ".join(smooth))
         if own:
             told += ". gradient_bound_usable has a cause of its own as well: " + "; ".join(own)
     return (spectral_usable, gradient_bound_usable,
-            stem + told + ". The numbers are reported as computed.")
+            told + ". The numbers are reported as computed.")
 
 
 _WRITTEN_BEFORE_SAVE_REASON = (

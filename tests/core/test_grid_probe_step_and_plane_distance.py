@@ -593,66 +593,102 @@ def test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor(dtype
 
 
 # ---------------------------------------------------------------------------
-# The report's reading of the two slots: both flags, and every cause
+# The report's flags: none for a group that solves positions; a smooth
+# group's where every position is a constant of the pass
 # ---------------------------------------------------------------------------
 
+_SOLVED = ("M.pos",)
+
+
 def _flags(**changed):
-    """``_geometry_flags`` of an honest report (both flags stand) with
-    *changed* inputs."""
+    """``_geometry_flags`` of an honest report of a group whose positions
+    are constants of the pass (both flags stand), with *changed* inputs."""
     from maddening.core.coupling import _group_layout       # noqa: PLC0415
 
-    inputs = dict(bound=1e-3, gradient_bound=2e-2, rho=0.5, arnoldi_residual=1e-9,
-                  settled=True, precision_limited=False, declared=False, limit=1.0,
-                  margin=3.0, reach=2.0, ulps=8.0, fraction=0.05, steps=8)
+    inputs = dict(solved=(), bound=1e-3, gradient_bound=2e-2, rho=0.5, arnoldi_residual=1e-9,
+                  settled=True, precision_limited=False, declared=False, limit=np.inf,
+                  margin=np.inf, fraction=0.05, steps=8)
     inputs.update(changed)
     return _group_layout._geometry_flags(["M.y->G.deposit"], **inputs)   # noqa: SLF001
 
 
-def test_both_flags_of_a_geometry_group_need_the_plane_margin_over_one():
-    """The spectral flag as the gradient's (MADD-ANO-248): a margin at one,
-    under it, not a number or absent withdraws both, whatever the limit and
-    the gradient bound read; over one, and ``inf`` (no position read from
-    the iterate), both stand."""
+def test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read():
+    """The rule of 0.4.0 (MADD-ANO-248): with a position the pass reads
+    from the iterate, both flags are ``False`` at every margin, limit,
+    bound and gradient bound -- the readings that set them under the three
+    earlier rules included -- and the reason is one sentence, the same at
+    every reading: what the group does, that the numbers are uncertified,
+    and the two ways to have the flags."""
     above = float(np.nextafter(1.0, 2.0))
-    for margin in (above, 3.0, np.inf):
+    reasons = set()
+    for margin in (np.inf, 1e30, 186.0, 3.0, above, 1.0, 0.25, 0.0, -1.0, np.nan, None):
         for limit in (np.inf, 1.0, 0.0, np.nan, None):
-            assert _flags(margin=margin, limit=limit) == (True, True, None), (margin, limit)
-    for margin in (1.0, 0.99, 1e-30, 0.0, -1.0, np.nan, None):
-        for limit in (np.inf, 1.0, 0.0):
+            for gradient in (2e-2, 0.0, np.inf, np.nan):
+                for more in ({}, {"bound": 0.0}, {"bound": np.inf, "settled": False},
+                             {"precision_limited": True, "declared": True},
+                             {"precision_limited": True}):
+                    spectral, gradient_flag, reason = _flags(
+                        solved=_SOLVED, margin=margin, limit=limit, gradient_bound=gradient,
+                        **more)
+                    assert (spectral, gradient_flag) == (False, False), (
+                        margin, limit, gradient, more)
+                    reasons.add(reason)
+    assert len(reasons) == 1, reasons
+    reason = next(iter(reasons))
+    for told in ("solves position(s) ['M.pos']", "edge(s) ['M.y->G.deposit']",
+                 "0.4.0 does not certify a bound for such a group",
+                 "spectral_usable and gradient_bound_usable are False on every step",
+                 "makes the pass another polynomial", "MADD-ANO-248",
+                 "reported as computed, uncertified",
+                 "a target-anchored geometry read by update",
+                 "positions held by a node outside the group",
+                 "no convergence_norm restores them for this group in 0.4.0"):
+        assert told in reason, (told, reason)
+    # The reasons of the rules that no longer decide anything are gone.
+    for gone in ("Newton-Kantorovich ball", "times spectral_error_bound of a",
+                 "tighter tolerance", "is on a lattice plane", "did not record"):
+        assert gone not in reason, (gone, reason)
+    # More than one solved field: each is named, in the order committed.
+    assert "['G.x', 'M.pos']" in _flags(solved=("G.x", "M.pos"))[2]
+    # No estimate: the flags are False and the NaN numbers are the reason.
+    assert _flags(solved=_SOLVED, rho=np.nan, bound=np.nan, gradient_bound=np.nan,
+                  settled=False, margin=np.nan, limit=np.nan) == (False, False, None)
+
+
+def test_constant_positions_keep_a_smooth_group_s_flags_only_where_the_step_recorded_them():
+    """Fail closed: with no position solved, the flags stand only where
+    both slots read ``inf``, which is what this build's step writes for
+    such a pass.  A slot that is absent, not a number, not numeric, or any
+    finite number (the reading of a step that had a reader), and a missing
+    record of what the pass solves, set no flag; the reason says the
+    record is missing and names no lattice plane."""
+    assert _flags() == (True, True, None)
+    above = float(np.nextafter(1.0, 2.0))
+    unrecorded = (None, np.nan, 3.0, above, 1.0, 0.0, -1.0, -np.inf, 1e30, "inf?", [1.0, 2.0],
+                  np.array([np.inf, np.inf]))
+    for slot in ("margin", "limit"):
+        for value in unrecorded:
             for gradient in (2e-2, np.inf, np.nan):
                 spectral, gradient_flag, reason = _flags(
-                    margin=margin, limit=limit, gradient_bound=gradient)
-                assert (spectral, gradient_flag) == (False, False), (margin, limit, gradient)
-                assert "Newton-Kantorovich ball" in reason and "M.y->G.deposit" in reason
+                    gradient_bound=gradient, **{slot: value})
+                assert (spectral, gradient_flag) == (False, False), (slot, value, gradient)
+                assert "did not record" in reason and "M.y->G.deposit" in reason, reason
+                assert "lattice plane" not in reason and "solves position" not in reason
+    spectral, gradient_flag, reason = _flags(solved=None)
+    assert (spectral, gradient_flag) == (False, False) and "did not record" in reason
+    # A zero-dimensional array is the slot's own form.
+    assert _flags(margin=np.asarray(np.inf, np.float32),
+                  limit=np.asarray(np.inf, np.float64)) == (True, True, None)
+    assert _flags(margin=np.asarray(2.5, np.float32))[:2] == (False, False)
 
 
-def test_the_limit_rule_stays_beside_the_margin_and_neither_implies_the_other():
-    """A margin over one with the bound over the limit: the flags stand on
-    a Newton-Kantorovich check that passed, and are withdrawn where it did
-    not (``inf``) or was not computed (NaN, an absent limit included) --
-    the measured half of the margin's one unproved assumption.  A bound
-    under the limit with a margin under one is withdrawn by the margin."""
-    assert _flags(margin=1.5, limit=1e-4) == (True, True, None)
-    for limit in (1e-4, 0.0, np.nan, None):
-        for gradient, told in ((np.inf, "did not pass (it is inf)"),
-                               (np.nan, "was not computed (it is NaN)")):
-            spectral, gradient_flag, reason = _flags(
-                margin=1.5, limit=limit, gradient_bound=gradient)
-            assert (spectral, gradient_flag) == (False, False), (limit, gradient)
-            assert "within 2 times spectral_error_bound of a lattice plane" in reason
-            assert told in reason and "Newton-Kantorovich ball" not in reason, reason
-    spectral, _gradient, reason = _flags(margin=0.5, limit=1.0)
-    assert spectral is False and "times spectral_error_bound of a" not in reason
-
-
-def test_a_false_flag_names_a_lattice_plane_only_where_a_plane_rule_is_a_cause():
+def test_a_false_flag_of_constant_positions_names_every_cause_and_no_lattice_plane():
     """Every cause of a ``False`` flag of a step that computed the estimate,
     and nothing else: the float floor, an estimate that did not settle, a
     bound that is not finite, a gradient bound that was not computed (NaN)
-    or did not certify (``inf``).  No plane is named with them, and no
-    tighter tolerance is suggested where none restores the flag (a
-    position on a plane; a residual at its floor).  With no estimate (a
-    NaN radius) the numbers say so and there is no reason."""
+    or did not certify (``inf``).  No lattice plane is named with any of
+    them.  With no estimate (a NaN radius) the numbers say so and there is
+    no reason."""
     spectral, gradient, reason = _flags(precision_limited=True)
     assert (spectral, gradient) == (False, False)
     assert "float floor" in reason and "update_evaluations" in reason
@@ -679,25 +715,11 @@ def test_a_false_flag_names_a_lattice_plane_only_where_a_plane_rule_is_a_cause()
     spectral, gradient, reason = _flags(precision_limited=True, margin=0.25,
                                         gradient_bound=np.inf)
     assert (spectral, gradient) == (False, False)
-    for told in ("float floor", "0.25 radii of that ball", "has a cause of its own",
-                 "gradient_relative_error_bound is inf"):
+    for told in ("float floor", "did not record", "read inf and 0.25",
+                 "has a cause of its own", "gradient_relative_error_bound is inf"):
         assert told in reason, (told, reason)
-    # A tighter tolerance: said for a plane in the ball above the floor only.
-    advice = "at a tighter tolerance the plane leaves it"
-    assert advice in _flags(margin=0.25)[2]
-    assert advice not in reason                              # at the float floor
-    assert advice not in _flags(margin=0.0)[2]               # on a plane
-    assert "no tolerance restores the flags" in _flags(margin=0.0)[2]
-    assert advice not in _flags(margin=np.nan)[2]            # not measured
-    assert "brings the iterate into the fixed point's cell" not in _flags(margin=0.25)[2]
-
-    # On a plane the reason is the plane's alone, whatever the gradient
-    # bound and the limit read: the report of a state at rest on a plane
-    # does not change with which side of it rounding put the Newton point.
-    resting = {_flags(margin=0.0, limit=limit, gradient_bound=gradient)
-               for limit in (0.0, 1.0) for gradient in (2e-2, np.inf, np.nan)}
-    assert len(resting) == 1 and next(iter(resting))[:2] == (False, False), resting
-    assert "can read inf on one step and a number on the next" in next(iter(resting))[2]
+    assert "lattice plane" not in reason and reason.endswith(
+        "The numbers are reported as computed.")
 
     # No estimate: the flags are False and the NaN numbers are the reason.
     assert _flags(rho=np.nan, bound=np.nan, gradient_bound=np.nan, settled=False,

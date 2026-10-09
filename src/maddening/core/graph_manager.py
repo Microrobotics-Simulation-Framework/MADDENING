@@ -285,6 +285,7 @@ class GraphManager:
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
         self._committed_geometry_edges: dict[str, tuple] = {}
+        self._committed_geometry_solved: dict[str, tuple] = {}
         self._committed_geometry_refusals: dict[str, Optional[str]] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
@@ -3259,6 +3260,15 @@ class GraphManager:
             key: tuple(r.key for r in plan.resolved_geometry_edges())
             for key, plan in interface_plans.items()
         }
+        # The position fields each group's pass reads from the iterate or
+        # builds and reads in the same pass (``"node.field"``; empty: every
+        # position is a constant of the pass).  A group with one has no
+        # usable flag in 0.4.0 (``_group_layout._geometry_flags``).
+        self._committed_geometry_solved = {
+            key: tuple(sorted({f"{holder}.{fld}"
+                               for holder, fld, _mapping in plan.geometry_iterate_reads()}))
+            for key, plan in interface_plans.items()
+        }
         # Why each such group's report withholds its bounds whatever the
         # step measures (``None``: the diagnostics read its geometry).
         self._committed_geometry_refusals = {
@@ -5343,21 +5353,21 @@ class GraphManager:
                     })
                     continue
                 if geometry_keys and "not_usable_reason" not in result[key]:
-                    # Experimental: the flags of a group whose pass reads a
-                    # moving geometry are a smooth group's and two
-                    # lattice-plane rules, each withdrawing both: no plane
-                    # in the Newton-Kantorovich ball around the returned
-                    # iterate (the step's ``geometry_plane_margin`` over
-                    # one; absent or not a number counts as none), and,
-                    # with a plane within the bound's reach
-                    # (``geometry_plane_limit``), a Newton-Kantorovich
-                    # check that passed.  ``_group_layout._geometry_flags``
-                    # has the rule and why each half is needed
-                    # (MADD-ANO-242, MADD-ANO-248).  The numbers stay; a
-                    # ``False`` flag of a step that computed the estimate
-                    # carries every cause.
+                    # Experimental: a group that solves the positions of a
+                    # geometry-dependent mapping (its pass reads one from
+                    # the iterate, or builds one and reads it in the same
+                    # pass) has no usable flag in 0.4.0, on any step,
+                    # whatever its numbers read; one whose positions are
+                    # constants of the pass has a smooth group's flags,
+                    # where the step recorded so.
+                    # ``_group_layout._geometry_flags`` is the one place
+                    # that decides, and says why (MADD-ANO-242,
+                    # MADD-ANO-248).  The numbers stay; a ``False`` flag
+                    # of a step that computed the estimate carries its
+                    # reason.
                     usable, gradient_usable, reason = _group_layout._geometry_flags(
                         geometry_keys,
+                        solved=self._committed_geometry_solved.get(key),
                         bound=result[key]["spectral_error_bound"],
                         gradient_bound=grad_bound, rho=rho_spec,
                         arnoldi_residual=spec_resid,
@@ -5365,7 +5375,6 @@ class GraphManager:
                         precision_limited=precision_limited, declared=bool(declared),
                         limit=meta.get(f"coupling_{key}_geometry_plane_limit"),
                         margin=meta.get(f"coupling_{key}_geometry_plane_margin"),
-                        reach=_bounds.GEOMETRY_PLANE_REACH, ulps=_bounds.GEOMETRY_PLANE_ULPS,
                         fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS)
                     result[key].update({
                         "spectral_usable": usable,

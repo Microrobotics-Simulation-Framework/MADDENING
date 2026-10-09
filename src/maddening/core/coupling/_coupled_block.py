@@ -1698,8 +1698,8 @@ def _run_coupled_block_impl(
                 if ball_readers:
                     # With the lattice-plane margin of the Kantorovich
                     # ball around the iterate: whether the fixed point is
-                    # in the iterate's polynomial piece, for the
-                    # gradient's flag (``_kantorovich_ball_plane_margin``).
+                    # in the iterate's polynomial piece, as a reported
+                    # number (``_kantorovich_ball_plane_margin``).
                     grad_bound, plane_margin = _gradient_error_bound_and_plane_margin_at(
                         step_pure, x_star_full, consts, weights,
                         rho_spec, spec_resid, spec_amp, resolution, ball_readers,
@@ -2424,8 +2424,10 @@ def _run_coupled_block_impl(
                 result[_META_KEY][f"coupling_{group_key}_geometry_plane_limit"] = (
                     jnp.asarray(plane_limit, dtype=spec_dtype))
                 # How many radii of the Kantorovich ball around the
-                # iterate the nearest lattice plane is away (the
-                # gradient's flag).
+                # iterate the nearest lattice plane is away; ``inf``
+                # where every position is a constant of the pass, which
+                # is what the report's flags need to read here
+                # (``_group_layout._geometry_flags``).
                 result[_META_KEY][f"coupling_{group_key}_geometry_plane_margin"] = (
                     jnp.asarray(plane_margin, dtype=spec_dtype))
 

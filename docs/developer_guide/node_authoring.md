@@ -645,7 +645,8 @@ A term you would rather wire than write into `update` can be an edge from
 the node to itself.  Outside a coupling group the node reads its own value
 from the previous step (the term is explicit); in a coupling group, one of
 that node alone included, the edge is iterated with the group (implicit
-once it has converged).  The two numbers, and what a cap, a stiff term or
+once it has converged).  `gm.validate()` says which in an `INFO:` line for
+the edge.  The two numbers, and what a cap, a stiff term or
 a sub-cycled member does to them, are in
 [An edge from a node to itself](coupling_algorithm_guide.md#an-edge-from-a-node-to-itself).
 

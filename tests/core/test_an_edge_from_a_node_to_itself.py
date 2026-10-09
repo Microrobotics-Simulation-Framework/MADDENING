@@ -11,9 +11,11 @@
   reads its own *new* value, so the term is implicit, ``x / (1 + k dt)``.
 
 Nothing else decides it: not the node's other edges, not its neighbours'
-groups, not the order the graph was built in.  ``validate()`` and
-``compile()`` say nothing in either case, by decision: putting the node in
-a group is how a term is made implicit, so there is no warning.
+groups, not the order the graph was built in.  ``compile()`` warns in
+neither case, by decision: putting the node in a group is how a term is
+made implicit.  ``validate()`` says which of the two it is, in one
+``INFO:`` line per such edge, as it names every longer loop; a graph that
+draws only such lines is valid.
 
 This module reads the values from the compiled graph, against closed forms
 in float64, across what could change them: the schedule, the solver, the
@@ -33,12 +35,21 @@ precisions.  What it found beside the two sentences, each held below:
 * A self-edge on a **flux** cannot be read outside a group at all
   (MADD-ANO-157, a bare ``KeyError``): the previous step's flux is not
   kept.  Inside a group it is iterated like any other.
+
+The wide products (the 40 graphs around a neighbour, schedule by solver by
+acceleration, scheme by precision of the gradient, interpolation by
+schedule of a sub-cycled member) run whole in the slow lane; a part of
+each that holds every value of every axis at least once runs on every
+push, with everything else in this module.
 """
 
 from __future__ import annotations
 
+import itertools
+import logging
 import re
 import warnings
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -61,6 +72,50 @@ CLOSE = 1e-11
 
 EXPLICIT = 1.0 - K * DT             # 0.99
 IMPLICIT = 1.0 / (1.0 + K * DT)     # 0.990099...
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+#: What ``validate()`` says after naming the edge.  Written out here, not
+#: read from the library: the two sentences of ``add_edge``'s docstring,
+#: and the one for a flux that cannot be read (MADD-ANO-157).
+READS_THE_PREVIOUS_STEP = (
+    "Outside a coupling group it is a back edge: the node reads its state of the previous "
+    "step, so the term the edge carries is explicit.")
+ITERATED_WITH = (
+    "With the node in a coupling group ({members}) the edge is iterated with the group and at "
+    "convergence the node reads its new value, so the term is implicit.")
+A_FLUX_CANNOT_BE_READ = (
+    "Outside a coupling group it is a back edge, and its source is a boundary flux, which "
+    "cannot be read there: the previous step's flux is not kept, and the step raises instead "
+    "of reading it (MADD-ANO-157). Put the node in a group, or carry the quantity in a state "
+    "field.")
+
+
+def _says(source, target="u", node="a", *, group=None, flux=False) -> str:
+    """``validate()``'s line for the edge ``node.source -> node.target``.
+
+    *group*: the members of the coupling group the node is in.  *flux*: the
+    source is a boundary flux (it matters outside a group only).
+    """
+    reading = (ITERATED_WITH.format(members=sorted(group)) if group is not None
+               else A_FLUX_CANNOT_BE_READ if flux else READS_THE_PREVIOUS_STEP)
+    return f"INFO: edge {node}.{source} -> {node}.{target} is from node '{node}' to itself. {reading}"
+
+
+def _cells(per_push, *axes, slow_only=()):
+    """The product of *axes* as parameters: the cells not in *per_push* are slow.
+
+    Every value of every axis is in a per-push cell, except the values
+    named in *slow_only* (said where it is used, with why).  The ids are
+    the ones stacked ``parametrize`` decorators give (a tuple's items
+    joined by a hyphen).
+    """
+    cells = list(itertools.product(*axes))
+    assert set(per_push) <= set(cells), set(per_push) - set(cells)
+    for i, axis in enumerate(axes):
+        assert {cell[i] for cell in per_push} == set(axis) - set(slow_only), (i, axis)
+    return [pytest.param(*cell, marks=() if cell in per_push else pytest.mark.slow,
+                         id="-".join(v if isinstance(v, str) else "-".join(v) for v in cell))
+            for cell in cells]
 
 
 class Rate(SimulationNode):
@@ -121,9 +176,10 @@ def _alone(group=None, *, dtype=jnp.float64, k=K, dt=DT, node=Rate, field="x"):
     gm.add_edge("a", "a", field, "u")
     if group is not None:
         gm.add_coupling_group(["a"], **group)
-    # Not a line from validate() either, which names every cycle of two or
-    # more nodes ("INFO: cycle detected ...", "... handled by iterative coupling").
-    assert gm.validate() == []
+    # One line from validate(), which says which value the edge reads, and
+    # no warning from compile().
+    assert gm.validate() == [_says(field, group=None if group is None else ["a"],
+                                   flux=field != "x")]
     assert _compile(gm) == []
     return gm
 
@@ -166,9 +222,9 @@ def test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
 
     ``a.temperature -> a.heat_source`` times ``-k``: with no group one step
     is ``1 - k dt`` and three are its cube; in a group of the one rod it is
-    ``1 / (1 + k dt)``.  Neither graph draws a word from ``validate()`` or
-    ``compile()``, and ``format_graph()`` names the edge's level in each.
-    In float32 and, under x64, in float64.
+    ``1 / (1 + k dt)``.  Neither graph draws a warning from ``compile()``;
+    ``validate()`` gives the edge's one line and ``format_graph()`` names
+    its level, in each.  In float32 and, under x64, in float64.
     """
     with x64(precision == "float64"):
         dtype = jnp.dtype(precision)
@@ -182,7 +238,8 @@ def test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
             if group:
                 gm.add_coupling_group(["a"], max_iterations=200,
                                       tolerance=1e-13 if precision == "float64" else 1e-6)
-            assert gm.validate() == []
+            assert gm.validate() == [_says("temperature", "heat_source",
+                                           group=["a"] if group else None)]
             assert _compile(gm) == []
             gm.set_node_state("a", {"temperature": jnp.ones(4, dtype)})
             return gm
@@ -209,9 +266,144 @@ def test_auto_couple_puts_no_group_around_a_node_whose_only_loop_is_its_own_edge
         gm.add_node(Rate("a", DT, jnp.float64, g=-K))
         gm.add_edge("a", "a", "x", "u")
         assert gm.auto_couple(**TIGHT) == []
-        assert gm.validate() == [] and _compile(gm) == []
+        assert gm.validate() == [_says("x")] and _compile(gm) == []
         gm.step()
         assert _x(gm) == pytest.approx(EXPLICIT, abs=CLOSE)
+
+
+# ---------------------------------------------------------------------------
+# What validate() says, and that nothing takes the graph for an invalid one
+# ---------------------------------------------------------------------------
+def _built(group=None, *, node=Rate, field="x"):
+    """``a`` with ``a.<field> -> a.u``, in a group of itself if *group*; not compiled."""
+    gm = GraphManager()
+    gm.add_node(node("a", DT, jnp.float32, g=-K))
+    gm.add_edge("a", "a", field, "u")
+    if group is not None:
+        gm.add_coupling_group(["a"], **group)
+    return gm
+
+
+def test_validate_says_which_of_its_own_values_the_node_reads_through_the_edge():
+    """The lines, word for word: the two sentences of ``add_edge``'s docstring.
+
+    Outside a group, and in a group of the one node; a group of two names
+    both members, sorted, whatever order they were given in.  An edge from
+    the node's own flux is iterated inside a group like any other, and is
+    told so.
+    """
+    assert _built().validate() == [
+        "INFO: edge a.x -> a.u is from node 'a' to itself. Outside a coupling group it is a "
+        "back edge: the node reads its state of the previous step, so the term the edge carries "
+        "is explicit."]
+    assert _built({}).validate() == [
+        "INFO: edge a.x -> a.u is from node 'a' to itself. With the node in a coupling group "
+        "(['a']) the edge is iterated with the group and at convergence the node reads its new "
+        "value, so the term is implicit."]
+    assert _built({}, node=FluxRate, field="q").validate() == [
+        "INFO: edge a.q -> a.u is from node 'a' to itself. With the node in a coupling group "
+        "(['a']) the edge is iterated with the group and at convergence the node reads its new "
+        "value, so the term is implicit."]
+    two = _built()
+    two.add_node(Rate("b", DT, jnp.float32))
+    two.add_edge("a", "b", "x", "u")
+    two.add_coupling_group(["b", "a"])
+    assert two.validate() == [
+        "INFO: edge a.x -> a.u is from node 'a' to itself. With the node in a coupling group "
+        "(['a', 'b']) the edge is iterated with the group and at convergence the node reads its "
+        "new value, so the term is implicit."]
+
+
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+def test_validate_gives_each_edge_to_itself_its_own_line_after_the_lines_for_longer_loops(mode):
+    """One line per edge, in the order the edges were added, after the loops' lines.
+
+    ``a`` reads its own flux and its own state, ``b`` its own state, and
+    the two read each other.  With no group the loop ``a -> b`` is
+    staggered and each edge to itself reads the previous step (the flux
+    cannot); with ``b`` alone in a group only ``b``'s line changes; with
+    both in one group the loop is iterated in the group's schedule, which
+    its line names, and so is every edge to itself.
+    """
+    def graph(*groups):
+        gm = GraphManager()
+        gm.add_node(FluxRate("a", DT, jnp.float32))
+        gm.add_node(Rate("b", DT, jnp.float32))
+        for source, target, field in (("a", "a", "q"), ("b", "a", "x"), ("a", "b", "x"),
+                                      ("a", "a", "x"), ("b", "b", "x")):
+            gm.add_edge(source, target, field, "u", additive=True)
+        for members in groups:
+            gm.add_coupling_group(list(members), iteration_mode=mode)
+        return gm
+
+    staggered = ("INFO: cycle detected: a -> b. Back-edges will use previous-timestep values "
+                 "(staggering).")
+    assert graph().validate() == [
+        staggered, _says("q", flux=True), _says("x"), _says("x", node="b")]
+    assert graph(["b"]).validate() == [
+        staggered, _says("q", flux=True), _says("x"), _says("x", node="b", group=["b"])]
+    name = {"gauss-seidel": "Gauss-Seidel", "jacobi": "Jacobi"}[mode]
+    both = ["b", "a"]
+    assert graph(both).validate() == [
+        f"INFO: cycle a -> b handled by iterative coupling ({name}).",
+        _says("q", group=both), _says("x", group=both), _says("x", node="b", group=both)]
+
+
+def test_an_edge_to_itself_from_a_field_that_does_not_exist_has_its_error_and_no_line():
+    """Nothing is read through it, so nothing is said about what it reads."""
+    for group in (None, {}):
+        gm = _built(group, field="no_such_field")
+        assert gm.validate() == [
+            "ERROR: source field 'no_such_field' not in state of node 'a'. Available: ['x']"]
+
+
+def test_the_line_for_an_edge_outside_a_group_is_logged_as_a_staggered_loop_is(caplog):
+    """``logging`` at ``INFO`` on the graph manager's logger, and never a warning.
+
+    Outside a group the edge is a back edge, and its line goes where the
+    line for a staggered loop of two goes; inside a group nothing is
+    logged, as nothing is for a loop a group iterates.
+    """
+    logger = "maddening.core.graph_manager"
+    for gm, logged in ((_built(), True), (_built(node=FluxRate, field="q"), True),
+                       (_built({}), False)):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=logger), warnings.catch_warnings():
+            warnings.simplefilter("error")
+            (line,) = gm.validate()
+        records = [(r.name, r.levelno, r.getMessage()) for r in caplog.records]
+        assert records == ([(logger, logging.INFO, line.removeprefix("INFO: "))] if logged else [])
+
+
+@pytest.mark.parametrize("group", [None, {}], ids=["no group", "a group of the node"])
+def test_a_graph_whose_only_remark_is_that_line_compiles_and_steps_with_warnings_as_errors(group):
+    """An ``INFO:`` line is not an error and not a warning.
+
+    ``compile()`` refuses a graph for its ``ERROR`` lines and warns for its
+    ``WARNING`` lines; under ``warnings.simplefilter("error")``, which is
+    how a project that turns warnings into errors runs, the graph compiles
+    and steps.
+    """
+    gm = _built(group)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert [line[:5] for line in gm.validate()] == ["INFO:"]
+        gm.compile()
+        gm.step()
+    assert _x(gm) == pytest.approx(EXPLICIT if group is None else IMPLICIT, abs=5e-7)
+
+
+def test_the_guides_show_the_lines_validate_gives():
+    """The quickstart's rod and the coupling guide's ``a``, with any line breaks taken out."""
+    def text(path):
+        return " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+
+    quickstart = text("docs/user_guide/quickstart.md")
+    for group in (None, ["rod"]):
+        assert _says("temperature", "heat_source", "rod", group=group) in quickstart
+    guide = text("docs/developer_guide/coupling_algorithm_guide.md")
+    for line in (_says("x"), _says("x", group=["a"]), _says("q", flux=True)):
+        assert line in guide
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +446,25 @@ def _pair(neighbour, groups, order=("a", "b"), self_edge_last=False, group_kw=No
     return gm, edges
 
 
-@pytest.mark.parametrize("order", [("a", "b"), ("b", "a")], ids="-".join)
-@pytest.mark.parametrize("groups", _GROUPS)
-@pytest.mark.parametrize("neighbour", _NEIGHBOUR_EDGES)
+_ORDERS = (("a", "b"), ("b", "a"))
+#: Of the 40 graphs, the ones stepped on every push: the eight with no group
+#: (an uncoupled step compiles in a few hundredths of a second) and five
+#: grouped ones that hold each neighbour and each grouping, among them the
+#: group of one inside the loop ``a -> b -> a`` and the group of both.
+_LEVEL_PER_PUSH = (
+    *((neighbour, "no group", order) for neighbour in _NEIGHBOUR_EDGES for order in _ORDERS),
+    ("none", "[a]", ("b", "a")),
+    ("b->a", "[b]", ("a", "b")),
+    ("both", "[a]", ("b", "a")),
+    ("both", "[a, b]", ("a", "b")),
+    ("a->b", "[a] and [b]", ("a", "b")),
+)
+
+
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group
+# (the 13 graphs of _LEVEL_PER_PUSH; the other 27 are the slow ones)
+@pytest.mark.parametrize("neighbour, groups, order", _cells(
+    _LEVEL_PER_PUSH, tuple(_NEIGHBOUR_EDGES), tuple(_GROUPS), _ORDERS))
 def test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group(
         neighbour, groups, order):
     """A neighbour, its edges, its group and the build order change nothing.
@@ -293,10 +501,14 @@ def test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group(
     assert got["a"] == pytest.approx(X_A + DT * (own_term + from_b), abs=CLOSE)
 
 
-@pytest.mark.parametrize("self_edge_last", [False, True], ids=["own edge first", "own edge last"])
-@pytest.mark.parametrize("groups", ["no group", "[a]", "[a, b]"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_delivers
+# (no group in both orders, and each group in one; the other order of each group is slow)
+@pytest.mark.parametrize("groups, own_edge", _cells(
+    (("no group", "own edge first"), ("no group", "own edge last"),
+     ("[a]", "own edge first"), ("[a, b]", "own edge last")),
+    ("no group", "[a]", "[a, b]"), ("own edge first", "own edge last")))
 def test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_delivers(
-        groups, self_edge_last):
+        groups, own_edge):
     """``a.u`` is fed by ``a`` itself and by ``b``, both additive, in either order.
 
     The input is the sum, each term at its own level: outside a group
@@ -305,7 +517,7 @@ def test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_del
     """
     members = _GROUPS[groups]
     with x64(True):
-        gm, _ = _pair(("ba",), members, self_edge_last=self_edge_last)
+        gm, _ = _pair(("ba",), members, self_edge_last=own_edge == "own edge last")
         assert _compile(gm) == []
         gm.step()
         got = _x(gm)
@@ -327,9 +539,18 @@ def _group_kw(solver, mode, acceleration):
     return kw
 
 
-@pytest.mark.parametrize("acceleration", _ACCELERATIONS)
-@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
-@pytest.mark.parametrize("solver", ["ift", "fori"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_every_schedule_solver_and_acceleration_makes_the_term_implicit[ift-gauss-seidel-none]
+# and its [fori-jacobi-aitken] and [fori-gauss-seidel-fixed]: each solver and each schedule.
+# The IQN methods are the costliest programs of the module to compile and are slow here.
+# IQN-ILS around an edge to itself runs on every push on a group of the one node, in
+# tests/core/test_an_edge_from_a_node_to_itself.py::test_past_k_dt_of_one_the_term_is_implicit_only_under_an_acceleration[iqn-ils]
+# and IQN-IMVJ, which differs from it in what it carries from one step to the next, is checked
+# in the slow lane only.
+@pytest.mark.parametrize("solver, mode, acceleration", _cells(
+    (("ift", "gauss-seidel", "none"), ("fori", "jacobi", "aitken"),
+     ("fori", "gauss-seidel", "fixed")),
+    ("ift", "fori"), ("gauss-seidel", "jacobi"), _ACCELERATIONS,
+    slow_only=("iqn-ils", "iqn-imvj")))
 def test_every_schedule_solver_and_acceleration_makes_the_term_implicit(
         solver, mode, acceleration):
     """Gauss-Seidel and Jacobi, ``"ift"`` and ``"fori"``, with and without an acceleration.
@@ -390,7 +611,10 @@ def test_a_group_stopped_before_it_converges_has_made_the_term_only_partly_impli
     assert sum((-K * DT) ** j for j in range(2)) == EXPLICIT
 
 
-@pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-ils"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_past_k_dt_of_one_the_term_is_implicit_only_under_an_acceleration[iqn-ils]
+# (the other IQN method, on the same graph; "none" and "aitken" run on every push as well)
+@pytest.mark.parametrize("acceleration", [
+    "none", "aitken", "iqn-ils", pytest.param("iqn-imvj", marks=pytest.mark.slow)])
 def test_past_k_dt_of_one_the_term_is_implicit_only_under_an_acceleration(acceleration):
     """The plain iteration is that series, which converges only for ``|k dt| < 1``.
 
@@ -398,8 +622,8 @@ def test_past_k_dt_of_one_the_term_is_implicit_only_under_an_acceleration(accele
     implicit one ``0.4``.  The unaccelerated group does not reach it: at its
     cap of 30 it returns the series' 31 terms, about ``1e5``, with no word
     (a group reports a cap it reached through its diagnostics, or raises
-    under ``strict_convergence``).  Aitken and IQN-ILS both converge to
-    ``0.4``.
+    under ``strict_convergence``).  Aitken, IQN-ILS and IQN-IMVJ each
+    converge to ``0.4``.
     """
     k = 1.5 / DT
     with x64(True):
@@ -461,8 +685,11 @@ def test_on_a_multi_rate_graph_each_node_reads_its_own_value_at_its_own_rate(gro
     np.testing.assert_allclose(seen, want, rtol=0, atol=CLOSE)
 
 
-@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
-@pytest.mark.parametrize("interpolation", ["constant", "linear", "quadratic"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_a_sub_cycled_member_reads_its_own_value_at_the_end_of_the_groups_step[linear-gauss-seidel]
+# and its [constant-jacobi] and [quadratic-jacobi]: each interpolation, both schedules.
+@pytest.mark.parametrize("interpolation, mode", _cells(
+    (("constant", "jacobi"), ("linear", "gauss-seidel"), ("quadratic", "jacobi")),
+    ("constant", "linear", "quadratic"), ("gauss-seidel", "jacobi")))
 def test_a_sub_cycled_member_reads_its_own_value_at_the_end_of_the_groups_step(
         interpolation, mode):
     """``subcycling=True``: the member at half the group's timestep takes two sub-steps.
@@ -525,8 +752,12 @@ def test_run_adaptive_takes_each_of_its_steps_by_the_same_rule():
 # ---------------------------------------------------------------------------
 # Gradients
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("precision", ["float32", "float64"])
-@pytest.mark.parametrize("scheme", ["no group", "ift", "fori", "ift, aitken"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took[ift-float64]
+# and its [fori-float32] and both precisions of no group.  The gradient through an accelerated
+# group ("ift, aitken") is checked in the slow lane only: its value is the plain group's.
+@pytest.mark.parametrize("scheme, precision", _cells(
+    (("no group", "float32"), ("no group", "float64"), ("fori", "float32"), ("ift", "float64")),
+    ("no group", "ift", "fori", "ift, aitken"), ("float32", "float64"), slow_only=("ift, aitken",)))
 def test_the_gradient_through_the_step_is_the_gradient_of_the_scheme_it_took(scheme, precision):
     """``jax.grad`` of one step in the start value and in the rate.
 
@@ -578,6 +809,26 @@ def test_an_edge_from_a_nodes_own_flux_is_iterated_inside_a_group():
             gm = _alone(dict(TIGHT, iteration_mode=mode), node=FluxRate, field="q")
             gm.step()
             assert _x(gm) == pytest.approx(1 / (1 + 2 * K * DT), abs=CLOSE), mode
+
+
+def test_validate_tells_an_edge_from_a_nodes_own_flux_outside_a_group_that_it_cannot_be_read():
+    """Not "reads the previous step": the step does not trace (MADD-ANO-157).
+
+    The line says what happens and what to do instead, and it is an
+    ``INFO:`` line like the others, so ``compile()`` behaves as it did:
+    no error, no warning.  That the step raises is held by the strict
+    xfail below: when MADD-ANO-157 is fixed that test fails, and this line
+    becomes the one every other edge outside a group has.
+    """
+    gm = _built(node=FluxRate, field="q")
+    assert gm.validate() == [
+        "INFO: edge a.q -> a.u is from node 'a' to itself. Outside a coupling group it is a "
+        "back edge, and its source is a boundary flux, which cannot be read there: the previous "
+        "step's flux is not kept, and the step raises instead of reading it (MADD-ANO-157). Put "
+        "the node in a group, or carry the quantity in a state field."]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        gm.compile()
 
 
 @pytest.mark.xfail(strict=True, raises=KeyError, reason=(

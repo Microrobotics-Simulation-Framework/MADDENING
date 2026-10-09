@@ -1741,10 +1741,23 @@ graph by `tests/core/test_an_edge_from_a_node_to_itself.py`):
 * **Only the node's own group decides.**  Not its other edges, not a
   neighbour's group, not the order the graph was built in; an additive
   edge to itself is summed with the other edges into the input, each at
-  its own level.  Neither `validate()` nor `compile()` remarks on the edge
-  in either place (`validate()` names loops of two or more nodes only),
-  and `auto_couple()` groups loops of two or more nodes, so it leaves the
-  edge explicit.  `format_graph()` says which beside the edge.
+  its own level.  `compile()` raises no warning for the edge in either
+  place, and `auto_couple()` groups loops of two or more nodes, so it
+  leaves the edge explicit.
+* **`validate()` says which.**  One `INFO:` line for each edge from a node
+  to itself, in the order the edges were added, after its lines for the
+  loops of two or more nodes; `format_graph()` says the same beside the
+  edge.  The line is how to learn which of the two readings an edge has:
+
+  ```text
+  INFO: edge a.x -> a.u is from node 'a' to itself. Outside a coupling group it is a back edge: the node reads its state of the previous step, so the term the edge carries is explicit.
+  INFO: edge a.x -> a.u is from node 'a' to itself. With the node in a coupling group (['a']) the edge is iterated with the group and at convergence the node reads its new value, so the term is implicit.
+  ```
+
+  The second names the group's members.  The first is also sent to the
+  `maddening.core.graph_manager` logger at `INFO`, as the line for a
+  staggered loop is.  Neither makes the graph invalid: `compile()` refuses
+  a graph for `ERROR` lines and warns for `WARNING` lines only.
 * **The term is implicit once the group has converged, and only then.**
   The first pass reads the previous step, so `max_iterations=1` returns
   the *explicit* value, and a cap of `n` returns the first `n` corrections
@@ -1783,7 +1796,12 @@ graph by `tests/core/test_an_edge_from_a_node_to_itself.py`):
   kept, and the step fails with a bare `KeyError` naming the flux
   (MADD-ANO-157).  That entry's workaround, adding the producer before
   its reader, does not exist for a node reading itself: put the node in a
-  group, or carry the quantity in a state field.
+  group, or carry the quantity in a state field.  `validate()` does not
+  tell this edge that it reads the previous step; its line is
+
+  ```text
+  INFO: edge a.q -> a.u is from node 'a' to itself. Outside a coupling group it is a back edge, and its source is a boundary flux, which cannot be read there: the previous step's flux is not kept, and the step raises instead of reading it (MADD-ANO-157). Put the node in a group, or carry the quantity in a state field.
+  ```
 
 ## Invariants
 

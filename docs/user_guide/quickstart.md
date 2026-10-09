@@ -170,13 +170,22 @@ print(f"{implicit:.6f}")   # 0.990099 = 1 / (1 + k dt)  iterated with the group
 assert abs(explicit - (1 - k * dt)) < 1e-6 and abs(implicit - 1 / (1 + k * dt)) < 1e-6
 ```
 
-Neither graph draws a warning or a line from `gm.validate()`: putting a
-node in a group is how one of its terms is made implicit.  Nothing else
-changes which value is read (not the node's other edges, a neighbour's
-group or the order the graph was built in), `gm.print_graph()` says which
-beside the edge ("back edge: reads the previous step's value" or
-"iterated inside its coupling group"), and `gm.auto_couple()` groups only
-cycles of two or more nodes, so it leaves such an edge explicit.
+Neither graph draws a warning: putting a node in a group is how one of its
+terms is made implicit.  `gm.validate()` says which of the two the edge
+is, in one `INFO:` line for each such edge, and that line is how you learn
+which reading an edge has.  For the first graph and for the second:
+
+```text
+INFO: edge rod.temperature -> rod.heat_source is from node 'rod' to itself. Outside a coupling group it is a back edge: the node reads its state of the previous step, so the term the edge carries is explicit.
+INFO: edge rod.temperature -> rod.heat_source is from node 'rod' to itself. With the node in a coupling group (['rod']) the edge is iterated with the group and at convergence the node reads its new value, so the term is implicit.
+```
+
+An `INFO:` line is not an error and `gm.compile()` does not warn for it.
+Nothing else changes which value is read (not the node's other edges, a
+neighbour's group or the order the graph was built in), `gm.print_graph()`
+says which beside the edge ("back edge: reads the previous step's value"
+or "iterated inside its coupling group"), and `gm.auto_couple()` groups
+only cycles of two or more nodes, so it leaves such an edge explicit.
 
 "Implicit" is what a *converged* group gives.  The first pass of a group
 reads the previous step, so `max_iterations=1` returns the explicit value,

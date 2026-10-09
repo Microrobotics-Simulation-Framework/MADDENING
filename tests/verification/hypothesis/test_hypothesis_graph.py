@@ -199,7 +199,8 @@ class TestSelfEdgeHandling:
     Outside a coupling group it is a back edge: the node reads the value it
     had a step ago.  In a coupling group (one of that node alone is enough)
     it is iterated with the group, and at convergence the node reads its new
-    value.  ``validate()`` and ``compile()`` say nothing in either case.
+    value.  ``validate()`` says which in one ``INFO:`` line for the edge,
+    and ``compile()`` raises no warning in either case.
     Two shipped nodes here; the closed forms across solvers, schedules,
     rates, gradients and precisions are in
     ``tests/core/test_an_edge_from_a_node_to_itself.py``.
@@ -216,7 +217,10 @@ class TestSelfEdgeHandling:
         gm = GraphManager()
         gm.add_node(BallNode(name="b", timestep=0.01, initial_position=5.0))
         gm.add_edge("b", "b", "position", "table_position")
-        assert gm.validate() == []
+        assert gm.validate() == [
+            "INFO: edge b.position -> b.table_position is from node 'b' to itself. "
+            "Outside a coupling group it is a back edge: the node reads its state of the "
+            "previous step, so the term the edge carries is explicit."]
         gm.compile()
         state = gm.step()
         assert float(state["b"]["position"]) == 5.0
@@ -241,7 +245,13 @@ class TestSelfEdgeHandling:
         gm.add_edge("s", "s", "position", "anchor_position")
         if grouped:
             gm.add_coupling_group(["s"], max_iterations=50)
-        assert gm.validate() == []
+        edge = "INFO: edge s.position -> s.anchor_position is from node 's' to itself. "
+        assert gm.validate() == [edge + (
+            "With the node in a coupling group (['s']) the edge is iterated with the group "
+            "and at convergence the node reads its new value, so the term is implicit."
+            if grouped else
+            "Outside a coupling group it is a back edge: the node reads its state of the "
+            "previous step, so the term the edge carries is explicit.")]
         gm.compile()
         state = gm.step()
         velocity = dt * k * rest / (1.0 - dt**2 * k) if grouped else dt * k * rest

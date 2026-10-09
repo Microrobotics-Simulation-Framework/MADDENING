@@ -38,9 +38,12 @@ precisions.  What it found beside the two sentences, each held below:
 
 The wide products (the 40 graphs around a neighbour, schedule by solver by
 acceleration, scheme by precision of the gradient, interpolation by
-schedule of a sub-cycled member) run whole in the slow lane; a part of
-each that holds every value of every axis at least once runs on every
-push, with everything else in this module.
+schedule of a sub-cycled member, an additive edge in either order in each
+group) run whole in the slow lane.  A part of each runs on every push,
+with everything else in this module: it holds every value of every axis
+but the few its ``# Per push:`` comment names as checked in the slow lane
+only (IQN-IMVJ, the gradient through an accelerated group), and ``_cells``
+asserts that.
 """
 
 from __future__ import annotations

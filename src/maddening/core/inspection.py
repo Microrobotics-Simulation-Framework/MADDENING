@@ -1369,6 +1369,17 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
         # of this group, so the caveats below (which read them) would be
         # statements about values that are not there.
         flags.append(f"no bound or estimate reported: {reason}")
+        if d.get("precision_limited"):
+            # A group withheld on account of its norm still reports the
+            # float floor (experimental: the interface norm over a
+            # geometry-dependent mapping); no bound is there to point to.
+            floor = d.get("residual_precision_floor")
+            measured = isinstance(floor, float) and not math.isnan(floor)
+            flags.append("precision_limited=True: the residual is at or below its float floor"
+                         + (f" (residual_precision_floor={floor:.3g}, in the residual's units)"
+                            if measured else "")
+                         + ", so residual is rounding and converged can be True on a stalled "
+                           "iterate; a group at max_iterations may be held there by rounding")
         return flags
     if not d["ratio_usable"]:
         flags.append("ratio_usable=False: the contraction ratio was unusable, so the "

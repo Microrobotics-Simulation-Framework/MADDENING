@@ -172,6 +172,59 @@ class MultilinearGridMapping:
         """
         return self.spacing
 
+    def geometry_coordinates_read(self, geom):
+        """Which coordinates of *geom* a transfer depends on: boolean,
+        the geometry's shape.
+
+        ``False`` where the stencil is the same whatever the last digits
+        of the coordinate are, so that its stored rounding moves nothing
+        the mapping delivers:
+
+        * on an axis of **one lattice point**: the stencil does not read
+          that coordinate (the spacing of such an axis is an arbitrary
+          positive number);
+        * for a coordinate **outside the hull on its axis by more than
+          its rounding can cross**: the kernel clamps it to the face,
+          where its weights are exactly 0 and 1.  "More than its
+          rounding can cross" is ``sqrt(eps)`` of the coordinate's own
+          distance from zero, both in spacings: 2,900 roundings of a
+          float32 position (6.7e7 of a float64 one), which is more than
+          the residual's float floor counts for a pass of up to 724
+          evaluations (``PRECISION_FLOOR_ULPS`` each).  A coordinate
+          nearer the face than that is read: its rounding can bring it
+          inside, where the weights move with it.
+
+        ``True`` for every other coordinate, a non-finite one included
+        (it fails the interface criterion by itself).  The arithmetic is
+        the stencil's (:meth:`_lattice_coordinates`), so a coordinate the
+        stencil clamps is outside the hull here.
+
+        Read by ``convergence_norm="interface"`` for the float floor of a
+        value **delivered** through the mapping
+        (``_interface_plan.InterfaceEdge.read``): the positions' rounding
+        that value carries is that of the coordinates it depends on.
+        Optional for a kind: one that does not declare it has every
+        coordinate counted.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        # units: dimensionless -- a fraction of a coordinate's own
+        # distance from zero (see the docstring for why this fraction).
+        slack = jnp.asarray(math.sqrt(float(jnp.finfo(T).eps)), T)
+        read = []
+        for a, u in enumerate(self._lattice_coordinates(cols)):
+            if self.shape[a] < 2:
+                read.append(jnp.zeros(u.shape, bool))
+                continue
+            top = jnp.asarray(self.shape[a] - 1, T)
+            outside = jnp.maximum(jnp.maximum(-u, u - top), jnp.zeros((), T))
+            p = pow2_host_factor(self.spacing[a], T)
+            reach = jnp.abs(cols[:, a] * jnp.asarray(p, T)) / jnp.asarray(self.spacing[a] * p, T)
+            # ``~(outside > ...)``: a NaN on either side reads as "read".
+            read.append(jnp.logical_not(outside > slack * reach))
+        return jnp.stack(read, axis=1).reshape(geom.shape)
+
     def accepts_geometry_shape(self, shape) -> bool:
         """Whether a geometry of *shape* can be read: ``(n_points, d)``,
         or ``(n_points,)`` on a one-dimensional grid."""

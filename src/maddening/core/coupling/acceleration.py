@@ -580,6 +580,28 @@ def _part_scaled_change(reading, atol: float, rtol: float):
     return scaled, jnp.array(True)
 
 
+def _part_counted(reading, value, atol: float, rtol: float):
+    """Does the residual read the part *reading*, whose value at the
+    state asked about is *value*?  A traced boolean.
+
+    **The one place the float floor decides which parts it counts**, and
+    it is the residual's own decision (:func:`_part_scaled_change`):
+    positions in a kind's length scale are always read; any other part
+    is read unless the dead band drops it (:func:`_scaled_change`, with
+    what the edge delivers for a reading taken at its source:
+    :func:`_kept_by_what_is_delivered`).  Read by
+    :func:`residual_precision_floor` and by :func:`_positions_floors`
+    (``compile()``'s advisory), so the advisory cannot speak of a part
+    the floor counts nothing for.
+    """
+    if reading.part.unit == KERNEL_LENGTH:
+        return jnp.array(True)
+    _scaled, active = _scaled_change(
+        _widened(value), _widened(value), atol, rtol,
+        kept=_kept_by_what_is_delivered(reading, atol))
+    return active
+
+
 def _part_reference(reading, value):
     """What *value*, a part's value at one state, is measured against:
     its own largest magnitude, or one unit of the kind's length scale."""
@@ -2132,16 +2154,14 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     sum_sq = jnp.zeros((), dtype)
     count = jnp.zeros((), dtype)
     for v, own_eps, reading in values:
-        if reading is not None and reading.part.unit == KERNEL_LENGTH:
-            # Positions in a kind's length scale: always read (the dead
-            # band does not apply: ``_part_scaled_change``).
-            active = jnp.array(True)
+        if reading is not None:
+            # The residual's own decision (``_part_counted``): positions in
+            # a kind's length scale are always read; for a reading taken at
+            # an edge's source the band asks the field and what the edge
+            # delivers.
+            active = _part_counted(reading, v, atol, use_rtol)
         else:
-            # The band's decision is the residual's: for a reading taken at
-            # an edge's source, of the field and of what the edge delivers.
-            _scaled, active = _scaled_change(
-                _widened(v), _widened(v), atol, use_rtol,
-                kept=None if reading is None else _kept_by_what_is_delivered(reading, atol))
+            _scaled, active = _scaled_change(_widened(v), _widened(v), atol, use_rtol)
         eps = own_eps / use_rtol
         n = jnp.where(active, float(v.size), 0.0).astype(dtype)
         sum_sq = sum_sq + n * jnp.asarray(eps * eps, dtype)
@@ -2151,7 +2171,8 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     return (PRECISION_FLOOR_ULPS * float(evaluations)) * jnp.sqrt(sum_sq)
 
 
-def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 1.0) -> list:
+def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 1.0,
+                      atol: float = 0.0) -> list:
     """``[(reading, holder, positions, resolution, floor), ...]``: what
     the rounding of stored positions puts into the float floor of an
     interface reading at *state*, part by part.
@@ -2163,10 +2184,21 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
     * a part that **is** positions, in the mapping kind's length scale
       (``InterfaceEdge.parts``: a mapping read at its source and anchored
       there);
-    * a value **delivered** through such a mapping (a gather, a tie),
-      which is computed at stored positions: the iterate's own for a
-      source anchor, the target's pre-step ones for a target anchor
-      (here *state* itself: what a step started from it would hold).
+    * a value **delivered** through such a mapping (one that does not
+      deliver more entries than it reads), which is computed at stored
+      positions: the iterate's own for a source anchor, the target's
+      pre-step ones for a target anchor (here *state* itself: what a
+      step started from it would hold).
+
+    **The floor's own decisions, and no others.**  A part the floor
+    counts nothing for has no entry: one the dead band drops at *atol*
+    (:func:`_part_counted`, the function :func:`residual_precision_floor`
+    asks), and a delivered value none of whose positions' coordinates
+    the mapping kind reads -- an axis of one lattice point, points
+    clamped to the hull (``_interface_plan._read_in_kernel_lengths``,
+    which is where the floor takes those positions from).  The
+    ``positions`` of a delivered part are the ones the floor counts:
+    zero in place of a coordinate the kind does not read.
 
     ``positions`` are those positions in lengths, ``holder`` the
     ``(node, field)`` they are stored in, and ``resolution`` is
@@ -2201,11 +2233,14 @@ def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 
             continue
         side, field = record.anchor
         holder = ((record.source if side == "source" else record.target)[0], field)
-        for reading in _interface_readings([record.edge], state, pre_step=state):
+        for reading in _interface_readings([record.edge], state, pre_step=state,
+                                           band=_declares_a_band(atol)):
             positions = (reading[2] if reading.part.unit == KERNEL_LENGTH
                          else reading.positions[0])
             if positions is None:
                 continue        # a value the floor counts no position for
+            if not bool(_part_counted(reading, jnp.asarray(reading[2]), atol, rtol)):
+                continue        # a part the dead band drops: nothing in the floor
             resolution = float(_positions_resolution(positions))
             floors.append((
                 reading, holder, positions, resolution,

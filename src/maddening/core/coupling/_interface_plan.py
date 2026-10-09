@@ -341,6 +341,31 @@ def _in_kernel_lengths(mapping, geom):
     return jnp.stack(scaled, axis=-1).reshape(geom.shape)
 
 
+def _read_in_kernel_lengths(mapping, geom):
+    """The positions a value **delivered** through *mapping* at the
+    geometry *geom* depends on, in the kind's length scale
+    (:func:`_in_kernel_lengths`), with zero in place of every coordinate
+    the kind says its transfer does not read.
+
+    What the float floor of such a value takes the positions' rounding
+    from (``acceleration._part_resolution``): a coordinate the kernel
+    ignores -- for ``multilinear_grid`` one on an axis of one lattice
+    point, or one clamped to the hull from further out than its rounding
+    can cross (``geometry_coordinates_read``) -- moves nothing the edge
+    delivers, whatever its last digits, so its rounding is none of the
+    value's.  A kind that does not declare which coordinates it reads
+    has all of them counted.  Positions that are themselves a **part**
+    of a reading (a mapping read at its source and anchored there) are
+    not passed through this: the residual reads every coordinate of
+    them, and so does its floor.
+    """
+    lengths = _in_kernel_lengths(mapping, geom)
+    declared: Any = getattr(mapping, "geometry_coordinates_read", None)
+    if not callable(declared):
+        return lengths
+    return jnp.where(declared(geom), lengths, jnp.zeros((), lengths.dtype))
+
+
 @dataclass(frozen=True)
 class ReadingPart:
     """One part of what the interface norm reads on an edge.
@@ -387,8 +412,9 @@ class PartReading(tuple):
       against);
     * ``positions``: per state, the positions (in the kind's length
       scale) a value delivered through a geometry-dependent mapping was
-      computed at -- its rounding carries theirs -- and ``None`` for
-      every other part;
+      computed at -- its rounding carries theirs -- with zero for a
+      coordinate the kind does not read (:func:`_read_in_kernel_lengths`),
+      and ``None`` for every other part;
     * ``delivered``: per state, what the edge delivers for a source field
       **read at its source**, where the reader asked for it
       (:meth:`InterfaceEdge.read` with ``band``: a group that declares a
@@ -706,7 +732,7 @@ class InterfaceEdge:
                 geoms = tuple(self.geometry_at(s, pre_step) for s in states)
                 values = tuple(self.reading(v, mappings, g) for v, g in zip(stored, geoms))
                 if callable(getattr(self.mapping, "geometry_length_scale", None)):
-                    positions = tuple(_in_kernel_lengths(self.mapping, g) for g in geoms)
+                    positions = tuple(_read_in_kernel_lengths(self.mapping, g) for g in geoms)
             else:
                 values = tuple(self.reading(v, mappings) for v in stored)
             out.append(PartReading(self.edge, source_dtype, values, part, positions))

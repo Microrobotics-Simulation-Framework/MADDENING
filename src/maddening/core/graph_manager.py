@@ -5240,6 +5240,10 @@ class GraphManager:
                     # estimates: every bound is NaN (the gradient estimate
                     # ``inf``, as where the ratio is rejected), every
                     # ``*_usable`` flag False, and the report says why.
+                    # A group withheld on account of its norm keeps what
+                    # its entry says of the float floor (one helper).
+                    floor_reading = _group_layout._floor_reading_of_a_norm_withheld_report(
+                        group, geometry_reason, result[key], floor)
                     result[key].update({
                         "amplification": float("nan"),
                         "error_estimate": float("nan"),
@@ -5253,6 +5257,7 @@ class GraphManager:
                         "precision_limited": False,
                         "not_usable_reason": geometry_reason,
                     })
+                    result[key].update(floor_reading)
                     continue
                 plane_limit = (meta.get(f"coupling_{key}_geometry_plane_limit")
                                if geometry_keys else None)

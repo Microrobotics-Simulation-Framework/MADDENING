@@ -442,8 +442,29 @@ _GEOMETRY_KIND_WHY = (
 )
 _GEOMETRY_NORM_WHY = (
     "under convergence_norm={norm!r} (the solve's own criterion reads it there, but the "
-    "analysis of that reading behind the bounds is not in this stage of 0.4.0; they do "
-    "under 'l2' and 'mixed', which measure the members' state, the geometry included)"
+    "analysis of that reading behind the bounds is not in 0.4.0; a diagnostic run of the "
+    "group under 'mixed' or 'l2', which measure the members' state, the geometry included, "
+    "reports them)"
+)
+#: What the report of a group withheld on account of its norm still says
+#: of the residual's float floor (:func:`_floor_reading_of_a_norm_withheld_report`):
+#: appended to the reason, so that it names every number the entry reports.
+_GEOMETRY_NORM_FLOOR_REPORTED = (
+    " The residual's float floor is reported: residual_precision_floor is the float "
+    "resolution of the residual at the state this step returned, in the residual's units "
+    "(tolerances), by the rule of every group's report, and precision_limited says whether "
+    "the residual is at or below it. Where it is, the residual is rounding and not motion: "
+    "converged=True does not say the readings have settled to the tolerance, and a group at "
+    "max_iterations may be held there by rounding alone. Positions a reading rests on enter "
+    "that floor by their stored rounding (eps * |u| grid spacings at u spacings from zero), "
+    "at the state of every step: this is the run-time reading of what compile() warns of "
+    "once, on the state it sees."
+)
+#: The same where the floor itself could not be reported (a checkpoint
+#: saved after a state write; a floor only the step could have measured).
+_GEOMETRY_NORM_FLOOR_WITHHELD = (
+    " The residual's float floor (residual_precision_floor, precision_limited) is not "
+    "reported either: {why}"
 )
 _GEOMETRY_SUBCYCLED_WHY = (
     "in a sub-cycled group (members {members} take several sub-steps per pass, and the "
@@ -531,6 +552,60 @@ def _geometry_diagnostics_refusal(group, nodes, plan) -> Optional[str]:
     else:
         return None
     return _GEOMETRY_DIAGNOSTICS_REASON.format(keys=keys, why=why)
+
+
+def _floor_reading_of_a_norm_withheld_report(group, reason: str, report, floor: float) -> dict:
+    """What the report of a group whose bounds are withheld **on account
+    of its norm** keeps of the residual's float floor; ``{}`` for a
+    report withheld for any other reason.
+
+    Experimental.  A group under ``convergence_norm="interface"`` that
+    resolves a ``multilinear_grid`` mapping solves, and its bounds are
+    not reported in 0.4.0 (:func:`_geometry_diagnostics_refusal`).  The
+    float floor of its residual is not one of them: it is
+    :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
+    of the state the step returned, the function and the rule of every
+    other group's report, and under this norm it is the one place the
+    rounding of stored positions is counted at run time (a position
+    ``u`` spacings from zero is stored to ``eps * |u|`` spacings, which a
+    reading that rests on it carries).  ``compile()`` asks that question
+    once, of the state it is called with
+    (:func:`_unresolved_position_warnings`); markers that drift, a state
+    write and a loaded checkpoint are all later than that, and a float32
+    pair whose markers had drifted 957 to 6659 spacings read
+    ``converged=True``, ``residual=0.0`` and ``precision_limited=False``
+    with its positions 3 to 20 tolerances from the fixed point while the
+    step's own recorded floor was 117 to 557 tolerances.  So the entry
+    keeps:
+
+    * ``"precision_limited"``: as computed for any group -- the floor is
+      positive and the (finite) residual is at or below it;
+    * ``"residual_precision_floor"``: that floor, in the residual's
+      units, NaN where it could not be measured;
+    * ``"not_usable_reason"``: *reason*, and what the entry reports of
+      the floor (or why it does not).
+
+    *report* is the group's entry as every group's is built, before the
+    bounds are withheld: its ``precision_limited``, and a
+    ``not_usable_reason`` where the floor itself was not reported (a
+    checkpoint saved after a state write, or a floor only the step could
+    have measured).  *floor* is the floor that entry was built with.
+    Read by ``GraphManager.coupling_diagnostics`` in one place.
+    """
+    if _GEOMETRY_NORM_WHY.format(norm=group.convergence_norm) not in reason:
+        return {}
+    unmeasured = report.get("not_usable_reason")
+    if unmeasured is not None:
+        return {
+            "precision_limited": False,
+            "residual_precision_floor": float("nan"),
+            "not_usable_reason": reason + _GEOMETRY_NORM_FLOOR_WITHHELD.format(why=unmeasured),
+        }
+    return {
+        "precision_limited": bool(report["precision_limited"]),
+        "residual_precision_floor": float(floor),
+        "not_usable_reason": reason + _GEOMETRY_NORM_FLOOR_REPORTED,
+    }
 
 
 def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
@@ -625,32 +700,59 @@ _POSITIONS_FLOOR_WARNED = 1.0  # units: tolerances (the residual's units under t
 
 def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     """``UserWarning`` texts for positions an interface reading rests on
-    that their dtype cannot resolve to the group's tolerance
-    (experimental; empty for every other group).
+    whose stored rounding the float floor counts at the group's
+    tolerance or above (experimental; empty for every other group).
 
     Under ``convergence_norm="interface"`` the stored positions of a
     geometry-dependent mapping enter the reading of an edge in one of two
-    ways (``InterfaceEdge.parts``):
+    ways (``InterfaceEdge.parts``; which one is decided by the entry
+    counts the mapping declares, never by its mode's name):
 
     * **as a part of their own**, in units of the mapping kind's length
-      scale, where the mapping is read at its source and anchored there
-      (a scatter): the criterion asks that they change by less than
-      ``rtol`` lengths;
-    * **through the value the edge delivers**, where the mapping is read
-      as delivered (a gather, a tie; either anchor): the value is
-      computed at those positions, and the criterion asks that it change
-      by less than ``rtol`` of its own magnitude.
+      scale, where the mapping delivers more entries than it reads and
+      is anchored at its source (a scatter of fewer points than the grid
+      has; a gather onto more points than the grid has, whose positions
+      the grid node holds): the criterion asks that they change by less
+      than ``rtol`` lengths;
+    * **through the value the edge delivers**, where the mapping does
+      not deliver more entries than it reads (a gather onto no more
+      points than the grid has, a scatter of at least as many points as
+      the grid has, a tie; either anchor): the value is computed at
+      those positions, and the criterion asks that it change by less
+      than ``rtol`` of its own magnitude.
 
     A position ``u`` lengths from zero is stored to ``eps * |u|``
-    lengths.  That is the rounding of a positions part entry for entry;
-    and it moves a kernel weight by as much, so a delivered value by up
-    to that fraction of its own magnitude (the worst case: a field that
-    varies by its own size across one length).  The float floor of the
-    residual
+    lengths.  That is the rounding of a positions part entry for entry.
+    It also moves a kernel weight by as much, and what that does to a
+    delivered value depends on the field: the value moves by that
+    rounding times the field's variation across one length over the
+    value's own magnitude.  **The count takes that ratio to be one** (a
+    field that varies across one cell by about the size of the value
+    delivered).  It is not a bound in either direction, and it is
+    stated as the assumption it is:
+
+    * a field that varies **less** across a cell is moved by less, and
+      the warning is early: on two float32 pairs of gathers the count
+      reached the tolerance at 132 and 222 spacings while the pairs took
+      float64's passes, their readings within 0.03 and 0.05 of a
+      tolerance of float64's, and stayed within 1.4 tolerances at 48 and
+      24 times the threshold (5032 spacings);
+    * a value delivered **far smaller** than the field's variation
+      across a cell (a field sampled near its zero: markers on the zero
+      contour of a level set, a velocity at a stagnation point) is moved
+      by more than the count says, and is **not** warned of at a smaller
+      count: at a ratio of 250 and 2500, 100 spacings from zero (count
+      0.96, no warning), a float32 pair reported ``converged=True`` 7.3
+      and 23 tolerances from its fixed point, and at 10 spacings (count
+      0.097) 2.8 tolerances at a ratio of 2500, where the same pairs
+      with float64 positions are within 0.5 (MADD-ANO-247, open; all on
+      jaxlib 0.11.0, CPU, ``rtol=1e-4``, Gauss-Seidel).
+
+    The float floor of the residual
     (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`)
-    counts ``PRECISION_FLOOR_ULPS`` of those per evaluation of the pass
-    for every entry of either part.  **Warned: a part for which that
-    count reaches the tolerance**,
+    counts ``PRECISION_FLOOR_ULPS`` of those roundings per evaluation of
+    the pass for every entry of either part.  **Warned: a part for which
+    that count reaches the tolerance**,
 
         ``PRECISION_FLOOR_ULPS * evaluations * eps * max|u| >= rtol``,
 
@@ -666,6 +768,19 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     more, and a floor of at least that times the root of their share of
     the entries the norm reads: the loop can run to its cap on rounding
     alone.
+
+    **The floor's own decisions.**  The parts asked are the parts the
+    floor counts, by the floor's own functions
+    (``acceleration._positions_floors``): a delivered value the dead
+    band drops (``atol`` above its magnitude) puts nothing into the
+    floor and is not warned of, and neither is a delivered value for a
+    coordinate its mapping does not read -- one on an axis of one
+    lattice point, or of a point clamped to the hull from further out
+    than its rounding can cross
+    (``MultilinearGridMapping.geometry_coordinates_read``).  A positions
+    part is asked of every coordinate, because the criterion reads every
+    coordinate of it (in the spacing declared for its axis, an axis of
+    one lattice point included).
 
     A mapping read at its source and anchored at its **target** is not
     asked: its reading is the source field alone (the positions are the
@@ -684,12 +799,20 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     floors at 0.44 and 0.87 of the threshold (and above them at 0.15 and
     0.30), so a residual can be at its floor without this warning; what
     the warning marks is where the positions' rounding by itself reaches
-    the tolerance.  For a delivered value the count is a worst case: a
-    field that varies little across a cell is moved by less.
+    the tolerance.
 
-    Asked of the state ``compile()`` sees; positions written afterwards
-    (``set_node_state``) are not asked again until the next
-    ``compile()``.  *evaluations* is the group's structural count
+    **Asked once, of the state ``compile()`` sees.**  Positions that
+    move afterwards -- by the markers' own update, a ``set_node_state``,
+    a loaded checkpoint -- are not asked again by this function.  The
+    run-time reading is the report's: ``coupling_diagnostics()`` gives
+    the floor of the state every step returned
+    (``residual_precision_floor``) and ``precision_limited``
+    (:func:`_floor_reading_of_a_norm_withheld_report`).  The two differ
+    in one respect: the floor counts every entry at the coarsest
+    floating dtype among the group's fields (a position computed from a
+    coarser member's output may carry that member's rounding), and this
+    advisory speaks of the dtype the positions are stored in.
+    *evaluations* is the group's structural count
     (:func:`_group_evaluations`, on the compiled schedule): the count a
     step measures with ``diagnostics=True`` can be larger.
     """
@@ -700,7 +823,7 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     count = PRECISION_FLOOR_ULPS * float(evaluations)
     out = []
     for reading, holder, held, resolution, floor in _positions_floors(
-            plan, state, rtol, evaluations):
+            plan, state, rtol, evaluations, atol=float(group.atol)):
         if not floor >= _POSITIONS_FLOOR_WARNED:
             continue            # resolved (or not a number: the criterion's own failure)
         edge, dtype = reading[0], np.dtype(held.dtype)
@@ -728,28 +851,34 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
             # The reading is a value computed at the positions.
             subject = (
                 f"the {dtype} positions {node}.{field} that the value on edge {key!r} is "
-                f"delivered at cannot be resolved to this tolerance. The norm reads what "
-                f"the edge delivers, a value its mapping computes at those positions, and "
-                f"asks that it change by less than rtol of its own magnitude.")
+                f"delivered at cannot be resolved to this tolerance of a grid spacing. The "
+                f"norm reads what the edge delivers, a value its mapping computes at those "
+                f"positions, and asks that it change by less than rtol of its own magnitude.")
             stored = (
-                f"where a {dtype} position is stored to {resolution:.3g} spacings, a "
-                f"weight of the mapping moves by as much, and the delivered value by up "
-                f"to that fraction of its own magnitude (the worst case: a field that "
-                f"varies by its own size across one cell; a smoother one is moved by less)")
+                f"where a {dtype} position is stored to {resolution:.3g} spacings and a "
+                f"weight of the mapping moves by as much. The count takes the delivered "
+                f"value to move by that fraction of its own magnitude, which assumes a "
+                f"field that varies across one cell by about the size of the value "
+                f"delivered: a field that varies less is moved by less (the warning is then "
+                f"early), and a value delivered far smaller than the field's variation "
+                f"across a cell (a field sampled near its zero) is moved by more, which "
+                f"this count does not see (MADD-ANO-247)")
             consequence = (
                 "Rounding alone can keep the delivered value from meeting the criterion "
                 "(the group then runs to max_iterations), and where it is met it says "
                 "little of the value's last digits.")
         remedies = [
-            f"use coordinates local to the grid (a {dtype} position within "
-            f"{rtol / (count * eps):.3g} spacings of zero resolves this tolerance)",
+            f"use coordinates local to the grid (for a {dtype} position this count is under "
+            f"the tolerance within {rtol / (count * eps):.3g} spacings of zero)",
             f"loosen rtol above {count * resolution:.3g}",
         ]
         if dtype != np.dtype(np.float64):
             remedies.insert(0, (
                 f"hold {node}.{field} in float64 (under jax_enable_x64; the mapping computes "
                 f"its weights in the geometry's dtype and casts them to the field's, so the "
-                f"other fields can stay as they are)"))
+                f"other fields can stay as they are for this count; the report's "
+                f"precision_limited counts every entry at the coarsest floating dtype among "
+                f"the group's fields)"))
         out.append(
             f"coupling group {names} (convergence_norm='interface', rtol={rtol:g}): "
             f"{subject} They reach "
@@ -758,6 +887,8 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
             f"the residual's float floor counts {count:g} of those per pass "
             f"(PRECISION_FLOOR_ULPS times {float(evaluations):g} evaluation(s)), which is "
             f"{floor:.3g} times the tolerance. {consequence} "
+            f"This is asked once, of the state compile() sees: the report's "
+            f"precision_limited and residual_precision_floor are the reading at every step. "
             f"Remedies: " + "; or ".join(remedies) + "."
         )
     return out

@@ -1938,7 +1938,8 @@ class GraphManager:
         # traced for (a missing field stays the KeyError described above).
         _graph_specs._refuse_edge_sources(
             _graph_specs._edge_source_rules(
-                [e for e in self._edges if e.target_node == node_name], self._nodes),
+                [e for e in self._edges if e.target_node == node_name], self._nodes,
+                fields=False),
             state, doing="read")
         out: dict[str, Any] = {}
         for edge in self._edges:
@@ -3567,8 +3568,7 @@ class GraphManager:
         # What compile() asked of each edge's source field (the shape its
         # target declares), asked again of the state each program below
         # is traced for: a state write is not a recompile.
-        edge_source_rules = _graph_specs._edge_source_rules(
-            self._edges, nodes, self._state)
+        edge_source_rules = _graph_specs._edge_source_rules(self._edges, nodes)
 
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
@@ -6056,8 +6056,7 @@ class GraphManager:
         params_snapshot = self.params
         # As in ``_build_step_fn``: compile()'s rule for each edge's
         # source field, asked of the state the program is traced for.
-        edge_source_rules = _graph_specs._edge_source_rules(
-            self._edges, nodes_dict, self._state)
+        edge_source_rules = _graph_specs._edge_source_rules(self._edges, nodes_dict)
 
         from maddening.core.node import SimulationNode as _SimBase
         flux_producers = {
@@ -6588,6 +6587,34 @@ class GraphManager:
         remedy the recovery warning names -- lands in the state that is
         kept.  It used to land in the traced state, and the next entry
         point put the graph back over it.
+
+        Notes
+        -----
+        The write is not held to the layout of the state it replaces:
+        *state* may have other fields, shapes and dtypes (``load_state``
+        and ``PUT /graph/state/{node}``, which write through this method,
+        refuse a field of another shape and cast to the dtype the graph
+        holds).  It is not a recompile either.  A layout that differs
+        makes the next entry point trace its program again, and that
+        trace asks some of what ``compile()`` asked of the state it was
+        given, by name:
+
+        - the shape each edge's target declares for it
+          (:class:`~maddening.warnings.ShapeMismatchError` in an
+          ``ExceptionGroup``, as from ``compile()``), and that the field
+          an edge reads is still there (``KeyError``);
+        - the rules of a geometry-dependent mapping's geometry field:
+          its shape, a float32 or float64 dtype, and a dtype fine enough
+          for the mapping.
+
+        It does not ask the dtype an edge's target declares
+        (:class:`~maddening.warnings.DtypeMismatchError` at
+        ``compile()``): an integer written into a floating-point field
+        that an edge reads is stepped, cast by whatever reads it.  Nor
+        does it ask anything of a write that keeps the layout.  Call
+        :meth:`validate` after a write that may have changed a dtype;
+        the graph runs again once the fields have the shapes
+        ``compile()`` accepted.
         """
         self._recover_from_escaped_tracers()
         if name not in self._nodes:

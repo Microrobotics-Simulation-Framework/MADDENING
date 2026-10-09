@@ -6,10 +6,11 @@ that without a recompile: a node's own ``update``, ``set_node_state`` (which
 ``load_state`` and ``PUT /graph/state`` write through), a parameter write, a
 ``params=`` pytree handed to one step.  Each test here is one such check and
 one such door, and pins what the library then does: asks again, refuses, or
-steps to the right answer anyway.  Two neighbours have files of their own:
-the geometry rules asked where a program is traced
-(``test_geometry_edge_refusals.py``) and the underflow-range warning
-(``test_coupling_underflow_range_warning.py``).
+steps to the right answer anyway.  Three neighbours have files of their
+own: the geometry rules asked where a program is traced
+(``test_geometry_edge_refusals.py``), the shape an edge's target declares,
+asked there too (``test_edge_shape_rule_at_every_trace.py``), and the
+underflow-range warning (``test_coupling_underflow_range_warning.py``).
 
 Three doors differ in what they can change.  ``load_state`` and ``PUT
 /graph/state`` refuse a field of another shape and cast to the live dtype, so
@@ -98,7 +99,9 @@ def test_validate_and_the_next_compile_name_a_shape_or_dtype_written_after_compi
     """``compile()`` holds an edge's source to its target's declared shape
     and dtype on the state it is given.  Asked again after a
     ``set_node_state`` that breaks the rule, ``validate()`` names the edge
-    and ``compile()`` refuses the graph.  (The step itself is not asked.)"""
+    and ``compile()`` refuses the graph.  (A step asks the shape rule too,
+    where it is traced, and not the dtype rule:
+    ``test_edge_shape_rule_at_every_trace.py``.)"""
     gm = GraphManager()
     gm.add_node(Cell("a", 1.0))
     gm.add_node(Cell("b", 1.0))

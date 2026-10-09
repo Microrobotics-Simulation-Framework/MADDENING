@@ -40,7 +40,11 @@ class EdgeValidationError(Exception):
     every detected problem and raises a single
     :class:`ExceptionGroup` whose ``.exceptions`` contains one
     :class:`ShapeMismatchError` or :class:`DtypeMismatchError` per
-    problem.  Catch :class:`EdgeValidationError` (or the more specific
+    problem.  The shape rule is asked again, and raised the same way,
+    wherever a step is traced for a state written after ``compile()``
+    (``set_node_state`` with another shape); the dtype rule is asked by
+    ``compile()`` and ``validate()`` only.  Catch
+    :class:`EdgeValidationError` (or the more specific
     subclasses) inside an ``except*`` to handle them uniformly::
 
         try:
@@ -55,7 +59,9 @@ class EdgeValidationError(Exception):
 
 class ShapeMismatchError(EdgeValidationError):
     """Edge brings a field whose runtime shape disagrees with the
-    target node's :attr:`BoundaryInputSpec.shape`."""
+    target node's :attr:`BoundaryInputSpec.shape`: at ``compile()``, or
+    where a step is traced for a state written with another shape after
+    it."""
 
 
 class DtypeMismatchError(EdgeValidationError):

@@ -345,8 +345,9 @@ class _EdgeSourceRule(NamedTuple):
     #: ``(source lead, target lead)`` of the edge's mapping
     #: (:func:`_edge_mapping_leads`); ``None`` without one.
     leads: Optional[tuple[tuple, tuple]]
-    #: The source was a field of its node's state when the program was
-    #: built, and the node has no flux hook that could supply it instead.
+    #: The source can only be a field of its node's state: the node has
+    #: no flux hook that could supply it instead (``compile()`` refuses
+    #: an edge whose source is neither).
     held: bool
 
 
@@ -406,15 +407,17 @@ def _edge_shape_issue(edge: EdgeSpec, value, declared: Optional[tuple],
     )
 
 
-def _edge_source_rules(edges, nodes, state=None) -> tuple[_EdgeSourceRule, ...]:
+def _edge_source_rules(edges, nodes, *, fields: bool = True) -> tuple[_EdgeSourceRule, ...]:
     """The rules of *edges* to ask again where a program is traced.
 
     Called on the host when a step program is built (and per call by a
     reader of the edges that is not a step): each target's
     ``boundary_input_spec()`` is asked here, never inside a trace, so the
-    check itself adds nothing to a program.  *state* is the state the
-    graph held at the build; with it, an edge whose source is one of its
-    fields is recorded as *held* (see :func:`_refuse_edge_sources`).
+    check itself adds nothing to a program.  Nothing here reads a state:
+    a scan builds its step when it is called, on whatever state was
+    written since ``compile()``.  ``fields=False`` leaves out the rule
+    that a source is still a field of its node's state (*held*; see
+    :func:`_refuse_edge_sources`).
     """
     rules = []
     specs: dict[str, dict] = {}
@@ -432,8 +435,7 @@ def _edge_source_rules(edges, nodes, state=None) -> tuple[_EdgeSourceRule, ...]:
                 declared = _edge_declared_shape(edge, spec)
         source = nodes.get(edge.source_node)
         held = (
-            state is not None and source is not None
-            and edge.source_field in state.get(edge.source_node, {})
+            fields and source is not None
             and (type(source.node).compute_boundary_fluxes
                  is SimulationNode.compute_boundary_fluxes))
         if declared is not None or held:

@@ -66,6 +66,22 @@ The first implementation is a dense matrix `H` (`n_target × n_source`),
 | `projection_1d_mapping(src_boundaries, tgt_boundaries)` | cell-average projection between 1D grids (conservative) |
 | `matrix_mapping(H, mode=)` | bring your own weights (e.g. supermesh weights precomputed offline) |
 
+**The dtype of the weights** is each factory's own, and only one follows
+`jax_enable_x64`:
+
+| factory | weights |
+|---------|---------|
+| `nearest_neighbor_mapping`, `projection_1d_mapping` | float32 under either setting, whatever dtype the points or boundaries have: a config written under one setting rebuilds the same weights under the other, and a float32 field stays float32 through the mapping in an x64 process |
+| `rbf_mapping` | float64 where a point array was passed as float64 under `jax_enable_x64` (NumPy's default, and a plain list); float32 otherwise |
+| `matrix_mapping` | the dtype of `H` as given |
+
+So in a float64 graph the projection's identities hold to float32 rounding:
+a row sums to one, and the integral is preserved, to about 3e-8 relative,
+not to 1e-16.  The weights are the float64 overlap formula rounded once.
+Where that matters, evaluate `P[i, j] = |target_i ∩ source_j| / |target_i|`
+in float64 yourself and pass it to `matrix_mapping` (or its rows to
+`sparse_matrix_mapping`), which keeps float64 under `jax_enable_x64`.
+
 ### Polynomial augmentation and the patch test
 
 With `polynomial=True` (the default) the RBF interpolant is augmented
@@ -571,6 +587,10 @@ small interfaces and for RBF interpolation, whose matrix is full.
 | `sparse_nearest_neighbor_mapping(src_pts, tgt_pts, mode=, transpose=)` | the matrix of `nearest_neighbor_mapping`, found with a k-d tree instead of an `n_target × n_source` distance table |
 | `sparse_projection_1d_mapping(src_boundaries, tgt_boundaries)` | the matrix of `projection_1d_mapping`, found with a sorted sweep instead of a double loop |
 | `sparse_matrix_mapping(indices, values, n_source=, mode=, name=)` | bring your own rows: `target[i] = sum_j values[i, j] * source[indices[i, j]]` |
+
+The first two hold float32 weights under either setting of
+`jax_enable_x64`, as the dense kinds they reproduce do (see the table of
+dtypes above); `sparse_matrix_mapping` keeps the dtype of `values`.
 
 A sparse mapping goes on an edge like any other, and its kind is
 registered, so `to_dict()` / `from_dict()` and the USD writer and reader

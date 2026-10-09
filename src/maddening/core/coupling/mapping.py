@@ -599,15 +599,20 @@ def projection_1d_mapping(
       no interval therefore give a matrix of zeros: check that they are
       in the same units and frame.
 
-    The weights are float32, and float64 where a boundary array was
-    passed as float64 under ``jax_enable_x64`` (as :func:`rbf_mapping`'s
-    are).  They were float32 in an x64 graph too, so a row summed to one
-    and the integral was preserved to float32 rounding only, about 3e-8
-   .
+    **The weights are float32 whatever** ``jax_enable_x64`` **says**, as
+    :func:`nearest_neighbor_mapping`'s are (:func:`rbf_mapping`'s follow
+    float64 points there; :func:`matrix_mapping` keeps the dtype it is
+    given).  The overlap formula is evaluated in float64 on the host and
+    rounded once, so a config written under one setting rebuilds the same
+    weights under the other, and a float32 field stays float32 through
+    the mapping in an x64 process.  The price is in a float64 graph: there
+    a row sums to one, and the integral is preserved, to float32 rounding
+    (about 3e-8 relative) and not to float64.  Where that matters, build
+    ``P`` from the formula above in float64 and hand it to
+    :func:`matrix_mapping` under ``jax_enable_x64``.
     """
     from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
 
-    dtype = _out_dtype(source_boundaries, target_boundaries)
     sb = _checks.checked_boundaries("source_boundaries", source_boundaries)
     tb = _checks.checked_boundaries("target_boundaries", target_boundaries)
     n_src, n_tgt = sb.size - 1, tb.size - 1
@@ -624,7 +629,7 @@ def projection_1d_mapping(
         "target_boundaries": reference_for_array(
             target_boundaries, target_ref, name="target_boundaries"),
     })
-    return StaticLinearMapping(jnp.asarray(P, dtype), kind="projection_1d",
+    return StaticLinearMapping(jnp.asarray(P, jnp.float32), kind="projection_1d",
                                mode="conservative", spec=spec)
 
 

@@ -652,13 +652,18 @@ claims:
     each grid pair both ways round: random, nested, identical, sharing
     boundaries, overlapping partly and not at all, touching, a single cell,
     float32 and integer boundaries, an offset of 1e9, cells of 1e-200,
-    adjacent floats.  With x64 off the weights are float32.  With it on,
-    the nearest-neighbour weights (ones) are float32 still, and the
-    projection's follow the boundaries' dtype as rbf_mapping's do: float64
-    from float64 boundaries (the dense factory's H bit for bit, the
-    overlap formula in float64, a row summing to one and the integral
-    preserved to float64 rounding), float32 from float32 ones.  The
-    builders run once, on the host.
+    adjacent floats.  With x64 off and on: the weights are float32 either
+    way, as the dense nearest-neighbour and projection kinds' are
+    (rbf_mapping's follow float64 points under x64 and matrix_mapping keeps
+    the dtype it is given: neither has a sparse twin here), from float64,
+    float32, plain-list and mixed boundaries, with the same bytes under
+    both settings and a float32 field delivered as float32 by apply and
+    apply_T in an x64 process.  STATED LIMIT: in a float64 (x64) graph the
+    projection's row sums and preserved integral therefore hold to float32
+    rounding (2.98e-8 and 3.7e-9 relative on the test's grids), not to
+    float64; the float64 route is the overlap formula handed to
+    matrix_mapping or sparse_matrix_mapping, exact to float64 rounding.
+    The builders run once, on the host.
   oracle: >-
     the dense factory's H from the same arrays: dtype, shape and every byte
     of the rows scattered into a zero matrix; for the projection also the
@@ -669,7 +674,8 @@ claims:
     - tests/core/test_sparse_mapping_builders.py::test_the_sparse_projection_is_the_dense_double_loop_bit_for_bit
     - tests/core/test_sparse_mapping_builders.py::test_the_grids_cover_empty_rows_shared_boundaries_and_padding
     - tests/core/test_sparse_mapping_builders.py::test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are
-    - tests/core/test_sparse_mapping_builders.py::test_the_projection_weights_follow_the_boundaries_dtype_under_x64
+    - tests/core/test_sparse_mapping_builders.py::test_the_projection_weights_are_float32_under_x64_and_a_float32_field_stays_float32
+    - tests/core/test_sparse_mapping_builders.py::test_in_a_float64_graph_the_projection_holds_to_float32_rounding_and_a_float64_matrix_to_float64
     - tests/core/test_sparse_mapping_builders.py::test_the_three_builders_at_a_hundred_thousand_points_in_a_capped_process
   status: verified
   domains:
@@ -906,7 +912,11 @@ claims:
     projection from node-field references, sparse_matrix from two members of
     one .npz beside the config, a small set inlined; JSON and YAML; a USD
     stage on file; a hand-written spec and its dict handed to add_edge;
-    with x64 off and on; float32 members, float64 members under x64 and a
+    with x64 off and on, and a config written under one setting rebuilt
+    under the other (the nearest-neighbour and projection kinds and the
+    dense projection, whose weights are float32 under both: the same index
+    and weight bytes; not sparse_matrix, which keeps float64 values under
+    x64); float32 members, float64 members under x64 and a
     float32 member beside a float64 one (mixed dtype); the reload stepped by
     the compiled (jit) step; a multi-rate graph, a sub-cycled group and a
     group with a predictor; run_adaptive on the reload; a checkpoint loaded
@@ -928,6 +938,7 @@ claims:
     - tests/core/test_sparse_mapping_serialisation.py::test_an_asset_that_changed_since_the_save_is_refused_naming_the_edge
     - tests/core/test_sparse_mapping_serialisation.py::test_a_node_field_that_moved_is_refused_when_the_config_is_written
     - tests/core/test_sparse_mapping_serialisation.py::test_the_rebuild_gives_the_same_index_and_weights_under_either_x64_setting
+    - tests/core/test_sparse_mapping_serialisation.py::test_a_config_written_under_one_x64_setting_rebuilds_the_same_weights_under_the_other
     - tests/core/test_sparse_mapping_serialisation.py::test_a_sparse_mapping_built_by_hand_has_no_recipe_and_is_refused_by_the_writers
     - tests/core/test_sparse_mapping_serialisation.py::test_edge_mapping_helper_references_every_array_of_every_case
     - tests/core/test_sparse_mapping.py::test_describe_adds_no_key_a_reload_would_read_as_a_hyper_parameter

@@ -119,7 +119,7 @@ import numpy as np
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.coupling import _mapping_checks as _checks
-from maddening.core.coupling.mapping import _MODES, _out_dtype
+from maddening.core.coupling.mapping import _MODES
 from maddening.core.coupling.mapping_registry import register_mapping
 from maddening.core.coupling.mapping_spec import (
     MAX_ASSET_BYTES,
@@ -624,24 +624,22 @@ def _check_structure_bytes(what: str, n_rows: int, k: int, weight_bytes: int, *,
 def _padded_rows(what: str, n_rows: int, rows: np.ndarray, columns: np.ndarray,
                  values: Optional[np.ndarray], *, hint: str = ""):
     """``(indices, weights, counts)`` of the entries ``(rows[e], columns[e])``
-    with ``values[e]`` (1 when ``None``), as weights of the values' dtype
-    (float32 when ``None``).
+    with ``values[e]`` (1 when ``None``), as float32 weights.
 
     *rows* must be ascending; entries of one row keep their order.  The
     byte cap is checked from the row counts before the padded arrays exist.
     """
-    dtype = np.dtype(np.float32) if values is None else np.asarray(values).dtype
     counts = np.bincount(rows, minlength=n_rows).astype(np.int64)
     k = max(1, int(counts.max(initial=0)))
     _check_structure_bytes(
-        what, n_rows, k, dtype.itemsize,
+        what, n_rows, k, np.dtype(np.float32).itemsize,
         detail=(f", median row {int(np.median(counts))}, {int(rows.size)} entries; "
                 f"every row is padded to the largest one"),
         hint=hint)
     starts = np.cumsum(counts) - counts
     slots = np.arange(rows.size, dtype=np.int64) - starts[rows]
     indices = np.zeros((n_rows, k), dtype=np.int32)
-    weights = np.zeros((n_rows, k), dtype=dtype)
+    weights = np.zeros((n_rows, k), dtype=np.float32)
     indices[rows, slots] = columns
     weights[rows, slots] = 1.0 if values is None else values
     return indices, weights, counts
@@ -952,9 +950,11 @@ def sparse_projection_1d_mapping(
     Returns
     -------
     StaticSparseMapping
-        Mode ``"conservative"``; the weights are the dense kind's, in
-        its dtype: float32, and float64 where a boundary array was passed
-        as float64 under ``jax_enable_x64``.
+        Mode ``"conservative"``, float32 weights whatever
+        ``jax_enable_x64`` says: the dense kind's, bit for bit (see
+        :func:`~maddening.core.coupling.mapping.projection_1d_mapping`
+        for what that costs in a float64 graph;
+        :func:`sparse_matrix_mapping` keeps float64 values there).
 
     Raises
     ------
@@ -966,7 +966,6 @@ def sparse_projection_1d_mapping(
         target cell spanning very many source cells).
     """
     what = "sparse_projection_1d_mapping"
-    dtype = np.dtype(_out_dtype(source_boundaries, target_boundaries))
     sb = _checked_boundaries("source_boundaries", source_boundaries)
     tb = _checked_boundaries("target_boundaries", target_boundaries)
     spec = MappingSpec("sparse_projection_1d", {}, {
@@ -988,7 +987,7 @@ def sparse_projection_1d_mapping(
     columns = np.arange(rows.size, dtype=np.int64) - offsets[rows] + j_first[rows]
     # The dense factory's own expression, entry by entry, in float64.
     overlap = np.minimum(high[rows], sb[columns + 1]) - np.maximum(low[rows], sb[columns])
-    values = (overlap / (high - low)[rows]).astype(dtype)
+    values = (overlap / (high - low)[rows]).astype(np.float32)
     indices, weights, counts = _padded_rows(what, n_target, rows, columns, values)
     return StaticSparseMapping(
         indices, jnp.asarray(weights), n_source=n_source, counts=counts,

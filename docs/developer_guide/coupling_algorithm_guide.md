@@ -230,7 +230,12 @@ The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
 every entry the norm reads, **per evaluation**, in the norm's units —
 `4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
 `"mixed"` and `"interface"` (`residual_precision_floor`), **every entry
-at the `eps` of the coarsest floating dtype among the group's fields**.
+at the `eps` of the coarsest floating dtype among the group's fields and
+what its internal edges deliver** (after the mapping and the transform:
+a transform that narrows to float32 between two float64 members puts a
+float32 rounding into every pass, and such a pair stalled with residual
+0.0 and read its bound at 5e-8 to 1e-7 of the distance with both flags
+set while only the fields' dtypes were read).
 A field a node computes from a coarser neighbour's output carries that
 neighbour's rounding: a float64 field of `n` values that is a function
 of one float32 value is as far from its fixed point, relative to its own
@@ -242,8 +247,9 @@ of the distance at `n = 1e3` and 0.21 at `n = 2e4` with the flags set
 ones read 0.37 and 0.36).  The rule assumes that any field of a group
 may be downstream of its coarsest member (which fields are is inside
 the nodes), that a node's own arithmetic is no coarser than the fields
-it reads and writes, and that what enters from outside the group is a
-constant of the solve; where a fine field is in fact computed from fine
+it reads and writes (a cast down and back inside `update` cannot be seen
+from outside and is not counted), and that what enters from outside the
+group is a constant of the solve; where a fine field is in fact computed from fine
 fields alone the floor is too large, never too small.  In a group of
 one dtype nothing changes.  **A position is exempt from that rule and
 keeps its own dtype's `eps`**: a geometry field that an internal edge

@@ -513,19 +513,32 @@ claims:
     - src/maddening/core/coupling/group.py:89 (CouplingGroup, atol)
     - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
   conditions: >-
-    Under iteration_mode="jacobi" a field inside the dead band also un-holds,
-    for a pass or more, the kept fields computed from it (the residual of p <-
-    f(q), q <- g(p) with p dropped tests only that q agrees with the p it was
-    computed from): a plain-edge pair whose three forces of 1e-8 are inside
-    atol = 1e-6 and are amplified by the member that reads them reported
-    converged=True after one pass on every other step, 4.5e5 to 7.4e5
-    tolerances from the fixed point, under all three norms (two to four passes
-    and 5e5 to 6.3e5 where the dropped member carries state); Gauss-Seidel
-    held at 0.5 to 4.9 in both sweep orders, and so does atol = 0.  The oracle
-    below is claimed under Gauss-Seidel, and under Jacobi only where no kept
-    member's output depends on a dead-banded field; validate() and compile()
-    advise on atol > 0 under Jacobi (MADD-ANO-254, open; pinned as a strict
-    xfail with its controls in tests/core/test_the_dead_band_under_jacobi.py).
+    WHAT HOLDS NOW: the oracle below (the distance of the kept field to its
+    fixed point) is claimed for any group with atol = 0, and with atol > 0
+    for a PAIR under Gauss-Seidel, as measured (both sweep orders: 0.5 to 4.9
+    tolerances on a float64 pair, 0.65 to 0.75 on a float32 one).  It is NOT
+    claimed with atol > 0 for a group of three or more members, nor under
+    iteration_mode="jacobi": a change that has to cross a field inside the
+    dead band is not in the residual until it reaches a kept field, and the
+    loop accepts on the first residual it measures.  Measured, each under all
+    three norms: (1) under Jacobi (the residual of p <- f(q), q <- g(p) with
+    p dropped tests only that q agrees with the p it was computed from) a
+    plain-edge pair whose three forces of 1e-8 are inside atol = 1e-6 and are
+    amplified by the member that reads them reported converged=True after one
+    pass on every other step, 4.5e5 to 7.4e5 tolerances from the fixed point
+    (two to four passes and 5e5 to 6.3e5 where the dropped member carries
+    state); (2) under Gauss-Seidel a float32 ring of three swept against its
+    data flow (members added A, B, C; edges A -> C -> B -> A; two fields of
+    1e-8 inside atol = 1e-6 in series) reported converged=True after one pass
+    with its kept field 4.6e3 to 1.8e4 tolerances off, with no acceleration,
+    Aitken and IQN-ILS; the same ring swept C, B, A held (one instance, not a
+    rule), and so does atol = 0 on every one of these groups.  validate() and
+    compile() advise on atol > 0 wherever a group has three or more members
+    or runs under Jacobi (MADD-ANO-254, open; the dead band is to be
+    redesigned in 0.5.0).  Both cases are pinned as strict xfails with their
+    controls: tests/core/test_the_dead_band_under_jacobi.py and
+    tests/core/test_the_dead_band_of_a_ring_of_three.py (the ring is outside
+    this claim).
     Under "interface" the reading of an edge read at its source is dropped
     only where both the source field and what the edge delivers are at or
     below atol (CPL-041).
@@ -536,6 +549,10 @@ claims:
   tests:
     - 'tests/core/test_the_dead_band_under_jacobi.py::test_validate_advises_on_a_dead_band_declared_under_jacobi'
     - 'tests/core/test_the_dead_band_under_jacobi.py::test_gauss_seidel_holds_the_pair_with_the_field_inside_the_dead_band'
+    - 'tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_pair_holds_with_the_force_inside_the_dead_band_in_both_sweep_orders'
+    - tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_same_ring_with_no_dead_band_is_held
+    - tests/core/test_the_dead_band_of_a_ring_of_three.py::test_validate_advises_on_a_dead_band_declared_on_three_members
+    - tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_group_with_no_dead_band_gets_no_advisory
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
     - tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
     - tests/core/test_coupling_error_bound.py::test_a_field_that_is_legitimately_zero_does_not_block_the_group
@@ -1561,9 +1578,11 @@ claims:
     the source field's; a source field at exactly zero stays out; nothing is
     built for a group with atol == 0; a group with atol > 0 and such an edge
     records its floor in the step (the band depends on the step's weights).
-    Positions read in a mapping kind's length scale are always read.  Under
-    Jacobi a field that is dropped un-holds the fields computed from it
-    (CPL-011, MADD-ANO-254).
+    Positions read in a mapping kind's length scale are always read.  A
+    change that has to cross a dropped field is not seen until it reaches a
+    kept one: with atol > 0 the distance to the fixed point is claimed for a
+    pair under Gauss-Seidel only, not under Jacobi nor for three or more
+    members (CPL-011, MADD-ANO-254).
     convergence_norm="interface"; state edges (a flux edge is refused at
     compile: CPL-075), with or without an interface mapping and a transform;
     an edge whose source field is not floating, or whose reading has no
@@ -3360,10 +3379,17 @@ claims:
     - src/maddening/core/coupling/acceleration.py::_compressed_spectrum
   conditions: >-
     as stated, in two statements the targeted search scores separately.
-    (1) What a user can check: wherever spectral_usable is True and no
-    more than eight scalars cross the group's edges,
+    (1) What a user can check: wherever spectral_usable is True, no
+    more than eight scalars cross the group's edges AND NO STATIC MAPPING
+    ON AN INTERNAL EDGE HAS A ROW OVER THE GUARD'S LIMIT OF 10 ENTRIES
+    (MAPPED_ROW_FLOOR_LIMIT),
     |rho_spectral - rho| <= 5% of (1 - rho_spectral) (score
-    "radius_strict").  Past that the Krylov space is still growing at the
+    "radius_strict").  Behind longer rows rho_spectral is an estimate even
+    with the flag set: behind scatter rows of 3333 entries (float32,
+    "interface", Gauss-Seidel, rtol = 0.1) it read 0.9257 for an exact 0.9,
+    seven times the margin, with both flags set, while spectral_error_bound
+    stayed conservative (7.8x the distance; pinned as a characterisation in
+    the slow lane).  Past eight scalars the Krylov space is still growing at the
     cap, the value is an estimate and the flag is False (it read 0.273 for
     0.219 on twelve non-normal float32 scalars with the flag set:
     MADD-ANO-225, resolved).  (2) For rank at most eight, rho_spectral is the
@@ -3871,8 +3897,18 @@ claims:
     the float floor times that row's length.  A row is the entries one
     delivered value adds up whatever the weights are: a sparse layout's
     valid slots, a dense matrix's width.  A flag kept behind such a row
-    read at least 0.9925 of the distance.  A geometry-dependent
-    mapping's rows are not counted.
+    read at least 0.9925 of the distance on the measured pairs (two
+    evaluations a pass), and 0.982 on a group of ONE member with an edge
+    to itself (one evaluation a pass; a report just above the threshold,
+    a uniform field, gain 0.999, 1000 entries a row, "interface"; 14 of
+    176 kept flags under 0.9925: pinned in the slow lane).  THE ROW RULE
+    COVERS THE ROUNDING OF A ROW'S LENGTH, NOT CANCELLATION WITHIN IT: a
+    field whose terms cancel in a row loses the cancellation's factor
+    whatever the row's length (MADD-ANO-247's mechanism, and 212's,
+    through the field's signs): with a cancellation sum|t| / |sum t| of
+    25 a row of 10 entries, within the limit, read 1.26 of the distance
+    in float32 and 0.85 at the float64 floor WITH THE FLAG SET (pinned as
+    a strict xfail).  A geometry-dependent mapping's rows are not counted.
   oracle: the flag against each condition.
   tests:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
@@ -4217,10 +4253,18 @@ claims:
     - src/maddening/core/coupling/acceleration.py::_group_coarsest_eps
   conditions: >-
     every norm; mixed dtypes; computed in at least float32 whatever the
-    fields' dtypes (MADD-ANO-186).  The eps of every value entry is that of the
-    coarsest floating dtype among the fields of the group's members that
-    hold entries, or a coarser one of the entry's own (what a transform
-    that narrows delivers): a field computed from a coarser member's
+    fields' dtypes (MADD-ANO-186).  The eps of every value entry is that of the coarsest floating dtype
+    among the fields of the group's members that hold entries AND what
+    every internal edge of the group delivers after its mapping and its
+    transform (a transform that narrows, lambda v: v.astype(float32)
+    between float64 members, is counted under all three norms and both
+    schedules; before it was, such a pair stalled with residual 0.0 and
+    read its bound at 5e-8 to 1e-7 of the distance with both flags set);
+    a non-floating delivery and one with no entries do not enter.  NOT
+    COUNTED, and outside this claim: a narrowing INSIDE a member's update
+    (a cast down and back), which nothing outside the node can see, and an
+    internal edge whose source is not a state field (a boundary flux):
+    a field computed from a coarser member's
     output carries its rounding, and with each field at its own eps a
     float64 field of n values downstream of one float32 value diluted the
     floor by sqrt(1 + n) and the bound read 0.92x (n = 1e3) and 0.21x
@@ -6447,8 +6491,15 @@ claims:
     (3e5) tolerances off at converged=True, against 1.8 to 6.2 with a gather
     mapping on the edge.  With a dead band (atol > 0) the reading of an edge
     read at its source is kept wherever the source field or what the edge
-    delivers is above atol (CPL-041); under Jacobi a dropped field un-holds
-    the fields computed from it (CPL-011).
+    delivers is above atol (CPL-041).  WITH atol > 0 THE K TOLERANCES ARE
+    CLAIMED FOR A PAIR UNDER GAUSS-SEIDEL ONLY, as measured; with atol = 0
+    for every group below.  Under Jacobi, and on three or more members
+    under either schedule, a change that has to cross a dropped field is not
+    seen until it reaches a kept one, and a converged group was 4.5e5 to
+    7.4e5 (a Jacobi pair) and 4.6e3 to 1.8e4 (a Gauss-Seidel ring of three
+    swept against its data flow, pinned in
+    tests/core/test_the_dead_band_of_a_ring_of_three.py) tolerances off:
+    outside this claim (CPL-011, MADD-ANO-254, open).
     an affine pass (linear nodes, linear static mappings, affine edge
     transforms; for a mapping that reads a moving geometry the claim is
     MAP-050's, to first order), above the residual's float floor; float32

@@ -366,6 +366,23 @@ and is not itself an iterate of the loop; its own residual can be a few times th
 See "What a converged step returns under each norm" in
 [the algorithm guide](../developer_guide/coupling_algorithm_guide.md).
 
+**A dead band (`atol > 0`) on three or more members, or under Jacobi.**  Leave `atol` at `0.0`
+there in 0.4.0.  A field at or below `atol` leaves the residual, and a change that has to cross it
+is not seen until it reaches a field the norm keeps, so such a group can report `converged=True`
+after one pass with a kept field thousands of tolerances from its fixed point (MADD-ANO-254, open:
+4.5e5 to 7.4e5 tolerances on a Jacobi pair, 4.6e3 to 1.8e4 on a Gauss-Seidel ring of three swept
+against its data flow, under every norm).  `compile()` warns and `validate()` says so.  A pair under
+Gauss-Seidel held in both sweep orders in every case measured.  At `atol=0.0` only a field that is
+exactly zero leaves the residual; every non-zero field, however small, is measured against its own
+magnitude.  The dead band is expected to be replaced in 0.5.0, so do not tune to it.
+
+**Mixed dtypes.**  The float floor, and so `precision_limited` and both usable flags, is counted at
+the coarsest floating dtype the group's pass goes through: any field of any member that holds
+entries (a field no loop passes through included), and what every internal edge delivers after its
+mapping and its transform, so a transform that narrows to float32 between float64 members is
+counted.  A narrowing *inside* a node's own `update` (a cast down and back) cannot be seen from
+outside and is not counted: declare the narrower field, or do not rely on the flags there.
+
 **What a node declares for `spectral_usable` at the float floor.**  A group whose residual is at
 its float floor (`precision_limited=True`: any converged float32 group at the default tolerance)
 reports `spectral_usable=False`, and so `gradient_bound_usable=False`, unless every node in it
@@ -458,7 +475,12 @@ own static class) with a row longer than 10 entries (`MAPPED_ROW_FLOOR_LIMIT`, a
 and the residual is not above the float floor times the row's length, `spectral_usable` and
 `gradient_bound_usable` are `False`, every number is reported as computed, and `not_usable_reason`
 names the edge, how its mapping is applied, the row's length and the way out: a wider dtype at the
-same tolerance.
+same tolerance.  "The group's fields" there means every floating field of every member, and what
+its edges deliver: the floor is counted at the coarsest of them (see "Mixed dtypes" above), so one
+float32 field on a float64 member, even one no loop passes through, keeps the whole group's floor
+at float32 until that field is widened too.  Behind such a row `rho_spectral` itself is an estimate
+(rows of 3333 entries, float32, `"interface"`, `rtol = 0.1`: 0.926 for an exact 0.9 with both flags
+set), while `spectral_error_bound` stayed conservative in every run measured (7.8x there).
 
 **What you see.**  A float32 group whose mapping adds up a few hundred entries a row has the two
 flags withdrawn on every step at an `rtol` of 1e-4 or tighter: the float floor there is 0.005 of
@@ -470,6 +492,9 @@ matrix's **width**.  A dense selection or interpolation matrix more than ten ent
 therefore counted although each of its rows holds one or two non-zeros and its sum is exact; a
 sparse mapping of the same operator is counted at those one or two entries and keeps its flags.
 `converged`, `residual`, `precision_limited`, `ratio_usable` and every number are as they were.
+A flag the rule keeps can still stand on a bound slightly under the distance: 0.9925 of it at the
+least on the measured pairs, and 0.982 on a group of ONE member with an edge to itself (one
+evaluation a pass, a row of 1000 entries, `"interface"`).
 
 **Why every kind is counted.**  Measured on a float32 pair stalled behind a uniform field (the
 smallest `spectral_error_bound` over the true distance among the reports that set the flag, before

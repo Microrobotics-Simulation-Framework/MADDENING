@@ -77,6 +77,7 @@ Usage::
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional, Sequence
 
@@ -514,6 +515,31 @@ def _stiff_pair_tolerance(gain: float) -> float:
     return _SPRING_TOL * (1.0 - _STIFF_REF_GAIN) / (1.0 - gain)
 
 
+#: ``compile()``'s advisory for a group that declares a dead band on three
+#: or more members (MADD-ANO-254), as a pattern for a warnings filter.
+DEAD_BAND_ON_MEMBERS = r"(?s).*declares a dead band on \d+ members"
+
+
+def compile_fixture(gm) -> None:
+    """``compile()`` a fixture graph, expecting the dead-band advisory.
+
+    The fixtures keep the dead band they have always been measured with
+    (``atol`` of 1e-8 to 1e-6 on groups of up to eight members), so that
+    their pinned iteration counts, their residuals and the recorded step
+    programs stay comparable from release to release.  ``compile()``
+    advises on such a band on three or more members, under either
+    schedule: a change that has to cross a field at or below ``atol`` is
+    not seen until it reaches a kept field.  The fixtures' fields are of
+    order one, so nothing of theirs is inside the band unless it is
+    exactly zero, which ``atol = 0`` drops as well.  The advisory is
+    therefore expected here, by name, and nothing else is filtered.  Do
+    not copy the band into new work: leave ``atol`` at ``0.0``.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=DEAD_BAND_ON_MEMBERS, category=UserWarning)
+        gm.compile()
+
+
 def _finish(gm, names, config, *, expensive=frozenset(), predicted=None,
             max_iterations=_SPRING_MAXIT, tolerance=_SPRING_TOL,
             atol=1e-8, rtol=1e-4, groups=None):
@@ -534,7 +560,7 @@ def _finish(gm, names, config, *, expensive=frozenset(), predicted=None,
             ),
         )
         keys.append("+".join(sorted(group_nodes)))
-    gm.compile()
+    compile_fixture(gm)
     return BuiltGraph(
         gm=gm, group_keys=tuple(keys), expensive_nodes=expensive,
         predicted_rho=predicted or {},
@@ -907,7 +933,7 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
         **config.group_kwargs(max_iterations=20, tolerance=_SPRING_TOL,
                               atol=1e-6, rtol=1e-4, accelerated_fields=accel),
     )
-    gm.compile()
+    compile_fixture(gm)
     return BuiltGraph(gm=gm, group_keys=("+".join(sorted(names)),),
                       expensive_nodes=frozenset({"grid"}),
                       # The grid's interface gain is ``2*Fo`` (the
@@ -993,7 +1019,7 @@ def build_mixed_modes(config: CouplingConfig, n_chain: int = 5,
                                tolerance=_SPRING_TOL, atol=1e-8, rtol=1e-4,
                                accelerated_fields=accel),
         )
-    gm.compile()
+    compile_fixture(gm)
     return BuiltGraph(
         gm=gm,
         group_keys=("+".join(sorted(chain)), "+".join(sorted(star))),

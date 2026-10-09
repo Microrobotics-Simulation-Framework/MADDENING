@@ -365,8 +365,10 @@ _MAPPED_ROW_REASON = (
     "is longer than the limit, so spectral_error_bound (and the gradient bound built on "
     "it) can read below the true distance here (MADD-ANO-257). spectral_usable and "
     "gradient_bound_usable are therefore False; every number is reported as computed. "
-    "The way out: hold the group's fields in a wider dtype at the same tolerance, so "
-    "that the residual stands clear of the floor.{others}"
+    "The way out: a wider dtype at the same tolerance, so that the residual stands clear "
+    "of the floor, for every floating field of the group's members (one no loop passes "
+    "through included) and for what its internal edges deliver: the floor is counted at "
+    "the coarsest of them.{others}"
 )
 
 
@@ -466,9 +468,17 @@ def _mapped_row_reason(rows, residual: float, floor: float) -> Optional[str]:
     reports measured below their distance on each jax version were not
     ``precision_limited``, 56 of 112 at the float64 tolerances).
     Measured with the rule (float32, tolerances from 1e-6 to 1e-1, rows
-    of 100, 1000 and 3e4): every flag that is kept reads at least 0.993
-    of the distance, which is where the bound's own estimate reads in a
-    residual-dominated report under ``"mixed"`` whatever the mapping.
+    of 100, 1000 and 3e4): every flag that is kept reads at least 0.9925
+    of the distance on a pair (two evaluations a pass), which is where
+    the bound's own estimate reads in a residual-dominated report under
+    ``"mixed"`` whatever the mapping.  That is not the rule's floor: on a
+    group of ONE member with an edge to itself (one evaluation a pass,
+    so the threshold is half the pair's) a kept flag read 0.982 of the
+    distance by construction (a report just above the threshold, a
+    uniform field, gain 0.999, 1000 entries a row, ``"interface"``; 14
+    of 176 kept flags under 0.9925).  At the threshold the bound's
+    allowance for rounding is ``1 / row`` of the residual while the
+    row's rounding is up to ``1 / (8 evaluations)`` of it.
 
     It only withdraws, and reads nothing but the report's own two
     numbers: a group with no static mapping on an internal edge, a row

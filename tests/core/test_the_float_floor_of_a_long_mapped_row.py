@@ -64,6 +64,7 @@ from maddening.core.coupling._group_layout import (
     _mapped_row_reason,
     _mapped_rows,
 )
+from maddening.core.coupling.acceleration import PRECISION_FLOOR_ULPS, SPECTRAL_SETTLED_FRACTION
 from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
 from maddening.core.coupling.mapping import matrix_mapping, nearest_neighbor_mapping
 from maddening.core.coupling.sparse_mapping import (
@@ -195,9 +196,14 @@ class Cell:
 
 def constants(n: int, field: str, dtype) -> np.ndarray:
     """The fine node's ``c``: ``"uniform"`` (every entry 1.1), ``"ramp"``
-    (``1 + j / n``) or ``"random"`` (uniform in ``[1, 2)``, seeded)."""
+    (``1 + j / n``), ``"random"`` (uniform in ``[1, 2)``, seeded) or
+    ``"cancelling"`` (alternating ``+1, -1`` beside 0.004: the terms of
+    a row cancel, and the coarse relay then adds no offset, so that the
+    returned field keeps its sign changes)."""
     if field == "uniform":
         return np.full(n, 1.1, dtype)
+    if field == "cancelling":
+        return (np.where(np.arange(n) % 2 == 0, 1.0, -1.0) + 0.004).astype(dtype)
     if field == "ramp":
         return (1.0 + np.arange(n) / n).astype(dtype)
     assert field == "random", field
@@ -269,7 +275,7 @@ def measure(cell: Cell) -> dict:
         gm = compiled(pair)
         np_dtype = np.dtype(pair.dtype).type
         c = constants(pair.fine, cell.field, np_dtype)
-        a, b = np_dtype(cell.gain / n), np_dtype(1.0)
+        a, b = np_dtype(cell.gain / n), np_dtype(0.0 if cell.field == "cancelling" else 1.0)
         gm.reset_state()
         gm.set_node_state("fine", {"x": jnp.asarray(c)})
         gm.step(external_inputs={"coarse": {"ab": jnp.asarray([a, b])},
@@ -922,3 +928,119 @@ def test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less
     distance = float(np.sqrt(np.mean(terms ** 2))) / rtol
     assert distance > 0.0
     assert distance <= report["spectral_error_bound"] < 2.0 * distance, (report, distance)
+
+
+# ---------------------------------------------------------------------------
+# What the row rule does not cover, and how close a kept flag comes
+# (characterisations: each pins a measured number, none is a claim)
+# ---------------------------------------------------------------------------
+
+#: A row of ten entries, within the limit, behind a field whose terms
+#: cancel (``sum |t| / |sum t|`` of 25 at the fixed point), stalled at the
+#: float64 floor: three rows in the gather layout under Jacobi.
+CANCELLING = Cell(Pair("gather", MAPPED_ROW_FLOOR_LIMIT, dtype="float64", rows=3),
+                  field="cancelling", gain=0.9)
+
+
+# Per push: tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_row_within_the_limit_keeps_its_flags_on_a_bound_that_holds
+@pytest.mark.slow
+def test_a_short_row_behind_a_cancelling_field_keeps_its_flag_on_a_bound_under_the_distance():
+    """The premise of the strict xfail below, as what happens today
+    (MADD-ANO-247's mechanism, reached through the field's signs): the
+    row rule counts a row's LENGTH, the row is within the limit, and the
+    flag stands on a bound of 0.85 of the distance (jax 0.10.2, 0.11.0
+    and 0.11.2)."""
+    report = measure(CANCELLING)
+    assert report["converged"] and report["precision_limited"], report
+    assert report["spectral_usable"] and "not_usable_reason" not in report, report
+    assert 0.7 < report["spectral_error_bound"] / report["distance"] < 1.0, report
+
+
+# Per push: tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_row_within_the_limit_keeps_its_flags_on_a_bound_that_holds
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "MADD-ANO-247 (open): the float floor takes a delivered value at its own magnitude, so "
+    "behind a field whose terms cancel in a row the bound reads under the distance with the "
+    "flag set whatever the row's length; the floor is fixed in 0.5.0"))
+def test_the_bound_behind_a_short_row_of_a_cancelling_field_is_at_or_above_the_distance():
+    """The number itself: what a floor that counts the cancellation
+    within a row will make pass."""
+    report = measure(CANCELLING)
+    assert report["spectral_error_bound"] >= report["distance"], report
+
+
+# Per push: tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give
+@pytest.mark.slow
+def test_a_kept_flag_on_a_group_of_one_member_reads_just_under_its_distance():
+    """How far under the distance a flag the rule KEEPS can read.  The
+    measured pairs bottom at 0.9925 (two evaluations a pass); a group of
+    ONE member with an edge to itself evaluates once a pass, so its
+    threshold is half the pair's, and by construction (a report just
+    above the threshold ``residual > floor * row``, a uniform field,
+    gain 0.999, a scatter row of 1000 entries, ``"interface"``) its kept
+    flag stands on a bound of 0.982 of the distance.  Pinned between 0.97
+    and 0.9925: the rule is as it was, and this is its measured margin."""
+    k, gain, value = 1000, 0.999, 1.1
+    rtol = 1.1 * PRECISION_FLOOR_ULPS * float(np.finfo(np.float32).eps) * k
+    weights = np.full((k, k), np.float32(gain / k), np.float32)
+    gm = GraphManager()
+    gm.add_node(Fine("s", 1.0, k, jnp.float32))
+    gm.add_external_input("s", "c", shape=(k,), dtype=jnp.dtype("float32"))
+    # The scatter layout of "gain / k times the sum, to every entry".
+    gm.add_edge("s", "s", "x", "u", mapping=StaticSparseMapping(
+        indices=np.tile(np.arange(k, dtype=np.int32), (k, 1)), weights=jnp.asarray(weights),
+        n_source=k, layout="scatter", n_target=k))
+    gm.add_coupling_group(["s"], convergence_norm="interface", max_iterations=60000,
+                          solver="ift", diagnostics=True, rtol=rtol)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+        c = np.full(k, value, np.float32)
+        gm.set_node_state("s", {"x": jnp.asarray(c)})
+        gm.step(external_inputs={"s": {"c": jnp.asarray(c)}})
+    (report,) = gm.coupling_diagnostics().values()
+    x = np.asarray(gm.get_node_state("s")["x"], np.float64)
+    weight = float(np.float32(gain / k))
+    total = math.fsum(np.asarray(c, np.float64).tolist()) / (1.0 - weight * k)
+    # The one reading: what the edge delivers, ``weight * sum(x)`` to every entry.
+    delivered = weight * math.fsum(x.tolist())
+    distance = abs(delivered - weight * total) / abs(delivered) / rtol
+    assert report["converged"] and not report["precision_limited"], report
+    assert report["spectral_usable"] and report["gradient_bound_usable"], report
+    assert "not_usable_reason" not in report, report
+    assert 0.97 < report["spectral_error_bound"] / distance < 0.9925, (report, distance)
+
+
+# Per push: tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give
+@pytest.mark.slow
+def test_rho_spectral_behind_a_long_row_is_an_estimate_while_the_bound_holds():
+    """Behind long mapped rows at a loose tolerance ``rho_spectral`` can
+    be off by more than the flag's margin with both flags set (CPL-087's
+    statement (1) is not claimed there): three scatter rows of 3333
+    entries, float32, ``"interface"``, Gauss-Seidel, ``rtol = 0.1``, an
+    exact radius of 0.9.  ``spectral_error_bound`` stays conservative."""
+    pair = Pair("scatter", 3333, schedule="gauss-seidel", rtol=0.1, rows=3)
+    gain, n = 0.9, pair.n
+    with x64(False):
+        gm = compiled(pair)
+        c = np.random.default_rng(0).uniform(1.0, 2.0, pair.fine).astype(np.float32)
+        a, b = np.float32(gain / n), np.float32(1.0)
+        gm.reset_state()
+        gm.step(external_inputs={"coarse": {"ab": jnp.asarray([a, b])},
+                                 "fine": {"c": jnp.asarray(c)}})
+        report = dict(gm.coupling_diagnostics()[KEY])
+        x = np.asarray(gm.get_node_state("coarse")["x"], np.float64)
+        fine = np.asarray(gm.get_node_state("fine")["x"], np.float64)
+    c64 = np.asarray(c, np.float64)
+    sums = np.array([math.fsum(c64[i * n:(i + 1) * n].tolist()) for i in range(pair.rows)])
+    x_star = (1.0 + float(a) * sums) / (1.0 - float(a) * n)
+    delivered = np.array([math.fsum(fine[i * n:(i + 1) * n].tolist()) for i in range(pair.rows)])
+    errors = np.concatenate([np.abs(x - x_star) / np.max(np.abs(x)),
+                             np.abs(delivered - (sums + n * x_star)) / np.max(np.abs(delivered))])
+    distance = float(np.sqrt(np.mean(errors ** 2))) / pair.tolerance
+    assert report["converged"], report
+    assert report["spectral_usable"] and report["gradient_bound_usable"], report
+    margin = SPECTRAL_SETTLED_FRACTION * (1.0 - report["rho_spectral"])
+    assert abs(report["rho_spectral"] - gain) > margin, (report, margin)
+    assert abs(report["rho_spectral"] - gain) < 0.05, report
+    assert report["spectral_error_bound"] >= distance > 0.0, (report, distance)

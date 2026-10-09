@@ -85,7 +85,9 @@ def _trajectory(solver, diagnostics, iteration_mode, norm, acceleration="none"):
         dataclasses.replace(g, solver=solver, diagnostics=diagnostics)
         for g in gm._coupling_groups
     ]
-    gm.compile()
+    # The fixture keeps its dead band on five members: the advisory is
+    # expected, by name (``coupling_fixtures.compile_fixture``).
+    cf.compile_fixture(gm)
     out = []
     for _ in range(_STEPS):
         gm.step()

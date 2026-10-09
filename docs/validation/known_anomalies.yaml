@@ -16729,8 +16729,19 @@ anomalies:
       (`|W| |x|` in place of `|W x|`), which a linear mapping kind can
       supply and an arbitrary transform cannot.  Until then the floor of a
       delivered value assumes it is of the size of the entries it was
-      computed from.
+      computed from.  The same mechanism is reached through the FIELD's
+      signs behind a mapping whose weights are all positive: a field whose
+      terms cancel in a row (`sum |t| / |sum t|` of 25) left a stalled
+      pair's bound at 1.26 of the distance behind a row of 10 entries in
+      float32 and at 0.85 at the float64 floor with `spectral_usable`
+      set, in the dense kind and in both sparse layouts, and a row of two
+      entries read as a row of ten does.  The mapped-row guard
+      (MADD-ANO-257) does not reach it: it counts a row's length, and no
+      row length answers for a field's signs.  Do not rely on
+      `spectral_usable` at the float floor behind a field whose terms
+      cancel within a mapping's row.
     verification:
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_short_row_of_a_cancelling_field_is_at_or_above_the_distance"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_whose_norm_reads_a_delivered_difference_is_bounded"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_norm_reads_the_fields"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_delivered_difference_cancels_nothing"
@@ -17183,52 +17194,79 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-254"
-    title: "Under iteration_mode=\"jacobi\" a field inside the dead band un-holds the fields computed from it: a pair reports converged=True after one pass 4.5e5 to 7.4e5 tolerances from its fixed point"
+    title: "A change that has to cross a field inside the dead band is not seen until it reaches a kept field: with atol > 0 a Jacobi pair, or a Gauss-Seidel ring of three, reports converged=True after one pass thousands of tolerances from its fixed point"
     description: >
       A field whose magnitude is at or below a group's `atol` leaves the
-      residual (the 0.4.0 dead band).  Under Jacobi every member reads the
-      previous iterate, so with `p` dropped the residual of a pair
-      `p <- f(q)`, `q <- g(p)` is `|g(p_k) - q_k|`: it tests that `q`
-      agrees with the `p` it was computed from, and nothing in that pass
-      tests `p = f(q)`.  A kept field can therefore be returned with
-      `converged=True` far from its fixed point, against the oracle the
-      dead band is documented with (the distance of the kept fields to
-      their fixed point).  Measured (CPU, jaxlib 0.11.0, float64,
-      `rtol=1e-6`, `atol=1e-6`, `solver="ift"`) on a plain-edge pair of
-      three forces of about 1e-8 and thirty grid values whose grid member
-      spreads and amplifies the forces it reads: on every other step the
-      group reports `iterations=1, converged=True` with both fields 4.5e5
-      to 7.4e5 tolerances from the fixed point, under `"interface"`,
-      `"mixed"` and `"l2"` alike and in either order of the members;
+      residual (the 0.4.0 dead band), and the loop accepts on the first
+      residual it measures, between its first two passes.  A change that
+      has to cross such a field on its way to a field the norm keeps is
+      therefore not in the residual until it arrives, and a kept field can
+      be returned with `converged=True` far from its fixed point, against
+      the oracle the dead band is documented with (the distance of the
+      kept fields to their fixed point).  Two cases are measured (CPU,
+      jaxlib 0.11.0, `atol=1e-6`, `solver="ift"`), each under
+      `"interface"`, `"mixed"` and `"l2"` alike.
+      (1) Under Jacobi every member reads the previous iterate, so with
+      `p` dropped the residual of a pair `p <- f(q)`, `q <- g(p)` is
+      `|g(p_k) - q_k|`: it tests that `q` agrees with the `p` it was
+      computed from, and nothing in that pass tests `p = f(q)`.  On a
+      plain-edge float64 pair (`rtol=1e-6`) of three forces of about 1e-8
+      and thirty grid values whose grid member spreads and amplifies the
+      forces it reads, on every other step the group reports
+      `iterations=1, converged=True` with both fields 4.5e5 to 7.4e5
+      tolerances from the fixed point, in either order of the members;
       where the dropped member carries state it accepts after two to four
       passes, 5e5 to 6.3e5 tolerances off, on every step after the first.
-      With `atol=0` the same pairs take 57 to 81 passes to 0.3 to 7.9
-      tolerances, and under Gauss-Seidel with the dead band declared 31 to
-      41 passes to 0.5 to 4.9, the dropped member swept first or second.
+      (2) Under Gauss-Seidel a member swept before the one it reads still
+      reads the previous pass.  On a float32 ring of three (`rtol=1e-4`;
+      members added, and swept, A, B, C; edges A -> C -> B -> A; three
+      displacements of order 10 computed from two fields of 36 forces of
+      about 1e-8 in series, both inside the band, the load on C changing
+      each step) the change needs three passes to reach the one kept
+      field, and the group reports `iterations=1, converged=True` with it
+      4.6e3 (mixed), 8.0e3 (l2) and 1.8e4 (interface) tolerances off, on
+      every step under `"interface"` and on every other step under the
+      other two; with Aitken 4.6e3, 8.0e3 and 4.6e3, with IQN-ILS 4.6e3,
+      8.0e3 and 1.8e4 (the same four digits on jax 0.10.2, 0.11.0 and
+      0.11.2); a fixed relaxation of 0.7 held under `"mixed"` and `"l2"`
+      and not under `"interface"`.
+      What held: `atol=0` on every one of these groups (57 to 81 passes to
+      0.3 to 7.9 tolerances on the pairs; 22 to 32 passes to 0.2 to 3.0
+      on the ring); a PAIR under Gauss-Seidel with the band declared, the
+      dropped member swept first or second (31 to 41 passes to 0.5 to 4.9
+      on the float64 pair; 0.65 to 0.75 on the pair of the ring's two
+      kinds of member); and, as one measured instance and not a rule, the
+      same ring swept along its data flow (C, B, A: 0.65 to 0.75).
       `strict_convergence` does not raise.  No release carried it: the dead
       band is new in 0.4.0's development (before it `atol` was a floor
-      under the scale).  Found by the pre-merge audit of the interface
-      norm on static mapped edges, on an edge whose source the band
-      dropped; reproduced here on plain edges.  Not fixed in 0.4.0: a rule
-      that only delays the exit (so many consecutive passes at or below
-      the threshold) is provable from the residuals the loop carries only
-      for a loop in which every kept member is reached from kept members
-      through the same number of dropped ones (a pair, a ring), where
-      `d + 1` consecutive kept residuals bound the residual of the
-      composed map by their sum; in a general read graph the bound needs
-      the Lipschitz constant of the maps through the dropped members, and
-      the stateful pair above accepts after two passes.  0.4.0 states the
-      condition, advises on it at `validate()` and `compile()`, and pins
-      the case.
+      under the scale).  Found by two pre-merge audits of the interface
+      norm on static mapped edges (the Jacobi case on an edge whose source
+      the band dropped, the ring on sparse mapped edges); both are
+      reproduced on every norm, so neither is the mappings'.  Not fixed
+      in 0.4.0, by decision: the dead band stays as it is and its
+      criterion is redesigned in 0.5.0.  A rule that only delays the exit
+      (so many consecutive passes at or below the threshold) is provable
+      from the residuals the loop carries only for a loop in which every
+      kept member is reached from kept members through the same number of
+      dropped ones, where `d + 1` consecutive kept residuals bound the
+      residual of the composed map by their sum; in a general read graph
+      the bound needs the Lipschitz constant of the maps through the
+      dropped members, and the stateful Jacobi pair accepts after two
+      passes.  0.4.0 states the condition, advises on it at `validate()`
+      and `compile()` for every group with `atol > 0` that has three or
+      more members or runs under Jacobi, and pins both cases.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       `converged=True` on a state far from its fixed point is a silent
       wrong result, never `minor`.  Not `critical`: it needs a dead band
-      declared (`atol > 0`; the default is 0.0), the Jacobi schedule, a
-      field that falls inside the band, and a member whose output depends
-      on that field enough to matter, which is the declaration `atol`
-      makes false; `compile()` warns about the configuration.
+      declared (`atol > 0`; the default is 0.0, where nothing of this
+      happens), a field that falls inside the band, and a kept member
+      whose output depends on that field enough to matter, which is the
+      declaration `atol` makes false; and `compile()` warns about every
+      configuration it was measured in (three or more members, or
+      Jacobi).  The second case runs under the default schedule, which is
+      why the advisory no longer offers Gauss-Seidel as the way out.
       `context_dependent` because whether the verdict gates anything is
       the program's choice.
     affected_components:
@@ -17237,25 +17275,39 @@ anomalies:
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
-      Use `iteration_mode="gauss-seidel"`, or leave `atol` at its default
-      of 0.0, in any group in which a member's output depends on a field
-      that can fall inside the dead band (both verified on the measured
-      pairs: 0.5 to 4.9 and 0.3 to 7.9 tolerances).  Where Jacobi and a
-      dead band are both needed, read `spectral_error_bound` with
-      `diagnostics=True`: the bound folds the dead-banded share in and
-      read 1.9e6 to 3.7e6 on the audited pair where the verdict read
-      converged.
+      Leave `atol` at its default of 0.0 on any group of three or more
+      members and on any group under `iteration_mode="jacobi"` (verified
+      on every measured group: 0.2 to 7.9 tolerances).  At `atol=0.0` only
+      a field that is exactly zero leaves the residual; every non-zero
+      field, however small, is measured against its own magnitude.  A
+      pair under Gauss-Seidel may keep its dead band (held in both sweep
+      orders in every case measured).  Changing the schedule to
+      Gauss-Seidel is NOT a remedy for a group of three or more.  The
+      dead band is expected to be replaced in 0.5.0: do not tune to it.
+      Where a band is kept regardless, read `spectral_error_bound` with
+      `diagnostics=True`: the bound folds the dead-banded share in (1.9e6
+      to 3.7e6 on the audited Jacobi pair, and 2x to 11x the kept field's
+      distance on the ring, where the verdict read converged).
     resolution_status: "open"
     residual_risk: >
-      Until a criterion for the dropped members is designed (0.5.0), a
-      Jacobi group with `atol > 0` can accept early as described.  The
-      advisory is static (the group's two settings); it cannot tell
-      whether a kept member depends on a dead-banded field.
+      Until the dead band is redesigned (0.5.0), a group with `atol > 0`
+      that has three or more members, or runs under Jacobi, can accept
+      early as described.  The advisory is static (the member count, the
+      schedule and `atol`); it cannot tell whether a kept member depends
+      on a dead-banded field, so it also fires on groups that are sound,
+      and a pair under Gauss-Seidel is not advised on because it held in
+      every case measured, not because it is proved.
     verification:
       - "tests/core/test_the_dead_band_under_jacobi.py::test_a_converged_jacobi_step_holds_the_fields_computed_from_a_dead_banded_one"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_the_fixture_reaches_the_one_pass_acceptance"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_gauss_seidel_holds_the_pair_with_the_field_inside_the_dead_band"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_validate_advises_on_a_dead_band_declared_under_jacobi"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_converged_step_of_the_banded_ring_holds_its_kept_field"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_banded_ring_accepts_after_one_pass_far_from_its_fixed_point"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_pair_holds_with_the_force_inside_the_dead_band_in_both_sweep_orders"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_same_ring_with_no_dead_band_is_held"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_validate_advises_on_a_dead_band_declared_on_three_members"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_group_with_no_dead_band_gets_no_advisory"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-255"
@@ -17282,10 +17334,23 @@ anomalies:
       in 0.4.0's development.  Found by the pre-merge audit of the
       interface norm on static mapped edges.  Resolved in 0.4.0: every
       entry of a group's floor is counted at the eps of the coarsest
-      floating dtype among the group's fields, or a coarser one of its own
-      (what a narrowing transform delivers), by one function read by the
-      report and by the step's analysis; a group of one dtype has the
-      floor it had, to the bit.
+      floating dtype among the group's fields and what its internal edges
+      deliver, by one function read by the report and by the step's
+      analysis; a group of one dtype has the floor it had, to the bit.
+      **What an edge delivers** was at first counted only for the one
+      reading of an edge read as delivered under `"interface"`: with every
+      field float64 and one internal edge carrying
+      `transform=lambda v: v.astype(float32)`, a pair stalled on the
+      float32 bottleneck with `residual` exactly 0.0 and
+      `converged=True` at `rtol=1e-12`, 2.8e5 to 3.6e5 tolerances from
+      its fixed point, and `spectral_error_bound` read 5e-8 to 1e-7 of the
+      distance with both usable flags set, under `"mixed"` and `"l2"` on
+      either edge, under `"interface"` on an edge read at its source, and
+      under both schedules (found by the second pre-merge audit).  The
+      delivered dtype of every internal edge (after its mapping and its
+      transform; read abstractly, the transform is never run on numbers)
+      now enters the group's coarsest eps under all three norms: the same
+      reports read the bound at 26x to 45x the distance.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -17310,7 +17375,10 @@ anomalies:
       coarsest member, that a node's own arithmetic is no coarser than the
       fields it reads and writes, and that an input from outside the group
       is a constant of the solve.  A node that rounds through a narrower
-      dtype inside `update` is outside it.  Where a fine field is computed
+      dtype inside `update` (a cast down and back) is outside it: nothing
+      outside the node can see it, and it is not counted.  So is an
+      internal edge whose source is not a state field (a boundary flux),
+      whose delivered dtype is not read.  Where a fine field is computed
       from fine fields alone the floor is larger than it needs to be, and
       `precision_limited` is reported sooner.  The rule is for value
       entries: a position (a geometry field an internal edge anchors a
@@ -17326,6 +17394,9 @@ anomalies:
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_set_flag_stands_on_a_bound_at_or_above_the_distance_in_a_group_of_two_dtypes"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_every_entry_of_the_floor_is_counted_at_the_groups_coarsest_eps"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_steps_analysis_counts_every_entry_at_the_groups_coarsest_eps"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_the_coarsest_eps_counts_a_floating_delivery_and_nothing_else"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_an_edge_that_keeps_its_dtype_changes_nothing_to_the_bit"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-256"
@@ -17500,7 +17571,12 @@ anomalies:
       three kinds, both dtypes, tolerances from the float floor to
       1e-1), no report at its counted floor keeps a flag, and the 927
       that keep one read at least 0.9925 of their distance (20 of them
-      below 1). **The price:** 9,862 of the 10,769 reports whose bound
+      below 1). That is the measured pairs' figure and not the rule's
+      floor: on a group of ONE member with an edge to itself (one
+      evaluation a pass, so half the pair's threshold) a kept flag read
+      0.982 of the distance by construction (a report just above the
+      threshold, a uniform field, gain 0.999, 1000 entries a row,
+      `"interface"`; 14 of 176 kept flags under 0.9925). **The price:** 9,862 of the 10,769 reports whose bound
       was right lose their flag. At the counted floor every flag behind
       a row over ten entries is withdrawn, so the price there is the
       share that was right: 2,551 of the 4,123 flagged there (62%) in

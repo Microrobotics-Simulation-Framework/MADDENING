@@ -3158,7 +3158,7 @@ claims:
     position a constant of the pass, or fed back from the sampled value;
     all (207 of 207, 300 of 300) with a marker at rest on a lattice point
     or a hull face read from the iterate; 13 of 83 (float32) at a lattice
-    origin of 20; no flagged number wrong in any of 6,200 scored reports.
+    origin of 20; no flagged number wrong in any of 8,408 scored reports.
     No returned state moved. Not claimed
     for float64 (x64) on every push for the limit (the slow
     plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,

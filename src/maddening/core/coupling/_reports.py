@@ -111,7 +111,7 @@ class _CouplingDiagnostics(dict):
 # is made for state writes.  It reads every field of every coupled group
 # twice on the host, which costs several times a small graph's step
 # (measured on four CPU cores: a three-entry pair's loop of ``set_node_state``
-# and ``step`` went from 45 to 160 microseconds with the check at every
+# and ``step`` went from 45 to 150 microseconds with the check at every
 # step, one of 100,000 entries from 0.6 to 1.1 ms).  So after each
 # ``compile()`` the first ``_UNDERFLOW_FREE_CHECKS`` checks that a write
 # makes due are made at the stepper call that follows the write, and from

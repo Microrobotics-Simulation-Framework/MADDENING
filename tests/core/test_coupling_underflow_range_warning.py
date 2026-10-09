@@ -288,7 +288,7 @@ def test_the_state_a_step_replaces_is_not_read_while_it_holds_a_tracer():
 # ---------------------------------------------------------------------------
 # The check reads every field of every group twice on the host, which costs
 # several times a small graph's step (a three-entry pair's loop of
-# set_node_state and step: 45 microseconds without the check, 160 with it at
+# set_node_state and step: 45 microseconds without the check, 150 with it at
 # every step).  After a compile() the first eight checks that writes make due
 # are made at the step after the write; from then on a due check waits until
 # 1024 stepper calls have stored a state since the previous check.

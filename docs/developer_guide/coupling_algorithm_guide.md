@@ -358,7 +358,7 @@ zero field never warns, and a group is warned of once.  The check runs on
 the host and does not change the compiled step; a state that decays into the
 range through the nodes' own updates is not re-checked.  Its two reads cost
 several times a small graph's step (a three-entry pair: 45 microseconds for
-`set_node_state` and `step`, 160 with the check), so a graph that is written
+`set_node_state` and `step`, 150 with the check), so a graph that is written
 to before every step is not asked at every one: after a `compile()` the
 first eight checks that writes make due are made at the next step, and from
 then on a due check is made once 1024 stepper calls have stored a state

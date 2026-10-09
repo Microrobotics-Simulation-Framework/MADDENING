@@ -223,6 +223,18 @@ class TestCouplingValidation:
             for i in cycle_issues
         )
 
+    @pytest.mark.parametrize("mode, name", [("gauss-seidel", "Gauss-Seidel"),
+                                            ("jacobi", "Jacobi")])
+    def test_cycle_covered_by_group_names_the_groups_iteration_mode(self, mode, name):
+        """The line for a loop a group iterates names the schedule of that group.
+
+        It said "(Gauss-Seidel)" of every group, a Jacobi one included.
+        """
+        gm = _make_bidirectional_springs()
+        gm.add_coupling_group(["spring_a", "spring_b"], iteration_mode=mode)
+        assert gm.validate() == [
+            f"INFO: cycle spring_a -> spring_b handled by iterative coupling ({name})."]
+
     def test_uncovered_cycle_advisory(self):
         """v0.2.1: an uncovered cycle is reported as INFO (not WARNING),
         and the same message goes through ``logging.info``."""

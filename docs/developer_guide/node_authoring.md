@@ -849,6 +849,16 @@ sub-cycled member under `boundary_interpolation="linear"`.  `compile()`
 refuses both, naming the edge and the setting that works (`"mixed"` or
 `"l2"`; `"constant"`).
 
+### A node reading itself
+A term you would rather wire than write into `update` can be an edge from
+the node to itself.  Outside a coupling group the node reads its own value
+from the previous step (the term is explicit); in a coupling group, one of
+that node alone included, the edge is iterated with the group (implicit
+once it has converged).  `gm.validate()` says which in an `INFO:` line for
+the edge.  The two numbers, and what a cap, a stiff term or
+a sub-cycled member does to them, are in
+[An edge from a node to itself](coupling_algorithm_guide.md#an-edge-from-a-node-to-itself).
+
 ### Dirichlet-Neumann coupling
 The classic partitioned approach — one node gets a value BC, the other gets a flux BC:
 <!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->

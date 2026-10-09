@@ -11380,6 +11380,13 @@ anomalies:
     workaround: >
       Add the flux producer before its reader, so the cycle is staggered
       on a state edge, or carry the quantity in a state field.
+      A node that reads its own flux through an edge to itself, outside a
+      coupling group, has no producer to add first: have the node publish
+      the quantity as a state field and read that (the edge then reads the
+      previous step's value), or put the node in a coupling group, a group
+      of that one node included, where the edge is iterated and the node
+      reads its new value at convergence and not the previous step's
+      (CPL-193 in docs/validation/coupling_claims.yaml).
     resolution_status: "open"
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps"

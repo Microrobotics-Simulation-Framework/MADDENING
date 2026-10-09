@@ -12,7 +12,7 @@ seed, the stream of the same node run alone -- and never a drawn value: JAX
 does not promise the values across versions, so the reference stream is
 computed here, with the same three calls, outside any graph.
 
-The fact the convention rests on inside a coupling group (CPL-193): every
+The fact the convention rests on inside a coupling group (CPL-194): every
 pass of the solve calls a member's ``update`` with the state the step
 started from, and the solvers iterate floating fields only, so a member
 draws one sample per step, the same on every pass, and its key advances
@@ -497,7 +497,7 @@ def test_the_battery_takes_a_strategy_that_draws_keys_from_seeds():
 
 
 # ---------------------------------------------------------------------------
-# A coupling-group member draws one sample per step (CPL-193)
+# A coupling-group member draws one sample per step (CPL-194)
 # ---------------------------------------------------------------------------
 
 _MODES = ("gauss-seidel", "jacobi")
@@ -815,7 +815,7 @@ def test_under_x64_the_key_stays_uint32_and_the_stream_is_drawn_in_float64():
 
 
 # ---------------------------------------------------------------------------
-# The group member in the other domains (CPL-193)
+# The group member in the other domains (CPL-194)
 # ---------------------------------------------------------------------------
 
 

@@ -393,7 +393,7 @@ RUN_STEPS = 10
 #: cell size and then subtracts a half; the kernel subtracts the first
 #: centre and then divides, so a weight can differ in its last bit, and
 #: each step's sample moves the point the next step samples at).  Sixteen
-#: leaves a factor of ten; half a cell is several thousand times that in
+#: leaves a factor of ten; half a cell is some 750,000 roundings in
 #: float32.
 ROUNDING = 16.0
 

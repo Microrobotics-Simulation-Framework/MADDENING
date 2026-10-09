@@ -49,10 +49,11 @@ What is held:
   points, by one step of the body's motion.
 
 Seeded faults in ``src/maddening/core/coupling/grid_mapping.py`` that
-this module catches (run with ``plans/tools/mutants.py``; the list is in
-the pull request that added the file): the lattice's origin moved by
-half a spacing, either way; the clamp removed, on one side and on both;
-a corner's weight taken from the other side.
+this module catches (nine, each run against the tests named for it; the
+list is in the pull request that added the file): the lattice's origin
+moved by half a spacing, either way; the clamp removed, below, above and
+on both sides, and moved from the last lattice point to the mesh's edge;
+each corner's weight taken from the other side.
 """
 
 from __future__ import annotations
@@ -360,11 +361,13 @@ def trajectory(gm: GraphManager, steps: int, names=("fluid", "body")) -> list[di
     return out
 
 
-def in_units_of_rounding(got, expected, dtype: str) -> float:
-    """``max|got - expected|`` over ``eps * max|expected|``."""
+def in_units_of_rounding(got, expected, dtype: str, scale=None) -> float:
+    """``max|got - expected|`` over ``eps * scale``; the scale is the
+    largest magnitude of *expected* unless one is given (the field's,
+    where a single value is compared)."""
     got, expected = np.asarray(got, np.float64), np.asarray(expected, np.float64)
-    scale = float(np.finfo(dtype).eps) * float(np.max(np.abs(expected)))
-    return float(np.max(np.abs(got - expected))) / scale
+    scale = float(np.max(np.abs(expected))) if scale is None else float(scale)
+    return float(np.max(np.abs(got - expected))) / (float(np.finfo(dtype).eps) * scale)
 
 
 def reference(mesh: Mesh, field, points) -> np.ndarray:
@@ -433,9 +436,8 @@ def test_every_class_of_point_is_sampled_as_an_independent_interpolator_samples_
     # The clamp, said without an interpolator: a point outside the box of
     # cell centres receives what its projection onto the box receives.
     # The projections ride in the same graphs, as eight more points.
-    low, high = mesh.axes(), None
-    low, high = np.array([a[0] for a in low]), np.array([a[-1] for a in low])
-    projected = np.clip(points, low, high)
+    axes = mesh.axes()
+    projected = np.clip(points, [a[0] for a in axes], [a[-1] for a in axes])
     moved = np.any(projected != points, axis=1)
     assert int(moved.sum()) == 5, "premise: five of the eight points are outside the box"
     with precision(dtype):
@@ -445,9 +447,10 @@ def test_every_class_of_point_is_sampled_as_an_independent_interpolator_samples_
     for wiring, (start, end) in stepped.items():
         # As stored: a float32 point is where float32 put it.
         expected = reference(mesh, end["fluid"]["velocity"], start["body"]["points"])
+        largest = np.max(np.abs(end["fluid"]["velocity"]))
         seen = end["body"]["seen"]
         for i, name in enumerate(named):
-            off = in_units_of_rounding(seen[i], expected[i], dtype)
+            off = in_units_of_rounding(seen[i], expected[i], dtype, scale=largest)
             assert off <= ROUNDING, f"{wiring}, {d}-D {dtype}, {name}: {off:.3g} roundings off"
         off = in_units_of_rounding(seen[:k][moved], seen[k:][moved], dtype)
         assert off <= ROUNDING, f"{wiring}, {d}-D {dtype}: {off:.3g} roundings from the projection"

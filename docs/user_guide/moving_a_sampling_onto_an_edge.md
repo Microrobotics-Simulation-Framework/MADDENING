@@ -10,8 +10,8 @@ of a body.  One way to answer is inside the grid node: it takes the
 points as a boundary input and interpolates in its own `update`.  On
 0.4.0 the interpolation belongs on the edge.  This page makes that port
 once, on a small example, and checks each step by running it: the two
-graphs deliver the same values, and the three places where the port goes
-wrong are shown going wrong.
+graphs deliver the same values, and each of the three arguments of
+`add_edge` that the port tends to get wrong is checked.
 
 The mesh is **cell-centred**: a field's values sit at the centres of the
 cells.  The example has two dimensions so that its numbers fit on a
@@ -214,13 +214,24 @@ except ValueError as refusal:
     print(refusal)
 else:
     raise AssertionError("a lattice of 9 x 7 points was accepted for 8 x 6 cells")
+
+# The clamp: on the first row of cell centres, between it and the mesh's
+# edge, on the edge and outside the mesh, a point receives the same value.
+column = jnp.asarray([[0.30, 0.25], [0.30, 0.10], [0.30, 0.00], [0.30, -3.00]], jnp.float32)
+received = np.asarray(gather.apply(VELOCITY0, None, column))
+assert np.array_equal(received, np.tile(received[0], (N_POINTS, 1)))
 ```
 
 Outside the lattice's hull the kind clamps (`outside="clamp"`, the only
-choice): a point is read at its projection onto the box of cell centres.
-That box ends half a cell *inside* the mesh, so a point between the last
-cell centre and the mesh's edge is already clamped, as it was in the
-node.  The third of `POINTS0` starts in that strip.
+choice in 0.4.0): a point is read at its projection onto the box of cell
+centres.  That box ends half a cell *inside* the mesh, so a point between
+the last row of cell centres and the mesh's edge is already clamped, as
+it was in the node above.  The third of `POINTS0` starts in that strip.
+**If your node did something else in that half cell**, the edge does not
+reproduce it: extrapolating linearly to the mesh's edge, reading a ghost
+cell or applying a wall value there is a boundary treatment, and it
+stays in the node (see [What stays in the node](#what-stays-in-the-node)).
+Points that stay between the outermost cell centres are not affected.
 
 ### `mode` and `layout`
 
@@ -229,7 +240,9 @@ temperature): what the fluid's `velocity_at_points` was.
 `mode="conservative"` is its transpose and spreads an *amount* held at
 the points onto the grid (a force): the total arrives, and the work done
 on the two sides is the same number.  Use it for the edge that returns
-the body's force to the fluid, as in the closed loop below.
+the body's force to the fluid, as in the closed loop below.  It deposits
+amounts and divides by no cell volume: a solver that wants a force
+density divides in the node, or in the edge's `transform`.
 
 `layout` says how the node stores the field: `"shaped"` for
 `(nx, ny)`, `"flat"` for the same values raveled in C order, `(nx * ny,)`.
@@ -293,16 +306,18 @@ which of its two edges was the back edge; with the body added first, the
 body received the field of the step before (and nothing at its first
 step).  The new graph has one edge and no cycle, and the order the nodes
 are added in changes nothing.  If your old graph was built the other way
-round, the port changes its numbers by one step of the field, and that is
-the port being right.  The other call sites (a flux hook, a coupling
-group, a multi-rate graph) are in
+round, the port changes its numbers by one step of the field: the body
+now receives the field of the step in hand.  The other call sites (a
+flux hook, a coupling group, a multi-rate graph) are in
 [the time level a geometry is read at](geometry_dependent_mappings.md#the-time-level-a-geometry-is-read-at-in-short).
 
 **Points held by a third node.**  If the points belong to neither end of
 the edge (a rigid body that feeds a sampler), `add_edge` refuses to
 anchor the geometry there.  In 0.4.0 the target keeps a copy in its own
 state, written by its `update` from a plain edge, and the edge reads the
-copy the next step: the positions are one step old.
+copy the next step: the positions are one step old.  At step `n` the
+edge samples at the points the carrier held after step `n - 1`, where a
+plain edge from the carrier delivers those of step `n`.
 
 <!-- snippet: continues -->
 ```python
@@ -392,7 +407,7 @@ a weight can differ in its last bit.  The test file measures the same
 ten steps on a field that is not linear, in two and in three dimensions,
 in float32 and in float64: at most 0.7 of a rounding, and it holds the
 two graphs to 16.  On those runs a lattice with the mesh's corner as its
-origin is 750,000 float32 roundings from the old graph.
+origin is 750,000 to 920,000 float32 roundings from the old graph.
 
 Gradients agree as well.  `jax.grad` of the points' final `x` with
 respect to the initial field and to the initial points:
@@ -419,7 +434,7 @@ print(np.round(np.asarray(gradients["after"][1]), 3))     # d final x / d initia
 
 In float64 the two gradients agree to `3e-16` of their size and with a
 central difference to `2e-9` (measured in two and three dimensions; the
-test above holds them to `1e-12` and `1e-7`).  Two things to know when
+test file holds them to `1e-12` and `1e-7`).  Two things to know when
 you compare gradients of your own port:
 
 * **On a cell-centre plane both samplers take the slope of the cell
@@ -588,7 +603,7 @@ Read it this way:
 * **The port keeps what the old wiring had.**  A fluid that samples for
   the body already sent point-sized fields across its plain edges, and
   the criterion read those.  Moving the sampling onto the edge does not
-  change how close a converged step is: a seventh of a tolerance at
+  change how close a converged step is: 0.13 to 0.18 of a tolerance at
   every size, in the same number of passes.
 * **The wiring to avoid is the third.**  A plain edge that carries the
   whole grid puts every cell into the criterion, of which the few around

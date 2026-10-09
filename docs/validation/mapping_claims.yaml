@@ -3064,3 +3064,76 @@ claims:
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
+
+- id: MAP-051
+  area: geometry-dependent mapping, a worked example
+  claim: >-
+    A node's own multilinear sampling of a cell-centred field (between cell
+    centres, clamped outside them) and a multilinear_grid edge whose
+    "lattice's origin is the first cell centre" and whose "shape is the
+    number of cells", with geometry=("target", <the points>), deliver the
+    same values: "the two graphs" carry a body alike, to rounding, while
+    it crosses cells and leaves the mesh. "The mesh's corner as the origin
+    is half a cell off": on a linear field, by the gradient times half a
+    cell. The value the body receives at a step is "the field after the
+    fluid's update" of that step "at the points the body held before it".
+    jax.grad of the body's final position with respect to the initial
+    field and to the initial points is the same in the two graphs, and is
+    the central difference. A held body's static sparse mapping built from
+    the same weights delivers what the geometry edge delivers.
+  sources:
+    - 'docs/user_guide/moving_a_sampling_onto_an_edge.md (After: the edge samples; They are the same graph; A held body: the same transfer as a static mapping)'
+  conditions: >-
+    Two stand-in nodes on a Cartesian cell-centred mesh of 8 x 6 cells (two
+    axes) and of 8 x 5 x 4 cells (three), a velocity with as many
+    components as the mesh has axes, stored with the grid's shape and, for
+    the held body, flat; float32 and float64 (x64); four points that start
+    inside, on a cell centre and between the first row of centres and the
+    mesh's edge, one of which leaves the mesh in the run; ten plain steps
+    with the fluid added first; one point of each class (inside, on a cell
+    centre, on an outermost cell centre, between an outermost centre and
+    the mesh's edge, outside the mesh) against scipy's interpolator on the
+    cell-centre coordinates; gradients over six steps in float64, from
+    points off the cell-centre planes. "To rounding" is 16 times eps times
+    the field's largest magnitude (0.7 measured). Not claimed for mixed
+    dtypes, 16-bit dtypes, vmap, multi-rate graphs, sub-cycled groups,
+    predictors, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    the old graph, whose node samples with its own code; scipy's
+    RegularGridInterpolator on the cell-centre coordinates at each point's
+    projection onto their box; the exact value of a linear field; a central
+    difference of the loss.
+  tests:
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_two_graphs_carry_the_body_alike_across_cells_and_out_of_the_mesh[2-float32]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_two_graphs_carry_the_body_alike_across_cells_and_out_of_the_mesh[3-float64]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_every_class_of_point_is_sampled_as_an_independent_interpolator_samples_it[2-float32]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_every_class_of_point_is_sampled_as_an_independent_interpolator_samples_it[3-float64]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_a_lattice_that_starts_at_the_meshs_corner_is_half_a_cell_off[2-float32]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_a_lattice_that_starts_at_the_meshs_corner_is_half_a_cell_off[3-float64]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_gradients_of_the_two_graphs_agree_and_are_the_central_difference[2]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_body_receives_the_field_after_the_step_at_the_points_before_it'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_a_held_bodys_static_sparse_mapping_delivers_what_the_geometry_edge_delivers[2-float32]'
+    - 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_a_held_bodys_static_sparse_mapping_delivers_what_the_geometry_edge_delivers[3-float64]'
+  status: verified
+  notes: >-
+    Nine seeded faults in the kernel (the origin half a spacing either way,
+    the clamp removed below, above and on both sides or moved to the mesh's
+    edge, each corner's weight from the other side) each fail one of the
+    first three tests. Slow, run once on each JAX lane: the other two
+    combinations of dimension and precision, the gradients in three
+    dimensions, and a closed loop under the interface norm at three grid
+    sizes.
+  domains:
+    f32: 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_two_graphs_carry_the_body_alike_across_cells_and_out_of_the_mesh[2-float32]'
+    f64: 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_two_graphs_carry_the_body_alike_across_cells_and_out_of_the_mesh[3-float64]'
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_two_graphs_carry_the_body_alike_across_cells_and_out_of_the_mesh[2-float32]'
+    grad: 'tests/core/test_moving_a_sampling_onto_an_edge.py::test_the_gradients_of_the_two_graphs_agree_and_are_the_central_difference[2]'
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed

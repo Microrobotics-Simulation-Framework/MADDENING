@@ -4230,9 +4230,12 @@ class GraphManager:
         returned" is, in every entry below, **the iterate the loop
         accepted**.  The step returns that iterate with each floating
         field the norm does not measure whole -- one no internal edge
-        reads, or one read only through a mapping or a transform --
+        reads, or one read only through a gather, a tie or a transform --
         recomputed by one plain pass at it (not counted in
-        ``iterations``), so the state held afterwards is within the
+        ``iterations``).  (The source field of a static mapping onto more
+        entries than it holds is read at its source, so it is measured
+        whole and kept, like one a plain edge reads.)  So the state held
+        afterwards is within the
         reported residual of the reported iterate on what the internal
         edges deliver, and is not itself an iterate of the loop.  Of the
         state held, in the norm taken at it, ``spectral_error_bound``

@@ -86,6 +86,17 @@ With the mixed norm, which reads every field of the group whole, the
 same pair stops as early as the diluted criterion did: prefer the
 interface norm where a small field drives a large one.
 
+**This needs the transfer to be on the edge.**  The figures above are of
+a pair whose grid field comes back to the markers through a gather
+*mapping*.  A member that is handed the whole grid through a plain edge
+and samples it inside its own `update` is read at the grid's `N`
+entries, as any plain edge is, and the dilution returns: on the same
+pair the markers were 4.6 tolerances off at `N` = 300, 27 to 74 at 3e3,
+56 to 104 at 3e4 and 179 at 3e5 with `converged=True`, against 1.8 to
+6.2 with the gather on the edge.  Put the sampling on the edge: a static
+gather (a dense or sparse matrix), or `multilinear_grid` with
+`geometry=` where the sample points move.
+
 A geometry-dependent mapping inside a group is read by the same rule,
 with its positions (see "What the interface norm reads on a geometry
 edge" below).

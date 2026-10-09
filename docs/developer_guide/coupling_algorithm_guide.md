@@ -107,7 +107,7 @@ the iterate before it, which nothing compares.  So the step returns
   edge that delivers it as it is, with no mapping and no transform -- as
   `x` holds it, bit for bit;
 * **every other floating field of every member** -- read by no internal
-  edge, or only through a mapping or a transform -- as `F(x)` holds it:
+  edge, or only through a gather, a tie or a transform -- as `F(x)` holds it:
   one more evaluation of the pass, at `x`.
 
 A static mapping onto more entries than its source holds is read at its
@@ -554,7 +554,14 @@ most `K` tolerances, with `K = ‖D (I − A)⁻¹ (I − L) D⁻¹‖₂` of th
 its compact readings (`A` the pass's stationary map, `L` its same-pass
 part, `D` dividing each reading by its own magnitude): the identity the
 bound above rests on, applied to a residual at its threshold.  `K` is
-about `1 / (1 − gain)` for a normal loop and does not see `N`.
+about `1 / (1 − gain)` for a normal loop and does not see `N`, **provided
+the transfer between the two sizes is on the edge**: a member handed the
+whole grid through a plain edge, which samples it inside its own
+`update`, is read at the grid's `N` entries, and the markers of such a
+pair were 4.6 (`N` = 300) to 179 (`N` = 3e5) tolerances off at
+`converged=True` (1.8 to 6.2 with the gather on the edge).  Put the
+sampling on the edge: a static gather, or `multilinear_grid` with
+`geometry=`.
 That is the iterate the loop accepted, which the report is of.  The state
 a solve returns is that iterate with every field the norm does not
 measure whole one plain pass on (the return rule above; CPL-191): a

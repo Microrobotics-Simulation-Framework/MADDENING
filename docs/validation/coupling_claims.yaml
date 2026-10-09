@@ -513,11 +513,29 @@ claims:
     - src/maddening/core/coupling/group.py:89 (CouplingGroup, atol)
     - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
   conditions: >-
+    Under iteration_mode="jacobi" a field inside the dead band also un-holds,
+    for a pass or more, the kept fields computed from it (the residual of p <-
+    f(q), q <- g(p) with p dropped tests only that q agrees with the p it was
+    computed from): a plain-edge pair whose three forces of 1e-8 are inside
+    atol = 1e-6 and are amplified by the member that reads them reported
+    converged=True after one pass on every other step, 4.5e5 to 7.4e5
+    tolerances from the fixed point, under all three norms (two to four passes
+    and 5e5 to 6.3e5 where the dropped member carries state); Gauss-Seidel
+    held at 0.5 to 4.9 in both sweep orders, and so does atol = 0.  The oracle
+    below is claimed under Gauss-Seidel, and under Jacobi only where no kept
+    member's output depends on a dead-banded field; validate() and compile()
+    advise on atol > 0 under Jacobi (MADD-ANO-248, open; pinned as a strict
+    xfail with its controls in tests/core/test_the_dead_band_under_jacobi.py).
+    Under "interface" the reading of an edge read at its source is dropped
+    only where both the source field and what the edge delivers are at or
+    below atol (CPL-041).
     all three norms. atol is compared after rounding to each field's own
     dtype, so the band's edge is drawn at that dtype's resolution: a field
     at exactly atol leaves the norm and one ulp above it stays.
   oracle: closed-form norm values; distance to the fixed point of the kept field.
   tests:
+    - 'tests/core/test_the_dead_band_under_jacobi.py::test_validate_advises_on_a_dead_band_declared_under_jacobi'
+    - 'tests/core/test_the_dead_band_under_jacobi.py::test_gauss_seidel_holds_the_pair_with_the_field_inside_the_dead_band'
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
     - tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
     - tests/core/test_coupling_error_bound.py::test_a_field_that_is_legitimately_zero_does_not_block_the_group
@@ -1532,6 +1550,20 @@ claims:
     - src/maddening/core/edge.py::_delivered
     - src/maddening/core/coupling/group.py::CouplingGroup (convergence_norm)
   conditions: >-
+    The dead band is asked of the value read; for an edge read at its source
+    it is asked of the source field AND of what the edge delivers (its mapping
+    with the step's weights, then its transform): the reading leaves the norm
+    only where both are at or below atol, since such an edge has two
+    quantities and atol is in a quantity's own units.  Asked of the source
+    alone, three forces of 1e-8 handed on as 17 to 520 by a transform were
+    dropped at atol = 1e-6 and a Jacobi pair accepted after one pass 34% to
+    74% from its fixed point.  The reading, its scale and its float floor stay
+    the source field's; a source field at exactly zero stays out; nothing is
+    built for a group with atol == 0; a group with atol > 0 and such an edge
+    records its floor in the step (the band depends on the step's weights).
+    Positions read in a mapping kind's length scale are always read.  Under
+    Jacobi a field that is dropped un-holds the fields computed from it
+    (CPL-011, MADD-ANO-248).
     convergence_norm="interface"; state edges (a flux edge is refused at
     compile: CPL-075), with or without an interface mapping and a transform;
     an edge whose source field is not floating, or whose reading has no
@@ -1554,6 +1586,10 @@ claims:
     0.11.0 and 0.11.2.
   oracle: closed form over the edge values that are read, in float64.
   tests:
+    - 'tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_banded_group_whose_only_mapped_edge_is_read_at_its_source_records_its_floor'
+    - 'tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_the_spectrums_weights_keep_the_reading_the_residual_keeps'
+    - 'tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_small_force_handed_on_in_other_units_is_held_to_the_criterion'
+    - 'tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_source_reading_leaves_the_norm_only_where_field_and_delivered_are_both_inside'
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
     - tests/core/test_phases_5_7_8.py::TestInterfaceResidual::test_interface_residual_detects_difference
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_norm_of_a_mapped_edge_is_the_norm_of_what_it_delivers
@@ -3251,6 +3287,15 @@ claims:
     - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
     - src/maddening/core/inspection.py:1261 (coupling_report, stale note)
   conditions: >-
+    The slots carry the numbers of the step that wrote them, not its settings:
+    after load_state into a graph whose group has another rtol, norm or
+    schedule, and before the next step, the report is judged under the loading
+    group, with no warning (saved under rtol=1e-3 and loaded with rtol=1e-6:
+    converged=True, bound 0.88, both flags set, 788 of the new tolerances off;
+    loaded under "mixed": a usable bound in a norm no step took; loaded under
+    Jacobi: the Gauss-Seidel rho_spectral 0.72 where its own is 0.8485).  It
+    corrects at the next step.  A fingerprint of the group beside the slots is
+    planned for 0.5.0.
     an edit after the last step and before the next compile. Not claimed for
     float64 (x64), mixed dtypes, 16-bit floats, multi-rate graphs,
     sub-cycled groups, run_adaptive, checkpoint restarts or sharded graphs.
@@ -5898,6 +5943,9 @@ claims:
     - src/maddening/core/coupling/_group_layout.py::_reads_mapping_weights
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-
+    With atol > 0 the dead band of an edge read at its source is asked of the
+    source field and of what the edge delivers (CPL-041); the group then
+    records its floor in the step.
     convergence_norm="interface"; static mappings: the dense kind, the
     sparse kind in its padded-gather and in its scatter layout, and a
     mapping class of the caller's own, the side taken from n_source and
@@ -6067,6 +6115,15 @@ claims:
     - src/maddening/core/simulation/checkpoint.py::_load_from_archive
     - src/maddening/core/simulation/checkpoint.py::save_state
   conditions: >-
+    The slots carry the numbers of the step that wrote them, not its settings:
+    after load_state into a graph whose group has another rtol, norm or
+    schedule, and before the next step, the report is judged under the loading
+    group, with no warning (saved under rtol=1e-3 and loaded with rtol=1e-6:
+    converged=True, bound 0.88, both flags set, 788 of the new tolerances off;
+    loaded under "mixed": a usable bound in a norm no step took; loaded under
+    Jacobi: the Gauss-Seidel rho_spectral 0.72 where its own is 0.8485).  It
+    corrects at the next step.  A fingerprint of the group beside the slots is
+    planned for 0.5.0.
     as stated: writes through set_node_state (which the REST state route and
     load_state use), add_node and remove_node.  An assignment into the
     private gm._state is not seen.  A group that stores its floor in the
@@ -6293,6 +6350,15 @@ claims:
     - src/maddening/core/coupling/acceleration.py::coupling_residual_interface
     - benchmarks/results/interface_norm_dilution/RESULT.md
   conditions: >-
+    The transfer between the two sizes must be on the edge: a member handed
+    the whole large field through a plain edge, which samples it inside its
+    own update, is read at the large field's entries, and the small field of
+    such a pair was 4.6 (N = 300), 27 to 74 (3e3), 56 to 104 (3e4) and 179
+    (3e5) tolerances off at converged=True, against 1.8 to 6.2 with a gather
+    mapping on the edge.  With a dead band (atol > 0) the reading of an edge
+    read at its source is kept wherever the source field or what the edge
+    delivers is above atol (CPL-041); under Jacobi a dropped field un-holds
+    the fields computed from it (CPL-011).
     an affine pass (linear nodes, linear static mappings, affine edge
     transforms; for a mapping that reads a moving geometry the claim is
     MAP-050's, to first order), above the residual's float floor; float32

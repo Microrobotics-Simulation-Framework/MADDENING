@@ -353,7 +353,9 @@ group fills `rho_spectral` and `spectral_error_bound`.
 **What the report is of under `convergence_norm="interface"`.**  `iterations`, `residual`,
 `converged` and the bounds describe the iterate the loop accepted.  The step returns that iterate
 with every floating field the norm does not measure whole -- one no internal edge reads, or one
-read only through a mapping or a transform -- recomputed by one plain pass at it.  The state you
+read only through a gather, a tie or a transform -- recomputed by one plain pass at it.  (The source
+field of a static mapping onto more entries than it holds is read at its source, so it is measured
+whole and kept, like one a plain edge reads.)  The state you
 read is therefore within the reported residual of the reported iterate on what the edges deliver,
 and is not itself an iterate of the loop; its own residual can be a few times the reported one.
 See "What a converged step returns under each norm" in
@@ -415,6 +417,16 @@ state, so one saved after a member's state was written holds the written state a
 one.  It says so, and the graph that loads it reports that group's `spectral_error_bound` as NaN and
 its `spectral_usable`, `gradient_bound_usable` and `precision_limited` as `False`, with a
 `not_usable_reason`, until the group steps.
+
+**A report is judged under the group the graph holds now.**  The saved slots carry the numbers of
+the step that wrote them, not its settings.  Loaded into a graph whose group has another `rtol`,
+norm or schedule, and read before the next step, they are judged under the loading group, with no
+warning: a state saved under `rtol=1e-3` and loaded with `rtol=1e-6` reported `converged=True`, a
+bound of 0.88 and both flags set while it was 788 of the new tolerances from its fixed point;
+loaded under `"mixed"` it reported a usable bound in a norm no step had taken; loaded under Jacobi
+it reported the Gauss-Seidel `rho_spectral` (0.72 where Jacobi's is 0.8485).  The next step
+corrects it.  After loading a checkpoint into a graph configured differently, step once before
+reading `coupling_diagnostics()`.
 
 **A group with a geometry-dependent mapping** (experimental, see
 [Geometry-dependent mappings](geometry_dependent_mappings.md)) reports like any other group where

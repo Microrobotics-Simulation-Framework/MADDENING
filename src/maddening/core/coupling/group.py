@@ -123,8 +123,9 @@ class CouplingGroup:
         within the reported residual of it on what the edges deliver;
         a field the norm does not measure meets no criterion of its
         own.  Use ``"mixed"`` or ``"l2"`` where every field must.
-        (The source field of a mapping read on its compact side, at
-        the source, is measured whole as well and is returned as the
+        (The source field of a static mapping onto more entries than
+        it holds is read at its source, so it is measured whole and kept,
+        like one a plain edge reads: it is returned as the
         accepted iterate holds it.)
     atol : float
         Dead band, in each field's own units: a field whose magnitude

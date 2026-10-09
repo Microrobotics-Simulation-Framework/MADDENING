@@ -276,6 +276,12 @@ names the edge and says what to do.
 
 ## What `convergence_norm="interface"` reads on a geometry edge
 
+A node that still samples a neighbour's grid inside its own `update` (handed the whole field
+through a plain edge) gets none of what follows: the norm reads that edge at the grid's entries,
+and a converged step left the sampled values up to 179 tolerances off at 3e5 cells (see "A mapped
+edge is read on its compact side" in [the interface mapping guide](../algorithm_guide/coupling/interface_mapping.md)).
+Put the sampling on the edge, as below.
+
 The interface norm judges a group on what crosses its internal edges, and
 reads a mapped edge on its compact side (see
 [Interface mapping](../algorithm_guide/coupling/interface_mapping.md)).

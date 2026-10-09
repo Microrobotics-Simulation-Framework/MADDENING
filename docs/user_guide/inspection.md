@@ -478,9 +478,11 @@ the dtype and the operator's shape: one row of either held at every length on ja
 300 entries, 1.09x at 3000), but jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries
 and more in order (0.002 to 0.007 of the distance), and a dense matrix of three rows of 3000
 entries read 0.18 on every version.  Rows of up to 10 entries held by 3.9x or more in every kind,
-behind fields whose terms do not cancel: a field that changes sign within a row loses the
-cancellation's factor whatever the row's length (1.26x at 10 entries with a cancellation of 25),
-which is MADD-ANO-247's case and not this guard's.
+behind fields whose terms do not cancel.  A field that changes sign within a row loses the
+cancellation's factor whatever the row's length and its kind, which is MADD-ANO-247's case (open)
+and not this guard's: with a cancellation `sum |t| / |sum t|` of 25 the bound read 1.26x at 10
+entries and 1.44x at two in float32, and 0.85x at 10 entries at the float64 floor **with the flag
+set**.  Behind a field whose terms cancel, do not rely on `spectral_usable` at the float floor.
 
 **Not counted: a geometry-dependent mapping.**  A `multilinear_grid` gather adds up at most `2^d`
 entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in

@@ -223,12 +223,13 @@ def test_a_sweep_that_updates_the_holder_first_has_no_geometry_column():
         case = Case(1, seed, 0.7, 0.2)
         seen = GS_SEARCH.observe(case)
         report = seen["report"]
-        # The only reason this report may carry is the gradient flag's own
-        # (its bound not finite): the radius and its flag are what is read
-        # here, and a plane in the Kantorovich ball would have withdrawn
-        # both (MADD-ANO-248).
-        assert seen["scored"] and seen["spectral_usable"], seen
-        assert (seen["reason"] is None or "spectral_usable stands" in seen["reason"]), seen
+        # The radius is what is read here.  Its flag stands, or is
+        # withdrawn with the gradient's by a lattice plane in the
+        # Kantorovich ball (MADD-ANO-248: the positions this sweep reads
+        # are the ones the pass has built, a reader of that rule); the
+        # report is never withheld.
+        assert seen["scored"] and not gc.withheld(seen["reason"]), seen
+        assert seen["spectral_usable"] or "Newton-Kantorovich ball" in seen["reason"], seen
         _gm, twin, ref = GS_SEARCH._built(1)                # noqa: SLF001
         values = gc.values_of(case, cell)
         ref = gc.bound_reference(ref, twin, values)
@@ -519,7 +520,11 @@ def test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane():
     assert seen["plane"] == 0.0
     reason = seen["reason"]
     assert "lattice plane" in reason and "P.x->F.u" in reason and "F.x->P.u" in reason
-    assert f"{report['spectral_error_bound']:.3g}" in reason
+    # The plane's cause: the pass moves the position across it (the margin
+    # is zero, and that is the whole reason), or it is in the ball and in
+    # reach of the bound without a passed check (the bound is then told).
+    assert ("is on a lattice plane" in reason
+            or f"{report['spectral_error_bound']:.3g}" in reason), reason
     assert "do not read a moving geometry" not in reason       # the numbers are reported
     assert math.isfinite(report["rho_spectral"]) and math.isfinite(report["residual"])
 

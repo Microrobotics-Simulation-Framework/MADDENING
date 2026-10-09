@@ -663,3 +663,84 @@ def test_a_field_below_tiny_is_read_as_zero_and_allowed_for_at_a_stated_narrower
     results = verify_mapping(edge, checks=["adjoint"], rounding_units=0.25, **claims)
     assert driver.ran == {"adjoint": 64}
     assert results["adjoint"].status == "PASS", _report(results)
+
+
+# ---------------------------------------------------------------------------
+# Each term of the allowance, where it alone decides
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e3])
+def test_every_product_of_a_row_flushed_at_once_is_within_the_allowance(scale, pin):
+    """The row's flushes are counted, not estimated from the gain: nine
+    weights of ``2**-20`` on a uniform field make nine products of 0.99
+    ``tiny``, and the row delivers nothing where the float64 evaluation of
+    the same float32 field delivers all nine, times the factor."""
+    weights = np.full((3, N_SOURCE), 2.0 ** -20, np.float32)
+    x = np.full(N_SOURCE, 0.99 * TINY * 2.0 ** 20, np.float32)
+    assert float(np.max(weights[0] * x)) < TINY < float(np.sum(weights[0] * x))
+    edge = EdgeSpec("fluid", "solid", "traction", "force", mapping=matrix_mapping(weights),
+                    transform=None if scale == 1.0 else _times(scale))
+    with _float64():
+        driver = pin(lambda name: [dict(x=x, geom=None)] if name == "dtype_float32" else [
+            dict(x=x, y=x, a=1.0, b=1.0, geom=None)])
+        results = verify_mapping(edge, scale=None if scale == 1.0 else scale,
+                                 checks=["linearity", "dtype"], dtypes=(np.float32,),
+                                 consistent=False, conservative=False)
+    assert driver.ran == {"linearity": 1, "dtype_float32": 1}
+    assert not _failed(results), _report(results)
+
+
+@pytest.mark.parametrize("near_tiny", ["x", "y"])
+def test_the_adjoint_identity_holds_with_one_field_near_tiny_and_the_other_ordinary(
+        near_tiny, pin):
+    """Small weights, so the products of one side flush and the other
+    side's do not: with ``x`` small the delivered values are lost and
+    weighed by an ordinary ``y``, with ``y`` small the transposed ones
+    are, weighed by an ordinary ``x``."""
+    edge, claims = _edge("rows", 1.0, 1e-6)
+
+    def examples(name):
+        xs = _fields(N_SOURCE, 1e-32 if near_tiny == "x" else 1.0, np.float32)
+        ys = _fields(N_TARGET, 1e-32 if near_tiny == "y" else 1.0, np.float32)
+        return [dict(x=x, y=y, geom=None) for x in xs for y in ys]
+
+    driver = pin(examples)
+    results = verify_mapping(edge, checks=["adjoint"], **claims)
+    assert driver.ran == {"adjoint": 64}
+    assert results["adjoint"].status == "PASS", _report(results)
+
+
+def test_a_field_below_tiny_on_the_transposed_side_is_carried_by_the_whole_column(pin):
+    """One source feeds every target with a weight of a thousand: the
+    column that ``apply_T`` sums is ``n_target`` times the gain, and a
+    ``y`` below ``tiny``, read as zero, is carried by all of it.  At a
+    quarter of a rounding unit, so that the allowance for flushes
+    decides."""
+    matrix = np.zeros((N_TARGET, N_SOURCE), np.float32)
+    matrix[:, 0] = 1e3
+    x = np.zeros(N_SOURCE, np.float32)
+    x[0] = 1.0
+    y = np.full(N_TARGET, 0.9 * TINY, np.float32)
+    driver = pin(lambda name: [dict(x=x, y=y, geom=None)])
+    results = verify_mapping(matrix_mapping(matrix), checks=["adjoint"], rounding_units=0.25,
+                             consistent=False, conservative=False)
+    assert driver.ran == {"adjoint": 1}
+    assert results["adjoint"].status == "PASS", _report(results)
+
+
+def test_linear_fields_delivered_near_tiny_are_reproduced_to_within_a_flush(pin):
+    """A factor of 1e-37 delivers the coordinates themselves at the
+    underflow end: a target coordinate of 0.05 arrives as zero."""
+    scale = 1e-37
+    positions = POSITIONS.copy()
+    positions[0] = (0.05, 0.1)
+    mapping = multilinear_grid_mapping(ORIGIN, SPACING, SHAPE, n_points=N_POINTS)
+    assert 0.05 * scale < TINY < scale
+    driver = pin(lambda name: [dict(c=c, geom=jnp.asarray(positions)) for c in (1.0, -0.25)])
+    results = verify_mapping(mapping, geometry=positions, polynomial_order=1,
+                             checks=["consistent"], source_coordinates=LATTICE,
+                             target_coordinates=lambda g: g, transform=_times(scale),
+                             scale=scale)
+    assert driver.ran == {"consistent": 2}
+    assert results["consistent"].status == "PASS", _report(results)

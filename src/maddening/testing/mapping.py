@@ -214,7 +214,8 @@ def _flush_cost(subject: "_Subject", gain: float, delivered: Any, field: Any, *,
     Twice the sum is returned.  The rounding of the same value is
     allowed for separately, a tolerance is the larger of the two
     allowances and not their sum (:func:`_allowed`), and the larger of
-    two is at least half of both together.
+    two is at least half of both together: it covers every flush counted
+    here and, at once, a rounding of half its own allowance.
 
     With ``transposed`` the value is one of ``scale * apply_T(y)``: a
     column of the same operator, ``n_target`` terms, whose absolute sum
@@ -706,17 +707,17 @@ def _mapping_linearity(subject: _Subject, sampling: _Sampling, rounding_units: f
         eps = _eps(dx.dtype, xj.dtype, *_geom_dtype(geom))
         size = abs(float(a_t)) * _amax(x) + abs(float(b_t)) * _amax(y)
         g = gain(geom)
-        # Three deliveries are compared, two of them times a scalar.  And
-        # the combination is formed in arithmetic that flushes too: its
-        # two products and its sum, each field value as it is read, and a
-        # scalar below tiny, which is read as zero and takes its whole
-        # term with it (such a draw says nothing about that term).
+        # Three deliveries are compared, two of them times a scalar.  The
+        # combination is formed in arithmetic that flushes too: its two
+        # products and the field values it reads cost what the three
+        # deliveries are allowed for reading theirs; a scalar below tiny
+        # costs more, since it is read as zero and takes its whole term
+        # with it (such a draw says nothing about that term).
         weight = abs(float(a_t)) + abs(float(b_t))
-        tiny = _tiny(xj.dtype)
         unread = sum(abs(float(c)) * _amax(v) for c, v in ((a_t, x), (b_t, y))
-                     if abs(float(c)) < tiny)
+                     if abs(float(c)) < _tiny(xj.dtype))
         flushes = (1.0 + weight) * _flush_cost(subject, g, dx.dtype, xj.dtype) \
-            + 2.0 * g * ((3.0 + weight) * tiny + unread)
+            + 2.0 * g * unread
         tol = _allowed(
             rounding_units * eps * g * max(size, _magnitude_floor(dx.dtype)), flushes)
         gap = float(np.max(np.abs(left - right), initial=0.0))
@@ -949,16 +950,9 @@ def _mapping_geometry_derivative(subject: _Subject, sampling: _Sampling,
             # The positions' dtype cannot hold this stencil at this point.
             counts["unresolved"] += 1
             raise _Kink
-        g = gain(geom)
-        r_sum = float(np.sum(np.abs(np.asarray(r, np.float64))))
-        size = g * max(_amax(x), _magnitude_floor(xj.dtype)) * r_sum
-        # One evaluation of phi: every delivered value times its r, and
-        # the functional's own row of n_target products and their sums
-        # (an r below tiny, read as zero, takes its term with it).
-        n_t = int(np.prod(subject.target_lead, dtype=np.int64))
-        flushes = r_sum * _flush_cost(subject, g, xj.dtype, xj.dtype) + 2.0 * _tiny(
-            xj.dtype) * (2 * n_t - 1 + n_t * g * _amax(x))
-        noise = _allowed(rounding_units * eps * size, flushes)
+        size = gain(geom) * max(_amax(x), _magnitude_floor(xj.dtype)) * float(
+            np.sum(np.abs(np.asarray(r, np.float64))))
+        noise = rounding_units * eps * size
         central, central_half = (f_2 - f_m2) / (2 * h), (f_1 - f_m1) / h
         derivative = float(_np(gradient(xj, rj, geom_j))[index])
         # Third differences over the two four-point halves of the stencil.
@@ -975,7 +969,11 @@ def _mapping_geometry_derivative(subject: _Subject, sampling: _Sampling,
             raise _Kink
         # The derivative arrives in the positions' dtype: below that dtype's
         # range (a float64 field of 1e-150 read at float32 positions) it is
-        # zero, whatever the kernel's slope.
+        # zero, whatever the kernel's slope.  This allowance is absolute --
+        # multiplied by neither the gain nor r -- so it is also what covers
+        # the flushes of the functional's evaluations, which the noise
+        # above (a floor times the gain) does not for an edge that scales
+        # down; a stencil those flushes dominate is counted as a kink.
         underflow = max(_magnitude_floor(geom_j.dtype), _magnitude_floor(xj.dtype))
         tol = 4.0 * noise / h + 2.0 * abs(central - central_half) + jump + underflow
         gap = abs(derivative - central_half)

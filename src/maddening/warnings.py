@@ -117,9 +117,13 @@ class UnderflowRangeWarning(PrecisionLimitWarning):
     the accelerators, the report) works in power-of-two frames and keeps
     its own resolution down to ``tiny``; a node's ``update`` does not.
 
-    ``GraphManager`` checks each coupled group once, on the first step after
-    every ``compile()``, and warns at most once per group, naming the field,
-    its magnitude and the threshold.  An exactly zero field never warns.
+    ``GraphManager`` checks each coupled group on the first step after
+    every ``compile()`` and after every write of node states that is not a
+    step's (``set_node_state``, ``load_state``, ``reset_state``), on the
+    state that step starts from and the one it returns, and warns at most
+    once per group, naming the field, its magnitude and the threshold.  An
+    exactly zero field never warns; a state that decays into the range
+    through the nodes' own updates is not checked again.
     The remedy is to write the field in units where it is of order one.
     Float32 thresholds: ``tiny / eps`` is about ``9.9e-32``; bfloat16
     ``1.5e-36``; float16 ``0.0625`` (its normal range starts at ``6.1e-5``);

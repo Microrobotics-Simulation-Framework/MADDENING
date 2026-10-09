@@ -1720,6 +1720,10 @@ class GraphManager:
         traced input on every step.  Its ``n_source`` must equal the
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
+        Both are asked here, once, of the source node's
+        ``initial_state()`` and the target's declaration; a source field
+        written with another size afterwards (``set_node_state``) is not
+        asked again and raises where its program is traced.
         A mapping of a class other than ``StaticLinearMapping`` is a
         ``ValueError`` unless its ``params_pytree()`` is a plain dict
         from identifiers to concrete, finite, floating-point JAX arrays,

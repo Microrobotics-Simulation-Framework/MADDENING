@@ -16691,3 +16691,102 @@ anomalies:
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_delivered_difference_cancels_nothing"
       - "tests/property/test_coupling_targeted_search.py::test_the_reading_allowance_is_the_cancellation_inside_the_edge_the_norm_reads"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-248"
+    title: "A geometry written with another shape after compile() was broadcast by a mapping kind that does not check its own shape"
+    description: >
+      The shape rule for the geometry of a geometry-dependent mapping --
+      the mapping's `geometry_shape`, or what its
+      `accepts_geometry_shape` takes -- was asked only by `validate()`,
+      which `compile()` runs on the state it is given.  A state write is
+      not a recompile.  The `multilinear_grid` kernel checks the shape it
+      is handed; a kind registered with `needs_geometry=True` whose
+      `apply` does not (one that computes `geom @ field` on a geometry of
+      shape `(2, 3)`) was handed whatever `set_node_state` had written:
+      one row of shape `(3,)` or `(1, 3)` in place of the matrix made the
+      product a scalar or a one-entry vector, which the target's update
+      broadcast into both of its entries, with no error or warning, where
+      `compile()` refuses that state by name.  Geometry-dependent
+      mappings are new in 0.4.0; no release has this.  Resolved before
+      release: the shape rule is asked with the dtype rules at every
+      geometry read of a traced program (a program is traced again
+      whenever a shape changes), including the interpolated read of a
+      sub-cycled group member, by the rule `validate()` applies.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: finite values computed from a geometry of a shape the
+      mapping was not built for.  It needs a mapping kind of the
+      caller's own that does not check the geometry it is handed, and an
+      in-process `set_node_state` after `compile()` that changes the
+      field's shape (`PUT /graph/state` and `load_state` refuse a field
+      of another shape).
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.coupling.mapping.register_mapping"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `set_node_state` itself still accepts the write; the refusal comes
+      from the next entry point that traces a step, and the graph steps
+      again once a geometry of the compiled shape is written back.  The
+      shape and dtype `compile()` holds an edge WITHOUT a geometry to
+      (its target's `BoundaryInputSpec`) are not asked at a trace.
+    verification:
+      - "tests/core/test_geometry_edge_refusals.py::test_g8_holds_for_a_geometry_written_after_compile"
+      - "tests/core/test_geometry_edge_refusals.py::test_g8_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group"
+      - "tests/core/test_geometry_edge_refusals.py::test_the_shape_asked_after_compile_is_the_one_compile_accepts"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-249"
+    title: "The underflow-range warning was asked once per compile, of the first stepped state alone: a state written into the range later, or already below tiny, stepped unwarned"
+    description: >
+      `UnderflowRangeWarning` (new in 0.4.0) tells that a coupled group
+      holds a field below `finfo(dtype).tiny / finfo(dtype).eps`, where a
+      node's own arithmetic loses resolution and, below `tiny`, XLA's CPU
+      backend flushes its products to zero.  `GraphManager` asked it once
+      per `compile()`, of the first state a step stored.  Two cases went
+      unwarned.  A state written into the range after that step
+      (`set_node_state`, a checkpoint loaded with `load_state`, `PUT
+      /graph/state`, `reset_state` onto such an initial state): a float32
+      pair whose fields were written at 1e-37 returned 25% off the float64
+      answer with `converged=True` (`iterations` at `max_iterations` and
+      a residual of exactly 0.0 under the mixed and L2 norms).  And a
+      state already below `tiny` when the graph was compiled: its first
+      step flushed every entry to exactly zero, and an exactly zero field
+      never warns, so a pair started at 3e-38 read `converged=True`,
+      residual 0.0, on a state of zeros.  The warning is new in 0.4.0; no
+      release has it.  Resolved before release: the check is due again
+      at the first step after every such write, and reads the state that
+      step starts from as well as the one it returns.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The numbers lost in that range are lost in every release (the
+      nodes' arithmetic and XLA's flush to zero); what was missing is the
+      one signal the library gives of it.  It needs fields held in units
+      where they are below about 1e-31 in float32.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.graph_manager.GraphManager.reset_state"
+      - "maddening.warnings.UnderflowRangeWarning"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A state that decays into the range through the nodes' own updates
+      is not checked again (the check reads every group field on the
+      host, and is kept out of the step loop), and a group is warned of
+      once in a graph's life.  A group whose fields are written every
+      step pays that host read at every step.
+    verification:
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_state_written_into_the_range_after_the_first_step_warns_at_the_next_step"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_reset_state_onto_an_initial_state_in_the_range_warns_at_the_next_step"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_state_below_tiny_at_compile_warns_although_the_first_step_flushes_it"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_written_state_outside_the_range_does_not_warn"
+    github_issue: null

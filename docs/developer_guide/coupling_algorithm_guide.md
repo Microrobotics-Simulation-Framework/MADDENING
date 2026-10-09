@@ -347,12 +347,16 @@ rows the table describes the node's own arithmetic on the field, which
 still rounds and flushes in the field's dtype.
 
 `GraphManager` checks each coupled group on the first step after every
-`compile()` and issues one `UnderflowRangeWarning` (a
-`PrecisionLimitWarning`) per group, naming the field, its magnitude and the
-remedy: write the field in units where it is of order one.  An exactly zero
-field never warns.  The check runs on the host, once per compile, and does
-not change the compiled step; a state that decays into the range after the
-first step is not re-checked.  It fires at the first step rather than in
+`compile()`, and again on the first step after every write of node states
+that is not a step's (`set_node_state`, so `load_state` and `PUT
+/graph/state/{node}`, and `reset_state`).  It reads the state that step
+starts from and the state it returns (a field already below `tiny` is
+flushed to exactly zero by the step), and issues one `UnderflowRangeWarning`
+(a `PrecisionLimitWarning`) per group, naming the field, its magnitude and
+the remedy: write the field in units where it is of order one.  An exactly
+zero field never warns, and a group is warned of once.  The check runs on
+the host and does not change the compiled step; a state that decays into the
+range through the nodes' own updates is not re-checked.  It fires at the first step rather than in
 `coupling_diagnostics()` because the remedy is a decision about the model's
 units, every caller steps whether or not it reads the report, and the
 report is read in loops, where a per-call read of every group field would

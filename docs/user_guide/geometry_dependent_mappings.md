@@ -113,7 +113,7 @@ names the edge and says what to do.
 | `replace_node`, `POST /surrogate/activate`, `POST /surrogate/deactivate` | a replacement that does not hold the geometry field with the same shape and a float32 or float64 dtype; nothing is changed (the REST routes answer 409) |
 | `DatasetGenerator` | a target node fed through a geometry edge |
 | the `multilinear_grid` kind | a non-floating field, when the step is traced |
-| any entry point that traces a step (`step`, `run`, `run_scan`, `resolve_boundary_inputs`, ...) | a geometry whose dtype a state write made after `compile()` (`set_node_state`), or a node's own `update`, changed to one `compile()` refuses: not float32 or float64, or too coarse for the grid.  A program is traced again when a dtype changes, and the rule is asked then |
+| any entry point that traces a step (`step`, `run`, `run_scan`, `resolve_boundary_inputs`, ...) | a geometry whose dtype or shape a state write made after `compile()` (`set_node_state`), or a node's own `update`, changed to one `compile()` refuses: not float32 or float64, too coarse for the grid, or not of the shape the mapping reads.  A program is traced again when a dtype or a shape changes, and the rules are asked then.  The warning at 1/1024 of a cell is not: `validate()` and `compile()` give it, of the state they are called with |
 
 ## Limits in 0.4.0
 

@@ -238,15 +238,18 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 #: **The gather layout and the dense kinds** are reduced by XLA in an
 #: order of its choosing, which depends on the jax version, the dtype
 #: and the operator's shape.  Short rows (one, three and sixteen rows of
-#: ``k`` entries; two random fields, two uniform ones and a ramp;
-#: ``"interface"``; float32; the same digits on the three versions):
+#: ``k`` entries in float32, one and three at the float64 floor; two
+#: random fields, two uniform ones and a ramp; ``"interface"``; the same
+#: digits on the three versions):
 #:
-#: ===============  ====  ====  ====  ====
-#: row              3     10    30    100
-#: ===============  ====  ====  ====  ====
-#: gather           6.5   4.9   3.4   2.8
-#: dense            6.5   4.9   2.24  2.8
-#: ===============  ====  ====  ====  ====
+#: ===================  ====  ====  ====  ====
+#: row                  3     10    30    100
+#: ===================  ====  ====  ====  ====
+#: gather, float32      6.5   4.9   3.4   2.8
+#: dense, float32       6.5   4.9   2.24  2.8
+#: gather, float64      8.9   5.0   3.05  2.6
+#: dense, float64       8.9   5.0   2.08  2.6
+#: ===================  ====  ====  ====  ====
 #:
 #: Long rows, flags set throughout:
 #:
@@ -278,10 +281,12 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 #: length and whichever way it is summed.  Measured on the same pairs
 #: with ``b = 0`` and fields alternating in sign: with a cancellation of
 #: 3 or less every kind held by two as above (3.7x at 10 entries; the
-#: scatter layout 2.14x at 30); with a cancellation of 25, 1.26x at 10
-#: entries in every kind, and 0.80x behind a dense matrix of three rows
-#: of ten (which is thirty wide, and so over the limit).  The limit is
-#: not taken on those runs: no row length answers for a field's signs.
+#: scatter layout 2.14x at 30); with a cancellation of 25, at 10 entries
+#: in every kind, 1.26x in float32 and **0.85x at the float64 floor,
+#: with the flag set**, and 0.80x and 0.72x behind a dense matrix of
+#: three rows of ten (which is thirty wide, and so over the limit).  The
+#: limit is not taken on those runs: no row length answers for a field's
+#: signs, and a row within the limit behind such a field keeps its flag.
 #:
 #: **What a row is** for each kind is in :func:`_longest_row`: counted
 #: whatever the weights are, a dense matrix by its width.

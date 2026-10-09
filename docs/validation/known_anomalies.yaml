@@ -17194,9 +17194,10 @@ anomalies:
       10, 30 and 100 entries; two random fields, two uniform ones and a
       ramp; `"interface"`; the same digits on the three versions): in
       float32 the gather layout read 6.5, 4.9, 3.4 and 2.8 times the
-      distance and the dense kind 6.5, 4.9, 2.24 and 2.8; the float64
-      floor was measured for the long rows above. They held by a factor
-      of two up to 100 entries. **Fields whose terms cancel** are
+      distance and the dense kind 6.5, 4.9, 2.24 and 2.8; at the float64
+      floor 8.9, 5.0, 3.05 and 2.6, and 8.9, 5.0, 2.08 and 2.6 (one row
+      on the three versions, three rows on jax 0.11.0). They held by a
+      factor of two up to 100 entries. **Fields whose terms cancel** are
       MADD-ANO-247's mechanism, reached through the field's signs in
       place of the mapping's: a delivered value is no finer than the
       terms it was added up from, whatever the row's length and the
@@ -17205,8 +17206,11 @@ anomalies:
       less left every kind holding by two (3.7 at 10 entries, the
       scatter layout 2.14 at 30), and a cancellation of 25 read 1.26 at
       10 entries in every kind and 0.80 behind a dense matrix of three
-      rows of ten entries, flags set. The limit below is not taken on
-      those runs: no row length answers for a field's signs. A
+      rows of ten entries, flags set; at the float64 floor the same row
+      of 10 entries read 0.85 in every kind, flag set; and a row of two
+      entries reads as a row of ten does (1.44 against 1.26 in float32),
+      so the row's length is not what decides it. The limit below is not
+      taken on those runs: no row length answers for a field's signs. A
       `multilinear_grid` mapping from points to a grid is the same
       scatter-add with as many entries on a grid node as there are
       points within one spacing of it, a number decided in the step:
@@ -17242,24 +17246,26 @@ anomalies:
       hold by 2.07, 100 do not); the reduced forms held by two up to 100
       entries, but which rows XLA sums in order is its own to choose, so
       they are not given a limit of their own. With the guard, over
-      10,805 flagged reports behind rows of more than ten entries (the
+      12,796 flagged reports behind rows of more than ten entries (the
       three kinds, both dtypes, tolerances from the float floor to
-      1e-1), no report at its counted floor keeps a flag, and the 693
+      1e-1), no report at its counted floor keeps a flag, and the 927
       that keep one read at least 0.9925 of their distance (20 of them
-      below 1). **The price:** 8,185 of the 8,858 reports whose bound
+      below 1). **The price:** 9,862 of the 10,769 reports whose bound
       was right lose their flag. At the counted floor every flag behind
       a row over ten entries is withdrawn, so the price there is the
-      share that was right: 2,551 of 4,123 (62%) in the scatter layout,
-      2,164 of 2,246 (96%) in the gather layout and 2,264 of 2,324 (97%)
-      behind a dense matrix, which is to say that behind the reduced
-      forms nearly every flag the guard withdraws stood on a bound that
-      held. Above the counted floor (measured for the scatter layout):
-      1,206 of 1,879. In practice a float32 group whose mapping adds up
-      a few hundred entries a row has both flags withdrawn at any `rtol`
-      of about 1e-4 or tighter (the floor is 0.005 of the threshold per
-      evaluation there), and the same group in float64 keeps them. A
-      geometry-dependent mapping is NOT counted: the `multilinear_grid`
-      scatter above keeps its flags.
+      share that was right: 2,551 of the 4,123 flagged there (62%) in
+      the scatter layout, 2,457 of 2,584 (95%) in the gather layout and
+      2,566 of 2,626 (98%) behind a dense matrix, which is to say that
+      behind the reduced forms nearly every flag the guard withdraws
+      stood on a bound that held. Above the counted floor it withdraws
+      1,206 of 1,879 right reports in the scatter layout, 583 of 700 in
+      the gather layout and 499 of 616 behind a dense matrix (where none
+      of the 616 was under its distance). In practice a float32 group
+      whose mapping adds up a few hundred entries a row has both flags
+      withdrawn at any `rtol` of about 1e-4 or tighter (the floor is
+      0.005 of the threshold per evaluation there), and the same group
+      in float64 keeps them. A geometry-dependent mapping is NOT
+      counted: the `multilinear_grid` scatter above keeps its flags.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -17306,17 +17312,18 @@ anomalies:
       `multilinear_grid` mapping from points to a grid: the bound held
       by 1.3 with 3000 markers in a cell, and larger counts were not
       measured); a row of ten entries or fewer behind a field whose
-      terms cancel (MADD-ANO-247: 1.26 of the distance at ten entries
-      with a cancellation of 25); a registered kind's own static class,
-      which is counted at its source side's entries and was not
-      measured. Where the guard keeps a flag the bound can still be
-      short by the row's rounding over the residual (under an eighth in
-      the worst case; 0.75% at most measured). The guard is conservative
-      behind the gather layout, a dense matrix and above all a dense
-      selection or interpolation matrix, where it withdraws flags whose
-      bound held. The limit and the margins are measurements on one CPU
-      family; a GPU scatter-add is not the in-order sum (MAP-023) and
-      was not measured.
+      terms cancel (MADD-ANO-247: with a cancellation of 25, 1.26 of the
+      distance at ten entries in float32 and 0.85 at the float64 floor,
+      flag set); a registered kind's own static class, which is counted
+      at its source side's entries and was not measured. Where the guard
+      keeps a flag the bound can still be short by the row's rounding
+      over the residual (under an eighth in the worst case; 0.75% at
+      most measured). The guard is conservative behind the gather
+      layout, a dense matrix and above all a dense selection or
+      interpolation matrix, where it withdraws flags whose bound held.
+      The limit and the margins are measurements on one CPU family; a
+      GPU scatter-add is not the in-order sum (MAP-023) and was not
+      measured.
     verification:
       - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_stalled_group_behind_a_long_row_withdraws_its_flags_and_says_why"
       - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_long_row_is_at_or_above_the_distance"

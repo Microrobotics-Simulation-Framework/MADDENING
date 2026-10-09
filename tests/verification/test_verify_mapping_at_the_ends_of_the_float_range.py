@@ -744,3 +744,15 @@ def test_linear_fields_delivered_near_tiny_are_reproduced_to_within_a_flush(pin)
                              scale=scale)
     assert driver.ran == {"consistent": 2}
     assert results["consistent"].status == "PASS", _report(results)
+
+
+def test_a_float32_field_below_tiny_under_float64_weights_is_allowed_for_in_its_own_dtype(pin):
+    """Mixed precision the other way: the products are float64, far from
+    their own underflow end, and the float32 field is still read as zero
+    below float32's ``tiny``."""
+    with _float64():
+        edge, claims = _edge("cols", 1.0, 1.0, np.float64)
+        driver = pin(lambda name: _examples(name, (1e-44, 1e-40), np.dtype(np.float32)))
+        results = verify_mapping(edge, dtype=np.float32, dtypes=(), **claims)
+    assert not _failed(results), _report(results)
+    assert results["conservative"].status == "PASS" and driver.ran["conservative"] == 16

@@ -250,8 +250,10 @@ class GraphManager:
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
         # The underflow-range check (``_warn_underflow_range``): pending
-        # until the first untraced step after each compile, and the groups
-        # already warned about, which are never warned about again.
+        # until the first untraced step after each compile and after each
+        # write of node states that is not a step's (``set_node_state``,
+        # ``reset_state``), and the groups already warned about, which are
+        # never warned about again.
         self._underflow_check_pending = False
         self._underflow_warned: set[str] = set()
         # The state-layout check of a stepped state
@@ -4033,6 +4035,7 @@ class GraphManager:
         *inside* a trace depends on it.  What is added is the state to
         come back to: see :meth:`_recover_from_escaped_tracers`.
         """
+        replaced = self._state
         if _graph_specs._holds_tracer(new_state):
             if not self._state_traced:
                 self._state_before_trace = self._state
@@ -4047,20 +4050,28 @@ class GraphManager:
         self._state = new_state
         if self._underflow_check_pending and not self._state_traced:
             self._underflow_check_pending = False
+            # The state the step started from, then the one it left: a
+            # field already below ``tiny`` is flushed to exactly zero by
+            # the step, and an exactly zero field never warns.
+            if not _graph_specs._holds_tracer(replaced):
+                self._warn_underflow_range(replaced)
             self._warn_underflow_range(new_state)
 
     def _warn_underflow_range(self, state: dict) -> None:
         """Warn once per coupled group whose fields are in the subnormal range.
 
-        Runs on the host, once per compile, on the first state a stepper
-        stores outside a transform (:meth:`_store_state`): the remedy --
+        Runs on the host, once per compile and once after each write of
+        node states that is not a step's (``set_node_state`` -- so
+        ``load_state`` and ``PUT /graph/state`` -- and ``reset_state``), on
+        the first state a stepper then stores outside a transform and on the
+        state that step started from (:meth:`_store_state`): the remedy --
         rescaling the field's units -- is a decision about the model's
         configuration, and the first step is where every caller passes,
         whether or not they ever read :meth:`coupling_diagnostics`.  It reads
-        each group field once (one device-to-host copy per compile) and
-        nothing inside the compiled step changes, so stepping and its
-        results are untouched.  A state that decays into the range after the
-        first step is not re-checked.  See
+        each group field of the two states once (two device-to-host copies
+        per compile or write) and nothing inside the compiled step changes,
+        so stepping and its results are untouched.  A state that decays into
+        the range through the nodes' own updates is not re-checked.  See
         :class:`~maddening.warnings.UnderflowRangeWarning`.
         """
         from maddening.warnings import UnderflowRangeWarning  # noqa: PLC0415
@@ -6581,6 +6592,9 @@ class GraphManager:
             }
             self._state_traced = True
         self._state[name] = state
+        # A written state is one no step of this graph was asked about:
+        # the underflow-range check is due again at the next step.
+        self._underflow_check_pending = bool(self._coupling_groups)
 
     def _meta_reset_seeds(self, fresh: dict) -> dict:
         """``{slot: value -> seed}`` for every ``_meta`` slot ``compile()`` seeds.
@@ -6690,6 +6704,9 @@ class GraphManager:
         # tracer with it while leaving the tracer in place.
         self._state_traced = False
         self._state_before_trace = None
+        # As after ``set_node_state``: the initial state is checked at the
+        # next step, whichever state the first step after compile left.
+        self._underflow_check_pending = bool(self._coupling_groups)
 
     # ------------------------------------------------------------------
     # Observer pattern

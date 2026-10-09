@@ -214,6 +214,12 @@ def _traceable_geometry(edge: EdgeSpec, field: str, value):
     kernel unasked and every sample of a grid it could not resolve came
     back wrong; a program is traced again when a dtype changes, so asking
     here cannot be bypassed.  Host-side: nothing is added to the program.
+
+    The shape rule is asked with them, for the same reason (a program is
+    traced again when a shape changes): a geometry written with another
+    shape after ``compile()`` reached a mapping kind that does not check
+    its own (``geom @ field`` broadcast a row written for a matrix), where
+    ``compile()`` refuses that state by name.
     """
     dtype = getattr(value, "dtype", None)
     if str(dtype) not in _GEOMETRY_DTYPES:
@@ -222,6 +228,13 @@ def _traceable_geometry(edge: EdgeSpec, field: str, value):
             f"{dtype} in the state being stepped; a geometry must be a float32 or "
             f"float64 array.  compile() checks the state it is given: a state write "
             f"made after it, or an update that returns another dtype, is checked here.")
+    if not _geometry_shape_read(edge.mapping, np.shape(value)):
+        raise ValueError(
+            f"edge {edge.key}: its geometry field {field!r} now has shape "
+            f"{tuple(int(n) for n in np.shape(value))} in the state being stepped, but "
+            f"mapping {edge.mapping!r} reads a geometry of shape "
+            f"{tuple(getattr(edge.mapping, 'geometry_shape', ()))}.  compile() checks the "
+            f"state it is given: a state write made after it is checked here.")
     problems = getattr(edge.mapping, "geometry_dtype_problems", None)
     if callable(problems):
         found: Any = problems(dtype)
@@ -233,6 +246,21 @@ def _traceable_geometry(edge: EdgeSpec, field: str, value):
                 f"compile() checks the state it is given: a state write made after it, "
                 f"or an update that returns another dtype, is checked here.")
     return value
+
+
+def _geometry_shape_read(mapping, shape) -> bool:
+    """Does *mapping* read a geometry of *shape*?
+
+    Its ``accepts_geometry_shape`` where it has one (the multilinear kind
+    takes ``(n_points,)`` on a one-axis grid), otherwise its
+    ``geometry_shape`` exactly.  The one rule ``validate()`` applies at
+    ``compile()`` and :func:`_traceable_geometry` where a program is traced.
+    """
+    shape = tuple(int(n) for n in shape)
+    accepts = getattr(mapping, "accepts_geometry_shape", None)
+    if callable(accepts):
+        return bool(accepts(shape))
+    return shape == tuple(getattr(mapping, "geometry_shape", ()))
 
 
 _GEOMETRY_ANCHORS = ("source", "target")
@@ -362,8 +390,7 @@ def _geometry_edge_issues(edges, nodes, state) -> list[str]:
             continue
         shape = tuple(int(n) for n in np.shape(value))
         want = tuple(getattr(e.mapping, "geometry_shape", ()))
-        accepts = getattr(e.mapping, "accepts_geometry_shape", None)
-        if not (accepts(shape) if callable(accepts) else shape == want):
+        if not _geometry_shape_read(e.mapping, shape):
             issues.append(
                 f"ERROR: edge {e.key}: geometry field {holder}.{field} has shape {shape}, "
                 f"but mapping {e.mapping!r} reads a geometry of shape {want}.")

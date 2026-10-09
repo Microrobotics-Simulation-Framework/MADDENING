@@ -616,6 +616,22 @@ A few things to know when reading a result:
   where it is passed: the RBF factories solve a kernel system with a
   relative ridge of `1e-8`, so in float64 they reproduce and conserve to
   `1e-8`, which is some `5e7` float64 roundings.
+* **At the underflow end a tolerance stops shrinking.**  The delivery
+  flushes: a result below the smallest normal number of its dtype (`tiny`,
+  `1.2e-38` in float32) is zero, and an operand below it is read as zero,
+  where the float64 reference of a check keeps both.  One flush costs up to
+  `tiny` *in the units of the value flushed*, whatever the gain: the
+  delivered value itself, the products and partial sums of the mapping's row
+  (which the transform's factor then scales), each source value as it is
+  read (which the gain carries).  No comparison is tighter than
+  `2 * tiny * (1 + |scale| * (2 * n_source - 1) + gain)` for each delivered
+  value it compares, and wherever the rounding tolerance is the larger --
+  any field of ordinary magnitude -- the tolerance is that one, unchanged.
+  This is why an edge that converts N to kN passes on a draw that takes
+  what it delivers below `tiny`, and it is the battery's resolution there:
+  an offset of one `tiny` in a transform is what one flush costs, and is
+  not told from an honest edge.  (`geometry_derivative` keeps its own
+  absolute allowance, `tiny / eps`.)
 * **A `SKIP` counts as passed**, as it does for a node.  Where a check must
   have been made, `assert_mapping_verified(..., require=("round_trip",))`
   raises on a skip of it.  An unregistered kind's `round_trip` is always a

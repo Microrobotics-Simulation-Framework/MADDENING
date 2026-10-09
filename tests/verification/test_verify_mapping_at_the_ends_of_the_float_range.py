@@ -180,6 +180,21 @@ def pin(monkeypatch):
     return install
 
 
+@pytest.fixture
+def allowed(monkeypatch):
+    """Every tolerance the battery takes: ``(rounding, flushes, tolerance)``."""
+    taken = []
+    real = battery._allowed
+
+    def recording(rounding, flushes):
+        tolerance = real(rounding, flushes)
+        taken.append((rounding, flushes, tolerance))
+        return tolerance
+
+    monkeypatch.setattr(battery, "_allowed", recording)
+    return taken
+
+
 @contextlib.contextmanager
 def _float64():
     previous = jax.config.jax_enable_x64
@@ -381,7 +396,8 @@ def _grid_examples(name, magnitudes, n_source, n_target):
 @pytest.mark.parametrize("case", [
     pytest.param(case, marks=() if case in GRID_EDGES_PER_PUSH else pytest.mark.slow)
     for case in sorted(GRID_EDGES)])
-def test_a_geometry_dependent_kind_on_a_scaled_edge_passes_at_every_magnitude(case, pin):
+def test_a_geometry_dependent_kind_on_a_scaled_edge_passes_at_every_magnitude(
+        case, pin, allowed):
     mode, scale = GRID_EDGES[case]
     mapping = multilinear_grid_mapping(ORIGIN, SPACING, SHAPE, n_points=N_POINTS, mode=mode)
     n_source, n_target = (len(LATTICE), N_POINTS) if mode == "consistent" else (
@@ -403,6 +419,12 @@ def test_a_geometry_dependent_kind_on_a_scaled_edge_passes_at_every_magnitude(ca
     assert results["geometry_derivative"].status == "PASS"
     assert "draws compared" in results["geometry_derivative"].detail
     assert not results["geometry_derivative"].detail.startswith("0 draws compared")
+    # Every comparison but the derivative's (which keeps an absolute
+    # allowance of its own) and the bit-for-bit round trip took its
+    # tolerance with an allowance for flushes: the hull check's among them.
+    compared = sum(n for name, n in driver.ran.items()
+                   if name not in ("geometry_derivative", "round_trip", "dtype_float32"))
+    assert len(allowed) >= compared and all(flushes > 0.0 for _, flushes, _ in allowed)
 
 
 # ---------------------------------------------------------------------------
@@ -564,21 +586,6 @@ def test_a_transpose_that_is_not_the_adjoint_fails_on_float64_fields_of_1e200(pi
 # ---------------------------------------------------------------------------
 # The allowance: unchanged at ordinary magnitudes, and never below a flush
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def allowed(monkeypatch):
-    """Every tolerance the battery takes: ``(rounding, flushes, tolerance)``."""
-    taken = []
-    real = battery._allowed
-
-    def recording(rounding, flushes):
-        tolerance = real(rounding, flushes)
-        taken.append((rounding, flushes, tolerance))
-        return tolerance
-
-    monkeypatch.setattr(battery, "_allowed", recording)
-    return taken
 
 
 #: Gains (the factor times the weight sum) from 1e-6 to 1e6, and the

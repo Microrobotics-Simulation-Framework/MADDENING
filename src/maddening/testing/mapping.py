@@ -69,7 +69,8 @@ source value as it is read, which the operator carries.  No comparison
 is tighter than what those flushes can cost the values it compares, and
 every comparison is exactly the rounding tolerance wherever that is the
 larger of the two: at any magnitude where ``eps * gain * max|field|`` is
-more than a few ``tiny``.
+more than a few ``tiny``.  (The position derivative is compared with an
+absolute allowance of its own, ``tiny / eps``.)
 
 Requires ``hypothesis >= 6.165``; install the ``[verify]`` extra.
 """
@@ -231,10 +232,11 @@ def _flush_cost(subject: "_Subject", gain: float, delivered: Any, field: Any, *,
 def _allowed(rounding: float, flushes: float) -> float:
     """The tolerance of a comparison: what rounding can cost it, and never
     less than what flushes to zero can (:func:`_flush_cost`, times the
-    values compared).  Every tolerance of the battery is taken here, so
-    the underflow end is allowed for in one place; wherever the rounding
-    is the larger -- any field of ordinary magnitude -- the tolerance is
-    that value, unchanged to the last bit."""
+    values compared).  Every tolerance of the battery is taken here but
+    the position derivative's, which adds an absolute allowance of its
+    own, so the underflow end is allowed for in one place; wherever the
+    rounding is the larger -- any field of ordinary magnitude -- the
+    tolerance is that value, unchanged to the last bit."""
     return max(rounding, flushes)
 
 
@@ -1340,7 +1342,12 @@ def verify_mapping(
         involved, ``gain`` the largest absolute row sum of the operator
         delivered.  See :data:`DEFAULT_ROUNDING_UNITS`.  Raise it for a
         kind whose documented accuracy is not rounding (a kernel
-        interpolant solved with a ridge), and say so.
+        interpolant solved with a ridge), and say so.  Whatever the
+        width, no comparison is tighter than what flushes to zero can
+        cost the values it compares: ``2 * tiny * (1 + |scale| * (2 *
+        n_source - 1) + gain)`` for each delivered value (the module's
+        notes say why), which is not in rounding units and matters only
+        at the underflow end.
     resolve_points : callable, optional
         Resolver for the ``round_trip`` check's references
         (``gm.point_resolver()`` for references to node fields).

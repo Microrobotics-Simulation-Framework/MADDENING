@@ -126,6 +126,75 @@ Both messages are designed to surface unintentional graph mistakes
 without breaking deliberate constructions.
 ```
 
+### An edge from a node to itself
+
+An edge may start and end at the same node.  Which of its own values the
+node then reads depends on one thing, whether the node is in a coupling
+group:
+
+- **outside a coupling group** the edge is a back edge, like the staggered
+  edge of any loop: the node reads its own value from the *previous* step,
+  so the term the edge carries is explicit;
+- **in a coupling group** (a group of that one node is enough) the edge is
+  iterated with the group: once the group has converged the node has read
+  its own *new* value, so the term is implicit.
+
+A rod at a uniform temperature that loses heat in proportion to it,
+`dT/dt = -k T`, written as an edge from the rod's temperature to its own
+heat source:
+
+<!-- snippet: continues -->
+```python
+import jax.numpy as jnp
+from maddening import GraphManager
+from maddening.nodes import HeatNode
+
+k, dt = 1.0, 0.01
+
+
+def one_step(grouped):
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", dt, n_cells=4, thermal_diffusivity=0.1))
+    gm.add_edge("rod", "rod", "temperature", "heat_source",
+                transform=lambda T: -k * T)
+    if grouped:
+        gm.add_coupling_group(["rod"], max_iterations=50)
+    gm.compile()
+    gm.set_node_state("rod", {"temperature": jnp.ones(4)})
+    return float(gm.step()["rod"]["temperature"][0])
+
+
+explicit, implicit = one_step(grouped=False), one_step(grouped=True)
+print(f"{explicit:.6f}")   # 0.990000 = 1 - k dt        the previous step's value
+print(f"{implicit:.6f}")   # 0.990099 = 1 / (1 + k dt)  iterated with the group
+assert abs(explicit - (1 - k * dt)) < 1e-6 and abs(implicit - 1 / (1 + k * dt)) < 1e-6
+```
+
+Neither graph draws a warning: putting a node in a group is how one of its
+terms is made implicit.  `gm.validate()` says which of the two the edge
+is, in one `INFO:` line for each such edge, and that line is how you learn
+which reading an edge has.  For the first graph and for the second:
+
+```text
+INFO: edge rod.temperature -> rod.heat_source is from node 'rod' to itself. Outside a coupling group it is a back edge: the node reads its state of the previous step, so the term the edge carries is explicit.
+INFO: edge rod.temperature -> rod.heat_source is from node 'rod' to itself. With the node in a coupling group (['rod']) the edge is iterated with the group and at convergence the node reads its new value, so the term is implicit.
+```
+
+An `INFO:` line is not an error and `gm.compile()` does not warn for it.
+Nothing else changes which value is read (not the node's other edges, a
+neighbour's group or the order the graph was built in), `gm.print_graph()`
+says which beside the edge ("back edge: reads the previous step's value"
+or "iterated inside its coupling group"), and `gm.auto_couple()` groups
+only cycles of two or more nodes, so it leaves such an edge explicit.
+
+"Implicit" is what a *converged* group gives.  The first pass of a group
+reads the previous step, so `max_iterations=1` returns the explicit value,
+and the plain iteration converges only while `|k dt| < 1`; past that the
+group needs an `acceleration`.  That, sub-cycled members, multi-rate
+graphs and edges from a node's own flux are in
+[An edge from a node to itself](../developer_guide/coupling_algorithm_guide.md#an-edge-from-a-node-to-itself)
+in the coupling guide.
+
 ## Differentiable Everything
 
 The entire {term}`graph step <Graph step>` is JIT-compiled and differentiable:

@@ -54,6 +54,9 @@ class CouplingGroup:
     nodes : frozenset[str]
         Names of the nodes that participate in the coupling group.
         All must belong to the same graph and form (part of) a cycle.
+        A member's edge to itself is iterated with the group, which makes
+        the term it carries implicit; a group of one node is allowed for
+        this.
     max_iterations : int
         Upper bound on coupling passes per timestep.
 

@@ -1738,6 +1738,94 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   it stays a bound in every order (see
   [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
 
+## An edge from a node to itself
+
+`add_edge("a", "a", ...)` is accepted, and a group changes what it means.
+Outside every group the edge is a back edge: `a` reads its own value from
+the previous step.  With `a` in a coupling group it is one of the group's
+internal edges and is iterated with the rest: a pass computes `a` from its
+state at the start of the step and from what its edges deliver, and this
+edge delivers `a` as the *previous iterate* holds it.  At the fixed point
+the two agree, so `a` has read its own new value.  With `dx/dt = -k x`
+carried by the edge, one step is
+
+| | one step | at `k dt = 0.01` |
+|---|---|---|
+| no group (the term is explicit) | `x (1 - k dt)` | `0.99` |
+| `add_coupling_group(["a"])` (implicit) | `x / (1 + k dt)` | `0.990099` |
+
+A group of the one node is allowed, and is how one term of one node is
+made implicit; the
+[quickstart](../user_guide/quickstart.md#an-edge-from-a-node-to-itself)
+has the example as code.  What follows from "iterated" (row CPL-193 of
+`docs/validation/coupling_claims.yaml`; every line is read from a compiled
+graph by `tests/core/test_an_edge_from_a_node_to_itself.py`):
+
+* **Only the node's own group decides.**  Not its other edges, not a
+  neighbour's group, not the order the graph was built in; an additive
+  edge to itself is summed with the other edges into the input, each at
+  its own level.  `compile()` raises no warning for the edge in either
+  place, and `auto_couple()` groups loops of two or more nodes, so it
+  leaves the edge explicit.
+* **`validate()` says which.**  One `INFO:` line for each edge from a node
+  to itself, in the order the edges were added, after its lines for the
+  loops of two or more nodes; `format_graph()` says the same beside the
+  edge.  The line is how to learn which of the two readings an edge has:
+
+  ```text
+  INFO: edge a.x -> a.u is from node 'a' to itself. Outside a coupling group it is a back edge: the node reads its state of the previous step, so the term the edge carries is explicit.
+  INFO: edge a.x -> a.u is from node 'a' to itself. With the node in a coupling group (['a']) the edge is iterated with the group and at convergence the node reads its new value, so the term is implicit.
+  ```
+
+  The second names the group's members.  The first is also sent to the
+  `maddening.core.graph_manager` logger at `INFO`, as the line for a
+  staggered loop is.  Neither makes the graph invalid: `compile()` refuses
+  a graph for `ERROR` lines and warns for `WARNING` lines only.
+* **The term is implicit once the group has converged, and only then.**
+  The first pass reads the previous step, so `max_iterations=1` returns
+  the *explicit* value, and a cap of `n` returns the first `n` corrections
+  of `1 - k dt + (k dt)^2 - ...` (`0.99`, `0.9901`, `0.990099`).  A cap
+  that was reached is reported like any other: in `coupling_diagnostics()`
+  or by `strict_convergence`, and otherwise not at all.
+* **Past `|k dt| = 1` it takes an acceleration.**  That series is the
+  plain iteration, and it converges only for `|k dt| < 1`, a narrower
+  range than the explicit step is stable on.  So an unaccelerated group
+  does not buy a stiff term its stability.  `"aitken"` and the two IQN
+  methods solve the linear case in a few passes at any `k dt`: at
+  `k dt = 1.5` they return `0.4 = 1 / (1 + k dt)`, where the explicit
+  step gives `-0.5` and the plain group, stopped at a cap of 30, about
+  `1e5`.
+* **Every way of iterating reaches the same value**: Gauss-Seidel and
+  Jacobi, `solver="ift"` and `"fori"`, each of the five accelerations, a
+  predictor.  The gradient is the implicit scheme's
+  (`1 / (1 + k dt)` in the start value), where the ungrouped edge gives
+  the explicit one (`1 - k dt`).
+* **A sub-cycled member reads its value at the end of the group's
+  step.**  Every one of its sub-steps reads the group's iterate, which
+  holds the member as it ends the *group's* step, not the sub-step it has
+  reached (MADD-ANO-027: the sub-step interpolation runs between
+  iterates).  The term is therefore implicit over the group's step: a
+  member at half the group's timestep steps `x / (1 + k dt)` with the
+  group's `dt`, under each `boundary_interpolation`, and not
+  `(1 + k dt / 2)^-2`.
+* **On a multi-rate graph the previous step is the state the node
+  holds.**  A node with rate divider 2 that reads itself steps
+  `x (1 - 2 k dt)`, `dt` the base timestep, on the base steps it fires on
+  and keeps that value on the others; in a group of itself,
+  `x / (1 + 2 k dt)`.  `run_adaptive` takes each of the steps it tries by
+  the same rule.
+* **An edge from a node's own flux** is iterated inside a group like any
+  other.  Outside one it cannot be read: the previous step's flux is not
+  kept, and the step fails with a bare `KeyError` naming the flux
+  (MADD-ANO-157).  That entry's workaround, adding the producer before
+  its reader, does not exist for a node reading itself: put the node in a
+  group, or carry the quantity in a state field.  `validate()` does not
+  tell this edge that it reads the previous step; its line is
+
+  ```text
+  INFO: edge a.q -> a.u is from node 'a' to itself. Outside a coupling group it is a back edge, and its source is a boundary flux, which cannot be read there: the previous step's flux is not kept, and the step raises instead of reading it (MADD-ANO-157). Put the node in a group, or carry the quantity in a state field.
+  ```
+
 ## Invariants
 
 `tests/core/test_coupling_fixture_invariants.py` asserts the properties

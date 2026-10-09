@@ -1347,9 +1347,13 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
     reason = d.get("not_usable_reason")
     estimate = d.get("error_estimate")
     bound = d.get("spectral_error_bound")
-    # Every number is there and only the spectral flags are withdrawn: a
-    # group with a geometry-dependent mapping whose bound reaches a
-    # lattice plane (experimental).  The caveats below still apply.
+    # Every number is there and only flags are withdrawn: a group with a
+    # geometry-dependent mapping, whose report says why a flag is False
+    # (the group solves the mapping's positions: neither flag, on any
+    # step; or, with every position fixed during the pass, the float
+    # floor, an estimate that did not settle, a gradient bound that is
+    # not finite: the gradient's alone); experimental.  The caveats
+    # below still apply.
     flags_only = bool(reason) and all(
         isinstance(v, float) and not math.isnan(v) for v in (estimate, bound))
     if flags_only:
@@ -1380,7 +1384,8 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
                      "iterate; read spectral_error_bound (solver='ift', diagnostics=True)")
     rho = d.get("rho_spectral")
     if flags_only:
-        flags.append(f"spectral_usable=False: {reason}")
+        withdrawn = ("gradient_bound_usable" if d.get("spectral_usable") else "spectral_usable")
+        flags.append(f"{withdrawn}=False: {reason}")
     elif isinstance(rho, float) and not math.isnan(rho) and not d.get("spectral_usable"):
         flags.append("spectral_usable=False: the spectral bound is not settled or not finite")
     if whole and d.get("gradient_bound_usable"):

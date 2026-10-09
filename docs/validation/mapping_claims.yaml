@@ -653,7 +653,17 @@ claims:
     boundaries, overlapping partly and not at all, touching, a single cell,
     float32 and integer boundaries, an offset of 1e9, cells of 1e-200,
     adjacent floats.  With x64 off and on: the weights are float32 either
-    way, as the dense kinds' are.  The builders run once, on the host.
+    way, as the dense nearest-neighbour and projection kinds' are
+    (rbf_mapping's follow float64 points under x64 and matrix_mapping keeps
+    the dtype it is given: neither has a sparse twin here), from float64,
+    float32, plain-list and mixed boundaries, with the same bytes under
+    both settings and a float32 field delivered as float32 by apply and
+    apply_T in an x64 process.  STATED LIMIT: in a float64 (x64) graph the
+    projection's row sums and preserved integral therefore hold to float32
+    rounding (2.98e-8 and 3.7e-9 relative on the test's grids), not to
+    float64; the float64 route is the overlap formula handed to
+    matrix_mapping or sparse_matrix_mapping, exact to float64 rounding.
+    The builders run once, on the host.
   oracle: >-
     the dense factory's H from the same arrays: dtype, shape and every byte
     of the rows scattered into a zero matrix; for the projection also the
@@ -664,6 +674,8 @@ claims:
     - tests/core/test_sparse_mapping_builders.py::test_the_sparse_projection_is_the_dense_double_loop_bit_for_bit
     - tests/core/test_sparse_mapping_builders.py::test_the_grids_cover_empty_rows_shared_boundaries_and_padding
     - tests/core/test_sparse_mapping_builders.py::test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are
+    - tests/core/test_sparse_mapping_builders.py::test_the_projection_weights_are_float32_under_x64_and_a_float32_field_stays_float32
+    - tests/core/test_sparse_mapping_builders.py::test_in_a_float64_graph_the_projection_holds_to_float32_rounding_and_a_float64_matrix_to_float64
     - tests/core/test_sparse_mapping_builders.py::test_the_three_builders_at_a_hundred_thousand_points_in_a_capped_process
   status: verified
   domains:
@@ -900,7 +912,11 @@ claims:
     projection from node-field references, sparse_matrix from two members of
     one .npz beside the config, a small set inlined; JSON and YAML; a USD
     stage on file; a hand-written spec and its dict handed to add_edge;
-    with x64 off and on; float32 members, float64 members under x64 and a
+    with x64 off and on, and a config written under one setting rebuilt
+    under the other (the nearest-neighbour and projection kinds and the
+    dense projection, whose weights are float32 under both: the same index
+    and weight bytes; not sparse_matrix, which keeps float64 values under
+    x64); float32 members, float64 members under x64 and a
     float32 member beside a float64 one (mixed dtype); the reload stepped by
     the compiled (jit) step; a multi-rate graph, a sub-cycled group and a
     group with a predictor; run_adaptive on the reload; a checkpoint loaded
@@ -922,6 +938,7 @@ claims:
     - tests/core/test_sparse_mapping_serialisation.py::test_an_asset_that_changed_since_the_save_is_refused_naming_the_edge
     - tests/core/test_sparse_mapping_serialisation.py::test_a_node_field_that_moved_is_refused_when_the_config_is_written
     - tests/core/test_sparse_mapping_serialisation.py::test_the_rebuild_gives_the_same_index_and_weights_under_either_x64_setting
+    - tests/core/test_sparse_mapping_serialisation.py::test_a_config_written_under_one_x64_setting_rebuilds_the_same_weights_under_the_other
     - tests/core/test_sparse_mapping_serialisation.py::test_a_sparse_mapping_built_by_hand_has_no_recipe_and_is_refused_by_the_writers
     - tests/core/test_sparse_mapping_serialisation.py::test_edge_mapping_helper_references_every_array_of_every_case
     - tests/core/test_sparse_mapping.py::test_describe_adds_no_key_a_reload_would_read_as_a_hyper_parameter
@@ -2053,8 +2070,20 @@ claims:
     pairs under every stock acceleration, both schedules, the l2 and the
     mixed norm, one- and two-dimensional lattices, origins up to forty
     spacings from zero, on examples whose points stay in one lattice cell
-    between the returned iterate and the fixed point (across a lattice
-    plane the flag is the run-time rule of MAP-049); every report key
+    between the returned iterate and the fixed point (the FLAGS of such a group depend on whether it solves the positions,
+    MAP-049: where the pass reads a position from the iterate, or builds one
+    and reads it in the same pass, spectral_usable and gradient_bound_usable
+    are False on every step in 0.4.0, whatever the numbers read (MAP-049,
+    MADD-ANO-252): the numbers are reported as computed, uncertified, and
+    not_usable_reason names the positions and says so; where every position
+    is a constant of the pass the flags are any other group's, and a False
+    one of a step that computed the estimate carries every cause in
+    not_usable_reason; and a position within
+    eight float resolutions of a plane, eps of its dtype times the largest
+    coordinate of the lattice's axis, counts as on it: at an origin forty
+    spacings from zero with a spacing of 0.5 that window is 3.8e-5 of a
+    spacing in float32, and a fixed point nearer a plane than that cannot
+    be told from one on it); every report key
     equal to the node-inlined twin's on every single-rate multilinear
     group case of the harness, a predictor among them; the report under a
     state write and a checkpoint saved after one (save_state, load_state),
@@ -2076,7 +2105,7 @@ claims:
     - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
     - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
     - 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker'
-    - 'tests/core/test_geometry_edge_surfaces.py::test_the_report_of_a_single_rate_grid_group_has_its_bounds_and_no_reason'
+    - 'tests/core/test_geometry_edge_surfaces.py::test_the_report_of_a_single_rate_grid_group_has_its_numbers_and_no_flag_with_the_rule_s_reason'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_twin_s_report_keeps_its_own_caveats'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_printed_coupling_report_prints_the_reason'
@@ -2558,10 +2587,16 @@ claims:
     resolutions is not seen: the source-anchored reads under
     stop_gradient on a deposit that moves the grid's field by nine read
     0.22, under the tolerance, and the report stood on a radius of 0.003
-    against 0.025. (2) An honest float32 pass that reads a position it
-    built in the same Gauss-Seidel sweep, within about 2e-5 of a spacing
-    of a lattice plane, can read a gap of any size and be withheld: of
-    2829 plane draws of two such cells (1489 that near) 47 read over
+    against 0.025. (2) An honest pass that reads a position built in the
+    same sweep, within the check's own step of a lattice plane (sqrt(eps)
+    of a spacing: 3.45e-4 in float32, 1.5e-8 in float64), can read a gap
+    of any size and be withheld; neither float64 nor Jacobi is exempt (an
+    independent audit with fixed points at every distance from a plane:
+    180 honest reports withheld in 65,714, each within that step, up to
+    2.9e-4 of a spacing in float32 and 6.8e-9 in float64; 44 float32 and
+    134 float64 Gauss-Seidel, one weakly coupled Jacobi group in each
+    dtype). Of
+    2829 float32 plane draws of two such cells (1489 within 2e-5) 47 read over
     0.05, 13 over 0.1, 2 over 0.2 and one 0.59 (jaxlib 0.11.0); one draw of the plane hunt reads 0.26 and 0.29
     on 0.10.2 and 0.11.2 (MADD-ANO-246, open). (3) An honest float32
     Gauss-Seidel pass behind a gather of a field alternating +A, -A
@@ -2971,55 +3006,159 @@ claims:
 - id: MAP-049
   area: geometry-dependent mapping diagnostics
   claim: >-
-    Across a lattice plane: "Where a position the pass reads from the
-    iterate is within twice spectral_error_bound of a lattice plane, the
-    bound stands only if the step certified its linearisation across the
-    Newton step to the fixed point (the Newton-Kantorovich check behind
-    gradient_relative_error_bound, which is then finite). Otherwise
-    spectral_usable and gradient_bound_usable are False, the numbers are
-    reported as computed, and not_usable_reason names the case". "A position
-    that is a constant of the pass (a target-anchored geometry read by
-    update, a node outside the group) does not move between the iterate and
-    the fixed point and withdraws nothing." The step stores "limit = (u / 2)
-    min_j D_j d_j" over the entries of every position field the pass reads
-    from the iterate, the faces of the hull counted as planes, in the units
-    of spectral_error_bound. coupling_report() prints the reason beside
+    In 0.4.0 a coupling group that SOLVES the positions of a
+    multilinear_grid mapping has no usable flag. Where the group's pass
+    reads a position from the iterate, or builds one and reads it in the
+    same pass (a member's source-anchored geometry; the target-anchored
+    geometry of a member that computes fluxes), spectral_usable and
+    gradient_bound_usable are False on every step, whatever the numbers
+    read; the numbers are reported as computed; and not_usable_reason is one
+    sentence that names the positions, says the numbers are uncertified and
+    gives the two ways to keep the flags. A group whose positions are all
+    constants of the pass (a target-anchored geometry read by update,
+    positions held by a node outside the group) has a smooth group's flags,
+    only where the step recorded that it read no position from the iterate
+    (both stored numbers inf: an absent or non-numeric slot sets no flag),
+    and no reason of its report names a lattice plane. The step still stores
+    two NUMBERS, on which no flag stands: "limit = (u / 2) min_j D_j d_j"
+    over the entries of every position field the pass reads from the
+    iterate, the faces of the hull counted as planes, in the units of
+    spectral_error_bound, with the SPECTRUM's weights; and "margin = min_j
+    D_j (d_j - w_j)_+ / (D_j |delta_j| + eta + 2 f)" over the same entries
+    with the NORM's weights (the Newton step's own move of the entry, one
+    more Newton step and the float floor; d_j zero where a position the pass
+    builds at the iterate or at the Newton point is not strictly inside the
+    iterate's cell). A position within eight float resolutions of a lattice
+    plane is on it, for both numbers; both read inf where every position is
+    a constant of the pass. coupling_report() prints the reason beside
     spectral_usable=False.
   sources:
     - 'docs/algorithm_guide/coupling/interface_mapping.md (Geometry-dependent mappings, What reads a geometry in 0.4.0, and what does not)'
     - docs/user_guide/geometry_dependent_mappings.md (Limits in 0.4.0)
     - 'src/maddening/core/coupling/_bounds.py::_geometry_plane_limit'
     - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_REACH'
+    - 'src/maddening/core/coupling/_bounds.py::_kantorovich_ball_plane_margin'
+    - 'src/maddening/core/coupling/_group_layout.py::_geometry_flags'
+    - 'src/maddening/core/coupling/_bounds.py::GEOMETRY_PLANE_ULPS'
+    - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_resolution'
     - 'src/maddening/core/coupling/grid_mapping.py::MultilinearGridMapping._plane_distance'
     - 'src/maddening/core/coupling/_interface_plan.py::InterfacePlan.geometry_iterate_reads'
     - 'src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics'
     - 'src/maddening/core/inspection.py::_coupling_flags'
   conditions: >-
     solver="ift" with diagnostics=True, a single-rate group of
-    multilinear_grid edges under the l2 or the mixed norm (MAP-036). On
-    every push: the audited float32 pair (one marker, Gauss-Seidel, the l2
+    multilinear_grid edges under the l2 or the mixed norm (MAP-036); the
+    steps compiled (jit) by the graph. THE RULE OF 0.4.0 (MADD-ANO-252). A
+    group whose pass reads a position from the iterate, or builds one and
+    reads it in the same pass, has neither flag on any step, with the one
+    reason; a group whose positions are all constants of the pass has a
+    smooth group's flags. One function decides (_geometry_flags), from the
+    record compile() committed of the positions the pass solves. THE STORED
+    NUMBERS SET NO FLAG. geometry_plane_limit and geometry_plane_margin are
+    what the claim's two formulae give at the returned iterate, and neither
+    says that the fixed point is in the iterate's lattice cells: a margin
+    over one puts the fixed point of the iterate's polynomial piece in the
+    iterate's cell only where that polynomial satisfies Newton-Kantorovich
+    with h <= 1/2, which the step measures on one secant and does not prove.
+    The rule reads the two slots only as the step's record that it read no
+    position from the iterate (both inf where every position is a constant
+    of the pass; any other reading withholds the flags). The rules that set
+    a flag from these numbers are withdrawn and decide nothing in 0.4.0 (the
+    limit with the gradient bound's Newton-Kantorovich check where the bound
+    is over it, MADD-ANO-242; the margin over one, MADD-ANO-252): an
+    independent audit of each found spectral_usable beside a bound far under
+    the distance, and the registry entries have those measurements. The
+    numbers of a group that solves positions are reported as computed and
+    are not certified. THE FLAGS, on every push. The rule's unit table: no
+    flag and the same one reason at every reading of the margin, the limit,
+    the bound and the gradient bound, the readings the withdrawn rules set a
+    flag on among them; with constant positions, a smooth group's flags only
+    where both slots read inf (a slot that is absent, NaN, not numeric or
+    finite sets no flag, with a reason that says the step's record is
+    missing), and every cause of a False flag, none naming a lattice plane.
+    The report's side, on the per-push pair of the geometry search with its
+    three slots replaced, on every printer, and its control read as constant
+    positions. The audited float32 pair (one marker, Gauss-Seidel, the l2
     norm, tolerance 1e-4) whose solve converges before a lattice plane with
-    its fixed point 2e-4 of a spacing past it, where the flag was set on a
-    bound under half the distance and is withdrawn with the numbers kept,
-    and the same graph with the fixed point mid-cell, which keeps its flag
-    and its bound; the stored limit against its definition (the distance
-    to the nearest plane in the reference's norm, halved) on eight pinned
-    plane draws of the float32 Jacobi pair under the mixed norm, either
-    face of the hull and a point outside it among them; no flag on a fixed
-    point beyond twice the bound on the house floor of drawn plane draws
-    of that pair; the report's reading of the two slots (at the limit,
-    over it with a finite gradient bound, over it without one, a limit
-    that is not a number, the self-check's failure first); the plane
-    distance and the limit's arithmetic on a toy pass; which positions
-    are listed (a source-anchored internal edge, a target-anchored edge
-    into a member that computes fluxes) and which are not. The steps
-    compiled (jit) by the graph. The rule is a run-time criterion and not
-    a proof: where no plane is within twice the bound it rests on the
-    polynomial piece at the iterate having its fixed point within the
-    Newton-Kantorovich ball (a smooth nonlinearity that fails this is the
-    condition CPL-088 states for every nonlinear group), and where one is
-    it rests on the gradient bound's measured Jacobian change across the
-    Newton step. Not claimed for float64 (x64) on every push (the slow
+    its fixed point 2e-4 of a spacing past it and the bound under half the
+    distance: no flag, the numbers kept, the reason; the same graph with the
+    fixed point mid-cell has no flag either, and its bound holds. The
+    saddle-node case (one marker on a one-dimensional lattice, affine
+    members, the returned iterate in a cell whose polynomial has no fixed
+    point, the pass's only fixed point one cell on; float32 and float64, and
+    slow: both sweep orders, the mixed norm, Aitken): converged, no flag,
+    the reason names the position and the edge, beside a bound more than ten
+    times under the distance, a margin over one, a gradient bound of inf and
+    a bound under the limit (the limit not pinned in the Aitken cells;
+    measured, MADD-ANO-252: margins of 2.8 to 186, bounds 34 to 1,874 times
+    under the distance). THE CONSTRUCTED CASES, per push in float64 (kernel
+    curvature: a 6 x 3 lattice, linear members) and float32 (a member's
+    quadratic response on a one-dimensional lattice), the other two dtypes
+    slow: the cell polynomial's fixed point 1e-6 to 2e-6 of a spacing-scale
+    past the plane with the iterate and the Newton point short of it, the
+    next cell expanding (the pass's fixed point two cells on, more than ten
+    bounds away) or contracting at 0.999 or 0.99; the Newton point across;
+    the fixed point just inside the cell with the plane in the ball; and
+    deep inside: no flag in any, with the rule's reason. A marker at rest on
+    the lower hull face at coordinate 0.0: both flags False with one reason
+    and a stored margin of zero on each of twelve steps. Every example of
+    the geometry searches is held to the rule
+    (geometry_cells.rule_violations), and no report of the per-push pair
+    carries a flag; the slow hunt has a cell of constant positions in each
+    of its four blocks, where its flagged reports are. Slow: a placement
+    sweep of the constructed pair (ten structures, three of them with an
+    expanding next cell, four tolerances, 21 signed distances, float32 and
+    float64): no flag and the rule's reason on either side of the plane, at
+    any distance. THE NUMBERS, on every push, against a NumPy reference of
+    the pass that does not import the library's kernel
+    (tests/property/plane_sides.py), with the fixed point PLACED at a chosen
+    signed distance from a plane by bisection of a marker's initial
+    position: a pinned table of 21 rows, 19 of them per push. Fourteen drawn
+    rows on three structures whose pass reads a position from the iterate
+    (float32 Gauss-Seidel l2 at tolerance 0.03; float64 Jacobi l2 at 1e-5;
+    float64 Jacobi mixed at rtol 0.03 with Aitken) cover the four
+    combinations of sides (which of the returned iterate and the Newton
+    point are in the fixed point's lattice cells) and a row within a few
+    float resolutions of a plane; two rows of float32 Jacobi mixed have
+    every position a constant of the pass, one of them with a plane between
+    the iterate's position and the fixed point's; three are the audited rows
+    of MADD-ANO-252 (the gradient bound 15 to 70,000 times under the error,
+    the fixed point across a plane the Newton point is short of); and two,
+    slow, are the audited rows of a position within a rounding of a plane.
+    In every row the sides are the pinned ones and the flags are the rule's:
+    none, with the rule's reason, on the 19 rows that read a position from
+    the iterate (17 per push); both, with both stored numbers inf and no
+    lattice plane named, on the two rows of constant positions, whose
+    flagged numbers hold against the reference. The numbers of a group that
+    solves positions carry no flag and are still scored where a row says so
+    (the table's *_number_holds; geometry_cells.held_numbers in the
+    searches): rho_spectral, spectral_error_bound and the gradient bound
+    hold on a row of each drawn structure, each with the iterate, the Newton
+    point and the fixed point in one cell and a margin over one; none is
+    scored with the fixed point across a plane; and on these rows, wherever
+    the margin is over one the fixed point of the iterate's polynomial piece
+    (the reference's stencil of the iterate's cell continued past its
+    planes) is in the iterate's cell and is the pass's, which the
+    saddle-node case shows does not hold in general. In the constructed
+    cases the margin is over one only with the fixed point deep inside the
+    cell, where the distance is within the bound. THE DEFINITIONS, on every
+    push: the stored limit against its definition (the distance to the
+    nearest plane in the reference's norm, halved) on eight pinned plane
+    draws of the float32 Jacobi pair under the mixed norm, either face of
+    the hull and a point outside it among them; the plane distance and the
+    limit's arithmetic on a toy pass; which positions are listed (a
+    source-anchored internal edge, a target-anchored edge into a member that
+    computes fluxes) and which are not; the margin's arithmetic on a toy
+    pass (weights, the entry's own move, the window through the ball, a
+    built position leaving the cell at either point, an entry the norm does
+    not read, NaN) and the radius the step takes on an affine pass (the
+    entry's move plus between one and three Newton steps: the floor is in
+    it), float32 and float64; the plane window at 0.3, 1 and 5 float
+    resolutions (zero) and at 50 (kept), float32 and float64, at a lattice
+    of order one, at an origin forty spacings from zero and at a plane on
+    zero of a lattice whose origin is far from it. The rule sets flags and
+    reasons only: no returned state and no reported number depends on it.
+    Not claimed for float64 (x64) on every push for the limit (the slow
     plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
     checkpoints or sharded graphs, nor for a mapping kind other than
@@ -3032,17 +3171,43 @@ claims:
     from the returned state by its definition; the documented reading of
     the slots.
   tests:
+    - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point'
+    - 'tests/property/test_coupling_geometry_search.py::test_every_block_of_the_hunt_has_a_cell_whose_positions_are_constants_of_the_pass'
     - 'tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane'
     - 'tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition'
     - 'tests/property/test_coupling_geometry_search.py::test_no_flag_stands_on_a_fixed_point_beyond_twice_the_bound_on_drawn_planes_per_push'
-    - 'tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified'
+    - 'tests/property/test_coupling_geometry_search.py::test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_distance_is_to_the_nearest_plane_inside_and_to_the_face_outside'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach'
     - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_zero_where_the_pass_moves_a_position_across'
     - 'tests/core/test_interface_plan.py::test_the_positions_a_pass_reads_from_the_iterate_are_listed_once_per_mapping'
+    - 'tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_pinned_table_has_every_row_of_sides_a_standing_flag_and_the_audited_cases'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error'
+    - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step'
+    - 'tests/property/test_coupling_plane_sides.py::test_the_placement_sweep_finds_no_flagged_bound_under_the_distance'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_constant_positions_keep_a_smooth_group_s_flags_only_where_the_step_recorded_them'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_false_flag_of_constant_positions_names_every_cause_and_no_lattice_plane'
+    - 'tests/property/test_coupling_geometry_search.py::test_no_gradient_flag_stands_with_the_fixed_point_across_a_plane_on_drawn_planes_per_push'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_reads_only_the_positions_that_move_with_the_iterate'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_zero_where_a_position_the_pass_builds_leaves_the_cell'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_not_a_number_where_it_cannot_be_evaluated'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_a_position_within_eight_float_resolutions_of_a_plane_is_on_it'
+    - 'tests/core/test_grid_probe_step_and_plane_distance.py::test_the_window_is_taken_at_the_position_the_pass_builds_too'
   status: verified
   notes: >-
-    Slow, run once on each JAX lane: the plane hunt over eight cells (each
+    Slow, run once on each JAX lane: the sweep of the table (every
+    anchoring, both schedules, both norms, float32 and float64: 32 cells,
+    six placed pairs each at twelve signed distances from four float
+    resolutions to a tenth of a spacing) scores every flagged number of
+    every example and prints the realised table; the two audited cases of a
+    position within a rounding of a plane (the iterate 4.7 float
+    resolutions before a plane and the fixed point 0.7 past it: the
+    gradient bound was 25x under the error, flagged). The plane hunt over eight cells (each
     anchoring, both schedules, both norms, float32 and float64, one and
     two axes, an origin forty spacings from zero) asserts the three
     scores of a plane draw and the stored limit on every example, and

@@ -488,11 +488,11 @@ def test_the_time_level_depends_only_on_whether_the_node_itself_is_in_a_group(
 
 
 # Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_delivers
-# (no group in both orders, and each group in one; the other order of each group is slow)
+# (no group in both orders, and the group of the node in one).  The group of both nodes is slow
+# here: the neighbour test above steps it on every push, with every edge into the input additive.
 @pytest.mark.parametrize("groups, own_edge", _cells(
-    (("no group", "own edge first"), ("no group", "own edge last"),
-     ("[a]", "own edge first"), ("[a, b]", "own edge last")),
-    ("no group", "[a]", "[a, b]"), ("own edge first", "own edge last")))
+    (("no group", "own edge first"), ("no group", "own edge last"), ("[a]", "own edge first")),
+    ("no group", "[a]", "[a, b]"), ("own edge first", "own edge last"), slow_only=("[a, b]",)))
 def test_an_additive_edge_to_itself_adds_to_what_another_edge_into_the_input_delivers(
         groups, own_edge):
     """``a.u`` is fed by ``a`` itself and by ``b``, both additive, in either order.
@@ -561,7 +561,9 @@ def test_every_schedule_solver_and_acceleration_makes_the_term_implicit(
     assert got_alone == pytest.approx(IMPLICIT, abs=CLOSE)
 
 
-@pytest.mark.parametrize("norm", ["mixed", "interface"])
+# Per push: tests/core/test_an_edge_from_a_node_to_itself.py::test_each_convergence_norm_stops_at_the_implicit_value[interface]
+# (the norm that measures the edge itself; "mixed" reads the state, as "l2" does everywhere else)
+@pytest.mark.parametrize("norm", [pytest.param("mixed", marks=pytest.mark.slow), "interface"])
 def test_each_convergence_norm_stops_at_the_implicit_value(norm):
     """``"l2"`` is the default above; ``"mixed"`` and ``"interface"`` carry ``rtol``.
 

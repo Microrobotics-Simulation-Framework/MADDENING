@@ -6455,12 +6455,13 @@ claims:
     has one since 0.4.0, approved 2026-10-08 for parity with longer loops,
     and that line is how a user learns which reading an edge has.  The
     wide products of the test module (the 40 graphs, schedule by solver by
-    acceleration, scheme by precision of the gradient, the other order of
-    a grouped additive edge, the fori solver at a cap) run whole in the
-    slow lane; every push runs a part of each that holds every schedule,
-    solver, interpolation, precision and grouping, with aitken, fixed and
-    IQN-ILS.  IQN-IMVJ around an edge to itself, and the gradient through
-    an accelerated group, are checked in the slow lane only.
+    acceleration, scheme by precision of the gradient, an additive edge in
+    either order in each group) run whole in the slow lane; every push
+    runs a part of each that holds every schedule, solver, interpolation,
+    precision and grouping, the accelerations aitken, fixed and IQN-ILS
+    and the interface norm.  In the slow lane only: IQN-IMVJ around an
+    edge to itself, the mixed norm, the fori solver at a cap, and the
+    gradient through an accelerated group.
   domains:
     f32: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value
     f64: tests/core/test_an_edge_from_a_node_to_itself.py::test_outside_a_group_it_reads_the_previous_step_and_inside_one_its_new_value

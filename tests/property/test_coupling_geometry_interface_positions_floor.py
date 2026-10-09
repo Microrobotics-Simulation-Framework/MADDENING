@@ -576,6 +576,9 @@ def test_float64_positions_far_from_zero_beside_float32_fields_are_not_flagged(a
     narrow = dataclasses.replace(pair, pos_dtype=None)
     gm, advisories = build(narrow)
     assert GATHER in warned(advisories), advisories
+    for text in advisories:         # the remedy the pair above took, in the message's words
+        assert "in float64" in text and "the report's floor counts a position at its own " \
+            "dtype too" in text, text
     pre = stored(gm)
     gm.step()
     flagged = _checked(narrow, gm, pre)

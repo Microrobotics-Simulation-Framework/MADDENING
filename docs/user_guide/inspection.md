@@ -441,6 +441,28 @@ step (`gradient_relative_error_bound` is not finite), `spectral_usable` and
 returned iterate, and across a lattice plane the stencil is another polynomial: the fixed point
 may be in a cell where the pass contracts at another rate.
 
+**A long row of a sparse mapping in the scatter layout** keeps its numbers and loses its flags
+at the float floor (MADD-ANO-251, open).  `transpose="scatter"` adds a target's row up one entry
+after another, and an in-order sum of `k` terms of one sign rounds by up to `(k - 1) / 2` units of
+`eps`, systematically where the terms are nearly equal (a uniform field); the float floor counts a
+fixed number of units per evaluation.  Where an internal edge of the group carries such a mapping
+with a row longer than 10 entries (`SCATTER_ROW_FLOOR_LIMIT`, a measured constant) and the residual
+is not above the float floor times the row's length, `spectral_usable` and `gradient_bound_usable`
+are `False`, every number is reported as computed, and `not_usable_reason` names the edge, the
+row's length and the way out: a wider dtype at the same tolerance.  Measured on a float32 pair
+stalled behind one row (a uniform field), `spectral_error_bound` read 0.68 of the true distance
+behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4, on jax 0.10.2, 0.11.0 and 0.11.2 alike;
+rows of up to 10 entries held by 3.9x or more.
+
+**The guard counts that layout only, and the same rounding is in the others.**  The gather layout
+and the dense kinds are summed in an order XLA chooses, which depends on the jax version, the dtype
+and the operator's shape, and their reports keep their flags.  Measured on the same pair: one row
+behind a uniform field held by 1.8x at 300 entries and by 1.09x at 3000; the gather layout's rows
+of 1e4 entries and more are summed in order on jax 0.10.2 in float32 and read 0.002 to 0.007 of the
+distance; a dense mapping with three rows of 3000 entries read 0.18 of it on every jax version.
+At a float floor (`precision_limited=True`) behind a row of more than a few hundred entries, in any
+layout, do not rely on `spectral_usable`: read the bound in a wider dtype.
+
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in
 kind between backends: on the pair above after 40 float32 steps (residual exactly 0),

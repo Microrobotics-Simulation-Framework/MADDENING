@@ -74,6 +74,16 @@ a gradient with respect to the source field through either layout may
 differ in its last bits between runs even where the forward result does
 not.
 
+The scatter layout's in-order sum is also what a coupling report's float
+floor does not count: a row of ``k`` entries of one sign rounds by up to
+``(k - 1) / 2`` ``eps``, systematically behind a uniform field, and
+``coupling_diagnostics()`` withdraws ``spectral_usable`` behind a
+scatter-layout row longer than ``SCATTER_ROW_FLOOR_LIMIT`` entries at the
+float floor (MADD-ANO-251).  The gather layout is not counted, and is
+not a way round it: its row sum is in the order XLA chooses, and on jax
+0.10.2 its float32 rows of 1e4 entries and more are summed in order as
+well.
+
 Summation order
 ---------------
 The row sum is deterministic for one compiled program.  It is not the
@@ -825,7 +835,9 @@ def sparse_nearest_neighbor_mapping(
         ``"scatter"`` stores one entry per source and applies a
         scatter-add: compact whatever the pattern.  Measured on the CPU it
         is the in-order sum, one result; measured on a GPU it gave a
-        different result on every run.  Choose it when the gather form is
+        different result on every run.  A coupling report withdraws
+        ``spectral_usable`` behind one of its rows of more than ten
+        entries at the float floor (MADD-ANO-251).  Choose it when the gather form is
         refused and run-to-run reproducibility on a GPU is not needed.
     source_ref, target_ref : optional
         Where the points come from, for serialisation, as in

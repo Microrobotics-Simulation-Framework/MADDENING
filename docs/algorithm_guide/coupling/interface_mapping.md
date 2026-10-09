@@ -758,6 +758,48 @@ recorded in the spec, so a reloaded mapping is applied the way it was
 built.  The two forms hold the same matrix, and agree with one another
 and with the dense conservative kind to rounding.
 
+**The order of the sum and a coupling report's float floor**
+(MADD-ANO-251, open).  "To rounding" is `(k + 2) eps` of a row of `k`
+entries, and an in-order sum of `k` terms of one sign reaches a good
+part of it where the terms are nearly equal: the rounding is then
+systematic and grows like `k`.  The float floor of
+`coupling_diagnostics()` counts a fixed number of `eps` per evaluation
+and does not count a row's own sum.  So a group stalled at its float
+floor behind a long row is further from its fixed point than
+`spectral_error_bound` says.  Measured on a pair of relays (one value fed
+by a row of `k` values that each read it back; gains 0.9 and 0.99, both
+schedules, uniform, ramp and random fields; the smallest bound over the
+true distance among the reports with `spectral_usable` set; the same
+digits on jax 0.10.2, 0.11.0 and 0.11.2):
+
+| row `k`, scatter layout | 3 | 10 | 30 | 100 | 300 | 1000 | 3000 | 1e4 | 3e4 |
+|---|---|---|---|---|---|---|---|---|---|
+| float32, `"interface"` | 6.2 | 3.9 | 2.07 | 0.68 | 0.24 | 0.069 | 0.023 | 0.0068 | 0.0022 |
+| float32, `"mixed"` | 6.3 | 4.9 | 2.09 | 0.66 | 0.22 | 0.069 | 0.023 | 0.0067 | 0.0022 |
+| float64 floor, `"interface"` | 8.0 | 5.0 | 2.08 | 0.63 | 0.22 | 0.068 | 0.023 | 0.0065 | 0.0022 |
+
+In 0.4.0 the report therefore withdraws `spectral_usable` and
+`gradient_bound_usable`, with a reason, where an internal edge carries a
+scatter-layout row longer than 10 entries and the residual is not above
+the float floor times the row's length; the numbers are reported as
+computed, and the floor itself is corrected in 0.5.0 (a row's own
+`(k - 1) / 2` `eps`, which holds for any order of the sum, counted with
+the evaluations).
+
+The gather layout and the dense kinds are **not** counted by that rule,
+and the same rounding is in them: XLA reduces a row in an order of its
+own, which depends on the jax version, the dtype and the shape.  One row
+behind a uniform field held by 1.8x at 300 entries, 1.2x at 1000 and
+1.09x at 3000 in both forms, and by 3.7x or more at 1e4 and 3e4; but
+jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries and
+more in order (0.0068 and 0.0022, as the scatter layout), and a dense
+mapping with three rows of 3000 entries read 0.18 of the distance in
+float32 on the three versions (0.09 at the float64 floor), all with the
+flags set.  A wider dtype at the same tolerance takes the report off
+its float floor in every layout: the same pair in float64 at
+`rtol=1e-7` kept its flags on a bound at 0.9995 of the distance or
+more.
+
 The reverse-mode derivative of a gather with respect to the *field* is
 itself a scatter-add.  On a GPU a gradient with respect to the source
 field through either form may therefore differ in its last bits between

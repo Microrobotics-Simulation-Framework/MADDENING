@@ -194,6 +194,179 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 )
 
 
+#: The longest row of a static sparse mapping in the scatter layout whose
+#: own rounding the float floor is taken to cover (MADD-ANO-251, open).
+#:
+#: **Measured, not proved.**  The floor counts ``PRECISION_FLOOR_ULPS``
+#: units of ``eps`` per evaluation of a pass.  The scatter layout
+#: (``StaticSparseMapping(layout="scatter")``, which
+#: ``sparse_nearest_neighbor_mapping(mode="conservative",
+#: transpose="scatter")`` builds) adds the entries of a target's row up
+#: one after another (a scatter-add), and an in-order sum of ``k`` terms
+#: of one sign rounds by up to ``(k - 1) / 2`` units of ``eps`` of the
+#: sum; nothing in the floor counts that.  Where the terms are nearly
+#: equal (a uniform field, or any field beside a much larger common
+#: value) the rounding is systematic, not a random walk: it grows like
+#: ``k``, and the pass then has a fixed point of its own that far from
+#: the exact one.
+#:
+#: The measurement: a pair of relays that declare one evaluation each
+#: (one value fed by the sum of ``k`` values, each of which reads the one
+#: back), loop gains 0.9 and 0.99, both schedules, six random fields,
+#: four uniform ones and a ramp, stalled at the float floor, CPU; 44
+#: runs per cell.  The smallest ``spectral_error_bound`` over the true
+#: distance among the reports that set ``spectral_usable``, by row
+#: length (float32; the same digits on jax 0.10.2, 0.11.0 and 0.11.2,
+#: the scatter-add being the in-order sum on each):
+#:
+#: ===============  ====  ====  ====  ====  ====  =====  =====  ======  ======
+#: row              3     10    30    100   300   1000   3000   1e4     3e4
+#: ===============  ====  ====  ====  ====  ====  =====  =====  ======  ======
+#: ``"interface"``  6.2   3.9   2.07  0.68  0.24  0.069  0.023  0.0068  0.0022
+#: ``"mixed"``      6.3   4.9   2.09  0.66  0.22  0.069  0.023  0.0067  0.0022
+#: ===============  ====  ====  ====  ====  ====  =====  =====  ======  ======
+#:
+#: At the float64 floor (``rtol=1e-16`` under x64) the same pair read
+#: 8.0, 5.0, 2.08, 0.63, 0.22, 0.068, 0.023, 0.0065 and 0.0022 under
+#: ``"interface"`` and 9.1, 5.0, 2.09, 0.63, 0.22, 0.069, 0.023, 0.0065
+#: and 0.0022 under ``"mixed"``, on the three versions alike.
+#:
+#: So the limit is the largest power of ten at which every one of those
+#: runs held by a factor of two on the three jax versions.  Other
+#: fields, another backend or another jax may move it.
+#:
+#: **What it does not cover.**  The gather layout and the dense kinds
+#: are reduced by XLA in an order of its choosing, which depends on the
+#: jax version, the dtype and the operator's shape, and their rows are
+#: not counted here.  Measured on the same pair, flags set throughout:
+#:
+#: * one row behind a uniform field, both forms alike: 1.8x the
+#:   distance at 300 entries, 1.2x at 1000, 1.09x at 3000, and 3.7x or
+#:   more at 1e4 and 3e4 (5x and more behind the other fields);
+#: * **the gather layout on jax 0.10.2 in float32: its rows of 1e4 and
+#:   3e4 entries are summed in order and read exactly as the scatter
+#:   layout's do, 0.0068 and 0.0022 of the distance** (not in float64,
+#:   and not on 0.11.0 or 0.11.2);
+#: * **the dense kind with three rows of 3000 entries: 0.18 of the
+#:   distance in float32 on the three versions, 0.09 at the float64
+#:   floor** (0.84 with three rows of 300 there); the gather layout of
+#:   the same operator held by 4x and more.
+#:
+#: A geometry-dependent mapping's rows (``multilinear_grid`` from points
+#: to a grid: a grid node adds up as many entries as there are points
+#: within one spacing of it, by the same scatter-add) are known only in
+#: the step and are not counted either: with 300 and 3000 markers in one
+#: cell behind a uniform field the bound read 3.8x and 1.3x the distance
+#: under ``"mixed"``, flags set (under ``"interface"`` such a group
+#: reports no bound).  MADD-ANO-251 records all of it.
+SCATTER_ROW_FLOOR_LIMIT = 10  # units: entries of one target's row
+
+#: Why ``spectral_usable`` and ``gradient_bound_usable`` are withdrawn
+#: from a report whose residual does not stand clear of the float floor
+#: a long scatter row would give it (:func:`_scatter_row_reason`).  The
+#: numbers stay as computed.  The way out it names is the one that was
+#: measured to hold on every jax version (see the constant above for
+#: why another layout is not one).
+_SCATTER_ROW_REASON = (
+    "the group's internal edge {key} carries a static sparse mapping in the scatter "
+    "layout whose longest row adds up {row} entries (the limit is {limit}), and the "
+    "residual ({residual:.3g}) is not above the float floor ({floor:.3g}) times the "
+    "row's length. The scatter layout sums a row's entries one after another, which "
+    "rounds by more than the fixed number of ulps per evaluation the float floor counts "
+    "once the row is longer than the limit, so spectral_error_bound (and the gradient "
+    "bound built on it) can read below the true distance here (MADD-ANO-251). "
+    "spectral_usable and gradient_bound_usable are therefore False; every number is "
+    "reported as computed. The way out: hold the group's fields in a wider dtype at the "
+    "same tolerance, so that the residual stands clear of the floor. Another layout or "
+    "a dense mapping is not one: their rows are summed in an order XLA chooses, which "
+    "this report does not count.{others}"
+)
+
+
+def _longest_scatter_row(mapping) -> int:
+    """The most entries *mapping* (a static sparse mapping in the scatter
+    layout) adds into one target: the longest row of the operator, as
+    opposed to the longest row of its storage, which is a source's.
+
+    Counted on the frozen index, on the host: every valid slot, whatever
+    its weight (the weights are a parameter a step may be handed)."""
+    index = np.asarray(mapping.indices)
+    if mapping.counts is not None:
+        valid = (np.arange(index.shape[1])[None, :]
+                 < np.asarray(mapping.counts)[:, None])
+        index = index[valid]
+    if index.size == 0:
+        return 0
+    return int(np.bincount(index.ravel().astype(np.int64)).max())
+
+
+def _scatter_rows(interface_edges) -> tuple:
+    """``((edge key, longest row), ...)`` over a group's internal edges
+    that carry a static sparse mapping in the scatter layout.
+
+    Read by ``compile()`` for the report's guard on the float floor
+    (:func:`_scatter_row_reason`).  *interface_edges* is the group's plan
+    or its bare internal edges.  Every norm: the row's rounding is in
+    what the edge delivers to its target, whichever fields or readings
+    the residual is taken on.  Only this form: the gather layout and the
+    dense kinds are reduced by XLA (measured, see
+    :data:`SCATTER_ROW_FLOOR_LIMIT`), and a geometry-dependent mapping's
+    rows are not known before the step (it is not counted here).
+    """
+    rows = []
+    for record in _interface_plan.interface_records(interface_edges):
+        mapping = record.mapping
+        if (record.mapping_form == _interface_plan.STATIC_SPARSE
+                and mapping.layout == "scatter"):
+            rows.append((record.key, _longest_scatter_row(mapping)))
+    return tuple(rows)
+
+
+def _scatter_row_reason(rows, residual: float, floor: float) -> Optional[str]:
+    """Why a report withdraws the flags that rest on its float floor on
+    account of a long scatter row; ``None`` where it does not.
+
+    *rows* is :func:`_scatter_rows` of the group the step was built
+    from, *residual* and *floor* the report's own.  Withdrawn where both
+    hold:
+
+    * a row is longer than :data:`SCATTER_ROW_FLOOR_LIMIT` entries; and
+    * the residual is at or below ``floor * row``: the report is at the
+      float floor that row could give it.  An in-order sum of ``row``
+      terms of one sign rounds by at most ``(row - 1) / 2`` ``eps``,
+      which is ``(row - 1) / 8`` of the ``PRECISION_FLOOR_ULPS`` one
+      evaluation is counted at, so a flag is kept only where that worst
+      case is under an eighth of the residual.
+
+    ``precision_limited`` (the residual at or below the floor as
+    counted) is the nearer part of the second condition and is not
+    enough: with a tolerance above the counted floor the same pair
+    accepts with its residual up to 1000 floors and its bound at 0.007
+    of the distance behind 3e4 entries (float32; 35 of the 83 such
+    reports measured below their distance on each jax version were not
+    ``precision_limited``, 56 of 112 at the float64 tolerances).
+    Measured with the rule (float32, tolerances from 1e-6 to 1e-1, rows
+    of 100, 1000 and 3e4): every flag that is kept reads at least 0.993
+    of the distance, which is where the bound's own estimate reads in a
+    residual-dominated report under ``"mixed"`` whatever the mapping.
+
+    It only withdraws, and reads nothing but the report's own two
+    numbers: a group with no such row, a row within the limit, and a
+    residual that stands clear all keep their flags, and no number of
+    the report moves.
+    """
+    long_rows = [(key, row) for key, row in rows if row > SCATTER_ROW_FLOOR_LIMIT]
+    if not long_rows or not floor > 0.0:
+        return None
+    key, row = max(long_rows, key=lambda item: item[1])
+    if not residual <= floor * row:
+        return None
+    others = [k for k, _ in long_rows if k != key]
+    return _SCATTER_ROW_REASON.format(
+        key=key, row=row, limit=SCATTER_ROW_FLOOR_LIMIT, residual=residual, floor=floor,
+        others=(f" Other edges with a row over the limit: {others}." if others else ""))
+
+
 def _reading_is_the_fields(interface_edges, float_fields) -> bool:
     """Is the interface norm's reading the fields it reads, each of them once?
 

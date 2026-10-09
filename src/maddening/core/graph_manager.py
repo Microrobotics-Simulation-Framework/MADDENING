@@ -253,12 +253,15 @@ class GraphManager:
         # until the first untraced step after each compile and after each
         # write of node states that is not a step's (``set_node_state``,
         # ``reset_state``), and the groups already warned about, which are
-        # never warned about again.  ``_underflow_write_run`` counts the
-        # steps of an unbroken run in which every step followed such a
-        # write: a loop that writes before every step is not asked at
-        # every one of them (``_reports._underflow_check_due``).
+        # never warned about again.  A graph that is written to before
+        # every step is not asked at every one of them: after the first
+        # few checks of a compile (``_underflow_free_checks``) a pending
+        # one waits until enough states have been stored since the last
+        # (``_underflow_stores_since_check``; the numbers are
+        # ``_reports._UNDERFLOW_FREE_CHECKS`` and ``_UNDERFLOW_CHECK_SPACING``).
         self._underflow_check_pending = False
-        self._underflow_write_run = 0
+        self._underflow_free_checks = 0
+        self._underflow_stores_since_check = 0
         self._underflow_warned: set[str] = set()
         # The state-layout check of a stepped state
         # (``_store_stepped_state``): which trace of which compile the
@@ -3296,7 +3299,9 @@ class GraphManager:
 
         self._dirty = False
         self._underflow_check_pending = bool(self._coupling_groups)
-        self._underflow_write_run = 0
+        # The check of the compiled state itself, then the writes' own.
+        self._underflow_free_checks = 1 + _reports._UNDERFLOW_FREE_CHECKS
+        self._underflow_stores_since_check = 0
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -4075,20 +4080,23 @@ class GraphManager:
         self._state = new_state
         if self._state_traced:
             return
+        self._underflow_stores_since_check += 1
         if not self._underflow_check_pending:
-            # A step that followed no write ends a run of write-then-step.
-            if self._underflow_write_run:
-                self._underflow_write_run = 0
+            return
+        if self._underflow_free_checks > 0:
+            self._underflow_free_checks -= 1
+        elif self._underflow_stores_since_check < _reports._UNDERFLOW_CHECK_SPACING:
+            # Written to again and again: the check stays due, and is
+            # made once enough states have been stored since the last.
             return
         self._underflow_check_pending = False
-        self._underflow_write_run += 1
-        if _reports._underflow_check_due(self._underflow_write_run):
-            # The state the step started from, then the one it left: a
-            # field already below ``tiny`` is flushed to exactly zero by
-            # the step, and an exactly zero field never warns.
-            if not _graph_specs._holds_tracer(replaced):
-                self._warn_underflow_range(replaced)
-            self._warn_underflow_range(new_state)
+        self._underflow_stores_since_check = 0
+        # The state the step started from, then the one it left: a field
+        # already below ``tiny`` is flushed to exactly zero by the step,
+        # and an exactly zero field never warns.
+        if not _graph_specs._holds_tracer(replaced):
+            self._warn_underflow_range(replaced)
+        self._warn_underflow_range(new_state)
 
     def _warn_underflow_range(self, state: dict) -> None:
         """Warn once per coupled group whose fields are in the subnormal range.
@@ -4104,12 +4112,13 @@ class GraphManager:
         each group field of the two states once (two device-to-host copies
         per compile or write) and nothing inside the compiled step changes,
         so stepping and its results are untouched.  Those reads cost several
-        times a small graph's step, so a loop that writes a state before
-        every step is not asked at every one of them: at the first eight
-        steps of such a run (the step after ``compile()`` counts as one),
-        at each power of two after that and at every 128th from there on
-        (``_reports._underflow_check_due``); a step that follows no write
-        ends the run.  A group already warned about
+        times a small graph's step, so a graph that is written to before
+        every step is not asked at every one of them: the first eight
+        checks that writes make due after a ``compile()`` are made at the
+        stepper call that follows the write, and from then on a due check
+        waits until 1024 stepper calls have stored a state since the
+        previous check (``_reports._UNDERFLOW_CHECK_SPACING``), and is
+        made then.  A group already warned about
         is not read again.  A state that decays into the range through the
         nodes' own updates is not re-checked.  See
         :class:`~maddening.warnings.UnderflowRangeWarning`.

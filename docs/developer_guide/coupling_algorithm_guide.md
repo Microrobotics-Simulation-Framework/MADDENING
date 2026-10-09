@@ -358,10 +358,11 @@ zero field never warns, and a group is warned of once.  The check runs on
 the host and does not change the compiled step; a state that decays into the
 range through the nodes' own updates is not re-checked.  Its two reads cost
 several times a small graph's step (a three-entry pair: 45 microseconds for
-`set_node_state` and `step`, 170 with the check), so a loop that writes a
-state before every step is asked at the first eight steps of the run, at
-each power of two after that and at every 128th from there on, not at every
-step; a step that follows no write ends the run.  It fires at a step
+`set_node_state` and `step`, 160 with the check), so a graph that is written
+to before every step is not asked at every one: after a `compile()` the
+first eight checks that writes make due are made at the next step, and from
+then on a due check is made once 1024 stepper calls have stored a state
+since the previous one.  It fires at a step
 rather than in
 `coupling_diagnostics()` because the remedy is a decision about the model's
 units, every caller steps whether or not it reads the report, and the

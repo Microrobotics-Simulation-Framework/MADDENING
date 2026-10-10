@@ -40,6 +40,7 @@ def _needs_four_devices():
 
     if len(jax.devices()) < 4:
         pytest.skip("needs >= 4 devices")
+    rc._load_backend()      # a test may read rc.LBMNode before any rung has run
 
 
 def _ramp(tmp_path: Path, *argv, launch=S.in_process, out: str = "out"):

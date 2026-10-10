@@ -2284,10 +2284,10 @@ def _kernel_rounding_eps(interface_edges, state, pre_step=None):
 
 def _kernel_rounding_floors(interface_edges, state, node_names, convergence_norm,
                             rtol: float = 1.0, evaluations: float = 1.0) -> list:
-    """``[(record, holder, reach, resolution, floor), ...]``: what the
-    rounding of each geometry edge's kernel puts into the float floor of
-    a group under ``"l2"`` or ``"mixed"`` at *state*, edge by edge
-    (experimental).
+    """``[(record, holder, reach, resolution, floor, own), ...]``: what
+    the rounding of each geometry edge's kernel puts into the float floor
+    of a group under ``"l2"`` or ``"mixed"`` at *state*, edge by edge
+    (experimental), beside what the fields' own rounding puts there.
 
     The first four are :func:`_kernel_rounding`'s, at the positions a
     step started from *state* reads (*state* is its own pre-step state).
@@ -2303,17 +2303,16 @@ def _kernel_rounding_floors(interface_edges, state, node_names, convergence_norm
       (:func:`_position_fields`), to compare with the group's
       ``tolerance``.
 
-    **Only an edge whose rounding is the larger**: one whose
-    ``resolution`` over ``PRECISION_FLOOR_ULPS`` is not above the
-    group's coarsest ``eps`` (:func:`_group_coarsest_eps`) has no entry,
-    because the floor is then the fields' own count and the kernel adds
-    nothing to it (positions within ``PRECISION_FLOOR_ULPS`` lengths of
-    the zero and of the grid's first point in the fields' dtype;
-    float64 positions beside float32 fields out to millions of
-    spacings).
+    ``own`` is the same floor with every value field at the group's
+    coarsest ``eps`` (:func:`_group_coarsest_eps`) counted
+    ``PRECISION_FLOOR_ULPS`` times per evaluation: what the group's
+    floor is without the kernel.  The kernel's is the larger exactly
+    where ``resolution`` is above ``PRECISION_FLOOR_ULPS`` of that
+    ``eps`` (positions more than ``PRECISION_FLOOR_ULPS`` lengths from
+    the zero or from the grid's first point, in the fields' dtype).
 
-    :func:`residual_precision_floor` returns at least the largest of
-    these times the root of the value entries' share of the entries it
+    :func:`residual_precision_floor` returns at least the larger of the
+    two times the root of the value entries' share of the entries it
     reads (the position fields are counted at their own ``eps``).  On
     the host, from a concrete state: Python floats.  Read by
     ``_group_layout._kernel_rounding_warnings`` (``compile()``'s
@@ -2324,18 +2323,16 @@ def _kernel_rounding_floors(interface_edges, state, node_names, convergence_norm
     n_values = sum(
         int(np.size(v)) for nn in node_names for name, v in (state.get(nn) or {}).items()
         if _is_float_leaf(v) and (nn, name) not in position_fields)
-    group_eps = _group_coarsest_eps(state, node_names, interface_edges)
+    group_eps = _group_coarsest_eps(state, node_names, interface_edges) or 0.0
+    # units: the residual's -- an eps per value entry, pooled as the norm pools
+    pooled = math.sqrt(n_values) if str(convergence_norm) == "l2" else 1.0 / float(rtol)
+    own = PRECISION_FLOOR_ULPS * float(evaluations) * group_eps * pooled
     out = []
     for record, holder, reach, resolution in _kernel_rounding(
             interface_edges, state, pre_step=state):
         resolution = float(resolution)
-        if group_eps is not None and not resolution / PRECISION_FLOOR_ULPS > group_eps:
-            continue            # the fields' own rounding is the floor
-        if str(convergence_norm) == "l2":
-            floor = float(evaluations) * resolution * math.sqrt(n_values)
-        else:
-            floor = float(evaluations) * resolution / float(rtol)
-        out.append((record, holder, reach, resolution, floor))
+        out.append((record, holder, reach, resolution,
+                    float(evaluations) * resolution * pooled, own))
     return out
 
 

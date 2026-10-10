@@ -1233,19 +1233,25 @@ def test_the_other_norms_are_warned_by_the_kernels_own_count(norm, which):
     geometry edge delivers is no finer than the weights its kernel forms
     from those positions, though, and the float floor of these norms
     counts that rounding once per evaluation for every value field
-    (MADD-ANO-261).  Five times the interface norm's threshold out,
-    ``compile()`` says so of each such edge, in that advisory's words;
-    under ``"mixed"`` a tenth of the threshold out it is silent."""
+    (MADD-ANO-261).  Under ``"mixed"``, five times the interface norm's
+    threshold out, ``compile()`` says so of each such edge, in that
+    advisory's words, and a tenth of the threshold out it is silent.
+    Under ``"l2"`` this pair's tolerance (1e-6 over every entry) is under
+    the float32 fields' own floor wherever the markers are, which is not
+    this advisory's to report: silent."""
     shape = _PLACED[which]
     positions, origin = _markers(shape, 5.0 * _threshold_reach(shape, gi.RTOL))
-    far = _edges_warned(_compile_warnings(_placed(shape, positions, origin, norm=norm)))
+    texts = _compile_warnings(_placed(shape, positions, origin, norm=norm))
+    if norm == "l2":
+        assert texts == []
+        return
+    far = _edges_warned(texts)
     assert sorted(far) == ["p.x->q.u", "q.x->p.u"]
     for text in far.values():
         assert f"convergence_norm={norm!r}" in text and "is delivered at" in text, text
         assert "once per evaluation of the pass" in text and "precision_limited=True" in text
-    if norm == "mixed":
-        positions, origin = _markers(shape, 0.1 * _threshold_reach(shape, gi.RTOL))
-        assert _compile_warnings(_placed(shape, positions, origin, norm=norm)) == []
+    positions, origin = _markers(shape, 0.1 * _threshold_reach(shape, gi.RTOL))
+    assert _compile_warnings(_placed(shape, positions, origin, norm=norm)) == []
 
 
 @pytest.mark.parametrize("which", ["two-way", "gather-only"])

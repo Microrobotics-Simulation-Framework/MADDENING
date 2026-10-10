@@ -849,11 +849,7 @@ def test_the_other_norms_reports_are_what_they_were(norm):
     norm, and the floor under ``residual_precision_floor`` (which every
     report has) is the one its ``precision_limited`` was taken with."""
     gm, advisories = build(Pair(), norm=norm)
-    # (Under "l2" this pair's tolerance, 1e-6 over every entry, is under
-    # one rounding of its markers' lattice coordinate, and ``compile()``
-    # says so of each edge: MADD-ANO-261.  Under "mixed" it is not.)
-    assert len(advisories) == (2 if norm == "l2" else 0), advisories
-    assert all("convergence_norm='l2'" in text for text in advisories)
+    assert advisories == []
     gm.step()
     d = report(gm)
     assert "under convergence_norm" not in d.get("not_usable_reason", ""), d

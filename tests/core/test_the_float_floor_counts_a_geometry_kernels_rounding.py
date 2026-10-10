@@ -504,11 +504,14 @@ def test_compile_says_what_the_report_will_say_far_into_a_grid_and_nothing_near_
 
 
 def test_the_advisory_is_only_where_the_kernels_rounding_is_what_sets_the_floor():
-    """A tolerance float32 cannot resolve anywhere is not this advisory's
-    to report: three spacings in, the fields' own rounding is the floor
-    (``rtol=1e-8``), and the kernel adds nothing to it."""
-    gm, _ = gather_pair(0, "mixed", "gauss-seidel", tolerance=1e-8, extra_cells=8)
-    assert [t for t in _compiled(gm) if ADVISORY in t] == []
+    """A tolerance the float32 fields cannot resolve themselves is not
+    this advisory's to report (``rtol=1e-8``: the fields' own count is 95
+    tolerances): three spacings in, where the kernel adds nothing to the
+    floor, and 300 in, where it is the larger of the two, alike.  Nothing
+    about the positions would bring that floor under the tolerance."""
+    for into in (0, 300):
+        gm, _ = gather_pair(into, "mixed", "gauss-seidel", tolerance=1e-8, extra_cells=8)
+        assert [t for t in _compiled(gm) if ADVISORY in t] == [], into
 
 
 # ------------------------------------------------- the row of a scatter
@@ -690,7 +693,11 @@ def test_on_the_audits_cells_no_flag_stands_beside_a_bound_under_the_distance(
             report, distance, advisories = solved(into, norm, schedule, declared, seed)
             where = (norm, schedule, declared, into, seed)
             assert report["converged"], where
-            assert len(advisories) == 1, where
+            if norm == "mixed":
+                # (Under "l2" at this tolerance the fields' own count is
+                # at the threshold already in some cells, and the
+                # advisory is the kernel's only where it is not.)
+                assert len(advisories) == 1, where
             if _usable(report):
                 assert report["spectral_error_bound"] > distance, (where, report, distance)
             if not declared:

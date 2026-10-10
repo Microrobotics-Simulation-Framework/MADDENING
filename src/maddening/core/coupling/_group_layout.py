@@ -1639,16 +1639,22 @@ def _kernel_rounding_warnings(group, plan, state, evaluations) -> list[str]:
     coordinate, ``r`` lengths (``_interface_plan._rounded_at``); the
     floor takes every value field of the group to be no finer, once per
     evaluation of the pass.  **Warned: an edge for which that count
-    reaches the criterion's threshold**,
+    reaches the criterion's threshold where the fields' own does not**,
 
         ``evaluations * eps * max r >= rtol``  (``"mixed"``),
         ``evaluations * eps * max r * sqrt(n) >= tolerance``  (``"l2"``,
         ``n`` the value entries of the group),
 
-    which is where every report of a step that meets the criterion reads
-    ``precision_limited=True`` (the residual is then under the floor),
-    and ``spectral_usable`` and ``gradient_bound_usable`` are ``False``
-    unless every member declares ``update_evaluations()``.  Uncounted,
+    with ``PRECISION_FLOOR_ULPS * evaluations * eps_fields`` (times
+    ``sqrt(n)`` under ``"l2"``) under the same threshold.  That is where
+    the kernel's rounding is what makes every report of a step that
+    meets the criterion read ``precision_limited=True`` (the residual is
+    then under the floor), with ``spectral_usable`` and
+    ``gradient_bound_usable`` ``False`` unless every member declares
+    ``update_evaluations()``, and where holding the positions in float64
+    undoes it.  A tolerance the fields' own dtype cannot resolve is not
+    this advisory's to report: nothing about the positions changes it.
+    Uncounted,
     such a group reported both flags beside a bound at 0.03 to 0.19 of
     the distance to the float64 fixed point 1000 to 2000 spacings into
     its grid, and said nothing here (MADD-ANO-261).
@@ -1670,10 +1676,12 @@ def _kernel_rounding_warnings(group, plan, state, evaluations) -> list[str]:
              else f"rtol={float(group.rtol):g}")
     out = []
     lattices = _interface_plan._position_lattices(plan.internal)
-    for record, holder, reach, resolution, floor in _kernel_rounding_floors(
+    for record, holder, reach, resolution, floor, own in _kernel_rounding_floors(
             plan, state, names, norm, float(group.rtol), evaluations):
         if not floor >= threshold:
             continue            # resolved (or not a number: the step's own failure)
+        if own >= threshold:
+            continue            # the fields' own dtype cannot resolve this tolerance
         node, field = holder
         geometry = state[node][field]
         dtype = np.dtype(np.asarray(geometry).dtype)
@@ -1745,7 +1753,9 @@ def _kernel_rounding_warnings(group, plan, state, evaluations) -> list[str]:
 def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     """``UserWarning`` texts for positions an interface reading rests on
     whose rounding the float floor counts at the group's tolerance or
-    above (experimental; empty for every other group).
+    above (experimental; empty for a group with no geometry edge).  A
+    group under ``"l2"`` or ``"mixed"`` is asked by its own floor's
+    count instead (:func:`_kernel_rounding_warnings`).
 
     Under ``convergence_norm="interface"`` the stored positions of a
     geometry-dependent mapping enter the reading of an edge in one of two

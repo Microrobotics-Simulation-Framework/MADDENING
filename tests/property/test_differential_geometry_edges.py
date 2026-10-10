@@ -63,6 +63,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import reason_codes
 from tests.core.coupling_reason_rules import WORDS, folded_codes
 from tests.property import geometry_graphs as gg
 from tests.property.geometry_graphs import DT, case
@@ -316,6 +317,14 @@ def _residual_floor(c: gg.Case, state: dict) -> float:
     return eps / float(knobs.get("rtol", 1e-6))
 
 
+#: The causes only the edge-mapped graph can have on account of its float
+#: floor (the kernel's rounding, a scatter's row), and the numbers that
+#: rest on that floor.
+ON_THE_FLOOR = frozenset({reason_codes.AT_FLOAT_FLOOR, reason_codes.LONG_MAPPED_ROW})
+RESTS_ON_THE_FLOOR = ("residual_precision_floor", "spectral_error_bound",
+                      "gradient_relative_error_bound")
+
+
 def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int) -> None:
     assert sorted(a) == sorted(b), (c.label, sorted(a), sorted(b))
     knobs = c.knobs
@@ -356,19 +365,51 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         # edge applies to the twin).  The words are each graph's own.
         own = {flag: [code for code in listed if code not in gg.GEOMETRY_CODES]
                for flag, listed in ra["reason_codes"].items()}
-        assert folded_codes(own) == folded_codes(rb["reason_codes"]), (
-            where, ra["reason_codes"], rb["reason_codes"])
+        # The float floor of the edge-mapped graph also counts the rounding
+        # of the weights its kernels form from the positions, and its row
+        # guard a scatter's points (MADD-ANO-261, MADD-ANO-257); the twin's
+        # node inlines the sampling, and a node's own arithmetic is not
+        # seen.  So the edge-mapped floor is never below the twin's, and
+        # where it is above (positions more than PRECISION_FLOOR_ULPS
+        # spacings out) what rests on it differs ONE way: the edge-mapped
+        # report can be at its floor where the twin's is not, lose a flag
+        # the twin keeps, for those two causes alone, and read a larger
+        # bound.  Everything else is the twin's.
+        floor_a = float(ra["residual_precision_floor"])
+        floor_b = float(rb["residual_precision_floor"])
+        counted = bool(np.isfinite(floor_a) and np.isfinite(floor_b)
+                       and floor_a > floor_b * (1 + 1e-4))
+        if np.isfinite(floor_a) and np.isfinite(floor_b):
+            assert floor_a >= floor_b * (1 - 1e-5), (where, floor_a, floor_b)
+        if counted:
+            theirs = folded_codes(rb["reason_codes"])
+            for flag, listed in folded_codes(own).items():
+                assert set(listed) - set(theirs[flag]) <= ON_THE_FLOOR, (
+                    where, flag, ra["reason_codes"], rb["reason_codes"])
+        else:
+            assert folded_codes(own) == folded_codes(rb["reason_codes"]), (
+                where, ra["reason_codes"], rb["reason_codes"])
         for name in ra:
             if name in WORDS:
                 continue
             va, vb = ra[name], rb[name]
             if isinstance(va, (bool, np.bool_)) or isinstance(vb, (bool, np.bool_)):
-                assert bool(va) == bool(vb), (where, name, va, vb)
+                if counted and name == "precision_limited":
+                    assert bool(va) or not bool(vb), (where, name, va, vb)      # only sets
+                elif counted and name in ("spectral_usable", "gradient_bound_usable"):
+                    assert bool(vb) or not bool(va), (where, name, va, vb)      # only withdraws
+                else:
+                    assert bool(va) == bool(vb), (where, name, va, vb)
                 continue
             va, vb = float(va), float(vb)
             assert np.isfinite(va) == np.isfinite(vb), (where, name, va, vb)
             if np.isfinite(va) and name not in ("iterations", "total_iterations", "residual"):
                 lo, hi = sorted((abs(va), abs(vb)))
+                if counted and name in RESTS_ON_THE_FLOOR:
+                    # Only raised: not under half the twin's.
+                    assert abs(vb) <= 2 * abs(va) + 64 * _residual_floor(c, state), (
+                        where, name, va, vb)
+                    continue
                 assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, name, va, vb)
 
 

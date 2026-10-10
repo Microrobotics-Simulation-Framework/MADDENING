@@ -6,8 +6,10 @@ residual of a pair ``p <- f(q)``, ``q <- g(p)`` is ``|g(p_k) - q_k|``: it
 tests that ``q`` agrees with the ``p`` it was computed from, and nothing
 in that pass tests ``p = f(q)``.  A kept field can then be returned with
 ``converged=True`` far from its fixed point.  Gauss-Seidel reads the
-member swept before it from the same pass, so its residual is the whole
-loop's.
+member swept before it from the same pass, so on THIS pair (one loop,
+one lagged read) its residual is the whole loop's; a pair whose loop
+passes the lagged read twice fails under Gauss-Seidel as well
+(``test_the_dead_band_of_a_pair_and_of_one_member.py``).
 
 This is the dead band's own behaviour, on plain edges, under every norm
 (MADD-ANO-254, open: no rule that only delays the exit is proved for
@@ -16,9 +18,10 @@ every loop, see the registry entry).  What is held here:
 * the defect stays visible: a strict xfail on the plain pair below;
 * its controls pass: the same pair with no dead band, and under
   Gauss-Seidel in both sweep orders (the dropped field read in the same
-  sweep, and read from the previous pass);
-* ``validate()`` says so for a group that declares a dead band under
-  Jacobi, and ``compile()`` warns.
+  sweep, and read from the previous pass): one measured instance, not a
+  rule, and the pair is advised on under Gauss-Seidel too;
+* ``validate()`` says so for a group that declares a dead band, under
+  either schedule, and ``compile()`` warns.
 
 **The pair** (plain edges; the audited construction with the scatter and
 the amplification inside the grid node)::
@@ -135,7 +138,9 @@ def test_the_same_pair_with_no_dead_band_is_held_under_jacobi(norm):
 def test_gauss_seidel_holds_the_pair_with_the_field_inside_the_dead_band(norm, order):
     """Gauss-Seidel with the dead band declared, the dropped member swept
     first (the kept one reads it in the same sweep) and swept second (the
-    kept one reads it from the previous pass): both hold."""
+    kept one reads it from the previous pass): both hold.  A measured
+    instance, not a rule: this pair's loop has one lagged read, the
+    advisory is given for it all the same, and other pairs fail."""
     with x64(True):
         run = steps(build("gauss-seidel", ATOL, norm, order))
     assert all(converged for _i, converged, _e in run), run
@@ -176,9 +181,11 @@ def _uncompiled(schedule: str, atol: float, norm: str = "mixed") -> GraphManager
 @pytest.mark.parametrize("norm", NORMS)
 def test_validate_advises_on_a_dead_band_declared_under_jacobi(norm):
     """One ``WARNING:`` line naming the group, its ``atol``, the measured
-    pair, who is not affected and the one way out (``atol=0.0``); none for
-    a pair under Gauss-Seidel, none at the default ``atol``.  (Three or
-    more members: ``test_the_dead_band_of_a_ring_of_three.py``.)"""
+    pairs under both schedules, that no group is excepted and the one way
+    out (``atol=0.0``); one for the same pair under Gauss-Seidel, under
+    the other opening; none at the default ``atol`` under either
+    schedule.  (Three or more members:
+    ``test_the_dead_band_of_a_ring_of_three.py``.)"""
     lines = _advisories(_uncompiled("jacobi", ATOL, norm))
     assert len(lines) == 1
     line = lines[0]
@@ -186,34 +193,49 @@ def test_validate_advises_on_a_dead_band_declared_under_jacobi(norm):
     assert "atol=1e-06" in line and "2 members" in line
     assert "a pair under Jacobi" in line and "4.5e5 to 7.4e5" in line
     assert "a ring of three" not in line
-    assert "A pair under Gauss-Seidel is not affected" in line
+    assert "under Gauss-Seidel a pair of 2-vectors" in line and "4.3e3 to 7.7e3" in line
+    assert "is not affected" not in line and "No group is excepted" in line
     assert "Set atol=0.0 (the default) on this group" in line and "MADD-ANO-254" in line
-    assert _advisories(_uncompiled("gauss-seidel", ATOL, norm)) == []
-    assert _advisories(_uncompiled("jacobi", 0.0, norm)) == []
+    (swept,) = _advisories(_uncompiled("gauss-seidel", ATOL, norm))
+    assert swept.startswith("WARNING: coupling group ['p', 'q'] declares a dead band on 2 members")
+    assert "iteration_mode='gauss-seidel'" in swept and "under Jacobi" not in swept
+    assert "is not affected" not in swept and "No group is excepted" in swept
+    assert "Set atol=0.0 (the default) on this group" in swept
+    for schedule in ("gauss-seidel", "jacobi"):
+        assert _advisories(_uncompiled(schedule, 0.0, norm)) == []
 
 
 def test_compile_warns_once_for_such_a_group():
     """``compile()`` emits the advisory as a ``UserWarning``, as it does
     every advisory ``validate()`` returns (the test configuration filters
-    it for the suites that run such groups on purpose)."""
+    it for the suites that run such groups on purpose): once for the pair
+    under Jacobi, once for the same pair under Gauss-Seidel, and not at
+    the default ``atol``."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _uncompiled("jacobi", ATOL).compile()
     ours = [w for w in caught if _group_layout._DEAD_BAND_ADVISORY in str(w.message)]
     assert len(ours) == 1 and issubclass(ours[0].category, UserWarning)
     assert _group_layout._DEAD_BAND_UNDER_JACOBI in str(ours[0].message)
-    for schedule, atol in (("gauss-seidel", ATOL), ("jacobi", 0.0)):
+    for schedule, atol, due in (("gauss-seidel", ATOL, 1), ("gauss-seidel", 0.0, 0),
+                                ("jacobi", 0.0, 0)):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             _uncompiled(schedule, atol).compile()
-        assert not [w for w in caught if _group_layout._DEAD_BAND_ADVISORY in str(w.message)]
+        ours = [w for w in caught if _group_layout._DEAD_BAND_ADVISORY in str(w.message)]
+        assert len(ours) == due, (schedule, atol, [str(w.message) for w in caught])
+        assert all(_group_layout._DEAD_BAND_ON_MEMBERS + " 2 members" in str(w.message)
+                   for w in ours)
 
 
-def test_the_configured_filter_matches_the_jacobi_advisory_and_no_other():
+def test_the_configured_filter_matches_the_advisory_under_both_openings_and_no_other():
     """The test configuration ignores ``compile()``'s copy of the advisory
-    for a group under Jacobi and for no other: its pattern is the Jacobi
-    opening, which the advisory of three members under Gauss-Seidel does
-    not carry."""
+    for every group that earns it (the advisory is due wherever ``atol >
+    0``, and the suite's batteries and searches build such groups on
+    purpose): its pattern is the two openings, of one member, a pair and
+    three members under either schedule, and it matches no other
+    advisory ``validate()`` returns for the same graphs, nor another
+    sentence about a dead band."""
     import re
     import tomllib
     from pathlib import Path
@@ -226,13 +248,25 @@ def test_the_configured_filter_matches_the_jacobi_advisory_and_no_other():
     assert len(ours) == 1
     action, pattern, category = ours[0].split(":")
     assert action == "ignore" and category == "UserWarning"
-    assert pattern.endswith(_group_layout._DEAD_BAND_UNDER_JACOBI)
+    # The pattern is the two openings and nothing after them.
+    assert re.fullmatch(pattern, "WARNING: ... " + _group_layout._DEAD_BAND_UNDER_JACOBI)
+    assert re.fullmatch(pattern, "WARNING: ... " + _group_layout._DEAD_BAND_ON_MEMBERS + " 2 member")
 
     def line(members, schedule):
         (out,) = _group_layout._dead_band_advisories(
             CouplingGroup(frozenset(members), atol=ATOL, iteration_mode=schedule))
         return out
 
-    assert re.match(pattern, line("pq", "jacobi"))
-    assert re.match(pattern, line("pqr", "jacobi"))
-    assert not re.match(pattern, line("pqr", "gauss-seidel"))
+    for members in ("p", "pq", "pqr"):
+        for schedule in ("jacobi", "gauss-seidel"):
+            assert re.match(pattern, line(members, schedule)), (members, schedule)
+    assert "declares a dead band on 1 member (" in line("p", "gauss-seidel")
+    assert "1 member)" in line("p", "jacobi")
+    # The warnings machinery matches from the start of the message, as
+    # ``re.match`` does: another advisory, or another sentence that names
+    # a dead band, is not ignored.
+    others = [issue for issue in _uncompiled("gauss-seidel", ATOL).validate()
+              if _group_layout._DEAD_BAND_ADVISORY not in issue]
+    others += ["WARNING: coupling group ['p', 'q'] declares a dead band of 1e-06",
+               "WARNING: a dead band on 2 members hides a change"]
+    assert not [text for text in others if re.match(pattern, text)]

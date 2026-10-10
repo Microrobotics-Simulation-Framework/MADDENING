@@ -145,26 +145,29 @@ def test_every_built_in_node_has_a_catalogue_entry():
     assert not missing, f"no node_catalogue entry for {missing}"
 
 
-def test_a_group_that_declares_a_dead_band_on_three_members_reloads_bit_for_bit():
+@pytest.mark.parametrize("members", [2, 3])
+def test_a_group_that_declares_a_dead_band_reloads_bit_for_bit(members):
     """A config carries a group's ``atol``, so the reload of a group that
-    declares a dead band on three or more members is advised on a second
-    time when it compiles (MADD-ANO-254), and the harness expects that by
-    name (``differential.reload_from_config``).  The slow test of coupled
-    graphs below draws such groups, and its per-push witness draws no
-    group at all: on the first slow lane after the advisory was widened
-    the reload raised on three BallNodes with ``atol=1e-08``, the group
-    built here."""
+    declares a dead band is advised on a second time when it compiles
+    (MADD-ANO-254), whatever its member count, and the harness expects
+    that by name (``differential.reload_from_config``).  The slow test of
+    coupled graphs below draws such groups, and its per-push witness draws
+    no group at all: on the first slow lane after the advisory was widened
+    to three members the reload raised on three BallNodes with
+    ``atol=1e-08``, the group built here; a pair is advised on since the
+    advisory was widened to every group."""
     from maddening.nodes.ball import BallNode
 
+    names = ("rod", "node_1", "Ball")[:members]
     gm = GraphManager()
-    for name, gravity in (("rod", -11.0), ("node_1", -12.0), ("Ball", -12.0)):
+    for name, gravity in zip(names, (-11.0, -12.0, -12.0)):
         gm.add_node(BallNode(name, 0.01, initial_position=0.0, initial_velocity=0.0,
                              elasticity=0.0, gravity=gravity))
-    gm.add_edge("rod", "node_1", "position", "table_position")
-    gm.add_edge("node_1", "Ball", "position", "table_position")
-    gm.add_coupling_group(["node_1", "rod", "Ball"], max_iterations=2, tolerance=1e-3,
+    for source, target in zip(names, names[1:]):
+        gm.add_edge(source, target, "position", "table_position")
+    gm.add_coupling_group(sorted(names), max_iterations=2, tolerance=1e-3,
                           convergence_norm="l2", atol=1e-8, rtol=1e-6)
-    with pytest.warns(UserWarning, match="declares a dead band on 3 members"):
+    with pytest.warns(UserWarning, match=f"declares a dead band on {members} members"):
         gm.compile()
     check_config_round_trip(gm, {"BallNode": BallNode})
 

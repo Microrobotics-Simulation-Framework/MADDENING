@@ -133,10 +133,10 @@ class CouplingGroup:
     atol : float
         Dead band, in each field's own units: a field whose magnitude
         does not exceed ``atol`` counts as being at zero, **leaves the
-        norm entirely** and is no longer held to any criterion.  Set it
-        to the field's noise floor if you have one; the default of
-        ``0.0`` asserts none, and excludes only a field with no scale
-        at all.
+        norm entirely** and is no longer held to any criterion.  The
+        default of ``0.0`` asserts no noise floor and excludes only a
+        field with no scale at all; **leave it there in 0.4.0** (the
+        paragraph on the dead band below says why).
 
         Read by **all three** norms.  Before 0.4.0 it was a floor under
         the scale, where a value above a field's magnitude merely
@@ -151,16 +151,16 @@ class CouplingGroup:
         quantities, the field and what the edge delivers, and its reading
         leaves the norm only where **both** are at or below ``atol``.
 
-        **On a group of three or more members, or under**
-        ``iteration_mode="jacobi"``, **leave** ``atol`` **at** ``0.0``
-        **in 0.4.0.**  A field inside the dead band leaves the residual,
-        and the loop accepts on the first residual it measures, so a
-        change that has to cross such a field is not seen until it
-        reaches a field the norm keeps, and the group can report
-        ``converged=True`` after one pass with a kept field thousands of
-        tolerances from its fixed point (MADD-ANO-254, open).  Measured,
-        each under all three norms, with two or three forces of 1e-8
-        inside ``atol = 1e-6``:
+        **Leave** ``atol`` **at** ``0.0`` **in 0.4.0, on every group.**
+        A field inside the dead band leaves the residual, and the loop
+        accepts on the first residual it measures, so a change that has
+        to cross such a field is not seen until it reaches a field the
+        norm keeps, and the group can report ``converged=True`` after
+        one pass with a kept field thousands of tolerances from its
+        fixed point (MADD-ANO-254, open).  It takes two lagged reads in
+        series between a kept field and itself, and every schedule and
+        member count has shown them.  Measured, each under all three
+        norms, with forces of 1e-8 inside ``atol = 1e-6``:
 
         * under Jacobi (every member reads the previous iterate, so with
           ``p`` dropped the residual of ``p <- f(q)``, ``q <- g(p)`` tests
@@ -172,17 +172,29 @@ class CouplingGroup:
           data flow (members added A, B, C; edges A -> C -> B -> A; two
           dropped fields in series): accepted after one pass, 4.6e3 to
           1.8e4 tolerances off, with no acceleration, with Aitken and with
-          IQN-ILS.  The same ring swept C, B, A held.
+          IQN-ILS.  The same ring swept C, B, A held;
+        * under Gauss-Seidel, a pair whose loop passes its one lagged
+          read twice (a pair of 2-vectors with one field a member and one
+          plain edge each way, a pair with two fields a member, a pair
+          with one edge from a member to itself) and a group of ONE
+          member with two edges to itself, the problem moving from step
+          to step: each accepted after one pass on every other step,
+          4.3e3 to 7.7e3 tolerances off in float32 at ``rtol = 1e-5``
+          (1.6e5 in the pairs' other sweep order; 6.4e7 to 1.6e9 in
+          float64 at ``rtol = 1e-9``), with no acceleration and with
+          IQN-ILS.
 
-        A **pair under Gauss-Seidel** held in both sweep orders in every
-        case measured (0.5 to 4.9 tolerances).  ``validate()`` and
-        ``compile()`` say so for every group that sets ``atol > 0`` and
-        has three or more members or runs under Jacobi; the condition is
-        the member count and the schedule, not which fields the graph
-        can put inside the band.  At ``atol=0.0`` only a field that is
-        exactly zero leaves the residual, and every non-zero field,
-        however small, is measured against its own magnitude.  The dead
-        band is expected to be replaced in 0.5.0: do not tune to it.
+        ``validate()`` and ``compile()`` say so for **every group that
+        sets** ``atol > 0``; the condition reads nothing from the graph.
+        Some groups held where they were measured (a pair with one
+        scalar field a member and no edge to itself, at most 0.8
+        tolerances in both sweep orders; the ring swept along its data
+        flow), and none is excepted: which groups hold is a criterion
+        nobody has proved.  At ``atol=0.0`` only a field that is exactly
+        zero leaves the residual, and every non-zero field, however
+        small, is measured against its own magnitude: every graph above
+        held there.  The dead band is expected to be replaced in 0.5.0:
+        do not tune to it.
     rtol : float
         Relative change demanded of every field above the dead band,
         under the ``"mixed"`` and ``"interface"`` norms.  Read **only**

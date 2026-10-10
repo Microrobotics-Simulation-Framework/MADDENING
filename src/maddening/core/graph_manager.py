@@ -2626,8 +2626,8 @@ class GraphManager:
         coupled-pair Fourier limit (MADD-ANO-050).
 
         The group's own settings are advised on first, whatever its
-        members: a dead band declared under Jacobi, or on three or more
-        members (``_group_layout._dead_band_advisories``).
+        members: a dead band (``atol > 0``), on any member count and
+        under either schedule (``_group_layout._dead_band_advisories``).
         """
         own = _group_layout._dead_band_advisories(group)
         members = {

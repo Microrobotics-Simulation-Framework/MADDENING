@@ -80,8 +80,8 @@ def _compile_drawn(gm: GraphManager) -> None:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
                                 category=UserWarning)
-        # ... and a drawn group of three members can declare a dead band,
-        # which compile() advises on (MADD-ANO-254): the round trip
+        # ... and a drawn group can declare a dead band, which compile()
+        # advises on for any member count (MADD-ANO-254): the round trip
         # carries the group's ``atol`` like every other field.
         warnings.filterwarnings("ignore", message=DRAWN_DEAD_BAND, category=UserWarning)
         gm.compile()

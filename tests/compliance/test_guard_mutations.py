@@ -328,7 +328,7 @@ MUTANTS: tuple[Mutant, ...] = (
     # --- SW: the slow lane's table, tests/slow_lane_weights.json ----------------
     _M("SW1", SWT, '  "tests/property/test_sysid_truth_recovery.py": ',
        '  "tests/property/test_sysid_truth_recovered.py": ', SHARD,
-       "the table's heaviest entry names a file that does not exist: its shard is 48 minutes lighter than dealt"),
+       "the table's heaviest entry names a file that does not exist: its shard is 49 minutes lighter than dealt"),
     _M("SW2", SWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
        "the table claims a floor its entries are under"),
     _M("SW3", SWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),

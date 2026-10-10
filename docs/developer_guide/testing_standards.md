@@ -557,8 +557,8 @@ split deals the files listed in `tests/slow_lane_weights.json` (seconds per
 file on its slower JAX lane, from a slow-lane run's JUnit artifacts),
 longest first, each onto the shard with the least time so far. A file the
 table does not list (a new one, or one under ten seconds) goes by the hash
-of its path. That predicts 60 minutes of test time on every shard (six
-shards held 80 each; the heaviest file alone is 42).
+of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 79
+minutes of test time on every shard; the heaviest file alone is 49.
 
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The
@@ -603,6 +603,14 @@ that run: give an earlier run first (`--run` repeats, and the later
 measurement of a file wins). `test_ci_sharding.py` fails if the table lists
 a file that no longer exists, or predicts more than 100 minutes on the
 heaviest shard; then raise `SLOW_LANE_SHARDS`, or split the heaviest file.
+
+A run's times carry the speed of each runner it drew. Between two runs of
+one deal on 2026-10-10 the same files on the same shard took from 0.57 to
+1.59 times as long, in compile time as in the rest: the hosted runners are
+of several CPU models (on the per-push lane one shard's files took 1.6
+times as long on an EPYC 7763 as on an EPYC 9V45). So the table balances
+the shards to within the runners' spread, not to the minute, and a shard
+dealt the mean can still run half as long again.
 
 Every allowlist entry is `<node id> # kept: <why it must run on every
 push>`. The tests that were already over 5 s when the budget arrived

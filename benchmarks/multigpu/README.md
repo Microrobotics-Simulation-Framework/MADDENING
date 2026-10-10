@@ -351,7 +351,7 @@ dominates; a GPU compile of the coupled group's adjoint is assumed to take
 | `hybrid` | `run_scan` and the gradient of the unsharded graph once per size, and of the sharded one on each of the four meshes at 1e5 cells and on the pencil at the others (9 graphs) | 4–8 min | 20 min |
 | `exchange` | per size, 2 transports | ~5 min | 10 min |
 | `forward` | per size, 2 transports, public and compiled step | ~10 min | 15 min |
-| `gradient` | per size, 3 rollout gradients and `sharded_cg` (55 to 58 iterations a solve; the 3000-iteration cap is never reached) | ~10 min | 20 min |
+| `gradient` | per size, 3 rollout gradients and `sharded_cg` (55 to 58 iterations a solve; the 3000-iteration cap is never reached) | ~8 min | 20 min |
 
 About 55–75 minutes of goals, 1.4–1.9 h with setup and copy-back.
 Budget one and three-quarter pod-hours; the whole session is capped at

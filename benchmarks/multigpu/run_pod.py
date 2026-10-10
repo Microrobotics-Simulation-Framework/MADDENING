@@ -303,13 +303,18 @@ CG_SOLVES = ("solve", "adjoint", "tangent")
 #: The limit every parity check is held to, as a relative difference
 #: ``max|sharded - reference| / max|reference|`` (componentwise for
 #: gradient vectors), and why; and the limit on a Krylov solve's true
-#: residual.  A dry run on CPU virtual devices is held to the same limits
-#: and lands orders of magnitude below the parity ones: measured for every
-#: goal at the dry run's 256 and 1024 cells, and for the ``gradient`` goal
-#: at the session's 1e5, 3e5 and 1e6 cells (rollouts 1e-7 against 1e-5,
-#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4; 8e-7 at 1e7 unknowns).  The
-#: few-ulp CPU numbers are pinned by the unit tests under
-#: tests/cloud/multigpu/.
+#: residual.  A dry run on CPU virtual devices is held to the same limits,
+#: and its parity checks land one to three orders of magnitude inside
+#: them.  Measured for every goal at the dry run's 256 and 1024 cells (the
+#: record under tests/cloud/multigpu/run_pod_record/): the closest is the
+#: D2Q9 lattice's forward velocity at 0.11 of the forward limit, then the
+#: coupled and hybrid gradients at 0.03 of theirs, the rollouts at 0.01,
+#: and ``sharded_cg`` at 0.001.  And for the ``gradient`` goal at the
+#: session's 1e5, 3e5 and 1e6 cells: rollouts 1e-7 against 1e-5,
+#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4 (8e-7 at 1e7 unknowns).  The
+#: residual limit is of another kind: a converged solve reads just under
+#: its tolerance, half the limit.  The few-ulp CPU numbers are pinned by
+#: the unit tests under tests/cloud/multigpu/.
 LIMITS = {
     # Pure data movement: the halo exchange and its adjoint on
     # integer-valued data, where every sum is exact.

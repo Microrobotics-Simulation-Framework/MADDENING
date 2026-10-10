@@ -2481,6 +2481,14 @@ class GraphManager:
                 issues.append(
                     f"ERROR: external input references non-existent node '{ei.target_node}'"
                 )
+        # A field that an edge delivers to and that is a declared external
+        # input: the input would replace the edge on every step.  One line
+        # for all of them, and what compile() raises.
+        try:
+            _graph_specs._refuse_edges_onto_external_inputs(
+                self._edges, self._external_inputs)
+        except ValueError as exc:
+            issues.append(f"ERROR: {exc}")
 
         # Disconnected-node warning.  Only meaningful when the graph
         # has multiple nodes -- a single-node graph is trivially
@@ -2686,6 +2694,10 @@ class GraphManager:
         scheduled = _graph_specs._scheduled_timesteps(self._nodes, self._coupling_groups)
         if len(set(scheduled.values())) > 1:
             _graph_specs._rate_dividers(scheduled)
+        # So is an edge onto a field that is also a declared external
+        # input (MADD-ANO-265): one ValueError naming every such edge.
+        _graph_specs._refuse_edges_onto_external_inputs(
+            self._edges, self._external_inputs)
         issues = self.validate()
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:

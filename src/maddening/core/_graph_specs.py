@@ -700,6 +700,57 @@ def _timestep_drift_issues(nodes) -> list[str]:
     return issues
 
 
+def _refuse_edges_onto_external_inputs(edges, external_inputs) -> None:
+    """Raise ``ValueError`` if an edge delivers to a field that is also a
+    declared external input.
+
+    The step writes a node's external inputs into its ``boundary_inputs``
+    after its edges, and an input the caller does not feed is zeros.  So on
+    such a field the edge's value never reached the node: additive or not,
+    transformed or mapped, inside a coupling group or outside, and in
+    whichever order the two were declared.  Nothing said so
+    (MADD-ANO-265).  The graph is refused instead of choosing one of the
+    two for its author.
+
+    One error names every such edge, in the order the edges were added,
+    with the two calls that resolve each.  ``compile()`` raises it before
+    it asks anything else, and ``validate()`` lists it as one ``ERROR``
+    line, as the two do for a multi-rate schedule that cannot be kept
+    (:func:`_rate_dividers`).  Asked of the names alone: a node that wraps
+    another is the node the graph holds, under the same name.
+    """
+    declared = {(ei.target_node, ei.target_field) for ei in external_inputs}
+    if not declared:
+        return
+    onto = [e for e in edges if (e.target_node, e.target_field) in declared]
+    if not onto:
+        return
+    # An edge added twice is one line, and one ``remove_edge`` removes both.
+    pairs = "; ".join(dict.fromkeys(
+        f"edge {e.source_node}.{e.source_field} -> {e.target_node}.{e.target_field} "
+        f"and external input {e.target_node}.{e.target_field}" for e in onto))
+    declarations = ", ".join(dict.fromkeys(
+        f"add_external_input({e.target_node!r}, {e.target_field!r}, ...)" for e in onto))
+    removals = ", ".join(dict.fromkeys(
+        f"remove_edge({e.source_node!r}, {e.target_node!r}, {e.source_field!r}, "
+        f"{e.target_field!r})" for e in onto))
+    raise ValueError(
+        f"an edge and a declared external input target the same field: {pairs}. "
+        "A graph with both on one field is not compiled: an external input replaces "
+        "whatever an edge delivers to its field on every step, with zeros when it is "
+        "not fed, so the edge would never reach the node. One way to get here: a "
+        "builder declares the external input for the case where nothing is wired to "
+        "the field, and a later step wires a node to it. Keep one of the two. To use "
+        "the edge, do not declare the external input (there is no "
+        f"remove_external_input: leave {declarations} out where the graph is built). "
+        f"To use the external input, remove the edge: {removals}. Before 0.4.0 such a "
+        "graph compiled, and the node read the edge's value only when external_inputs "
+        "was a dict that left this input out (0.3.x did not fill an omitted input with "
+        "zeros); it read the fed value when the dict held one, and zeros when "
+        "external_inputs was not passed."
+    )
+
+
 def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:
     """Each node's timestep as ``compile()`` schedules it.
 

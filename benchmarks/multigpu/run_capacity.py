@@ -93,7 +93,7 @@ recorded flags (no JAX needed).
 
 Examples (``README.md`` next to this file has the session order)::
 
-    python benchmarks/multigpu/run_capacity.py --dry-run --cells 2000 8000 30000 \\
+    python benchmarks/multigpu/run_capacity.py --dry-run --cells 8000 30000 100000 \\
         --out /tmp/capacity-dry
     python benchmarks/multigpu/run_capacity.py --device-memory-gb 24 \\
         --ramp 0.25 0.5 0.75 0.85 0.9 --soak-minutes 5 --out results/capacity

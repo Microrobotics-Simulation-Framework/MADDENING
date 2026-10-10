@@ -230,11 +230,26 @@ _COMPILED: dict = {}
 @pytest.fixture(scope="module", autouse=True)
 def _the_compiled_pairs_are_dropped_after_the_module():
     """The module keeps every compiled pair; a shard runs many modules in
-    one process, so they are released after the last test here."""
+    one process, so the module's own table is emptied after the last test
+    here.  Nothing else: a collection or ``jax.clear_caches()`` here costs
+    what the whole process has compiled, is charged to this module's last
+    test, and throws away the programs of the modules that follow."""
     yield
     _COMPILED.clear()
-    gc.collect()
-    jax.clear_caches()
+
+
+@pytest.fixture(autouse=True)
+def _a_slow_test_releases_what_it_compiled(request):
+    """The slow tests compile a pair for every cell they sweep, and the
+    slow lane runs a whole shard in one process: each releases its pairs
+    and what JAX compiled for them when it ends.  The per-push tests keep
+    their pairs until the module ends."""
+    yield
+    if request.node.get_closest_marker("slow") is not None:
+        _COMPILED.clear()
+        gc.collect()
+        jax.clear_caches()
+        gc.collect()
 
 
 def compiled(pair: Pair) -> GraphManager:

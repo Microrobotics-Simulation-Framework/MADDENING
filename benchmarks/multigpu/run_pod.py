@@ -62,7 +62,8 @@ three are the timing goals::
     gradient     checklist 3 for ``ShardedUnstructuredNode``: ``jax.grad``
                  through a sharded rollout (both transports) and through
                  the Jacobi-preconditioned ``sharded_cg`` against the
-                 unsharded references.              -> gradient.json
+                 unsharded references, on a system both sides' solves
+                 must have converged on.            -> gradient.json
     checklist    the five checklist goals, in the order above.
     all          all eight, in the order above.
 
@@ -209,7 +210,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Exit status of a run this runner refused before a check decided anything
 #: (argparse's own status for an option it does not take).
@@ -259,10 +260,54 @@ CHECKLIST = {
         ("coupled",)),
 }
 
+#: The system the ``gradient`` goal's ``sharded_cg`` part solves, in
+#: float32: ``(2 + CG_SHIFT) x[i] - x[i-1] - x[i+1] = b[i]``, the 1-D
+#: Dirichlet Laplacian shifted on its diagonal, preconditioned by that
+#: diagonal.  The one number the sharded and the unsharded operator, the
+#: preconditioner and the host's residual all read.
+#:
+#: Why a shift: the unshifted operator has condition number
+#: ``(2 (n + 1) / pi)**2``, 4e9 at 1e5 unknowns and 4e11 at 1e6, and no
+#: float32 solve converges on it -- the goal solved it until schema 7 and
+#: its true residual ``|b - A x| / |b|`` was 5e-2 at 1024 unknowns and 6e2
+#: to 2e4 at the session's sizes, after all 3000 iterations.  With the
+#: shift the condition number is ``(4 + s) / s`` at every size, 134 here.
+#:
+#: Why this one: the true residual a float32 solve can reach on this
+#: operator is about ``eps32 * (4 + s) / s`` (measured 0.6 to 1.8 times
+#: that for shifts from 1e-3 to 1e-1): 1.6e-5 here, one sixth of
+#: ``CG_RTOL``, so both sides converge on any backend's rounding; and the
+#: solve is not trivial: 56 iterations for the solve, 58 for the adjoint
+#: solve and 56 for the tangent solve, the same on both sides and at every
+#: size from 256 to 1e7 unknowns (CPU), so each derivative crosses the
+#: exchange about 110 times.  Hundreds of iterations per solve are not to
+#: be had in float32 together with convergence: the count grows as
+#: ``sqrt(kappa) ln(2 / rtol) / 2`` while the floor ``eps32 * kappa`` has
+#: to stay under ``rtol`` (a shift of 3e-3 gives 190 iterations at 1e5
+#: unknowns and a true residual of 1.4e-4 that no tolerance below it
+#: reaches).
+CG_SHIFT = 0.03
+
+#: The relative tolerance of that solve (``|r| <= CG_RTOL |b|``).  Until
+#: schema 7 the goal asked for 1e-6, which float32 cannot reach on this
+#: operator at any shift worth solving (2.7e-6 at a shift of 0.1, where the
+#: solve takes 28 iterations).
+CG_RTOL = 1e-4
+
+#: The three linear solves behind the goal's two derivatives of
+#: ``sum(x**2)``, ``A x = b``: the solve itself, the reverse pass's solve
+#: for the gradient (right-hand side ``2 x``) and the forward pass's for the
+#: tangent (right-hand side the direction ``v``).
+CG_SOLVES = ("solve", "adjoint", "tangent")
+
 #: The limit every parity check is held to, as a relative difference
 #: ``max|sharded - reference| / max|reference|`` (componentwise for
-#: gradient vectors), and why.  A dry run on CPU virtual devices is held to
-#: the same limits and lands orders of magnitude below them; the few-ulp
+#: gradient vectors), and why; and the limit on a Krylov solve's true
+#: residual.  A dry run on CPU virtual devices is held to the same limits
+#: and lands orders of magnitude below the parity ones: measured for every
+#: goal at the dry run's 256 and 1024 cells, and for the ``gradient`` goal
+#: at the session's 1e5, 3e5 and 1e6 cells and at 1e7 (rollouts 1e-7
+#: against 1e-5, ``sharded_cg`` 4e-7 to 9e-7 against 4e-4).  The few-ulp
 #: CPU numbers are pinned by the unit tests under tests/cloud/multigpu/.
 LIMITS = {
     # Pure data movement: the halo exchange and its adjoint on
@@ -282,8 +327,27 @@ LIMITS = {
     "coupled_gradient_ift": 1e-4,
     # "fori" differentiates straight through the iterates, no Krylov solve.
     "coupled_gradient_fori": 1e-5,
-    # sharded_cg gradient and jvp: unchanged from schema 2.
-    "krylov": 1e-3,
+    # sharded_cg gradient and jvp.  Each is the result of two CG solves
+    # that stop at rtol = CG_RTOL = 1e-4 and have converged (the next
+    # limit holds them to it).  Against a float64 direct solve each side's
+    # derivative is then within 1.2e-4 of exact at every size from 256 to
+    # 1e7 unknowns, so two correct solves are within 2.4e-4 of each other
+    # however each got there.  Measured, the sharded and the unsharded
+    # side stop on the same iteration and differ by float32 round-off
+    # (2e-7 to 9e-7 on CPU), and a stop one iteration apart moves a
+    # derivative by 2.6e-5 at most.  4x the tolerance.  (1e-3 until
+    # schema 7, with no reason given, on solves that had not converged:
+    # the check read 5.3e-4, 5.7e-4 and 9.2e-4 at the session's sizes.)
+    "krylov": 4 * CG_RTOL,
+    # The true residual |rhs - A x| / |rhs| of each of those solves,
+    # computed on the host in float64 from the result.  The loop stops
+    # when its recursively updated residual is under rtol; the true one
+    # differs from that by the float32 floor of the operator (measured
+    # 4e-6 for the solve and its tangent, 1.5e-5 for the adjoint solve),
+    # so a converged solve reads at most rtol plus that: measured 8.3e-5
+    # to 1.04e-4.  2x the tolerance.  The unshifted operator reads 0.26
+    # to 23 at 1024 unknowns and up within the dry run's 300 iterations.
+    "krylov_residual": 2 * CG_RTOL,
     # The coupled group's gradient against central differences of the
     # float64 model: the IFT adjoint is exact at the fixed point up to its
     # GMRES tolerance (1.2e-5) and "fori" differentiates the returned
@@ -1506,14 +1570,18 @@ def forward_checks(results: list, n_devices: int) -> list:
 
 
 def _laplacian_matvec_unsharded():
+    """The shifted 1-D Dirichlet Laplacian of the ``sharded_cg`` part
+    (``CG_SHIFT`` says why it is shifted), on one device."""
     def matvec(x):
         left = jnp.concatenate([jnp.zeros((1,), dtype=x.dtype), x[:-1]])
         right = jnp.concatenate([x[1:], jnp.zeros((1,), dtype=x.dtype)])
-        return 2 * x - left - right
+        return (2 + CG_SHIFT) * x - left - right
     return matvec
 
 
 def _laplacian_matvec_sharded(mesh):
+    """The same operator over the mesh: each shard takes its two ghosts
+    from its neighbours by ``ppermute`` and the global ends take zero."""
     D = int(mesh.shape[MESH_AXIS])
 
     def shard_matvec(x):
@@ -1524,12 +1592,130 @@ def _laplacian_matvec_sharded(mesh):
         right_ghost = jnp.where(idx == D - 1, 0.0, right_ghost)
         left = jnp.concatenate([jnp.asarray([left_ghost], dtype=x.dtype), x[:-1]])
         right = jnp.concatenate([x[1:], jnp.asarray([right_ghost], dtype=x.dtype)])
-        return 2 * x - left - right
+        return (2 + CG_SHIFT) * x - left - right
 
     def matvec(x):
         return shard_map(shard_matvec, mesh=mesh, in_specs=(P(MESH_AXIS),),
                          out_specs=P(MESH_AXIS))(x)
     return matvec
+
+
+def _cg_true_residual(x, rhs) -> float:
+    """``|rhs - A x| / |rhs|`` of the ``sharded_cg`` part's operator, in
+    float64 on the host: the residual of the system itself, measured
+    outside the solve and by neither of the two JAX operators.
+
+    ``A`` has the diagonal the float32 solves were given (``2 + CG_SHIFT``
+    rounded to float32).  A solve of a wrong operator -- a ghost from the
+    wrong neighbour, say -- has a large residual here, whatever its own
+    solver reported.
+    """
+    x, rhs = np.asarray(x, np.float64), np.asarray(rhs, np.float64)
+    ax = float(np.float32(2 + CG_SHIFT)) * x
+    ax[1:] -= x[:-1]
+    ax[:-1] -= x[1:]
+    return float(np.linalg.norm(rhs - ax) / np.linalg.norm(rhs))
+
+
+def run_gradient_cg(args, mesh, n_cg: int, rng) -> dict:
+    """The ``sharded_cg`` part of the ``gradient`` goal at ``n_cg`` unknowns:
+    reverse and forward mode through the Jacobi-preconditioned CG, sharded
+    against unsharded, and whether the solves behind them converged.
+
+    The right-hand side and the tangent direction are white noise from
+    ``rng``.  A smooth right-hand side (until schema 7, a sine) is nearly
+    an eigenvector of the shifted operator: its residual lives in the two
+    boundary layers, the solver's test -- relative to ``|b|``, which grows
+    as ``sqrt(n)`` -- is met sooner the larger the system (21 iterations at
+    1e6 unknowns, 14 at 1e7), and the solution it stops on is 40 to 60
+    times ``CG_RTOL`` from a float64 direct solve there.  On white noise
+    the iteration count and that distance (about ``CG_RTOL``) are the same
+    at every size.
+
+    ``sharded_cg(differentiable=True)``, which the derivatives are taken
+    through, cannot report an iteration count (``iters`` is -1: the solve
+    is behind ``lax.custom_linear_solve``), and its ``converged`` is the
+    float32 true residual against ``rtol`` with no slack, which reads
+    ``False`` on a converged solve whenever the loop stopped within the
+    float32 floor of the tolerance (measured at 1024 unknowns, shift 0.01:
+    stopped after 75 of 3000 iterations, true residual 1.04e-4).  So the
+    flag and the count recorded here are the loop's own (the same solve
+    without ``differentiable``: it stopped on its tolerance, after so many
+    iterations), and convergence is decided on the true residual of each
+    of the three solves (``CG_SOLVES``), measured on the host against
+    ``LIMITS["krylov_residual"]``.
+    """
+    matvec_ref = _laplacian_matvec_unsharded()
+    matvec_sh = _laplacian_matvec_sharded(mesh)
+    pc = jacobi_preconditioner(jnp.full((n_cg,), 2 + CG_SHIFT, jnp.float32))
+    kw = dict(max_iters=args.cg_max_iters, rtol=CG_RTOL, atol=1e-8, backend="loop",
+              preconditioner=pc, differentiable=True)
+    on_mesh = dict(mesh=mesh, in_specs=P(MESH_AXIS))
+    b_host = rng.standard_normal(n_cg).astype(np.float32)
+    v_host = rng.standard_normal(n_cg).astype(np.float32)
+    b, v = jnp.asarray(b_host), jnp.asarray(v_host)
+    b_sh = place_on_mesh(b_host, mesh)
+
+    def cg_loss_sh(bb):
+        return jnp.sum(sharded_cg(matvec_sh, bb, **on_mesh, **kw).value ** 2)
+
+    def cg_loss_ref(bb):
+        return jnp.sum(sharded_cg(matvec_ref, bb, **kw).value ** 2)
+
+    g_sh_fn, g_ref_fn = jax.jit(jax.grad(cg_loss_sh)), jax.jit(jax.grad(cg_loss_ref))
+    cg_presharded = require_presharded([b_sh], mesh, "gradient/sharded_cg")
+    sh_compile_s, _ = compile_seconds(g_sh_fn, b_sh)
+    ref_compile_s, _ = compile_seconds(g_ref_fn, b)
+    g_sh = np.asarray(jax.device_get(g_sh_fn(b_sh)))
+    g_ref = np.asarray(jax.device_get(g_ref_fn(b)))
+    # Jitted: an eager jvp through the solver dispatched op by op and
+    # took 13 of the dry run's 21 s at 256 dof; compiled, it is the same
+    # derivative.
+    jvp_sh = jax.jit(lambda bb, vv: jax.jvp(
+        lambda x: sharded_cg(matvec_sh, x, **on_mesh, **kw).value, (bb,), (vv,))[1])
+    jvp_ref = jax.jit(lambda bb, vv: jax.jvp(
+        lambda x: sharded_cg(matvec_ref, x, **kw).value, (bb,), (vv,))[1])
+    t_sh = np.asarray(jax.device_get(jvp_sh(b, v)))
+    t_ref = np.asarray(jax.device_get(jvp_ref(b, v)))
+
+    def report(matvec, where):
+        # The solution of the route the derivatives are taken through, and
+        # the flag and count of the loop itself.
+        def solve(bb):
+            through = sharded_cg(matvec, bb, **where, **kw)
+            loop = sharded_cg(matvec, bb, **where, **dict(kw, differentiable=False))
+            return through.value, loop.converged, loop.iters
+        return jax.jit(solve)
+
+    solves = {}
+    for side, fn, rhs, g, t in (("sharded", report(matvec_sh, on_mesh), b_sh, g_sh, t_sh),
+                                ("unsharded", report(matvec_ref, {}), b, g_ref, t_ref)):
+        x, stopped, iterations = jax.device_get(fn(rhs))
+        x = np.asarray(x, np.float64)
+        solves[side] = {
+            "converged": bool(stopped), "iterations": int(iterations),
+            "true_residual": {"solve": _cg_true_residual(x, b_host),
+                              "adjoint": _cg_true_residual(g, 2 * x),
+                              "tangent": _cg_true_residual(t, v_host)},
+        }
+    cg = {
+        "dof": n_cg,
+        "shift": CG_SHIFT, "rtol": CG_RTOL, "max_iters": args.cg_max_iters,
+        "input_presharded": cg_presharded,
+        "grad_sharded": timed(lambda: g_sh_fn(b_sh), warmup=args.warmup, repeats=args.repeats),
+        "grad_unsharded": timed(lambda: g_ref_fn(b), warmup=args.warmup, repeats=args.repeats),
+        "compile_s": {"sharded": sh_compile_s, "unsharded": ref_compile_s},
+        "grad_parity": _diff(g_sh, g_ref),
+        "jvp_parity": _diff(t_sh, t_ref),
+        "solve": solves,
+    }
+    worst = max(r for s in solves.values() for r in s["true_residual"].values())
+    print(f"[gradient] dof={n_cg:>8} sharded_cg grad {cg['grad_sharded']['median_ms']:8.2f} ms "
+          f"(unsharded {cg['grad_unsharded']['median_ms']:8.2f})  "
+          f"rel grad={cg['grad_parity']['max_rel']:.2e} jvp={cg['jvp_parity']['max_rel']:.2e}  "
+          f"iterations {solves['sharded']['iterations']}/{solves['unsharded']['iterations']} "
+          f"of {args.cg_max_iters}  true residual <= {worst:.2e}")
+    return cg
 
 
 def run_gradient(args, out: dict) -> dict:
@@ -1593,51 +1779,7 @@ def run_gradient(args, out: dict) -> dict:
                   f"  rel={entry['rollout'][method]['parity']['max_rel']:.2e}")
 
         # (ii) reverse + forward mode through the Jacobi-preconditioned sharded CG
-        n_cg = (n // D) * D
-        matvec_ref = _laplacian_matvec_unsharded()
-        matvec_sh = _laplacian_matvec_sharded(mesh)
-        pc = jacobi_preconditioner(jnp.full((n_cg,), 2.0, jnp.float32))
-        kw = dict(max_iters=args.cg_max_iters, rtol=1e-6, atol=1e-8, backend="loop",
-                  preconditioner=pc, differentiable=True)
-        b_host = np.sin(np.linspace(0.0, 6.0, n_cg, dtype=np.float32)) + np.float32(0.1)
-        b = jnp.asarray(b_host)
-        b_sh = place_on_mesh(b_host, mesh)
-
-        def cg_loss_sh(bb):
-            return jnp.sum(sharded_cg(matvec_sh, bb, mesh=mesh, in_specs=P(MESH_AXIS), **kw).value ** 2)
-
-        def cg_loss_ref(bb):
-            return jnp.sum(sharded_cg(matvec_ref, bb, **kw).value ** 2)
-
-        g_sh_fn, g_ref_fn = jax.jit(jax.grad(cg_loss_sh)), jax.jit(jax.grad(cg_loss_ref))
-        cg_presharded = require_presharded([b_sh], mesh, "gradient/sharded_cg")
-        sh_compile_s, _ = compile_seconds(g_sh_fn, b_sh)
-        ref_compile_s, _ = compile_seconds(g_ref_fn, b)
-        g_sh = np.asarray(jax.device_get(g_sh_fn(b_sh)))
-        g_ref = np.asarray(jax.device_get(g_ref_fn(b)))
-        v = jnp.ones_like(b)
-        # Jitted: an eager jvp through the solver dispatched op by op and
-        # took 13 of the dry run's 21 s at 256 dof (3000 iterations on a
-        # pod would take far longer); compiled, it is the same derivative.
-        jvp_sh = jax.jit(lambda bb, vv: jax.jvp(
-            lambda x: sharded_cg(matvec_sh, x, mesh=mesh, in_specs=P(MESH_AXIS), **kw).value,
-            (bb,), (vv,))[1])
-        jvp_ref = jax.jit(lambda bb, vv: jax.jvp(
-            lambda x: sharded_cg(matvec_ref, x, **kw).value, (bb,), (vv,))[1])
-        t_sh, t_ref = jvp_sh(b, v), jvp_ref(b, v)
-        entry["sharded_cg"] = {
-            "dof": n_cg,
-            "input_presharded": cg_presharded,
-            "grad_sharded": timed(lambda: g_sh_fn(b_sh), warmup=args.warmup, repeats=args.repeats),
-            "grad_unsharded": timed(lambda: g_ref_fn(b), warmup=args.warmup, repeats=args.repeats),
-            "compile_s": {"sharded": sh_compile_s, "unsharded": ref_compile_s},
-            "grad_parity": _diff(g_sh, g_ref),
-            "jvp_parity": _diff(np.asarray(jax.device_get(t_sh)), np.asarray(jax.device_get(t_ref))),
-        }
-        cg = entry["sharded_cg"]
-        print(f"[gradient] dof={n_cg:>8} sharded_cg grad {cg['grad_sharded']['median_ms']:8.2f} ms "
-              f"(unsharded {cg['grad_unsharded']['median_ms']:8.2f})  "
-              f"rel grad={cg['grad_parity']['max_rel']:.2e} jvp={cg['jvp_parity']['max_rel']:.2e}")
+        entry["sharded_cg"] = run_gradient_cg(args, mesh, (n // D) * D, rng)
         results.append(entry)
     out["results"] = results
     return finish_checks(out, gradient_checks(results, D))
@@ -1656,6 +1798,17 @@ def gradient_checks(results: list, n_devices: int) -> list:
                                  cg["grad_parity"], LIMITS["krylov"])
         checks += _parity_checks(f"{cg['dof']} dof sharded_cg jvp vs unsharded",
                                  cg["jvp_parity"], LIMITS["krylov"])
+        # Parity alone passes two solves that failed alike (it did, until
+        # schema 7): each side's solves must also have converged.
+        for side in ("sharded", "unsharded"):
+            solve = cg["solve"][side]
+            prefix = f"{cg['dof']} dof sharded_cg {side}"
+            checks.append(check_that(
+                f"{prefix} solve stopped on its tolerance, not on the iteration cap",
+                solve["converged"] is True,
+                detail=f"{solve['iterations']} iterations, cap {cg['max_iters']}"))
+            checks += [check(f"{prefix} {which} true residual", solve["true_residual"][which],
+                             LIMITS["krylov_residual"]) for which in CG_SOLVES]
     return checks
 
 

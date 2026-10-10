@@ -5805,7 +5805,12 @@ claims:
     results degraded one solve at a time (a residual of 0.26, one a
     thousandth over what is accepted, NaN, inf; a flag that is not true).
     Measured once at 1e5, 3e5, 1e6 and 1e7 unknowns with the session's 3000
-    iterations at most on the three jax versions: not a test.
+    iterations at most on the three jax versions: not a test.  The loop's
+    own flag is taken on its recursively updated residual, not on the
+    system's (MADD-ANO-263, open, pinned in
+    tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py):
+    the claim does not rest on it, the float64 residual is checked beside
+    it and is what holds each solve to the limit.
   oracle: >-
     the checks' statuses re-derived from value, limit and sense; a float64
     residual on the host by an operator written apart from the two JAX
@@ -5901,7 +5906,10 @@ claims:
   conditions: >-
     CPU, four virtual devices, float32; 1024 unknowns with a cap of 300
     iterations per push and 1e5 unknowns with the cap of 3000 in the slow
-    lane; both run on jax 0.10.2, 0.11.0 and 0.11.2.
+    lane; both run on jax 0.10.2, 0.11.0 and 0.11.2.  "The loop's flag"
+    is taken on its recursively updated residual (MADD-ANO-263, open);
+    the float64 true residual asserted beside it is what holds each
+    solve to the limit.
   oracle: >-
     a float64 direct solve of the system (the Thomas algorithm) and a
     float64 residual, both by an operator written apart from the two JAX

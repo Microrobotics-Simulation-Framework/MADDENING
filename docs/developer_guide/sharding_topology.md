@@ -129,7 +129,17 @@ which wrapper a node is written for:
   `lax.custom_linear_solve` so a node that solves inside a differentiated
   step gets an exact linear-solve adjoint with the same preconditioner
   applied in the adjoint solve; the iteration count is then reported as
-  -1.
+  -1.  What `converged` and `residual_norm` report depends on the route
+  (the docstring of `sharded_cg` says it for each), and two behaviours of
+  `sharded_cg` are open in 0.4.0.  On the loop backend (`backend="loop"`,
+  or the default with a preconditioner) both are the recursively updated
+  residual, which in float32 reads under a tolerance that the true
+  residual is 10 to 100 times above (MADD-ANO-263): check with one product
+  (`||b - matvec(x)||`) or read the `differentiable=True` result, whose
+  flag is taken on the returned value.  And the default route without a
+  preconditioner is lineax's CG, which returns NaN with `converged=False`
+  in float32 above about 1e5 unknowns (MADD-ANO-264): pass
+  `backend="loop"`, or solve in float64.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
 * Boundary inputs are classified by shape.  A **grid-shaped** input (on

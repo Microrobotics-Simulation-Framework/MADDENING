@@ -522,8 +522,10 @@ anomalies:
       ['amplification', 'converged', 'error_estimate',
       'gradient_bound_usable', 'gradient_error_estimate',
       'gradient_relative_error_bound', 'iterations', 'precision_limited',
-      'ratio_usable', 'residual', 'rho_spectral', 'spectral_error_bound',
-      'spectral_usable', 'total_iterations'].
+      'ratio_usable', 'reason_codes', 'residual',
+      'residual_precision_floor', 'rho_spectral', 'spectral_error_bound',
+      'spectral_usable', 'total_iterations'], and an entry with a usable
+      flag that is False has 'not_usable_reason' as well.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

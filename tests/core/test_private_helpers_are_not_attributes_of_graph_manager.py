@@ -77,10 +77,13 @@ def test_a_stale_import_or_patch_fails_loudly(monkeypatch):
 
 def test_every_private_module_graph_manager_reads_is_listed():
     """A helper module added later is scanned too: the list above is the modules
-    ``graph_manager`` holds, and the two the others reach only through each other."""
-    held = {value.__name__ for name, value in vars(graph_manager).items()
-            if isinstance(value, types.ModuleType) and name.startswith("_")
-            and value.__name__.startswith("maddening.")}
+    ``graph_manager`` holds, and the two the others reach only through each other.
+    A module is private by its own name, whatever name ``graph_manager`` binds it
+    to: ``reason_codes``, public constants held as ``_reason_codes``, is not one."""
+    held = {value.__name__ for value in vars(graph_manager).values()
+            if isinstance(value, types.ModuleType)
+            and value.__name__.startswith("maddening.")
+            and value.__name__.rsplit(".", 1)[1].startswith("_")}
     assert held <= set(HELPER_MODULES), sorted(held - set(HELPER_MODULES))
     assert set(HELPER_MODULES) - held == {"maddening.core.coupling._fixed_point",
                                           "maddening.core.coupling._ift"}

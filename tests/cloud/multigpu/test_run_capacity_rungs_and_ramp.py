@@ -184,11 +184,13 @@ def test_a_rung_past_its_time_box_is_killed_and_recorded_as_timed_out(tmp_path):
 
 def test_a_ramp_that_is_terminated_takes_its_rung_with_it(tmp_path):
     """``timeout`` around the ramp ends it with SIGTERM; the rung in flight
-    is this script's own process and must not be left holding the cards."""
+    is this script's own process and must not be left holding the cards.
+    The rung here would step for many minutes: gone within seconds, it was
+    ended, it did not finish."""
     import time
 
     out, pid = tmp_path / "out", None
-    ramp = S.start_capacity(["--dry-run", *S.TILE_ARGS, "--k", "3", "3", "1", "--steps", "20000",
+    ramp = S.start_capacity(["--dry-run", *S.TILE_ARGS, "--k", "3", "3", "1", "--steps", "5000000",
                              "--out", out])
     try:
         record = out / rc.rung_file(1)
@@ -201,7 +203,7 @@ def test_a_ramp_that_is_terminated_takes_its_rung_with_it(tmp_path):
         assert Path(f"/proc/{pid}").exists()
         ramp.terminate()
         assert ramp.wait(timeout=60) == 128 + 15
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 5
         while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert not Path(f"/proc/{pid}").exists(), "the rung outlived the ramp"

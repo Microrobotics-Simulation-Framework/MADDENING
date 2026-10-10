@@ -182,6 +182,41 @@ def test_a_rung_past_its_time_box_is_killed_and_recorded_as_timed_out(tmp_path):
     assert "CEILING: none" in done.stdout and "timed out" in done.stdout
 
 
+def test_a_ramp_that_is_terminated_takes_its_rung_with_it(tmp_path):
+    """``timeout`` around the ramp ends it with SIGTERM; the rung in flight
+    is this script's own process and must not be left holding the cards."""
+    import time
+
+    out, pid = tmp_path / "out", None
+    ramp = S.start_capacity(["--dry-run", *S.TILE_ARGS, "--k", "3", "3", "1", "--steps", "20000",
+                             "--out", out])
+    try:
+        record = out / rc.rung_file(1)
+        deadline = time.monotonic() + 120
+        while pid is None and time.monotonic() < deadline and ramp.poll() is None:
+            with contextlib.suppress(OSError, ValueError):
+                pid = json.loads(record.read_text())["pid"]
+            time.sleep(0.01)
+        assert pid is not None and pid != ramp.pid, "the rung never wrote its record"
+        assert Path(f"/proc/{pid}").exists()
+        ramp.terminate()
+        assert ramp.wait(timeout=60) == 128 + 15
+        deadline = time.monotonic() + 30
+        while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not Path(f"/proc/{pid}").exists(), "the rung outlived the ramp"
+    finally:
+        if ramp.poll() is None:
+            ramp.kill()
+            ramp.wait()
+        if pid is not None and Path(f"/proc/{pid}").exists():
+            import os
+            import signal
+
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)        # the rung this test's ramp started
+
+
 # --- a wrong halo and a wrong reference must fail a rung ----------------------
 
 

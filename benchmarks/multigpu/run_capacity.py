@@ -109,6 +109,7 @@ import math
 import os
 import platform
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -1067,6 +1068,7 @@ def base_record(args, kind: str) -> dict:
         "config": {key: (str(value) if isinstance(value, Path) else value)
                    for key, value in vars(args).items()},
         "phase": "starting",
+        "pid": os.getpid(),
         "outcome": None,
         "memory": {"device_memory_gb": args.device_memory_gb, "readings": [], "fill": None},
     }
@@ -1442,18 +1444,22 @@ def _tail(path: Path, lines: int = 20) -> str:
 def launch_child(argv: list[str], timeout_s: float, stderr_path: Path) -> Launched:
     """Run this script again for one rung, under its time box.  Its stdout
     is this process's; its stderr goes to ``stderr_path``.  A rung past its
-    time box is killed -- this process's own child, by its handle."""
+    time box is killed -- this process's own child, by its handle -- and so
+    is one still running when this process is on its way out (``timeout``
+    around the ramp, Ctrl-C): a rung left behind would keep the cards."""
     t0 = time.perf_counter()
+    timed_out = False
     with open(stderr_path, "w", encoding="utf-8") as err:
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *argv],
                                 stderr=err)
         try:
             proc.wait(timeout=timeout_s)
-            timed_out = False
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
             timed_out = True
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
     return Launched(proc.returncode, timed_out, _tail(stderr_path), time.perf_counter() - t0)
 
 
@@ -1932,6 +1938,10 @@ def check_option_values(args: argparse.Namespace) -> None:
                              "be of neither.  Give this run a directory of its own")
 
 
+def _terminated(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str] | None = None,
          launch: Callable[[list, float, Path], Launched] = launch_child) -> int:
     args = parse_args(argv)
@@ -1944,7 +1954,13 @@ def main(argv: list[str] | None = None,
         args.rung_timeout_s = 120.0 if args.dry_run else 300.0
     if args.child is not None:
         return child_main(args)
-    return run_ramp(args, launch)
+    # ``timeout`` ends this process with SIGTERM: leave as for Ctrl-C, through
+    # the launcher's clean-up, so the rung in flight ends with the ramp.
+    previous = signal.signal(signal.SIGTERM, _terminated)
+    try:
+        return run_ramp(args, launch)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def exit_status(argv: list[str] | None = None,

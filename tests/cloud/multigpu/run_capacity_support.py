@@ -73,6 +73,14 @@ def run_capacity(argv, *, timeout: float, n_devices: int = 4) -> subprocess.Comp
                           capture_output=True, text=True, timeout=timeout, check=False)
 
 
+def start_capacity(argv, n_devices: int = 4) -> subprocess.Popen:
+    """Start the script as :func:`run_capacity` does and return at once."""
+    env = {k: v for k, v in offline_env(str(REPO / "src"), n_devices).items()
+           if k not in module().ALLOCATOR_VARIABLES}
+    return subprocess.Popen([sys.executable, str(SCRIPT), *checked_argv(argv)], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def in_process(argv, timeout_s, stderr_path):
     """A launcher for ``run_ramp``: the rung's own entry point, here."""
     rc = module()

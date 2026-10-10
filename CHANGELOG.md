@@ -15,6 +15,7 @@ guidance; the itemized changes follow.
 
 ### Added
 
+- **A capacity test for the multi-GPU session** (`benchmarks/multigpu/run_capacity.py`, not a gate): a sharded D3Q19 lattice larger than one card, compared with a small tile's own unsharded run, tiled, and ramped towards a target fill of every card with one process per rung; the runbook's new section "After the checklist: the stress tail" gives the commands, and `--dry-run --cells ...` proves it on a laptop.  It found MADD-ANO-262 (open): `ShardedStencilNode` builds the wrapped node's whole initial state on the default device.
 - **`coupling_diagnostics()`: a reason code beside every usable flag that is `False`** (experimental): each entry has `reason_codes`, a list of codes for `spectral_usable`, for `gradient_bound_usable` and for `precision_limited` (the constants of `maddening.core.coupling.reason_codes`), a `not_usable_reason` in words wherever a usable flag is `False` (a plain float32 pair at the default tolerance had none), and the float floor as `residual_precision_floor`.
   Action: branch on the codes, not the sentence: `interface_too_wide` is expected (one pass depends on the previous one through more than seven independent scalars: what the loop closes through under Gauss-Seidel), `spectral_self_check_failed` is a worry, `at_float_floor` says to use float64 or a looser tolerance. Code that took the presence of `not_usable_reason` to mean "numbers withheld" should read the codes instead. No flag and no number moved.
 

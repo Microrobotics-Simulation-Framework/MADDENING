@@ -585,7 +585,11 @@ SADDLE_NODE = {
     "float32-marker-first-l2-aitken": ("float32", ("M", "G"), "l2", "aitken", 1e-6, 3e-3),
     "float64-marker-first-l2-aitken": ("float64", ("M", "G"), "l2", "aitken", 1e-6, 3e-3),
 }
-SADDLE_NODE_PER_PUSH = ("float32-marker-first-l2", "float64-marker-first-l2")
+#: Per push: the float32 report the audit recorded.  The float64 one takes
+#: 23 s on a CI runner (over the per-test limit of 20 s) and is slow with
+#: the other cells; the rule it pins is decided from the group's layout, not
+#: from its dtype.
+SADDLE_NODE_PER_PUSH = ("float32-marker-first-l2",)
 
 
 def _saddle_node_graph(dtype, order, norm, acceleration, gap, tolerance):

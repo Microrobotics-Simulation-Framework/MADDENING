@@ -90,7 +90,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 8
+    assert doc["schema_version"] == 9
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -308,7 +308,13 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
         assert m["wrapper_step"]["ms_per_step"] == pytest.approx(
             m["wrapper_step"]["median_ms"] / r["steps"])
         assert m["parity_x"]["finite"] and m["parity_x"]["max_rel"] < 1e-5
-        assert m["parity_total"]["finite"] and m["parity_total"]["max_rel"] < 1e-5
+        # the float total: information, held to no limit (its sum cancels)
+        assert m["parity_total"]["finite"] and "max_rel" in m["parity_total"]
+        # the reduction, exactly: a field of ones sums to the number of cells
+        assert m["ones"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
+                             "entries_not_one": 0}
+    assert r["ones_unsharded"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
+                                   "entries_not_one": 0}
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.

@@ -58,7 +58,8 @@ three are the timing goals::
     forward      checklist 1 for ``ShardedUnstructuredNode``: 1e6-cell
                  forward run on a real unstructured mesh (``--mesh``) or a
                  synthetic one, both transports, checked against the
-                 unsharded node.                    -> forward.json
+                 unsharded node; and its cross-shard sum exactly, on a
+                 field of ones (``EXACT_COUNT_CELLS``). -> forward.json
     gradient     checklist 3 for ``ShardedUnstructuredNode``: ``jax.grad``
                  through a sharded rollout (both transports) and through
                  the Jacobi-preconditioned ``sharded_cg`` against the
@@ -210,7 +211,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 #: Exit status of a run this runner refused before a check decided anything
 #: (argparse's own status for an option it does not take).
@@ -317,11 +318,22 @@ CG_SOLVES = ("solve", "adjoint", "tangent")
 #: the unit tests under tests/cloud/multigpu/.
 LIMITS = {
     # Pure data movement: the halo exchange and its adjoint on
-    # integer-valued data, where every sum is exact.
+    # integer-valued data, where every sum is exact.  And the ``forward``
+    # goal's count of its cells: the total of a field of ones, which the
+    # node leaves a field of ones (``EXACT_COUNT_CELLS``).
     "exact": 0.0,
     # float32 round-off across a rollout: the order in which XLA fuses the
     # sharded and the unsharded program may differ, and a cross-device
     # mean or loss reduces in another order.  Unchanged from schema 2.
+    # The ``forward`` goal's ``total`` was held to it until schema 8 and is
+    # not any more: that field's sum cancels (``sum|x| / |sum x|`` is 22
+    # to 69,000 at the session's sizes and 1e7 cells), so eight float32
+    # orders of addition of one and the same field differ by up to 3.5e-4
+    # of the total (7.9e-4 at 1e7 cells) while every ghost row counted
+    # into it moves it by 3.6e-4 at 1,000,000 cells: no limit on that
+    # number tells the one from the other.  The field ``x`` is compared
+    # entry by entry, and the reduction is checked exactly on a field of
+    # ones (``EXACT_COUNT_CELLS``).
     "forward": 1e-5,
     # A rollout adjoint without a Krylov solve: the same round-off, once
     # more through the reverse pass.  Unchanged from schema 2.
@@ -361,6 +373,30 @@ LIMITS = {
     # float64 differences themselves are good to ~1e-9.
     "model_gradient": 1e-4,
 }
+
+#: The ``forward`` goal checks its cross-shard reduction on a field of
+#: ones, at every size under this many cells.  ``NeighbourMeanNode`` leaves
+#: a field of ones a field of ones, bit for bit (the mean of ones is 1,
+#: ``(1 - w) + w`` is 1 at ``w = 0.5``, and a padded neighbour slot points
+#: at the cell itself), so the step's ``total`` is a float32 sum of ones:
+#: exact in ANY order of addition while the count is under 2**24, since
+#: every partial sum is an integer float32 holds, and equal to the number
+#: of cells.  One public ``update`` of the sharded node from such a field,
+#: placed as the wrapper places its own initial state (the compiled step
+#: is the one already timed: same shape, dtype and sharding), must
+#: therefore return ``total == cells`` and a field still all ones, with a
+#: limit of zero; and so must the unsharded node.  A shard left out of the
+#: reduction or counted twice reads off by that shard's cells (25,122 to
+#: 250,000 at the session's sizes), ghost rows counted off by their number
+#: (1,532, 2,646 and 4,830 there; 15,276 at 10,004,569 cells), and pad rows
+#: counted -- the node's ``own`` mask ignored -- off by half a cell each (a
+#: pad row starts at zero and takes half of its shard's first cell in the
+#: step): 1.5 cells at 100,489 and at 10,004,569 cells, which leave one
+#: pad row on each of three shards.  300,304 and 1,000,000 cells divide by
+#: four and have no pad row: the mask masks nothing there, and no check of
+#: a total can see it ignored.  At this many cells or more (the stress
+#: tail's 3e7 and 1e8) the count is recorded as a check not run.
+EXACT_COUNT_CELLS = 2 ** 24
 
 #: The parameters the ``hybrid`` and ``coupled`` goals differentiate with
 #: respect to, as ``(node, params key)``; the check names spell them out.
@@ -1547,26 +1583,71 @@ def run_forward(args, out: dict) -> dict:
                 "parity_total": _diff(np.asarray(got["total"]).reshape(-1),
                                       np.asarray(jax.device_get(ref_state["total"])).reshape(-1)),
             }
+            if n < EXACT_COUNT_CELLS:
+                # One more public step, from a field of ones placed as the
+                # wrapper places its own initial state: the program is the
+                # one compiled above (require_presharded: same sharding).
+                ones = {"x": place_on_mesh(layout_slab(np.ones(n, np.float32), layout), mesh)}
+                require_presharded([ones["x"]], mesh, f"forward/{method} ones")
+                m["ones"] = _ones_record(sharded.gather_global(sharded.update(ones, {}, dt)))
             entry["methods"][method] = m
             print(f"[forward] cells={n:>8} {method:<10} wrapper {m['wrapper_step']['ms_per_step']:8.3f}"
                   f" ms/step  device {m['device_step']['ms_per_step']:8.3f} ms/step"
                   f"  compile {compile_s:6.2f} s  max|dx|={m['parity_x']['max_abs']:.2e}")
+        if n < EXACT_COUNT_CELLS:
+            entry["ones_unsharded"] = _ones_record(
+                ref_node.update({"x": jnp.ones(n, jnp.float32)}, {}, 1.0))
         results.append(entry)
     out["results"] = results
     return finish_checks(out, forward_checks(results, D))
 
 
+def _ones_record(stepped: dict) -> dict:
+    """What one step from a field of ones returned, in global cell order:
+    its ``total`` (the number of cells when the reduction is right), the
+    largest ``|x - 1|`` of the stepped field and how many entries are not
+    exactly 1 (zero and none when the step leaves ones ones)."""
+    x = np.asarray(stepped["x"], np.float64)
+    return {"total": float(np.asarray(stepped["total"]).reshape(-1)[0]),
+            "max_abs_from_one": float(np.max(np.abs(x - 1.0))) if x.size else 0.0,
+            "entries_not_one": int(np.count_nonzero(x != 1.0))}
+
+
+def _ones_checks(prefix: str, cells: int, record: dict) -> list:
+    """The two exact checks of one side's step from a field of ones: the
+    count, and its precondition as a check of its own, so that a failed
+    count on a field that did not stay ones reads as that."""
+    return [check(f"{prefix} ones: |total - cells|", abs(record["total"] - cells),
+                  LIMITS["exact"]),
+            check(f"{prefix} ones: max |x - 1| after the step", record["max_abs_from_one"],
+                  LIMITS["exact"])]
+
+
 def forward_checks(results: list, n_devices: int) -> list:
     """The ``forward`` goal's checks, from its ``results`` alone (see
-    :func:`exchange_checks`)."""
+    :func:`exchange_checks`): the field against the unsharded node's, entry
+    by entry; the total of the cancelling field finite; and the reduction
+    exactly, on a field of ones (``EXACT_COUNT_CELLS``)."""
     checks = []
     for r in results:
         for method in METHODS:
             m = r["methods"][method]
             prefix = f"{r['cells']} cells {method}"
             checks += _parity_checks(f"{prefix} x vs unsharded", m["parity_x"], LIMITS["forward"])
-            checks += _parity_checks(f"{prefix} total vs unsharded", m["parity_total"],
-                                     LIMITS["forward"])
+            # ``parity_total`` is recorded as information: its max_rel is
+            # decided by the order of addition (see LIMITS["forward"]).
+            checks.append(check_that(f"{prefix} total vs unsharded finite",
+                                     m["parity_total"]["finite"]))
+            if r["cells"] < EXACT_COUNT_CELLS:
+                checks += _ones_checks(prefix, r["cells"], m["ones"])
+        if r["cells"] < EXACT_COUNT_CELLS:
+            checks += _ones_checks(f"{r['cells']} cells unsharded", r["cells"],
+                                   r["ones_unsharded"])
+        else:
+            checks.append(check_not_run(
+                f"{r['cells']} cells ones: total == cells exactly, sharded and unsharded",
+                f"a float32 sum of ones is exact only under 2**24 = {EXACT_COUNT_CELLS} "
+                "cells"))
     return checks
 
 

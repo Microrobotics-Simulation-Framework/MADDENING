@@ -34,6 +34,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import maddening
@@ -293,6 +294,48 @@ def _the_convergence_checks_deleted_from_gradient(rp, d):
     return ["gradient"]
 
 
+def _is_ones_check(c: dict) -> bool:
+    return " ones: " in c["name"]
+
+
+def _as_the_runner_wrote_forward_before_it_counted_its_cells(doc: dict) -> None:
+    """``forward.json`` in the layout of schema 8: no step from a field of
+    ones recorded, and the float total's ``max_rel`` held to the forward
+    limit, before its ``finite`` check."""
+    for r in doc["results"]:
+        del r["ones_unsharded"]
+        for m in r["methods"].values():
+            del m["ones"]
+    checks = []
+    for c in doc["checks"]:
+        if _is_ones_check(c):
+            continue
+        if c["name"].endswith(" total vs unsharded finite"):
+            cells, _, method = c["name"].split(" ")[:3]
+            (r,) = [r for r in doc["results"] if str(r["cells"]) == cells]
+            checks.append({"name": c["name"].replace(" finite", " max_rel"),
+                           "value": r["methods"][method]["parity_total"]["max_rel"],
+                           "limit": 1e-5, "sense": "<=", "passed": True})
+        checks.append(c)
+    doc["checks"] = checks
+    doc["passed"] = bool(doc["checks"]) and all(c["passed"] for c in doc["checks"])
+
+
+def _a_forward_file_of_schema_8_relabelled(rp, d):
+    """Until schema 8 the ``forward`` goal held two float32 sums of a
+    cancelling field to 1e-5 of the sum and never checked the reduction
+    exactly; such a file, its schema number edited to the current one, must
+    not close item 1."""
+    _as_the_runner_wrote_forward_before_it_counted_its_cells(d["forward"][0])
+    return ["forward"]
+
+
+def _the_exact_count_checks_deleted_from_forward(rp, d):
+    f = d["forward"][0]
+    f["checks"] = [c for c in f["checks"] if not _is_ones_check(c)]
+    return ["forward"]
+
+
 #: (seed, a phrase the status of every affected item must contain; ``None``:
 #: the item must read ``FAILED``).
 _SEEDS = [
@@ -304,12 +347,12 @@ _SEEDS = [
     (_r4_all_but_one_check_deleted,
      "lacks case(s) the runner runs for cells [256, 1024] on 4 devices: field 1d 4x1 "
      "16x20 edge, field 1d 4x1 16x20 dirichlet, lbm 1d 4x1 16x20 periodic (+13 more)"),
-    (_r5_an_older_runner_and_commit, "schema_version 3, not 8"),
+    (_r5_an_older_runner_and_commit, "schema_version 3, not 9"),
     (_r6_one_goal_from_another_commit_and_host, "its files come from 2 commits"),
     (_r7_more_devices_than_the_environment_saw,
      "n_devices 4, but its environment saw 1 device(s)"),
     (_r8_partitioned_checks_deleted, "check(s) the runner derives from its results"),
-    (_r9_schema_from_the_future, "schema_version 99, not 8"),
+    (_r9_schema_from_the_future, "schema_version 99, not 9"),
     (_config_says_fewer_sizes_than_were_run,
      "holds case(s) the runner does not run for its config: field 2d 2x2 32x36 periodic"),
     (_a_check_the_runner_never_emits,
@@ -328,6 +371,11 @@ _SEEDS = [
      "lacks case(s) the runner runs for cells [256, 1024] on 4 devices"),
     (_a_gradient_file_of_schema_7_relabelled,
      "gradient.json cannot decide it (its results cannot be read (KeyError: 'solve'))"),
+    (_a_forward_file_of_schema_8_relabelled,
+     "forward.json cannot decide it (its results cannot be read (KeyError: 'ones'))"),
+    (_the_exact_count_checks_deleted_from_forward,
+     "lacks 12 check(s) the runner derives from its results: '256 cells all_to_all ones: "
+     "|total - cells|'"),
     (_the_convergence_checks_deleted_from_gradient,
      "lacks 16 check(s) the runner derives from its results: '256 dof sharded_cg sharded "
      "solve stopped on its tolerance, not on the iteration cap'"),
@@ -608,14 +656,140 @@ def test_a_gradient_file_written_before_schema_8_is_refused_twice_over(rp, recor
     assert rp.goal_verdict([old]) == "INVALID"
     old["schema_version"] = 7
     assert rp.record_problems(old) == [
-        "schema_version 7, not 8: written by another version of this runner",
+        "schema_version 7, not 9: written by another version of this runner",
         "its results cannot be read (KeyError: 'solve')"]
     # the current record with only its schema number taken back is refused for that alone
     relabelled = copy.deepcopy(recorded["gradient"][0])
     relabelled["schema_version"] = 7
     assert rp.record_problems(relabelled) == [
-        "schema_version 7, not 8: written by another version of this runner"]
+        "schema_version 7, not 9: written by another version of this runner"]
     assert rp.goal_verdict([relabelled]) == "INVALID"
+
+
+def test_a_forward_file_written_before_schema_9_is_refused_twice_over(rp, recorded):
+    """A ``forward.json`` of schema 8 held the float total of a cancelling
+    field to the forward limit and did not count its cells.  It is refused
+    for its schema number, as every older file is -- and, were that number
+    edited, because its results do not record the step from a field of ones
+    this runner derives its exact checks from.  Neither refusal depends on
+    the other."""
+    old = copy.deepcopy(recorded["forward"][0])
+    _as_the_runner_wrote_forward_before_it_counted_its_cells(old)
+    assert all(c["passed"] for c in old["checks"]) and old["passed"] is True
+    assert len(old["checks"]) == 16 and len(recorded["forward"][0]["checks"]) == 24
+    assert rp.record_problems(old) == ["its results cannot be read (KeyError: 'ones')"]
+    assert rp.goal_verdict([old]) == "INVALID"
+    old["schema_version"] = 8
+    assert rp.record_problems(old) == [
+        "schema_version 8, not 9: written by another version of this runner",
+        "its results cannot be read (KeyError: 'ones')"]
+    # the current record with only its schema number taken back is refused for that alone
+    relabelled = copy.deepcopy(recorded["forward"][0])
+    relabelled["schema_version"] = 8
+    assert rp.record_problems(relabelled) == [
+        "schema_version 8, not 9: written by another version of this runner"]
+    assert rp.goal_verdict([relabelled]) == "INVALID"
+
+
+@pytest.mark.parametrize("side", ["all_to_all", "ppermute", "unsharded"])
+@pytest.mark.parametrize("off_by", [1.0, -1.0, 0.5, 2.0 ** -20, float("nan"), float("inf")],
+                         ids=["one_more", "one_fewer", "half", "under_1e-5", "nan", "inf"])
+def test_the_forward_goal_fails_a_count_that_is_not_the_number_of_cells(rp, recorded, side,
+                                                                        off_by):
+    """The count is held to exactly zero: a total one cell off, half a cell
+    off (a pad row counted), off by less than any float32 limit in use, or
+    not finite, fails that side's count and nothing else; the recorded
+    total, which is the number of cells, passes."""
+    (doc,) = recorded["forward"]
+    cells = doc["results"][0]["cells"]
+    name = f"{cells} cells {side} ones: |total - cells|"
+
+    def record_of(results):
+        entry = results[0]
+        return entry["ones_unsharded"] if side == "unsharded" else entry["methods"][side]["ones"]
+
+    assert record_of(doc["results"])["total"] == cells == 256
+
+    def degrade(results):
+        record_of(results)["total"] = cells + off_by
+
+    before, after = _rederived(rp, doc, degrade)
+    assert rp.check_status(_check_named(before, name)) == "passed"
+    assert _check_named(before, name)["limit"] == 0.0
+    assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [name]
+
+
+@pytest.mark.parametrize("side", ["all_to_all", "ppermute", "unsharded"])
+@pytest.mark.parametrize("worst", [2.0 ** -24, 1e-6, 1.0, float("nan")],
+                         ids=["half_ulp", "under_1e-5", "one", "nan"])
+def test_the_forward_goal_fails_a_field_of_ones_the_step_did_not_keep(rp, recorded, side,
+                                                                      worst):
+    """The precondition of the count, as a check of its own and to exactly
+    zero: any entry of the stepped field off 1, by however little, fails
+    it -- so a count that is off because the field moved reads as that."""
+    (doc,) = recorded["forward"]
+    cells = doc["results"][0]["cells"]
+    name = f"{cells} cells {side} ones: max |x - 1| after the step"
+
+    def degrade(results):
+        entry = results[0]
+        record = (entry["ones_unsharded"] if side == "unsharded"
+                  else entry["methods"][side]["ones"])
+        record["max_abs_from_one"] = worst
+
+    before, after = _rederived(rp, doc, degrade)
+    assert rp.check_status(_check_named(before, name)) == "passed"
+    assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [name]
+
+
+def test_the_float_total_of_the_forward_goal_is_recorded_and_held_to_no_limit(rp, recorded):
+    """``parity_total`` stays in the record as information: whatever its
+    ``max_rel`` reads, no check fails on it (the order of addition decides
+    it); only a total that is not finite does."""
+    (doc,) = recorded["forward"]
+    assert not [c for c in doc["checks"] if "total vs unsharded max_rel" in c["name"]]
+
+    def far_off(results):
+        for r in results:
+            for m in r["methods"].values():
+                m["parity_total"]["max_rel"] = 0.5
+
+    before, after = _rederived(rp, doc, far_off)
+    assert [rp.check_status(c) for c in after] == ["passed"] * len(before) == [
+        rp.check_status(c) for c in before]
+
+    def not_finite(results):
+        results[0]["methods"]["ppermute"]["parity_total"]["finite"] = False
+
+    _, after = _rederived(rp, doc, not_finite)
+    assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [
+        "256 cells ppermute total vs unsharded finite"]
+
+
+def test_at_the_float32_integer_limit_the_count_is_a_check_not_run(rp, recorded, monkeypatch):
+    """A float32 sum of ones is exact only while the count is under 2**24:
+    at that many cells or more the goal records the count as not run --
+    one check a size, in place of the six -- and needs no step from ones in
+    the record.  Shown with the threshold lowered to the record's sizes."""
+    assert rp.EXACT_COUNT_CELLS == 2 ** 24 == 16_777_216
+    assert np.float32(2 ** 24) + np.float32(1) == np.float32(2 ** 24)       # why
+    (doc,) = recorded["forward"]
+    results = copy.deepcopy(doc["results"])
+    assert [r["cells"] for r in results] == [256, 1024]
+    monkeypatch.setattr(rp, "EXACT_COUNT_CELLS", 1024)       # 256 under it, 1024 at it
+    for r in results[1:]:
+        del r["ones_unsharded"]
+        for m in r["methods"].values():
+            del m["ones"]
+    checks = rp.forward_checks(results, doc["n_devices"])
+    not_run = [c for c in checks if rp.check_status(c) == "not run"]
+    assert [c["name"] for c in not_run] == [
+        "1024 cells ones: total == cells exactly, sharded and unsharded"]
+    assert "2**24" in not_run[0]["detail"]
+    assert sum(" ones: " in c["name"] for c in checks) == 6 + 1
+    assert all(rp.check_status(c) == "passed" for c in checks if c not in not_run)
+    out = rp.finish_checks({}, checks)
+    assert out["passed"] is False            # for a reader of the flag alone: not complete
 
 
 @pytest.mark.parametrize("iterations", [0, 1, 40, 41, None, True, 2.5],

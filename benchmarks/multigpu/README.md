@@ -20,7 +20,7 @@ pod except whether to stop.
 
 | # | claim | goal(s) | compared against | limit |
 |---|---|---|---|---|
-| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on every mesh below), `forward` | the unsharded node, same pod | rel 1e-5 |
+| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on every mesh below), `forward` | the unsharded node, same pod; `forward` also the number of cells | rel 1e-5 on every field; `forward`'s count of its cells **0** (exact) |
 | 2 | halo exchange at the shard and global boundaries | `halo` | NumPy, every slot, forward and adjoint | **0** (bit for bit) |
 | 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 4e-4 (`sharded_cg`, each of whose solves must have converged: true residual within 2e-4) |
 | 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` (every mesh) | `HybridNode(inner)` in the same graph | rel 1e-5 |
@@ -28,7 +28,24 @@ pod except whether to stop.
 | 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` (every mesh) | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
 
 The limits live in `LIMITS` in `run_pod.py`, each with its reason; a dry
-run is held to the same ones.  The `sharded_cg` rows of item 3 solve
+run is held to the same ones.  The `forward` goal checks its cross-shard
+sum exactly: one more public step from a field of ones, which the node
+leaves a field of ones bit for bit, must return `total` equal to the
+number of cells and a field still all ones, with a limit of zero, sharded
+under both transports and unsharded.  A float32 sum of ones is exact in
+any order of addition under 2**24 = 16,777,216 cells, so a shard left out
+or counted twice reads off by its 25,122 to 250,000 cells at the gate's
+sizes, ghost rows counted by their 1,532 to 4,830, and pad rows counted by
+half a cell each (1.5 cells at 100,489; 300,304 and 1,000,000 cells divide
+by four, have no pad row, and nothing can be miscounted there).  The float
+`total` of the goal's own field is recorded (`parity_total`) and must be
+finite, and is held to no limit: that field's sum cancels (`sum|x| / |sum
+x|` of 22 to 69,000), so eight float32 orders of addition of the same
+field differ by up to 3.5e-4 of the total while every ghost row counted
+moves it by 3.6e-4 at 1,000,000 cells, and no limit on that number tells
+the two apart.  (Until schema 8 it was held to 1e-5: on CPU it read
+6.95e-6 at 300,304 cells after the dry run's 3 steps and 0.0 at the gate's
+sizes after 20, with the field itself bit-identical.)  The `sharded_cg` rows of item 3 solve
 `(2 + s) x[i] - x[i-1] - x[i+1] = b[i]` with `s = CG_SHIFT = 0.03` to
 `CG_RTOL = 1e-4` in float32, for a white-noise `b`: a system both sides
 converge on in 55 to 58 iterations a solve at every size (condition number
@@ -473,6 +490,12 @@ big 4m exchange 30000000;  echo $?
 big 9m forward  100000000; echo $?
 ```
 
+At 3e7 and 1e8 cells the `forward` goal prints one `CHECK NOT RUN` a size
+and `INCOMPLETE`, and still exits 0: its exact count of the cells is a
+float32 sum of ones, exact only under 2**24 = 16,777,216 cells, and is
+not run at or over that.  The field is compared entry by entry at every
+size, and the 1e7 run counts its 10,004,569 cells.
+
 **What bounds it is the host's RAM, not the cards.**  The unstructured
 path builds its mesh, its partition and its layout on the host and
 indexes with int32.  Measured in the CPU dry run (four cores, jaxlib
@@ -622,7 +645,7 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (8);
+* be on the current `schema_version` (9);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
@@ -712,7 +735,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 8)
+## Schema of the JSON (schema_version 9)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -785,7 +808,12 @@ compile without execution.
   `methods.<m>` = `compile_s`, `wrapper_first_call_s` (host
   partitioning of the statics by the public `update()`),
   `input_presharded`, `wrapper_step`, `device_step` (timings with
-  `ms_per_step`), `parity_x`, `parity_total`.
+  `ms_per_step`), `parity_x`, `parity_total` (information: no check
+  reads its `max_rel`), `ones` = `total`, `max_abs_from_one`,
+  `entries_not_one` (the step from a field of ones); and
+  `ones_unsharded`, the same three for the unsharded node.  At 2**24
+  cells or more neither `ones` is recorded and the count is one check not
+  run.
 * `gradient.json` results: `cells`, `mesh`, `partition`, `n_devices`,
   `grad_steps`, `rollout.{unsharded,all_to_all,ppermute}` (`grad`
   timing and `compile_s`; `input_presharded` and `parity` for the
@@ -795,7 +823,9 @@ compile without execution.
   `solve.{sharded,unsharded}` = `converged` and `iterations` (the loop's
   own flag and count), `true_residual.{solve,adjoint,tangent}`).
 
-Schema 7 files ran the `gradient` goal's `sharded_cg` part on the
+Schema 8 files held the `forward` goal's float `total` to 1e-5 of
+itself and did not count the cells: they record no step from a field of
+ones.  Schema 7 files ran the `gradient` goal's `sharded_cg` part on the
 unshifted operator with a smooth right-hand side and `rtol=1e-6`, recorded
 neither the system nor its solves, and checked parity only: neither side
 had converged.  Schema 5 files ran the wrapper goals on the 1-D (axis 0) and the pencil

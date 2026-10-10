@@ -5534,7 +5534,8 @@ claims:
   area: run_pod-goals
   claim: >-
     The checklist table's limits -- rel 1e-5 (forward and rollout
-    adjoints), 0 bit for bit (halo), 1e-4 (coupled IFT gradient), 1e-5
+    adjoints), 0 bit for bit (halo) and 0 for the forward goal's count of
+    its cells (RPD-060), 1e-4 (coupled IFT gradient), 1e-5
     ("fori"), 4e-4 (sharded_cg, "each of whose solves must have converged:
     true residual within 2e-4"), 1e-4 against the float64 model -- "live in
     LIMITS in run_pod.py, each with its reason; a dry run is held to the
@@ -5570,7 +5571,7 @@ claims:
 - id: RPD-030
   area: run_pod-records
   claim: >-
-    "Schema of the JSON (schema_version 8)": the common keys (goal, dry_run,
+    "Schema of the JSON (schema_version 9)": the common keys (goal, dry_run,
     allow_fewer_devices, n_devices, environment with hostname ...
     git_commit, config, wall_s, results, checks {name, value, limit, sense,
     passed}, passed) on every file.
@@ -5637,6 +5638,140 @@ claims:
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
     relabelled_records: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_dry_run_relabelled_as_a_four_gpu_run_closes_every_item
+    mixed_commits: n/a
+
+- id: RPD-060
+  area: run_pod-goals
+  claim: >-
+    "The forward goal checks its cross-shard sum exactly: one more public
+    step from a field of ones, which the node leaves a field of ones bit
+    for bit, must return total equal to the number of cells and a field
+    still all ones, with a limit of zero, sharded under both transports and
+    unsharded."  A shard left out of the reduction or counted twice reads
+    off by that shard's cells, ghost rows counted by their number, pad rows
+    counted (the node's own mask ignored) by half a cell each; a size that
+    divides by the device count has no pad row and nothing to miscount.
+    The step from ones runs the program the goal had already compiled.
+  sources:
+    - benchmarks/multigpu/README.md:30 (The sharding checklist)
+    - benchmarks/multigpu/run_pod.py:399 (EXACT_COUNT_CELLS)
+    - benchmarks/multigpu/run_pod.py:1626 (forward_checks)
+  conditions: >-
+    CPU, four virtual devices, float32, both transports; 225 cells (three
+    pad rows) and 256 (none) per push, through run_forward itself; the
+    goal as a dry-run subprocess on scratch copies in the slow lane; five
+    seeded faults (the wrapper's psum, the node's total and its step); the
+    committed record's results degraded.  Measured apart at 100,489,
+    300,304, 1,000,000 and 10,004,569 cells on jax 0.10.2, 0.11.0, 0.11.2.
+  oracle: >-
+    the number of cells, and each fault's own count taken from the layout
+    (a shard's cells, the ghost rows, half the pad rows); exactly zero for
+    the control.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_miscount_fails_the_forward_goals_exact_count
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_forward_goal_fails_a_count_that_is_not_the_number_of_cells
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_forward_goal_fails_a_field_of_ones_the_step_did_not_keep
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-061
+  area: run_pod-goals
+  claim: >-
+    "At 3e7 and 1e8 cells the forward goal prints one CHECK NOT RUN a size
+    and INCOMPLETE, and still exits 0: its exact count of the cells is a
+    float32 sum of ones, exact only under 2**24 = 16,777,216 cells, and is
+    not run at or over that."  At such a size the record holds no step
+    from ones and one check not run in place of the six.
+  sources:
+    - benchmarks/multigpu/README.md:471 (The runner at larger sizes)
+    - benchmarks/multigpu/run_pod.py:399 (EXACT_COUNT_CELLS)
+  conditions: >-
+    the threshold lowered to a dry-run size (no run of 2**24 cells is
+    made): a forward dry run in-process at 225 and 256 cells with the
+    threshold at 256, and the committed record's checks derived again with
+    it at 1024.
+  oracle: >-
+    exit status 0, the printed lines, goal_verdict INCOMPLETE,
+    record_problems empty; the count runs under the threshold and not at it.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_forward_run_too_large_to_count_exactly_exits_0_and_reads_incomplete
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_at_the_float32_integer_limit_the_count_is_a_check_not_run
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_limits_are_the_runbooks
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_forward_run_too_large_to_count_exactly_exits_0_and_reads_incomplete
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-062
+  area: run_pod-records
+  claim: >-
+    "The float total of the goal's own field is recorded (parity_total) and
+    must be finite, and is held to no limit"; "Schema 8 files held the
+    forward goal's float total to 1e-5 of itself and did not count the
+    cells: they record no step from a field of ones."  Such a file is
+    refused for its schema number and, were that number edited, because its
+    results cannot be read; it closes no checklist item.
+  sources:
+    - benchmarks/multigpu/README.md:30 (The sharding checklist)
+    - benchmarks/multigpu/README.md:738 (Schema of the JSON)
+    - benchmarks/multigpu/run_pod.py:1626 (forward_checks)
+  conditions: >-
+    the committed dry-run record of the forward goal, put back into the
+    layout of schema 8 with and without its schema number, relabelled as a
+    four-GPU run; its float total's relative difference and its finite
+    flag degraded.
+  oracle: >-
+    record_problems' lines, goal_verdict INVALID, the checklist's status of
+    item 1; the derived checks' statuses.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_forward_file_written_before_schema_9_is_refused_twice_over
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_float_total_of_the_forward_goal_is_recorded_and_held_to_no_limit
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_float_total_of_the_forward_goal_is_recorded_and_held_to_no_limit
+    relabelled_records: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_forward_file_written_before_schema_9_is_refused_twice_over
     mixed_commits: n/a
 
 - id: RPD-050

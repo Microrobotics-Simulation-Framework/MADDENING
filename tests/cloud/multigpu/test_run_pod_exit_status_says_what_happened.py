@@ -85,6 +85,41 @@ def test_a_failed_check_still_exits_1_and_a_pass_0(rp, tmp_path, monkeypatch):
                                "--out", str(tmp_path / str(ok))]) == want
 
 
+def test_a_forward_run_too_large_to_count_exactly_exits_0_and_reads_incomplete(
+        rp, tmp_path, monkeypatch, capsys):
+    """At 2**24 cells or more the ``forward`` goal's exact count is a check
+    not run (the stress tail's 3e7 and 1e8 cells).  Nothing about it can
+    make a run exit non-zero: the goal's other checks ran and passed, so
+    the run exits 0, prints ``CHECK NOT RUN`` and reads ``INCOMPLETE``.
+    Emulated with the threshold lowered to the second of two dry-run
+    sizes: under it the count runs, at it it does not."""
+    import jax
+
+    assert rp.EXACT_COUNT_CELLS == 2 ** 24
+    monkeypatch.setattr(rp, "EXACT_COUNT_CELLS", 256)
+    status = rp.exit_status(["--goal", "forward", "--dry-run", "--cells", "225", "256",
+                             "--warmup", "0", "--repeats", "1", "--steps", "1",
+                             "--out", str(tmp_path)])
+    printed = capsys.readouterr().out
+    assert status == 0, printed
+    (doc,) = rp._load_results(tmp_path, "forward")
+    small, large = doc["results"]
+    assert (small["cells"], large["cells"]) == (225, 256)
+    assert small["ones_unsharded"]["total"] == 225.0 and "ones_unsharded" not in large
+    assert all("ones" in m for m in small["methods"].values())
+    assert not any("ones" in m for m in large["methods"].values())
+    not_run = [c for c in doc["checks"] if c.get("not_run")]
+    assert [c["name"] for c in not_run] == [
+        "256 cells ones: total == cells exactly, sharded and unsharded"]
+    assert all(c["passed"] for c in doc["checks"] if not c.get("not_run"))
+    assert doc["passed"] is False and rp.record_problems(doc) == []
+    assert rp.goal_verdict([doc]) == "INCOMPLETE"
+    assert "CHECK NOT RUN [forward] 256 cells ones: total == cells exactly" in printed
+    assert "INCOMPLETE (checks not run; the checklist items stay open): forward" in printed
+    assert "CHECK FAILED" not in printed and "FAILED:" not in printed
+    assert len(jax.devices()) < 2 or doc["n_devices"] >= 2
+
+
 def test_an_option_it_does_not_take_still_exits_2(rp):
     with pytest.raises(SystemExit) as raised:
         rp.exit_status(["--goal", "halo", "--dry", "--out", "x"])

@@ -187,7 +187,7 @@ def test_a_file_the_runner_can_read_but_would_not_write_exits_3_with_its_tables(
     path.write_text(json.dumps(doc), encoding="utf-8")
     assert rp.summarise(directory) == 3
     out = capsys.readouterr().out
-    assert "schema_version 5, not 8" in out
+    assert "schema_version 5, not 9" in out
     assert "Halo exchange vs NumPy" in out
 
 

@@ -278,8 +278,21 @@ ADDRESS_SPACE = 8 * _GIB
 #: What the step itself may hold (peak resident set of the child).
 RESIDENT_LIMIT_GB = 1.5
 
-_STEP_UNDER_A_CAP = '''
-    import json, resource, sys, warnings
+#: How a child script reads ITS OWN peak resident set, in GB.  ``ru_maxrss``
+#: is not that: it survives a fork and an exec, so a child that has done
+#: nothing reports what its parent held when it was started.  On CI's slow
+#: lane that was the test session, 1.8 GB (jax 0.11.2) and 3.5 GB (jax
+#: 0.10.2) the first time this step was run there, and both read as the
+#: step's, which holds 0.7 GB.  ``VmHWM`` belongs to the process image.
+_OWN_PEAK = '''
+    def own_peak_gb():
+        with open("/proc/self/status") as status:
+            high_water = [line for line in status if line.startswith("VmHWM:")]
+        return int(high_water[0].split()[1]) / 1e6
+'''
+
+_STEP_UNDER_A_CAP = _OWN_PEAK + '''
+    import json, sys, warnings
     from tests.core.test_spectral_norm_takes_singular_values_only import KEY, pair
 
     n, norm = int(sys.argv[1]), sys.argv[2]
@@ -293,8 +306,13 @@ _STEP_UNDER_A_CAP = '''
         out = {name: bool(report[name])
                for name in ("converged", "spectral_usable", "gradient_bound_usable")}
         out["iterations"] = int(report["iterations"])
-    out["peak_rss_gb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+    out["peak_rss_gb"] = own_peak_gb()
     print("RESULT" + json.dumps(out))
+'''
+
+_AN_IDLE_CHILD = _OWN_PEAK + '''
+    import json
+    print("RESULT" + json.dumps({"peak_rss_gb": own_peak_gb()}))
 '''
 
 
@@ -318,6 +336,17 @@ def _capped(script: str, *arguments: str, address_space: int, timeout: int = 600
                           preexec_fn=cap)
     assert done.returncode == 0, done.stderr[-4000:]
     return json.loads(done.stdout.rsplit("RESULT", 1)[1])
+
+
+def test_a_child_reports_its_own_peak_and_not_this_sessions():
+    """The slow test below holds its child to the child's own peak: an
+    idle child, read the same way (``_OWN_PEAK``), reports about 0.01 GB
+    while this session, with jax imported, holds more than ten times
+    that.  Read from ``ru_maxrss`` the idle child reports the session's
+    memory, and the slow test failed on a step that holds 0.7 GB."""
+    session_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+    out = _capped(_AN_IDLE_CHILD, address_space=ADDRESS_SPACE)
+    assert out["peak_rss_gb"] < 0.05 < session_gb, (out, session_gb)
 
 
 # Per push: tests/core/test_spectral_norm_takes_singular_values_only.py::test_a_step_with_diagnostics_declares_nothing_quadratic_in_the_group

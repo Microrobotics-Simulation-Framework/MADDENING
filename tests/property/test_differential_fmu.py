@@ -95,6 +95,7 @@ from maddening.nodes import BallNode, HeatNode, SpringDamperNode, TableNode
 
 from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.differential import (
+    DEAD_BAND_ON_MEMBERS,
     note,
     assert_trees_identical,
     no_cloud_launch,
@@ -1299,6 +1300,18 @@ class FourPaths(Paths):
             what=f"{what}: TCP bridge vs C wrapper's bridge state")
 
 
+def _compile_again(gm: GraphManager) -> None:
+    """``compile()`` a graph that was compiled when it was built.
+
+    A generated graph can declare a dead band on three or more members
+    (MADD-ANO-254), which ``compile()`` advises on at every call: expected
+    here by name, as ``strategies.GraphRecipe.build`` expects it at the
+    first build.  Nothing else is filtered."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=DEAD_BAND_ON_MEMBERS, category=UserWarning)
+        gm.compile()
+
+
 def op_write_and_export(paths: FourPaths, node: str, key: str, value: Any,
                         compile_first: bool) -> None:
     """``node.params[key] = value`` on the graph the FMU comes from and on
@@ -1313,7 +1326,7 @@ def op_write_and_export(paths: FourPaths, node: str, key: str, value: Any,
     for gm in (m.ref, m.direct):
         gm.get_node(node).params[key] = value
     if compile_first:
-        m.ref.compile()
+        _compile_again(m.ref)
 
     def export():
         with warnings.catch_warnings():
@@ -1324,7 +1337,7 @@ def op_write_and_export(paths: FourPaths, node: str, key: str, value: Any,
     if isinstance(value, int) and not compile_first:
         with pytest.raises(ValueError, match=r"compile\(\)"):
             export()
-        m.ref.compile()
+        _compile_again(m.ref)
     m.md = export()
     m.initial_state = {n: dict(f) for n, f in m.ref._state.items()}       # noqa: SLF001
     m.initial_params = _copy_params(m.ref.params)

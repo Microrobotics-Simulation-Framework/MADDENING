@@ -447,7 +447,7 @@ def test_a_checkpoint_beats_the_config_for_trained_mapping_weights(recipe):
         with pytest.warns(UserWarning, match="live mapping weights"):
             config = gm.to_dict()
         rebuilt = GraphManager.from_dict(config, recipe.registry)
-        rebuilt.compile()
+        _compile_drawn(rebuilt)
         # The recipe rebuild is *not* the trained state: if it were, this
         # property would be vacuous.
         assert any(

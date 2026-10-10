@@ -2364,6 +2364,17 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     the norm reads no active field -- it then measures nothing, and the
     residual is ``0.0`` too.
 
+    Experimental: where an internal edge carries a geometry-dependent
+    mapping of a kind with a length scale (``multilinear_grid``), what it
+    delivers is no finer than the weights its kernel forms from the
+    stored positions, and under ``"l2"`` and ``"mixed"`` every **value**
+    field of the group is counted no finer than one rounding of the
+    kernel's coordinate per evaluation (:func:`_kernel_rounding_eps`;
+    the positions keep their own dtype's ``eps``).  Under
+    ``"interface"`` the same rounding is counted part by part
+    (:func:`_part_resolution`).  A group with no such edge is counted as
+    it always was, by the same Python floats.
+
     Parameters
     ----------
     state : dict
@@ -2390,7 +2401,9 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     pre_step : callable or dict, optional
         A member's pre-step state, by name (read under ``"interface"``
         for an edge whose geometry-dependent mapping is anchored at its
-        target).  EXPERIMENTAL (new in 0.4.0).
+        target, and under ``"l2"`` and ``"mixed"`` for the positions
+        such a mapping's kernel formed its weights from; refused where
+        one is needed and not given).  EXPERIMENTAL (new in 0.4.0).
     evaluations : float
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.

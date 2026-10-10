@@ -508,7 +508,30 @@ def test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged(tmp_pa
         # a converged solve reads just under its tolerance, never far under
         assert all(rp.CG_RTOL / 4 < r <= rp.LIMITS["krylov_residual"]
                    for r in solve["true_residual"].values()), solve
+        # ... and the three are the residuals of three systems, not one reported thrice
+        assert len(set(solve["true_residual"].values())) == 3, solve
     assert cg["solve"]["sharded"]["iterations"] == cg["solve"]["unsharded"]["iterations"]
+
+
+def test_the_host_residual_is_that_of_the_shifted_operator_in_float64():
+    """What the convergence checks measure with: ``|rhs - A x| / |rhs|`` for
+    the tridiagonal ``A`` with ``2 + CG_SHIFT`` (as float32 rounds it) on
+    its diagonal and -1 beside it, against a dense matrix written here."""
+    rp = _runner()
+    n = 9
+    diagonal = float(np.float32(2 + rp.CG_SHIFT))
+    a = diagonal * np.eye(n) - np.eye(n, k=1) - np.eye(n, k=-1)
+    rng = np.random.default_rng(3)
+    x, off = rng.standard_normal(n), rng.standard_normal(n)
+    rhs = a @ x
+    assert rp._cg_true_residual(x, rhs) < 1e-15
+    assert rp._cg_true_residual(x.astype(np.float32), rhs) < 1e-6      # float32 in, float64 inside
+    want = np.linalg.norm(off) / np.linalg.norm(rhs + off)
+    assert rp._cg_true_residual(x, rhs + off) == pytest.approx(want, rel=1e-12)
+    assert rp._cg_true_residual(np.zeros(n), rhs) == 1.0
+    # the unshifted operator is another system: by CG_SHIFT |x| / |rhs|
+    unshifted = (a - rp.CG_SHIFT * np.eye(n)) @ x
+    assert rp._cg_true_residual(x, unshifted) > 1e-3
 
 
 @pytest.mark.parametrize("name", sorted(_CG_SEEDS))

@@ -327,7 +327,7 @@ _SEEDS = [
     (_the_cases_on_spatial_axis_1_left_out,
      "lacks case(s) the runner runs for cells [256, 1024] on 4 devices"),
     (_a_gradient_file_of_schema_7_relabelled,
-     "gradient.json: its results cannot be read (KeyError: 'solve')"),
+     "gradient.json cannot decide it (its results cannot be read (KeyError: 'solve'))"),
     (_the_convergence_checks_deleted_from_gradient,
      "lacks 16 check(s) the runner derives from its results: '256 dof sharded_cg sharded "
      "solve stopped on its tolerance, not on the iteration cap'"),

@@ -1,12 +1,12 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "goal": "forward",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-10T18:14:56Z",
+    "timestamp_utc": "2026-10-10T20:45:36Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "90cf87b9ca57fa02174fc7bb202f5b2dac0aa1ce"
+    "git_commit": "0b061d1c9ef52c4dda932ba0c1207d3e0c0c4d3a"
   },
   "config": {
     "goal": "all",
@@ -57,34 +57,34 @@
       "steps": 3,
       "methods": {
         "all_to_all": {
-          "compile_s": 0.21535214500909206,
-          "wrapper_first_call_s": 0.13715899900125805,
+          "compile_s": 0.12048036699707154,
+          "wrapper_first_call_s": 0.0675116870115744,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              2.2979710047366098,
-              1.923179006553255,
-              2.0534890063572675
+              1.8640119960764423,
+              1.800212005036883,
+              1.713661986286752
             ],
-            "min_ms": 1.923179006553255,
-            "median_ms": 2.0534890063572675,
-            "mean_ms": 2.0915463392157108,
-            "ms_per_step": 0.6844963354524225
+            "min_ms": 1.713661986286752,
+            "median_ms": 1.800212005036883,
+            "mean_ms": 1.7926286624666925,
+            "ms_per_step": 0.6000706683456277
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.3799109981628135,
-              0.6088079971959814,
-              0.15920799341984093
+              0.836271996377036,
+              0.2806940028676763,
+              0.1907639962155372
             ],
-            "min_ms": 0.15920799341984093,
-            "median_ms": 0.3799109981628135,
-            "mean_ms": 0.38264232959287864,
-            "ms_per_step": 0.1266369993876045
+            "min_ms": 0.1907639962155372,
+            "median_ms": 0.2806940028676763,
+            "mean_ms": 0.43590999848674983,
+            "ms_per_step": 0.09356466762255877
           },
           "parity_x": {
             "max_abs": 0.0,
@@ -97,37 +97,42 @@
             "max_rel": 0.0,
             "reference_scale": 183.40968322753906,
             "finite": true
+          },
+          "ones": {
+            "total": 256.0,
+            "max_abs_from_one": 0.0,
+            "entries_not_one": 0
           }
         },
         "ppermute": {
-          "compile_s": 0.13373782100097742,
-          "wrapper_first_call_s": 0.002682165999431163,
+          "compile_s": 0.08456149899575394,
+          "wrapper_first_call_s": 0.0011553279910003766,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              2.275407998240553,
-              2.267768999445252,
-              2.0913299958920106
+              1.8036239926004782,
+              1.907710000523366,
+              1.7562059947522357
             ],
-            "min_ms": 2.0913299958920106,
-            "median_ms": 2.267768999445252,
-            "mean_ms": 2.211502331192605,
-            "ms_per_step": 0.755922999815084
+            "min_ms": 1.7562059947522357,
+            "median_ms": 1.8036239926004782,
+            "mean_ms": 1.8225133292920266,
+            "ms_per_step": 0.6012079975334927
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.504953000927344,
-              0.21470199862960726,
-              0.2241100009996444
+              0.3499000013107434,
+              0.27566999779082835,
+              0.16348899225704372
             ],
-            "min_ms": 0.21470199862960726,
-            "median_ms": 0.2241100009996444,
-            "mean_ms": 0.3145883335188652,
-            "ms_per_step": 0.07470333366654813
+            "min_ms": 0.16348899225704372,
+            "median_ms": 0.27566999779082835,
+            "mean_ms": 0.26301966378620517,
+            "ms_per_step": 0.09188999926360945
           },
           "parity_x": {
             "max_abs": 0.0,
@@ -140,6 +145,11 @@
             "max_rel": 0.0,
             "reference_scale": 183.40968322753906,
             "finite": true
+          },
+          "ones": {
+            "total": 256.0,
+            "max_abs_from_one": 0.0,
+            "entries_not_one": 0
           }
         }
       },
@@ -150,6 +160,11 @@
         "ppermute": 32,
         "useful": 19,
         "ppermute_messages": 2
+      },
+      "ones_unsharded": {
+        "total": 256.0,
+        "max_abs_from_one": 0.0,
+        "entries_not_one": 0
       }
     },
     {
@@ -160,34 +175,34 @@
       "steps": 3,
       "methods": {
         "all_to_all": {
-          "compile_s": 0.20356333599193022,
-          "wrapper_first_call_s": 0.13717162700777408,
+          "compile_s": 0.12341243600531016,
+          "wrapper_first_call_s": 0.06603868199454155,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              2.3041559907142073,
-              2.1116719872225076,
-              2.0928800076944754
+              1.9189500017091632,
+              1.9390289962757379,
+              1.8177700112573802
             ],
-            "min_ms": 2.0928800076944754,
-            "median_ms": 2.1116719872225076,
-            "mean_ms": 2.16956932854373,
-            "ms_per_step": 0.7038906624075025
+            "min_ms": 1.8177700112573802,
+            "median_ms": 1.9189500017091632,
+            "mean_ms": 1.8919163364140938,
+            "ms_per_step": 0.6396500005697211
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              1.2407929898472503,
-              0.26349299878347665,
-              0.1829699904192239
+              0.35679800203070045,
+              0.3573809954104945,
+              0.16075999883469194
             ],
-            "min_ms": 0.1829699904192239,
-            "median_ms": 0.26349299878347665,
-            "mean_ms": 0.562418659683317,
-            "ms_per_step": 0.08783099959449221
+            "min_ms": 0.16075999883469194,
+            "median_ms": 0.35679800203070045,
+            "mean_ms": 0.2916463320919623,
+            "ms_per_step": 0.11893266734356682
           },
           "parity_x": {
             "max_abs": 1.1920928955078125e-07,
@@ -200,37 +215,42 @@
             "max_rel": 0.0,
             "reference_scale": 169.25265502929688,
             "finite": true
+          },
+          "ones": {
+            "total": 1024.0,
+            "max_abs_from_one": 0.0,
+            "entries_not_one": 0
           }
         },
         "ppermute": {
-          "compile_s": 0.1468445009959396,
-          "wrapper_first_call_s": 0.003315451991511509,
+          "compile_s": 0.08858514000894502,
+          "wrapper_first_call_s": 0.001232609007274732,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              2.6320320030208677,
-              2.246048010420054,
-              1.9659959943965077
+              1.7852900055004284,
+              1.812925998819992,
+              1.8439790001139045
             ],
-            "min_ms": 1.9659959943965077,
-            "median_ms": 2.246048010420054,
-            "mean_ms": 2.281358669279143,
-            "ms_per_step": 0.7486826701400181
+            "min_ms": 1.7852900055004284,
+            "median_ms": 1.812925998819992,
+            "mean_ms": 1.8140650014781083,
+            "ms_per_step": 0.6043086662733307
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.45061799755785614,
-              0.219445995753631,
-              0.205489996005781
+              0.28512599237728864,
+              0.28614701295737177,
+              0.1733859971864149
             ],
-            "min_ms": 0.205489996005781,
-            "median_ms": 0.219445995753631,
-            "mean_ms": 0.29185132977242273,
-            "ms_per_step": 0.07314866525121033
+            "min_ms": 0.1733859971864149,
+            "median_ms": 0.28512599237728864,
+            "mean_ms": 0.2482196675070251,
+            "ms_per_step": 0.09504199745909621
           },
           "parity_x": {
             "max_abs": 1.1920928955078125e-07,
@@ -243,6 +263,11 @@
             "max_rel": 0.0,
             "reference_scale": 169.25265502929688,
             "finite": true
+          },
+          "ones": {
+            "total": 1024.0,
+            "max_abs_from_one": 0.0,
+            "entries_not_one": 0
           }
         }
       },
@@ -253,6 +278,11 @@
         "ppermute": 64,
         "useful": 39,
         "ppermute_messages": 2
+      },
+      "ones_unsharded": {
+        "total": 1024.0,
+        "max_abs_from_one": 0.0,
+        "entries_not_one": 0
       }
     }
   ],
@@ -273,18 +303,25 @@
       "passed": true
     },
     {
-      "name": "256 cells all_to_all total vs unsharded max_rel",
-      "value": 0.0,
-      "limit": 1e-05,
-      "sense": "<=",
-      "passed": true
-    },
-    {
       "name": "256 cells all_to_all total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
       "detail": "",
+      "passed": true
+    },
+    {
+      "name": "256 cells all_to_all ones: |total - cells|",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 cells all_to_all ones: max |x - 1| after the step",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
       "passed": true
     },
     {
@@ -303,18 +340,39 @@
       "passed": true
     },
     {
-      "name": "256 cells ppermute total vs unsharded max_rel",
-      "value": 0.0,
-      "limit": 1e-05,
-      "sense": "<=",
-      "passed": true
-    },
-    {
       "name": "256 cells ppermute total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
       "detail": "",
+      "passed": true
+    },
+    {
+      "name": "256 cells ppermute ones: |total - cells|",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 cells ppermute ones: max |x - 1| after the step",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 cells unsharded ones: |total - cells|",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 cells unsharded ones: max |x - 1| after the step",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
       "passed": true
     },
     {
@@ -333,18 +391,25 @@
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all total vs unsharded max_rel",
-      "value": 0.0,
-      "limit": 1e-05,
-      "sense": "<=",
-      "passed": true
-    },
-    {
       "name": "1024 cells all_to_all total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
       "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1024 cells all_to_all ones: |total - cells|",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 cells all_to_all ones: max |x - 1| after the step",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
       "passed": true
     },
     {
@@ -363,21 +428,42 @@
       "passed": true
     },
     {
-      "name": "1024 cells ppermute total vs unsharded max_rel",
-      "value": 0.0,
-      "limit": 1e-05,
-      "sense": "<=",
-      "passed": true
-    },
-    {
       "name": "1024 cells ppermute total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
       "detail": "",
       "passed": true
+    },
+    {
+      "name": "1024 cells ppermute ones: |total - cells|",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 cells ppermute ones: max |x - 1| after the step",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 cells unsharded ones: |total - cells|",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 cells unsharded ones: max |x - 1| after the step",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
     }
   ],
   "passed": true,
-  "wall_s": 1.6741539789945818
+  "wall_s": 0.9786806430056458
 }

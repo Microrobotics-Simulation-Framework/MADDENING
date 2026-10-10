@@ -6725,3 +6725,59 @@ claims:
     adaptive: n/a
     checkpoint_restart: n/a
     sharded: n/a
+
+- id: FMU-063
+  area: model description
+  claim: >-
+    "A field takes an external input or edges, not both: the input replaces
+    whatever an edge delivers to its field (with zeros when it is not fed),
+    so compile() refuses a graph that has both on one field with a
+    ValueError naming them, and validate() lists it."  The export takes a
+    compiled graph, so no FMU is described from such a graph: an FMU input
+    and an edge never drive one field.
+  sources:
+    - src/maddening/core/graph_manager.py::GraphManager.add_external_input
+    - src/maddening/core/graph_manager.py::GraphManager.add_edge
+    - docs/user_guide/quickstart.md (Advisories on multi-node graphs)
+  conditions: >-
+    an edge of each kind (plain, additive, two additive ones, transformed,
+    with units, mapped, with a geometry, inside a coupling group, from a
+    node to itself, into a wrapped node) whose target field is a declared
+    external input, the two declared in either order; several such pairs at
+    once and an edge added twice; compile(), validate(), each stepping
+    entry point on a graph never compiled and on one compiled before it
+    gained the pair, a config loaded with from_dict, the REST routes that
+    compile, and build_model_description.
+  oracle: >-
+    the ValueError and the parts of its text (the pair, the two calls, the
+    hedge); the one ERROR line of validate(); the 400 and its detail; the
+    description refused; the controls beside them step.
+  tests:
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_compile_raises_one_value_error_and_validate_lists_it_in_either_order
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_the_message_names_the_pair_and_both_fixes_and_only_suggests_how_it_came_about
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_every_kind_of_edge_onto_an_external_input_is_refused
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_several_pairs_give_one_error_that_names_them_all_in_the_order_of_the_edges
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_every_stepping_entry_point_refuses_with_the_text_compile_raises
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_a_compiled_graph_that_gains_the_other_one_is_refused_at_its_next_step
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_a_config_that_holds_both_loads_and_is_refused_when_it_is_compiled
+    - tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_no_fmu_is_described_from_such_a_graph
+    - tests/api/test_an_edge_onto_an_external_input_is_refused_over_rest.py::test_an_edge_posted_onto_an_external_input_is_a_400_wherever_the_graph_is_compiled
+  status: verified
+  notes: >-
+    Missing from the inventory, and silent, in every release: the edge
+    never reached the node and nothing said so (MADD-ANO-265).  The rule is
+    asked of the names alone, so no numeric domain changes it.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a

@@ -1744,6 +1744,11 @@ class GraphManager:
         :meth:`format_graph` beside the edge; :meth:`compile` raises no
         warning for it.
 
+        An edge whose target field is also a declared external input
+        (:meth:`add_external_input`) is taken here and refused by
+        :meth:`compile` with a ``ValueError`` that names both, since the
+        input would replace what the edge delivers on every step.
+
         ``mapping`` (a :class:`maddening.core.coupling.mapping.Mapping`)
         transfers the source field onto the target interface before
         ``transform`` is applied; its weights are snapshotted into
@@ -2009,6 +2014,12 @@ class GraphManager:
         External inputs appear in the target node's ``boundary_inputs``
         dict alongside edge-delivered values.  They are supplied via the
         ``external_inputs`` argument to :meth:`step` or :meth:`run`.
+
+        A field takes an external input or edges, not both: the input
+        replaces whatever an edge delivers to its field (with zeros when
+        it is not fed), so :meth:`compile` refuses a graph that has both
+        on one field with a ``ValueError`` naming them, and
+        :meth:`validate` lists it.
 
         Parameters
         ----------

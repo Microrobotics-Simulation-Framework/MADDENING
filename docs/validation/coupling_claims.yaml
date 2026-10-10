@@ -4376,6 +4376,7 @@ claims:
     - 'tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_group_of_one_dtype_keeps_the_floor_it_had'
     - 'tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_steps_analysis_counts_every_entry_at_the_groups_coarsest_eps'
     - tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_analysis_of_a_reading_counts_what_an_edge_delivers_at_the_groups_coarsest_eps
+    - tests/property/test_coupling_geometry_interface_norm.py::test_a_narrowing_transform_on_a_geometry_edge_raises_the_values_and_not_the_positions
   status: verified
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve

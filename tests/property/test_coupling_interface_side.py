@@ -753,10 +753,29 @@ def test_a_settled_spectrum_and_its_bounds_are_the_marker_side_twin_s(shape, gra
     settles in both graphs, ``spectral_error_bound`` is finite, and on the
     rows that report a gradient bound that is finite too.  A spectral
     analysis left on the delivered side of the scatter (the fault no
-    instrument saw while the criterion read that side too) moves these."""
+    instrument saw while the criterion read that side too) moves these.
+
+    **The float32 row that holds its mapping as a dense matrix has no
+    flag, and says why.**  The matrix is 500 entries wide, and the
+    float-floor guard on a mapped row counts a dense matrix at its width
+    (MADD-ANO-257): the pair accepts within that row's reach of its
+    float floor, so both graphs withdraw ``spectral_usable`` and
+    ``gradient_bound_usable`` with that guard's reason (the same string,
+    compared above) and keep every number.  Its spectrum settles all the
+    same, which is what the row is for: the bound is finite, where an
+    unsettled spectrum's is infinite, and the two graphs' numbers are
+    the ones compared.  The float64 row of the same matrix keeps its
+    flags (the wider dtype)."""
     mapped, twin = _same_reports(shape)
+    withdrawn_for_the_row = shape.mapping == "matrix" and shape.dtype == "float32"
     for report in (mapped, twin):
-        assert bool(report["converged"]) and bool(report["spectral_usable"]), report
+        assert bool(report["converged"]), report
+        if withdrawn_for_the_row:
+            assert not report["spectral_usable"] and not report["gradient_bound_usable"], report
+            assert "MADD-ANO-257" in report["not_usable_reason"], report
+            assert "adds up 500 entries" in report["not_usable_reason"], report
+        else:
+            assert bool(report["spectral_usable"]) and "not_usable_reason" not in report, report
+            assert bool(report["gradient_bound_usable"]) is gradient, report
         assert math.isfinite(float(report["spectral_error_bound"])), report
-        assert bool(report["gradient_bound_usable"]) is gradient, report
         assert math.isfinite(float(report["gradient_relative_error_bound"])) is gradient, report

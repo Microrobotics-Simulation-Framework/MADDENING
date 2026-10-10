@@ -153,6 +153,12 @@ class StaticLinearMapping:
     back as ``weights`` on every step.  Compared and hashed by identity
     (``eq=False``): an ``EdgeSpec`` holding a mapping must stay hashable,
     and two mappings with equal matrices are still two edges' weights.
+
+    Each delivered value is a sum over the matrix's width.  A coupling
+    report's float floor does not count that sum's rounding, and
+    ``coupling_diagnostics()`` withdraws ``spectral_usable`` at the
+    float floor of a group with such a mapping more than ten entries
+    wide on an internal edge, whatever the weights are (MADD-ANO-257).
     """
     H: Any
     kind: str = "matrix"
@@ -598,6 +604,18 @@ def projection_1d_mapping(
       in zeros, and one wholly outside it is zero.  Two grids that share
       no interval therefore give a matrix of zeros: check that they are
       in the same units and frame.
+
+    **The weights are float32 whatever** ``jax_enable_x64`` **says**, as
+    :func:`nearest_neighbor_mapping`'s are (:func:`rbf_mapping`'s follow
+    float64 points there; :func:`matrix_mapping` keeps the dtype it is
+    given).  The overlap formula is evaluated in float64 on the host and
+    rounded once, so a config written under one setting rebuilds the same
+    weights under the other, and a float32 field stays float32 through
+    the mapping in an x64 process.  The price is in a float64 graph: there
+    a row sums to one, and the integral is preserved, to float32 rounding
+    (about 3e-8 relative) and not to float64.  Where that matters, build
+    ``P`` from the formula above in float64 and hand it to
+    :func:`matrix_mapping` under ``jax_enable_x64``.
     """
     from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
 

@@ -17,6 +17,8 @@ target node, and `field` is a state field of that node.
 
 ## An example
 
+*Porting a node that samples a cell-centred grid itself?  See the worked example [Moving a node's own sampling onto an edge](moving_a_sampling_onto_an_edge.md).*
+
 A row of markers drifts across a one-dimensional grid.  One edge samples
 the grid's field at the markers (a *gather*, `mode="consistent"`); the
 other deposits the markers' values back on the grid (a *scatter*,
@@ -113,10 +115,61 @@ names the edge and says what to do.
 | `replace_node`, `POST /surrogate/activate`, `POST /surrogate/deactivate` | a replacement that does not hold the geometry field with the same shape and a float32 or float64 dtype; nothing is changed (the REST routes answer 409) |
 | `DatasetGenerator` | a target node fed through a geometry edge |
 | the `multilinear_grid` kind | a non-floating field, when the step is traced |
-| any entry point that traces a step (`step`, `run`, `run_scan`, `resolve_boundary_inputs`, ...) | a geometry whose dtype a state write made after `compile()` (`set_node_state`), or a node's own `update`, changed to one `compile()` refuses: not float32 or float64, or too coarse for the grid.  A program is traced again when a dtype changes, and the rule is asked then |
+| any entry point that traces a step (`step`, `run`, `run_scan`, `resolve_boundary_inputs`, ...) | a geometry whose dtype or shape a state write made after `compile()` (`set_node_state`), or a node's own `update`, changed to one `compile()` refuses: not float32 or float64, too coarse for the grid, or not of the shape the mapping reads.  A program is traced again when a dtype or a shape changes, and the rules are asked then.  The warning at 1/1024 of a cell is not: `validate()` and `compile()` give it, of the state they are called with |
 
 ## Limits in 0.4.0
 
+* **A group that solves the positions of a geometry-dependent mapping
+  has no usable flag.**  Where a coupling group's pass reads a position
+  from the iterate, or builds one and reads it in the same pass,
+  `spectral_usable` and `gradient_bound_usable` are `False` on every
+  step, whatever the numbers read.  The numbers (`rho_spectral`,
+  `spectral_error_bound`, `gradient_relative_error_bound`) are reported
+  as computed, uncertified, and `not_usable_reason` names the positions
+  and says this.  **Two ways to keep the flags**, both of which fix every
+  position during the pass:
+
+  - anchor the geometry at a target that `update` reads
+    (`geometry=("target", field)`: the member's pre-step positions), on
+    every geometry edge of the group;
+  - keep the node that holds the positions outside the group (it then
+    moves between the group's solves, not inside them).
+
+  The positions a pass solves are a member's source-anchored geometry
+  (`geometry=("source", field)` on an edge inside the group: in the
+  example above, the scatter's) and the target-anchored geometry of a
+  member that computes fluxes.  No tolerance and no `convergence_norm`
+  restores the flags of such a group in 0.4.0, and a group with more
+  than eight independent interface scalars has no flag with or without
+  a geometry (the spectral estimate takes eight Krylov steps).
+
+  *Why.*  A multilinear stencil is one polynomial of the positions
+  inside a lattice cell and another in the next, so the pass's Jacobian
+  jumps where a position crosses a lattice plane, or a face of the
+  grid's hull (outside it the kernel clamps).  The three numbers are the
+  linearisation at the returned iterate: they describe the polynomial
+  the pass is in the lattice cells its positions are in *there*, and
+  `spectral_error_bound` is the distance to *that polynomial's* fixed
+  point, which is the pass's only if it lies in those cells.  Three
+  rules in turn tried to certify that it does, and an independent audit
+  of each found `spectral_usable` set beside a wrong number near a
+  lattice plane: a bound 0.13 times the true distance (MADD-ANO-242);
+  17 to 1,294 times under it, and a gradient bound 15 to 70,000 times
+  under the true error; and last, 34 to 1,874 times under it on a
+  `converged` solve in a cell whose polynomial has no fixed point at
+  all (MADD-ANO-252).  A sharper rule is left to a later release; until
+  then the numbers of such a group are an estimate and not a
+  certificate.  Away from lattice planes they are usually right: an
+  audit of the example above over 300 steps found no wrong number among
+  the reports the last rule had flagged, against a float64 reference.
+* **For a group that solves positions, prefer
+  `convergence_norm="interface"`**, which measures a position in lattice
+  spacings.  Under `"l2"` and `"mixed"` a position field is scaled by
+  its own largest magnitude, so a marker near the coordinate origin is
+  weighted enormously and what the solve calls converged depends on
+  where the origin is: with one marker 5e-4 from coordinate zero (its
+  position weighted by 2,008) `rho_spectral` read 0.245 for 0.153 in
+  float32.
 * **Coupling diagnostics read a geometry in one case.**  The step, the
   coupling passes and their gradients read the geometry everywhere.
   `coupling_diagnostics()` reports the bounds of a group that resolves a
@@ -145,14 +198,21 @@ names the edge and says what to do.
     tolerance, on a deposit so weak that it moved the grid's field by
     nine resolutions.  The spectral radius reported there was 0.003
     against 0.025.
-  - **An honest float32 report can be withheld beside a lattice plane.**
-    Where a member reads, in the same Gauss-Seidel sweep, positions that
-    another member has just built, and one of them is within about 2e-5
-    of a spacing of a lattice plane, the check's step carries it across
+  - **An honest report can be withheld beside a lattice plane.**
+    Where a member reads, in the same sweep, positions that another
+    member has just built, and one of them is within the check's own
+    step of a lattice plane -- `sqrt(eps)` of a spacing: 3.45e-4 in
+    float32, 1.5e-8 in float64 -- the check's step carries it across
     the plane and the difference is not a derivative.  Of 2829 drawn
-    examples of two such groups, 1489 of them that near a plane, 47 read
-    over 0.05, two over 0.2 and one 0.59; of a thousand further from a
-    plane none read over 5e-3 (MADD-ANO-246).
+    float32 examples of two such Gauss-Seidel groups (1489 within 2e-5
+    of a spacing of a plane), 47 read over 0.05, two over 0.2 and one
+    0.59; of a thousand further than 2e-5 from a plane none read over
+    5e-3.  An independent audit that placed fixed points at every
+    distance from a plane had 180 honest reports withheld in 65,714,
+    each with a position the pass reads within that step of a plane (up
+    to 2.9e-4 of a spacing in float32, 6.8e-9 in float64): 45 in
+    float32 and 135 in float64, two of them weakly coupled Jacobi groups
+    (MADD-ANO-246).
   - **An honest float32 report is withheld behind a strongly cancelling
     gather.**  A Gauss-Seidel group whose gather samples a field that
     changes sign across a cell reads 0.25 to 0.75 once the lattice
@@ -168,31 +228,30 @@ names the edge and says what to do.
   lower because of the second limit: at 0.05 the check would catch the
   weak deposit and would withhold 7 to 9 of the 4,450 honest examples of
   the test suite's searches, where it now withholds none or one.
-* **Across a lattice plane the flags are withdrawn and the numbers
-  kept.**  A multilinear stencil is one polynomial of the positions
-  inside a lattice cell and another in the next, so the pass's Jacobian
-  jumps where a position crosses a lattice plane, or a face of the
-  grid's hull (outside it the kernel clamps).  `rho_spectral`,
-  `spectral_error_bound` and `gradient_relative_error_bound` are the
-  linearisation at the returned iterate: they describe the pass in the
-  lattice cells its positions are in *there*.  Where a position the pass
-  reads from the iterate is within twice `spectral_error_bound` of a
-  lattice plane, the bound stands only if the step certified its
-  linearisation across the Newton step to the fixed point (the
-  Newton-Kantorovich check behind `gradient_relative_error_bound`, which
-  is then finite).  Otherwise `spectral_usable` and
-  `gradient_bound_usable` are `False`, the numbers are reported as
-  computed, and `not_usable_reason` names the case: the fixed point may
-  be in the next cell, where the pass contracts at another rate.
-  Measured on a marker whose fixed point was 2e-4 of a spacing past a
-  plane: a radius of 0.28 before the plane and 0.97 after it, and a
-  bound 0.13 times the true distance on a converged solve.  The
-  positions concerned are a member's source-anchored geometry and the
-  target-anchored geometry of a member that computes fluxes; a position
-  that is a constant of the pass (a target-anchored geometry read by
-  `update`, a node outside the group) does not move between the iterate
-  and the fixed point and withdraws nothing.  A tighter tolerance
-  usually brings the returned iterate into the fixed point's cell.
+* **How far the lattice planes are is still stored, as two numbers.**
+  For a group that solves positions the step writes, in the state's
+  internal `_meta` entry, `geometry_plane_limit` (the largest
+  `spectral_error_bound` at which no position the pass reads from the
+  iterate is within twice the bound of a lattice plane or of a face of
+  the hull) and `geometry_plane_margin` (how many radii of the
+  Newton-Kantorovich ball around the returned iterate the nearest plane
+  is away: the Newton step's own move of the position, plus one more
+  Newton step and the float floor, in the group's norm).  A position
+  within eight float resolutions of a plane counts as on it (the kernel
+  decides the cell from a rounded quotient), and a marker at rest on a
+  lattice point or a hull face has a margin of zero on every step.  Both
+  read `inf` for a group whose positions are all fixed during the pass.
+  **No flag stands on either in 0.4.0**: that a margin over one puts the
+  fixed point in the iterate's cell is proved only where the cell's
+  polynomial satisfies the Newton-Kantorovich condition, which the step
+  does not prove (the algorithm guide has the argument and the case
+  that defeats it).
+* **`not_usable_reason` of a group whose positions are fixed during the
+  pass gives every cause of a `False` flag** of a step that computed the
+  estimate: the float floor, an estimate that did not settle, a gradient
+  bound that was not computed (NaN) told from one that did not certify
+  (`inf`).  It never names a lattice plane: no plane can come between
+  the iterate and the fixed point of such a pass.
 * **Everywhere else the report says so.**  For any other group that
   resolves a geometry-dependent mapping (another mapping kind, a
   sub-cycled group, the interface norm), `coupling_diagnostics()` reports `iterations`,
@@ -412,7 +471,8 @@ names the edge and says what to do.
   a coupling group.  If its components are not affine coordinates (a
   quaternion, a wrapped angle), set `boundary_interpolation="constant"`.
 * `POST /graph/edges` cannot create a mapped edge, so it cannot create one
-  with a geometry; `GET /graph` shows the key.
+  with a geometry: a body with a `mapping` or a `geometry` key is refused
+  (422, the key named) and no edge is added; `GET /graph` shows the key.
 * One kind ships, `multilinear_grid`.  Your own kind registers with
   `register_mapping(..., needs_geometry=True)` and declares
   `needs_geometry = True` and `geometry_shape`; see the `Mapping`

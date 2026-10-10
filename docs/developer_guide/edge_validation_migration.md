@@ -52,6 +52,15 @@ All shape/dtype errors detected during a single `compile()` call are
 aggregated and raised together — the lab-newcomer "see every problem
 at once" property is preserved by the `ExceptionGroup` shape.
 
+`compile()` asks these rules of the state it is given. The shape rule is
+asked again wherever a step is traced, so a field written with another
+shape afterwards (`set_node_state`) raises the same `ExceptionGroup` of
+`ShapeMismatchError` at the next `step()` or `run_scan()` in place of
+being broadcast, and a source field dropped from the state is a
+`KeyError` naming the edge. The dtype rule is not asked there (a node's
+update may widen float32 to float64 under x64): call `validate()` after
+a write that may have changed a dtype.
+
 ## The escape hatch: any `transform=` on the edge suppresses the check
 
 When an edge has a `transform=` callable, both shape and dtype checks

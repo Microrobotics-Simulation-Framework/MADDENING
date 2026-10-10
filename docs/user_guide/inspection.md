@@ -370,6 +370,23 @@ and is not itself an iterate of the loop; its own residual can be a few times th
 See "What a converged step returns under each norm" in
 [the algorithm guide](../developer_guide/coupling_algorithm_guide.md).
 
+**A dead band (`atol > 0`) on three or more members, or under Jacobi.**  Leave `atol` at `0.0`
+there in 0.4.0.  A field at or below `atol` leaves the residual, and a change that has to cross it
+is not seen until it reaches a field the norm keeps, so such a group can report `converged=True`
+after one pass with a kept field thousands of tolerances from its fixed point (MADD-ANO-254, open:
+4.5e5 to 7.4e5 tolerances on a Jacobi pair, 4.6e3 to 1.8e4 on a Gauss-Seidel ring of three swept
+against its data flow, under every norm).  `compile()` warns and `validate()` says so.  A pair under
+Gauss-Seidel held in both sweep orders in every case measured.  At `atol=0.0` only a field that is
+exactly zero leaves the residual; every non-zero field, however small, is measured against its own
+magnitude.  The dead band is expected to be replaced in 0.5.0, so do not tune to it.
+
+**Mixed dtypes.**  The float floor, and so `precision_limited` and both usable flags, is counted at
+the coarsest floating dtype the group's pass goes through: any field of any member that holds
+entries (a field no loop passes through included), and what every internal edge delivers after its
+mapping and its transform, so a transform that narrows to float32 between float64 members is
+counted.  A narrowing *inside* a node's own `update` (a cast down and back) cannot be seen from
+outside and is not counted: declare the narrower field, or do not rely on the flags there.
+
 **What a node declares for `spectral_usable` at the float floor.**  A group whose residual is at
 its float floor (`precision_limited=True`: any converged float32 group at the default tolerance)
 reports `spectral_usable=False`, and so `gradient_bound_usable=False`, unless every node in it
@@ -438,39 +455,74 @@ corrects it.  After loading a checkpoint into a graph configured differently, st
 reading `coupling_diagnostics()`.
 
 **A group with a geometry-dependent mapping** (experimental, see
-[Geometry-dependent mappings](geometry_dependent_mappings.md)) reports like any other group where
+[Geometry-dependent mappings](geometry_dependent_mappings.md)) has its numbers reported where
 every such mapping is a `multilinear_grid`, the norm is `"l2"` or `"mixed"` and the group does not
 sub-cycle.  Otherwise, and on a step whose self-check of the geometry term failed, its entry has
 `iterations`, `total_iterations`, `residual` and `converged`, every bound NaN, every `*_usable`
-flag `False`, and a `not_usable_reason` that says which case it is.  One more case keeps its
-numbers: where a position the pass reads from the iterate is within twice `spectral_error_bound`
-of a lattice plane of the grid and the step did not certify its linearisation across the Newton
-step (`gradient_relative_error_bound` is not finite), `spectral_usable` and
-`gradient_bound_usable` are `False` and the reason says so.  The spectrum is taken at the
-returned iterate, and across a lattice plane the stencil is another polynomial: the fixed point
-may be in a cell where the pass contracts at another rate.
+flag `False`, and a `not_usable_reason` that says which case it is.  Its **flags** depend on
+whether the group solves the positions.  Where the pass reads a position from the iterate, or
+builds one and reads it in the same pass (a source-anchored geometry inside the group; the
+target-anchored geometry of a member that computes fluxes), `spectral_usable` and
+`gradient_bound_usable` are `False` on every step in 0.4.0: the numbers are reported as computed,
+uncertified, and the reason names the positions.  The spectrum is taken at the returned iterate,
+and across a lattice plane the stencil is another polynomial, whose fixed point may be in another
+cell or nowhere.  Where every position is fixed during the pass (a target-anchored geometry read
+by `update`, positions held by a node outside the group) the flags are those of any other group.
 
-**A long row of a sparse mapping in the scatter layout** keeps its numbers and loses its flags
-at the float floor (MADD-ANO-257, open).  `transpose="scatter"` adds a target's row up one entry
-after another, and an in-order sum of `k` terms of one sign rounds by up to `(k - 1) / 2` units of
-`eps`, systematically where the terms are nearly equal (a uniform field); the float floor counts a
-fixed number of units per evaluation.  Where an internal edge of the group carries such a mapping
-with a row longer than 10 entries (`SCATTER_ROW_FLOOR_LIMIT`, a measured constant) and the residual
-is not above the float floor times the row's length, `spectral_usable` and `gradient_bound_usable`
-are `False`, every number is reported as computed, and `not_usable_reason` names the edge, the
-row's length and the way out: a wider dtype at the same tolerance.  Measured on a float32 pair
-stalled behind one row (a uniform field), `spectral_error_bound` read 0.68 of the true distance
-behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4, on jax 0.10.2, 0.11.0 and 0.11.2 alike;
-rows of up to 10 entries held by 3.9x or more.
+**A long row of a static mapping** keeps its numbers and loses its flags at the float floor
+(MADD-ANO-257, open).  A mapped edge delivers sums over its rows, and a float sum of `k` terms of
+one sign rounds by up to `(k - 1) / 2` units of `eps`, systematically where the terms are nearly
+equal (a uniform field) and the sum is taken in order; the float floor counts a fixed number of
+units per evaluation.  Where an internal edge of the group carries a static mapping of any kind (a
+dense matrix, a sparse mapping in the gather layout or in the scatter layout, a registered kind's
+own static class) with a row longer than 10 entries (`MAPPED_ROW_FLOOR_LIMIT`, a measured constant)
+and the residual is not above the float floor times the row's length, `spectral_usable` and
+`gradient_bound_usable` are `False`, every number is reported as computed, and `not_usable_reason`
+names the edge, how its mapping is applied, the row's length and the way out: a wider dtype at the
+same tolerance.  "The group's fields" there means every floating field of every member, and what
+its edges deliver: the floor is counted at the coarsest of them (see "Mixed dtypes" above), so one
+float32 field on a float64 member, even one no loop passes through, keeps the whole group's floor
+at float32 until that field is widened too.  Behind such a row `rho_spectral` itself is an estimate
+(rows of 3333 entries, float32, `"interface"`, `rtol = 0.1`: 0.926 for an exact 0.9 with both flags
+set), while `spectral_error_bound` stayed conservative in every run measured (7.8x there).
 
-**The guard counts that layout only, and the same rounding is in the others.**  The gather layout
-and the dense kinds are summed in an order XLA chooses, which depends on the jax version, the dtype
-and the operator's shape, and their reports keep their flags.  Measured on the same pair: one row
-behind a uniform field held by 1.8x at 300 entries and by 1.09x at 3000; the gather layout's rows
-of 1e4 entries and more are summed in order on jax 0.10.2 in float32 and read 0.002 to 0.007 of the
-distance; a dense mapping with three rows of 3000 entries read 0.18 of it on every jax version.
-At a float floor (`precision_limited=True`) behind a row of more than a few hundred entries, in any
-layout, do not rely on `spectral_usable`: read the bound in a wider dtype.
+**What you see.**  A float32 group whose mapping adds up a few hundred entries a row has the two
+flags withdrawn on every step at an `rtol` of 1e-4 or tighter: the float floor there is 0.005 of
+the threshold per evaluation, so 300 entries reach past a residual at the threshold itself.  The
+same group in float64 keeps its flags (its floor times such a row reaches a residual only at an
+`rtol` of about 1e-12 or tighter).  A row is the entries one delivered value adds up, whatever the weights are,
+since they are a parameter a step may be handed: a sparse layout's valid slots, and a dense
+matrix's **width**.  A dense selection or interpolation matrix more than ten entries wide is
+therefore counted although each of its rows holds one or two non-zeros and its sum is exact; a
+sparse mapping of the same operator is counted at those one or two entries and keeps its flags.
+`converged`, `residual`, `precision_limited`, `ratio_usable` and every number are as they were.
+A flag the rule keeps can still stand on a bound slightly under the distance: 0.9925 of it at the
+least on the measured pairs, and 0.982 on a group of ONE member with an edge to itself (one
+evaluation a pass, a row of 1000 entries, `"interface"`).
+
+**Why every kind is counted.**  Measured on a float32 pair stalled behind a uniform field (the
+smallest `spectral_error_bound` over the true distance among the reports that set the flag, before
+the guard): the scatter layout, which adds a row up one entry after another, read 0.68 behind 100
+entries, 0.24 behind 300 and 0.002 behind 3e4, on jax 0.10.2, 0.11.0 and 0.11.2 alike.  The gather
+layout and the dense kinds are summed in an order XLA chooses, which depends on the jax version,
+the dtype and the operator's shape: one row of either held at every length on jax 0.11 (1.8x at
+300 entries, 1.09x at 3000), but jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries
+and more in order (0.002 to 0.007 of the distance), and a dense matrix of three rows of 3000
+entries read 0.18 on every version.  Rows of up to 10 entries held by 3.9x or more in every kind,
+behind fields whose terms do not cancel.  A field that changes sign within a row loses the
+cancellation's factor whatever the row's length and its kind, which is MADD-ANO-247's case (open)
+and not this guard's: with a cancellation `sum |t| / |sum t|` of 25 the bound read 1.26x at 10
+entries and 1.44x at two in float32, and 0.85x at 10 entries at the float64 floor **with the flag
+set**.  Behind a field whose terms cancel, do not rely on `spectral_usable` at the float floor.
+
+**Not counted: a geometry-dependent mapping.**  A `multilinear_grid` gather adds up at most `2^d`
+entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in
+a grid node's support, a number decided in the step, so the guard does not count it: with 8, 300
+and 3000 markers in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3 times the
+distance under `"mixed"` (it held, by less than the factor of two the limit is taken at; larger
+counts were not measured).  That group solves the markers' positions, and in 0.4.0 such a group
+has no usable flag whatever its rows (MADD-ANO-252); a group whose positions are constants of the
+pass keeps its flags behind the same uncounted rows, which was not measured.
 
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in

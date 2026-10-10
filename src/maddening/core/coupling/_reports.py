@@ -24,7 +24,7 @@ _REPORT_SLOT_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification",
     "rho_spectral", "spectral_residual", "spectral_amplification",
     "gradient_relative_error_bound", "pass_evaluations", "reading_floor",
-    "geometry_gap", "geometry_plane_limit",
+    "geometry_gap", "geometry_plane_limit", "geometry_plane_margin",
 )
 
 
@@ -105,6 +105,21 @@ class _CouplingDiagnostics(dict):
 
     def __contains__(self, key):
         return dict.__contains__(self, self._resolve(key))
+
+
+# How often the underflow-range check (``GraphManager._warn_underflow_range``)
+# is made for state writes.  It reads every field of every coupled group
+# twice on the host, which costs several times a small graph's step
+# (measured on four CPU cores: a three-entry pair's loop of ``set_node_state``
+# and ``step`` went from 45 to 150 microseconds with the check at every
+# step, one of 100,000 entries from 0.6 to 1.1 ms).  So after each
+# ``compile()`` the first ``_UNDERFLOW_FREE_CHECKS`` checks that a write
+# makes due are made at the stepper call that follows the write, and from
+# then on a due check waits until ``_UNDERFLOW_CHECK_SPACING`` stepper calls
+# have stored a state since the previous check: a graph written before every
+# step is read once in that many steps, not at every one.
+_UNDERFLOW_FREE_CHECKS = 8
+_UNDERFLOW_CHECK_SPACING = 1024
 
 
 def _underflow_range_fields(groups, state) -> dict[str, list]:
@@ -264,7 +279,7 @@ def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> N
 _PER_SOLVE_REPORT_SUFFIXES = (
     "residual", "amplification", "rho_spectral", "spectral_residual",
     "spectral_amplification", "gradient_relative_error_bound", "pass_evaluations",
-    "geometry_gap", "geometry_plane_limit",
+    "geometry_gap", "geometry_plane_limit", "geometry_plane_margin",
 )
 
 

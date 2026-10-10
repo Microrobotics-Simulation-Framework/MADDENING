@@ -76,7 +76,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core._pow2_frame import pow2_host_factor
 from maddening.core.edge import _delivered
@@ -891,6 +893,51 @@ class InterfaceEdge:
     def read_from_state(self) -> bool:
         """Is the source a field of the producer's state (floating or not)?"""
         return self.source_kind in _STATE_FIELD_KINDS
+
+    def delivered_leaves(self, state, mappings=None) -> tuple:
+        """``(dtype, size)`` of each array this edge hands its target, read from *state*.
+
+        Static: the edge's own rule (``maddening.core.edge._delivered``:
+        the mapping with the weights in *mappings*, then the transform)
+        evaluated on the **abstract** value of the source field
+        (:func:`jax.eval_shape`: shapes and dtypes, never values), so a
+        transform is traced once more and is never run on numbers, and
+        nothing is added to a program being traced around the call.  A
+        geometry-dependent mapping is handed the abstract value of its
+        geometry field in *state* (the pre-step field has the same shape
+        and dtype).
+
+        Empty where there is nothing to ask: an edge with neither a
+        mapping nor a transform delivers its source field, which the
+        caller already holds; a source that is not a field of *state* (a
+        boundary flux, an absent field) or a geometry field *state* does
+        not hold cannot be evaluated from it.
+
+        Read by ``acceleration._group_coarsest_eps``: a transform (or a
+        mapping) that delivers a coarser floating dtype than every field
+        of the group is a rounding the pass goes through.
+        """
+        if not self.read_from_state or (self.mapping is None and not self.has_transform):
+            return ()
+        geom: tuple = ()
+        if self.anchor is not None:
+            side, field = self.anchor
+            holder = (state.get(self.source[0] if side == "source" else self.target[0])
+                      or {})
+            if field not in holder:
+                return ()
+            geom = (holder[field],)
+        fields = state.get(self.source[0]) or {}
+        if self.source[1] not in fields:
+            return ()
+        edge = self.edge
+
+        def rule(value, *geometry):
+            return _delivered(edge, value, mappings, *geometry)
+
+        out = jax.eval_shape(rule, fields[self.source[1]], *geom)
+        return tuple((leaf.dtype, int(np.prod(leaf.shape, dtype=np.int64)))
+                     for leaf in jax.tree_util.tree_leaves(out))
 
 
 def _edge_record(edge, state=None, nodes=None, *, declared: int = 0,

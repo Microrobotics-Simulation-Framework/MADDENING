@@ -20,11 +20,12 @@ What is held here, on the library's own functions and on compiled graphs
 ``tests/property/test_coupling_interface_side.py`` and
 ``test_coupling_targeted_search.py``):
 
-* the residual, the float floor and the floor's eps each read the
-  prescribed side -- the value, the entry count and the magnitude -- on
-  the dense form, both sparse layouts and a mapping class of the caller's
-  own, expanding, reducing and tied, with and without a transform, in
-  float32 and float64;
+* the residual and the float floor each read the prescribed side -- the
+  value, the entry count and the magnitude -- on the dense form, both
+  sparse layouts and a mapping class of the caller's own, expanding,
+  reducing and tied, with and without a transform, in float32 and
+  float64; the floor's eps is the coarsest the pass goes through, a
+  narrowing transform's included, whichever side is read;
 * a group owns the ``reading_floor`` slot exactly where an edge is read
   *through* its mapping, the step writes the slot it was compiled with,
   and the three plans a graph builds of one group read every edge on the
@@ -208,25 +209,32 @@ def _narrow(v):
 
 
 @pytest.mark.parametrize("form", sorted(FORMS))
-def test_the_float_floor_takes_its_eps_on_the_side_that_is_read(form):
-    """Under x64, a float64 field whose edge delivers float32 (a narrowing transform):
-    read at its source the reading is the stored float64 field, at that
-    dtype's eps; read as delivered it is the float32 value, at the coarser
-    eps.  A floor left on the delivered side of an expanding edge is 5e8
-    times too large."""
+def test_the_float_floor_counts_a_narrowing_transform_whichever_side_is_read(form):
+    """Under x64, a float64 field whose edge delivers float32 (a narrowing
+    transform).  Read as delivered (reducing, tie) the reading is the
+    float32 value, at that eps.  Read at its source (expanding) the
+    reading is the stored float64 field, and the floor is counted at the
+    float32 eps all the same: the pass goes through what the edge
+    delivers, and the group's coarsest eps counts it (MADD-ANO-255).
+    Counted at the field's own eps, as it was, a float64 pair stalled on
+    such an edge with a residual of exactly 0.0 read its bound at 5e-8 of
+    the distance with both flags set.  The transform is what sets it: the
+    same edge without one is counted at the float64 eps on every side."""
     with precision(True):
-        floors = {}
+        floors, plain = {}, {}
         for size, (n_source, n_target) in SIZES.items():
-            edge = EdgeSpec("a", "b", "x", "u", mapping=FORMS[form](n_source, n_target, "float64"),
-                            transform=_narrow)
+            mapping = FORMS[form](n_source, n_target, "float64")
+            edge = EdgeSpec("a", "b", "x", "u", mapping=mapping, transform=_narrow)
+            same = EdgeSpec("a", "b", "x", "u", mapping=mapping)
             x = jnp.asarray(1.0 + np.arange(n_source), jnp.float64)
             assert _delivered(edge, x).dtype == jnp.float32
-            floors[size] = float(residual_precision_floor(
-                {"a": {"x": x}}, ["a"], "interface", 0.0, RTOL, [edge]))
+            assert _delivered(same, x).dtype == jnp.float64
+            floors[size], plain[size] = (float(residual_precision_floor(
+                {"a": {"x": x}}, ["a"], "interface", 0.0, RTOL, [e])) for e in (edge, same))
         eps32, eps64 = (float(np.finfo(t).eps) for t in (np.float32, np.float64))
-        assert floors["expanding"] == pytest.approx(PRECISION_FLOOR_ULPS * eps64 / RTOL, rel=1e-6)
-        assert floors["reducing"] == pytest.approx(PRECISION_FLOOR_ULPS * eps32 / RTOL, rel=1e-6)
-        assert floors["tie"] == floors["reducing"]
+        for size in SIZES:
+            assert floors[size] == pytest.approx(PRECISION_FLOOR_ULPS * eps32 / RTOL, rel=1e-6), size
+            assert plain[size] == pytest.approx(PRECISION_FLOOR_ULPS * eps64 / RTOL, rel=1e-6), size
 
 
 @pytest.mark.parametrize("form", ["dense", "sparse-gather", "sparse-scatter"])

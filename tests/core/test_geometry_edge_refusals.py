@@ -984,3 +984,90 @@ def test_g7_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group(
     with pytest.raises(TypeError, match=f"edge {KEY}: its geometry field 'g' now has "
                                         f"dtype float16"):
         gm.step()
+
+
+# ---------------------------------------------------------------------------
+# The shape rule (G8) holds for a geometry written after compile() too
+# ---------------------------------------------------------------------------
+# A program is traced again when a shape changes, as when a dtype does.  The
+# multilinear kernel checks the shape it is handed; a kind that does not
+# (``geom @ field``) broadcast a row written where a matrix was compiled.
+
+
+def _reshaped(gm, node, g):
+    state = dict(gm.get_node_state(node))
+    state["g"] = jnp.asarray(g, jnp.float32)
+    gm.set_node_state(node, state)
+
+
+_OTHER_SHAPES = {
+    "one row": np.ones(N_SOURCE),                       # broadcast silently: geom @ field is a scalar
+    "one row, two axes": np.ones((1, N_SOURCE)),        # broadcast silently into both targets
+    "more rows": np.ones((N_TARGET + 2, N_SOURCE)),
+    "scalar": np.float32(1.0),
+}
+
+
+@pytest.mark.parametrize("entry", sorted(_ENTRIES))
+@pytest.mark.parametrize("shape", sorted(_OTHER_SHAPES))
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g8_holds_for_a_geometry_written_after_compile(anchor, node, shape, entry):
+    """``compile()`` refuses a geometry of another shape than the mapping
+    reads (G8); so does the first traced entry point after a write that
+    makes it one, by the edge's name, and the compiled shape written back
+    steps."""
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    gm.step()
+    kept = np.asarray(gm.get_node_state(node)["g"])
+    written = _OTHER_SHAPES[shape]
+    _reshaped(gm, node, written)
+    with pytest.raises(ValueError) as refused:
+        _ENTRIES[entry](gm)
+    message = str(refused.value)
+    assert f"edge {KEY}: its geometry field 'g' now has shape {np.shape(written)}" in message
+    assert f"reads a geometry of shape {SHAPE}" in message
+    # What compile() says of the same state, in validate()'s words.
+    assert any(f"geometry field {node}.g has shape {np.shape(written)}" in issue
+               for issue in gm.validate())
+    _reshaped(gm, node, kept)
+    _ENTRIES[entry](gm)
+
+
+@pytest.mark.parametrize("iteration_mode", ["gauss-seidel", "jacobi"])
+@pytest.mark.parametrize("subcycled", [False, True], ids=["one-rate", "sub-cycled"])
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g8_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group(
+        anchor, node, subcycled, iteration_mode):
+    """Every read of a geometry inside a coupled solve asks the shape rule,
+    the interpolated read of a sub-cycled member's source included."""
+    gm = _written_ring(anchor, subcycled=subcycled, iteration_mode=iteration_mode)
+    gm.compile()
+    gm.step()
+    _reshaped(gm, node, np.ones((1, N_SOURCE)))
+    with pytest.raises(ValueError, match=f"edge {KEY}: its geometry field 'g' now has "
+                                         rf"shape \(1, {N_SOURCE}\)"):
+        gm.step()
+
+
+def test_the_shape_asked_after_compile_is_the_one_compile_accepts():
+    """The rule is the mapping's own (``accepts_geometry_shape`` where it
+    has one): on a one-axis grid ``compile()`` takes positions written flat,
+    ``(n_points,)``, and so does a step after such a write."""
+    gm = GraphManager()
+    gm.add_node(Holder("a", 1.0, n=N_SOURCE))
+    gm.add_node(Holder("b", 1.0, n=N_TARGET, rows=N_TARGET, cols=1))
+    gm.add_edge("a", "b", "x", "u", geometry=("target", "g"), mapping=gg.multilinear(
+        (0.0,), (1.0,), (N_SOURCE,), n_points=N_TARGET, mode="consistent"))
+    gm.compile()
+    gm.step()
+    flat = np.asarray(gm.get_node_state("b")["g"]).reshape(-1)
+    assert flat.shape == (N_TARGET,)
+    _reshaped(gm, "b", flat)
+    assert not [i for i in gm.validate() if i.startswith("ERROR")]
+    gm.step()
+    assert gm.get_node_state("b")["g"].shape == (N_TARGET,)
+    # ... and a third position is refused by the edge's name.
+    _reshaped(gm, "b", np.ones(N_TARGET + 1))
+    with pytest.raises(ValueError, match=f"edge {KEY}: its geometry field 'g' now has shape"):
+        gm.step()

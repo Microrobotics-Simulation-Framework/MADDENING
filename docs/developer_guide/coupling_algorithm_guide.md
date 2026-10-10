@@ -230,7 +230,12 @@ The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
 every entry the norm reads, **per evaluation**, in the norm's units —
 `4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
 `"mixed"` and `"interface"` (`residual_precision_floor`), **every entry
-at the `eps` of the coarsest floating dtype among the group's fields**.
+at the `eps` of the coarsest floating dtype among the group's fields and
+what its internal edges deliver** (after the mapping and the transform:
+a transform that narrows to float32 between two float64 members puts a
+float32 rounding into every pass, and such a pair stalled with residual
+0.0 and read its bound at 5e-8 to 1e-7 of the distance with both flags
+set while only the fields' dtypes were read).
 A field a node computes from a coarser neighbour's output carries that
 neighbour's rounding: a float64 field of `n` values that is a function
 of one float32 value is as far from its fixed point, relative to its own
@@ -242,8 +247,9 @@ of the distance at `n = 1e3` and 0.21 at `n = 2e4` with the flags set
 ones read 0.37 and 0.36).  The rule assumes that any field of a group
 may be downstream of its coarsest member (which fields are is inside
 the nodes), that a node's own arithmetic is no coarser than the fields
-it reads and writes, and that what enters from outside the group is a
-constant of the solve; where a fine field is in fact computed from fine
+it reads and writes (a cast down and back inside `update` cannot be seen
+from outside and is not counted), and that what enters from outside the
+group is a constant of the solve; where a fine field is in fact computed from fine
 fields alone the floor is too large, never too small.  In a group of
 one dtype nothing changes.  **A position is exempt from that rule and
 keeps its own dtype's `eps`**: a geometry field that an internal edge
@@ -391,12 +397,23 @@ rows the table describes the node's own arithmetic on the field, which
 still rounds and flushes in the field's dtype.
 
 `GraphManager` checks each coupled group on the first step after every
-`compile()` and issues one `UnderflowRangeWarning` (a
-`PrecisionLimitWarning`) per group, naming the field, its magnitude and the
-remedy: write the field in units where it is of order one.  An exactly zero
-field never warns.  The check runs on the host, once per compile, and does
-not change the compiled step; a state that decays into the range after the
-first step is not re-checked.  It fires at the first step rather than in
+`compile()`, and again on the first step after every write of node states
+that is not a step's (`set_node_state`, so `load_state` and `PUT
+/graph/state/{node}`, and `reset_state`).  It reads the state that step
+starts from and the state it returns (a field already below `tiny` is
+flushed to exactly zero by the step), and issues one `UnderflowRangeWarning`
+(a `PrecisionLimitWarning`) per group, naming the field, its magnitude and
+the remedy: write the field in units where it is of order one.  An exactly
+zero field never warns, and a group is warned of once.  The check runs on
+the host and does not change the compiled step; a state that decays into the
+range through the nodes' own updates is not re-checked.  Its two reads cost
+several times a small graph's step (a three-entry pair: 45 microseconds for
+`set_node_state` and `step`, 150 with the check), so a graph that is written
+to before every step is not asked at every one: after a `compile()` the
+first eight checks that writes make due are made at the next step, and from
+then on a due check is made once 1024 stepper calls have stored a state
+since the previous one.  It fires at a step
+rather than in
 `coupling_diagnostics()` because the remedy is a decision about the model's
 units, every caller steps whether or not it reads the report, and the
 report is read in loops, where a per-call read of every group field would
@@ -648,7 +665,15 @@ not test it:
   and the bound 0.15–0.29x the kept field's distance.  It now keeps its
   own magnitude's weight in the spectrum, and its share of the residual
   — which `residual` does not contain — is measured and folded into
-  the factor (2.8–5.5x there);
+  the factor (2.8–5.5x there).  That is the *bound*; the loop's own exit
+  is another matter.  A change that has to cross a dead-banded field is
+  not in the residual until it reaches a kept one, and the loop accepts
+  on the first residual it measures: a group with `atol > 0` under
+  Jacobi, or with three or more members under Gauss-Seidel, can return
+  `converged=True` after one pass thousands of tolerances from its fixed
+  point (MADD-ANO-254, open; `compile()` warns).  Leave `atol` at `0.0`
+  on such a group in 0.4.0; a pair under Gauss-Seidel held in both sweep
+  orders in every case measured;
 * **a non-finite state reports NaN**, not a spectral radius computed at
   a state that has left float range.
 

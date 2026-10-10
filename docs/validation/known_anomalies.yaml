@@ -16126,8 +16126,20 @@ anomalies:
       held.
       `spectral_error_bound` held on every such example (at most 0.82 of
       the distance), and so did the gradient bound for the gradient the
-      group computes.  The spectral keys are new in 0.4.0; no release
-      carries them.
+      group computes.  The same through a geometry: a float32 Gauss-Seidel
+      group with a `multilinear_grid` edge whose sweep reads a position
+      another member has just built, a fraction of a float resolution from
+      a lattice plane (0.33 in the audited case, at a lattice origin forty
+      spacings from zero), evaluates the stencil of the cell rounding
+      picks, exact arithmetic the other's: `rho_spectral` read 0.0077
+      against 0.1412 with `spectral_usable=True`, and 13 to 22% of
+      `1 - rho` off in seven examples of an independent audit.  Since
+      MADD-ANO-252 a position within eight float resolutions of a plane
+      counts as on it and both `spectral_usable` and
+      `gradient_bound_usable` are withdrawn there (the margin of the
+      Newton-Kantorovich ball is zero), so through a geometry that radius
+      is no longer flagged.  The spectral
+      keys are new in 0.4.0; no release carries them.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16348,15 +16360,29 @@ anomalies:
       already `inf` in every such row (its Newton-Kantorovich check takes
       the Jacobian at the Newton point).  No release carried it: the
       geometry-dependent tier and its diagnostics are new in 0.4.0's
-      development.  Fixed in 0.4.0: with `diagnostics=True` the step stores
-      the largest bound at which no position the pass reads from the
-      iterate is within twice the bound of a lattice plane
-      (`geometry_plane_limit`); where `spectral_error_bound` exceeds it and
-      the step did not certify its linearisation across the Newton step
-      (`gradient_relative_error_bound` not finite), the report sets
-      `spectral_usable` and `gradient_bound_usable` to `False`, keeps every
-      number, and says why in `not_usable_reason`.  A position that is a
-      constant of the pass withdraws nothing.
+      development.  Resolved first by a rule that no longer decides a flag:
+      with `diagnostics=True` the step stores the largest bound at which no
+      position the pass reads from the iterate is within twice the bound of
+      a lattice plane (`geometry_plane_limit`); where `spectral_error_bound`
+      exceeded it and the step had not certified its linearisation across
+      the Newton step (`gradient_relative_error_bound` not finite), the
+      report set `spectral_usable` and `gradient_bound_usable` to `False`,
+      kept every number, and said why in `not_usable_reason`; a position
+      that is a constant of the pass withdrew nothing.  THAT RULE IS
+      WITHDRAWN IN 0.4.0. Two later audits found a flag set beside a wrong
+      number under it (`spectral_usable` on a bound 17 to 1,294 times under
+      the distance, the fixed point just past a plane that the Newton point
+      stopped short of, so that the check passed) and under its successor,
+      which also asked for no plane inside the Newton-Kantorovich ball (34
+      to 1,874 times under, in a cell whose polynomial has no fixed point):
+      MADD-ANO-252 has both.  So 0.4.0 certifies no bound for a group that
+      solves positions: where the pass reads a position from the iterate, or
+      builds one and reads it in the same pass, `spectral_usable` and
+      `gradient_bound_usable` are `False` on every step, whatever the limit
+      or the gradient bound read; the numbers are reported as computed, and
+      `not_usable_reason` names the positions and says so.  The limit is
+      still stored, as a number that sets no flag.  A group whose positions
+      are all constants of the pass has a smooth group's flags.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16379,20 +16405,25 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The rule keeps the flag where no plane is within twice the bound, on
-      the argument that the polynomial piece at the iterate has its fixed
-      point within the Newton-Kantorovich ball; a smooth nonlinearity
-      strong enough to put that fixed point beyond twice the bound is the
-      condition `spectral_error_bound` documents for every nonlinear group,
-      not a new one.  Where a plane is within reach it relies on the
-      gradient bound's Kantorovich check, which measures the Jacobian's
-      change between the iterate and the Newton point and is an estimate of
-      the Lipschitz constant, not a proof.  Only the `multilinear_grid`
-      kind is diagnosed; a registered kind of one's own reports no bound.
+      As first resolved, the rule kept the flag where no plane was within
+      twice the bound, on the argument that the polynomial piece at the
+      iterate has its fixed point within the Newton-Kantorovich ball, and
+      where a plane was within reach it relied on the gradient bound's
+      Kantorovich check, which measures the Jacobian's change between the
+      iterate and the Newton point and is an estimate of the Lipschitz
+      constant, not a proof.  Both were found short (MADD-ANO-252), and
+      nothing rests on either in 0.4.0: a group that solves positions has no
+      usable flag.  What remains is a limit of 0.4.0, stated in the user
+      guide and in `not_usable_reason`: such a group's `rho_spectral`,
+      `spectral_error_bound` and `gradient_relative_error_bound` are
+      uncertified estimates, which can be far under their quantity beside a
+      lattice plane, as measured here; the flags are available only with
+      every position fixed during the pass. Only the `multilinear_grid` kind
+      is diagnosed; a registered kind of one's own reports no bound.
     verification:
       - "tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane"
       - "tests/property/test_coupling_geometry_search.py::test_the_plane_limit_the_step_stores_is_its_definition"
-      - "tests/property/test_coupling_geometry_search.py::test_the_report_withdraws_the_flag_where_a_plane_is_in_reach_and_the_step_is_not_certified"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read"
       - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_plane_limit_is_the_nearest_weighted_plane_distance_over_the_reach"
     github_issue: null
 
@@ -16558,8 +16589,15 @@ anomalies:
       every one of those examples had `spectral_usable=True` on a bound the
       float64 reference holds.  A thousand plane draws further than 2e-5
       of a spacing from their plane read 4.4e-3 at most, the six other
-      cells of the hunt 6.4e-3 at most, and float64 is not affected (its
-      step is 1.5e-8 of a spacing).  A wrong refusal, not a wrong number,
+      cells of the hunt 6.4e-3 at most.  The reach is the check's own step,
+      `sqrt(eps)` of a spacing (3.45e-4 in float32, 1.5e-8 in float64), not
+      the 2e-5 those draws happened to be placed within, and neither
+      float64 nor Jacobi is exempt: an independent audit with fixed points
+      at every distance from a plane had 180 honest reports withheld in
+      65,714, each with a position the pass reads within that step of a
+      plane (up to 2.9e-4 of a spacing in float32, 6.8e-9 in float64): 44
+      float32 and 134 float64 Gauss-Seidel, and one weakly coupled Jacobi
+      group in each dtype.  A wrong refusal, not a wrong number,
       and the reason names it: a gap over the tolerance is reported as
       either a derivative that is not the value's or a finite difference
       that could not be formed.  It is also why the tolerance is not
@@ -16732,8 +16770,19 @@ anomalies:
       (`|W| |x|` in place of `|W x|`), which a linear mapping kind can
       supply and an arbitrary transform cannot.  Until then the floor of a
       delivered value assumes it is of the size of the entries it was
-      computed from.
+      computed from.  The same mechanism is reached through the FIELD's
+      signs behind a mapping whose weights are all positive: a field whose
+      terms cancel in a row (`sum |t| / |sum t|` of 25) left a stalled
+      pair's bound at 1.26 of the distance behind a row of 10 entries in
+      float32 and at 0.85 at the float64 floor with `spectral_usable`
+      set, in the dense kind and in both sparse layouts, and a row of two
+      entries read as a row of ten does.  The mapped-row guard
+      (MADD-ANO-257) does not reach it: it counts a row's length, and no
+      row length answers for a field's signs.  Do not rely on
+      `spectral_usable` at the float floor behind a field whose terms
+      cancel within a mapping's row.
     verification:
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_short_row_of_a_cancelling_field_is_at_or_above_the_distance"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_whose_norm_reads_a_delivered_difference_is_bounded"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_norm_reads_the_fields"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_delivered_difference_cancels_nothing"
@@ -16743,53 +16792,525 @@ anomalies:
       - "tests/property/test_coupling_geometry_interface_positions_floor.py::test_the_count_holds_where_the_field_varies_by_about_the_value_delivered"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-248"
+    title: "A geometry written with another shape after compile() was broadcast by a mapping kind that does not check its own shape"
+    description: >
+      The shape rule for the geometry of a geometry-dependent mapping --
+      the mapping's `geometry_shape`, or what its
+      `accepts_geometry_shape` takes -- was asked only by `validate()`,
+      which `compile()` runs on the state it is given.  A state write is
+      not a recompile.  The `multilinear_grid` kernel checks the shape it
+      is handed; a kind registered with `needs_geometry=True` whose
+      `apply` does not (one that computes `geom @ field` on a geometry of
+      shape `(2, 3)`) was handed whatever `set_node_state` had written:
+      one row of shape `(3,)` or `(1, 3)` in place of the matrix made the
+      product a scalar or a one-entry vector, which the target's update
+      broadcast into both of its entries, with no error or warning, where
+      `compile()` refuses that state by name.  Geometry-dependent
+      mappings are new in 0.4.0; no release has this.  Resolved before
+      release: the shape rule is asked with the dtype rules at every
+      geometry read of a traced program (a program is traced again
+      whenever a shape changes), including the interpolated read of a
+      sub-cycled group member, by the rule `validate()` applies.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: finite values computed from a geometry of a shape the
+      mapping was not built for.  It needs a mapping kind of the
+      caller's own that does not check the geometry it is handed, and an
+      in-process `set_node_state` after `compile()` that changes the
+      field's shape (`PUT /graph/state` and `load_state` refuse a field
+      of another shape).
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.coupling.mapping.register_mapping"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `set_node_state` itself still accepts the write; the refusal comes
+      from the next entry point that traces a step, and the graph steps
+      again once a geometry of the compiled shape is written back.  The
+      shape `compile()` holds every edge's source field to (its target's
+      `BoundaryInputSpec`) is asked at a trace too (MADD-ANO-250); the
+      dtype it holds one to is not.
+    verification:
+      - "tests/core/test_geometry_edge_refusals.py::test_g8_holds_for_a_geometry_written_after_compile"
+      - "tests/core/test_geometry_edge_refusals.py::test_g8_holds_after_compile_for_a_geometry_edge_inside_a_coupling_group"
+      - "tests/core/test_geometry_edge_refusals.py::test_the_shape_asked_after_compile_is_the_one_compile_accepts"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-249"
+    title: "The underflow-range warning was asked once per compile, of the first stepped state alone: a state written into the range later, or already below tiny, stepped unwarned"
+    description: >
+      `UnderflowRangeWarning` (new in 0.4.0) tells that a coupled group
+      holds a field below `finfo(dtype).tiny / finfo(dtype).eps`, where a
+      node's own arithmetic loses resolution and, below `tiny`, XLA's CPU
+      backend flushes its products to zero.  `GraphManager` asked it once
+      per `compile()`, of the first state a step stored.  Two cases went
+      unwarned.  A state written into the range after that step
+      (`set_node_state`, a checkpoint loaded with `load_state`, `PUT
+      /graph/state`, `reset_state` onto such an initial state): a float32
+      pair whose fields were written at 1e-37 returned 25% off the float64
+      answer with `converged=True` (`iterations` at `max_iterations` and
+      a residual of exactly 0.0 under the mixed and L2 norms).  And a
+      state already below `tiny` when the graph was compiled: its first
+      step flushed every entry to exactly zero, and an exactly zero field
+      never warns, so a pair started at 3e-38 read `converged=True`,
+      residual 0.0, on a state of zeros.  The warning is new in 0.4.0; no
+      release has it.  Resolved before release: the check is due again
+      at the first step after every such write, and reads the state that
+      step starts from as well as the one it returns.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The numbers lost in that range are lost in every release (the
+      nodes' arithmetic and XLA's flush to zero); what was missing is the
+      one signal the library gives of it.  It needs fields held in units
+      where they are below about 1e-31 in float32.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.graph_manager.GraphManager.reset_state"
+      - "maddening.warnings.UnderflowRangeWarning"
+    affected_versions: "none"
+    workaround: >
+      None needed in a release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A state that decays into the range through the nodes' own updates
+      is not checked again (the check reads every group field on the
+      host, and is kept out of the step loop), and a group is warned of
+      once in a graph's life.  The check costs several times a small
+      graph's step, so a graph written to before every step is not asked
+      at every one: the first eight checks that writes make due after a
+      `compile()` are made at the next step, and from then on a due
+      check waits until 1024 stepper calls have stored a state since the
+      previous check.  A state written into the range in between is
+      warned of then, if it is still in the range.
+    verification:
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_state_written_into_the_range_after_the_first_step_warns_at_the_next_step"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_reset_state_onto_an_initial_state_in_the_range_warns_at_the_next_step"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_state_below_tiny_at_compile_warns_although_the_first_step_flushes_it"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_written_state_outside_the_range_does_not_warn"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_loop_that_writes_before_every_step_is_read_a_bounded_number_of_times"
+      - "tests/core/test_coupling_underflow_range_warning.py::test_a_check_that_is_not_made_at_once_stays_due_and_is_made_within_the_spacing"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-250"
+    title: "A state field written with another shape after compile() was broadcast into the node that reads it: the shape compile() holds an edge to was asked once"
+    description: >
+      `compile()` refuses an edge whose source field has not the shape
+      its target's `BoundaryInputSpec` declares (`ShapeMismatchError`), on
+      the state it is given.  `GraphManager.set_node_state` takes any
+      layout and is not a recompile, so a source written afterwards with
+      a shape that broadcasts into the declared one was delivered as it
+      was and broadcast by the target's update, with no error or warning:
+      two nodes `a -> b` of three entries each, `a.x` written as one
+      entry, and the next `step()` or `run_scan()` returned `b.x`
+      computed from that one entry in all three, where `compile()`
+      refuses that state by the edge's name.  The same through a mapping
+      (a `(4, 1)` source for a `(4, 3)` field read into `(2, 3)`), with a
+      scalar, in a multi-rate graph, for a member of a coupling group
+      that reads its partner through a transform, and through `run`,
+      `run_scan_with_history`, `run_sweep`, `run_adaptive`,
+      `run_adaptive_scan`, `resolve_boundary_inputs` and the step
+      function handed a state.  (A source that does not broadcast INTO
+      its target's shape changed the target's own shape or failed to
+      broadcast, and was loud already: MADD-ANO-220.)  `load_state` and
+      `PUT /graph/state/{node}` refuse a field of another shape, so only
+      the in-process write is a door.  Measured at the tags with one
+      reproducer: v0.1.0 (silent; `compile()` had no shape rule at all,
+      so a graph BUILT that way was broadcast too), v0.2.0 (`compile()`
+      warns, the write is silent), v0.2.1, v0.3.0 and v0.3.1
+      (`compile()` refuses, the write is silent).  Resolved in 0.4.0:
+      every step program asks the rule of the state it is traced for, on
+      the host (a program is traced again whenever a shape changes, so
+      it cannot be bypassed, and a step that is not traced again pays
+      nothing), and raises the `ExceptionGroup` of `ShapeMismatchError`
+      that `compile()` raises, with `validate()`'s line for each edge;
+      `resolve_boundary_inputs` asks it of the state it reads.  A source
+      field dropped from the state, which was a bare `KeyError` from
+      whatever read it first, is a `KeyError` naming the edge.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: finite values computed from a source broadcast into a
+      field it was not declared for.  It needs an in-process
+      `set_node_state` after `compile()` that changes the shape of a
+      field an edge reads to one that broadcasts into the declared
+      shape; the REST and checkpoint doors refuse such a write.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.graph_manager.GraphManager.run_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On 0.2.0 to 0.3.1 call `validate()` (or `compile()`) after a
+      `set_node_state` that may have changed a field's shape: both name
+      the edge.  Write fields with the shape `initial_state()` gives them.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `set_node_state` itself still accepts the write (tests and callers
+      write other layouts on purpose); the refusal comes from the next
+      entry point that traces a program, and the graph runs again once
+      the field has the shape `compile()` accepts.  What `compile()`
+      does not hold to a shape is not held at a trace either: an edge
+      with a `transform=`, an input declared with a symbolic (negative)
+      dimension, an input its target does not declare, and a flux
+      output.  The dtype half of the rule (`DtypeMismatchError`) is not
+      asked at a trace, because a node's update may widen float32 to
+      float64 under x64: an integer written into a floating-point field
+      an edge reads is stepped, and `validate()` names it.
+    verification:
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_source_written_with_another_shape_is_refused_where_the_next_program_is_traced"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_group_members_source_written_with_another_shape_is_refused"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_trace_refuses_exactly_the_shapes_validate_names"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_shape_compile_accepts_is_not_refused_at_a_trace"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_a_source_field_dropped_from_the_state_is_named_by_its_edge"
+      - "tests/core/test_edge_shape_rule_at_every_trace.py::test_the_check_adds_nothing_to_the_step_program"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-251"
+    title: "A node's delta_t written after add_node was neither followed nor reported: the graph kept its timestep and to_dict() wrote the new one"
+    description: >
+      `add_node` reads a node's `delta_t` once and keeps it as the
+      timestep the graph steps the node at (the step, the multi-rate
+      schedule and `GraphManager.timestep` use that value).  A `delta_t`
+      written on the node afterwards changed none of them, and nothing
+      said so: `validate()` and `compile()` were silent, and
+      `to_dict()` wrote the node's attribute.  A rod added at 1.0 and
+      written to 2.0 went on stepping at 1.0 while its config said 2.0,
+      so the graph loaded from the config ran another step than the one
+      it was saved from; written to 0.0, the config said 0.0 (which the
+      released versions load, and 0.4.0's `from_dict` refuses).  The
+      surrogate dataset generator labelled its samples with the
+      attribute too.  Measured at the tags with one reproducer: v0.1.0,
+      v0.2.1 and v0.3.1 each step at 1.0, write 2.0 and load a graph
+      that steps at 2.0.  Resolved in 0.4.0: `validate()` has an `ERROR`
+      line naming the node, the written value and the registered one
+      and saying what to do, so the next `compile()` refuses the graph;
+      `to_dict()` writes the timestep the graph runs; the dataset
+      generator reads it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a saved configuration that runs another timestep than the
+      graph it was written from.  It needs an attribute write on a node
+      that is already in a graph; no method of the library writes
+      `delta_t` after the constructor.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.core.graph_manager.GraphManager.validate"
+      - "maddening.core.node.SimulationNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Do not write `delta_t` on a node after `add_node`; construct the
+      node with the timestep it should have.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A written `delta_t` is still not followed, by design: the error
+      says to add a node constructed with the new timestep in its place.
+      A graph that is already compiled keeps stepping after the write
+      until `validate()` or `compile()` is called.  The rule is asked of
+      the node the graph holds, not of a node that one wraps (a wrapper
+      may step its node at another timestep than its own).  The
+      experimental surrogate-replacement route still builds its
+      surrogate with the replaced node's attribute.
+    verification:
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_a_delta_t_written_after_add_node_is_an_error_of_validate_and_compile"
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_the_graph_steps_at_the_registered_timestep_and_to_dict_writes_that_one"
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_a_wrapper_that_steps_its_node_at_another_timestep_is_not_an_error"
+      - "tests/core/test_checks_of_state_values_after_compile.py::test_a_surrogate_dataset_is_labelled_with_the_timestep_its_samples_were_stepped_at"
+  - anomaly_id: "MADD-ANO-252"
+    title: "gradient_bound_usable=True on a gradient_relative_error_bound 15 to 70,000 times under the true error, and spectral_usable=True on a spectral_error_bound 17 to 1,294 times under the distance, for a group with a multilinear_grid edge whose fixed point lay just past a lattice plane that the Newton point stopped short of"
+    description: >
+      `gradient_relative_error_bound` is the bound of a smooth pass: its
+      Newton-Kantorovich check takes the pass's Jacobian at the returned
+      iterate and at the Newton point, and the report kept
+      `gradient_bound_usable` (and, with a lattice plane within twice
+      `spectral_error_bound`, both flags: the rule of MADD-ANO-242)
+      wherever that check read `h < 1/2`.  A `multilinear_grid` mapping is
+      another polynomial of the positions across a lattice plane, and two
+      Jacobians say nothing of a plane neither point is beyond.  Where the
+      fixed point lay past a plane by less than the Newton step's
+      second-order miss, the Newton point was still in the iterate's cell:
+      both Jacobians were that cell's, `h` read near zero, the bound was
+      "certified", and the gradient of the fixed point is the next cell's.
+      Measured by an independent audit on the 0.4.0 development tree (CPU,
+      jaxlib 0.11.0; one grid, one marker, a target-anchored gather and a
+      source-anchored scatter, `solver="ift"`, `diagnostics=True`, every
+      solve `converged=True`): float32, Gauss-Seidel, the L2 norm,
+      `tolerance=0.03`, the fixed point 3.6e-5 of a spacing past the plane:
+      a bound of 0.059 for an error of 0.90 (15x); float64, Jacobi, L2,
+      `tolerance=1e-5`, 1.0e-12 of a spacing past: 2.0e-5 for 1.50
+      (74,000x); float64, Jacobi, the mixed norm, `rtol=0.03`, Aitken:
+      0.060 for 1.17 (20x).  The library disagreed with itself by the same
+      factors (`jax.jacfwd` of one step at the report's tolerance against a
+      tight one).  On the audit's scan of fixed points at every distance
+      from a plane, 872 of 3,773 resolved reports with the fixed point in
+      another cell had the flag on a bound that did not hold, in 21 of 30
+      cells (every anchoring, both schedules, both norms, both dtypes), and
+      43 more where a Gauss-Seidel sweep read a position it had built in
+      another cell than the fixed point's.  The same held at the float
+      resolution: a float32 iterate 4.7 float resolutions before a plane
+      with its fixed point 0.7 past it kept both flags on a bound 25x under
+      the error (the kernel decides the cell from a rounded quotient).
+      On that audit's examples `spectral_error_bound` held (within twice
+      the bound across a plane), and so did `rho_spectral` off a plane:
+      their next lattice cell contracts as the first does.  THE SPECTRAL
+      FLAG HAD THE SAME HOLE, found by the audit of the first fix, which
+      had left `spectral_usable` on the older rule (withdrawn only with a
+      plane within twice the bound and a gradient bound that is not
+      finite).  `spectral_error_bound` is a bound to the fixed point of the
+      polynomial the pass is in the returned iterate's lattice cells;
+      inside a cell the pass is not affine (the kernel's own cross term, a
+      scatter times a field), so the Newton step misses that fixed point
+      at second order, and with it a distance under that miss past a
+      plane the iterate and the Newton point are in one cell, the check
+      reads that cell's small `h`, and the pass has no fixed point there.
+      Constructed, nothing drawn (jaxlib 0.11.0, every solve
+      `converged=True`, `precision_limited=False`, `rho_spectral` right): a
+      6 x 3 lattice with linear members, Gauss-Seidel, the L2 norm, the
+      next cell expanding at 1.2 so that the pass's fixed point is two
+      cells on: distance over bound 72.8 at `tolerance=0.03`, 181 at 0.01
+      and 603 at 0.003 in float64, 82.7 and 205 in float32; a
+      one-dimensional lattice with a member of smooth quadratic response:
+      166 (float64) and 190 (float32).  In float64 the Newton point was
+      2e-6 short of the plane, about 1e9 float resolutions.  On that
+      audit's placement sweep 66 of 2,700 scored float32 reports had the
+      flag on a bound 17 to 1,294 times under the distance, all in the
+      three structures whose next cell expands.  The library's own solve
+      at a tolerance of 1e-10 reaches the reference's fixed point.  No
+      release carried
+      either: the geometry-dependent tier and its diagnostics are new in
+      0.4.0's development.  THE RULE THAT CLOSED BOTH WAS FOUND SHORT
+      TOO, by the third audit in a row.  That rule kept both flags only
+      where no lattice plane was inside the Newton-Kantorovich ball around
+      the returned iterate (the step's `geometry_plane_margin` over one),
+      beside the older one (a plane within twice the bound needs a passed
+      check).  Its argument takes the cell's polynomial to satisfy
+      Newton-Kantorovich, which the step measures on one secant and does
+      not prove.  Constructed: one marker on a one-dimensional lattice,
+      affine members, the only nonlinearity the scatter's own, the pass a
+      saddle-node whose cell polynomial has no fixed point (a gap of 1e-5
+      to 1e-8); the solve reports `converged=True`, `rho_spectral` is
+      right (0.994), the step's own check had failed
+      (`gradient_relative_error_bound` was `inf`), the margin read 2.8 to
+      186, the bound was under the limit, and `spectral_usable` stood on a
+      bound 34 to 191 times under the distance in float32 (12 of 30
+      reports; both sweep orders, both norms, Aitken) and 61 to 1,874
+      times in float64 (11 of 18), the pass's only fixed point being one
+      cell on.  Resolved in 0.4.0 BY WITHDRAWING THE CERTIFICATE, not by a
+      fourth rule: a group whose pass reads a position from the iterate,
+      or builds one and reads it in the same pass, has
+      `spectral_usable=False` and `gradient_bound_usable=False` on every
+      step, whatever its numbers read; the numbers are reported as
+      computed and `not_usable_reason` names the positions and says so.
+      A group whose positions are all constants of the pass (a
+      target-anchored geometry read by `update`, positions held by a node
+      outside the group) keeps a smooth group's flags, where the step
+      recorded that it read none from the iterate (an absent or
+      non-numeric record sets no flag).  One function decides
+      (`_group_layout._geometry_flags`), from what `compile()` committed.
+      Every audited case above is unflagged; no returned state, verdict
+      or reported number moved.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs a geometry-dependent
+      mapping read from the iterate (an experimental tier), diagnostics on,
+      and a fixed point within the Newton step's second-order miss of a
+      lattice plane; the iteration, `converged` and the gradient itself
+      were unaffected.  `context_dependent` because whether the bound
+      gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling._bounds._gradient_error_bound_at"
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: do not gate on `spectral_usable` or `gradient_bound_usable`
+      for a group that solves the positions of a geometry-dependent
+      mapping.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None for the flags: a group that solves positions has none.  What
+      remains is a limit of 0.4.0, stated in the user guide and in
+      `not_usable_reason`: such a group's `rho_spectral`,
+      `spectral_error_bound` and `gradient_relative_error_bound` are
+      uncertified estimates (usually right away from lattice planes: an
+      audit of the user guide's example over 300 steps found no wrong
+      number among the reports the last rule had flagged), and the flags
+      are available only with every position fixed during the pass.  The
+      stored `geometry_plane_limit` and `geometry_plane_margin` are still
+      the numbers their definitions give and decide nothing.  A sharper
+      rule has to establish the Newton-Kantorovich condition for the
+      cell's polynomial instead of assuming it; it is left to a later
+      release.  Under `"l2"` and `"mixed"` a position field is weighted by
+      its own largest magnitude, so `rho_spectral` of a group with a
+      marker near the coordinate origin is ill-conditioned in float32
+      (0.245 read for 0.153, CPL-087's stated condition); it carries no
+      flag either.  Only the `multilinear_grid` kind is diagnosed.
+    verification:
+      - "tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference"
+      - "tests/property/test_coupling_plane_sides.py::test_the_audited_bounds_were_flagged_and_far_under_the_error"
+      - "tests/property/test_coupling_plane_sides.py::test_the_sweep_finds_no_flagged_number_wrong_on_any_side_of_a_plane"
+      - "tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane"
+      - "tests/property/test_coupling_plane_sides.py::test_the_placement_sweep_finds_no_flagged_bound_under_the_distance"
+      - "tests/property/test_coupling_plane_sides.py::test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point"
+      - "tests/property/test_coupling_plane_sides.py::test_the_report_of_a_marker_at_rest_on_a_hull_face_is_the_same_on_every_step"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_group_that_solves_positions_has_no_flag_whatever_its_numbers_read"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_constant_positions_keep_a_smooth_group_s_flags_only_where_the_step_recorded_them"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_ball_margin_is_the_nearest_weighted_plane_distance_over_the_radius"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_the_radius_the_step_takes_is_two_newton_steps_and_the_float_floor"
+      - "tests/core/test_grid_probe_step_and_plane_distance.py::test_a_position_within_eight_float_resolutions_of_a_plane_is_on_it"
+      - "tests/property/test_coupling_geometry_search.py::test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slots_read"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-253"
+    title: "POST /graph/edges and POST /graph/nodes answered 201 to a body carrying a key the route does not apply (additive, transform, mapping, geometry; a misspelt params) and built another graph than the one asked for"
+    description: >
+      The request models of the two routes named the keys they read and
+      ignored every other.  `POST /graph/edges` reads `source_node`,
+      `target_node`, `source_field` and `target_field` and calls
+      `GraphManager.add_edge` with those four; `add_edge` also takes
+      `transform`, `additive`, `source_units` and `target_units` (every
+      release) and, since 0.4.0's development, `mapping` and `geometry`.
+      A body carrying `"additive": true` was answered 201 and added a
+      plain edge that overwrites its target field instead of adding to it;
+      one carrying a `mapping` and a `geometry` (as `GET /graph` writes
+      them) was answered 201 and added an unmapped edge, and the graph
+      stepped to other values than the one built with `add_edge(mapping=...)`
+      (measured: a reversed field).  A misspelt key was a 201 too.
+      `POST /graph/nodes` has an optional `params`, so a body with
+      `parameters`, or with a constructor argument written beside `type`,
+      was answered 201 and the node built from its defaults (measured on
+      every tag from 0.1.0 to 0.3.1: `{"parameters": {"stiffness": 500}}`
+      gave a spring of stiffness 100, and `"additive": true` an edge with
+      `additive=False`).  Nothing in the reply said a key had been dropped.
+      Present in every release with the REST server (0.1.0 to 0.3.1).
+      Changed in 0.4.0: both models refuse a key they do not apply with a
+      422 whose detail names it (`extra_forbidden`), and nothing is added.
+      The other request models (`DELETE /graph/edges`, `PUT /graph/state`,
+      `PUT /graph/params`, `POST /surrogate/train`) still ignore an unknown
+      key: a test pins that as the state of a sweep, for the maintainer to
+      decide.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A 201 on a graph other than the one the body described is a silent
+      wrong result: the simulation runs, with an edge that overwrites where
+      it should add, or without a mapping.  Not `critical`: `GET /graph`
+      shows the edge as it was added, and a client that reads it back sees
+      the difference.  `context_dependent` because what the graph drives
+      is the deployment's.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On an affected release, send only the four edge keys, or `type`,
+      `name`, `timestep` and `params`, and read the graph back with
+      `GET /graph` after a write.  An additive, transformed or mapped edge
+      cannot be added over REST in any release: add it in-process with
+      `GraphManager.add_edge` before the server starts.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A client that sent extra keys to either route, relying on their being
+      ignored, now gets a 422 and must drop them.  The four request models
+      that still ignore unknown keys have no optional key a dropped one
+      could have been, except `POST /surrogate/train` (experimental), whose
+      misspelt hyperparameter trains with the default.
+    verification:
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_an_edge_request_with_a_key_the_route_does_not_apply_is_refused_and_adds_nothing"
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_a_node_request_with_a_key_the_route_does_not_apply_is_refused_and_adds_nothing"
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_every_key_the_library_s_door_takes_is_applied_or_refused_by_the_route"
+      - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_the_other_request_models_drop_a_key_they_do_not_know_and_apply_the_rest"
+    github_issue: null
+
   - anomaly_id: "MADD-ANO-254"
-    title: "Under iteration_mode=\"jacobi\" a field inside the dead band un-holds the fields computed from it: a pair reports converged=True after one pass 4.5e5 to 7.4e5 tolerances from its fixed point"
+    title: "A change that has to cross a field inside the dead band is not seen until it reaches a kept field: with atol > 0 a Jacobi pair, or a Gauss-Seidel ring of three, reports converged=True after one pass thousands of tolerances from its fixed point"
     description: >
       A field whose magnitude is at or below a group's `atol` leaves the
-      residual (the 0.4.0 dead band).  Under Jacobi every member reads the
-      previous iterate, so with `p` dropped the residual of a pair
-      `p <- f(q)`, `q <- g(p)` is `|g(p_k) - q_k|`: it tests that `q`
-      agrees with the `p` it was computed from, and nothing in that pass
-      tests `p = f(q)`.  A kept field can therefore be returned with
-      `converged=True` far from its fixed point, against the oracle the
-      dead band is documented with (the distance of the kept fields to
-      their fixed point).  Measured (CPU, jaxlib 0.11.0, float64,
-      `rtol=1e-6`, `atol=1e-6`, `solver="ift"`) on a plain-edge pair of
-      three forces of about 1e-8 and thirty grid values whose grid member
-      spreads and amplifies the forces it reads: on every other step the
-      group reports `iterations=1, converged=True` with both fields 4.5e5
-      to 7.4e5 tolerances from the fixed point, under `"interface"`,
-      `"mixed"` and `"l2"` alike and in either order of the members;
+      residual (the 0.4.0 dead band), and the loop accepts on the first
+      residual it measures, between its first two passes.  A change that
+      has to cross such a field on its way to a field the norm keeps is
+      therefore not in the residual until it arrives, and a kept field can
+      be returned with `converged=True` far from its fixed point, against
+      the oracle the dead band is documented with (the distance of the
+      kept fields to their fixed point).  Two cases are measured (CPU,
+      jaxlib 0.11.0, `atol=1e-6`, `solver="ift"`), each under
+      `"interface"`, `"mixed"` and `"l2"` alike.
+      (1) Under Jacobi every member reads the previous iterate, so with
+      `p` dropped the residual of a pair `p <- f(q)`, `q <- g(p)` is
+      `|g(p_k) - q_k|`: it tests that `q` agrees with the `p` it was
+      computed from, and nothing in that pass tests `p = f(q)`.  On a
+      plain-edge float64 pair (`rtol=1e-6`) of three forces of about 1e-8
+      and thirty grid values whose grid member spreads and amplifies the
+      forces it reads, on every other step the group reports
+      `iterations=1, converged=True` with both fields 4.5e5 to 7.4e5
+      tolerances from the fixed point, in either order of the members;
       where the dropped member carries state it accepts after two to four
       passes, 5e5 to 6.3e5 tolerances off, on every step after the first.
-      With `atol=0` the same pairs take 57 to 81 passes to 0.3 to 7.9
-      tolerances, and under Gauss-Seidel with the dead band declared 31 to
-      41 passes to 0.5 to 4.9, the dropped member swept first or second.
+      (2) Under Gauss-Seidel a member swept before the one it reads still
+      reads the previous pass.  On a float32 ring of three (`rtol=1e-4`;
+      members added, and swept, A, B, C; edges A -> C -> B -> A; three
+      displacements of order 10 computed from two fields of 36 forces of
+      about 1e-8 in series, both inside the band, the load on C changing
+      each step) the change needs three passes to reach the one kept
+      field, and the group reports `iterations=1, converged=True` with it
+      4.6e3 (mixed), 8.0e3 (l2) and 1.8e4 (interface) tolerances off, on
+      every step under `"interface"` and on every other step under the
+      other two; with Aitken 4.6e3, 8.0e3 and 4.6e3, with IQN-ILS 4.6e3,
+      8.0e3 and 1.8e4 (the same four digits on jax 0.10.2, 0.11.0 and
+      0.11.2); a fixed relaxation of 0.7 held under `"mixed"` and `"l2"`
+      and not under `"interface"`.
+      What held: `atol=0` on every one of these groups (57 to 81 passes to
+      0.3 to 7.9 tolerances on the pairs; 22 to 32 passes to 0.2 to 3.0
+      on the ring); a PAIR under Gauss-Seidel with the band declared, the
+      dropped member swept first or second (31 to 41 passes to 0.5 to 4.9
+      on the float64 pair; 0.65 to 0.75 on the pair of the ring's two
+      kinds of member); and, as one measured instance and not a rule, the
+      same ring swept along its data flow (C, B, A: 0.65 to 0.75).
       `strict_convergence` does not raise.  No release carried it: the dead
       band is new in 0.4.0's development (before it `atol` was a floor
-      under the scale).  Found by the pre-merge audit of the interface
-      norm on static mapped edges, on an edge whose source the band
-      dropped; reproduced here on plain edges.  Not fixed in 0.4.0: a rule
-      that only delays the exit (so many consecutive passes at or below
-      the threshold) is provable from the residuals the loop carries only
-      for a loop in which every kept member is reached from kept members
-      through the same number of dropped ones (a pair, a ring), where
-      `d + 1` consecutive kept residuals bound the residual of the
-      composed map by their sum; in a general read graph the bound needs
-      the Lipschitz constant of the maps through the dropped members, and
-      the stateful pair above accepts after two passes.  0.4.0 states the
-      condition, advises on it at `validate()` and `compile()`, and pins
-      the case.
+      under the scale).  Found by two pre-merge audits of the interface
+      norm on static mapped edges (the Jacobi case on an edge whose source
+      the band dropped, the ring on sparse mapped edges); both are
+      reproduced on every norm, so neither is the mappings'.  Not fixed
+      in 0.4.0, by decision: the dead band stays as it is and its
+      criterion is redesigned in 0.5.0.  A rule that only delays the exit
+      (so many consecutive passes at or below the threshold) is provable
+      from the residuals the loop carries only for a loop in which every
+      kept member is reached from kept members through the same number of
+      dropped ones, where `d + 1` consecutive kept residuals bound the
+      residual of the composed map by their sum; in a general read graph
+      the bound needs the Lipschitz constant of the maps through the
+      dropped members, and the stateful Jacobi pair accepts after two
+      passes.  0.4.0 states the condition, advises on it at `validate()`
+      and `compile()` for every group with `atol > 0` that has three or
+      more members or runs under Jacobi, and pins both cases.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       `converged=True` on a state far from its fixed point is a silent
       wrong result, never `minor`.  Not `critical`: it needs a dead band
-      declared (`atol > 0`; the default is 0.0), the Jacobi schedule, a
-      field that falls inside the band, and a member whose output depends
-      on that field enough to matter, which is the declaration `atol`
-      makes false; `compile()` warns about the configuration.
+      declared (`atol > 0`; the default is 0.0, where nothing of this
+      happens), a field that falls inside the band, and a kept member
+      whose output depends on that field enough to matter, which is the
+      declaration `atol` makes false; and `compile()` warns about every
+      configuration it was measured in (three or more members, or
+      Jacobi).  The second case runs under the default schedule, which is
+      why the advisory no longer offers Gauss-Seidel as the way out.
       `context_dependent` because whether the verdict gates anything is
       the program's choice.
     affected_components:
@@ -16798,25 +17319,39 @@ anomalies:
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
-      Use `iteration_mode="gauss-seidel"`, or leave `atol` at its default
-      of 0.0, in any group in which a member's output depends on a field
-      that can fall inside the dead band (both verified on the measured
-      pairs: 0.5 to 4.9 and 0.3 to 7.9 tolerances).  Where Jacobi and a
-      dead band are both needed, read `spectral_error_bound` with
-      `diagnostics=True`: the bound folds the dead-banded share in and
-      read 1.9e6 to 3.7e6 on the audited pair where the verdict read
-      converged.
+      Leave `atol` at its default of 0.0 on any group of three or more
+      members and on any group under `iteration_mode="jacobi"` (verified
+      on every measured group: 0.2 to 7.9 tolerances).  At `atol=0.0` only
+      a field that is exactly zero leaves the residual; every non-zero
+      field, however small, is measured against its own magnitude.  A
+      pair under Gauss-Seidel may keep its dead band (held in both sweep
+      orders in every case measured).  Changing the schedule to
+      Gauss-Seidel is NOT a remedy for a group of three or more.  The
+      dead band is expected to be replaced in 0.5.0: do not tune to it.
+      Where a band is kept regardless, read `spectral_error_bound` with
+      `diagnostics=True`: the bound folds the dead-banded share in (1.9e6
+      to 3.7e6 on the audited Jacobi pair, and 2x to 11x the kept field's
+      distance on the ring, where the verdict read converged).
     resolution_status: "open"
     residual_risk: >
-      Until a criterion for the dropped members is designed (0.5.0), a
-      Jacobi group with `atol > 0` can accept early as described.  The
-      advisory is static (the group's two settings); it cannot tell
-      whether a kept member depends on a dead-banded field.
+      Until the dead band is redesigned (0.5.0), a group with `atol > 0`
+      that has three or more members, or runs under Jacobi, can accept
+      early as described.  The advisory is static (the member count, the
+      schedule and `atol`); it cannot tell whether a kept member depends
+      on a dead-banded field, so it also fires on groups that are sound,
+      and a pair under Gauss-Seidel is not advised on because it held in
+      every case measured, not because it is proved.
     verification:
       - "tests/core/test_the_dead_band_under_jacobi.py::test_a_converged_jacobi_step_holds_the_fields_computed_from_a_dead_banded_one"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_the_fixture_reaches_the_one_pass_acceptance"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_gauss_seidel_holds_the_pair_with_the_field_inside_the_dead_band"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_validate_advises_on_a_dead_band_declared_under_jacobi"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_converged_step_of_the_banded_ring_holds_its_kept_field"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_banded_ring_accepts_after_one_pass_far_from_its_fixed_point"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_pair_holds_with_the_force_inside_the_dead_band_in_both_sweep_orders"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_same_ring_with_no_dead_band_is_held"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_validate_advises_on_a_dead_band_declared_on_three_members"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_group_with_no_dead_band_gets_no_advisory"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-255"
@@ -16843,10 +17378,23 @@ anomalies:
       in 0.4.0's development.  Found by the pre-merge audit of the
       interface norm on static mapped edges.  Resolved in 0.4.0: every
       entry of a group's floor is counted at the eps of the coarsest
-      floating dtype among the group's fields, or a coarser one of its own
-      (what a narrowing transform delivers), by one function read by the
-      report and by the step's analysis; a group of one dtype has the
-      floor it had, to the bit.
+      floating dtype among the group's fields and what its internal edges
+      deliver, by one function read by the report and by the step's
+      analysis; a group of one dtype has the floor it had, to the bit.
+      **What an edge delivers** was at first counted only for the one
+      reading of an edge read as delivered under `"interface"`: with every
+      field float64 and one internal edge carrying
+      `transform=lambda v: v.astype(float32)`, a pair stalled on the
+      float32 bottleneck with `residual` exactly 0.0 and
+      `converged=True` at `rtol=1e-12`, 2.8e5 to 3.6e5 tolerances from
+      its fixed point, and `spectral_error_bound` read 5e-8 to 1e-7 of the
+      distance with both usable flags set, under `"mixed"` and `"l2"` on
+      either edge, under `"interface"` on an edge read at its source, and
+      under both schedules (found by the second pre-merge audit).  The
+      delivered dtype of every internal edge (after its mapping and its
+      transform; read abstractly, the transform is never run on numbers)
+      now enters the group's coarsest eps under all three norms: the same
+      reports read the bound at 26x to 45x the distance.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -16871,7 +17419,10 @@ anomalies:
       coarsest member, that a node's own arithmetic is no coarser than the
       fields it reads and writes, and that an input from outside the group
       is a constant of the solve.  A node that rounds through a narrower
-      dtype inside `update` is outside it.  Where a fine field is computed
+      dtype inside `update` (a cast down and back) is outside it: nothing
+      outside the node can see it, and it is not counted.  So is an
+      internal edge whose source is not a state field (a boundary flux),
+      whose delivered dtype is not read.  Where a fine field is computed
       from fine fields alone the floor is larger than it needs to be, and
       `precision_limited` is reported sooner.  The rule is for value
       entries: a position (a geometry field an internal edge anchors a
@@ -16880,12 +17431,16 @@ anomalies:
       position has float64 resolution.  That leaves one corner: a float64
       position a member sets within the pass purely from float32 data is
       counted finer than it is (on the pair that pins it the bound held
-      by 575x and more with the flags set).
+      by 575x and more; the pair solves positions, so in 0.4.0 its
+      report carries no flag: MADD-ANO-252).
     verification:
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_float64_field_downstream_of_a_float32_member_is_floored_at_float32"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_set_flag_stands_on_a_bound_at_or_above_the_distance_in_a_group_of_two_dtypes"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_every_entry_of_the_floor_is_counted_at_the_groups_coarsest_eps"
       - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_steps_analysis_counts_every_entry_at_the_groups_coarsest_eps"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_the_coarsest_eps_counts_a_floating_delivery_and_nothing_else"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_an_edge_that_keeps_its_dtype_changes_nothing_to_the_bit"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-256"
@@ -16997,36 +17552,90 @@ anomalies:
       versions (13 of 28 flagged reports below their distance), 0.09 at
       the float64 floor on jax 0.11.0, and 0.84 there with three rows of
       300, while the gather layout of the same three-row operator held
-      (1.7 at 300 entries, 4.3 or more at 3000).  A `multilinear_grid` mapping from points to a
-      grid is the same scatter-add with as many entries on a grid node
-      as there are points within one spacing of it: with 300 and 3000
-      markers in one cell behind a uniform field the bound read 3.8 and
-      1.3 of the distance under `"mixed"` (flags set; larger counts were
-      not measured), and under `"interface"` such a group reports no
-      bound.  No release carried it: sparse mappings, the float floor's
-      flags and the interface norm's readings are new in 0.4.0's
-      development.  Found by the pre-merge audit of the interface norm
-      on static mapped edges.  **What 0.4.0 does** (a guard on the flag,
-      not a fix of the number): where an internal edge of a group
-      carries a static sparse mapping in the scatter layout whose
-      longest row is over `SCATTER_ROW_FLOOR_LIMIT = 10` entries (the
-      largest power of ten at which every measured run held by a factor
-      of two on the three versions) and the residual is not above the
-      float floor times that row's length, the report withdraws
-      `spectral_usable` and `gradient_bound_usable` with a
-      `not_usable_reason`; every number is reported as computed, and
-      `ratio_usable`, `precision_limited` and `converged` are untouched.
-      With it, over 6,235 flagged reports behind rows of more than ten
-      entries (both dtypes, tolerances from the float floor to 1e-1), no
-      report at its counted floor keeps a flag, and the 693 that keep
-      one read at least 0.9925 of their distance (20 of them below 1).
-      The price: 3,757 of the 4,430 reports whose bound was right lose
-      their flag (every one at the counted floor: all of them at 30
-      entries, 85% of those flagged at 100, 73% at 300, 70% at 1000, 48%
-      at 3000, 43% at 1e4 and 32% at 3e4 had a bound that held).  The
-      gather layout, the dense kinds and geometry-dependent mappings are
-      NOT guarded: their reports keep their flags in the failing cases
-      above.
+      (1.7 at 300 entries, 4.3 or more at 3000).
+      Short rows of the reduced forms (one, three and sixteen rows of 3,
+      10, 30 and 100 entries; two random fields, two uniform ones and a
+      ramp; `"interface"`; the same digits on the three versions): in
+      float32 the gather layout read 6.5, 4.9, 3.4 and 2.8 times the
+      distance and the dense kind 6.5, 4.9, 2.24 and 2.8; at the float64
+      floor 8.9, 5.0, 3.05 and 2.6, and 8.9, 5.0, 2.08 and 2.6 (one row
+      on the three versions, three rows on jax 0.11.0). They held by a
+      factor of two up to 100 entries. **Fields whose terms cancel** are
+      MADD-ANO-247's mechanism, reached through the field's signs in
+      place of the mapping's: a delivered value is no finer than the
+      terms it was added up from, whatever the row's length and the
+      order of the sum. On the same pairs with `b = 0` and a field that
+      alternates in sign, a cancellation `sum |t| / |sum t|` of 3 or
+      less left every kind holding by two (3.7 at 10 entries, the
+      scatter layout 2.14 at 30), and a cancellation of 25 read 1.26 at
+      10 entries in every kind and 0.80 behind a dense matrix of three
+      rows of ten entries, flags set; at the float64 floor the same row
+      of 10 entries read 0.85 in every kind, flag set; and a row of two
+      entries reads as a row of ten does (1.44 against 1.26 in float32),
+      so the row's length is not what decides it. The limit below is not
+      taken on those runs: no row length answers for a field's signs. A
+      `multilinear_grid` mapping from points to a grid is the same
+      scatter-add with as many entries on a grid node as there are
+      points within one spacing of it, a number decided in the step:
+      with 8, 300 and 3000 markers in one cell behind a uniform field
+      the bound read 13.8, 3.8 and 1.3 of the distance under `"mixed"`
+      (it held, by less than two at 3000; larger counts were not
+      measured). That group solves the markers' positions, and in 0.4.0
+      such a group has no usable flag whatever its rows (MADD-ANO-252);
+      a group whose positions are constants of the pass keeps its flags
+      behind the same uncounted rows, which was not measured. Its gather
+      adds up at most `2^d` entries. No release carried it: sparse
+      mappings, the float floor's flags and the interface norm's
+      readings are new in 0.4.0's development. Found by the pre-merge
+      audit of the interface norm on static mapped edges. **What 0.4.0
+      does** (a guard on the flag, not a fix of the number): where an
+      internal edge of a group carries a static mapping of any kind (a
+      dense matrix, a static sparse mapping in the gather layout or in
+      the scatter layout, a registered kind's own static class) whose
+      longest row is over `MAPPED_ROW_FLOOR_LIMIT = 10` entries and the
+      residual is not above the float floor times that row's length, the
+      report withdraws `spectral_usable` and `gradient_bound_usable`
+      with a `not_usable_reason` that names the edge, how its mapping is
+      applied, the row and the limit; every number is reported as
+      computed, and `ratio_usable`, `precision_limited` and `converged`
+      are untouched. A row is the entries one delivered value adds up
+      whatever the weights are, since they are a parameter a step may be
+      handed: the valid slots of a sparse row in either layout; the
+      **width** of a dense matrix, so a dense selection matrix is
+      counted at its width although its sums are exact; and for a
+      registered kind's own class the entries of its source side (its
+      `apply` is its author's, and nothing was measured on it). One
+      limit for every kind: the largest power of ten at which every
+      measured run behind fields that do not cancel held by a factor of
+      two on the three versions. The scatter layout sets it (30 entries
+      hold by 2.07, 100 do not); the reduced forms held by two up to 100
+      entries, but which rows XLA sums in order is its own to choose, so
+      they are not given a limit of their own. With the guard, over
+      12,796 flagged reports behind rows of more than ten entries (the
+      three kinds, both dtypes, tolerances from the float floor to
+      1e-1), no report at its counted floor keeps a flag, and the 927
+      that keep one read at least 0.9925 of their distance (20 of them
+      below 1). That is the measured pairs' figure and not the rule's
+      floor: on a group of ONE member with an edge to itself (one
+      evaluation a pass, so half the pair's threshold) a kept flag read
+      0.982 of the distance by construction (a report just above the
+      threshold, a uniform field, gain 0.999, 1000 entries a row,
+      `"interface"`; 14 of 176 kept flags under 0.9925). **The price:** 9,862 of the 10,769 reports whose bound
+      was right lose their flag. At the counted floor every flag behind
+      a row over ten entries is withdrawn, so the price there is the
+      share that was right: 2,551 of the 4,123 flagged there (62%) in
+      the scatter layout, 2,457 of 2,584 (95%) in the gather layout and
+      2,566 of 2,626 (98%) behind a dense matrix, which is to say that
+      behind the reduced forms nearly every flag the guard withdraws
+      stood on a bound that held. Above the counted floor it withdraws
+      1,206 of 1,879 right reports in the scatter layout, 583 of 700 in
+      the gather layout and 499 of 616 behind a dense matrix (where none
+      of the 616 was under its distance). In practice a float32 group
+      whose mapping adds up a few hundred entries a row has both flags
+      withdrawn at any `rtol` of about 1e-4 or tighter (the floor is
+      0.005 of the threshold per evaluation there), and the same group
+      in float64 keeps them. A geometry-dependent mapping is NOT counted
+      by this guard.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -17050,32 +17659,52 @@ anomalies:
       pair in float64 at `rtol=1e-7`, rows of 300 and 3e4 entries, both
       schedules, `"interface"` and `"mixed"`: 128 of 128 reports kept
       their flags on a bound at 0.9995 of the distance or more, 1.4 or
-      more under `"interface"`).  Another layout or a dense mapping is
-      not a workaround in general: see the failing cases above.  Where
-      `precision_limited=True` behind a mapped edge with rows of more
-      than a few hundred entries, in any layout, do not rely on
-      `spectral_usable`.
+      more under `"interface"`; one row of 300 entries in the gather
+      layout and behind a dense matrix likewise keeps its flags on a
+      bound that holds). The same long row in another layout or as a
+      dense matrix is not a workaround: every static kind is counted
+      alike. A dense matrix that holds a selection or an interpolation
+      (one or two non-zeros a row) can be held as a sparse mapping
+      instead, whose rows are counted at those entries (verified on a
+      selection 40 entries wide: the dense form loses its flags at the
+      float floor, the sparse form keeps them, on the same bound). Where
+      a flag is withdrawn, `precision_limited`, `residual` and the bound
+      itself are still reported.
     resolution_status: "open"
     residual_risk: >
       Until the floor counts a mapped edge's own rounding (0.5.0: the
       row's `(k - 1) / 2` `eps` over the cancellation of its terms,
       which holds for any order of the sum, added to the evaluation
       count), `spectral_error_bound` and `gradient_relative_error_bound`
-      can read too small behind a long row in every layout.  The 0.4.0
-      guard covers the scatter layout only; the gather layout on jax
-      0.10.2 (float32, rows of 1e4 and more), a dense mapping of several
-      long rows and a geometry-dependent scatter keep their flags.
-      Where the guard keeps a flag the bound can still be short by the
-      row's rounding over the residual (under an eighth in the worst
-      case; 0.75% at most measured).  The limit and the margins are
-      measurements on one CPU family; a GPU scatter-add is not the
-      in-order sum (MAP-023) and was not measured.
+      can read too small behind a long row in every kind; in 0.4.0 their
+      flags no longer say usable there, behind any static mapping. Not
+      covered by the guard: a geometry-dependent scatter whose positions
+      are constants of the pass (a `multilinear_grid` mapping from
+      points to a grid: the bound held by 1.3 with 3000 markers in a
+      cell on a group that solves its positions, which has no flag in
+      0.4.0; larger counts, and the form with constant positions, were
+      not measured); a row of ten entries or fewer behind a field whose
+      terms cancel (MADD-ANO-247: with a cancellation of 25, 1.26 of the
+      distance at ten entries in float32 and 0.85 at the float64 floor,
+      flag set); a registered kind's own static class, which is counted
+      at its source side's entries and was not measured. Where the guard
+      keeps a flag the bound can still be short by the row's rounding
+      over the residual (under an eighth in the worst case; 0.75% at
+      most measured). The guard is conservative behind the gather
+      layout, a dense matrix and above all a dense selection or
+      interpolation matrix, where it withdraws flags whose bound held.
+      The limit and the margins are measurements on one CPU family; a
+      GPU scatter-add is not the in-order sum (MAP-023) and was not
+      measured.
     verification:
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_a_stalled_group_behind_a_long_scatter_row_withdraws_its_flags_and_says_why"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_bound_behind_a_long_scatter_row_is_at_or_above_the_distance"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_same_operator_in_the_gather_layout_keeps_its_flags_on_a_bound_that_holds"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
-      - "tests/core/test_the_float_floor_of_a_long_scatter_row.py::test_the_guard_moves_no_number_of_the_report"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_stalled_group_behind_a_long_row_withdraws_its_flags_and_says_why"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_long_row_is_at_or_above_the_distance"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_row_within_the_limit_keeps_its_flags_on_a_bound_that_holds"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_every_static_mapping_on_an_internal_edge_is_counted"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_dense_row_is_the_matrix_width_whatever_its_weights"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_guard_moves_no_number_of_the_report"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less_than_two"
 
   - anomaly_id: "MADD-ANO-258"
     title: "Under convergence_norm=\"interface\" the float floor counts no position for a multilinear_grid mapping read at its source and anchored at its target: far into a long float32 grid such a group reads a floor under one, no advisory and converged=True 2.6 to 16 tolerances from its float64 fixed point"

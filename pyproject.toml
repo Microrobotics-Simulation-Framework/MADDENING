@@ -285,10 +285,12 @@ filterwarnings = [
     # differential properties carry such groups.  Its own tests record it
     # with catch_warnings(record=True) and simplefilter("always").
     "ignore:.* is read from the previous step although no cycle runs through it:UserWarning",
-    # ... and about a dead band declared under Jacobi (MADD-ANO-254): the
+    # ... and about a dead band declared under JACOBI (MADD-ANO-254): the
     # domain batteries and the searches run such groups on purpose.  Its own
-    # tests read it from validate() and record compile()'s with pytest.warns.
-    "ignore:(?s).*a field inside the dead band leaves the residual, and under Jacobi:UserWarning",
+    # tests read it from validate() and record compile()'s.  The same
+    # advisory for three or more members under Gauss-Seidel is NOT filtered
+    # here: a test that builds such a group expects it by name.
+    "ignore:(?s).*declares a dead band under iteration_mode='jacobi':UserWarning",
     # RigidBody2DNode is deprecated but existing tests still exercise it
     "ignore:RigidBody2DNode is deprecated:DeprecationWarning",
     # solver='fori' is deprecated; the fori-vs-ift parity tests keep

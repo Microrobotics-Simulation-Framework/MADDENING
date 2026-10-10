@@ -485,6 +485,38 @@ class MultilinearGridMapping:
             out.append(jnp.where(jnp.isfinite(cols[:, a]), distance, jnp.asarray(jnp.nan, T)))
         return jnp.stack(out, axis=1).reshape(geom.shape)
 
+    def _plane_resolution(self, geom):
+        """The float resolution at which a coordinate can be told from a
+        lattice plane, in the geometry's units, shape and dtype: ``eps``
+        of the dtype times the largest coordinate magnitude of the
+        lattice's axis (its first or its last point), or the coordinate's
+        own, or its offset's from the lattice origin, where that is
+        larger.
+
+        The stencil decides the lattice cell from the rounded quotient of
+        that offset by the spacing (:meth:`_lattice_coordinates`), and a
+        coordinate is known to one rounding of what built it: a position
+        a member moved to within 2e-9 of a face at zero, from 0.1, is the
+        rounding of a sum of terms of order 0.1 (the float64 reference
+        has it 1e-8 on the other side).  So the scale is the lattice's,
+        not the coordinate's own: nearer a plane than a few of these,
+        which side of it the floats evaluated is not the value's to say.
+        Read by the coupling diagnostics
+        (``_bounds._reader_plane_distance``).
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        eps = jnp.asarray(jnp.finfo(T).eps, T)
+        out = []
+        for a in range(self._d):
+            origin = float(self.origin[a])
+            top = origin + (self.shape[a] - 1) * float(self.spacing[a])
+            scale = jnp.asarray(max(abs(origin), abs(top)), T)
+            own = jnp.maximum(jnp.abs(cols[:, a]), jnp.abs(cols[:, a] - jnp.asarray(origin, T)))
+            out.append(eps * jnp.maximum(own, scale))
+        return jnp.stack(out, axis=1).reshape(geom.shape)
+
     def _floating(self, field, what: str):
         field = jnp.asarray(field)
         if not jnp.issubdtype(field.dtype, jnp.floating):

@@ -266,6 +266,96 @@ def test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are():
             _same_matrix(sparse, nearest_neighbor_mapping(src, tgt, mode=mode))
 
 
+#: The boundary arrays a caller can pass: NumPy's default float64, float32,
+#: a plain list of floats (float64 once NumPy reads it) and one of each.
+_BOUNDARY_FORMS = {
+    "float64": lambda source, target: (source, target),
+    "float32": lambda source, target: (source.astype(np.float32), target.astype(np.float32)),
+    "list": lambda source, target: (source.tolist(), target.tolist()),
+    "mixed": lambda source, target: (source.astype(np.float32), target),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_BOUNDARY_FORMS))
+def test_the_projection_weights_are_float32_under_x64_and_a_float32_field_stays_float32(form):
+    """Both projection factories hold float32 weights whatever
+    ``jax_enable_x64`` says and whatever dtype the boundaries have, as the
+    nearest-neighbour kinds do: the same bytes under either setting (so a
+    config written under one rebuilds under the other), and a float32
+    field delivered as float32 in an x64 process, by ``apply`` and by
+    ``apply_T``.  (Weights that followed float64 boundaries there
+    delivered float64 into a float32 target from a plain list of
+    boundaries, and moved with the setting.)"""
+    rng = np.random.default_rng(12)
+    source = np.concatenate([[0.0], np.cumsum(rng.uniform(0.1, 1.0, 23))])
+    target = np.linspace(0.0, source[-1], 8)                # covers the source grid exactly
+    sb, tb = _BOUNDARY_FORMS[form](source, target)
+    built = {}
+    for enabled in (False, True):
+        with x64(enabled):
+            dense = projection_1d_mapping(sb, tb)
+            sparse = sparse_projection_1d_mapping(sb, tb)
+            assert dense.H.dtype == jnp.float32 and sparse.weights.dtype == jnp.float32
+            _same_matrix(sparse, dense, f"{form} x64={enabled}")
+            built[enabled] = (np.asarray(dense.H).tobytes(), np.asarray(sparse.weights).tobytes(),
+                              np.asarray(sparse.indices).tobytes())
+            field = jnp.asarray(rng.uniform(-2.0, 2.0, 23), jnp.float32)
+            back = jnp.asarray(rng.uniform(-2.0, 2.0, 7), jnp.float32)
+            for mapping in (dense, sparse):
+                assert jax.jit(mapping.apply)(field).dtype == jnp.float32
+                assert jax.jit(mapping.apply_T)(back).dtype == jnp.float32
+    assert built[False] == built[True]
+
+
+def test_in_a_float64_graph_the_projection_holds_to_float32_rounding_and_a_float64_matrix_to_float64():
+    """What float32 weights cost under x64, as the factory's docstring
+    states it: a row sums to one, and the integral of a float64 field is
+    preserved, to float32 rounding (2.98e-8 and 3.7e-9 on these grids)
+    and not to float64; the weights are the float64 overlap formula
+    rounded once.  The stated way to float64 weights is the formula
+    handed to ``matrix_mapping`` (``sparse_matrix_mapping``), which keeps
+    the dtype it is given: exact to float64 rounding."""
+    rng = np.random.default_rng(12)
+    source = np.concatenate([[0.0], np.cumsum(rng.uniform(0.1, 1.0, 23))])
+    target = np.linspace(0.0, source[-1], 8)
+    field64 = rng.uniform(-2.0, 2.0, 23)
+    widths_s, widths_t = np.diff(source), np.diff(target)
+    ref = np.zeros((7, 23))
+    for i in range(7):
+        for j in range(23):
+            ref[i, j] = max(0.0, min(target[i + 1], source[j + 1]) - max(target[i], source[j])
+                            ) / widths_t[i]
+    eps32, eps64 = float(np.finfo(np.float32).eps), float(np.finfo(np.float64).eps)
+    want = float(widths_s @ field64)
+    scale = float(widths_s @ np.abs(field64))
+    with x64(True):
+        field = jnp.asarray(field64)
+        dense = projection_1d_mapping(source, target)
+        sparse = sparse_projection_1d_mapping(source, target)
+        np.testing.assert_array_equal(np.asarray(dense.H), ref.astype(np.float32))
+        row_gap = float(np.max(np.abs(np.asarray(dense.H, np.float64).sum(axis=1) - 1.0)))
+        assert 64 * eps64 < row_gap <= 4 * eps32, "float32 rounding, and visibly not float64"
+        for mapping in (dense, sparse):
+            out = np.asarray(jax.jit(mapping.apply)(field))
+            assert out.dtype == np.float64                  # the field's, by promotion
+            gap = abs(float(widths_t @ out) - want)
+            assert 64 * eps64 * scale < gap <= 4 * eps32 * scale
+        # The float64 route.
+        rows, columns = np.nonzero(ref)
+        k = int(np.bincount(rows).max())
+        indices = np.full((7, k), -1, np.int64)             # -1: an unused slot
+        values = np.zeros((7, k))
+        slot = np.arange(rows.size) - np.searchsorted(rows, rows)
+        indices[rows, slot], values[rows, slot] = columns, ref[rows, columns]
+        exact = (matrix_mapping(ref, mode="conservative"),
+                 sparse_matrix_mapping(indices, values, n_source=23, mode="conservative"))
+        assert exact[0].H.dtype == jnp.float64 and exact[1].weights.dtype == jnp.float64
+        for mapping in exact:
+            out = np.asarray(jax.jit(mapping.apply)(field))
+            np.testing.assert_allclose(out, ref @ field64, rtol=0, atol=64 * eps64)
+            assert abs(float(widths_t @ out) - want) <= 64 * eps64 * scale
+
+
 def test_conservative_nearest_neighbour_preserves_the_total_in_both_forms():
     """Every source adds to exactly one target: the column sums of the
     operator are one, and the total of a mapped field is the total of the

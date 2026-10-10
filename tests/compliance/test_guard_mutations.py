@@ -160,6 +160,7 @@ _LIN = "tests/property/test_coupling_targeted_search.py"
 _GEO = "tests/property/geometry_cells.py"
 _HELPER = "tests/property/targeted_search.py"
 _SYSID = "tests/property/test_sysid_targeted_search.py"
+_RING = "tests/core/test_the_dead_band_of_a_ring_of_three.py"
 HUNTS_SEEDED = (f"{_HUNTS}::test_no_hunt_in_the_tree_is_written_without_a_seed",)
 _GS_L2 = '    dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="l2"),\n'
 
@@ -819,6 +820,43 @@ MUTANTS: tuple[Mutant, ...] = (
         "test_cycle_covered_by_group_names_the_groups_iteration_mode",),
        "a loop that a Jacobi group iterates reported as handled by Gauss-Seidel, as in every "
        "release to 0.3.1"),
+    # --- DB: the advisory on a dead band (MADD-ANO-254): atol > 0 on three ---
+    # --- or more members, or under Jacobi; nothing at atol == 0 -------------
+    _M("DB1", "src/maddening/core/coupling/_group_layout.py",
+       "    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):\n",
+       "    if not (group.atol > 0 and jacobi):\n",
+       (f"{_RING}::test_validate_advises_on_a_dead_band_declared_on_three_members",),
+       "the advisory under Jacobi only, as first written: a Gauss-Seidel ring of three that "
+       "accepts after one pass thousands of tolerances off compiles without a word"),
+    _M("DB2", "src/maddening/core/coupling/_group_layout.py",
+       "    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):\n",
+       "    if not (group.atol > 0 and (jacobi or members > _DEAD_BAND_MEMBERS)):\n",
+       (f"{_RING}::test_validate_advises_on_a_dead_band_declared_on_three_members",),
+       "the advisory from four members on: the measured ring has three"),
+    _M("DB3", "src/maddening/core/coupling/_group_layout.py",
+       "    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):\n",
+       "    if not (jacobi or members >= _DEAD_BAND_MEMBERS):\n",
+       (f"{_RING}::test_a_group_with_no_dead_band_gets_no_advisory",),
+       "the advisory at the default atol: every group of three members and every Jacobi group "
+       "warned about a dead band it does not declare"),
+    # --- CE: the group's coarsest eps counts what an internal edge delivers --
+    _M("CE1", "src/maddening/core/coupling/acceleration.py",
+       "    for record in interface_records(interface_edges, state):\n"
+       "        for dtype, size in record.delivered_leaves(state, mappings):\n",
+       "    for record in ():\n"
+       "        for dtype, size in record.delivered_leaves(state, mappings):\n",
+       ("tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::"
+        "test_the_coarsest_eps_counts_a_floating_delivery_and_nothing_else",),
+       "the delivered dtype left out of the coarsest eps: a float64 pair stalled on a transform "
+       "that narrows to float32 reads its bound at 1e-7 of the distance with both flags set"),
+    _M("CE2", "src/maddening/core/coupling/_coupled_block.py",
+       "                map_eps = _group_coarsest_eps(\n"
+       "                    template_state, group_node_names, plan, step_mappings)\n",
+       "                map_eps = _group_coarsest_eps(template_state, group_node_names)\n",
+       ("tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::"
+        "test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance",),
+       "the step's own analysis not handed the group's edges: the report's floor counts the "
+       "delivered dtype and the spectral analysis inside the step rounds at the fields' finer one"),
 )
 
 

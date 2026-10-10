@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
+    SPECTRAL_KRYLOV_STEPS,
+    SPECTRAL_SETTLED_FRACTION,
     convergence_criterion,
     float_fields_of,
     reported_converged,
@@ -250,9 +252,18 @@ class GraphManager:
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
         # The underflow-range check (``_warn_underflow_range``): pending
-        # until the first untraced step after each compile, and the groups
-        # already warned about, which are never warned about again.
+        # until the first untraced step after each compile and after each
+        # write of node states that is not a step's (``set_node_state``,
+        # ``reset_state``), and the groups already warned about, which are
+        # never warned about again.  A graph that is written to before
+        # every step is not asked at every one of them: after the first
+        # few checks of a compile (``_underflow_free_checks``) a pending
+        # one waits until enough states have been stored since the last
+        # (``_underflow_stores_since_check``; the numbers are
+        # ``_reports._UNDERFLOW_FREE_CHECKS`` and ``_UNDERFLOW_CHECK_SPACING``).
         self._underflow_check_pending = False
+        self._underflow_free_checks = 0
+        self._underflow_stores_since_check = 0
         self._underflow_warned: set[str] = set()
         # The state-layout check of a stepped state
         # (``_store_stepped_state``): which trace of which compile the
@@ -279,13 +290,14 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
-        # Per group key, ``(edge key, longest row)`` of the internal edges
-        # that carry a static sparse mapping in the scatter layout.
-        self._committed_scatter_rows: dict[str, tuple] = {}
+        # Per group key, ``(edge key, what, longest row)`` of the internal
+        # edges that carry a static mapping, of every kind.
+        self._committed_mapped_rows: dict[str, tuple] = {}
         # Per group key, the keys of the geometry-dependent mapped edges
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
         self._committed_geometry_edges: dict[str, tuple] = {}
+        self._committed_geometry_solved: dict[str, tuple] = {}
         self._committed_geometry_refusals: dict[str, Optional[str]] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
@@ -1628,7 +1640,17 @@ class GraphManager:
         return self._nodes[name].node
 
     def add_node(self, node: SimulationNode) -> None:
-        """Register a node and initialise its state."""
+        """Register a node and initialise its state.
+
+        The node's ``delta_t`` is read here, once, and kept as the
+        timestep the graph steps it at (a value that is not a finite
+        number above zero is refused).  Writing ``node.delta_t``
+        afterwards changes nothing the graph does: :meth:`validate`
+        reports it as an ``ERROR`` naming both values, so the next
+        :meth:`compile` refuses the graph, and :meth:`to_dict` writes
+        the timestep the graph runs.  To change a node's timestep, add
+        a node constructed with the new one in its place.
+        """
         # Into the state that is kept: added to a traced one (right after
         # ``jax.grad`` of a loss that stepped the graph), the node's state
         # was lost when the next entry point put the graph back.
@@ -1721,6 +1743,10 @@ class GraphManager:
         traced input on every step.  Its ``n_source`` must equal the
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
+        Both are asked here, once, of the source node's
+        ``initial_state()`` and the target's declaration; a source field
+        written with another size afterwards (``set_node_state``) is not
+        asked again and raises where its program is traced.
         A mapping of a class other than ``StaticLinearMapping`` is a
         ``ValueError`` unless its ``params_pytree()`` is a plain dict
         from identifiers to concrete, finite, floating-point JAX arrays,
@@ -1930,6 +1956,14 @@ class GraphManager:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
         resolved = _graph_specs._ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
+        # The shape compile() holds each of these edges' sources to, asked
+        # of *state* as every step program asks it of the state it is
+        # traced for (a missing field stays the KeyError described above).
+        _graph_specs._refuse_edge_sources(
+            _graph_specs._edge_source_rules(
+                [e for e in self._edges if e.target_node == node_name], self._nodes,
+                fields=False),
+            state, doing="read")
         out: dict[str, Any] = {}
         for edge in self._edges:
             if edge.target_node != node_name:
@@ -2330,6 +2364,9 @@ class GraphManager:
         flux_sourced: set[int] = set()
         unknown_source: set[int] = set()
 
+        # A node's ``delta_t`` written after ``add_node`` read it.
+        issues.extend(_graph_specs._timestep_drift_issues(self._nodes))
+
         # Edge endpoint checks
         for e in self._edges:
             if e.source_node not in node_names:
@@ -2374,35 +2411,22 @@ class GraphManager:
 
             # Shape check: compare when both source and spec shapes are
             # concrete.  ``spec.shape == ()`` means the input is a scalar
-            # — non-scalar sources still get flagged.
+            # — non-scalar sources still get flagged.  A mapping replaces
+            # the leading axes it reads by the ones it delivers (axis 0
+            # by its n_target, unless it declares its field shapes); the
+            # rest of the shape (vector components) passes through.  No
+            # comparison when the spec leaves a dimension symbolic
+            # (negative convention) or when a transform may reshape on
+            # the fly.  The rule is ``_edge_shape_issue``'s, which every
+            # step program asks again of the state it is traced for
+            # (``_refuse_edge_sources``): a state write is not a recompile.
             source_state = self._state.get(e.source_node, {})
             src_val = source_state.get(e.source_field)
-            if src_val is not None:
-                src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
-                spec_shape = tuple(spec.shape)
-                leads = (None if e.mapping is None
-                         else _graph_specs._mapping_field_leads(e.mapping))
-                if leads is not None and src_shape:
-                    # A mapping that declares its field shapes replaces
-                    # the leading axes it reads by the ones it delivers.
-                    src_shape = leads[1] + src_shape[len(leads[0]):]
-                elif e.mapping is not None and src_shape:
-                    # The mapping changes axis 0 to its n_target; the
-                    # rest of the shape (vector components) passes through.
-                    src_shape = (int(e.mapping.n_target),) + src_shape[1:]
-                # Skip when spec leaves any dimension symbolic (negative
-                # convention) or when a transform may reshape on the fly.
-                if (e.transform is None
-                        and all(d >= 0 for d in spec_shape)
-                        and src_shape != spec_shape):
-                    issues.append(
-                        f"WARNING[shape]: edge "
-                        f"{e.source_node}.{e.source_field} -> "
-                        f"{e.target_node}.{e.target_field}: "
-                        f"source shape {src_shape} disagrees with "
-                        f"target BoundaryInputSpec shape {spec_shape} "
-                        f"and no transform is set"
-                    )
+            shape_issue = _graph_specs._edge_shape_issue(
+                e, src_val, _graph_specs._edge_declared_shape(e, spec),
+                _graph_specs._edge_mapping_leads(e.mapping))
+            if shape_issue is not None:
+                issues.append(shape_issue)
 
             # Dtype check: only when both source and spec dtypes are set.
             if src_val is not None and spec.dtype is not None:
@@ -2602,10 +2626,10 @@ class GraphManager:
         coupled-pair Fourier limit (MADD-ANO-050).
 
         The group's own settings are advised on first, whatever its
-        members: a dead band declared under Jacobi
-        (``_group_layout._dead_band_under_jacobi_advisories``).
+        members: a dead band declared under Jacobi, or on three or more
+        members (``_group_layout._dead_band_advisories``).
         """
-        own = _group_layout._dead_band_under_jacobi_advisories(group)
+        own = _group_layout._dead_band_advisories(group)
         members = {
             name: self._nodes[name] for name in sorted(group.nodes)
             if name in self._nodes
@@ -2926,6 +2950,12 @@ class GraphManager:
                             # pass reads from the iterate reaches a
                             # lattice plane (same condition).
                             meta[f"coupling_{key}_geometry_plane_limit"] = jnp.array(
+                                jnp.nan, dtype=spec_dtype
+                            )
+                            # How many radii of the Kantorovich ball
+                            # around the iterate the nearest lattice
+                            # plane is away (same condition).
+                            meta[f"coupling_{key}_geometry_plane_margin"] = jnp.array(
                                 jnp.nan, dtype=spec_dtype
                             )
                 if g.acceleration == "iqn-imvj":
@@ -3256,15 +3286,25 @@ class GraphManager:
             for g in self._coupling_groups
         }
         # Per group key, the longest row of each internal edge that carries
-        # a static sparse mapping in the scatter layout, as the step was
-        # built: what the report's guard on the float floor reads
-        # (``_group_layout._scatter_rows``, MADD-ANO-257).
-        self._committed_scatter_rows = {
-            key: _group_layout._scatter_rows(plan)
+        # a static mapping (a dense matrix, a sparse one in either layout,
+        # a registered kind's own class), as the step was built: what the
+        # report's guard on the float floor reads
+        # (``_group_layout._mapped_rows``, MADD-ANO-257).
+        self._committed_mapped_rows = {
+            key: _group_layout._mapped_rows(plan)
             for key, plan in interface_plans.items()
         }
         self._committed_geometry_edges = {
             key: tuple(r.key for r in plan.resolved_geometry_edges())
+            for key, plan in interface_plans.items()
+        }
+        # The position fields each group's pass reads from the iterate or
+        # builds and reads in the same pass (``"node.field"``; empty: every
+        # position is a constant of the pass).  A group with one has no
+        # usable flag in 0.4.0 (``_group_layout._geometry_flags``).
+        self._committed_geometry_solved = {
+            key: tuple(sorted({f"{holder}.{fld}"
+                               for holder, fld, _mapping in plan.geometry_iterate_reads()}))
             for key, plan in interface_plans.items()
         }
         # Why each such group's report withholds its bounds whatever the
@@ -3294,6 +3334,9 @@ class GraphManager:
 
         self._dirty = False
         self._underflow_check_pending = bool(self._coupling_groups)
+        # The check of the compiled state itself, then the writes' own.
+        self._underflow_free_checks = 1 + _reports._UNDERFLOW_FREE_CHECKS
+        self._underflow_stores_since_check = 0
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -3580,6 +3623,11 @@ class GraphManager:
             e.target_node for e in self._edges
             if e.geometry is not None and e.geometry[0] == "target")
 
+        # What compile() asked of each edge's source field (the shape its
+        # target declares), asked again of the state each program below
+        # is traced for: a state write is not a recompile.
+        edge_source_rules = _graph_specs._edge_source_rules(self._edges, nodes)
+
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None, hold=None,
@@ -3741,6 +3789,7 @@ class GraphManager:
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
             def graph_step(full_state, external_inputs, params=None):
+                _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
                 external_inputs = _graph_specs._cast_external_inputs(
                     external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
@@ -3757,6 +3806,7 @@ class GraphManager:
         if has_coupling and not is_multirate:
             # ---- Coupling groups, uniform rate ----
             def graph_step_coupled(full_state, external_inputs, params=None):
+                _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
                 external_inputs = _graph_specs._cast_external_inputs(
                     external_inputs, declared_input_dtypes)
                 node_params = _resolve_params(params)
@@ -3781,6 +3831,7 @@ class GraphManager:
 
         # ---- Multi-rate path (with or without coupling) ----
         def graph_step_multirate(full_state, external_inputs, params=None):
+            _graph_specs._refuse_edge_sources(edge_source_rules, full_state)
             external_inputs = _graph_specs._cast_external_inputs(
                 external_inputs, declared_input_dtypes)
             node_params = _resolve_params(params)
@@ -4049,6 +4100,7 @@ class GraphManager:
         *inside* a trace depends on it.  What is added is the state to
         come back to: see :meth:`_recover_from_escaped_tracers`.
         """
+        replaced = self._state
         if _graph_specs._holds_tracer(new_state):
             if not self._state_traced:
                 self._state_before_trace = self._state
@@ -4061,27 +4113,58 @@ class GraphManager:
             # kept copy still describes.)
             self._state_as_reported = None
         self._state = new_state
-        if self._underflow_check_pending and not self._state_traced:
-            self._underflow_check_pending = False
-            self._warn_underflow_range(new_state)
+        if self._state_traced:
+            return
+        self._underflow_stores_since_check += 1
+        if not self._underflow_check_pending:
+            return
+        if self._underflow_free_checks > 0:
+            self._underflow_free_checks -= 1
+        elif self._underflow_stores_since_check < _reports._UNDERFLOW_CHECK_SPACING:
+            # Written to again and again: the check stays due, and is
+            # made once enough states have been stored since the last.
+            return
+        self._underflow_check_pending = False
+        self._underflow_stores_since_check = 0
+        # The state the step started from, then the one it left: a field
+        # already below ``tiny`` is flushed to exactly zero by the step,
+        # and an exactly zero field never warns.
+        if not _graph_specs._holds_tracer(replaced):
+            self._warn_underflow_range(replaced)
+        self._warn_underflow_range(new_state)
 
     def _warn_underflow_range(self, state: dict) -> None:
         """Warn once per coupled group whose fields are in the subnormal range.
 
-        Runs on the host, once per compile, on the first state a stepper
-        stores outside a transform (:meth:`_store_state`): the remedy --
+        Runs on the host, once per compile and once after each write of
+        node states that is not a step's (``set_node_state`` -- so
+        ``load_state`` and ``PUT /graph/state`` -- and ``reset_state``), on
+        the first state a stepper then stores outside a transform and on the
+        state that step started from (:meth:`_store_state`): the remedy --
         rescaling the field's units -- is a decision about the model's
         configuration, and the first step is where every caller passes,
         whether or not they ever read :meth:`coupling_diagnostics`.  It reads
-        each group field once (one device-to-host copy per compile) and
-        nothing inside the compiled step changes, so stepping and its
-        results are untouched.  A state that decays into the range after the
-        first step is not re-checked.  See
+        each group field of the two states once (two device-to-host copies
+        per compile or write) and nothing inside the compiled step changes,
+        so stepping and its results are untouched.  Those reads cost several
+        times a small graph's step, so a graph that is written to before
+        every step is not asked at every one of them: the first eight
+        checks that writes make due after a ``compile()`` are made at the
+        stepper call that follows the write, and from then on a due check
+        waits until 1024 stepper calls have stored a state since the
+        previous check (``_reports._UNDERFLOW_CHECK_SPACING``), and is
+        made then.  A group already warned about
+        is not read again.  A state that decays into the range through the
+        nodes' own updates is not re-checked.  See
         :class:`~maddening.warnings.UnderflowRangeWarning`.
         """
         from maddening.warnings import UnderflowRangeWarning  # noqa: PLC0415
 
-        for key, hits in _reports._underflow_range_fields(self._coupling_groups, state).items():
+        unwarned = [g for g in self._coupling_groups
+                    if "+".join(sorted(g.nodes)) not in self._underflow_warned]
+        if not unwarned:
+            return
+        for key, hits in _reports._underflow_range_fields(unwarned, state).items():
             if key in self._underflow_warned or not hits:
                 continue
             self._underflow_warned.add(key)
@@ -4979,31 +5062,42 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
-            **A long row of a sparse mapping in the scatter layout**
-            (MADD-ANO-257, open).  The float floor counts a fixed number
-            of ``eps`` per evaluation, and a static sparse mapping in the
-            scatter layout (``transpose="scatter"``) adds a target's row
-            up one entry after another, which rounds by more than that
-            once the row is long, systematically behind a uniform field:
-            a float32 pair stalled behind one row read
+            **A long row of a static mapping** (MADD-ANO-257, open).
+            The float floor counts a fixed number of ``eps`` per
+            evaluation, and a static mapping adds a row's entries up,
+            which rounds by more than that once the row is long,
+            systematically behind a uniform field: a float32 pair
+            stalled behind one row in the scatter layout read
             ``"spectral_error_bound"`` at 0.68 of its true distance
-            behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4.
-            Where an internal edge of the group carries such a mapping
-            with a row longer than ``SCATTER_ROW_FLOOR_LIMIT`` (10, a
-            measured constant) and ``"residual"`` is not above the float
-            floor times the row's length, ``"spectral_usable"`` and
+            behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4; a
+            dense matrix of three rows of 3000 entries read 0.18; the
+            gather layout's rows of 1e4 entries read 0.007 on jax
+            0.10.2.  Where an internal edge of the group carries a
+            static mapping of any kind (a dense matrix, a sparse mapping
+            in either layout, a registered kind's own static class) with
+            a row longer than ``MAPPED_ROW_FLOOR_LIMIT`` (10, a measured
+            constant) and ``"residual"`` is not above the float floor
+            times the row's length, ``"spectral_usable"`` and
             ``"gradient_bound_usable"`` are ``False``, every number is
             reported as computed, and the entry has a
-            ``"not_usable_reason"`` naming the edge, the row's length and
-            the way out (a wider dtype at the same tolerance).  **Only
-            that layout is counted.**  The gather layout and the dense
-            kinds are summed in an order XLA chooses, and their reports
-            keep their flags: measured, the gather layout's rows of 1e4
-            entries and more read as the scatter layout's do on jax
-            0.10.2 in float32, and a dense mapping with three rows of
-            3000 entries read 0.18 of its distance on every jax version.
-            At a float floor behind a row of more than a few hundred
-            entries, in any layout, read the bound in a wider dtype.
+            ``"not_usable_reason"`` naming the edge, how its mapping is
+            applied, the row's length and the way out (a wider dtype at
+            the same tolerance).  A row is the entries one delivered
+            value adds up whatever the weights are: a sparse layout's
+            valid slots, and a dense matrix's **width** (its weights are
+            a parameter a step may be handed, so a selection matrix is
+            counted at its width too).  In practice a float32 group
+            whose mapping adds up a few hundred entries a row has these
+            two flags withdrawn at any ``rtol`` of about 1e-4 or
+            tighter; the same group in float64 keeps them.  **Not
+            counted:** a geometry-dependent mapping, whose rows are
+            decided in the step (a ``multilinear_grid`` scatter adds up
+            as many entries on a grid node as there are markers in its
+            support: measured at 13.8, 3.8 and 1.3 times the distance
+            with 8, 300 and 3000 markers under ``"mixed"``; a group
+            that solves those positions has no flag in 0.4.0, and one
+            whose positions are constants of the pass keeps its flags
+            behind such rows).
 
             **A group that resolves a geometry-dependent mapping**
             (experimental: an edge into a member, from inside the group
@@ -5017,19 +5111,28 @@ class GraphManager:
             the bounds stand where the two agree to
             ``GEOMETRY_GAP_TOLERANCE``.  The spectrum is taken at the
             returned iterate, and a multilinear stencil is another
-            polynomial across a lattice plane: where a position the pass
-            reads from the iterate (a member's source-anchored geometry,
-            or the target-anchored one of a member that computes fluxes)
-            is within twice ``"spectral_error_bound"`` of a lattice plane
-            of its mapping's grid or of a face of the grid's hull, and
-            the step did not certify its linearisation across the Newton
-            step to the fixed point
-            (``"gradient_relative_error_bound"`` is not finite),
-            ``"spectral_usable"`` and ``"gradient_bound_usable"`` are
-            ``False``, every number is reported as computed, and the
-            entry has a ``"not_usable_reason"`` saying so: the fixed
-            point may be in another lattice cell, where the pass
-            contracts at another rate.  Any other such group, and one
+            polynomial across a lattice plane, where the fixed point of
+            the polynomial the pass is in the iterate's lattice cells
+            need not be the pass's.  So in 0.4.0 a group that *solves*
+            positions -- its pass reads one from the iterate, or builds
+            one and reads it in the same pass (a member's
+            source-anchored geometry, or the target-anchored one of a
+            member that computes fluxes) -- has ``"spectral_usable"``
+            and ``"gradient_bound_usable"`` ``False`` on every step,
+            whatever its numbers read: every number is reported as
+            computed, uncertified, and the entry's
+            ``"not_usable_reason"`` names the positions and says so.
+            Where every position is fixed during the pass (a
+            target-anchored geometry read by ``update``, positions held
+            by a node outside the group) the flags are any other
+            group's, and a ``False`` one of a step that computed the
+            estimate has a ``"not_usable_reason"`` giving every cause
+            -- the float floor, an estimate that did not settle (more
+            independent interface scalars than its eight Krylov steps),
+            a gradient bound that was not computed (NaN) or did not
+            certify (``inf``) -- none of which names a lattice plane.
+            A marker whose position the group solves therefore has
+            neither flag on any step.  Any other such group, and one
             whose step failed that check, reports the solve's own
             ``"iterations"``,
             ``"total_iterations"``, ``"residual"`` and ``"converged"``
@@ -5043,9 +5146,10 @@ class GraphManager:
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
-            says which case it is; besides the lattice-plane case above,
-            a long scatter row and a checkpoint saved after a state
-            write, no other group's entry has it.
+            says which case it is; besides the causes above of a group
+            with a geometry edge, a long row of a static mapping and a
+            checkpoint saved after a state write, no other group's entry
+            has it.
 
             **One of those groups keeps the float floor: one withheld
             on account of** ``convergence_norm="interface"`` (its
@@ -5413,51 +5517,57 @@ class GraphManager:
                     })
                     result[key].update(floor_reading)
                     continue
-                plane_limit = (meta.get(f"coupling_{key}_geometry_plane_limit")
-                               if geometry_keys else None)
-                reported_bound = result[key]["spectral_error_bound"]
-                if (plane_limit is not None and math.isfinite(reported_bound)
-                        and not reported_bound <= float(plane_limit)
-                        and not math.isfinite(grad_bound)):
-                    # Experimental: the bound is the linearisation at the
-                    # returned iterate, and a multilinear stencil is
-                    # another polynomial across a lattice plane.  Where a
-                    # position the pass reads from the iterate is within
-                    # the bound's reach of one
-                    # (``_bounds._geometry_plane_limit``; a limit that is
-                    # not a number counts), the fixed point may be in
-                    # another cell, and the linearisation stands only if
-                    # the step certified it across the Newton step to the
-                    # fixed point: the Newton-Kantorovich check of the
-                    # gradient bound, which takes the pass's Jacobian at
-                    # both ends and is what a finite
-                    # ``gradient_relative_error_bound`` records.  Without
-                    # that the flag is withdrawn and the numbers stay,
-                    # with the reason (MADD-ANO-242).
+                if geometry_keys and "not_usable_reason" not in result[key]:
+                    # Experimental: a group that solves the positions of a
+                    # geometry-dependent mapping (its pass reads one from
+                    # the iterate, or builds one and reads it in the same
+                    # pass) has no usable flag in 0.4.0, on any step,
+                    # whatever its numbers read; one whose positions are
+                    # constants of the pass has a smooth group's flags,
+                    # where the step recorded so.
+                    # ``_group_layout._geometry_flags`` is the one place
+                    # that decides, and says why (MADD-ANO-242,
+                    # MADD-ANO-252).  The numbers stay; a ``False`` flag
+                    # of a step that computed the estimate carries its
+                    # reason.
+                    usable, gradient_usable, reason = _group_layout._geometry_flags(
+                        geometry_keys,
+                        solved=self._committed_geometry_solved.get(key),
+                        bound=result[key]["spectral_error_bound"],
+                        gradient_bound=grad_bound, rho=rho_spec,
+                        arnoldi_residual=spec_resid,
+                        settled=bool(spectral_rate_settled(rho_spec, spec_resid)),
+                        precision_limited=precision_limited, declared=bool(declared),
+                        limit=meta.get(f"coupling_{key}_geometry_plane_limit"),
+                        margin=meta.get(f"coupling_{key}_geometry_plane_margin"),
+                        fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS)
                     result[key].update({
-                        "spectral_usable": False,
-                        "gradient_bound_usable": False,
-                        "not_usable_reason": _group_layout._geometry_plane_reason(
-                            geometry_keys, reported_bound, float(plane_limit),
-                            _bounds.GEOMETRY_PLANE_REACH),
+                        "spectral_usable": usable,
+                        "gradient_bound_usable": gradient_usable,
                     })
+                    if reason is not None:
+                        result[key]["not_usable_reason"] = reason
                 # The float floor counts a fixed number of ulps per
-                # evaluation, and a sparse mapping in the scatter layout
-                # adds a row's entries up in order, which rounds by more
-                # than that once the row is long (MADD-ANO-257, open).
-                # Where the residual does not stand clear of the floor
-                # such a row would give it, the flags that rest on the
-                # floor are withdrawn, with the reason; the numbers stay
-                # as computed.  Asked only of a flag that is still set.
-                scatter_reason = (
-                    _group_layout._scatter_row_reason(
-                        self._committed_scatter_rows.get(key, ()), residual, floor)
+                # evaluation, and a static mapping adds a row's entries
+                # up (a dense matrix, a sparse one in either layout),
+                # which rounds by more than that once the row is long
+                # (MADD-ANO-257, open).  Where the residual does not
+                # stand clear of the floor such a row would give it, the
+                # flags that rest on the floor are withdrawn, with the
+                # reason; the numbers stay as computed.  Asked only of a
+                # flag that is still set.
+                row_reason = (
+                    _group_layout._mapped_row_reason(
+                        self._committed_mapped_rows.get(key, ()), residual, floor)
                     if result[key]["spectral_usable"] else None)
-                if scatter_reason is not None:
+                if row_reason is not None:
+                    # (A reason another rule left beside a flag of its
+                    # own, with ``spectral_usable`` standing, is kept.)
                     result[key].update({
                         "spectral_usable": False,
                         "gradient_bound_usable": False,
-                        "not_usable_reason": scatter_reason,
+                        "not_usable_reason": _group_layout._joined_reasons(
+                            result[key].get("not_usable_reason"), row_reason),
                     })
         return result
 
@@ -6147,6 +6257,9 @@ class GraphManager:
         has_coupling = bool(coupling_groups)
 
         params_snapshot = self.params
+        # As in ``_build_step_fn``: compile()'s rule for each edge's
+        # source field, asked of the state the program is traced for.
+        edge_source_rules = _graph_specs._edge_source_rules(self._edges, nodes_dict)
 
         from maddening.core.node import SimulationNode as _SimBase
         flux_producers = {
@@ -6217,6 +6330,7 @@ class GraphManager:
             return new_node_state
 
         def dt_step_fn(state, external_inputs, dt, params=None):
+            _graph_specs._refuse_edge_sources(edge_source_rules, state)
             external_inputs = _graph_specs._cast_external_inputs(
                 external_inputs, declared_input_dtypes)
             if params is None:
@@ -6676,6 +6790,34 @@ class GraphManager:
         remedy the recovery warning names -- lands in the state that is
         kept.  It used to land in the traced state, and the next entry
         point put the graph back over it.
+
+        Notes
+        -----
+        The write is not held to the layout of the state it replaces:
+        *state* may have other fields, shapes and dtypes (``load_state``
+        and ``PUT /graph/state/{node}``, which write through this method,
+        refuse a field of another shape and cast to the dtype the graph
+        holds).  It is not a recompile either.  A layout that differs
+        makes the next entry point trace its program again, and that
+        trace asks some of what ``compile()`` asked of the state it was
+        given, by name:
+
+        - the shape each edge's target declares for it
+          (:class:`~maddening.warnings.ShapeMismatchError` in an
+          ``ExceptionGroup``, as from ``compile()``), and that the field
+          an edge reads is still there (``KeyError``);
+        - the rules of a geometry-dependent mapping's geometry field:
+          its shape, a float32 or float64 dtype, and a dtype fine enough
+          for the mapping.
+
+        It does not ask the dtype an edge's target declares
+        (:class:`~maddening.warnings.DtypeMismatchError` at
+        ``compile()``): an integer written into a floating-point field
+        that an edge reads is stepped, cast by whatever reads it.  Nor
+        does it ask anything of a write that keeps the layout.  Call
+        :meth:`validate` after a write that may have changed a dtype;
+        the graph runs again once the fields have the shapes
+        ``compile()`` accepted.
         """
         self._recover_from_escaped_tracers()
         if name not in self._nodes:
@@ -6692,6 +6834,9 @@ class GraphManager:
             }
             self._state_traced = True
         self._state[name] = state
+        # A written state is one no step of this graph was asked about:
+        # the underflow-range check is due again at the next step.
+        self._underflow_check_pending = bool(self._coupling_groups)
 
     def _meta_reset_seeds(self, fresh: dict) -> dict:
         """``{slot: value -> seed}`` for every ``_meta`` slot ``compile()`` seeds.
@@ -6722,7 +6867,7 @@ class GraphManager:
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound",
                            "pass_evaluations", "reading_floor", "geometry_gap",
-                           "geometry_plane_limit"):
+                           "geometry_plane_limit", "geometry_plane_margin"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):
@@ -6801,6 +6946,9 @@ class GraphManager:
         # tracer with it while leaving the tracer in place.
         self._state_traced = False
         self._state_before_trace = None
+        # As after ``set_node_state``: the initial state is checked at the
+        # next step, whichever state the first step after compile left.
+        self._underflow_check_pending = bool(self._coupling_groups)
 
     # ------------------------------------------------------------------
     # Observer pattern
@@ -6924,6 +7072,14 @@ class GraphManager:
         nodes = []
         for name, spec in self._nodes.items():
             d = spec.node.to_dict()
+            if "timestep" in d:
+                # The timestep the graph registered for the node and
+                # steps it at, which is the node's ``delta_t`` unless
+                # that was written after ``add_node`` read it
+                # (``validate()`` says so): the config then ran another
+                # step than the graph it was written from, or did not
+                # load.
+                d["timestep"] = spec.timestep
             if spec.accepts_params:
                 d["params"] = self.effective_node_params(name)
             nodes.append(d)
@@ -7607,14 +7763,12 @@ class GraphManager:
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;
-        * ``not_usable_reason`` for a group with a geometry-dependent
-          mapping whose bound reaches a lattice plane without the step
-          having certified its linearisation across it (experimental):
-          ``spectral_usable`` is withdrawn and the numbers are kept;
+        * ``not_usable_reason`` for a group that solves the positions of
+          a geometry-dependent mapping (experimental): it has no usable
+          flag in 0.4.0 and its numbers are kept, uncertified;
         * ``not_usable_reason`` for a group at its float floor behind a
-          long row of a sparse mapping in the scatter layout
-          (MADD-ANO-257): ``spectral_usable`` is withdrawn and the
-          numbers are kept;
+          long row of a static mapping of any kind (MADD-ANO-257):
+          ``spectral_usable`` is withdrawn and the numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

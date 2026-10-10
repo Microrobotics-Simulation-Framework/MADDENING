@@ -750,13 +750,33 @@ def _positions_resolution(positions):
     return eps * jax.lax.stop_gradient(jnp.max(jnp.abs(positions)))
 
 
-def _group_coarsest_eps(state, node_names) -> Optional[float]:
-    """``eps`` of the coarsest floating dtype among the fields of a group's members.
+def _group_coarsest_eps(state, node_names, interface_edges=(),
+                        mappings: Optional[dict] = None) -> Optional[float]:
+    """``eps`` of the coarsest floating dtype a group's pass goes through.
 
     **The one resolution a group's float floor is counted at.**  Over
     every floating field of ``state[node]`` for the nodes named that
-    holds entries (:func:`_has_entries`); ``None`` where there is none
-    (or no node is named).  Static: dtypes, never values.
+    holds entries (:func:`_has_entries`), **and over what every internal
+    edge of the group delivers** (*interface_edges*: the group's plan, or
+    its internal edges; after the mapping, with the weights in
+    *mappings*, and the transform); ``None`` where there is none.
+    Static: dtypes, never values.
+
+    **What an edge delivers counts like a field.**  A transform that
+    narrows (``lambda v: v.astype(float32)`` between two float64
+    members) puts a float32 rounding into every pass although no field
+    is float32: such a pair stalled on it with ``residual`` exactly
+    ``0.0``, ``converged=True`` at ``rtol = 1e-12``, 2.8e5 to 3.6e5
+    tolerances from its fixed point, and read ``spectral_error_bound``
+    at 5e-8 to 1e-7 of the distance with both usable flags set, under
+    all three norms and both schedules (CPU, jaxlib 0.11.0).  The
+    delivered dtype is read by ``InterfaceEdge.delivered_leaves``
+    (abstract evaluation: the transform is never run on numbers).  A
+    non-floating delivery, and one with no entries, does not enter.
+    **Not seen:** a narrowing *inside* a member's ``update`` (a cast
+    down and back) -- assumption (2) below -- and an edge whose source
+    is not a state field (a boundary flux), whose dtype nothing outside
+    the producing node holds.
 
     **Why the coarsest, and not each field's own.**  One pass of a
     coupling group computes every member's fields from the group's
@@ -832,6 +852,13 @@ def _group_coarsest_eps(state, node_names) -> Optional[float]:
                 # field's magnitude, the coordinates every norm measures
                 # a field in; the largest is the coarsest resolution.
                 coarsest = eps if coarsest is None else max(coarsest, eps)
+    for record in interface_records(interface_edges, state):
+        for dtype, size in record.delivered_leaves(state, mappings):
+            if jnp.issubdtype(dtype, jnp.floating) and size:
+                eps = float(jnp.finfo(dtype).eps)
+                # units: dimensionless -- relative to the delivered value's
+                # own magnitude, like a field's.
+                coarsest = eps if coarsest is None else max(coarsest, eps)
     return coarsest
 
 
@@ -840,8 +867,10 @@ def _reading_eps(source_dtype, value) -> float:
 
     *value* is what the norm reads on the edge
     (``InterfaceEdge.reading``).  An edge read at its source hands the
-    stored field itself, so this is that field's own eps: the dtype a
-    mapping or a transform would have delivered does not enter.
+    stored field itself, so this is that field's own eps; the dtype its
+    mapping or transform delivers enters through the group's coarsest
+    (:func:`_group_coarsest_eps`, which counts what every internal edge
+    delivers), not here.
 
     A delivered value is no finer than the field it was computed from.
     Under ``jax_enable_x64`` a float64 mapping matrix applied to a
@@ -2227,7 +2256,7 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     # an eps for a value over its own magnitude; for positions read in a
     # mapping kind's length scale, eps times their size in lengths), and
     # the part of an interface reading it is.
-    group_eps = _group_coarsest_eps(state, node_names)
+    group_eps = _group_coarsest_eps(state, node_names, interface_edges, mappings)
     values = []
     if norm == "interface":
         for reading in _interface_readings(

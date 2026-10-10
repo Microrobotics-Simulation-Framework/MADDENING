@@ -83,7 +83,7 @@ try:
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
-    from pydantic import BaseModel, BeforeValidator, Field, field_validator
+    from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
     from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as _exc:
     raise ImportError(
@@ -818,6 +818,13 @@ def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]
 # ------------------------------------------------------------------
 
 class AddNodeRequest(BaseModel):
+    # The four keys the route applies, and no other (as ``AddEdgeRequest``):
+    # ``params`` is optional, so a misspelt ``params``, or a constructor
+    # argument written beside ``type``, was dropped and the node built from
+    # its defaults with a 201.  A key the route does not apply is a 422
+    # that names it.
+    model_config = ConfigDict(extra="forbid")
+
     type: str
     name: str
     # A finite number > 0: NaN or Infinity added the node and then answered
@@ -842,6 +849,14 @@ class AddNodeRequest(BaseModel):
 
 
 class AddEdgeRequest(BaseModel):
+    # The four keys the route applies, and no other.  ``GraphManager.add_edge``
+    # also takes ``transform``, ``additive``, units, a ``mapping`` and a
+    # ``geometry``; the route passes none of them, and a body carrying one
+    # was answered 201 with a plain edge added: another graph than the one
+    # asked for, which steps differently (MADD-ANO-253).  A key the route
+    # does not apply is a 422 that names it.
+    model_config = ConfigDict(extra="forbid")
+
     source_node: str
     target_node: str
     source_field: str

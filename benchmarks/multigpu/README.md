@@ -428,6 +428,7 @@ when they are up, stop, whatever is left.
 | step | expected | time box |
 |---|---|---|
 | (a) `forward`, `exchange` at 1e7 cells | 1 min each | 2 min each |
+| (a) `gradient` at 1e7 cells | 2–3 min | 4 min |
 | (a) `forward`, `exchange` at 3e7 cells | 2–3 min each | 4 min each |
 | (b) the pencil's ramp, five rungs | about 1 min a rung | 120 s a rung |
 | (b) the soak | 3 min, and its last block | 7 min |
@@ -465,6 +466,7 @@ big() { timeout "$1" python benchmarks/multigpu/run_pod.py --goal "$2" --cells "
             --out $T/cells-$3 2>&1 | tee $T/$2-$3.log; }
 big 2m forward  10000000;  echo $?
 big 2m exchange 10000000;  echo $?
+big 4m gradient 10000000;  echo $?
 big 4m forward  30000000;  echo $?
 big 4m exchange 30000000;  echo $?
 # then section (b); and only if the 30 minutes are not up after it:
@@ -489,15 +491,17 @@ leave the 1e8 run out on a pod with less than 70 GiB.  The commands pass
 and `--warmup 1 --repeats 3` because twenty timed repeats of twenty steps
 are for the ranking at the gate's sizes, not for this.
 
-**`gradient` is not in the tail.**  At 10,004,569 cells in the CPU dry
-run (its `sharded_cg` capped at 300 iterations) seven of its eight checks
-pass and `sharded_cg grad vs unsharded max_rel` reads 1.52e-3 against its
-limit of 1e-3 (3.0e-4 at 1e6), after 21 minutes.  The limit was set for
-the gate's sizes: a float32 conjugate-gradient solve that has not
-converged amplifies the different order in which the sharded and the
-unsharded side sum.  No `--cg-max-iters` was shown to hold it at 3e6 and
-1e7, so a `gradient` run there would exit 1 for a reason that is not a
-defect of the sharding.  It stays at the gate's sizes (section 2b).
+**`gradient` is in the tail at 1e7 cells, and no further.**  At 10,004,569
+cells in the CPU dry run (the command above with `--dry-run
+--cg-max-iters 3000`: a dry run alone caps `sharded_cg` at 300; sixteen
+cores, jaxlib 0.11.0) all sixteen of its checks pass in 154 s at a peak of 4.30 GiB of host memory (4,504,536 kB),
+about 450 bytes a cell: the rollout gradients agree to 1.3e-7 against
+1e-5, and each side's three `sharded_cg` solves stop after 56 iterations
+with true residuals of 8.8e-5 to 8.9e-5 (limit 2e-4) and derivatives that
+agree to 7.5e-7 and 4.4e-7 against 4e-4, as at the gate's sizes (the
+shifted system of the checklist's item 3 has the same condition number at
+every size).  It was not run at 3e7 cells, about 13 GiB of host memory at
+that rate, and is not asked for there.
 
 ### (b) The capacity ramp: a sharded run larger than one card
 

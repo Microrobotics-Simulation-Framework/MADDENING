@@ -370,15 +370,20 @@ and is not itself an iterate of the loop; its own residual can be a few times th
 See "What a converged step returns under each norm" in
 [the algorithm guide](../developer_guide/coupling_algorithm_guide.md).
 
-**A dead band (`atol > 0`) on three or more members, or under Jacobi.**  Leave `atol` at `0.0`
-there in 0.4.0.  A field at or below `atol` leaves the residual, and a change that has to cross it
-is not seen until it reaches a field the norm keeps, so such a group can report `converged=True`
-after one pass with a kept field thousands of tolerances from its fixed point (MADD-ANO-254, open:
-4.5e5 to 7.4e5 tolerances on a Jacobi pair, 4.6e3 to 1.8e4 on a Gauss-Seidel ring of three swept
-against its data flow, under every norm).  `compile()` warns and `validate()` says so.  A pair under
-Gauss-Seidel held in both sweep orders in every case measured.  At `atol=0.0` only a field that is
-exactly zero leaves the residual; every non-zero field, however small, is measured against its own
-magnitude.  The dead band is expected to be replaced in 0.5.0, so do not tune to it.
+**A dead band (`atol > 0`), on any group.**  Leave `atol` at `0.0` in 0.4.0.  A field at or below
+`atol` leaves the residual, and a change that has to cross it is not seen until it reaches a field
+the norm keeps, so a group that sets it can report `converged=True` after one pass with a kept
+field thousands of tolerances from its fixed point (MADD-ANO-254, open; under every norm: 4.5e5 to
+7.4e5 tolerances on a Jacobi pair; 4.6e3 to 1.8e4 on a Gauss-Seidel ring of three swept against its
+data flow; and under Gauss-Seidel 4.3e3 to 7.7e3, 1.6e5 in the other sweep order, on a pair of
+2-vectors, a pair with two fields a member, a pair with one edge from a member to itself and a
+group of ONE member with two such edges).  `compile()` warns and `validate()` says so for every
+group that sets `atol > 0`, whatever its member count and schedule.  A pair with one scalar field a
+member and no edge to itself held where it was measured (at most 0.8 tolerances, both sweep
+orders) and is advised on all the same: which groups hold is not a proved criterion, and none is
+excepted.  At `atol=0.0` only a field that is exactly zero leaves the residual; every non-zero
+field, however small, is measured against its own magnitude, and every graph above held there.
+The dead band is expected to be replaced in 0.5.0, so do not tune to it.
 
 **Mixed dtypes.**  The float floor, and so `precision_limited` and both usable flags, is counted at
 the coarsest floating dtype the group's pass goes through: any field of any member that holds
@@ -386,6 +391,30 @@ entries (a field no loop passes through included), and what every internal edge 
 mapping and its transform, so a transform that narrows to float32 between float64 members is
 counted.  A narrowing *inside* a node's own `update` (a cast down and back) cannot be seen from
 outside and is not counted: declare the narrower field, or do not rely on the flags there.
+**Nor is an internal edge whose source is a boundary flux** (a key of `compute_boundary_fluxes`
+and not a state field): what it delivers is not read, so a transform on it that narrows is not
+counted (MADD-ANO-259, open).  On a float64 pair at `rtol=1e-12` whose one edge narrows to float32,
+the value handed over as a flux stalled at float32's rounding with `converged=True`, a residual of
+exactly 0 and `spectral_usable=True` beside a bound 5.6e-8 to 7.5e-8 of the distance to the fixed
+point, under `"mixed"` and `"l2"` and both schedules.  Carry a value that is narrowed on its way
+as a *state field*: the same pair with the same transform on a state field is counted, and its
+bound read 30 to 39 times the distance.  (`convergence_norm="interface"` refuses a flux edge at
+`compile()`.)
+
+**In a batch (`jax.vmap` of the step).**  The step of a batch is another compiled program than the
+step alone.  A member's verdict, its pass count and every flag are the member's alone, and its
+state to a few roundings (measured on thirty graphs with a mapped internal edge and on plain
+pairs and rings, under both schedules: identical flags and reasons, node state within 9e-8).
+The report's numbers are good to their own float resolution, and one of them shows it:
+`gradient_relative_error_bound` is the bound's own arithmetic run by the batched program.  It
+agreed with the member's alone to 4e-6 on plain edges under either schedule and to 2.5e-7 on a
+mapped edge under Gauss-Seidel; on a Jacobi group with a mapped edge the two were 0.03% to 0.8%
+apart above the float floor and up to a factor of two apart where the report is at its float
+floor (`precision_limited=True`).  A member's number does not depend on the other members of
+the batch, their order or their count.  On a plain pair whose gradient is closed form each
+member's bound held against the true error in the batch as alone (1.1 to 3.2 times it, both
+schedules); behind a mapped edge under Jacobi at the float floor the batched number was not
+compared with a true error, so read its order of magnitude there, not its digits.
 
 **What a node declares for `spectral_usable` at the float floor.**  A group whose residual is at
 its float floor (`precision_limited=True`: any converged float32 group at the default tolerance)
@@ -537,6 +566,17 @@ cancellation's factor whatever the row's length and its kind, which is MADD-ANO-
 and not this guard's: with a cancellation `sum |t| / |sum t|` of 25 the bound read 1.26x at 10
 entries and 1.44x at two in float32, and 0.85x at 10 entries at the float64 floor **with the flag
 set**.  Behind a field whose terms cancel, do not rely on `spectral_usable` at the float floor.
+
+**Not counted: a sum written inside an edge transform.**  The guard reads the static mappings on
+a group's internal edges and nothing else.  A `transform=` that adds many terms into one entry
+(`lambda v: jnp.zeros(n).at[cells].add(...)`) is not a mapping: its sum is arithmetic the guard
+cannot see, like a node's own, and no flag is withdrawn for it (MADD-ANO-260, open).  With 300,
+3000 and 30000 float32 terms added into one entry behind a uniform field, members that declare
+one evaluation and the residual at its float floor, the bound read 0.28, 0.034 and 0.0025 to
+0.0038 of the distance with `spectral_usable=True`; with ordinary members at `rtol=1e-4` it read
+0.2 behind 3000 terms and 0.096 behind 30000, `precision_limited=False`.  Declare the operator as
+a static sparse mapping (`mapping=`): the guard then counts its rows and withdraws both flags
+with its reason, and the bound read 1.16 to 27 times the distance on the same operators.
 
 **Not counted: a geometry-dependent mapping.**  A `multilinear_grid` gather adds up at most `2^d`
 entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in

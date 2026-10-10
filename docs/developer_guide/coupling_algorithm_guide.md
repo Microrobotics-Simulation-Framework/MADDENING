@@ -705,12 +705,14 @@ not test it:
   the factor (2.8–5.5x there).  That is the *bound*; the loop's own exit
   is another matter.  A change that has to cross a dead-banded field is
   not in the residual until it reaches a kept one, and the loop accepts
-  on the first residual it measures: a group with `atol > 0` under
-  Jacobi, or with three or more members under Gauss-Seidel, can return
-  `converged=True` after one pass thousands of tolerances from its fixed
-  point (MADD-ANO-254, open; `compile()` warns).  Leave `atol` at `0.0`
-  on such a group in 0.4.0; a pair under Gauss-Seidel held in both sweep
-  orders in every case measured;
+  on the first residual it measures: a group with `atol > 0`, under
+  either schedule and with any number of members (a pair under
+  Gauss-Seidel whose loop passes its lagged read twice, and one member
+  with two edges to itself, among them), can return `converged=True`
+  after one pass thousands of tolerances from its fixed point
+  (MADD-ANO-254, open; `compile()` warns for every group that sets
+  `atol > 0`).  Leave `atol` at `0.0` in 0.4.0; a pair with one scalar
+  field a member held where it was measured and is not excepted;
 * **a non-finite state reports NaN**, not a spectral radius computed at
   a state that has left float range.
 

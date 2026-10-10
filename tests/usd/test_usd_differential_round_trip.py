@@ -60,8 +60,8 @@ def _reload_usd(gm: GraphManager, registry: dict) -> GraphManager:
 
     reloaded = load_graph_from_usd(stage, node_registry=registry)
     with warnings.catch_warnings():
-        # A drawn group of three members can declare a dead band, which
-        # compile() advises on (MADD-ANO-254); the round trip carries the
+        # A drawn group can declare a dead band, which compile() advises
+        # on for any member count (MADD-ANO-254); the round trip carries the
         # group's ``atol`` like every other field.  Nothing else is filtered.
         warnings.filterwarnings("ignore", message=DRAWN_DEAD_BAND, category=UserWarning)
         reloaded.compile()

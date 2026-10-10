@@ -128,8 +128,18 @@ def _a_slow_test_releases_what_it_compiled(request):
 
 @pytest.fixture(scope="module", autouse=True)
 def _the_compiled_graphs_live_for_this_module_only():
+    """The module lets go of its graphs when it ends, and no more.
+
+    Not the whole release: collecting and clearing JAX's caches costs
+    what the PROCESS has compiled, not what this module has, and pytest
+    charges it to the module's last test.  At the end of a per-push shard
+    that was 20 s of a test whose call takes 4 s (over the lane's per-test
+    limit), and it threw away the compiled programs of the modules that
+    follow.  The slow lane's memory is held down by the fixture above,
+    after each slow test.
+    """
     yield
-    _release_what_was_compiled()
+    _graph.cache_clear()
 
 
 def _stepped(cfg: ps.Cfg):
@@ -585,11 +595,7 @@ SADDLE_NODE = {
     "float32-marker-first-l2-aitken": ("float32", ("M", "G"), "l2", "aitken", 1e-6, 3e-3),
     "float64-marker-first-l2-aitken": ("float64", ("M", "G"), "l2", "aitken", 1e-6, 3e-3),
 }
-#: Per push: the float32 report the audit recorded.  The float64 one takes
-#: 23 s on a CI runner (over the per-test limit of 20 s) and is slow with
-#: the other cells; the rule it pins is decided from the group's layout, not
-#: from its dtype.
-SADDLE_NODE_PER_PUSH = ("float32-marker-first-l2",)
+SADDLE_NODE_PER_PUSH = ("float32-marker-first-l2", "float64-marker-first-l2")
 
 
 def _saddle_node_graph(dtype, order, norm, acceleration, gap, tolerance):

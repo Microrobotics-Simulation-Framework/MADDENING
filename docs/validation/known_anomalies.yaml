@@ -17818,3 +17818,132 @@ anomalies:
       count the positions.  Measured on one CPU family.
     verification:
       - "tests/property/test_coupling_geometry_interface_positions_floor.py::test_a_scatter_anchored_at_its_target_far_into_a_grid_is_not_counted"
+
+  - anomaly_id: "MADD-ANO-259"
+    title: "The float floor of a coupling report does not count what an internal edge delivers from a boundary flux: a narrowing transform on a flux edge leaves spectral_usable=True beside a bound 6e-8 of the distance"
+    description: >
+      The float floor of a group's report (and so `precision_limited` and
+      both usable flags) is counted at the coarsest floating dtype the
+      group's pass goes through, which since 0.4.0 includes what every
+      internal edge delivers after its mapping and its transform
+      (CPL-100).  The delivered dtype is read by
+      `InterfaceEdge.delivered_leaves`, which returns nothing for an edge
+      whose source is not a state field: a key of
+      `compute_boundary_fluxes`.  A transform on such an edge that
+      narrows is therefore not counted.  Measured (CPU, jaxlib 0.11.0,
+      x64): two float64 members that declare one evaluation, the edge
+      A -> B with `transform=lambda v: v.astype(float32)`, `rtol=1e-12`.
+      With the source a state field the floor is float32's and
+      `spectral_error_bound` read 29.8 (Jacobi) to 38.8 (Gauss-Seidel)
+      times the distance to the fixed point.  With the same value handed
+      over as a flux the pair stalls at float32's rounding with
+      `residual=0.0`, `converged=True` and `spectral_usable=True` beside
+      a bound 7.48e-8 (Gauss-Seidel) and 5.56e-8 (Jacobi) of the
+      distance, the state 1.06e5 tolerances off, under `"mixed"` and
+      `"l2"` alike (`gradient_bound_usable` was False in every cell;
+      `convergence_norm="interface"` refuses a flux edge at `compile()`).
+      The exception was written in CPL-100's conditions and in
+      `residual_precision_floor`'s docstring from the day the delivered
+      dtype was counted; the user guide's "Mixed dtypes" paragraph said
+      "every internal edge" until it was corrected with this entry.
+      The flags are new in 0.4.0's development, so no release carried it.
+      Found by an audit of the mapping tier.  Not changed in 0.4.0: the
+      floor is a bound outside the experimental tier, and reading a
+      flux's dtype (by abstract evaluation of
+      `compute_boundary_fluxes`) or withdrawing the flags for such an
+      edge is 0.5.0's, with its own audit.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A usable flag beside a bound far below the distance is wrong
+      without a signal.  It is confined to one idiom the documents now
+      except by name: an internal edge that carries a boundary flux AND
+      a transform that narrows the dtype, between members of a wider
+      dtype, at a tolerance below the narrow dtype's resolution.  The
+      state, the residual and the verdict are the criterion's own; what
+      is wrong is the report's claim that its bound may be relied on.
+      `context_dependent` because whether the flag gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.coupling._interface_plan.InterfaceEdge.delivered_leaves"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Carry a value that is narrowed on its way as a state field of the
+      producing node and put the transform on that edge: the delivered
+      dtype is then counted (verified on the same pair: bound 29.8 to
+      38.8 times the distance).  Or narrow nothing on a flux edge.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0.  Until then a flux edge with a
+      narrowing transform is not in the float floor, and neither is a
+      narrowing inside a node's own `update` (documented beside it):
+      do not rely on `spectral_usable` or `precision_limited` behind
+      either.
+    verification:
+      - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_a_narrowing_transform_on_a_flux_edge_is_not_in_the_float_floor"
+      - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_the_same_value_carried_as_a_state_field_is_counted"
+      - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_the_interface_norm_refuses_the_flux_edge_at_compile"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-260"
+    title: "The mapped-row guard of a coupling report reads static mappings only: a sum of many terms written inside an edge transform keeps spectral_usable=True beside a bound 0.0025 to 0.28 of the distance"
+    description: >
+      At its float floor a coupling report withdraws `spectral_usable`
+      and `gradient_bound_usable` behind a static mapping whose longest
+      row adds up more than ten entries (MADD-ANO-257): the rounding of
+      such a sum is not in the floor.  The guard reads the static
+      mappings on the group's internal edges (`_mapped_rows`) and nothing
+      else.  A sum written inside an edge TRANSFORM
+      (`transform=lambda v: jnp.zeros(n).at[cells].add(...)`) is not a
+      mapping: it is arithmetic the guard cannot see, like a node's own,
+      and no flag is withdrawn for it.  Measured (CPU, jaxlib 0.11.0,
+      float32, `"mixed"`): a pair with M markers in one cell of a
+      four-point grid behind a uniform field, loop gain 0.9 and 0.99,
+      the scatter-add written as the transform of the edge.  Members
+      that declare one evaluation, the residual at its float floor
+      (`rtol=1e-7`): `spectral_usable=True` beside a bound 0.283 and
+      0.229 of the distance at M = 300, 0.0338 and 0.0227 at 3000,
+      0.00382 and 0.00245 at 30000 (0.0338 under `"l2"`, 0.596 under
+      Jacobi at 3000).  Ordinary members at `rtol=1e-4`: 0.2 at 3000 and
+      0.0956 at 30000 with `precision_limited=False`.
+      `gradient_bound_usable` was False in every such cell.  The same
+      operator declared as a static sparse mapping: both flags withdrawn
+      with the row's reason, the bound 1.16 to 27.3 times the distance.
+      The guard is new in 0.4.0's development and the flags with it, so
+      no release carried it.  Found by an audit of the mapping tier.
+      Not changed in 0.4.0: a transform is opaque to the report by
+      design (as a node's `update` is), and the documents now say so
+      where the guard is described.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A usable flag beside a bound below the distance is wrong without a
+      signal.  It is confined to an idiom the documents now except by
+      name: an operator that adds many terms into one entry, written as
+      an edge transform where the library offers a mapping for it, on a
+      group at or near its float floor.  The state, the residual and the
+      verdict are the criterion's own.  `context_dependent` because
+      whether the flag gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling._group_layout._mapped_rows"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Declare the operator as a static sparse mapping on the edge
+      (`mapping=`) and keep the transform for entrywise arithmetic: the
+      guard then counts its rows and withdraws both flags with its
+      reason where a row is long (verified on the same operators: bound
+      1.16 to 27.3 times the distance).  Or hold the group's fields in a
+      wider dtype at the same tolerance, as for MADD-ANO-257.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0.  A sum inside a transform, as
+      inside a node's own `update`, is outside what the report can
+      count: do not rely on `spectral_usable` at the float floor behind
+      one.
+    verification:
+      - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_a_sum_written_inside_an_edge_transform_is_not_counted_by_the_row_guard"
+      - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_the_same_sum_declared_as_a_static_sparse_mapping_withdraws_the_flags"
+    github_issue: null

@@ -40,22 +40,24 @@ def _laplacian_1d_dense(n: int, dtype=jnp.float32) -> jnp.ndarray:
     return main - off
 
 
-def _laplacian_1d_matvec_unsharded(n: int, dtype=jnp.float32):
-    """Closed-form Laplacian matvec — no sharding."""
+def _laplacian_1d_matvec_unsharded(n: int, dtype=jnp.float32, diagonal=2):
+    """Closed-form Laplacian matvec — no sharding.  ``diagonal`` other than
+    2 shifts the operator (the gradient-parity gate's system)."""
     def matvec(x):
         # x[i+1] - 2 x[i] + x[i-1] with x[-1] = x[n] = 0
         left = jnp.concatenate([jnp.zeros((1,), dtype=x.dtype), x[:-1]])
         right = jnp.concatenate([x[1:], jnp.zeros((1,), dtype=x.dtype)])
-        return 2 * x - left - right
+        return diagonal * x - left - right
     return matvec
 
 
-def _laplacian_1d_matvec_sharded(mesh: Mesh, n_per_shard: int, dtype=jnp.float32):
+def _laplacian_1d_matvec_sharded(mesh: Mesh, n_per_shard: int, dtype=jnp.float32,
+                                 diagonal=2):
     """Sharded Laplacian matvec using shard_map + neighbour ppermute.
 
     Each shard holds ``n_per_shard`` consecutive entries.  Ghost cells
     are obtained via ``lax.ppermute`` so cross-shard contributions are
-    correct.
+    correct.  ``diagonal`` as for the unsharded one.
     """
     def shard_matvec(x_shard):
         # x_shard shape: (n_per_shard,)
@@ -77,7 +79,7 @@ def _laplacian_1d_matvec_sharded(mesh: Mesh, n_per_shard: int, dtype=jnp.float32
                                 x_shard[:-1]])
         right = jnp.concatenate([x_shard[1:],
                                  jnp.asarray([right_ghost], dtype=x_shard.dtype)])
-        return 2 * x_shard - left - right
+        return diagonal * x_shard - left - right
 
     def matvec(x):
         return shard_map(
@@ -498,43 +500,161 @@ class TestPreconditioned:
         assert jnp.allclose(jnp.asarray(g_sh), jnp.asarray(g_ref), rtol=1e-3, atol=1e-3)
 
 
-# Per push: tests/cloud/multigpu/test_iterative_solver.py::TestDifferentiability::test_jvp_through_sharded_cg_matches_unsharded
-# and tests/cloud/multigpu/test_iterative_solver.py::TestPreconditioned::test_grad_through_sharded_preconditioned_cg_on_4_device_mesh
-# (32 unknowns rather than 1e5).
+# ---------------------------------------------------------------------------
+# The gradient-parity gate, the half that runs on CPU-virtual devices
+# ---------------------------------------------------------------------------
+#
+# The other half is the ``gradient`` goal of ``benchmarks/multigpu/run_pod.py``
+# on real GPUs.  Both solve one system and are held to the same limits, read
+# here from the runner, so that the two halves cannot drift apart: the 1-D
+# Dirichlet Laplacian shifted on its diagonal by ``CG_SHIFT`` (0.03: condition
+# number 134 at every size), solved to ``CG_RTOL`` (1e-4) in float32 for a
+# white-noise right-hand side.
+#
+# Until 0.4.0 both halves solved the unshifted Laplacian with ``rtol=1e-6``.
+# Its condition number is 4e9 at 1e5 unknowns: the solve returned after all
+# 3000 iterations with a true residual ``|b - A x| / |b|`` of 5.8e2
+# (``converged`` false), on both sides, and the comparison of the two
+# gradients -- 5.3e-4 against a tolerance of 1e-3 -- compared rounding with
+# rounding.  A parity test of solves that have not converged cannot fail for
+# the right reason, so convergence is asserted first.
+
+
+def _gate():
+    """``(shift, rtol, parity limit, residual limit)`` of the pod-side half."""
+    import importlib.util
+    from pathlib import Path
+
+    import maddening
+
+    runner = (Path(maddening.__file__).resolve().parents[2] / "benchmarks" / "multigpu"
+              / "run_pod.py")
+    spec = importlib.util.spec_from_file_location("run_pod_for_the_cpu_half_of_its_gate", runner)
+    rp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rp)
+    return rp.CG_SHIFT, rp.CG_RTOL, rp.LIMITS["krylov"], rp.LIMITS["krylov_residual"]
+
+
+def _shifted_apply64(x, diagonal: float) -> np.ndarray:
+    """The gate's operator in float64 on the host, written a third time."""
+    x = np.asarray(x, np.float64)
+    ax = diagonal * x
+    ax[1:] -= x[:-1]
+    ax[:-1] -= x[1:]
+    return ax
+
+
+def _shifted_solve64(rhs, diagonal: float) -> np.ndarray:
+    """A float64 direct solve of the gate's system (the Thomas algorithm)."""
+    rhs = np.asarray(rhs, np.float64)
+    n = rhs.shape[0]
+    c, d = np.empty(n), np.empty(n)
+    c[0], d[0] = -1.0 / diagonal, rhs[0] / diagonal
+    for i in range(1, n):
+        pivot = diagonal + c[i - 1]
+        c[i] = -1.0 / pivot
+        d[i] = (rhs[i] + d[i - 1]) / pivot
+    x = np.empty(n)
+    x[-1] = d[-1]
+    for i in range(n - 2, -1, -1):
+        x[i] = d[i] - c[i] * x[i + 1]
+    return x
+
+
+def _max_rel(a, b) -> float:
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+
+def _gradient_parity_through_converged_solves(n_per_shard: int, max_iters: int) -> None:
+    shift, rtol, parity_limit, residual_limit = _gate()
+    mesh = _make_4_device_mesh()
+    n = n_per_shard * 4
+    diagonal = 2 + shift
+    diagonal32 = float(np.float32(diagonal))          # what the float32 solves are given
+    pc = jacobi_preconditioner(jnp.full((n,), diagonal, jnp.float32))
+    kw = dict(max_iters=max_iters, rtol=rtol, backend="loop", preconditioner=pc)
+    rng = np.random.default_rng(0)
+    b_host = rng.standard_normal(n).astype(np.float32)
+    v_host = rng.standard_normal(n).astype(np.float32)
+    b, v = jnp.asarray(b_host), jnp.asarray(v_host)
+    sides = {
+        "sharded": (_laplacian_1d_matvec_sharded(mesh, n_per_shard, diagonal=diagonal),
+                    dict(mesh=mesh, in_specs=P("devices"))),
+        "unsharded": (_laplacian_1d_matvec_unsharded(n, diagonal=diagonal), {}),
+    }
+    got = {}
+    for side, (matvec, where) in sides.items():
+        def solve(bb, matvec=matvec, where=where):
+            return sharded_cg(matvec, bb, **where, **kw, differentiable=True).value
+
+        def loop(bb, matvec=matvec, where=where):
+            r = sharded_cg(matvec, bb, **where, **kw)
+            return r.converged, r.iters
+
+        g = jax.jit(jax.grad(lambda bb, solve=solve: jnp.sum(solve(bb) ** 2)))(b)
+        x, t = jax.jit(lambda bb, vv, solve=solve: jax.jvp(solve, (bb,), (vv,)))(b, v)
+        stopped, iters = jax.jit(loop)(b)
+        got[side] = {k: np.asarray(jax.device_get(a), np.float64)
+                     for k, a in (("x", x), ("g", g), ("t", t))}
+        # 1. Each side's solves converged: the loop stopped on its tolerance
+        #    with iterations to spare, and the true residual of the solve,
+        #    of the adjoint solve (right-hand side 2 x) and of the tangent
+        #    solve (right-hand side v), in float64 on the host, is within
+        #    the gate's residual limit.
+        assert bool(stopped), side
+        assert 20 < int(iters) < max_iters // 2, (side, int(iters))
+        for name, sol, rhs in (("solve", got[side]["x"], b_host),
+                               ("adjoint", got[side]["g"], 2 * got[side]["x"]),
+                               ("tangent", got[side]["t"], v_host)):
+            rhs = np.asarray(rhs, np.float64)
+            residual = float(np.linalg.norm(rhs - _shifted_apply64(sol, diagonal32))
+                             / np.linalg.norm(rhs))
+            assert rtol / 4 < residual <= residual_limit, (side, name, residual)
+    # 2. Each side is the derivative: within half the parity limit of a
+    #    float64 direct solve (so two such sides are within the limit of
+    #    each other, however each got there).
+    x64 = _shifted_solve64(b_host, diagonal32)
+    exact = {"x": x64, "g": _shifted_solve64(2 * x64, diagonal32),
+             "t": _shifted_solve64(v_host, diagonal32)}
+    for side in sides:
+        for k in ("x", "g", "t"):
+            assert _max_rel(got[side][k], exact[k]) <= parity_limit / 2, (side, k)
+    # 3. Parity.  The gate's limit -- and, on CPU, far inside it: the two
+    #    sides stop on the same iteration and differ by float32 round-off.
+    for k in ("g", "t"):
+        parity = _max_rel(got["sharded"][k], got["unsharded"][k])
+        assert parity <= parity_limit, (k, parity)
+        assert parity <= 1e-5, (k, parity)
+
+
+def test_grad_and_jvp_through_sharded_cg_match_unsharded_on_solves_that_converged():
+    """The gate at 1024 unknowns, per push (the dry run's size and cap).
+
+    Measured on jax 0.10.2, 0.11.0 and 0.11.2 (CPU, four virtual devices):
+    56 iterations on each side; true residuals 7.9e-5 to 9.8e-5 (limit
+    2e-4); each side within 1.06e-4 of the float64 direct solve (limit
+    2e-4); parity 3.3e-7 (gradient) and 2.9e-7 (tangent) against the gate's
+    4e-4.  The three versions agree to the digits given."""
+    _gradient_parity_through_converged_solves(n_per_shard=256, max_iters=300)
+
+
+# Per push: tests/cloud/multigpu/test_iterative_solver.py::test_grad_and_jvp_through_sharded_cg_match_unsharded_on_solves_that_converged
+# (the same assertions at 1024 unknowns rather than 1e5).
 @pytest.mark.slow
 class TestGradientParityAtScale:
     """The v0.4.0 plan's gradient-parity gate at real-mesh size, the half
     that runs on CPU-virtual devices: 10^5 DOF over 4 shards, reverse and
     forward mode through the differentiable, Jacobi-preconditioned CG,
-    against the unsharded reference."""
+    against the unsharded reference -- on solves that converged.
+
+    Measured on jax 0.10.2, 0.11.0 and 0.11.2 (CPU, four virtual devices,
+    the session's cap of 3000 iterations): 56 iterations on each side; true
+    residuals 8.7e-5 to 8.8e-5 (limit 2e-4); each side within 1.05e-4 of
+    the float64 direct solve (limit 2e-4); parity 5.5e-7 (gradient) and
+    4.8e-7 (tangent) against the gate's 4e-4.  The test this replaces
+    compared two solves of the unshifted Laplacian that had not converged
+    (true residual 5.8e2) and read 5.3e-4 against 1e-3."""
 
     def test_grad_and_jvp_through_sharded_cg_at_1e5_dof(self):
-        mesh = _make_4_device_mesh()
-        n_per_shard = 25_000
-        n = n_per_shard * 4
-        matvec_ref = _laplacian_1d_matvec_unsharded(n)
-        matvec_sh = _laplacian_1d_matvec_sharded(mesh, n_per_shard)
-        pc = jacobi_preconditioner(jnp.full((n,), 2.0, jnp.float32))
-        kw = dict(max_iters=3000, rtol=1e-6, atol=1e-8, backend="loop",
-                  preconditioner=pc, differentiable=True)
-        # a smooth right-hand side keeps the CG iteration count moderate
-        b = jnp.sin(jnp.linspace(0.0, 6.0, n, dtype=jnp.float32)) + 0.1
-
-        def loss_sh(b):
-            return jnp.sum(sharded_cg(matvec_sh, b, mesh=mesh, in_specs=P("devices"), **kw).value ** 2)
-
-        def loss_ref(b):
-            return jnp.sum(sharded_cg(matvec_ref, b, **kw).value ** 2)
-
-        g_sh = np.asarray(jax.device_get(jax.grad(loss_sh)(b)))
-        g_ref = np.asarray(jax.device_get(jax.grad(loss_ref)(b)))
-        scale = np.max(np.abs(g_ref))
-        assert scale > 0
-        np.testing.assert_allclose(g_sh / scale, g_ref / scale, rtol=1e-3, atol=1e-3)
-        v = jnp.ones_like(b)
-        _, t_sh = jax.jvp(lambda bb: sharded_cg(matvec_sh, bb, mesh=mesh, in_specs=P("devices"),
-                                                **kw).value, (b,), (v,))
-        _, t_ref = jax.jvp(lambda bb: sharded_cg(matvec_ref, bb, **kw).value, (b,), (v,))
-        t_sh, t_ref = np.asarray(jax.device_get(t_sh)), np.asarray(jax.device_get(t_ref))
-        s2 = np.max(np.abs(t_ref))
-        np.testing.assert_allclose(t_sh / s2, t_ref / s2, rtol=1e-3, atol=1e-3)
+        _gradient_parity_through_converged_solves(n_per_shard=25_000, max_iters=3000)

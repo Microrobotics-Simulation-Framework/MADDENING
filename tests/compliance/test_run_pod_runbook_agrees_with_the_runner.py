@@ -41,9 +41,14 @@ def test_the_limits_are_the_runbooks(rp, runbook):
     them, and the README says so ("The limits live in LIMITS")."""
     assert rp.LIMITS == {"exact": 0.0, "forward": 1e-5, "gradient": 1e-5,
                          "coupled_gradient_ift": 1e-4, "coupled_gradient_fori": 1e-5,
-                         "krylov": 1e-3, "model_gradient": 1e-4}
+                         "krylov": 4e-4, "krylov_residual": 2e-4,
+                         "model_gradient": 1e-4}
+    # The Krylov limits are multiples of the tolerance the solves stop at.
+    assert (rp.CG_RTOL, rp.LIMITS["krylov"], rp.LIMITS["krylov_residual"]) == (
+        1e-4, 4 * rp.CG_RTOL, 2 * rp.CG_RTOL)
     for fragment in ("rel 1e-5 |", "**0** (bit for bit)", "1e-4 (coupled, IFT)",
-                     "1e-3 (`sharded_cg`)", "1e-4 (IFT) / 1e-5 (`\"fori\"`), 1e-4 against "
+                     "4e-4 (`sharded_cg`, each of whose solves must have converged: true "
+                     "residual within 2e-4)", "1e-4 (IFT) / 1e-5 (`\"fori\"`), 1e-4 against "
                      "the model"):
         assert fragment in runbook, fragment
 

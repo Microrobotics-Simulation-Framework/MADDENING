@@ -274,24 +274,24 @@ CHECKLIST = {
 #: shift the condition number is ``(4 + s) / s`` at every size, 134 here.
 #:
 #: Why this one: the true residual a float32 solve can reach on this
-#: operator is about ``eps32 * (4 + s) / s`` (measured 0.6 to 1.8 times
-#: that for shifts from 1e-3 to 1e-1): 1.6e-5 here, one sixth of
-#: ``CG_RTOL``, so both sides converge on any backend's rounding; and the
-#: solve is not trivial: 56 iterations for the solve, 58 for the adjoint
-#: solve and 56 for the tangent solve, the same on both sides and at every
-#: size from 256 to 1e7 unknowns (CPU), so each derivative crosses the
-#: exchange about 110 times.  Hundreds of iterations per solve are not to
-#: be had in float32 together with convergence: the count grows as
+#: operator is about ``eps32 * (4 + s) / s`` for a right-hand side in its
+#: low modes, as the adjoint solve's is (measured 0.6 to 1.8 times that for
+#: shifts from 1e-3 to 1e-1): 1.6e-5 here, measured 1.5e-5, one sixth of
+#: ``CG_RTOL``, so both sides converge whatever a backend's rounding; and
+#: the solve is not trivial: 55 to 58 iterations for each of the three
+#: solves (``CG_SOLVES``), the same on both sides, at every size from 256
+#: to 1e7 unknowns (CPU), so each derivative crosses the exchange about 110
+#: times.  Hundreds of iterations a solve are not to be had in float32
+#: together with convergence: the count grows as
 #: ``sqrt(kappa) ln(2 / rtol) / 2`` while the floor ``eps32 * kappa`` has
-#: to stay under ``rtol`` (a shift of 3e-3 gives 190 iterations at 1e5
-#: unknowns and a true residual of 1.4e-4 that no tolerance below it
-#: reaches).
+#: to stay well under ``rtol`` (at a shift of 0.01 the floor is 4.8e-5, the
+#: tolerance has to rise to 4e-4, and the count is 80 to 88).
 CG_SHIFT = 0.03
 
 #: The relative tolerance of that solve (``|r| <= CG_RTOL |b|``).  Until
 #: schema 7 the goal asked for 1e-6, which float32 cannot reach on this
-#: operator at any shift worth solving (2.7e-6 at a shift of 0.1, where the
-#: solve takes 28 iterations).
+#: operator at any shift worth solving (a true residual of 2.6e-6 at a
+#: shift of 0.1, where the solve takes 28 iterations at 1e5 unknowns).
 CG_RTOL = 1e-4
 
 #: The three linear solves behind the goal's two derivatives of
@@ -306,9 +306,10 @@ CG_SOLVES = ("solve", "adjoint", "tangent")
 #: residual.  A dry run on CPU virtual devices is held to the same limits
 #: and lands orders of magnitude below the parity ones: measured for every
 #: goal at the dry run's 256 and 1024 cells, and for the ``gradient`` goal
-#: at the session's 1e5, 3e5 and 1e6 cells and at 1e7 (rollouts 1e-7
-#: against 1e-5, ``sharded_cg`` 4e-7 to 9e-7 against 4e-4).  The few-ulp
-#: CPU numbers are pinned by the unit tests under tests/cloud/multigpu/.
+#: at the session's 1e5, 3e5 and 1e6 cells (rollouts 1e-7 against 1e-5,
+#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4; 8e-7 at 1e7 unknowns).  The
+#: few-ulp CPU numbers are pinned by the unit tests under
+#: tests/cloud/multigpu/.
 LIMITS = {
     # Pure data movement: the halo exchange and its adjoint on
     # integer-valued data, where every sum is exact.
@@ -334,7 +335,7 @@ LIMITS = {
     # 1e7 unknowns, so two correct solves are within 2.4e-4 of each other
     # however each got there.  Measured, the sharded and the unsharded
     # side stop on the same iteration and differ by float32 round-off
-    # (2e-7 to 9e-7 on CPU), and a stop one iteration apart moves a
+    # (2e-7 to 8e-7 on CPU), and a stop one iteration apart moves a
     # derivative by 2.6e-5 at most.  4x the tolerance.  (1e-3 until
     # schema 7, with no reason given, on solves that had not converged:
     # the check read 5.3e-4, 5.7e-4 and 9.2e-4 at the session's sizes.)
@@ -345,8 +346,8 @@ LIMITS = {
     # differs from that by the float32 floor of the operator (measured
     # 4e-6 for the solve and its tangent, 1.5e-5 for the adjoint solve),
     # so a converged solve reads at most rtol plus that: measured 8.3e-5
-    # to 1.04e-4.  2x the tolerance.  The unshifted operator reads 0.26
-    # to 23 at 1024 unknowns and up within the dry run's 300 iterations.
+    # to 1.0e-4.  2x the tolerance.  The unshifted operator reads 0.25 to
+    # 23 at 1024 unknowns and up after the dry run's 300 iterations.
     "krylov_residual": 2 * CG_RTOL,
     # The coupled group's gradient against central differences of the
     # float64 model: the IFT adjoint is exact at the fixed point up to its
@@ -1627,18 +1628,19 @@ def run_gradient_cg(args, mesh, n_cg: int, rng) -> dict:
     an eigenvector of the shifted operator: its residual lives in the two
     boundary layers, the solver's test -- relative to ``|b|``, which grows
     as ``sqrt(n)`` -- is met sooner the larger the system (21 iterations at
-    1e6 unknowns, 14 at 1e7), and the solution it stops on is 40 to 60
-    times ``CG_RTOL`` from a float64 direct solve there.  On white noise
-    the iteration count and that distance (about ``CG_RTOL``) are the same
-    at every size.
+    1e6 unknowns, 14 at 1e7), and the solution it stops on at 1e6 is 40 to
+    60 times ``CG_RTOL`` from a float64 direct solve.  On white noise the
+    iteration count and that distance (about ``CG_RTOL``) are the same at
+    every size.
 
     ``sharded_cg(differentiable=True)``, which the derivatives are taken
     through, cannot report an iteration count (``iters`` is -1: the solve
     is behind ``lax.custom_linear_solve``), and its ``converged`` is the
     float32 true residual against ``rtol`` with no slack, which reads
     ``False`` on a converged solve whenever the loop stopped within the
-    float32 floor of the tolerance (measured at 1024 unknowns, shift 0.01:
-    stopped after 75 of 3000 iterations, true residual 1.04e-4).  So the
+    float32 floor of the tolerance (measured at 1024 unknowns with a
+    shift of 0.01 and a smooth right-hand side: stopped after 75 of 3000
+    iterations, true residual 1.04e-4).  So the
     flag and the count recorded here are the loop's own (the same solve
     without ``differentiable``: it stopped on its tolerance, after so many
     iterations), and convergence is decided on the true residual of each
@@ -1793,22 +1795,33 @@ def gradient_checks(results: list, n_devices: int) -> list:
         for method in METHODS:
             checks += _parity_checks(f"{r['cells']} cells rollout {method} grad vs unsharded",
                                      r["rollout"][method]["parity"], LIMITS["gradient"])
-        cg = r["sharded_cg"]
-        checks += _parity_checks(f"{cg['dof']} dof sharded_cg grad vs unsharded",
-                                 cg["grad_parity"], LIMITS["krylov"])
-        checks += _parity_checks(f"{cg['dof']} dof sharded_cg jvp vs unsharded",
-                                 cg["jvp_parity"], LIMITS["krylov"])
-        # Parity alone passes two solves that failed alike (it did, until
-        # schema 7): each side's solves must also have converged.
-        for side in ("sharded", "unsharded"):
-            solve = cg["solve"][side]
-            prefix = f"{cg['dof']} dof sharded_cg {side}"
-            checks.append(check_that(
-                f"{prefix} solve stopped on its tolerance, not on the iteration cap",
-                solve["converged"] is True,
-                detail=f"{solve['iterations']} iterations, cap {cg['max_iters']}"))
-            checks += [check(f"{prefix} {which} true residual", solve["true_residual"][which],
-                             LIMITS["krylov_residual"]) for which in CG_SOLVES]
+        checks += gradient_cg_checks(r["sharded_cg"])
+    return checks
+
+
+def gradient_cg_checks(cg: dict) -> list:
+    """The checks of one size's ``sharded_cg`` entry: the two derivatives
+    against the unsharded ones, and that each side's solves converged.
+
+    Parity alone passes two solves that failed alike -- it did, until
+    schema 7, at every size of the session.  So each side must have stopped
+    on its tolerance and not on the iteration cap (the loop's own flag),
+    and the true residual of each of its three solves must be within
+    ``LIMITS["krylov_residual"]``.
+    """
+    checks = _parity_checks(f"{cg['dof']} dof sharded_cg grad vs unsharded",
+                            cg["grad_parity"], LIMITS["krylov"])
+    checks += _parity_checks(f"{cg['dof']} dof sharded_cg jvp vs unsharded",
+                             cg["jvp_parity"], LIMITS["krylov"])
+    for side in ("sharded", "unsharded"):
+        solve = cg["solve"][side]
+        prefix = f"{cg['dof']} dof sharded_cg {side}"
+        checks.append(check_that(
+            f"{prefix} solve stopped on its tolerance, not on the iteration cap",
+            solve["converged"] is True,
+            detail=f"{solve['iterations']} iterations, cap {cg['max_iters']}"))
+        checks += [check(f"{prefix} {which} true residual", solve["true_residual"][which],
+                         LIMITS["krylov_residual"]) for which in CG_SOLVES]
     return checks
 
 

@@ -493,7 +493,7 @@ names the edge and says what to do.
   `spectral_error_bound` at 0.03 to 0.19 of the distance to the fixed
   point of the positions as stored, with no advisory (MADD-ANO-261;
   counted, the same reports have no flag, or, where the members
-  declare, a bound 20 times the distance or more).  What to do is what
+  declare, a bound 15 times the distance or more).  What to do is what
   the message says: **hold the positions in float64** (the same pair
   then keeps both flags on a bound 1.6 to 7 times the distance), or
   **loosen `rtol`**.  Moving the coordinates' origin to the markers

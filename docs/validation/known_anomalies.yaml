@@ -18018,8 +18018,15 @@ anomalies:
       norms, both schedules, 1000 to 4000 spacings in, four seeds): of
       64 reports of ordinary members none has a usable flag and all
       read `precision_limited=True`; the 64 of members that declare
-      keep their flags on a bound 19.8 times the distance or more; three
-      to seven spacings in, 32 of 32 reports keep the flags they had.
+      keep their flags on a bound 19.8 times the distance or more (15.5
+      or more at the tolerances the audit used for them, `"mixed"` at
+      1e-6 and `"l2"` at 1e-5, 200 to 2000 spacings in, where they read
+      0.80 down to 0.031); three to seven spacings in, 32 of 32 reports
+      keep the flags they had.  From 3000 in the self-check no longer
+      withholds the report (its probe is sized by the counted
+      resolution).  The count reaches this tolerance from about 42
+      spacings in, so the reports 500 in, whose bound held uncounted
+      (3.8 to 6.4 times the distance), lose their flags too.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -18057,7 +18064,7 @@ anomalies:
       counted `PRECISION_FLOOR_ULPS` times: counted four times, the same
       pair three to seven spacings into its grid lost both flags on 16
       of 16 reports whose bound held (1.4 to 1.7 times the distance).
-      The margin left on the cells measured is 19.8 or more; the
+      The margin left on the cells measured is 15.5 or more; the
       interface norm's floor keeps its own count
       (`PRECISION_FLOOR_ULPS` per evaluation) for a delivered value.
       (3) It assumes a field that varies across one cell by about the

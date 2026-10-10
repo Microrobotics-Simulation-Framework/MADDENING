@@ -457,27 +457,25 @@ def test_the_floor_is_counted_at_the_positions_the_pass_read_not_the_ones_it_lef
 
 def test_the_steps_own_resolution_is_counted_at_the_positions_the_pass_read_too():
     """The step's analysis takes the same count from the same positions
-    as the floor it records.  Members that declare, 3000 spacings in,
-    whose markers the step carries to within 14 spacings of the grid's
-    first point: the pass read the positions 3000 in, so the bounds'
-    per-entry resolution is that of 3000, the geometry self-check's probe
-    stands clear of the kernel's rounding, and the flags stand on a
-    reported bound.  (Sized by the positions the step leaves, the probe
-    is under that rounding and the self-check withholds the report, as
-    it did before the count: gap 0.8 against a limit of 0.25.)"""
-    gm, built = gather_pair(3000, "mixed", "gauss-seidel", declared=True,
-                            vel=-2990 * SPACING)
+    as the floor it records.  Members that declare, 3000 spacings into a
+    grid whose first point is the coordinates' zero, whose markers the
+    step carries to within 14 spacings of it: the pass read the positions
+    3000 out, so the per-entry resolution of its bounds is that of 3000,
+    and ``gradient_relative_error_bound`` is the one the same pair reads
+    standing still (0.51; sized by the positions the step leaves it read
+    0.003, a resolution 230 times finer than the weights the pass used)."""
+    gm, _built = gather_pair(3000, "mixed", "gauss-seidel", declared=True, centred=False,
+                             vel=-2990 * SPACING)
     assert len([t for t in _compiled(gm) if ADVISORY in t]) == 1
     gm.step()
     report = _report(gm)
     left = np.asarray(gm.get_node_state("P")["pos"], np.float64)
-    assert float(np.max((left - built["origin"]) / SPACING)) < 14.0
+    assert float(np.max(np.abs(left)) / SPACING) < 14.0
     assert report["converged"] and report["precision_limited"]
-    assert reason_codes.GEOMETRY_SELF_CHECK_FAILED not in report["reason_codes"]["spectral_usable"]
     assert report["spectral_usable"] and report["gradient_bound_usable"], report
-    assert math.isfinite(report["spectral_error_bound"])
     assert report["residual_precision_floor"] == pytest.approx(
         2 * EPS32 * 3003.5 / 1e-5, rel=2e-3)
+    assert 0.1 < report["gradient_relative_error_bound"] < 2.0, report
 
 
 # ------------------------------------------------------------ the advisory

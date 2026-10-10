@@ -121,7 +121,12 @@ def test_a_float64_position_field_beside_float32_values_is_floored_at_its_own_ep
     geometry there, the same float64 field is a value like any other and
     takes the group's coarsest eps; and float32 positions beside float64
     values put the values at float32's eps (the coarsest rule) and stay
-    at their own."""
+    at their own.  Those float32 positions are up to 22.4 spacings from
+    the grid's first point, and what the scatter delivers at them is no
+    finer than its kernel's weights: the values are counted at one
+    rounding of that lattice coordinate over ``PRECISION_FLOOR_ULPS``
+    (5.6 float32 eps; MADD-ANO-261), where float64 positions leave them
+    at float32's."""
     eps32, eps64 = (float(np.finfo(t).eps) for t in (np.float32, np.float64))
     with x64(True):
         state = {"p": {"x": jnp.ones(M, jnp.float32), "pos": jnp.asarray(P0.reshape(M, 1))},
@@ -142,7 +147,9 @@ def test_a_float64_position_field_beside_float32_values_is_floored_at_its_own_ep
 
     assert got == pytest.approx(pooled(eps32, eps64), rel=1e-6)
     assert plain == pytest.approx(pooled(eps32, eps32), rel=1e-6)
-    assert coarse_positions == pytest.approx(pooled(eps32, eps32), rel=1e-6)
+    assert coarse_positions == pytest.approx(
+        pooled(eps32 * float(P0.max()) / PRECISION_FLOOR_ULPS, eps32), rel=1e-6)
+    assert float(P0.max()) > PRECISION_FLOOR_ULPS
     assert got < plain
 
 

@@ -877,8 +877,18 @@ def test_the_step_records_the_floor_where_the_returned_state_cannot_repeat_the_r
     for anchor, needs in (("target", True), ("source", False)):
         edges = _geometry_pair("consistent", anchor).norm_edges()
         assert layout._floor_needs_the_step(group, edges) is needs
-        assert not layout._floor_needs_the_step(
-            types.SimpleNamespace(convergence_norm="mixed", atol=0.0), edges)
+        # Under "l2" and "mixed" the floor counts the rounding of the
+        # weights the kernel formed at those positions (MADD-ANO-261):
+        # a target anchor's are the pre-step ones there too.
+        for norm in ("mixed", "l2"):
+            other = types.SimpleNamespace(convergence_norm=norm, atol=0.0)
+            assert layout._floor_needs_the_step(other, edges) is needs
+            assert layout._reads_mapping_weights(
+                other, _geometry_pair("consistent", anchor)) is needs
+    for norm in ("mixed", "l2"):
+        other = types.SimpleNamespace(convergence_norm=norm, atol=0.0)
+        assert not layout._reads_mapping_weights(other, tie), "a static mapping: no slot"
+        assert not layout._floor_needs_the_step(other, tie.norm_edges())
     assert not layout._floor_needs_the_step(group, tie.norm_edges()), (
         "weights: the graph's own are the fallback")
 

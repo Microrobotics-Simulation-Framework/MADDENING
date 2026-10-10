@@ -622,8 +622,9 @@ def test_a_static_mapping_of_another_class_is_counted_at_its_source_side():
 def test_every_static_mapping_on_an_internal_edge_is_counted():
     """Per internal edge, in the order given: the scatter layout, the
     gather layout, a dense matrix and a registered kind's own class by
-    their key, their form and their longest row; a plain edge and a
-    geometry-dependent mapping not at all."""
+    their key, their form and their longest row; a geometry-dependent
+    scatter by its number of points (how many share a grid entry is
+    state); a plain edge not at all."""
     n = 40
     scatter, gather, dense = (_row_mapping(layout, n) for layout in LAYOUTS)
     other = inverse_distance_mapping(np.linspace(0.0, 1.0, 5), np.linspace(0.0, 1.0, 2))
@@ -637,10 +638,14 @@ def test_every_static_mapping_on_an_internal_edge_is_counted():
              EdgeSpec("a", "b", "p", "q", mapping=grid, geometry=("source", "pos"))]
     rows = _mapped_rows(edges)
     assert [(key, row) for key, _what, row in rows] == [
-        ("a.x->b.u", n), ("a.y->b.v", n), ("a.z->b.w", n), ("b.y->a.v", 3), ("b.z->a.w", 5)]
+        ("a.x->b.u", n), ("a.y->b.v", n), ("a.z->b.w", n), ("b.y->a.v", 3), ("b.z->a.w", 5),
+        ("a.p->b.q", n)]
     for (_key, what, _row), layout in zip(rows, LAYOUTS):
         assert SAID[layout] in what, (layout, what)
-    assert _mapped_rows(edges[3:4]) == () and _mapped_rows(edges[6:]) == ()
+    assert "a geometry-dependent mapping (multilinear_grid)" in rows[-1][1]
+    assert "its number of points" in rows[-1][1]
+    assert _mapped_rows(edges[3:4]) == ()
+    assert [(key, row) for key, _what, row in _mapped_rows(edges[6:])] == [("a.p->b.q", n)]
 
 
 def test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give():

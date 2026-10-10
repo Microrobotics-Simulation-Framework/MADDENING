@@ -482,15 +482,19 @@ def test_the_kept_state_holds_references_not_copies(graph):
         assert kept_state[name] is fields
 
 
-def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker(
+def test_a_group_with_a_geometry_edge_keeps_its_report_under_a_write_and_through_a_checkpoint(
         tmp_path):
     """Experimental: a single-rate group whose pass resolves
     ``multilinear_grid`` mappings reports its bounds (MAP-036), so the
     invariant above is its too.  A write after the step (the positions
-    the mappings read among it) does not move the report; a checkpoint
-    saved after the write carries the marker, and the graph that loads it
-    withholds what rests on the float floor, with that reason and no
-    other, until the group steps."""
+    the mappings read among it) does not move the report.  **The step
+    records this group's float floor itself**: its gather is anchored at
+    its target, the floor counts the rounding of the weights the kernel
+    formed at the target's pre-step positions (MADD-ANO-261), and only
+    the step holds those.  So a checkpoint saved after the write needs
+    no marker and carries none, and the graph that loads it reports what
+    the step left, floor and all, as a group does whose norm reads the
+    weights a step ran with."""
     from tests.core import geometry_surface_graphs as G  # noqa: PLC0415
 
     def report(gm):
@@ -513,28 +517,26 @@ def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_a
     markers = dict(gm.get_node_state("markers"))
     gm.set_node_state("markers", {"x": markers["x"] * 0, "pos": markers["pos"] + 0.2})
     assert report(gm) == first
+    floor_slot = f"coupling_{G.GROUP}_reading_floor"
+    recorded = np.asarray(gm._state["_meta"][floor_slot])
+    assert np.isfinite(recorded) and float(recorded) > 0.0
     path = gm.save_state(tmp_path / "written.npz")
     members = _archive_members(path)
-    assert [m for m in members if m.startswith("_reports/")] == [
-        f"_reports/{G.GROUP}/written_after_step"]
+    assert [m for m in members if m.startswith("_reports/")] == []
     assert members[f"_meta/{slot}"].tobytes() == gap.tobytes()
+    assert members[f"_meta/{floor_slot}"].tobytes() == recorded.tobytes()
     gm.step()
     want = report(gm)
 
     gm.reset_state()
     gm.load_state(path)
     loaded = report(gm)
-    # The marker's reason first, as for any group; then the cause that is
-    # this group's own and holds whatever is saved (it solves positions),
-    # each with its code.
-    assert loaded["not_usable_reason"].startswith("this report was loaded from a checkpoint")
-    assert "do not read a moving geometry" not in loaded["not_usable_reason"]
-    assert " Also: the group solves position(s)" in loaded["not_usable_reason"]
+    # The report of the step that was saved: nothing withheld on account
+    # of the write, the one reason still the cause that is this group's
+    # own (it solves positions).
+    assert loaded == first
+    assert not any(SAVED_AFTER in listed for listed in loaded["reason_codes"].values())
     assert loaded["reason_codes"]["spectral_usable"] == [
-        SAVED_AFTER, reason_codes.GEOMETRY_POSITIONS_SOLVED]
-    assert loaded["reason_codes"]["precision_limited"] == [SAVED_AFTER]
-    for key, value in loaded.items():
-        if key not in ("not_usable_reason", "reason_codes"):
-            assert value == WITHHELD.get(key, first[key]), key
+        reason_codes.GEOMETRY_POSITIONS_SOLVED]
     gm.step()
     assert report(gm) == want and "written" not in want.get("not_usable_reason", "")

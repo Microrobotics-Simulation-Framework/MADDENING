@@ -36,8 +36,9 @@ lineax 0.0.7); the three agree to the digits quoted in each test.  No
 iteration count of the loop is pinned.
 """
 
-from __future__ import annotations
-
+# No ``from __future__ import annotations`` here: the device-policy test of
+# this directory executes every test module without registering it in
+# ``sys.modules``, where a dataclass with string annotations cannot be built.
 import contextlib
 import math
 import os

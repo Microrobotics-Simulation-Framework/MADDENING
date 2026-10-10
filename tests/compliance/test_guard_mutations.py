@@ -161,6 +161,7 @@ _GEO = "tests/property/geometry_cells.py"
 _HELPER = "tests/property/targeted_search.py"
 _SYSID = "tests/property/test_sysid_targeted_search.py"
 _RING = "tests/core/test_the_dead_band_of_a_ring_of_three.py"
+_PAIR = "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py"
 HUNTS_SEEDED = (f"{_HUNTS}::test_no_hunt_in_the_tree_is_written_without_a_seed",)
 _GS_L2 = '    dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="l2"),\n'
 
@@ -820,25 +821,42 @@ MUTANTS: tuple[Mutant, ...] = (
         "test_cycle_covered_by_group_names_the_groups_iteration_mode",),
        "a loop that a Jacobi group iterates reported as handled by Gauss-Seidel, as in every "
        "release to 0.3.1"),
-    # --- DB: the advisory on a dead band (MADD-ANO-254): atol > 0 on three ---
-    # --- or more members, or under Jacobi; nothing at atol == 0 -------------
+    # --- DB: the advisory on a dead band (MADD-ANO-254): on EVERY group ------
+    # --- with atol > 0, in validate() and compile(); nothing at atol == 0 ----
     _M("DB1", "src/maddening/core/coupling/_group_layout.py",
-       "    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):\n",
-       "    if not (group.atol > 0 and jacobi):\n",
-       (f"{_RING}::test_validate_advises_on_a_dead_band_declared_on_three_members",),
-       "the advisory under Jacobi only, as first written: a Gauss-Seidel ring of three that "
-       "accepts after one pass thousands of tolerances off compiles without a word"),
+       "    if not group.atol > 0:\n        return []\n    members = len(group.nodes)\n",
+       "    if not (group.atol > 0 and (group.iteration_mode == \"jacobi\"\n"
+       "                                or len(group.nodes) >= 3)):\n"
+       "        return []\n    members = len(group.nodes)\n",
+       (f"{_PAIR}::test_validate_advises_on_the_dead_band_of_a_pair_and_of_one_member",
+        f"{_PAIR}::test_compile_warns_once_for_the_dead_band_of_a_pair_and_of_one_member"),
+       "the advisory under Jacobi or on three members only, as it was before the pairs were "
+       "measured: a Gauss-Seidel pair, and one member with two edges to itself, accept after "
+       "one pass thousands of tolerances off and compile without a word"),
     _M("DB2", "src/maddening/core/coupling/_group_layout.py",
-       "    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):\n",
-       "    if not (group.atol > 0 and (jacobi or members > _DEAD_BAND_MEMBERS)):\n",
-       (f"{_RING}::test_validate_advises_on_a_dead_band_declared_on_three_members",),
-       "the advisory from four members on: the measured ring has three"),
+       "    if not group.atol > 0:\n        return []\n    members = len(group.nodes)\n",
+       "    if not (group.atol > 0 and len(group.nodes) >= 2):\n"
+       "        return []\n    members = len(group.nodes)\n",
+       (f"{_PAIR}::test_validate_advises_on_the_dead_band_of_a_pair_and_of_one_member",),
+       "the advisory from two members on: a group of one member with two edges to itself "
+       "fails as the pairs do"),
     _M("DB3", "src/maddening/core/coupling/_group_layout.py",
-       "    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):\n",
-       "    if not (jacobi or members >= _DEAD_BAND_MEMBERS):\n",
-       (f"{_RING}::test_a_group_with_no_dead_band_gets_no_advisory",),
-       "the advisory at the default atol: every group of three members and every Jacobi group "
-       "warned about a dead band it does not declare"),
+       "    if not group.atol > 0:\n        return []\n    members = len(group.nodes)\n",
+       "    members = len(group.nodes)\n",
+       (f"{_RING}::test_a_group_with_no_dead_band_gets_no_advisory",
+        f"{_PAIR}::test_validate_advises_on_the_dead_band_of_a_pair_and_of_one_member"),
+       "the advisory at the default atol: every group warned about a dead band it does not "
+       "declare"),
+    _M("DB4", "src/maddening/core/graph_manager.py",
+       "            else:\n                warnings.warn(issue, stacklevel=2)\n"
+       "        if validation_errors:\n",
+       "            elif \"dead band\" not in issue:\n"
+       "                warnings.warn(issue, stacklevel=2)\n"
+       "        if validation_errors:\n",
+       (f"{_PAIR}::test_compile_warns_once_for_the_dead_band_of_a_pair_and_of_one_member",
+        f"{_RING}::test_compile_warns_once_for_a_banded_group_of_three"),
+       "the advisory given by validate() and not by compile(): a user who never calls "
+       "validate() runs a banded group without a word"),
     # --- CE: the group's coarsest eps counts what an internal edge delivers --
     _M("CE1", "src/maddening/core/coupling/acceleration.py",
        "    for record in interface_records(interface_edges, state):\n"

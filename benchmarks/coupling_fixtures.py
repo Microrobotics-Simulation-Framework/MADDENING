@@ -515,9 +515,9 @@ def _stiff_pair_tolerance(gain: float) -> float:
     return _SPRING_TOL * (1.0 - _STIFF_REF_GAIN) / (1.0 - gain)
 
 
-#: ``compile()``'s advisory for a group that declares a dead band on three
-#: or more members (MADD-ANO-254), as a pattern for a warnings filter.
-DEAD_BAND_ON_MEMBERS = r"(?s).*declares a dead band on \d+ members"
+#: ``compile()``'s advisory for a group that declares a dead band, on any
+#: member count (MADD-ANO-254), as a pattern for a warnings filter.
+DEAD_BAND_ON_MEMBERS = r"(?s).*declares a dead band on \d+ member"
 
 
 def compile_fixture(gm) -> None:
@@ -527,7 +527,7 @@ def compile_fixture(gm) -> None:
     (``atol`` of 1e-8 to 1e-6 on groups of up to eight members), so that
     their pinned iteration counts, their residuals and the recorded step
     programs stay comparable from release to release.  ``compile()``
-    advises on such a band on three or more members, under either
+    advises on such a band on every group, whatever its member count and
     schedule: a change that has to cross a field at or below ``atol`` is
     not seen until it reaches a kept field.  The fixtures' fields are of
     order one, so nothing of theirs is inside the band unless it is

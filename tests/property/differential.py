@@ -167,20 +167,20 @@ def json_config(gm: GraphManager) -> dict:
     return json.loads(json.dumps(gm.to_dict(), allow_nan=True))
 
 
-#: ``compile()``'s advisory for a group that declares a dead band on three
-#: or more members (MADD-ANO-254), as a pattern for a warnings filter: the
+#: ``compile()``'s advisory for a group that declares a dead band, on any
+#: member count (MADD-ANO-254), as a pattern for a warnings filter: the
 #: pattern of ``strategies.DRAWN_DEAD_BAND``, kept here so that this module
 #: imports no strategy.  A drawn graph can carry such a group, and whoever
 #: compiles it a second time is advised a second time.
-DEAD_BAND_ON_MEMBERS = r"(?s).*declares a dead band on \d+ members"
+DEAD_BAND_ON_MEMBERS = r"(?s).*declares a dead band on \d+ member"
 
 
 def reload_from_config(config: dict, registry: dict) -> GraphManager:
     """A compiled graph rebuilt from ``config``.
 
     The config carries a group's ``atol`` like every other field, so a
-    group that declares a dead band on three or more members is advised
-    on again when its reload compiles: expected here by name, as
+    group that declares a dead band is advised on again when its reload
+    compiles: expected here by name, as
     ``strategies.GraphRecipe.build`` expects it at the first build.
     Nothing else is filtered."""
     gm = GraphManager.from_dict(config, registry)

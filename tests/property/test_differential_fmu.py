@@ -1303,7 +1303,7 @@ class FourPaths(Paths):
 def _compile_again(gm: GraphManager) -> None:
     """``compile()`` a graph that was compiled when it was built.
 
-    A generated graph can declare a dead band on three or more members
+    A generated graph can declare a dead band on any of its groups
     (MADD-ANO-254), which ``compile()`` advises on at every call: expected
     here by name, as ``strategies.GraphRecipe.build`` expects it at the
     first build.  Nothing else is filtered."""

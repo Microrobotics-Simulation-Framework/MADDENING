@@ -16,10 +16,11 @@ What is held here:
   step leaves the kept field within ``PROMISE`` tolerances of its fixed
   point" on the ring below, and its premise stated as what happens today;
 * its controls pass: the same ring with no dead band; the same ring
-  swept along its data flow (one measured instance, not a rule); a PAIR
-  of the same two kinds of member in both sweep orders;
-* ``compile()`` warns for the ring with the band declared, and every
-  build here expects exactly that.
+  swept along its data flow, and a PAIR of the same two kinds of member
+  in both sweep orders (measured instances, not rules: other pairs fail,
+  ``test_the_dead_band_of_a_pair_and_of_one_member.py``);
+* ``compile()`` warns for the ring and for the pair with the band
+  declared, and every build here expects exactly that.
 
 **The ring** (float32; data flow A -> C -> B -> A; members added, and so
 swept, A, B, C)::
@@ -164,7 +165,8 @@ def ring(norm: str, atol: float, order: str = "ABC", acceleration: str = "none")
 def pair(norm: str, atol: float, order: str) -> GraphManager:
     """The same displacement and force with no relay between them:
     ``A.x <- 1e9 u`` reads ``C.x``, ``C.x <- load + 0.5e-9 u`` reads
-    ``A.x``.  A pair under Gauss-Seidel is not advised on."""
+    ``A.x``.  Advised on wherever it declares the band, as every group
+    is."""
     nodes = {"A": Relay("A", NA, STIFFNESS), "C": Relay("C", NF, COMPLIANCE, loaded=True)}
     gm = GraphManager()
     for name in order:
@@ -175,7 +177,7 @@ def pair(norm: str, atol: float, order: str) -> GraphManager:
     gm.add_edge("C", "A", "x", "u",
                 mapping=sparse_nearest_neighbor_mapping(_positions(NF), _positions(NA)))
     _group(gm, order, norm, atol, "none")
-    _compile(gm, advised=False)
+    _compile(gm, advised=atol > 0)
     return gm
 
 
@@ -297,8 +299,10 @@ def test_the_same_ring_with_no_dead_band_is_held():
 @pytest.mark.parametrize("order", ["AC", "CA"], ids=["the force read from the previous pass",
                                                      "the force read in the same sweep"])
 def test_a_pair_holds_with_the_force_inside_the_dead_band_in_both_sweep_orders(order):
-    """The pair the advisory leaves alone: with the band declared, both
-    sweep orders hold."""
+    """This pair held with the band declared, in both sweep orders: its
+    one loop has one lagged read.  A measured instance and not a rule (a
+    pair whose loop passes that read twice does not hold), so the
+    advisory is given for it too, as ``pair()`` expects."""
     run = steps(pair(PER_PUSH_NORM, ATOL, order), PER_PUSH_NORM)
     assert all(converged for _i, converged, _off in run), run
     assert _held(run) and min(i for i, _c, _off in run) > 3, run
@@ -337,16 +341,18 @@ def _advisories(gm: GraphManager) -> list:
 @pytest.mark.parametrize("norm", NORMS)
 def test_validate_advises_on_a_dead_band_declared_on_three_members(norm):
     """One ``WARNING:`` line under Gauss-Seidel, naming the group, its
-    ``atol``, the member count, the measured ring, who is not affected and
-    the one way out.  It does not offer Gauss-Seidel as a remedy: that is
-    the schedule the group already runs."""
+    ``atol``, the member count, the measured ring, the measured pairs,
+    that no group is excepted and the one way out.  It does not offer
+    Gauss-Seidel as a remedy: that is the schedule the group already
+    runs."""
     lines = _advisories(ring_graph(norm, ATOL))
     assert len(lines) == 1
     line = lines[0]
     assert line.startswith("WARNING: coupling group ['A', 'B', 'C'] declares a dead band on 3 members")
     assert "atol=1e-06" in line and "iteration_mode='gauss-seidel'" in line
     assert "a ring of three members under Gauss-Seidel" in line and "4.6e3 to 1.8e4" in line
-    assert "A pair under Gauss-Seidel is not affected" in line
+    assert "under Gauss-Seidel a pair of 2-vectors" in line and "4.3e3 to 7.7e3" in line
+    assert "is not affected" not in line and "No group is excepted" in line
     assert "Set atol=0.0 (the default) on this group" in line and "MADD-ANO-254" in line
     assert "Use " not in line and "under Jacobi" not in line
 
@@ -372,9 +378,10 @@ def test_a_group_with_no_dead_band_gets_no_advisory(norm, schedule):
 
 
 def test_compile_warns_once_for_a_banded_group_of_three():
-    """``compile()`` emits the advisory as one ``UserWarning``; the test
-    configuration does not filter it for a group under Gauss-Seidel, so a
-    suite that builds one says so (as every build in this module does)."""
+    """``compile()`` emits the advisory as one ``UserWarning``, under the
+    opening that names the member count (the test configuration filters
+    both openings; every build in this module records the advisory
+    itself and counts it)."""
     with pytest.warns(UserWarning, match=_group_layout._DEAD_BAND_ADVISORY) as caught:
         ring_graph(PER_PUSH_NORM, ATOL).compile()
     ours = [w for w in caught if _group_layout._DEAD_BAND_ADVISORY in str(w.message)]

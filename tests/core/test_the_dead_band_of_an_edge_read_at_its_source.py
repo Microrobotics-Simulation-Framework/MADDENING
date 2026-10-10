@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -260,13 +261,20 @@ def test_one_function_decides_and_only_for_a_reading_taken_at_a_source():
 
 def test_a_group_without_a_dead_band_applies_no_mapping_for_the_band(monkeypatch):
     """``atol == 0`` (the default) builds nothing: the residual and the
-    floor of the pair apply the scatter not at all (it is read at its
-    source), and with a band declared once per state read."""
-    calls = []
+    floor of the pair apply the scatter to no values (it is read at its
+    source), and with a band declared once per state read.
+
+    The floor also asks every mapped edge what dtype it delivers (the
+    group's coarsest eps counts it: MADD-ANO-255), once per call and
+    abstractly: shapes and dtypes, never values, band or no band."""
+    calls, asked = [], []
     real = _interface_plan._delivered
 
     def counting(edge, value, mappings=None, geom=None):
-        calls.append((edge.source_node, edge.target_node))
+        # An abstract evaluation hands a tracer; these functions are called
+        # here on concrete arrays, so anything else is an application.
+        (asked if isinstance(value, jax.core.Tracer) else calls).append(
+            (edge.source_node, edge.target_node))
         return real(edge, value, mappings, geom)
 
     monkeypatch.setattr(_interface_plan, "_delivered", counting)
@@ -274,14 +282,17 @@ def test_a_group_without_a_dead_band_applies_no_mapping_for_the_band(monkeypatch
         new, old = iterates(1e-9, "float64")
         both = edges(1e9, "dense", "float64")
         coupling_residual_interface(new, old, both, 0.0, 1e-3)
+        assert asked == [], "the residual asks no dtype"
         residual_precision_floor(new, ["p", "q"], "interface", 0.0, 1e-3, both)
         assert ("p", "q") not in calls and calls.count(("q", "p")) == 3
-        calls.clear()
+        assert sorted(asked) == [("p", "q"), ("q", "p")]
+        calls.clear(), asked.clear()
         coupling_residual_interface(new, old, both, ATOL, 1e-3)
-        assert calls.count(("p", "q")) == 2
+        assert calls.count(("p", "q")) == 2 and asked == []
         calls.clear()
         residual_precision_floor(new, ["p", "q"], "interface", ATOL, 1e-3, both)
         assert calls.count(("p", "q")) == 1
+        assert sorted(asked) == [("p", "q"), ("q", "p")]
 
 
 def test_a_source_field_at_exactly_zero_stays_out_whatever_is_delivered():

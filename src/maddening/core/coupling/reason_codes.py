@@ -120,7 +120,8 @@ GRADIENT_BOUND_NOT_CERTIFIED = "gradient_bound_not_certified"
 
 #: The residual does not stand clear of the float floor that a long row
 #: of a static mapping on an internal edge would give it (a row over
-#: ``MAPPED_ROW_FLOOR_LIMIT`` entries, of any static kind): the floor
+#: ``MAPPED_ROW_FLOOR_LIMIT`` entries, of any static kind; a
+#: geometry-dependent scatter is counted at its number of points): the floor
 #: does not count the rounding of such a row's sum (MADD-ANO-257).  The
 #: numbers are reported as computed; a wider dtype at the same tolerance
 #: is the way out.

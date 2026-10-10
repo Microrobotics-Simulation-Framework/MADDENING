@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Optional
+from typing import Any, Optional
 
 import jax.numpy as jnp
 import numpy as np
@@ -17,6 +17,7 @@ from maddening.core.coupling import _interface_plan, reason_codes
 from maddening.core.coupling.acceleration import (
     PRECISION_FLOOR_ULPS,
     _has_entries,
+    _kernel_rounding_floors,
     _positions_floors,
     float_fields_of,
 )
@@ -114,9 +115,15 @@ def _reads_mapping_weights(group, plan) -> bool:
     (``InterfacePlan.band_reads_beyond_the_state``).  At the default
     ``atol == 0`` no group gains the slot.
     """
-    return group.convergence_norm == "interface" and (
-        plan.norm_reads_beyond_the_state()
-        or (group.atol > 0 and plan.band_reads_beyond_the_state()))
+    if group.convergence_norm != "interface":
+        # Experimental: under "l2" and "mixed" the floor counts the
+        # rounding of the weights a geometry-dependent mapping forms from
+        # stored positions (``acceleration._kernel_rounding``); for a
+        # target anchor those are the pre-step ones, which only the step
+        # holds.  Every group with no such edge is as it was.
+        return plan.kernel_rounds_beyond_the_state()
+    return (plan.norm_reads_beyond_the_state()
+            or (group.atol > 0 and plan.band_reads_beyond_the_state()))
 
 
 #: The sentence every advisory about a dead band carries
@@ -243,10 +250,16 @@ def _floor_needs_the_step(group, interface_edges) -> bool:
     at its target counts as well: the band is asked of what it delivers
     at that geometry.
     """
-    return group.convergence_norm == "interface" and any(
+    records = _interface_plan.interface_records(interface_edges)
+    if group.convergence_norm != "interface":
+        # "l2" and "mixed": the floor counts the rounding of the weights a
+        # target-anchored geometry-dependent mapping forms from the
+        # target's pre-step positions (``acceleration._kernel_rounding``).
+        return any(record.kernel_rounds_at_pre_step_positions for record in records)
+    return any(
         record.reads_pre_step_geometry
         or (group.atol > 0 and record.band_reads_pre_step_geometry)
-        for record in _interface_plan.interface_records(interface_edges))
+        for record in records)
 
 
 #: Why a report built on the float floor is withheld where the floor
@@ -357,18 +370,25 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 #: **What a row is** for each kind is in :func:`_longest_row`: counted
 #: whatever the weights are, a dense matrix by its width.
 #:
-#: **What it does not cover.**  A geometry-dependent mapping's rows
-#: (``multilinear_grid`` from points to a grid: a grid node adds up as
-#: many entries as there are points within one spacing of it, by the
-#: same scatter-add) are known only in the step and are not counted:
-#: with 8, 300 and 3000 markers in one cell behind a uniform field the
-#: bound read 13.8x, 3.8x and 1.3x the distance under ``"mixed"`` (it
-#: held, by less than two at 3000).  That group solves the markers'
-#: positions, and in 0.4.0 such a group has no usable flag whatever its
-#: rows (:func:`_geometry_flags`); one whose positions are constants of
-#: the pass keeps its flags behind the same uncounted rows, which was
-#: not measured.  MADD-ANO-257 records all of it.
-MAPPED_ROW_FLOOR_LIMIT = 10  # units: entries of one row of a static mapping
+#: **A geometry-dependent mapping's rows** (``multilinear_grid`` from
+#: points to a grid: a grid node adds up as many entries as there are
+#: points within one spacing of it, by the same scatter-add) are known
+#: only in the step, so such an edge is counted at the most a row can be
+#: whatever the positions are: **its number of points** for a scatter
+#: (the kind's ``geometry_longest_row()``; a gather's row is the
+#: ``2 ** d`` weights of a cell, within the limit).  Uncounted, a pair
+#: whose scatter's positions are constants of the pass (the grid node
+#: holds them) read its bound at 0.40x and 0.32x the distance behind 300
+#: markers in one cell and 0.048x and 0.032x behind 3000 with both
+#: usable flags set (members declaring one evaluation, stalled at the
+#: float32 floor, ``"mixed"`` and ``"l2"``), and 0.61x with ordinary
+#: members at ``rtol = 1e-4`` and ``precision_limited=False``; the same
+#: operator as a static sparse mapping held at 1.16x to 27x behind the
+#: guard.  A group that solves the markers' positions has no usable flag
+#: whatever its rows (:func:`_geometry_flags`); its report says the row
+#: too.  A sum written inside an edge ``transform`` is not seen
+#: (MADD-ANO-260).  MADD-ANO-257 records all of it.
+MAPPED_ROW_FLOOR_LIMIT = 10  # units: entries of one row of a mapping
 
 #: Why ``spectral_usable`` and ``gradient_bound_usable`` are withdrawn
 #: from a report whose residual does not stand clear of the float floor
@@ -393,12 +413,20 @@ _MAPPED_ROW_REASON = (
 
 
 def _longest_row(mapping) -> tuple:
-    """``(what, entries)`` of *mapping*, a static one: how it is applied,
-    in the words the report's reason uses, and the most entries it adds
-    up into one delivered value.
+    """``(what, entries)`` of *mapping*: how it is applied, in the words
+    the report's reason uses, and the most entries it adds up into one
+    delivered value.
 
-    Counted on what is frozen, on the host, **whatever the weights are**:
-    they are a parameter a step may be handed, zeros included.
+    Counted on what is frozen, on the host, **whatever the weights are**
+    (they are a parameter a step may be handed, zeros included) **and
+    wherever the positions are** (they are state).
+
+    * A geometry-dependent mapping: what its kind declares
+      (``geometry_longest_row()``; for ``multilinear_grid`` the
+      ``2 ** d`` weights of a cell for a gather and the **number of
+      points** for a scatter, every one of which can fall within a
+      spacing of one grid entry); the entries of its source side for a
+      kind that declares none.
 
     * A static sparse mapping in the scatter layout: the most valid
       slots that name one target (the longest row of the operator, as
@@ -420,6 +448,17 @@ def _longest_row(mapping) -> tuple:
     kind = getattr(mapping, "kind", None)
     named = "" if kind is None else f" ({kind})"
     form = _interface_plan._mapping_form(mapping)
+    if form == _interface_plan.NEEDS_GEOMETRY:
+        declared: Any = getattr(mapping, "geometry_longest_row", None)
+        if callable(declared):
+            row: Any = declared()
+            return (f"a geometry-dependent mapping{named}, counted at the most entries one "
+                    f"delivered value can add up wherever the positions are (a scatter: its "
+                    f"number of points),", int(row))
+        source_lead, _target_lead = _interface_plan._mapping_leads(mapping)
+        return (f"a geometry-dependent mapping of class {type(mapping).__name__}{named}, "
+                f"counted at the entries of its source side,",
+                _interface_plan._entries(source_lead))
     if form == _interface_plan.STATIC_DENSE:
         return (f"a dense matrix mapping{named}, counted at the matrix's width,",
                 int(mapping.n_source))
@@ -444,29 +483,32 @@ def _longest_row(mapping) -> tuple:
 
 def _mapped_rows(interface_edges) -> tuple:
     """``((edge key, what, longest row), ...)`` over a group's internal
-    edges that carry a static mapping, of every kind: a dense matrix, a
-    static sparse mapping in either layout, a registered kind's own
-    static class (:func:`_longest_row` has what a row is for each).
+    edges that carry a mapping, of every kind: a dense matrix, a static
+    sparse mapping in either layout, a registered kind's own static
+    class, a geometry-dependent mapping (:func:`_longest_row` has what a
+    row is for each).
 
     Read by ``compile()`` for the report's guard on the float floor
     (:func:`_mapped_row_reason`).  *interface_edges* is the group's plan
     or its bare internal edges.  Every norm: the row's rounding is in
     what the edge delivers to its target, whichever fields or readings
-    the residual is taken on.  Not a geometry-dependent mapping: its
-    rows are not known before the step (a ``multilinear_grid`` scatter's
-    are the markers in a cell's support), and it is not counted here
-    (see :data:`MAPPED_ROW_FLOOR_LIMIT`).
+    the residual is taken on.  A geometry-dependent mapping's rows are
+    not known before the step (a ``multilinear_grid`` scatter's are the
+    markers in a cell's support), so it is counted at the longest a row
+    can be: a scatter at its number of points, whichever side its
+    positions are anchored at (see :data:`MAPPED_ROW_FLOOR_LIMIT`).
     """
-    static = (_interface_plan.STATIC_DENSE, _interface_plan.STATIC_SPARSE,
-              _interface_plan.STATIC_OTHER)
+    counted = (_interface_plan.STATIC_DENSE, _interface_plan.STATIC_SPARSE,
+               _interface_plan.STATIC_OTHER, _interface_plan.NEEDS_GEOMETRY)
     return tuple((record.key, *_longest_row(record.mapping))
                  for record in _interface_plan.interface_records(interface_edges)
-                 if record.mapping_form in static)
+                 if record.mapping_form in counted)
 
 
 def _mapped_row_reason(rows, residual: float, floor: float) -> Optional[str]:
     """Why a report withdraws the flags that rest on its float floor on
-    account of a long row of a static mapping; ``None`` where it does not.
+    account of a long row of a mapping (a static one, or a geometry-dependent
+    scatter); ``None`` where it does not.
 
     *rows* is :func:`_mapped_rows` of the group the step was built from,
     *residual* and *floor* the report's own.  Withdrawn where both hold:
@@ -501,7 +543,7 @@ def _mapped_row_reason(rows, residual: float, floor: float) -> Optional[str]:
     row's rounding is up to ``1 / (8 evaluations)`` of it.
 
     It only withdraws, and reads nothing but the report's own two
-    numbers: a group with no static mapping on an internal edge, a row
+    numbers: a group with no mapping on an internal edge, a row
     within the limit, and a residual that stands clear all keep their
     flags, and no number of the report moves.
 
@@ -1581,10 +1623,139 @@ def _geometry_edge_coupling_errors(group, nodes, plan) -> list[str]:
 _POSITIONS_FLOOR_WARNED = 1.0  # units: tolerances (the residual's units under the interface norm)
 
 
+def _kernel_rounding_warnings(group, plan, state, evaluations) -> list[str]:
+    """``UserWarning`` texts for a group under ``"l2"`` or ``"mixed"``
+    whose geometry edges form their weights from positions held in a
+    dtype that cannot resolve the group's tolerance where they are
+    (experimental; empty for a group with no such edge).
+
+    The interface norm's advisory (:func:`_unresolved_position_warnings`)
+    under the other two norms, **by the float floor's own count**
+    (``acceleration._kernel_rounding_floors``).  The kernel forms its
+    coordinate from a stored position in the positions' dtype (for
+    ``multilinear_grid`` the lattice coordinate ``(x - origin) /
+    spacing``), so a weight is resolved to ``eps`` times the larger of
+    the position's distance from the coordinates' zero and of that
+    coordinate, ``r`` lengths (``_interface_plan._rounded_at``); the
+    floor takes every value field of the group to be no finer, once per
+    evaluation of the pass.  **Warned: an edge for which that count
+    reaches the criterion's threshold where the fields' own does not**,
+
+        ``evaluations * eps * max r >= rtol``  (``"mixed"``),
+        ``evaluations * eps * max r * sqrt(n) >= tolerance``  (``"l2"``,
+        ``n`` the value entries of the group),
+
+    with ``PRECISION_FLOOR_ULPS * evaluations * eps_fields`` (times
+    ``sqrt(n)`` under ``"l2"``) under the same threshold.  That is where
+    the kernel's rounding is what makes every report of a step that
+    meets the criterion read ``precision_limited=True`` (the residual is
+    then under the floor), with ``spectral_usable`` and
+    ``gradient_bound_usable`` ``False`` unless every member declares
+    ``update_evaluations()``, and where holding the positions in float64
+    undoes it.  A tolerance the fields' own dtype cannot resolve is not
+    this advisory's to report: nothing about the positions changes it.
+    Uncounted,
+    such a group reported both flags beside a bound at 0.03 to 0.19 of
+    the distance to the float64 fixed point 1000 to 2000 spacings into
+    its grid, and said nothing here (MADD-ANO-261).
+
+    The count takes a field that varies across one length by about the
+    size of the value delivered, as the interface norm's does
+    (MADD-ANO-247 for a value far smaller than that variation).  Asked
+    once, of the state ``compile()`` sees; the report's
+    ``residual_precision_floor`` is the reading at every step.  A
+    warning, never a refusal: it changes no number.  *evaluations* is
+    the group's structural count (:func:`_group_evaluations`); with
+    diagnostics the report's floor takes the measured count, which is
+    never smaller.
+    """
+    norm = group.convergence_norm
+    names = sorted(group.nodes)
+    threshold = float(group.tolerance) if norm == "l2" else _POSITIONS_FLOOR_WARNED
+    asked = (f"tolerance={float(group.tolerance):g}" if norm == "l2"
+             else f"rtol={float(group.rtol):g}")
+    out = []
+    lattices = _interface_plan._position_lattices(plan.internal)
+    for record, holder, reach, resolution, floor, own in _kernel_rounding_floors(
+            plan, state, names, norm, float(group.rtol), evaluations):
+        if not floor >= threshold:
+            continue            # resolved (or not a number: the step's own failure)
+        if own >= threshold:
+            continue            # the fields' own dtype cannot resolve this tolerance
+        node, field = holder
+        geometry = state[node][field]
+        dtype = np.dtype(np.asarray(geometry).dtype)
+        eps = float(np.finfo(dtype).eps)
+        reached = np.asarray(reach, np.float64)
+        columns = reached.reshape(reached.shape[0], -1)
+        axis = int(np.argmax(np.max(columns, axis=0)))
+        spacing = _interface_plan._kernel_lengths(record.mapping)[axis]
+        among = lattices.get(holder) or (record.mapping,)
+
+        def on_axis(magnitude) -> float:
+            values = np.asarray(magnitude(among, geometry), np.float64)
+            return float(np.max(values.reshape(values.shape[0], -1)[:, axis]))
+
+        from_zero = on_axis(_interface_plan._stored_magnitude)
+        on_lattice = on_axis(_interface_plan._kernel_magnitude)
+        # units: spacings -- where the count is the threshold
+        allowed = float(np.max(columns)) * threshold / floor
+        if on_lattice > from_zero:
+            where = (
+                f"They reach {float(np.max(columns)):.6g} spacings from the grid's first "
+                f"point (axis {axis}, spacing {spacing:g}; {from_zero:.6g} from zero), where "
+                f"the mapping forms a {dtype} lattice coordinate to {resolution:.3g} spacings")
+        else:
+            where = (
+                f"They reach {float(np.max(columns)):.6g} spacings from zero (axis {axis}, "
+                f"spacing {spacing:g}; {on_lattice:.6g} from the grid's first point), where a "
+                f"{dtype} position is stored to {resolution:.3g} spacings")
+        remedies = [f"loosen {'tolerance' if norm == 'l2' else 'rtol'} above "
+                    f"{(float(group.tolerance) if norm == 'l2' else float(group.rtol)) * floor / threshold:.3g}"]
+        if on_lattice < allowed:
+            remedies.insert(0, (
+                f"use coordinates local to the grid (for a {dtype} position this count is "
+                f"under the tolerance within {allowed:.3g} spacings of zero and of the "
+                f"grid's first point)"))
+            coordinates = ""
+        else:
+            coordinates = (
+                f" No choice of the coordinates' origin brings this count under the "
+                f"tolerance: a lattice coordinate does not depend on it, and these positions "
+                f"are {on_lattice:.6g} spacings from the grid's first point where a {dtype} "
+                f"one allows {allowed:.3g}.")
+        if dtype != np.dtype(np.float64):
+            remedies.insert(0, (
+                f"hold {node}.{field} in float64 (under jax_enable_x64; the mapping computes "
+                f"its weights in the geometry's dtype and casts them to the field's, so the "
+                f"other fields can stay as they are)"))
+        out.append(
+            f"coupling group {names} (convergence_norm={norm!r}, {asked}): the {dtype} "
+            f"positions {node}.{field} that the value on edge {record.key!r} is delivered at "
+            f"cannot be resolved to this tolerance of a grid spacing. {where} and a weight of "
+            f"the mapping moves by as much; a position is rounded at the larger of its "
+            f"distance from the coordinates' zero and of its lattice coordinate. The "
+            f"residual's float floor takes every value field of the group to be no finer "
+            f"than that rounding, once per evaluation of the pass ({float(evaluations):g} "
+            f"here; a field that varies across one cell by about the size of the value "
+            f"delivered is assumed, MADD-ANO-247), which is {floor / threshold:.3g} times "
+            f"the tolerance: a step that meets the criterion then reports "
+            f"precision_limited=True, and spectral_usable and gradient_bound_usable are "
+            f"False unless every member declares update_evaluations(). The group converges "
+            f"to the fixed point of the weights as rounded, which is that far from the one "
+            f"of the positions as stored. This is asked once, of the state compile() sees; "
+            f"the report's residual_precision_floor is the reading at every step."
+            f"{coordinates} Remedies: " + "; or ".join(remedies) + "."
+        )
+    return out
+
+
 def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     """``UserWarning`` texts for positions an interface reading rests on
     whose rounding the float floor counts at the group's tolerance or
-    above (experimental; empty for every other group).
+    above (experimental; empty for a group with no geometry edge).  A
+    group under ``"l2"`` or ``"mixed"`` is asked by its own floor's
+    count instead (:func:`_kernel_rounding_warnings`).
 
     Under ``convergence_norm="interface"`` the stored positions of a
     geometry-dependent mapping enter the reading of an edge in one of two
@@ -1739,7 +1910,7 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     diagnostics on or off (:func:`_reports_the_structural_count`).
     """
     if group.convergence_norm != "interface":
-        return []
+        return _kernel_rounding_warnings(group, plan, state, evaluations)
     names = sorted(group.nodes)
     rtol = float(group.rtol)
     count = PRECISION_FLOOR_ULPS * float(evaluations)

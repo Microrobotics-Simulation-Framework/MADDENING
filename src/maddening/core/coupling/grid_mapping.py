@@ -234,6 +234,23 @@ class MultilinearGridMapping:
             read.append(jnp.logical_not(outside > slack * reach))
         return jnp.stack(read, axis=1).reshape(geom.shape)
 
+    def geometry_longest_row(self) -> int:
+        """The most source entries one delivered value adds up, whatever
+        the positions are: the ``2 ** d`` weights of a point's cell for
+        a gather; **the number of points** for a scatter, whose grid
+        entries each add up, in order, one term from every point within
+        a spacing of them (how many share an entry is state: all of
+        them can).
+
+        Read at ``compile()`` by the coupling report's guard on the
+        float floor (``_group_layout._mapped_rows``, MADD-ANO-257): a
+        sum of that many terms rounds by more than the fixed number of
+        ulps the floor counts per evaluation once it is long.  Optional
+        for a kind: a geometry-dependent mapping that declares none is
+        counted at the entries of its source side.
+        """
+        return 2 ** self._d if self.mode == "consistent" else self.n_points
+
     def geometry_lattice(self) -> tuple:
         """``(origin, spacing, shape)``: the lattice the stencil forms its
         coordinates on.

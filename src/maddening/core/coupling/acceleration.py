@@ -11,6 +11,7 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Optional, Union
 
 import jax
@@ -22,6 +23,7 @@ from maddening.core.coupling._interface_plan import (
     KERNEL_LENGTH,
     InterfacePlan,
     _position_lattices,
+    _read_in_kernel_lengths,
     interface_records,
 )
 
@@ -2164,6 +2166,176 @@ def _position_fields(interface_edges) -> frozenset:
     return frozenset(fields)
 
 
+def _kernel_rounding(interface_edges, state, pre_step=None) -> list:
+    """``[(record, holder, reach, resolution), ...]``: the rounding of the
+    weights a geometry-dependent mapping forms on a group's internal
+    edges, edge by edge (experimental).
+
+    One entry per internal edge whose mapping is geometry-dependent and
+    of a kind that declares a length scale (``geometry_length_scale``;
+    ``multilinear_grid``), its geometry floating and holding entries:
+
+    * ``holder`` is the ``(node, field)`` the positions are stored in;
+    * ``reach`` the magnitude each coordinate the kernel reads is rounded
+      at, in the kind's lengths
+      (``_interface_plan._read_in_kernel_lengths``: the larger of the
+      stored position's distance from the coordinates' zero and of the
+      coordinate the kernel forms from it -- for ``multilinear_grid`` the
+      lattice coordinate ``(x - origin) / spacing`` -- over every lattice
+      of the group that reads the field; zero for a coordinate the kind
+      does not read);
+    * ``resolution`` is :func:`_positions_resolution` of it: ``eps`` of
+      the positions' dtype times the largest ``reach``, the rounding of a
+      kernel weight in lengths.
+
+    **The positions are the ones the step's kernel reads**
+    (``InterfaceEdge.geometry_at``, the one place that time level is
+    written): the geometry field of *state* for a source anchor, the
+    target's **pre-step** field for a target anchor, from *pre_step*
+    (refused where it is not given: the returned state does not hold
+    it).
+
+    **What it is for.**  The kernel forms its weights in the positions'
+    dtype, so a value delivered through it is resolved, relative to the
+    variation of the field across one length, to ``resolution`` and no
+    better, at every pass alike: the group converges to the fixed point
+    of a slightly different transfer.  Under ``"l2"`` and ``"mixed"``
+    :func:`residual_precision_floor` takes every value field of the
+    group to be at least that coarse (the largest ``resolution`` over
+    the edges: what an edge delivers more coarsely than the fields makes
+    every value field as coarse, the argument of
+    :func:`_group_coarsest_eps`), and the step's own analysis takes the
+    same number for the per-entry resolution of its bounds
+    (``_coupled_block.py``).  Under ``"interface"`` the same rounding is
+    counted part by part (:func:`_part_resolution`), from the same
+    function of the same positions.
+
+    **A count, not a bound.**  Like the interface norm's, it takes a
+    field that varies across one length by about the size of the value
+    delivered: a field that varies less is moved by less (the floor is
+    then too large), and a value far smaller than the field's variation
+    across a cell is moved by more (MADD-ANO-247).  A kind that declares
+    no length scale has no entry: nothing is known of its kernel.
+    """
+    records = interface_records(interface_edges if interface_edges is not None else (), state)
+    lattices = _position_lattices(records)
+    out = []
+    for record in records:
+        if not record.kernel_rounds_at_stored_positions:
+            continue
+        side, field = record.anchor
+        holder = ((record.source if side == "source" else record.target)[0], field)
+        geom = record.geometry_at(state, pre_step)
+        if not (_is_float_leaf(geom) and _has_entries(geom)):
+            continue
+        reach = _read_in_kernel_lengths(record.mapping, geom, lattices.get(holder))
+        out.append((record, holder, reach, _positions_resolution(reach)))
+    return out
+
+
+def _kernel_rounding_eps(interface_edges, state, pre_step=None):
+    """The ``eps`` no value field of a group is counted finer than on
+    account of the weights its geometry edges' kernels form: the largest
+    ``resolution`` of :func:`_kernel_rounding` over
+    :data:`PRECISION_FLOOR_ULPS`, or ``None`` for a group with no such
+    edge (whose floor and step are then what they were, to the bit:
+    nothing is built).  A traced scalar where the positions are, with no
+    derivative.
+
+    **One rounding of the kernel's coordinate per evaluation.**  The
+    floor counts ``PRECISION_FLOOR_ULPS`` units of an entry's ``eps``
+    per evaluation; at this ``eps`` that is ``resolution`` once: ``eps``
+    of the positions' dtype times the largest lattice coordinate, which
+    bounds what the two rounded operations of ``(x - origin) / spacing``
+    move a weight by.  So a group's floor is
+    ``evaluations * eps_pos * reach / rtol`` wherever that is the larger
+    (``"mixed"``; times the root of the value entries under ``"l2"``),
+    and exactly what it was for positions within
+    ``PRECISION_FLOOR_ULPS`` lengths of the coordinates' zero and of the
+    grid's first point in a dtype no coarser than the fields.
+
+    Counted ``PRECISION_FLOOR_ULPS`` times instead (the count of a value's
+    own rounding), a float32 pair with four markers 3 to 7 spacings from
+    its grid's first point lost both usable flags on 16 of 16 reports at
+    ``rtol = 1e-5`` (floor 0.43 to 0.47 tolerances against residuals of
+    0.16 to 0.30 under Gauss-Seidel; 0.21 to 0.23 against 0.09 to 0.17
+    under Jacobi) with its bound 2.6 to 3.9 times the distance: the
+    kernel's rounding there is under a tenth of a tolerance.  Counted
+    once, the same reports keep their flags, and 1000 to 4000 spacings in
+    no report has a usable flag beside a bound under the distance
+    (jaxlib 0.11.0, CPU; MADD-ANO-261 has the numbers).
+
+    **The one number** both the report's floor
+    (:func:`residual_precision_floor`, ``"l2"`` and ``"mixed"``) and the
+    step's per-entry resolution take a value field to be no finer than,
+    so the two cannot count the kernel's rounding differently.
+    """
+    worst = None
+    for _record, _holder, _reach, resolution in _kernel_rounding(
+            interface_edges, state, pre_step):
+        worst = resolution if worst is None else jnp.maximum(worst, resolution)
+    if worst is None:
+        return None
+    # units: dimensionless -- a weight's rounding in lengths, taken as a
+    # fraction of the delivered value, over the units the floor counts
+    # per evaluation.
+    return worst / PRECISION_FLOOR_ULPS
+
+
+def _kernel_rounding_floors(interface_edges, state, node_names, convergence_norm,
+                            rtol: float = 1.0, evaluations: float = 1.0) -> list:
+    """``[(record, holder, reach, resolution, floor, own), ...]``: what
+    the rounding of each geometry edge's kernel puts into the float floor
+    of a group under ``"l2"`` or ``"mixed"`` at *state*, edge by edge
+    (experimental), beside what the fields' own rounding puts there.
+
+    The first four are :func:`_kernel_rounding`'s, at the positions a
+    step started from *state* reads (*state* is its own pre-step state).
+    ``floor`` is the floor of a group every value field of which is
+    counted at that edge's rounding and nothing else
+    (:func:`_kernel_rounding_eps`: once per evaluation), in the units
+    the residual is reported in:
+
+    * ``"mixed"``: ``evaluations * resolution / rtol`` (tolerances; the
+      RMS of one number over the value entries is that number);
+    * ``"l2"``: ``evaluations * resolution * sqrt(n)``, ``n`` the
+      floating entries of the members' fields other than the positions
+      (:func:`_position_fields`), to compare with the group's
+      ``tolerance``.
+
+    ``own`` is the same floor with every value field at the group's
+    coarsest ``eps`` (:func:`_group_coarsest_eps`) counted
+    ``PRECISION_FLOOR_ULPS`` times per evaluation: what the group's
+    floor is without the kernel.  The kernel's is the larger exactly
+    where ``resolution`` is above ``PRECISION_FLOOR_ULPS`` of that
+    ``eps`` (positions more than ``PRECISION_FLOOR_ULPS`` lengths from
+    the zero or from the grid's first point, in the fields' dtype).
+
+    :func:`residual_precision_floor` returns at least the larger of the
+    two times the root of the value entries' share of the entries it
+    reads (the position fields are counted at their own ``eps``).  On
+    the host, from a concrete state: Python floats.  Read by
+    ``_group_layout._kernel_rounding_warnings`` (``compile()``'s
+    advisory), so the advisory and the floor cannot locate the rounding
+    differently.
+    """
+    position_fields = _position_fields(interface_edges)
+    n_values = sum(
+        int(np.size(v)) for nn in node_names for name, v in (state.get(nn) or {}).items()
+        if _is_float_leaf(v) and (nn, name) not in position_fields)
+    group_eps = _group_coarsest_eps(state, node_names, interface_edges) or 0.0
+    # units: the residual's -- an eps per value entry, pooled as the norm pools
+    pooled = math.sqrt(n_values) if str(convergence_norm) == "l2" else 1.0 / float(rtol)
+    own = PRECISION_FLOOR_ULPS * float(evaluations) * group_eps * pooled
+    out = []
+    for record, holder, reach, resolution in _kernel_rounding(
+            interface_edges, state, pre_step=state):
+        resolution = float(resolution)
+        out.append((record, holder, reach, resolution,
+                    float(evaluations) * resolution * pooled, own))
+    return out
+
+
 def residual_precision_floor(state, node_names, convergence_norm="l2",
                              atol: float = 0.0, rtol: float = 1.0,
                              interface_edges=(), evaluations: float = 1.0,
@@ -2192,6 +2364,17 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     the norm reads no active field -- it then measures nothing, and the
     residual is ``0.0`` too.
 
+    Experimental: where an internal edge carries a geometry-dependent
+    mapping of a kind with a length scale (``multilinear_grid``), what it
+    delivers is no finer than the weights its kernel forms from the
+    stored positions, and under ``"l2"`` and ``"mixed"`` every **value**
+    field of the group is counted no finer than one rounding of the
+    kernel's coordinate per evaluation (:func:`_kernel_rounding_eps`;
+    the positions keep their own dtype's ``eps``).  Under
+    ``"interface"`` the same rounding is counted part by part
+    (:func:`_part_resolution`).  A group with no such edge is counted as
+    it always was, by the same Python floats.
+
     Parameters
     ----------
     state : dict
@@ -2218,7 +2401,9 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     pre_step : callable or dict, optional
         A member's pre-step state, by name (read under ``"interface"``
         for an edge whose geometry-dependent mapping is anchored at its
-        target).  EXPERIMENTAL (new in 0.4.0).
+        target, and under ``"l2"`` and ``"mixed"`` for the positions
+        such a mapping's kernel formed its weights from; refused where
+        one is needed and not given).  EXPERIMENTAL (new in 0.4.0).
     evaluations : float
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
@@ -2269,6 +2454,10 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
                            _part_resolution(reading, group_eps=group_eps), reading))
     else:
         position_fields = _position_fields(interface_edges)
+        # What the group's geometry edges deliver is no finer than their
+        # kernels' weights (``_kernel_rounding_eps``; ``None``, and
+        # nothing built, for a group with no such edge).
+        kernel_eps = _kernel_rounding_eps(interface_edges, state, pre_step)
         for nn in node_names:
             for field_name in state[nn]:
                 v = state[nn][field_name]
@@ -2279,12 +2468,19 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
                     # one of the fields it is taken over.  A position field
                     # keeps its own (``_position_fields``).
                     own = float(jnp.finfo(v.dtype).eps)
+                    eps_entry: Any
                     if group_eps is None or (nn, field_name) in position_fields:
                         eps_entry = own
                     else:
                         # units: dimensionless -- both eps are relative to
                         # a field's own magnitude.
                         eps_entry = max(own, group_eps)
+                        if kernel_eps is not None:
+                            # units: dimensionless -- the rounding of a
+                            # kernel weight in lengths, taken as the
+                            # fraction of its own magnitude a delivered
+                            # value moves by (``_kernel_rounding``).
+                            eps_entry = jnp.maximum(eps_entry, kernel_eps)
                     values.append((v, eps_entry, None))
     values = [entry for entry in values if _has_entries(entry[0])]
     if not values:

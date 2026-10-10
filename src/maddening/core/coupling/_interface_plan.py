@@ -748,6 +748,32 @@ class InterfaceEdge:
                 and self.anchor[0] == "target")
 
     @property
+    def kernel_rounds_at_stored_positions(self) -> bool:
+        """Does this edge deliver through a geometry-dependent mapping of
+        a kind that declares a length scale (``geometry_length_scale``;
+        ``multilinear_grid``)?
+
+        Such a kernel forms its weights from stored positions in their
+        dtype, which the float floor of a group under ``"l2"`` and
+        ``"mixed"`` counts for every value field
+        (``acceleration._kernel_rounding``), whatever the edge's source
+        is and whichever side the interface norm would read it on.
+        """
+        return self.anchor is not None and callable(
+            getattr(self.mapping, "geometry_length_scale", None))
+
+    @property
+    def kernel_rounds_at_pre_step_positions(self) -> bool:
+        """:attr:`kernel_rounds_at_stored_positions` for a mapping
+        anchored at its **target**: the positions the kernel reads are
+        the target's pre-step state, which the state a solve returns
+        does not hold.  Read by
+        :meth:`InterfacePlan.kernel_rounds_beyond_the_state`.
+        """
+        return (self.kernel_rounds_at_stored_positions and self.anchor is not None
+                and self.anchor[0] == "target")
+
+    @property
     def reads_weights_of_the_step(self) -> bool:
         """Is this edge read through a mapping that holds weights (which a
         caller may override for one step)?
@@ -815,7 +841,8 @@ class InterfaceEdge:
             raise ValueError(
                 f"edge {self.key!r}: the interface norm reads what this edge delivers "
                 f"at the pre-step {self.target[0]}.{field} (a target-anchored geometry), "
-                f"which only the step that solved the group holds")
+                f"and under every norm the float floor counts the rounding of the weights "
+                f"its mapping forms there, which only the step that solved the group holds")
         held: Any = (pre_step(self.target[0]) if callable(pre_step)
                      else pre_step[self.target[0]])
         return held[field]
@@ -1138,6 +1165,23 @@ class InterfacePlan:
         return self.norm_reads_mapping_weights() or any(
             rec.reads_pre_step_geometry and rec.source_kind == FLOATING
             for rec in self.internal)
+
+    def kernel_rounds_beyond_the_state(self) -> bool:
+        """Does an internal edge form its kernel's weights from positions
+        the state a solve returns does not hold (a geometry-dependent
+        mapping of a kind with a length scale, anchored at its target:
+        :attr:`InterfaceEdge.kernel_rounds_at_pre_step_positions`)?
+
+        Under ``"l2"`` and ``"mixed"`` the float floor of such a group
+        counts the rounding of those weights
+        (``acceleration._kernel_rounding``), so it cannot be taken from
+        the returned state alone and the step records it, as it does
+        the floor of an interface reading taken at a pre-step geometry
+        (:meth:`norm_reads_beyond_the_state`).  Read by
+        ``_group_layout._reads_mapping_weights`` and
+        ``_group_layout._floor_needs_the_step``.
+        """
+        return any(rec.kernel_rounds_at_pre_step_positions for rec in self.internal)
 
     def band_reads_beyond_the_state(self) -> bool:
         """With a dead band declared (``atol > 0``), does it ask, on an

@@ -3626,13 +3626,21 @@ claims:
     report withdraws the flag there for every static mapping kind (a row
     over MAPPED_ROW_FLOOR_LIMIT = 10 entries, a dense matrix counted at
     its width, with the residual not above the floor times the row's
-    length).  A geometry-dependent mapping's rows are decided in the step
-    and are not counted (a multilinear_grid scatter read 1.3x its
-    distance with 3000 markers in a cell; that group solves positions and
-    has no flag in 0.4.0, and one whose positions are constants of the
-    pass keeps its flags behind such rows: not measured).
+    length).  A geometry-dependent mapping's rows are decided in the step,
+    so a multilinear_grid scatter is counted at its number of points (it
+    read 1.3x its distance with 3000 markers in a cell on a group that
+    solves positions, which has no flag in 0.4.0; on one whose positions
+    are constants of the pass 0.048x with both flags set before the
+    guard read it, MADD-ANO-257).  The float floor of a group with a
+    geometry edge counts the rounding of the weights its kernel forms
+    (MADD-ANO-261, CPL-100): float32 positions far into a grid put the
+    report at its floor, and the flag is withdrawn there unless every
+    member declares its evaluations.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_an_ordinary_pair_is_at_its_floor_and_no_flag_stands'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_three_spacings_into_its_grid_the_pair_keeps_both_flags'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_behind_a_scatter_of_many_points_no_flag_stands_at_the_floor'
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - 'tests/property/test_coupling_plane_sides.py::test_every_flagged_number_of_a_table_row_holds_against_the_reference'
     - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_with_the_cell_polynomials_fixed_point_past_a_plane'
@@ -3930,7 +3938,15 @@ claims:
     through the field's signs): with a cancellation sum|t| / |sum t| of
     25 a row of 10 entries, within the limit, read 1.26 of the distance
     in float32 and 0.85 at the float64 floor WITH THE FLAG SET (pinned as
-    a strict xfail).  A geometry-dependent mapping's rows are not counted.
+    a strict xfail).  A geometry-dependent mapping's rows are decided in
+    the step, so the edge is counted at the longest a row can be whatever
+    the positions are (experimental; the kind's geometry_longest_row()):
+    a multilinear_grid scatter at its number of points, whichever side
+    it is anchored at, a gather at the 2**d weights of a cell.  Before
+    the guard read such an edge a pair whose scatter's positions are
+    constants of the pass read 0.40 (300 markers in one cell) and 0.048
+    (3000) of the distance with both flags set; ten points keep them on
+    a bound that holds.
     NOT COUNTED BY THE ROW GUARD (MADD-ANO-257's): a sum written inside an
     edge TRANSFORM (transform=lambda v: zeros(n).at[cells].add(...)).  The
     guard reads the static mappings on internal edges; a transform is
@@ -3945,6 +3961,9 @@ claims:
     tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py.
   oracle: the flag against each condition.
   tests:
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_behind_a_scatter_of_many_points_no_flag_stands_at_the_floor'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_behind_a_scatter_of_ten_points_the_flags_stand_on_a_bound_that_holds'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_a_scatter_is_a_row_of_its_points_and_a_gather_of_its_cells_corners'
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_resolved_spectrum_is_usable
     - tests/core/test_coupling_spectral_bound_certificate.py::test_a_residual_the_space_never_absorbs_reads_as_unresolved
@@ -4327,7 +4346,10 @@ claims:
     an internal edge anchors a geometry-dependent mapping at (the l2 and
     the mixed norm), a position part read in kernel lengths (the interface
     norm), and the rounding eps r of the positions a value was
-    delivered through (r as below); a stored float64 position has float64 resolution,
+    delivered through (r as below; under the l2 and the mixed norm that
+    rounding makes every VALUE field of the group no finer than
+    eps r / PRECISION_FLOOR_ULPS, one rounding of the kernel's coordinate
+    per evaluation: MAP-036, MADD-ANO-261); a stored float64 position has float64 resolution,
     and counted at a float32 member's eps float64 positions tens of
     spacings from zero read precision_limited=True on a floor of hundreds
     of tolerances with the iterate within a thousandth of one of its fixed
@@ -4377,7 +4399,14 @@ claims:
     strict xfail with its controls).
     A group with a geometry edge (experimental; MAP-036: multilinear_grid
     mappings, one rate, the l2 or the mixed norm): the floor is the
-    members' state's, each position field at its own dtype's eps, with
+    members' state's, each position field at its own dtype's eps and
+    each value field no finer than one rounding of the kernel's lattice
+    coordinate per evaluation (eps of the positions' dtype times r over
+    PRECISION_FLOOR_ULPS, read at the positions the pass's kernel reads:
+    the pre-step ones for a target anchor, so the step records the
+    floor; MADD-ANO-261: uncounted, float32 positions 1000 to 2000
+    spacings into a grid kept both flags beside a bound at 0.03 to 0.19
+    of the distance), with
     the measured gain of a read through the gather or the scatter in the
     evaluation count.  That gain is taken against the positions' own
     magnitude, so under these two norms the count a step measures with
@@ -4409,6 +4438,9 @@ claims:
     such kind.
   oracle: closed form.
   tests:
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_the_floor_takes_every_value_field_no_finer_than_that_and_a_position_at_its_own'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_the_floor_is_counted_at_the_positions_the_pass_read_not_the_ones_it_left'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_members_that_declare_keep_their_flags_on_a_bound_that_holds'
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_floor_of_a_mapped_edge_counts_what_it_delivers
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_is_no_finer_than_the_field_it_was_computed_from

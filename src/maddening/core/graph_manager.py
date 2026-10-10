@@ -3308,7 +3308,8 @@ class GraphManager:
         }
         # Per group key, the longest row of each internal edge that carries
         # a static mapping (a dense matrix, a sparse one in either layout,
-        # a registered kind's own class), as the step was built: what the
+        # a registered kind's own class) or a geometry-dependent one (a
+        # scatter at its number of points), as the step was built: what the
         # report's guard on the float floor reads
         # (``_group_layout._mapped_rows``, MADD-ANO-257).
         self._committed_mapped_rows = {
@@ -5058,6 +5059,14 @@ class GraphManager:
               count declared the bound with its floor *is* a bound, and
               a group converged to float32 -- the best a float32 group
               can do -- stays usable.
+              Experimental: under ``"l2"`` and ``"mixed"`` the floor of
+              a group with a geometry-dependent mapping on an internal
+              edge also counts the rounding of the weights the kernel
+              forms from the positions in their dtype (one rounding of
+              the lattice coordinate per evaluation, for every value
+              field; MADD-ANO-261), so float32 positions far into a grid
+              put a converged residual under it: the wider dtype is then
+              the positions'.
               The floor is measured on the state the step returned,
               and stays so when the state is written afterwards
               (``set_node_state``, ``PUT /graph/state``, a node replaced):
@@ -5134,7 +5143,10 @@ class GraphManager:
             gather layout's rows of 1e4 entries read 0.007 on jax
             0.10.2.  Where an internal edge of the group carries a
             static mapping of any kind (a dense matrix, a sparse mapping
-            in either layout, a registered kind's own static class) with
+            in either layout, a registered kind's own static class), or
+            a geometry-dependent mapping (experimental; counted at the
+            longest its row can be wherever the positions are: a
+            ``multilinear_grid`` scatter at its number of points), with
             a row longer than ``MAPPED_ROW_FLOOR_LIMIT`` (10, a measured
             constant) and ``"residual"`` is not above the float floor
             times the row's length, ``"spectral_usable"`` and

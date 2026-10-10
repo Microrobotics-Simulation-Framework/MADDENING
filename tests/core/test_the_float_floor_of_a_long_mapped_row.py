@@ -622,8 +622,9 @@ def test_a_static_mapping_of_another_class_is_counted_at_its_source_side():
 def test_every_static_mapping_on_an_internal_edge_is_counted():
     """Per internal edge, in the order given: the scatter layout, the
     gather layout, a dense matrix and a registered kind's own class by
-    their key, their form and their longest row; a plain edge and a
-    geometry-dependent mapping not at all."""
+    their key, their form and their longest row; a geometry-dependent
+    scatter by its number of points (how many share a grid entry is
+    state); a plain edge not at all."""
     n = 40
     scatter, gather, dense = (_row_mapping(layout, n) for layout in LAYOUTS)
     other = inverse_distance_mapping(np.linspace(0.0, 1.0, 5), np.linspace(0.0, 1.0, 2))
@@ -637,10 +638,14 @@ def test_every_static_mapping_on_an_internal_edge_is_counted():
              EdgeSpec("a", "b", "p", "q", mapping=grid, geometry=("source", "pos"))]
     rows = _mapped_rows(edges)
     assert [(key, row) for key, _what, row in rows] == [
-        ("a.x->b.u", n), ("a.y->b.v", n), ("a.z->b.w", n), ("b.y->a.v", 3), ("b.z->a.w", 5)]
+        ("a.x->b.u", n), ("a.y->b.v", n), ("a.z->b.w", n), ("b.y->a.v", 3), ("b.z->a.w", 5),
+        ("a.p->b.q", n)]
     for (_key, what, _row), layout in zip(rows, LAYOUTS):
         assert SAID[layout] in what, (layout, what)
-    assert _mapped_rows(edges[3:4]) == () and _mapped_rows(edges[6:]) == ()
+    assert "a geometry-dependent mapping (multilinear_grid)" in rows[-1][1]
+    assert "its number of points" in rows[-1][1]
+    assert _mapped_rows(edges[3:4]) == ()
+    assert [(key, row) for key, _what, row in _mapped_rows(edges[6:])] == [("a.p->b.q", n)]
 
 
 def test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give():
@@ -923,12 +928,13 @@ class Markers(SimulationNode):
 
 # Per push: tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_every_static_mapping_on_an_internal_edge_is_counted
 @pytest.mark.slow
-def test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less_than_two():
+def test_a_geometry_dependent_scatter_is_counted_at_its_points_and_its_bound_holds_by_less_than_two():
     """A characterisation, not a promise.  A conservative
     ``multilinear_grid`` mapping from points to a grid is a scatter-add
     whose fan-in is the number of markers in a cell's support, which is
-    decided in the step: no static number, so the guard does not count
-    it.  With 3000 markers in one cell behind a uniform field (float32,
+    decided in the step: no static number, so the guard counts the edge
+    at the most it can be, its number of points.  With 3000 markers in
+    one cell behind a uniform field (float32,
     ``"mixed"``, loop gain 0.99) each of the two grid nodes adds up 3000
     entries, and the bound read 1.27 times the distance (3.8 with 300
     markers, 13.8 with 8; jax 0.10.2 and 0.11.0 alike): it holds, and
@@ -939,9 +945,12 @@ def test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less
     **Its flags.**  The markers' positions are a member's own state, so
     this group solves positions, and in 0.4.0 such a group has no usable
     flag on any step, with that rule's reason (MADD-ANO-252): the row
-    guard is not what takes them, and it is not asked.  A group whose
-    positions are constants of the pass keeps its flags behind the same
-    uncounted rows; that form was not measured.
+    guard is not what takes them.  It is asked all the same, as of every
+    entry that reports a float floor, and adds its sentence and its
+    code: the floor shown does not count the row's rounding.  (A group
+    whose positions are constants of the pass has flags for the guard to
+    withdraw:
+    ``tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py``.)
 
     When this fails, the registry entry and the guide state other
     numbers than the tree gives."""
@@ -967,13 +976,14 @@ def test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less
     gm.set_node_state("fine", {"x": jnp.asarray(c), "pos": jnp.full((k, 1), 0.5, jnp.float32)})
     gm.step(external_inputs={"coarse": {"ab": jnp.asarray([a, b])}, "fine": {"c": jnp.asarray(c)}})
     report = dict(gm.coupling_diagnostics()[KEY])
-    # Only the dense edge back (two entries a row) is a static mapping.
+    # The dense edge back (two entries a row), and the scatter at its points.
     rows = gm._committed_mapped_rows[KEY]  # noqa: SLF001
-    assert [(key, row) for key, _what, row in rows] == [(BACK_EDGE, 2)]
+    assert {key: row for key, _what, row in rows} == {BACK_EDGE: 2, "fine.x->coarse.u": k}
     assert report["converged"] and report["precision_limited"], report
     assert not report["spectral_usable"] and not report["gradient_bound_usable"], report
-    assert "the group solves position(s)" in report["not_usable_reason"], report
-    assert ANOMALY not in report["not_usable_reason"], report
+    solved, also, row_said = report["not_usable_reason"].partition(" Also: ")
+    assert "the group solves position(s)" in solved and ANOMALY not in solved, report
+    assert also and ANOMALY in row_said and f"adds up {k} entries" in row_said, report
     x = np.asarray(gm.get_node_state("coarse")["x"], np.float64)
     fine = np.asarray(gm.get_node_state("fine")["x"], np.float64)
     c64 = np.asarray(c, np.float64)

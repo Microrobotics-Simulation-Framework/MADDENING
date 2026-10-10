@@ -1595,14 +1595,19 @@ def test_a_measured_count_still_enters_the_floor_of_a_group_whose_bounds_are_rep
     without a geometry edge), once and not ten times.  The floor is the
     per-evaluation floor times the larger of the structural count and
     the slot, and ``precision_limited`` turns where that reaches the
-    residual: half the count that would, and twice it."""
-    pair = Pair(n=41)
+    residual: half the count that would, and twice it.  (The pair's
+    tolerance is ten times the default's: its floor also counts the
+    rounding of its kernels' weights, MADD-ANO-261, and at the default
+    the structural count already puts the residual under it.)"""
+    pair = Pair(n=41, rtol=1e-4)
     gm, _advisories = build(pair, norm="mixed")
     gm.step()
     plain = report(gm)
-    state = {name: gm.get_node_state(name) for name in ("grid", "markers")}
-    per_evaluation = float(residual_precision_floor(
-        state, ["grid", "markers"], "mixed", pair.atol, pair.rtol, (), evaluations=1.0))
+    # The floor the step recorded (the gather is anchored at its target:
+    # only the step holds the positions its kernel read), per evaluation.
+    per_evaluation = float(gm._state["_meta"][f"coupling_{KEY}_reading_floor"])  # noqa: SLF001
+    assert plain["residual_precision_floor"] == pytest.approx(
+        EVALUATIONS * per_evaluation, rel=1e-6)
     turns_at = plain["residual"] / per_evaluation
     # Premise: the structural count (2) leaves the residual above the floor.
     assert plain["precision_limited"] is False and turns_at > 1.2 * EVALUATIONS, (plain, turns_at)

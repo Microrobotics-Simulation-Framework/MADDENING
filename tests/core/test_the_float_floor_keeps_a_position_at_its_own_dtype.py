@@ -121,7 +121,12 @@ def test_a_float64_position_field_beside_float32_values_is_floored_at_its_own_ep
     geometry there, the same float64 field is a value like any other and
     takes the group's coarsest eps; and float32 positions beside float64
     values put the values at float32's eps (the coarsest rule) and stay
-    at their own."""
+    at their own.  Those float32 positions are up to 22.4 spacings from
+    the grid's first point, and what the scatter delivers at them is no
+    finer than its kernel's weights: the values are counted at one
+    rounding of that lattice coordinate over ``PRECISION_FLOOR_ULPS``
+    (5.6 float32 eps; MADD-ANO-261), where float64 positions leave them
+    at float32's."""
     eps32, eps64 = (float(np.finfo(t).eps) for t in (np.float32, np.float64))
     with x64(True):
         state = {"p": {"x": jnp.ones(M, jnp.float32), "pos": jnp.asarray(P0.reshape(M, 1))},
@@ -142,7 +147,9 @@ def test_a_float64_position_field_beside_float32_values_is_floored_at_its_own_ep
 
     assert got == pytest.approx(pooled(eps32, eps64), rel=1e-6)
     assert plain == pytest.approx(pooled(eps32, eps32), rel=1e-6)
-    assert coarse_positions == pytest.approx(pooled(eps32, eps32), rel=1e-6)
+    assert coarse_positions == pytest.approx(
+        pooled(eps32 * float(P0.max()) / PRECISION_FLOOR_ULPS, eps32), rel=1e-6)
+    assert float(P0.max()) > PRECISION_FLOOR_ULPS
     assert got < plain
 
 
@@ -182,8 +189,11 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
     float64 and recomputed every pass from float32 samples carry float32
     rounding, and the floor counts them at float64's eps.  On this pair
     the bound is hundreds of times the distance, and it is the lower of
-    the two (against the same pair with float32 positions), by a few
-    percent.
+    the two against the same pair with float32 positions: by a few
+    percent while nothing counted the weights the kernel forms from
+    those positions, and by the factor that count takes now (float32
+    positions up to 22.4 spacings into the grid: 5.6 float32 eps for
+    every value field, MADD-ANO-261), between four and six.
 
     **Its flags.**  The markers' positions are recomputed in the pass,
     so this group solves positions, and in 0.4.0 such a group has no
@@ -217,5 +227,5 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
             assert np.asarray(report[name]).tobytes() == np.asarray(bare[name]).tobytes(), name
         assert report["spectral_error_bound"] == bare["spectral_error_bound"], (report, bare)
         assert report["spectral_error_bound"] >= 10.0 * report["distance"] > 0.0, report
-    assert fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)
-    assert fine["spectral_error_bound"] > 0.5 * coarse["spectral_error_bound"], (fine, coarse)
+    assert 4.0 * fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)
+    assert 6.0 * fine["spectral_error_bound"] > coarse["spectral_error_bound"], (fine, coarse)

@@ -116,7 +116,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import numpy as np
 
@@ -524,8 +524,8 @@ def fill_of(readings, device_bytes: int | None) -> dict:
     given, and ``why_not`` says which.  The peak, never ``bytes_in_use``:
     between two readings a step's temporaries have come and gone.
     """
-    out = {"fill": None, "peak_bytes": None, "by_device": None, "bytes_limit": None,
-           "why_not": None}
+    out: dict[str, Any] = {"fill": None, "peak_bytes": None, "by_device": None,
+                           "bytes_limit": None, "why_not": None}
     peaks: dict[str, int] = {}
     limits: dict[str, int] = {}
     for reading in readings or []:
@@ -607,20 +607,24 @@ def rederive(doc: dict) -> dict:
         problems.append("it is recorded as a failed check, but no check fails by its own values")
     if failed:
         outcome = CHECK_FAILED
-    tile, k = doc.get("tile"), doc.get("k")
+    tile, k, shape = doc.get("tile"), doc.get("k"), doc.get("shape")
     try:
-        if doc.get("cells") != _cells(tile, k) or list(doc.get("shape")) != list(grid_shape(tile, k)):
+        if not isinstance(shape, list) or doc.get("cells") != _cells(tile, k) \
+                or shape != list(grid_shape(tile, k)):
             problems.append("its cells or shape are not its tile's times its counts")
     except _UNREADABLE:
         problems.append("its tile, counts, cells or shape cannot be read")
-    memory = doc.get("memory") if isinstance(doc.get("memory"), dict) else {}
+    recorded = doc.get("memory")
+    memory: dict = recorded if isinstance(recorded, dict) else {}
     gb = memory.get("device_memory_gb")
     derived_fill = fill_of(memory.get("readings"), int(gb * GIB) if isinstance(gb, (int, float))
                            and not isinstance(gb, bool) and gb > 0 else None)["fill"]
     recorded_fill = memory.get("fill")
-    if (recorded_fill is None) != (derived_fill is None) or (
-            derived_fill is not None and not math.isclose(recorded_fill, derived_fill,
-                                                          rel_tol=1e-9, abs_tol=0.0)):
+    if derived_fill is None or not isinstance(recorded_fill, float):
+        agree = derived_fill is None and recorded_fill is None
+    else:
+        agree = math.isclose(recorded_fill, derived_fill, rel_tol=1e-9, abs_tol=0.0)
+    if not agree:
         problems.append(f"its fill is recorded as {recorded_fill!r}, but its memory readings "
                         f"give {derived_fill!r}")
     return {"outcome": outcome, "failed": failed, "problems": problems, "fill": derived_fill}
@@ -644,8 +648,22 @@ def read_record(path: Path) -> tuple[dict | None, str | None]:
 # The backend, loaded on first use (--summarise and the ramp need none)
 # ---------------------------------------------------------------------------
 
-jax = jnp = lax = NamedSharding = P = None
-create_device_mesh = ShardedStencilNode = LBMNode = Lattice = None
+if TYPE_CHECKING:
+    # What the names below are once :func:`_load_backend` has run.
+    import jax
+    import jax.numpy as jnp
+    from jax import lax
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    from maddening.cloud.multigpu.device_mesh import create_device_mesh
+    from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
+    from maddening.nodes.lbm import LBMNode
+else:
+    jax = jnp = lax = NamedSharding = P = None
+    create_device_mesh = ShardedStencilNode = LBMNode = None
+#: ``LBMNode`` as this script wraps it (:func:`_make_lattice_class`).
+Lattice: Any = None
 _PROGRAMS: dict = {}
 _TILE_STEPS: dict = {}
 
@@ -726,14 +744,14 @@ def environment() -> dict:
     own step records it, and the operator passes the card's size."""
     _load_backend()
     devices = jax.devices()
-    import jaxlib  # noqa: PLC0415
+    from jaxlib import version as jaxlib_version  # noqa: PLC0415
 
     return {
         "hostname": socket.gethostname(),
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "python": platform.python_version(),
         "jax": jax.__version__,
-        "jaxlib": jaxlib.__version__,
+        "jaxlib": jaxlib_version.__version__,
         "platform": devices[0].platform,
         "devices": [str(d) for d in devices],
         "device_kinds": sorted({d.device_kind for d in devices}),
@@ -795,8 +813,9 @@ def tile_start(tile, lattice) -> dict:
     ripple = np.stack([tile_pattern(tile, 0.7 * q + 0.2) for q in range(e.shape[0])],
                       axis=-1) / _PATTERN_MAX
     f = (f_eq * (1.0 + POPULATION_RIPPLE * ripple)).astype(np.float32)
-    density = np.sum(f, axis=-1, dtype=np.float64)
-    velocity = (f.astype(np.float64) @ e) / density[..., None]
+    f64 = f.astype(np.float64)
+    density = f64.sum(axis=-1)
+    velocity = (f64 @ e) / density[..., None]
     return {"f": f, "density": density.astype(np.float32),
             "velocity": velocity.astype(np.float32),
             "pressure": (density * cs2).astype(np.float32),
@@ -1025,10 +1044,10 @@ class Problem(NamedTuple):
     shape: tuple
     cells: int
     steps: int
-    mesh: object
+    mesh: Any
     axis_map: dict
     devices: list
-    sharded: object
+    sharded: Any
     dt: float
     tile_state: dict
     reference: dict
@@ -1621,6 +1640,8 @@ def run_ramp(args, launch: Callable[[list, float, Path], Launched] = launch_chil
     last = None
     for target, sized_from, k in plan:
         if k is None:
+            if device_bytes is None:        # check_option_values refuses a ramp without it
+                raise SystemExit("--ramp needs --device-memory-gb")
             if last is None:
                 per_cell = args.bytes_per_cell or STATE_BYTES_PER_CELL * APRIORI_STEP_MULTIPLE
                 want = first_rung_cells(target, device_bytes, n_devices, per_cell)
@@ -1667,10 +1688,8 @@ def run_ramp(args, launch: Callable[[list, float, Path], Launched] = launch_chil
         soak = _run_one(args, launch, "soak",
                         _row(0, None, f"{args.soak_at:g} of rung {ceiling['rung']}'s cells", k,
                              tile, SOAK_FILE), timeout_s)
-        try:
-            soak["growth"] = read_record(args.out / SOAK_FILE)[0].get("growth")
-        except _UNREADABLE:
-            soak["growth"] = None
+        soak_record, _ = read_record(args.out / SOAK_FILE)
+        soak["growth"] = None if soak_record is None else soak_record.get("growth")
     status = ramp_status(rows, soak)
     summary = {
         "schema_version": CAPACITY_SCHEMA_VERSION,

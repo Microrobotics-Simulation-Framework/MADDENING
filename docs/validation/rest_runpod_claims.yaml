@@ -6523,7 +6523,7 @@ claims:
     runner_active: n/a
     sim_run_active: n/a
     large_payload: n/a
-    hostile_input: n/a
+    hostile_input: tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_one_wrong_cell_on_one_device_is_found_in_its_field_alone
     shutdown: n/a
     wrapper_nodes: n/a
     checkpoint_restore: n/a
@@ -6590,8 +6590,8 @@ claims:
     runner_active: n/a
     sim_run_active: n/a
     large_payload: n/a
-    hostile_input: n/a
-    shutdown: n/a
+    hostile_input: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_summarise_rederives_every_verdict_from_the_values_of_a_tampered_record
+    shutdown: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_ramp_that_is_terminated_takes_its_rung_with_it
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_past_its_time_box_is_killed_and_recorded_as_timed_out

@@ -548,11 +548,13 @@ for it and never gives it back or joins two pieces of it, so a block can
 be refused while the sum of what is free would hold it: the ceiling the
 ramp finds is the ceiling of a growing pool, which is what a run has by
 default here, and may be below what one preallocated pool would take.
-The pool also has an upper limit of its own,
+The pool is also understood to have an upper limit of its own,
 `XLA_PYTHON_CLIENT_MEM_FRACTION` of the card's free memory, 0.75 where
 unset -- below the ramp's last two targets -- which is why the commands
-export 0.95 (the script sets that too where it is unset).  Neither was
-measured before the session.  Each rung records the three variables as
+export 0.95 (the script sets that too where it is unset).  JAX documents
+the fraction for a preallocated pool; that it also bounds a growing one
+is read from the allocator, and neither effect was measured before the
+session.  Each rung records the three variables as
 found and as used and every card's `bytes_limit`, and the summary prints
 the allocator's own limit beside the ceiling: **an out-of-memory at a
 fill just under `bytes_limit` over 24 GiB is the allocator's limit, not
@@ -561,8 +563,8 @@ the card's.**
 Read in the first rung's record before trusting the rest (nothing below
 has run on an accelerator before): `environment.platform` is `gpu` and
 `device_kinds` names the card; `memory.readings` hold numbers on all four
-devices; `memory.bytes_limit` is about 0.95 of the card; `memory.fill`
-against the 0.25 asked for says how good the factor 6 was; and
+devices; `memory.bytes_limit` is about 0.95 of what the card had free;
+`memory.fill` against the 0.25 asked for says how good the factor 6 was; and
 `results.fields` gives each field's `max_rel` and whether it was exactly
 0 (in the CPU dry run it is, at the default tile).  Device 0 also holds
 a bool per cell that `LBMNode`'s constructor builds there, so it is the

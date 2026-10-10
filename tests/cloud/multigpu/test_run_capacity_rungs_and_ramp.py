@@ -713,9 +713,26 @@ def test_the_soak_repeats_the_rung_at_a_share_of_the_ceiling_and_records_the_gro
     growth = record["growth"]
     assert growth["blocks"] == 2
     assert set(next(iter(growth["bytes_in_use"].values()))) == {"first_to_last", "after_first"}
-    assert all(g["first_to_last"] == 4000 for g in growth["bytes_in_use"].values())
+    assert all(g == {"first_to_last": 4000, "after_first": None}
+               for g in growth["bytes_in_use"].values())
     assert all(g["first_to_last"] == 0 for g in growth["peak_bytes_in_use"].values())
     assert growth["host_rss_bytes"]["first_to_last"] is not None
+    assert "device bytes in use grew by 4000 from the first block to the last" in text
+    # Three blocks: the stretch that matters starts after the first, which
+    # holds the compiles.
+    blocks = [{"memory_after": [{"device": "d0", "bytes_in_use": use, "peak_bytes_in_use": 900},
+                                {"device": "d1", "bytes_in_use": 500, "peak_bytes_in_use": 900}],
+               "host_rss_bytes": rss}
+              for use, rss in ((100, 10 << 20), (700, 30 << 20), (760, 31 << 20))]
+    three = rc.soak_growth(blocks)
+    assert three["bytes_in_use"] == {"d0": {"first_to_last": 660, "after_first": 60},
+                                     "d1": {"first_to_last": 0, "after_first": 0}}
+    assert three["host_rss_bytes"] == {"first_to_last": 21 << 20, "after_first": 1 << 20}
+    assert rc._growth_line(three) == ("device bytes in use grew by 60 after the first block; "
+                                      "host RSS grew by 1.0 MiB after the first block")
+    del blocks[0]["memory_after"][1]["bytes_in_use"]
+    assert rc.soak_growth(blocks)["bytes_in_use"] is None
+    assert "device memory not measured" in rc._growth_line(rc.soak_growth(blocks))
     assert len(record["memory"]["readings"]) == 8
     assert record["memory"]["fill"] == pytest.approx(1152 / 4 * 400.0 / _CARD)
     assert "SOAK: 1152 cells: passed" in text and "device bytes in use grew by" in text

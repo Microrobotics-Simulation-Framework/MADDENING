@@ -145,6 +145,18 @@ def test_the_command_line_refuses_it_with_exit_2_before_anything_runs(argv, word
     assert not out.exists()
 
 
+def test_an_abbreviated_dry_run_is_refused(tmp_path, capsys):
+    """The CPU pin reads the literal ``--dry-run`` before the options are
+    parsed: an accepted ``--dry`` would be a "dry run" on whatever
+    accelerator is there."""
+    with pytest.raises(SystemExit) as refused:
+        rc.exit_status(["--dry", "--out", str(tmp_path / "out"), *S.TILE_ARGS, "--cells", "5000"],
+                       _refusing_launcher)
+    assert refused.value.code == rc.EXIT_REFUSED
+    assert "unrecognized arguments: --dry" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
 # --- the field, built one device's block at a time ----------------------------
 
 

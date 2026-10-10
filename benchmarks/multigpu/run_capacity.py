@@ -235,9 +235,12 @@ PLANES_APART = 100.0
 
 #: The allocator's environment: recorded as found, then given these
 #: defaults where unset.  Preallocation off is the runner's choice (the
-#: pool grows as needed); the fraction is the pool's upper limit as a
-#: share of the card's free memory, 0.75 unless set, which is below the
-#: ramp's last targets.
+#: pool grows as needed).  The fraction is documented by JAX for a
+#: preallocated pool, 0.75 of the card by default; its allocator is
+#: understood to take the same number as the upper limit of a pool that
+#: grows, which would end the ramp's last targets at 0.75.  That reading
+#: has not been measured (no accelerator has run this): every rung records
+#: each device's ``bytes_limit``, which is the measurement.
 ALLOCATOR_VARIABLES = ("XLA_PYTHON_CLIENT_PREALLOCATE", "XLA_PYTHON_CLIENT_MEM_FRACTION",
                        "XLA_PYTHON_CLIENT_ALLOCATOR")
 ALLOCATOR_DEFAULTS = {"XLA_PYTHON_CLIENT_PREALLOCATE": "false",
@@ -1372,7 +1375,8 @@ def soak_growth(blocks: list) -> dict:
     same point of each (after its comparison): per device ``bytes_in_use``
     and ``peak_bytes_in_use`` where the backend keeps them, and the host's
     resident memory.  The first block compiles; the growth that matters is
-    from the second on (``after_first``)."""
+    from the second block to the last (``after_first``; ``None`` with fewer
+    than three blocks, where there is no such stretch)."""
     def series(key):
         per_device: dict = {}
         for block in blocks:
@@ -1385,7 +1389,7 @@ def soak_growth(blocks: list) -> dict:
 
     def moved(values):
         return {"first_to_last": values[-1] - values[0],
-                "after_first": values[-1] - values[min(1, len(values) - 1)]}
+                "after_first": values[-1] - values[1] if len(values) >= 3 else None}
 
     out: dict = {"blocks": len(blocks)}
     for key in ("bytes_in_use", "peak_bytes_in_use"):
@@ -1397,15 +1401,26 @@ def soak_growth(blocks: list) -> dict:
 
 
 def _growth_line(growth: dict) -> str:
+    def most(moves) -> tuple[int, str]:
+        """The largest move, and the stretch it is over: from the second
+        block on where there are three, else from the first (which holds
+        the first block's compiles)."""
+        key, over = ("after_first", "after the first block") \
+            if all(m["after_first"] is not None for m in moves) \
+            else ("first_to_last", "from the first block to the last")
+        return max(m[key] for m in moves), over
+
     in_use = growth.get("bytes_in_use")
     if in_use is None:
         device = "device memory not measured"
     else:
-        most = max(v["after_first"] for v in in_use.values())
-        device = f"device bytes in use grew by {most} after the first block"
+        device = "device bytes in use grew by {} {}".format(*most(list(in_use.values())))
     rss = growth.get("host_rss_bytes")
-    host = "host RSS not read" if rss is None else \
-        f"host RSS grew by {rss['after_first'] / (1024 * 1024):.1f} MiB after the first block"
+    if rss is None:
+        host = "host RSS not read"
+    else:
+        moved, over = most([rss])
+        host = f"host RSS grew by {moved / (1024 * 1024):.1f} MiB {over}"
     return f"{device}; {host}"
 
 

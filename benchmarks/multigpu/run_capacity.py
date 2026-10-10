@@ -846,7 +846,12 @@ def field_sharding(mesh, axis_map: dict, ndim: int):
 
 
 def _take3(tile, ix, iy, iz):
-    return jnp.take(jnp.take(jnp.take(tile, ix, axis=0), iy, axis=1), iz, axis=2)
+    """The rows ``ix``, ``iy``, ``iz`` of ``tile`` along its three spatial
+    axes.  The indices are tile rows already (taken modulo the tile's
+    extents on the host), so nothing is out of range to fill or to check."""
+    def rows(a, index, axis):
+        return jnp.take(a, index, axis=axis, mode="clip")
+    return rows(rows(rows(tile, ix, 0), iy, 1), iz, 2)
 
 
 def _tiled_state(tiles: dict, ix, iy, iz) -> dict:
@@ -857,12 +862,18 @@ def _compare_state(blocks: dict, x0, tiles: dict, ix, iy, iz) -> dict:
     """``ix.shape[0]`` planes of every field of one device's block, from
     plane ``x0``, against the same planes of the tiled reference: the
     largest difference, the reference's scale, whether every value is
-    finite, and the sum over each row (for the mass)."""
+    finite, and the sum over each row (for the mass).
+
+    A difference that is not a number counts as infinite: a reduction's
+    ``max`` need not carry a NaN (on CPU it dropped one on the 1-D mesh and
+    kept it on the pencil), and a NaN cell must never read as "no
+    difference"."""
     out = {}
     for name, block in blocks.items():
         got = lax.dynamic_slice_in_dim(block, x0, ix.shape[0], axis=0).astype(jnp.float32)
         want = _take3(tiles[name], ix, iy, iz).astype(jnp.float32)
-        out[name] = {"max_abs": jnp.max(jnp.abs(got - want)),
+        apart = jnp.abs(got - want)
+        out[name] = {"max_abs": jnp.max(jnp.where(jnp.isnan(apart), jnp.inf, apart)),
                      "scale": jnp.max(jnp.abs(want)),
                      "finite": jnp.all(jnp.isfinite(got)),
                      "rows": jnp.sum(got, axis=tuple(range(2, got.ndim)))}

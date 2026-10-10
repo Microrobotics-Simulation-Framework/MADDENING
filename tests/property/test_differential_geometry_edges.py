@@ -63,6 +63,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tests.core.coupling_reason_rules import WORDS, folded_codes
 from tests.property import geometry_graphs as gg
 from tests.property.geometry_graphs import DT, case
 
@@ -349,7 +350,17 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         assert sorted(ra) == sorted(rb), (where, sorted(ra), sorted(rb))
         if ia != ib:
             continue
+        # The causes of a False flag are the twin's, but for the one that
+        # only the edge-mapped graph has: its group solves the positions of
+        # a mapping, which the twin's node inlines (no rule of a geometry
+        # edge applies to the twin).  The words are each graph's own.
+        own = {flag: [code for code in listed if code not in gg.GEOMETRY_CODES]
+               for flag, listed in ra["reason_codes"].items()}
+        assert folded_codes(own) == folded_codes(rb["reason_codes"]), (
+            where, ra["reason_codes"], rb["reason_codes"])
         for name in ra:
+            if name in WORDS:
+                continue
             va, vb = ra[name], rb[name]
             if isinstance(va, (bool, np.bool_)) or isinstance(vb, (bool, np.bool_)):
                 assert bool(va) == bool(vb), (where, name, va, vb)

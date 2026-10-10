@@ -29,6 +29,7 @@ import math
 import numpy as np
 import pytest
 
+from maddening.core.coupling import reason_codes
 from maddening.core.simulation.profiler import profile_graph
 from maddening.serialization import json_codec
 
@@ -100,7 +101,10 @@ def test_the_texts_of_a_graph_without_a_geometry_edge_do_not_mention_one(grouped
     for text in (grouped_twin.format_graph(), grouped_twin.to_mermaid(), grouped_twin.to_dot(),
                  str(grouped_twin.coupling_report())):
         assert "geometry" not in text, text
-    assert "not_usable_reason" not in grouped_twin.coupling_diagnostics()[G.GROUP]
+    twin = grouped_twin.coupling_diagnostics()[G.GROUP]
+    assert "geometry" not in twin.get("not_usable_reason", "")
+    assert not any(code.startswith("geometry_")
+                   for codes in twin["reason_codes"].values() for code in codes)
 
 
 def test_an_uncompiled_graph_s_text_names_the_geometry_too():
@@ -213,11 +217,18 @@ def test_the_profiler_reads_the_pass_count_of_a_group_with_a_geometry_edge():
     gm = G.graph(group=True, diagnostics=False)
     report = profile_graph(gm, n_steps=2, n_warmup=1, counts=False)
     assert report.coupling_iters[G.GROUP] == gm.coupling_diagnostics()[G.GROUP]["iterations"] > 0
-    assert "not_usable_reason" not in gm.coupling_diagnostics()[G.GROUP]
+    # Nothing is withheld from this group; its flags are False for two
+    # causes (no diagnostics; it solves positions), each named.
+    quick = gm.coupling_diagnostics()[G.GROUP]
+    assert "do not read a moving geometry" not in quick["not_usable_reason"]
+    assert quick["reason_codes"]["spectral_usable"] == [
+        reason_codes.DIAGNOSTICS_OFF, reason_codes.GEOMETRY_POSITIONS_SOLVED]
     slow = G.graph(group=True, diagnostics=False, substeps=2)
     report = profile_graph(slow, n_steps=2, n_warmup=1, counts=False)
     assert report.coupling_iters[G.GROUP] == slow.coupling_diagnostics()[G.GROUP]["iterations"] > 0
-    assert "not_usable_reason" in slow.coupling_diagnostics()[G.GROUP]
+    withheld = slow.coupling_diagnostics()[G.GROUP]
+    assert "do not read a moving geometry" in withheld["not_usable_reason"]
+    assert withheld["reason_codes"]["spectral_usable"] == [reason_codes.GEOMETRY_SUBCYCLED]
 
 
 def test_the_raw_meta_slots_are_still_the_step_s_own_while_the_report_withholds_them(withheld):

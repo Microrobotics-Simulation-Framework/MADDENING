@@ -62,6 +62,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import reason_codes
 from maddening.core.coupling.acceleration import residual_precision_floor
 from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
 from maddening.core.graph_manager import GraphManager
@@ -835,18 +836,27 @@ def test_the_floor_of_a_report_no_step_measured_is_not_reported_and_says_why():
     reason = d["not_usable_reason"]
     assert "under convergence_norm='interface'" in reason, reason
     assert "is not reported either" in reason and "only the step that solved" in reason, reason
+    # Both causes as codes: the norm's for the bounds, and why the floor is missing.
+    both = [reason_codes.FLOOR_NEEDS_THE_STEP, reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED]
+    assert d["reason_codes"] == {"spectral_usable": both, "gradient_bound_usable": both,
+                                 "precision_limited": [reason_codes.FLOOR_NEEDS_THE_STEP]}
 
 
 @pytest.mark.parametrize("norm", ["mixed", "l2"])
 def test_the_other_norms_reports_are_what_they_were(norm):
-    """Only a group withheld on account of the interface norm carries the
-    floor's key: the same pair under a norm whose diagnostics read the
-    geometry reports as every group does."""
+    """The same pair under a norm whose diagnostics read the geometry
+    reports as every group does: nothing is withheld on account of a
+    norm, and the floor under ``residual_precision_floor`` (which every
+    report has) is the one its ``precision_limited`` was taken with."""
     gm, advisories = build(Pair(), norm=norm)
     assert advisories == []
     gm.step()
     d = report(gm)
-    assert "residual_precision_floor" not in d and "not_usable_reason" not in d, d
+    assert "under convergence_norm" not in d.get("not_usable_reason", ""), d
+    assert reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED not in d["reason_codes"]["spectral_usable"]
+    floor = d["residual_precision_floor"]
+    assert floor > 0.0 and d["reason_codes"]["precision_limited"] == [], d
+    assert d["precision_limited"] is bool(d["residual"] <= floor), d
 
 
 # ---------------------------------------------------------------------------

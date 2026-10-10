@@ -3524,8 +3524,13 @@ claims:
     - src/maddening/core/coupling/_bounds.py::_interface_spectral_rate_at
     - src/maddening/core/coupling/_group_layout.py::_reading_is_the_fields
   conditions: >-
-    F linear; solver="ift", diagnostics=True; at most eight independent
-    interface scalars (spectral_usable); the group's own norm at the
+    F linear; solver="ift", diagnostics=True; one pass depending on the
+    previous one through at most seven independent scalars, eight where
+    they are the whole state -- a rank, not a count of points: what the
+    loop closes through under Gauss-Seidel, both directions under Jacobi
+    (spectral_usable says so, and where it does not the report's reason
+    code tells a pass that is too wide from an estimate whose check of
+    itself failed: CPL-196); the group's own norm at the
     returned state -- each field divided by its own max|field| at the
     returned state, the residual put in those weights (MADD-ANO-146), and
     under convergence_norm="interface" the fields are what that norm reads,
@@ -6837,4 +6842,156 @@ claims:
       - 'tests/core/test_a_node_that_draws_random_numbers.py::test_a_group_member_draws_one_sample_per_step_under_every_schedule_solver_and_norm[gauss-seidel-iqn-imvj-ift-l2]'
     adaptive: tests/core/test_a_node_that_draws_random_numbers.py::test_an_adaptive_step_of_a_group_is_two_solves_of_one_sample_each
     checkpoint_restart: tests/core/test_a_node_that_draws_random_numbers.py::test_a_checkpoint_between_coupled_steps_continues_a_members_stream
+    sharded: narrowed
+- id: CPL-195
+  area: report
+  claim: >-
+    coupling_diagnostics() says why a usable flag is False in a code as
+    well as in words (experimental).  Every entry has "reason_codes", a
+    dict with one list of codes (the string constants of
+    maddening.core.coupling.reason_codes) for each of spectral_usable,
+    gradient_bound_usable and precision_limited, and
+    "residual_precision_floor", the float floor precision_limited was taken
+    with.  A usable flag that is False has at least one code and the entry
+    a not_usable_reason; a flag that is True has none, and with both True
+    there is no reason.  Every cause that holds is listed, in a fixed
+    order; gradient_bound_usable's list holds spectral_usable's codes and
+    then its own.  precision_limited has a code exactly where its floor was
+    not measured (residual_precision_floor is then NaN and the flag reads
+    False without saying anything of rounding).  The codes are host
+    bookkeeping on what the step stored and what compile() recorded: no
+    flag and no number of the entry is read from them.
+  sources:
+    - src/maddening/core/coupling/reason_codes.py::ALL
+    - src/maddening/core/graph_manager.py::GraphManager.coupling_diagnostics
+    - src/maddening/core/coupling/_group_layout.py::_flag_causes
+    - src/maddening/core/coupling/_group_layout.py::_geometry_flag_causes
+    - src/maddening/core/coupling/_group_layout.py::_causes_sentence
+    - docs/developer_guide/coupling_algorithm_guide.md#the-reason-codes-of-a-report
+  conditions: >-
+    Every entry coupling_diagnostics() returns: solver="ift" and "fori",
+    with and without diagnostics, a budget of one pass, both schedules,
+    every acceleration, the three norms; float32, float64 under x64,
+    float32 members under x64, 16-bit floats; a jitted step; each member of
+    a vmap of the step (the codes come from that member's slots); a
+    multi-rate graph; a sub-cycled group; predictors and warm starts;
+    run_adaptive; a checkpoint, loaded (the codes are derived from the
+    slots it holds; one saved after a state write lists
+    written_before_save beside the group's own causes); a sharded member.
+    Groups with a geometry-dependent mapping and with a static mapping of a
+    long row list their rules' codes (MAP-036, MADD-ANO-257): an entry
+    whose numbers a geometry rule withholds lists that rule's code alone,
+    and where two of the three geometry rules hold, the first of kind,
+    norm and sub-cycling, as its sentence does.  The lists are plain
+    strings: equal after a JSON round trip (the standard codec and
+    maddening.serialization.json_codec).  A group that has not stepped has
+    no entry, and so no codes.  coupling_report()'s table does not print
+    the codes and quotes only the reasons it quoted before them.
+  oracle: >-
+    The flags' own definitions, taken apart: spectral_usable is
+    isfinite(bound) and settled and (declared or not precision_limited),
+    and each branch of that expression that fails has its code; the same
+    state reported with the two cause functions made to return nothing
+    (every number and flag equal to the bit); one constructed case per
+    code.
+  tests:
+    - tests/core/test_coupling_report_reason_codes.py::test_a_usable_report_has_no_code_no_reason_and_a_measured_floor
+    - tests/core/test_coupling_report_reason_codes.py::test_the_plain_float32_pair_at_the_default_norm_and_tolerance_says_why
+    - tests/core/test_coupling_report_reason_codes.py::test_a_step_that_computes_no_estimate_says_which_setting_it_was
+    - tests/core/test_coupling_report_reason_codes.py::test_each_cause_the_slots_can_show_has_its_code
+    - tests/core/test_coupling_report_reason_codes.py::test_several_causes_at_once_are_all_listed_in_the_table_s_order
+    - tests/core/test_coupling_report_reason_codes.py::test_a_long_mapped_row_is_named_beside_whatever_else_holds_the_flags_down
+    - tests/core/test_coupling_report_reason_codes.py::test_the_geometry_rules_give_their_codes_where_they_decide
+    - tests/core/test_coupling_report_reason_codes.py::test_the_codes_and_the_floor_go_through_json_as_they_are
+    - tests/core/test_coupling_report_reason_codes.py::test_a_checkpoint_brings_the_codes_back_and_one_saved_after_a_write_says_so
+    - tests/core/test_coupling_report_reason_codes.py::test_the_codes_read_the_report_and_move_nothing_in_it
+    - tests/core/test_coupling_report_reason_codes.py::test_the_table_of_coupling_report_quotes_only_the_reasons_it_always_did
+    - tests/core/test_coupling_report_reason_codes.py::test_the_codes_are_lower_case_constants_each_in_one_kind_and_in_the_guide_s_table
+    - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_checkpoint_saved_over_rest_after_a_put_reloads_the_state_and_withholds_the_bound
+    - tests/property/test_coupling_geometry_interface_norm.py::test_a_group_withheld_on_account_of_its_norm_behind_a_long_mapped_row_names_both_causes
+    - tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_guard_names_its_cause_beside_a_flag_another_cause_holds_down
+  status: verified
+  domains:
+    f32: tests/core/test_coupling_report_reason_codes.py::test_each_cause_the_slots_can_show_has_its_code
+    f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-195]'
+    mixed_dtype: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_member_under_x64[CPL-195]'
+    16bit: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-195]'
+    jit: tests/core/test_coupling_report_reason_codes.py::test_the_plain_float32_pair_at_the_default_norm_and_tolerance_says_why
+    grad: n/a
+    vmap: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step[CPL-195]'
+    multi_rate: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_multirate_graph[CPL-195]'
+    sub_cycled: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_subcycled_group[CPL-195]'
+    predictors_warm_starts: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[CPL-195]'
+    adaptive: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-195]'
+    checkpoint_restart: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_a_checkpoint_restart[CPL-195]'
+    sharded: 'tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-195]'
+- id: CPL-196
+  area: report
+  claim: >-
+    What the spectral estimate's eight Krylov steps resolve is a rank, and
+    the report says which side of it a group is on.  A pass that depends on
+    the previous one through at most seven independent scalars (eight where
+    they are the whole state) is resolved: under Gauss-Seidel that is what
+    the loop closes through, so a pair whose loop closes through 3, 6 or 7
+    scalars has spectral_usable True and the pass's radius in
+    rho_spectral, in either sweep order, with a second member of up to 3000
+    entries; and with members that declare a parameter
+    gradient_bound_usable follows it.  A member of 8 or 13 scalars beside a
+    larger one is not resolved, nor is a pair under Jacobi whose two
+    directions add up past the limit.  Where the estimate did not settle,
+    reason_codes lists interface_too_wide exactly where compile()'s
+    structural count of the pass is past what the steps span (expected:
+    nothing is wrong), and spectral_self_check_failed where the steps span
+    the pass (a worry); never interface_too_wide for a pass counted within
+    the steps.
+  sources:
+    - src/maddening/core/coupling/_group_layout.py::_pass_width
+    - src/maddening/core/coupling/_group_layout.py::_unsettled_cause
+    - src/maddening/core/coupling/reason_codes.py::INTERFACE_TOO_WIDE
+    - src/maddening/core/coupling/reason_codes.py::SPECTRAL_SELF_CHECK_FAILED
+    - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - docs/user_guide/inspection.md
+  conditions: >-
+    solver="ift", diagnostics=True; linear relays at a tolerance above the
+    float floor (the mixed norm, rtol=1e-4), each declaring one evaluation;
+    Gauss-Seidel and Jacobi; no acceleration.  The count is structural and
+    an upper bound on the rank: the entries of the fields read from the
+    previous pass (every internal edge under Jacobi and in a group that
+    sub-steps a member; under Gauss-Seidel the edges whose source is swept
+    at or after their target), or of the members that read them, or of the
+    whole state, whichever is smallest.  A member that uses only a
+    combination of what it reads, and a mapping that delivers fewer
+    entries than its source holds, make the pass narrower than counted:
+    such a group reads interface_too_wide where rounding may have had its
+    part, which the report cannot tell (the step stores one number for an
+    estimate that did not settle).  A group with a boundary-flux edge
+    between members is counted at its whole state.  Not claimed for
+    float64, mixed dtypes, 16-bit floats, vmap, multi-rate or sub-cycled
+    graphs, predictors, run_adaptive, checkpoints or sharded graphs.
+  oracle: >-
+    The loop's matrix: the spectral radius of the product of the two
+    relays' matrices in float64, and its rank (the smaller member's
+    entries); the structural count against the entries each pair is built
+    with.
+  tests:
+    - tests/core/test_coupling_report_reason_codes.py::test_an_estimate_that_did_not_settle_is_too_wide_only_where_the_pass_is
+    - tests/core/test_coupling_report_reason_codes.py::test_the_width_of_a_pass_is_what_it_reads_from_the_previous_one
+    - tests/core/test_coupling_report_reason_codes.py::test_a_loop_closing_through_a_few_scalars_is_resolved_whatever_is_on_the_other_side
+    - tests/core/test_coupling_report_reason_codes.py::test_a_wider_loop_is_not_and_its_report_says_that_is_expected
+    - tests/core/test_coupling_report_reason_codes.py::test_members_that_declare_no_parameter_keep_the_spectral_flag_and_say_why_the_gradient_s_is_down
+    - tests/core/test_coupling_report_reason_codes.py::test_a_whole_state_of_eight_entries_is_within_the_steps_under_jacobi
+  status: verified
+  domains:
+    f32: tests/core/test_coupling_report_reason_codes.py::test_an_estimate_that_did_not_settle_is_too_wide_only_where_the_pass_is
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
     sharded: narrowed

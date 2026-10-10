@@ -799,6 +799,7 @@ def test_what_a_narrowed_report_withholds_at_a_loose_tolerance_was_usable_and_fi
     gg.assert_not_diagnosed(loose.coupling_diagnostics()["a+b"], [KEY], "kind")
     unnarrowed = _with_the_rule_off(loose)
     assert "not_usable_reason" not in unnarrowed
+    assert not any(unnarrowed["reason_codes"].values()), unnarrowed["reason_codes"]
     for flag in ("ratio_usable", "spectral_usable", "gradient_bound_usable"):
         assert unnarrowed[flag] is True, (flag, unnarrowed)
     for bound in ("amplification", "error_estimate", "gradient_error_estimate",
@@ -823,10 +824,11 @@ def test_what_a_narrowed_report_withholds_at_a_tight_tolerance_was_a_residual_at
 @pytest.mark.parametrize("norm", sorted({norm for _anchor, norm in NARROWED_RINGS}))
 def test_the_same_group_with_a_static_mapping_reports_its_bounds_and_no_reason(norm):
     """The control: the ring of the tests above with a static mapping where
-    the geometry edge was reports its bounds as it always did, and has no
-    ``not_usable_reason``."""
+    the geometry edge was reports its bounds as it always did, and no
+    reason of a geometry rule (at this tolerance it is at its float
+    floor, and says that)."""
     plain = _stepped_ring(norm, TIGHT, None).coupling_diagnostics()["a+b"]
-    assert "not_usable_reason" not in plain
+    gg.assert_no_geometry_reason(plain)
     assert bool(plain["ratio_usable"]) or bool(plain["spectral_usable"]), plain
 
 
@@ -854,7 +856,7 @@ def test_a_geometry_edge_into_a_group_from_outside_also_leaves_it_undiagnosed():
         return gm.coupling_diagnostics()["b+c"]
 
     gg.assert_not_diagnosed(build(True), ["a.x->b.u"], "kind")
-    assert "not_usable_reason" not in build(False)
+    gg.assert_no_geometry_reason(build(False))
 
 
 # ---------------------------------------------------------------------------

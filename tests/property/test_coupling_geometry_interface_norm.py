@@ -119,6 +119,7 @@ from maddening.core.coupling.acceleration import (
     coupling_residual_interface,
     residual_precision_floor,
 )
+from maddening.core.coupling import reason_codes
 from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
 from maddening.core.graph_manager import GraphManager
 from tests.property import geometry_interface_graphs as gi
@@ -687,17 +688,22 @@ def test_a_narrowing_transform_on_a_geometry_edge_raises_the_values_and_not_the_
     assert distance <= ref.K(gi.measured_whole(shape)), (distance, report)
 
 
-def test_a_group_withheld_on_account_of_its_norm_behind_a_long_mapped_row_has_one_reason():
-    """Where two reasons could meet, one is given, once.  A static mapping
+def test_a_group_withheld_on_account_of_its_norm_behind_a_long_mapped_row_names_both_causes():
+    """Where two causes meet, both are given, each once.  A static mapping
     whose row adds up more than ``MAPPED_ROW_FLOOR_LIMIT`` entries has
     the flags that rest on the float floor withdrawn where the residual
     is not clear of it, with that rule's reason (MADD-ANO-257).  A group
     under this norm that resolves a ``multilinear_grid`` mapping reports
     no bound and no flag at all, with its own reason and the floor.  In
     a group that is both -- a dense matrix of twelve entries a row one
-    way, a gather the other -- the report is the second kind's: the row
-    rule withdraws flags and finds none set, so it adds nothing, and the
-    reason is the norm's, with the floor's sentence, each once.
+    way, a gather the other -- the report is the second kind's, and it
+    **shows a float floor that does not count the row's rounding**: the
+    row rule finds no flag to withdraw, and its caveat is about the
+    floor the entry reports, so the reason is the norm's, with the
+    floor's sentence, and then the row's, and the codes list both.  No
+    flag and no number of the entry is the row rule's doing.  (Until the
+    reports carried their causes as codes the row rule spoke only where
+    it withdrew a flag, and this entry gave the norm's reason alone.)
 
     Premise: on this very report the row rule's own condition holds (it
     would have spoken beside a standing flag).  Without ``diagnostics``:
@@ -731,11 +737,25 @@ def test_a_group_withheld_on_account_of_its_norm_behind_a_long_mapped_row_has_on
     said = _group_layout._mapped_row_reason(rows, report["residual"], floor)   # noqa: SLF001
     assert said is not None and "MADD-ANO-257" in said, (report["residual"], floor)
     reason = report["not_usable_reason"]
-    assert "MADD-ANO-257" not in reason and " Also: " not in reason, reason
+    norms, also, rows_said = reason.partition(" Also: ")
+    assert also and rows_said == said, reason
     for once in ("the group resolves geometry-dependent mapping(s)",
                  "under convergence_norm='interface'",
                  "residual_precision_floor is the float resolution"):
-        assert reason.count(once) == 1, (once, reason)
+        assert norms.count(once) == 1 and once not in rows_said, (once, reason)
+    assert reason.count("MADD-ANO-257") == said.count("MADD-ANO-257")
+    both = [reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED, reason_codes.LONG_MAPPED_ROW]
+    assert report["reason_codes"] == {"spectral_usable": both, "gradient_bound_usable": both,
+                                      "precision_limited": []}, report["reason_codes"]
+    # No flag and no number is the row rule's: with its limit out of reach
+    # the entry differs in the reason and the codes alone.
+    with precision(False), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_group_layout, "MAPPED_ROW_FLOOR_LIMIT", 10 ** 9)
+        bare = dict(gm.coupling_diagnostics()[KEY])
+    assert bare["not_usable_reason"] == norms and bare["reason_codes"]["spectral_usable"] == [
+        reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED]
+    for name in set(report) - {"not_usable_reason", "reason_codes"}:
+        assert np.asarray(report[name]).tobytes() == np.asarray(bare[name]).tobytes(), name
 
 
 def _check_report_is_withheld(shape, tmp_path):

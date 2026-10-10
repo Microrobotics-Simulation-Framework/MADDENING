@@ -436,6 +436,29 @@ once on a two-spring pair in float32 (an RTX A2000 laptop GPU, jax 0.11.0,
 6 to 8 ms with them on, about 4 ms of it the eigenvalue solve; on CPU the same diagnostics-on step
 takes 0.25 to 0.5 ms.
 
+**Why a flag is `False`: `reason_codes`** (experimental).  Every entry of `coupling_diagnostics()`
+has a `reason_codes` dict with a list of codes for `spectral_usable`, for `gradient_bound_usable`
+and for `precision_limited` (the string constants of `maddening.core.coupling.reason_codes`), and
+a usable flag that is `False` always has a `not_usable_reason` saying the same in words.  A test
+can branch on the codes: `interface_too_wide` is expected and nothing is wrong;
+`spectral_self_check_failed` and `not_contracting` deserve a look; `at_float_floor` says to switch
+to float64 or loosen the tolerance; `diagnostics_off` says the estimates were never asked for.
+[The table of codes](../developer_guide/coupling_algorithm_guide.md#the-reason-codes-of-a-report)
+says what each means and what to do.  `precision_limited` has a code only where the float floor
+was not measured (the flag then says nothing of rounding); every entry also reports that floor as
+`residual_precision_floor`, in tolerances, NaN where it was not measured.  This table does not
+print the codes; it quotes the reasons it always did.
+
+**How wide a group the spectral estimate resolves.**  Not a matter of how many points a member
+holds.  The estimate takes eight Krylov steps, which resolve a pass that depends on the previous
+one through at most seven independent scalars (eight where they are the whole state).  Under
+Gauss-Seidel that is what the loop closes through, so a body exchanging one wrench (six scalars)
+with a field of any size is within it, in either sweep order; a rigid body's full state (13
+scalars) is not, nor is a field-to-field pair; under Jacobi both directions count.  Members are
+swept in the order they were added, which is the lever.  A wider group reads `spectral_usable=False`
+with the code `interface_too_wide`: its `rho_spectral` is an estimate, and nothing is wrong.  See
+[the algorithm guide](../developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured).
+
 **A report describes the step that ran.**  The bound's float floor is measured on the state the
 step returned.  Writing the state afterwards (`set_node_state`, `PUT /graph/state/{node}`) does not
 change the entry: it describes that step until the group steps again.  A checkpoint is a copy of the

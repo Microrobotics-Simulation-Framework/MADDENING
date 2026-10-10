@@ -199,11 +199,13 @@ never run.
 | `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
 | `gradient_error_estimate` | how far the IFT adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
 | `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
-| `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true and no more than eight scalars cross the group's edges.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
+| `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true, which needs one pass to depend on the previous one through at most seven independent scalars (eight where they are the whole state; see below).  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
 | `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
-| `spectral_usable` | the bound is finite and the Arnoldi space had settled: the Krylov space closed within the eight steps, any direction the breakdown test discarded as rounding is `≤ 0.05 (1 − rho_spectral)`, and no rounding of the size one more Jacobian-vector product measures can move the radius by that much.  False where nothing was computed, where rounding can move the radius by more than that (a non-normal Jacobian), for a group with more than seven independent interface scalars (eight where they are the whole state), and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
+| `spectral_usable` | the bound is finite and the Arnoldi space had settled: the Krylov space closed within the eight steps, any direction the breakdown test discarded as rounding is `≤ 0.05 (1 − rho_spectral)`, and no rounding of the size one more Jacobian-vector product measures can move the radius by that much.  False where nothing was computed, where rounding can move the radius by more than that (a non-normal Jacobian), where one pass depends on the previous one through more than seven independent scalars (eight where they are the whole state: what the loop closes through under Gauss-Seidel, both directions under Jacobi), and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
 | `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
 | `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
+| `reason_codes` | experimental: why each of `spectral_usable`, `gradient_bound_usable` and `precision_limited` reads `False`, as lists of the constants of `maddening.core.coupling.reason_codes`.  A usable flag that is `False` has at least one code and the entry a `not_usable_reason` in words; a flag that is `True` has none.  See [the reason codes of a report](#the-reason-codes-of-a-report) |
+| `residual_precision_floor` | experimental: the residual's float floor at the state the step returned, in the residual's units (tolerances): the number `precision_limited` compares the residual with and `spectral_error_bound` adds.  NaN where it was not measured, and `reason_codes["precision_limited"]` then says why |
 | `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group; clears `spectral_usable` only where a node's evaluation count is undeclared |
 
 ### A stalled float32 iterate reads `converged=True`
@@ -466,13 +468,48 @@ map the IFT adjoint solves with — on an Arnoldi iteration at the
 returned state, in the coordinates of the group's own norm.  Three
 things come out of it: the Ritz spectral radius `rho_spectral`, the
 Arnoldi residual `h_{k+1,k}`, and the resolvent norm `‖(I − H)⁻¹‖₂` of
-the compressed Jacobian.  A coupling Jacobian's rank is at most the
-number of boundary scalars crossing the group's edges, so for a group
-with up to seven of them (eight where they are the whole state: the
-space is grown from a start outside the range and has to hold it too)
-the Krylov space closes within the eight steps, the non-zero spectrum is
-that of a matrix within rounding of the Jacobian and `h_{k+1,k}` is
-zero.  A space still growing at the cap is never reported settled.  A new Krylov direction is taken for rounding only
+the compressed Jacobian.
+
+**What the eight steps resolve is a rank, not a size.**  What counts is
+the rank of one pass's dependence on the previous one: how many
+independent scalars of the previous iterate the pass reads.  With at most
+seven (eight where they are the whole state: the space is grown from a
+start outside the range and has to hold it too) the Krylov space closes
+within the eight steps, the non-zero spectrum is that of a matrix within
+rounding of the Jacobian and `h_{k+1,k}` is zero.  A member's update
+starts from its pre-step state, so a pass reads the previous iterate only
+through the internal edges it takes from the previous pass, and how many
+entries the members hold does not enter:
+
+* **Under Gauss-Seidel it is what the loop closes through.**  A member
+  reads the members swept before it from this pass and the others from
+  the previous one, so only the edges that close the loop carry the
+  previous iterate.  A group whose loop closes through one wrench (six
+  scalars) is within the limit whatever sits on the other side: measured
+  on linear pairs, a member of 3 or 6 scalars beside one of 3 to 3000
+  entries has `spectral_usable=True` and `rho_spectral` exact in both
+  sweep orders, and so does one of 7 scalars beside 300 entries; with
+  members that declare a parameter `gradient_bound_usable` follows it.
+* **A rigid body's full state (13 scalars) is not within it**, nor is a
+  member of 8 scalars beside a larger one, nor a field-to-field pair.
+* **Under Jacobi both directions count**: every member reads the previous
+  iterate, so the rank is the sum over the edges (a pair exchanging 6
+  scalars and 300 entries has rank 12; one exchanging 4 and 4 is the
+  whole state and closes).
+* **The order is the lever.**  Members are swept
+  [in the order they were added](#what-the-way-a-graph-is-built-can-change),
+  and which edges close the loop follows from it: in a group of three or
+  more, add first the member whose inputs are the narrow ones.
+
+`compile()` counts this structurally (the entries of the fields read from
+the previous pass, and of the members that read them, whichever is
+smaller: an upper bound on the rank), and the report uses the count to
+say which kind of unsettled estimate it holds:
+[`interface_too_wide`](#the-reason-codes-of-a-report), which is expected
+and nothing to fix, or `spectral_self_check_failed`, which is rounding
+and is worth a look.
+
+A space still growing at the cap is never reported settled.  A new Krylov direction is taken for rounding only
 below eight units of the products' own rounding (`eps` of the group's
 dtype times the Jacobian's norm), never a fixed fraction of the product,
 and the estimate then spends a ninth product on a check of itself: along
@@ -480,7 +517,7 @@ a combination of the basis, against what the eight before it say that
 product is.  How far the disagreement moves the radius is reported with
 the Arnoldi residual, so a radius that float rounding leaves undetermined
 -- a non-normal Jacobian turns one `eps` of its norm into far more -- reads
-`spectral_usable=False` instead of a number.  For a larger group
+`spectral_usable=False` instead of a number.  For a wider pass
 the radius is an estimate -- from below for a normal Jacobian, from
 either side for a non-normal one (1.17 on a Jacobi ring of nine relays
 whose every eigenvalue has modulus 0.95) -- `spectral_usable` is false,
@@ -882,6 +919,81 @@ settled spectrum, not those conditions.  It is not spelled
 `gradient_error_bound`: that spelling is the deprecated alias of
 `gradient_error_estimate` (below), and code written against 0.3.x
 would read a new meaning under it as the old number.
+
+### The reason codes of a report
+
+Experimental.  A `False` flag means different things, and a test cannot
+branch on a sentence, so every entry of `coupling_diagnostics()` carries
+`reason_codes`: one list of codes for each of `spectral_usable`,
+`gradient_bound_usable` and `precision_limited`.  The codes are the
+string constants of `maddening.core.coupling.reason_codes`:
+
+<!-- snippet: no-run, reason: fragment: reads the report of a graph built and stepped elsewhere -->
+```python
+from maddening.core.coupling import reason_codes
+
+entry = gm.coupling_diagnostics()["body+field"]
+why = entry["reason_codes"]["spectral_usable"]
+if not why:
+    pass                                    # the flag is True
+elif set(why) <= reason_codes.EXPECTED | reason_codes.CONFIGURATION:
+    pass                                    # nothing is wrong with the solve
+else:
+    raise AssertionError(entry["not_usable_reason"])
+```
+
+The rules: a usable flag that is `False` has at least one code, and the
+entry a `not_usable_reason` that says each in words; a flag that is
+`True` has none; every cause that holds is listed, in the order of the
+table; the gradient flag rests on the spectral one, so its list holds the
+spectral flag's codes and then its own.  `precision_limited` has a code
+exactly where the float floor was **not measured**: the flag then reads
+`False` and says nothing of rounding, and `residual_precision_floor` is
+NaN.  Where the floor was measured that list is empty, whatever the flag
+reads.  The codes are computed on the host from what the step stored and
+what `compile()` recorded; the compiled step is the same program.  An
+entry whose numbers a geometry rule withholds lists that rule's code
+alone (with why its floor was not measured, where it says so): nothing
+would be reported for it whatever else holds.  Where two of the three
+geometry rules hold, the entry names the first of kind, norm and
+sub-cycling, in words and in code alike.
+
+| code | what it means | what to do |
+|---|---|---|
+| `solver_not_ift` | the group's solver is `"fori"`, which has no linearisation of the pass | use `solver="ift"` (the default) with `diagnostics=True` |
+| `diagnostics_off` | the group was built with `diagnostics=False` (the default): the estimates are not computed | build the group with `diagnostics=True` for a diagnostic run |
+| `single_pass` | `max_iterations=1`: no fixed point is solved | allow a second pass |
+| `state_not_finite` | the state the step returned is not finite: the iteration diverged | look at the relaxation and the node updates |
+| `estimate_not_recorded` | the state holds no estimate for a group that asks for one: it was not written by this graph's step (set by hand, or loaded from a graph without diagnostics) | step the group |
+| `written_before_save` | loaded from a checkpoint saved after the group's state was written: the state the float floor is measured on is not in it | step the group; save before writing |
+| `floor_needs_the_step` | the float floor reads what an edge delivers at pre-step geometry, which only the step holds, and the state carries none | step the group |
+| `geometry_kind_not_diagnosed` | a geometry-dependent mapping of a kind other than `multilinear_grid` | expected in 0.4.0: no bound is reported for this group |
+| `geometry_norm_not_diagnosed` | a geometry-dependent mapping under `convergence_norm="interface"` | expected; run a diagnostic pass under `"mixed"` or `"l2"`.  The float floor is still reported |
+| `geometry_subcycled` | a geometry-dependent mapping in a sub-cycled group | expected in 0.4.0 |
+| `geometry_self_check_failed` | the step's product along the geometry disagrees with a finite difference of the pass | **a worry** where it persists: a member or mapping whose derivative is not that of its value, or a state at which the difference cannot be formed (the sentence lists them) |
+| `geometry_self_check_not_evaluated` | that check produced no number | look at the state: the pass or its product is not a number there |
+| `geometry_positions_solved` | the group solves the positions a geometry-dependent mapping reads | expected in 0.4.0 (MADD-ANO-252): the numbers are reported, uncertified |
+| `geometry_record_missing` | the step did not record that every position was fixed during its pass | step the group |
+| `bound_not_evaluated` | an estimate was recorded and `spectral_error_bound` is still not a number: the residual or its floor is not finite | look at the state |
+| `not_contracting` | `rho_spectral >= 1`, or the compressed `I − H` is singular: the linearised pass does not contract at the returned state | **a worry**: the plain iteration would not converge here; relaxation or acceleration may be carrying it |
+| `interface_too_wide` | the estimate did not settle, and one pass depends on the previous one through more scalars than the eight steps span | **expected, nothing is wrong**; no tolerance or dtype changes it.  Sweep order is the lever under Gauss-Seidel (see above) |
+| `spectral_self_check_failed` | the estimate did not settle although the eight steps span the pass: its check of itself did not pass (rounding moved the radius, or could have) | **a worry**: do not trust `rho_spectral` here; run in float64 |
+| `at_float_floor` | the residual is at its float floor and a member has not declared `update_evaluations()` | switch to float64 or loosen the tolerance; or declare the count on every member |
+| `long_mapped_row` | the residual does not stand clear of the floor a long row of a static mapping would give it (MADD-ANO-257) | a wider dtype at the same tolerance |
+| `gradient_bound_not_computed` | the gradient bound is NaN beside a computed spectrum: the Jacobian's range was not captured by eight directions, or the fixed point responds to no constant the bound probes | expected for a wide pass, and for members that declare no parameter |
+| `gradient_bound_not_certified` | the gradient bound is `inf`: its Newton–Kantorovich check did not pass | **a worry** for the gradient: iterate further (a tighter tolerance) before differentiating |
+
+**What the split between the two unsettled codes rests on.**  The step
+stores one number for an estimate that did not settle (the larger of what
+the Krylov space missed and of what the estimate's check of itself
+measured), so the report tells the two apart by `compile()`'s structural
+count and not by a measurement.  The count is an upper bound on the rank:
+a member that uses only a combination of what it reads, or a mapping that
+delivers fewer entries than its source holds, makes the pass narrower than
+counted, and such a group reads `interface_too_wide` where rounding may
+have had its part.  A group with a boundary-flux edge between members is
+counted at its whole state.  `spectral_self_check_failed` is never given
+to a pass counted wider than the steps span.
 
 ### `waveform_iterations`: what the sweeps are, and which one each field describes
 

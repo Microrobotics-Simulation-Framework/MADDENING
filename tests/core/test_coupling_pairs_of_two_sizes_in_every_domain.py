@@ -74,6 +74,7 @@ import numpy as np
 import pytest
 
 from maddening.core.coupling.acceleration import PRECISION_FLOOR_ULPS
+from tests.core.coupling_reason_rules import WORDS, folded_codes, same_causes, same_words
 from tests.core import coupling_domain_sizes as cs
 from tests.core import coupling_domains as cd
 from tests.property import coupled_graphs as cg
@@ -522,6 +523,12 @@ def _check_reference(cell, count=None) -> None:
 
 
 def _numbers_agree(a, b, rel: float) -> bool:
+    if isinstance(a, dict) and isinstance(b, dict):
+        # ``reason_codes``: the causes, as causes.
+        return folded_codes(a) == folded_codes(b)
+    if isinstance(a, str) and isinstance(b, str):
+        # A reason's words quote the report's own numbers.
+        return same_words(a, b, exact=not rel > 0.0)
     if isinstance(a, (bool, np.bool_, str, type(None))) or isinstance(b, (str, type(None))):
         return a == b
     a, b = float(a), float(b)
@@ -624,8 +631,13 @@ def _same_solve(cell, mapped, twin, what: str, twin_accepted=None, apart=()) -> 
                 f"{where}: {name}.x is {np.max(np.abs(xa - xb)):.3e} from {of}")
     ra, rb = mapped.report, twin.report
     assert sorted(ra) == sorted(rb), (where, sorted(ra), sorted(rb))
+    # The causes of a False flag agree as causes (the words quote each
+    # graph's own numbers and structure, and are not compared).
+    assert same_causes(ra, rb), (where, ra["reason_codes"], rb["reason_codes"])
     differ = {}
     for key in ra:
+        if key in WORDS:
+            continue
         same = _numbers_agree(ra[key], rb[key], 0.0 if exact else 2e-2)
         if not same and not exact and key in ("residual", "error_estimate",
                                               "gradient_error_estimate"):
@@ -861,11 +873,24 @@ def _check_one_rate(cell) -> None:
     step: the reading is taken once per pass, of the members' fields as
     the pass leaves them -- the fast member's after its two sub-steps --
     and nothing of the report, the state or the floor's slot moves.
+
+    One number of the report does follow the schedule, by design: the
+    float floor it shows (``residual_precision_floor``, experimental) is
+    the slot's, which is per evaluation, times the evaluations a pass
+    rounds like, and a member that takes two sub-steps a pass rounds like
+    two.  So a sub-cycled pair's floor is above the one-rate pair's, and
+    a reason that quotes it differs in that number alone.
     """
     run, plain = _run(cell), _run(dataclasses.replace(cell, label="f32"))
+    floor, reason = "report[residual_precision_floor]", "report[not_usable_reason]"
     for k, (s, t) in enumerate(zip(run.solves, plain.solves)):
-        assert not _group_differs(s, t), (
-            f"{cell.id}: solve {k} differs from the one-rate pair's: {_group_differs(s, t)}")
+        differs = _group_differs(s, t)
+        if cell.domain.subcycled and floor in differs:
+            assert s.report[floor[7:-1]] > t.report[floor[7:-1]] > 0.0, (cell.id, k)
+            if reason in differs:
+                assert same_words(s.report[reason[7:-1]], t.report[reason[7:-1]], exact=False)
+            differs = [w for w in differs if w not in (floor, reason)]
+        assert not differs, f"{cell.id}: solve {k} differs from the one-rate pair's: {differs}"
 
 
 def _check_firing(cell) -> None:

@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.api.server import SimulationServer
+from maddening.core.coupling import reason_codes
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from tests._loopback_client import LoopbackTestClient as TestClient
@@ -102,6 +103,10 @@ def test_a_checkpoint_saved_over_rest_after_a_put_reloads_the_state_and_withhold
     loaded = _report(gm)
     assert loaded["spectral_usable"] is False and loaded["precision_limited"] is False
     assert "written" in loaded["not_usable_reason"]
+    # The same in codes (experimental), beside each flag the marker withholds.
+    assert all(reason_codes.WRITTEN_BEFORE_SAVE in listed
+               for listed in loaded["reason_codes"].values()), loaded["reason_codes"]
+    assert reason_codes.WRITTEN_BEFORE_SAVE not in first["reason_codes"]["spectral_usable"]
     assert loaded["iterations"] == first["iterations"]
     reply = client.post("/checkpoint/load", params={"path": "stepped.npz"})
     assert reply.status_code == 200, reply.text

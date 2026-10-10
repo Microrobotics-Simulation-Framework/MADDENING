@@ -72,6 +72,7 @@ import numpy as np
 from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
+from tests.core.coupling_reason_rules import assert_reason_rules
 
 KEY = "a+b"
 #: The library's keys of the pair's two edges, ``b -> a`` and ``a -> b``:
@@ -407,14 +408,21 @@ def _host(tree):
 
 
 def report_of(gm: GraphManager, state=None) -> dict:
-    """``coupling_diagnostics()[KEY]`` for *state* (the graph's own by default)."""
+    """``coupling_diagnostics()[KEY]`` for *state* (the graph's own by default).
+
+    Every report the battery reads keeps the rules of its reason codes
+    (``assert_reason_rules``): in each domain, and for each member of a
+    vmapped step, whose codes come from that member's slots."""
     if state is None:
-        return dict(gm.coupling_diagnostics()[KEY])
-    saved, gm._state = gm._state, state
-    try:
-        return dict(gm.coupling_diagnostics()[KEY])
-    finally:
-        gm._state = saved
+        report = dict(gm.coupling_diagnostics()[KEY])
+    else:
+        saved, gm._state = gm._state, state
+        try:
+            report = dict(gm.coupling_diagnostics()[KEY])
+        finally:
+            gm._state = saved
+    assert_reason_rules(report, KEY)
+    return report
 
 
 def _solve(gm, params, state=None, pre=None) -> Solve:

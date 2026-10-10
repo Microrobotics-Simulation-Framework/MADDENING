@@ -129,6 +129,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tests.core.coupling_reason_rules import WORDS, same_causes
 from tests.property import coupled_graphs as cg
 from tests.property import coupled_topologies as ct
 from tests.property import interface_side_graphs as sg
@@ -501,7 +502,12 @@ def _same_reports(shape: sg.Shape) -> tuple:
     assert sorted(a) == sorted(b)
     rtol = TWIN_RTOL[shape.dtype]
     differ = {}
+    # The causes of a False flag agree as causes (the words quote each
+    # graph's own numbers and structure, and are not compared).
+    assert same_causes(a, b), (_id(shape), a["reason_codes"], b["reason_codes"])
     for key in a:
+        if key in WORDS:
+            continue
         va, vb = a[key], b[key]
         if isinstance(va, (bool, np.bool_, str, type(None))) or isinstance(vb, (str, type(None))):
             same = va == vb

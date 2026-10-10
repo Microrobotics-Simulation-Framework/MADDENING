@@ -117,6 +117,7 @@ from maddening.core.coupling.sparse_mapping import (
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.transforms import scale
+from tests.core.coupling_reason_rules import assert_reason_rules
 from tests.property import coupled_graphs as cg
 
 # The scaling transforms are registered on first use; the generator names them.
@@ -984,6 +985,10 @@ def run(built: Built, values: dict, steps: int, *, rename: Optional[dict] = None
             key = built.topo.group_key(gi)
             if key in diag:
                 reports[gi] = dict(diag[key])
+                # Every report the linear search judges keeps the rules of
+                # its reason codes (a False flag has a code and a sentence,
+                # a True one none).
+                assert_reason_rules(reports[gi], key)
             metas[gi] = cg.group_meta(gm, key)
         out.append(Step(pre, state, reports, metas))
         pre = state

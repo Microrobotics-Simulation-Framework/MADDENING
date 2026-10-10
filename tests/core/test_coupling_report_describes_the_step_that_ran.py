@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import reason_codes
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.simulation.profiler import _one_iteration_variant, compile_counts
@@ -249,7 +250,14 @@ def test_a_loaded_checkpoint_is_reported_as_the_step_it_saved(stepped, graph, tm
 
 #: What the report of a group loaded from such a checkpoint withholds.
 WITHHELD = {"spectral_usable": False, "gradient_bound_usable": False,
-            "precision_limited": False, "spectral_error_bound": "nan"}
+            "precision_limited": False, "spectral_error_bound": "nan",
+            "residual_precision_floor": "nan"}
+#: The code of that rule (experimental): beside each flag it withholds.
+SAVED_AFTER = reason_codes.WRITTEN_BEFORE_SAVE
+
+
+def _says_it_was_saved_after_a_write(report) -> bool:
+    return all(SAVED_AFTER in listed for listed in report["reason_codes"].values())
 
 
 def _archive_members(path):
@@ -288,8 +296,9 @@ def test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_
     np.testing.assert_array_equal(np.asarray(graph.get_node_state("a")["x"]), 0.0)
     loaded = _report(graph)
     assert "written" in loaded["not_usable_reason"]
+    assert _says_it_was_saved_after_a_write(loaded), loaded["reason_codes"]
     for key, value in loaded.items():
-        if key == "not_usable_reason":
+        if key in ("not_usable_reason", "reason_codes"):
             continue
         assert value == WITHHELD.get(key, first[key]), key
     # It stays so under a further write, and a save of it says so again.
@@ -306,7 +315,8 @@ def test_a_checkpoint_is_a_copy_of_the_state_and_says_when_it_was_written_after_
     for name in ("a", "b"):
         assert np.asarray(graph.get_node_state(name)["x"]).tobytes() == want[0][name].tobytes()
     assert _report(graph) == want[1]
-    assert "not_usable_reason" not in want[1]
+    assert "written" not in want[1].get("not_usable_reason", "")
+    assert not any(SAVED_AFTER in listed for listed in want[1]["reason_codes"].values())
 
 
 def test_an_archive_without_the_marker_loads_as_it_always_did(graph, tmp_path):
@@ -325,7 +335,9 @@ def test_an_archive_without_the_marker_loads_as_it_always_did(graph, tmp_path):
     graph.reset_state()
     graph.load_state(tmp_path / "stripped.npz")
     old = _report(graph)
-    assert "not_usable_reason" not in old and old["iterations"] == first["iterations"]
+    assert "written" not in old.get("not_usable_reason", "")
+    assert not any(SAVED_AFTER in listed for listed in old["reason_codes"].values())
+    assert old["iterations"] == first["iterations"]
     # A marker for a group this graph does not have is ignored.
     foreign = dict(stripped)
     foreign["_reports/x+y/written_after_step"] = np.ones((), np.uint8)
@@ -512,11 +524,17 @@ def test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_a
     gm.reset_state()
     gm.load_state(path)
     loaded = report(gm)
-    assert "written" in loaded["not_usable_reason"]
-    assert "geometry" not in loaded["not_usable_reason"]
-    assert "solves position" not in loaded["not_usable_reason"]
+    # The marker's reason first, as for any group; then the cause that is
+    # this group's own and holds whatever is saved (it solves positions),
+    # each with its code.
+    assert loaded["not_usable_reason"].startswith("this report was loaded from a checkpoint")
+    assert "do not read a moving geometry" not in loaded["not_usable_reason"]
+    assert " Also: the group solves position(s)" in loaded["not_usable_reason"]
+    assert loaded["reason_codes"]["spectral_usable"] == [
+        SAVED_AFTER, reason_codes.GEOMETRY_POSITIONS_SOLVED]
+    assert loaded["reason_codes"]["precision_limited"] == [SAVED_AFTER]
     for key, value in loaded.items():
-        if key != "not_usable_reason":
+        if key not in ("not_usable_reason", "reason_codes"):
             assert value == WITHHELD.get(key, first[key]), key
     gm.step()
     assert report(gm) == want and "written" not in want.get("not_usable_reason", "")

@@ -1495,6 +1495,9 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
         "rho_spectral", "spectral_error_bound", "spectral_usable",
         "gradient_relative_error_bound", "gradient_bound_usable",
         "precision_limited",
+        # Experimental, every group: why a flag is False, as codes, and
+        # the float floor the residual is compared with.
+        "reason_codes", "residual_precision_floor",
     }
     # ``dict()`` copies through the real items, not the aliases.
     assert set(dict(d)) == set(d)

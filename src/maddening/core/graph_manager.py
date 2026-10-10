@@ -4800,8 +4800,12 @@ class GraphManager:
               ``False`` where nothing was computed (see
               ``"rho_spectral"``), where the bound is ``inf``, for
               a group whose Krylov space is still growing at the cap
-              -- more than seven independent interface scalars, or
-              more than eight where they are the whole state; there
+              -- one pass depends on the previous one through more
+              than seven independent scalars, or more than eight where
+              they are the whole state (what the loop closes through
+              under Gauss-Seidel, both directions under Jacobi: a
+              rank, not a count of points; the code
+              ``"interface_too_wide"`` of ``"reason_codes"``); there
               ``"rho_spectral"`` is an estimate (from below only for a
               normal ``dF/dx``) and the bound carries only the margin --
               where the residual never entered the Krylov space
@@ -5067,6 +5071,39 @@ class GraphManager:
               ``"gradient_bound_usable"`` and ``"precision_limited"``
               ``False`` and a ``"not_usable_reason"``, until the group
               steps.  The entry's other numbers are the slots' own.
+            - ``"residual_precision_floor"`` : float — experimental: the
+              float floor that ``"precision_limited"`` compares the
+              residual with and ``"spectral_error_bound"`` adds, in the
+              residual's units (tolerances), at the state the step
+              returned
+              (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`,
+              the number the step's own analysis takes).  Counted at the
+              coarsest floating dtype the pass goes through.  NaN where
+              it was not measured: ``"precision_limited"`` is then
+              ``False`` and says nothing of rounding, and
+              ``"reason_codes"["precision_limited"]`` says why.
+            - ``"reason_codes"`` : dict — experimental: why each of
+              ``"spectral_usable"``, ``"gradient_bound_usable"`` and
+              ``"precision_limited"`` reads ``False``, as a list of codes
+              per flag (the string constants of
+              :mod:`maddening.core.coupling.reason_codes`, whose
+              docstrings say what each means; the guide's table says
+              what to do).  A usable flag that is ``False`` has at least
+              one code and the entry a ``"not_usable_reason"`` : str
+              that says each in words; a flag that is ``True`` has
+              none.  Every cause that holds is listed, in a fixed order:
+              ``"interface_too_wide"`` (the pass depends on the previous
+              one through more scalars than the estimate's eight steps
+              span: expected, nothing is wrong) is told from
+              ``"spectral_self_check_failed"`` (a worry) and from
+              ``"at_float_floor"`` (a wider dtype or a looser tolerance)
+              and ``"diagnostics_off"``.  The gradient flag's list holds
+              the spectral flag's codes and then its own.
+              ``"precision_limited"`` has a code exactly where the float
+              floor was not measured.  Host bookkeeping on what the step
+              stored and what ``compile()`` recorded: lists of plain
+              strings, the same through JSON and a checkpoint, and no
+              number or flag of the entry is read from them.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -5105,7 +5142,13 @@ class GraphManager:
             reported as computed, and the entry has a
             ``"not_usable_reason"`` naming the edge, how its mapping is
             applied, the row's length and the way out (a wider dtype at
-            the same tolerance).  A row is the entries one delivered
+            the same tolerance).  An entry whose flags another cause
+            already holds down (no diagnostics, an estimate that did not
+            settle, a group withheld on account of its norm) says so
+            too, after that cause, with the code ``"long_mapped_row"``:
+            the float floor it reports does not count the row's
+            rounding either.  Nothing is withdrawn from such an entry.
+            A row is the entries one delivered
             value adds up whatever the weights are: a sparse layout's
             valid slots, and a dense matrix's **width** (its weights are
             a parameter a step may be handed, so a selection matrix is
@@ -5167,12 +5210,13 @@ class GraphManager:
             ``"gradient_error_estimate"`` is ``inf``, and
             ``"ratio_usable"``, ``"spectral_usable"``,
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
-            ``False``.  Such an entry has one more key,
-            ``"not_usable_reason"`` : str, which names the edges and
-            says which case it is; besides the causes above of a group
-            with a geometry edge, a long row of a static mapping and a
-            checkpoint saved after a state write, no other group's entry
-            has it.
+            ``False``.  Such an entry's ``"not_usable_reason"`` names
+            the edges and says which case it is, and its
+            ``"reason_codes"`` list that rule's code alone (with why the
+            float floor was not measured, where it says so): nothing
+            would be reported for it whatever else holds.  Where two of
+            the three rules hold (kind, norm, sub-cycling) the entry
+            names the first, in words and in code alike.
 
             **One of those groups keeps the float floor: one withheld
             on account of** ``convergence_norm="interface"`` (its
@@ -5181,7 +5225,7 @@ class GraphManager:
             them).  Its ``"precision_limited"`` is reported as for
             every group -- the residual is at or below its float floor
             at the state the step returned -- and its entry has a
-            further key, ``"residual_precision_floor"`` : float, that
+            number under ``"residual_precision_floor"``, that
             floor in the residual's units (tolerances;
             :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
             times the pass's **structural** evaluation count, with
@@ -5206,7 +5250,11 @@ class GraphManager:
             rather than motion: ``"converged"`` does not say the
             readings settled to the tolerance, and a group at
             ``max_iterations`` may be held there by rounding alone.
-            No other group's entry has that key.  The values are
+            The other groups whose bounds a geometry rule withholds
+            report NaN under that key (their floor is not reported, and
+            their ``"precision_limited"`` says nothing of rounding:
+            ``"reason_codes"["precision_limited"]`` has the rule's
+            code).  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step

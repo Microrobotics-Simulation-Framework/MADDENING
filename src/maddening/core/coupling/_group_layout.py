@@ -484,6 +484,12 @@ def _mapped_row_reason(rows, residual: float, floor: float) -> Optional[str]:
     numbers: a group with no static mapping on an internal edge, a row
     within the limit, and a residual that stands clear all keep their
     flags, and no number of the report moves.
+
+    The report asks it of every entry whose float floor is reported, a
+    flag standing or not (``reason_codes.LONG_MAPPED_ROW``): the floor
+    an entry shows does not count the row's rounding whatever else holds
+    its flags down, and a group withheld on account of its norm, which
+    has no flag to withdraw, reported that floor with no word of the row.
     """
     long_rows = [entry for entry in rows if entry[2] > MAPPED_ROW_FLOOR_LIMIT]
     if not long_rows or not floor > 0.0:

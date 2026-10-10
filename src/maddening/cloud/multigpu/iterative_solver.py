@@ -35,6 +35,13 @@ Design:
   hand-rolled ``lax.fori_loop`` paths in ``_cg_loop`` and
   ``_gmres_loop`` provide a fallback that depends only on stock JAX.
   Select it explicitly with ``backend="loop"``.
+* The routes do not report alike, and two things about CG are open:
+  the loop's ``converged`` and ``residual_norm`` are its recursively
+  updated residual, which float32 lets read under a tolerance the true
+  residual is far above (MADD-ANO-263); and lineax's CG returns NaN in
+  float32 above about 1e5 unknowns, where ``backend="loop"`` is the CG
+  route that answers (MADD-ANO-264).  See ``Returns`` of
+  :func:`sharded_cg`.
 
 Differentiability: forward-mode JVP composes naturally with stock
 JAX operators in both the lineax and the fori_loop fallback; the
@@ -79,11 +86,25 @@ class SharedSolveResult:
     value : jax.Array
         The approximate solution ``x`` to ``A x = b``.
     converged : jax.Array
-        Boolean scalar — True iff the solver converged within tolerance.
+        Boolean scalar — True iff the route's own stopping test passed.
+        What that test reads depends on the route (``Returns`` of
+        :func:`sharded_cg` and of :func:`sharded_gmres`), and only under
+        ``differentiable=True`` is it a test of ``||b - A x||`` for the
+        returned ``value``.  On the CG loop backend it is the residual the
+        iteration updates, which in float32 reads under the tolerance on
+        solves whose ``||b - A x||`` is far above it (MADD-ANO-263, open).
     iters : jax.Array
         Integer scalar — number of iterations used.
     residual_norm : jax.Array
-        Final ``||b - A x||_2``.
+        The residual norm the route reports.  ``||b - A x||_2`` of the
+        returned ``value``, from one product in the working dtype, on the
+        lineax backend and under ``differentiable=True``.  On the CG loop
+        backend the recursively updated residual, not ``||b - A x||_2``
+        (MADD-ANO-263).  On the GMRES loop backend the residual computed
+        after the last restart cycle: of the left-preconditioned system,
+        ``||M (b - A x)||_2``, when a preconditioner is given.  NaN where
+        ``value`` is NaN (a non-finite ``b``; the lineax CG route in
+        float32 at scale, MADD-ANO-264).
     """
     value: jax.Array
     converged: jax.Array
@@ -229,6 +250,13 @@ def _cg_loop(
     Inner products use ``jnp.vdot``, which is correctly all-reduced
     when its inputs are sharded across a mesh axis (the partial sums
     on each shard get summed automatically by XLA).
+
+    The residual the loop tests, and the one ``converged`` and
+    ``residual_norm`` are taken from, is the recursively updated ``r``
+    (``r <- r - alpha * A p``), never ``b - A x``: the two drift apart by
+    about ``eps * kappa``, so in float32 the test passes on solves whose
+    true residual is far above the tolerance (MADD-ANO-263, open; pinned
+    by ``tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py``).
     """
     M = preconditioner if preconditioner is not None else (lambda r: r)
     b_norm = jnp.linalg.norm(b)
@@ -611,6 +639,13 @@ def sharded_cg(
         Initial guess.  Defaults to zeros_like(b).
     rtol : float
         Relative tolerance: stop when ``||r|| <= max(atol, rtol * ||b||)``.
+        On the loop backend ``r`` is the residual the iteration updates
+        (``r <- r - alpha * A p``), which drifts from ``b - A x`` by about
+        ``eps * kappa`` (``kappa`` the condition number).  In float32 an
+        ``rtol`` under about ``eps * kappa`` -- the default ``1e-6`` from a
+        ``kappa`` of a few hundred -- is therefore reported as met on a
+        solve whose true residual is 10 to 100 times ``rtol``
+        (MADD-ANO-263, see ``Returns``).
     atol : float or None
         Absolute floor of that test, in ``b``'s units: give a number only to
         assert a noise floor in ``b``'s own units.  ``None`` (the default)
@@ -637,10 +672,57 @@ def sharded_cg(
         (lineax's CG takes none).  ``"loop"`` forces the loop fallback
         (useful if lineax misbehaves with shard_map).
 
+        **The lineax route -- so the default without a preconditioner --
+        is not usable in float32 at scale (MADD-ANO-264, open).**  lineax's
+        CG sets its step to NaN when ``|p.A p| <= 200 * eps * n * |r.r|``
+        (``n`` unknowns): in float32 a quotient ``p.A p / r.r`` under
+        ``2.4e-5 * n``, which is 2.4 at 1e5 unknowns and 24 at 1e6.  The
+        quotient lies between the operator's extreme eigenvalues, so an
+        operator whose eigenvalues are of order one cannot pass it there,
+        and a smooth right-hand side fails far below (measured: at 4096
+        unknowns).  The answer is then NaN in every entry of ``.value``, a
+        NaN ``.residual_norm`` and ``converged=False`` after one or two
+        steps.  Use ``backend="loop"``, or float64 (both measured to
+        converge on the systems that fail).
+
     Returns
     -------
     SharedSolveResult
         ``.value`` (solution), ``.converged``, ``.iters``, ``.residual_norm``.
+        What ``.converged`` and ``.residual_norm`` report depends on the
+        route:
+
+        * loop backend (``backend="loop"``, and ``"auto"`` with a
+          preconditioner): the residual the iteration updates, not
+          ``b - A x``.  In float32 the two differ by about
+          ``eps * kappa``, so ``converged=True`` and a ``.residual_norm``
+          under ``rtol * ||b||`` come back for solves whose true residual
+          is far above the tolerance: measured at the default
+          ``rtol=1e-6`` on a shifted 1-D Laplacian of 4096 unknowns, 11.7
+          times ``rtol`` at a condition number of 401 and 115 times at
+          4001 (MADD-ANO-263, open).  Check with one product
+          (``||b - matvec(x)||``) or read the ``differentiable=True``
+          result; or solve in float64; or ask for no ``rtol`` under about
+          ``eps * kappa``.
+        * lineax backend: ``.residual_norm`` is ``||b - A x||`` of the
+          returned value (one extra product, in the working dtype).
+          ``.converged`` is lineax's own verdict, not a test of that
+          number: its entrywise test ``|r_i| <= atol + rtol * |b_i|`` on
+          a residual it recomputes every tenth step, and the same test on
+          its last step.  In float32 this route returns NaN above about
+          1e5 unknowns (MADD-ANO-264, see ``backend``).
+        * ``differentiable=True``, on either backend: both come from one
+          extra product on the returned value, so ``.converged`` is
+          ``||b - A x|| <= max(atol, rtol * ||b||)`` in the working dtype
+          with no allowance for rounding.  It reads False on every solve
+          MADD-ANO-263 describes, and also on a loop solve that stopped
+          on its tolerance with a true residual just over it (measured:
+          1.06 times ``rtol``).
+
+        One system can therefore be answered ``converged=True`` by the
+        loop and ``False`` both under ``differentiable=True`` and by
+        lineax.
+
         A ``b`` with a NaN or infinite entry gives NaN in every entry of
         ``.value``, a NaN ``.residual_norm`` and ``converged=False`` (and
         under ``differentiable=True`` a non-finite tangent or cotangent a
@@ -749,6 +831,34 @@ def sharded_gmres(
         unknowns — we default to 50 here.  See the regression test in
         ``tests/core/test_coupling_ift_lineax.py`` for the historical
         gotcha.
+
+    Returns
+    -------
+    SharedSolveResult
+        What ``.converged`` and ``.residual_norm`` report depends on the
+        route, as it does for :func:`sharded_cg`:
+
+        * loop backend (``backend="loop"``, and ``"auto"`` with a
+          preconditioner): the residual computed from the iterate after
+          each restart cycle (one product, in the working dtype), not a
+          recursively updated one, so MADD-ANO-263 does not apply.  At
+          the float32 floor it reads above the same residual evaluated
+          in float64 (measured: 8.1e-6 against 6.1e-6, with
+          ``converged=False``).  With a ``preconditioner`` both are of
+          the left-preconditioned system: ``.residual_norm`` is
+          ``||M (b - A x)||`` and the test is against
+          ``max(atol, rtol * ||M b||)``, so the number is not in ``b``'s
+          units (measured with a Jacobi preconditioner of diagonal 2.5:
+          0.40 times ``||b - A x||``).  ``.iters`` counts whole cycles,
+          a multiple of ``restart``.
+        * lineax backend (the default without a preconditioner):
+          ``.residual_norm`` is ``||b - A x||`` of the returned value;
+          ``.converged`` is lineax's own verdict.  The NaN of
+          MADD-ANO-264 is lineax CG's alone: this route was measured to
+          converge in float32 up to 1e6 unknowns on the systems where
+          :func:`sharded_cg`'s default route returns NaN.
+        * ``differentiable=True``: one extra product on the returned
+          value, unpreconditioned, as for :func:`sharded_cg`.
 
     Stability
     ---------

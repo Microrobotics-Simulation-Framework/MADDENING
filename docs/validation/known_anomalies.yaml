@@ -18217,7 +18217,15 @@ anomalies:
       measurements at 4096 unknowns were repeated on `git archive` of
       v0.3.0 and of v0.3.1 (CPU, jax 0.11.0) with the same numbers.
       `sharded_gmres`'s loop backend is not affected: it recomputes the
-      residual from the iterate after every restart cycle.  Found on
+      residual from the iterate after every restart cycle.  With a
+      `preconditioner`, though, what it tests and reports is the residual
+      of the left-preconditioned system, `||M (b - A x)||` against
+      `max(atol, rtol * ||M b||)`, which the result's documentation
+      called `||b - A x||` until this entry was written: a number that is
+      not in `b`'s units (0.40 times the true norm behind a Jacobi
+      preconditioner of diagonal 2.5), and an `atol` given in `b`'s units
+      is compared with it as it stands.  The docstrings now say so; no
+      test pins that number.  Found on
       2026-10-10 while the conjugate-gradient part of the multi-GPU
       runner's `gradient` goal was being repaired.  Not changed in 0.4.0:
       having the loop test the residual of the system (one more product,
@@ -18308,7 +18316,10 @@ anomalies:
       lineax's default `throw=True`: on those two failing float32 systems
       it raises lineax's "The linear solver returned non-finite (NaN or
       inf) output", where `solver="gmres"` solves them (measured once,
-      jax 0.11.0; not pinned by a test).
+      jax 0.11.0; not pinned by a test).  The wavelet adaptive node's
+      masked-CG frozen solve (`frozen_solver="cg"`,
+      `nodes/adaptive/wavelet.py::_cg_kernel`) makes that same call; it
+      was not measured.
       The default route has been lineax's CG since `sharded_cg` first
       shipped; at v0.3.0 and v0.3.1 lineax was optional and
       `backend="auto"` used the loop where it was not installed.

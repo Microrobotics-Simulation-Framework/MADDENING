@@ -189,8 +189,11 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
     float64 and recomputed every pass from float32 samples carry float32
     rounding, and the floor counts them at float64's eps.  On this pair
     the bound is hundreds of times the distance, and it is the lower of
-    the two (against the same pair with float32 positions), by a few
-    percent.
+    the two against the same pair with float32 positions: by a few
+    percent while nothing counted the weights the kernel forms from
+    those positions, and by the factor that count takes now (float32
+    positions up to 22.4 spacings into the grid: 5.6 float32 eps for
+    every value field, MADD-ANO-261), between four and six.
 
     **Its flags.**  The markers' positions are recomputed in the pass,
     so this group solves positions, and in 0.4.0 such a group has no
@@ -224,5 +227,5 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
             assert np.asarray(report[name]).tobytes() == np.asarray(bare[name]).tobytes(), name
         assert report["spectral_error_bound"] == bare["spectral_error_bound"], (report, bare)
         assert report["spectral_error_bound"] >= 10.0 * report["distance"] > 0.0, report
-    assert fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)
-    assert fine["spectral_error_bound"] > 0.5 * coarse["spectral_error_bound"], (fine, coarse)
+    assert 4.0 * fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)
+    assert 6.0 * fine["spectral_error_bound"] > coarse["spectral_error_bound"], (fine, coarse)

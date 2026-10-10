@@ -391,7 +391,7 @@ names the edge and says what to do.
   target, whose reading is its source value alone; and the `"l2"` and
   `"mixed"` norms, which measure positions against their own size and
   read no delivered value.  **The target-anchored scatter is a gap, not
-  a guarantee** (MADD-ANO-252, open): the mapping still forms its
+  a guarantee** (MADD-ANO-258, open): the mapping still forms its
   weights from those positions in their dtype, and nothing counts that.
   Beside a gather at the same positions (the usual pair) the gather's
   floor flags the group.  With no such edge in the group, float32

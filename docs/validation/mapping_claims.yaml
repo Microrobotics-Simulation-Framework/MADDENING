@@ -755,7 +755,7 @@ claims:
     MAP-015.
     That (k + 2) eps is not in the float floor of a coupling report: a
     group at its float floor behind a long row can read
-    spectral_error_bound below its distance (MADD-ANO-251, open).
+    spectral_error_bound below its distance (MADD-ANO-257, open).
   oracle: >-
     the sum over each row's own slots in 80-bit extended precision, and its
     sum of magnitudes for the bound; the dense matrix the rows scatter into,
@@ -1356,7 +1356,7 @@ claims:
     SCATTER_ROW_FLOOR_LIMIT = 10 entries the report withdraws
     spectral_usable at the float floor, and the gather layout's rows of
     1e4 entries and more were measured summed in order on jaxlib 0.10.2 as
-    well, with the flag kept (MADD-ANO-251, open).
+    well, with the flag kept (MADD-ANO-257, open).
     Not claimed for x64, mixed dtypes, 16-bit floats, gradients,
     vmap or sharded graphs.
   oracle: NumPy's in-order np.add.at in float32, byte for byte; the set of results of ten calls.
@@ -3088,7 +3088,7 @@ claims:
     zero alone took them for clamped; 30 spacings past, a marker is not
     read), and not a mapping read at its source and anchored at its
     target, whose reading is its source value alone - which leaves a gap
-    (MADD-ANO-252, open; pinned as a characterisation): the kernel still
+    (MADD-ANO-258, open; pinned as a characterisation): the kernel still
     forms its weights from those positions, and with no edge in the group
     that delivers a value at them, float32 positions 8000 and 50000
     spacings from the grid's first point read a floor of 0.095, no

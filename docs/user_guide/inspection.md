@@ -451,7 +451,7 @@ returned iterate, and across a lattice plane the stencil is another polynomial: 
 may be in a cell where the pass contracts at another rate.
 
 **A long row of a sparse mapping in the scatter layout** keeps its numbers and loses its flags
-at the float floor (MADD-ANO-251, open).  `transpose="scatter"` adds a target's row up one entry
+at the float floor (MADD-ANO-257, open).  `transpose="scatter"` adds a target's row up one entry
 after another, and an in-order sum of `k` terms of one sign rounds by up to `(k - 1) / 2` units of
 `eps`, systematically where the terms are nearly equal (a uniform field); the float floor counts a
 fixed number of units per evaluation.  Where an internal edge of the group carries such a mapping

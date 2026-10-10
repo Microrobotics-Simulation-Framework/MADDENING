@@ -285,7 +285,7 @@ filterwarnings = [
     # differential properties carry such groups.  Its own tests record it
     # with catch_warnings(record=True) and simplefilter("always").
     "ignore:.* is read from the previous step although no cycle runs through it:UserWarning",
-    # ... and about a dead band declared under Jacobi (MADD-ANO-248): the
+    # ... and about a dead band declared under Jacobi (MADD-ANO-254): the
     # domain batteries and the searches run such groups on purpose.  Its own
     # tests read it from validate() and record compile()'s with pytest.warns.
     "ignore:(?s).*a field inside the dead band leaves the residual, and under Jacobi:UserWarning",

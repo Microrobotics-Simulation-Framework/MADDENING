@@ -1388,7 +1388,7 @@ def test_the_advisory_quotes_one_part_and_says_the_reports_floor_is_pooled():
     assert d["residual_precision_floor"] < min(counts.values()), (d, counts)
 
 
-# -- what the rule leaves: a scatter anchored at its target (MADD-ANO-252) ----
+# -- what the rule leaves: a scatter anchored at its target (MADD-ANO-258) ----
 
 
 class _SamplingGrid(SimulationNode):
@@ -1480,7 +1480,7 @@ def _scatter_anchored_at_its_target(cells: int, pos_dtype: str, rtol: float = 1e
 
 
 def test_a_scatter_anchored_at_its_target_far_into_a_grid_is_not_counted():
-    """What the rule leaves (MADD-ANO-252, open).  An edge read at its
+    """What the rule leaves (MADD-ANO-258, open).  An edge read at its
     source through a mapping anchored at its TARGET has no position in
     its reading: the positions are the target's pre-step state, a
     constant of the solve, and the floor counts none for it.  The kernel

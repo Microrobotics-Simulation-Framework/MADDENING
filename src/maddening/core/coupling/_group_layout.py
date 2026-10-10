@@ -155,7 +155,7 @@ def _dead_band_under_jacobi_advisories(group) -> list:
         f"(atol={group.atol!r}) with iteration_mode='jacobi': {_DEAD_BAND_UNDER_JACOBI} "
         f"a member that reads it is not held to the criterion in that pass, so the group "
         f"can report converged=True after one pass with the fields computed from it far "
-        f"from their fixed point (MADD-ANO-248).  Use iteration_mode='gauss-seidel', or "
+        f"from their fixed point (MADD-ANO-254).  Use iteration_mode='gauss-seidel', or "
         f"atol=0.0, wherever a member's output depends on a field that can fall inside "
         f"the dead band."]
 
@@ -195,7 +195,7 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 
 
 #: The longest row of a static sparse mapping in the scatter layout whose
-#: own rounding the float floor is taken to cover (MADD-ANO-251, open).
+#: own rounding the float floor is taken to cover (MADD-ANO-257, open).
 #:
 #: **Measured, not proved.**  The floor counts ``PRECISION_FLOOR_ULPS``
 #: units of ``eps`` per evaluation of a pass.  The scatter layout
@@ -258,7 +258,7 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
 #: the step and are not counted either: with 300 and 3000 markers in one
 #: cell behind a uniform field the bound read 3.8x and 1.3x the distance
 #: under ``"mixed"``, flags set (under ``"interface"`` such a group
-#: reports no bound).  MADD-ANO-251 records all of it.
+#: reports no bound).  MADD-ANO-257 records all of it.
 SCATTER_ROW_FLOOR_LIMIT = 10  # units: entries of one target's row
 
 #: Why ``spectral_usable`` and ``gradient_bound_usable`` are withdrawn
@@ -274,7 +274,7 @@ _SCATTER_ROW_REASON = (
     "row's length. The scatter layout sums a row's entries one after another, which "
     "rounds by more than the fixed number of ulps per evaluation the float floor counts "
     "once the row is longer than the limit, so spectral_error_bound (and the gradient "
-    "bound built on it) can read below the true distance here (MADD-ANO-251). "
+    "bound built on it) can read below the true distance here (MADD-ANO-257). "
     "spectral_usable and gradient_bound_usable are therefore False; every number is "
     "reported as computed. The way out: hold the group's fields in a wider dtype at the "
     "same tolerance, so that the residual stands clear of the floor. Another layout or "
@@ -1077,7 +1077,7 @@ def _unresolved_position_warnings(group, plan, state, evaluations) -> list[str]:
     A mapping read at its source and anchored at its **target** is not
     asked: its reading is the source field alone (the positions are the
     pre-step state, a constant of the solve), and the floor counts no
-    position for it.  (A gap, MADD-ANO-252, open: the kernel still forms
+    position for it.  (A gap, MADD-ANO-258, open: the kernel still forms
     its weights from those positions in their dtype, and with no edge in
     the group that delivers a value at them, float32 positions thousands
     of spacings from the grid's first point are flagged by nothing.)  A

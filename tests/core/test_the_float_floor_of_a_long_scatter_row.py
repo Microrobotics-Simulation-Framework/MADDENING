@@ -6,7 +6,7 @@ by up to ``(k - 1) / 2`` units of ``eps`` of the sum, and where the terms
 are nearly equal the rounding is systematic: it grows like ``k``.  The
 float floor of a coupling report counts a fixed number of ulps per
 evaluation, so a group stalled behind such a row is further from its
-fixed point than ``spectral_error_bound`` says (MADD-ANO-251, open: the
+fixed point than ``spectral_error_bound`` says (MADD-ANO-257, open: the
 floor is not fixed in 0.4.0).
 
 What 0.4.0 does: the report withdraws ``spectral_usable`` and
@@ -63,7 +63,7 @@ from tests.sparse_mapping_support import x64
 
 KEY = "coarse+fine"
 ROW_EDGE = "fine.x->coarse.u"
-ANOMALY = "MADD-ANO-251"
+ANOMALY = "MADD-ANO-257"
 
 
 class Coarse(SimulationNode):

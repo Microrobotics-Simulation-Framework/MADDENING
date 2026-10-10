@@ -163,7 +163,7 @@ class CouplingGroup:
         5e5 to 6.3e5 where the dropped member carries state); Gauss-Seidel
         held at 0.5 to 4.9 in both sweep orders.  ``validate()`` and
         ``compile()`` say so for every group that sets ``atol > 0`` under
-        Jacobi (MADD-ANO-248, open).  Use Gauss-Seidel, or leave ``atol``
+        Jacobi (MADD-ANO-254, open).  Use Gauss-Seidel, or leave ``atol``
         at 0, wherever a member's output depends on a field that can fall
         inside the band.
     rtol : float

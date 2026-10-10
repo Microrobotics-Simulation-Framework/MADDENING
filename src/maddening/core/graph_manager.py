@@ -3258,7 +3258,7 @@ class GraphManager:
         # Per group key, the longest row of each internal edge that carries
         # a static sparse mapping in the scatter layout, as the step was
         # built: what the report's guard on the float floor reads
-        # (``_group_layout._scatter_rows``, MADD-ANO-251).
+        # (``_group_layout._scatter_rows``, MADD-ANO-257).
         self._committed_scatter_rows = {
             key: _group_layout._scatter_rows(plan)
             for key, plan in interface_plans.items()
@@ -4980,7 +4980,7 @@ class GraphManager:
             ``"converged"`` above and ``"precision_limited"``).
 
             **A long row of a sparse mapping in the scatter layout**
-            (MADD-ANO-251, open).  The float floor counts a fixed number
+            (MADD-ANO-257, open).  The float floor counts a fixed number
             of ``eps`` per evaluation, and a static sparse mapping in the
             scatter layout (``transpose="scatter"``) adds a target's row
             up one entry after another, which rounds by more than that
@@ -5444,7 +5444,7 @@ class GraphManager:
                 # The float floor counts a fixed number of ulps per
                 # evaluation, and a sparse mapping in the scatter layout
                 # adds a row's entries up in order, which rounds by more
-                # than that once the row is long (MADD-ANO-251, open).
+                # than that once the row is long (MADD-ANO-257, open).
                 # Where the residual does not stand clear of the floor
                 # such a row would give it, the flags that rest on the
                 # floor are withdrawn, with the reason; the numbers stay
@@ -7613,7 +7613,7 @@ class GraphManager:
           ``spectral_usable`` is withdrawn and the numbers are kept;
         * ``not_usable_reason`` for a group at its float floor behind a
           long row of a sparse mapping in the scatter layout
-          (MADD-ANO-251): ``spectral_usable`` is withdrawn and the
+          (MADD-ANO-257): ``spectral_usable`` is withdrawn and the
           numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /

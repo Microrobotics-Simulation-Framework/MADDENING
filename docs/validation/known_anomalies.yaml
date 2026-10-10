@@ -17852,7 +17852,7 @@ anomalies:
       flux's dtype (by abstract evaluation of
       `compute_boundary_fluxes`) or withdrawing the flags for such an
       edge is 0.5.0's, with its own audit.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       A usable flag beside a bound far below the distance is wrong
@@ -17916,7 +17916,7 @@ anomalies:
       Not changed in 0.4.0: a transform is opaque to the report by
       design (as a node's `update` is), and the documents now say so
       where the guard is described.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       A usable flag beside a bound below the distance is wrong without a

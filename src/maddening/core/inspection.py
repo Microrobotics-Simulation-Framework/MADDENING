@@ -64,6 +64,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling import reason_codes as _reason_codes
 
 if TYPE_CHECKING:
     from maddening.core.graph_manager import GraphManager
@@ -1335,7 +1336,45 @@ _REPORT_KEYS = ("iterations", "total_iterations", "converged", "residual", "erro
                 "spectral_error_bound", "spectral_usable")
 
 
-def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list[str]:
+#: The reason codes of the rules that withhold a report's numbers or
+#: its float floor: an entry that lists one always said why in this table.
+_WITHHOLDING_CODES = frozenset({
+    _reason_codes.WRITTEN_BEFORE_SAVE, _reason_codes.FLOOR_NEEDS_THE_STEP,
+    _reason_codes.GEOMETRY_KIND_NOT_DIAGNOSED, _reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED,
+    _reason_codes.GEOMETRY_SUBCYCLED, _reason_codes.GEOMETRY_SELF_CHECK_FAILED,
+    _reason_codes.GEOMETRY_SELF_CHECK_NOT_EVALUATED,
+})
+
+
+def _reason_this_table_shows(d: Mapping[str, Any], geometry: bool) -> Optional[str]:
+    """``d["not_usable_reason"]`` where this table quotes it, else ``None``.
+
+    Every entry with a ``False`` usable flag carries a reason now (and
+    its ``"reason_codes"``, experimental); the table quotes the reasons
+    it always did and reads the others off the numbers, as before: a
+    rule that withholds numbers or the float floor; the flags of a group
+    with a geometry-dependent mapping (*geometry*) whose step computed
+    an estimate; a long row of a static mapping where nothing else holds
+    ``spectral_usable`` down.  A flag that is ``False`` because no
+    estimate was computed, or for a cause the numbers show (an estimate
+    that did not settle, the float floor), gets the lines below.
+    """
+    reason = d.get("not_usable_reason")
+    if not reason:
+        return None
+    codes = (d.get("reason_codes") or {}).get("spectral_usable") or ()
+    if _WITHHOLDING_CODES.intersection(codes):
+        return reason
+    rho = d.get("rho_spectral")
+    if geometry and isinstance(rho, float) and not math.isnan(rho):
+        return reason
+    if list(codes) == [_reason_codes.LONG_MAPPED_ROW]:
+        return reason
+    return None
+
+
+def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = (),
+                    geometry: bool = False) -> list[str]:
     flags = []
     cap = int(group.max_iterations)
     if int(d["iterations"]) >= cap:
@@ -1344,7 +1383,7 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
         flags.append("converged=False: the returned state is still outside the threshold"
                      + ("; under solver='ift' the gradient through this step is unreliable"
                         if group.solver == "ift" else ""))
-    reason = d.get("not_usable_reason")
+    reason = _reason_this_table_shows(d, geometry)
     estimate = d.get("error_estimate")
     bound = d.get("spectral_error_bound")
     # Every number is there and only flags are withdrawn: a group with a
@@ -1444,7 +1483,8 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
             for k in _REPORT_KEYS:
                 row[k] = d.get(k)
             row[_FLAGS] = tuple(_coupling_flags(
-                ran, d, (getattr(gm, "_gradient_whole_probes", {}) or {}).get(key, ())))
+                ran, d, (getattr(gm, "_gradient_whole_probes", {}) or {}).get(key, ()),
+                geometry=bool((getattr(gm, "_committed_geometry_edges", {}) or {}).get(key))))
         elif status.traced or not status.ever_compiled:
             row[_FLAGS] = ()
         elif group.solver == "fori" and not group.diagnostics:

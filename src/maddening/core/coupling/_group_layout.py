@@ -13,7 +13,7 @@ from typing import Optional
 import jax.numpy as jnp
 import numpy as np
 
-from maddening.core.coupling import _interface_plan
+from maddening.core.coupling import _interface_plan, reason_codes
 from maddening.core.coupling.acceleration import (
     PRECISION_FLOOR_ULPS,
     _has_entries,
@@ -863,6 +863,25 @@ def _geometry_diagnostics_refusal(group, nodes, plan) -> Optional[str]:
     return _GEOMETRY_DIAGNOSTICS_REASON.format(keys=keys, why=why)
 
 
+def _geometry_refusal_code(group, nodes, plan) -> Optional[str]:
+    """The reason code of :func:`_geometry_diagnostics_refusal` for the
+    same group: the cause its sentence names, by the same precedence (a
+    mapping kind the diagnostics do not read, else the interface norm,
+    else sub-cycling); ``None`` where it gives no reason.  Where two of
+    the three hold the report names the first, in words and in code
+    alike."""
+    geometry = plan.resolved_geometry_edges()
+    if not geometry:
+        return None
+    if any(r.mapping_kind != _DIAGNOSED_GEOMETRY_KIND for r in geometry):
+        return reason_codes.GEOMETRY_KIND_NOT_DIAGNOSED
+    if group.convergence_norm not in _DIAGNOSED_GEOMETRY_NORMS:
+        return reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED
+    if _group_dividers(group, nodes):
+        return reason_codes.GEOMETRY_SUBCYCLED
+    return None
+
+
 def _withheld_on_account_of_its_norm(group, reason: Optional[str]) -> bool:
     """Is *reason* (a group's ``_geometry_diagnostics_refusal``, or
     ``None``) the one of a group whose bounds are withheld because its
@@ -1002,6 +1021,13 @@ def _geometry_self_check_reason(keys, gap: float, allowed: float) -> str:
         keys=list(keys), why=why.format(gap=gap, allowed=allowed))
 
 
+def _geometry_self_check_code(gap: float) -> str:
+    """The reason code of :func:`_geometry_self_check_reason`: a gap over
+    its tolerance, or one that is not a number (nothing was compared)."""
+    return (reason_codes.GEOMETRY_SELF_CHECK_FAILED if gap == gap
+            else reason_codes.GEOMETRY_SELF_CHECK_NOT_EVALUATED)
+
+
 #: The one reason of a group that solves the positions of a
 #: geometry-dependent mapping (:func:`_geometry_flags`): neither flag is
 #: set for it in 0.4.0, on any step.
@@ -1058,6 +1084,333 @@ _CAUSE_GRADIENT_INF = (
 )
 
 
+#: The clauses of a report whose step computed no estimate at all
+#: (``rho_spectral`` is NaN), one per cause (:func:`_flag_causes`).
+_CAUSE_SOLVER_NOT_IFT = (
+    "the group's solver is {solver!r}, which has no linearisation of the pass: the spectral "
+    "estimate and the gradient bound exist only under solver='ift' with diagnostics=True"
+)
+_CAUSE_DIAGNOSTICS_OFF = (
+    "the group was built with diagnostics=False, so its steps do not compute the spectral "
+    "estimate (rho_spectral is NaN) or the gradient bound; build the group with "
+    "diagnostics=True for a run that reports them"
+)
+_CAUSE_SINGLE_PASS = (
+    "max_iterations=1 runs one staggered pass and solves no fixed point, so there is no "
+    "spectrum of a solve to estimate; allow the group a second pass"
+)
+_CAUSE_STATE_NOT_FINITE = (
+    "the state this step returned is not finite (residual is {residual:g}), and nothing is "
+    "computed at such a state: the iteration diverged"
+)
+_CAUSE_ESTIMATE_NOT_RECORDED = (
+    "the state holds no spectral estimate for this group (rho_spectral is absent or NaN) "
+    "although the group asks for one: it was not written by a step of this graph as "
+    "compiled (a state set by hand, or a checkpoint of a graph built without diagnostics); "
+    "the estimates return when the group steps"
+)
+#: An estimate that did not settle in a group whose pass ``compile()``
+#: counted within the estimate's Krylov steps (:func:`_pass_width`): the
+#: steps span such a pass, so what is unsettled is the estimate's check
+#: of itself, and :data:`_CAUSE_NOT_SETTLED` (a pass wider than the
+#: steps) would say the wrong thing of it.
+_CAUSE_SELF_CHECK = (
+    "the spectral estimate did not settle: its Arnoldi residual, {residual:.3g}, is over "
+    "{fraction:g} of 1 - rho_spectral ({allowed:.3g}), although one pass depends on the "
+    "previous one through at most {width} scalar(s) in a state of {entries} entries, which "
+    "the estimate's {steps} Krylov steps span: the estimate's check of itself did not pass "
+    "(one more product moved the radius by more than that margin, or rounding could have, "
+    "or a direction was discarded as rounding, or the residual was not absorbed into the "
+    "space), so rho_spectral and the bound are not to be trusted here; a wider dtype is "
+    "the usual way out"
+)
+#: What an unsettled estimate adds where its margin alone makes the bound
+#: ``inf``: said after the cause, so that such a report is not told its
+#: pass does not contract.
+_CAUSE_BOUND_INF_BY_MARGIN = (
+    "spectral_error_bound is inf because twice that residual added to rho_spectral "
+    "({rho:.3g}) is not below 1: the pass may well contract, and the estimate cannot say"
+)
+
+
+def _pass_width(group, nodes, plan, state) -> tuple:
+    """``(width, entries)``: how many scalars one pass of *group* depends
+    on the previous one through, at most, and how many entries the
+    group's floating state holds.  Structural, read by ``compile()`` on
+    the host; the report tells an estimate that did not settle in a pass
+    **wider than its Krylov steps** from one that did not although the
+    steps span the pass (:func:`_unsettled_cause`).
+
+    **What is counted.**  A pass ``F`` maps the group's state to the
+    next iterate, and each member's update starts from its pre-step
+    state, a constant of the pass.  So ``F`` reads the previous iterate
+    only through the internal edges it takes *from the previous pass*:
+    every internal edge under Jacobi and in a group that sub-cycles (an
+    interpolated read takes both ends); under Gauss-Seidel an edge whose
+    source is swept at or after its target (*plan*'s order: the order
+    the members were added in, a self-edge included).  The rank of
+    ``dF/dx`` is then at most each of:
+
+    * the entries of the distinct source fields those edges read (and of
+      the geometry field of a source-anchored mapping on one of them);
+    * the floating entries of the members that read one: every other
+      member reads only this pass's values, which are functions of those
+      members' new states;
+    * the entries of the whole state.
+
+    *width* is the smallest of the three.  **An upper bound, not the
+    rank**: a member that uses only a combination of what it reads (a
+    mean, a selection inside ``update``), and a mapping that delivers
+    fewer entries than its source holds, have a lower rank than is
+    counted here.  A group with a boundary-flux edge between members is
+    counted at its whole state (a flux is computed from its producer's
+    state and inputs, and neither count above holds for it).
+
+    The estimate's Krylov space holds its start vector and the range of
+    the pass's Jacobian, so ``SPECTRAL_KRYLOV_STEPS`` steps span a pass
+    of width ``SPECTRAL_KRYLOV_STEPS - 1`` or less, and any pass of a
+    state of ``SPECTRAL_KRYLOV_STEPS`` entries or fewer (the space is
+    then the whole state).  Measured on linear pairs in float64
+    (Gauss-Seidel, a member of 6, 7 and 8 scalars beside one of 300
+    entries: settled, settled, not; Jacobi with 4 + 4, 3 + 5 and 5 + 5
+    entries: settled, settled, not; ``"fixed"`` with and without
+    relaxation and ``"aitken"`` alike; jax 0.11.0).
+    """
+    def entries(name) -> int:
+        return sum(int(np.prod(np.shape(value), dtype=np.int64))
+                   for value in (state.get(name) or {}).values()
+                   if _is_float_leaf(value))
+
+    members = sorted(group.nodes)
+    whole = sum(entries(name) for name in members)
+    position = {name: i for i, name in enumerate(plan.order)}
+    last = len(position)
+    every = group.iteration_mode == "jacobi" or bool(_group_dividers(group, nodes))
+    readers: set = set()
+    fields: set = set()
+    counted = not plan.flux_members
+    for record in plan.internal:
+        source, target = record.source[0], record.target[0]
+        previous = every or position.get(source, last) >= position.get(target, last)
+        if not previous and record.read_from_state:
+            continue
+        # (An edge whose source is not a state field is taken from the
+        # previous pass whatever the order: counted at the whole state.)
+        readers.add(target)
+        if not record.read_from_state:
+            counted = False
+            continue
+        fields.add(record.source)
+        if record.anchor is not None and record.anchor[0] == "source":
+            fields.add((source, record.anchor[1]))
+    if not counted:
+        return whole, whole
+
+    def size(name, field) -> int:
+        value = (state.get(name) or {}).get(field)
+        if value is None or not _is_float_leaf(value):
+            return 0
+        return int(np.prod(np.shape(value), dtype=np.int64))
+
+    through_fields = sum(size(name, field) for name, field in fields)
+    through_readers = sum(entries(name) for name in readers)
+    return min(through_fields, through_readers, whole), whole
+
+
+def _is_float_leaf(value) -> bool:
+    dtype = getattr(value, "dtype", None)
+    return dtype is not None and bool(jnp.issubdtype(dtype, jnp.floating))
+
+
+def _unsettled_cause(width, *, rho: float, arnoldi_residual: float, fraction: float,
+                     steps: int) -> tuple:
+    """``(code, clause)`` of a spectral estimate that did not settle.
+
+    *width* is :func:`_pass_width` of the group the step was built from.
+    Where the pass is wider than the estimate's steps span, the limit
+    explains the unsettled estimate, which is expected of such a group
+    (``interface_too_wide``); where the steps span the pass, the space
+    closed and what is unsettled is the estimate's check of itself
+    (``spectral_self_check_failed``).  The step stores one number for
+    the two (the larger of what the space missed and of what its check
+    measured), so nothing but the count tells them apart: in a pass
+    counted as too wide, rounding may have had its part as well, and the
+    report does not say.
+    """
+    scalars, entries = width
+    allowed = fraction * (1.0 - rho)
+    if entries <= steps or scalars <= steps - 1:
+        return (reason_codes.SPECTRAL_SELF_CHECK_FAILED, _CAUSE_SELF_CHECK.format(
+            residual=arnoldi_residual, fraction=fraction, allowed=allowed, width=scalars,
+            entries=entries, steps=steps))
+    return (reason_codes.INTERFACE_TOO_WIDE, _CAUSE_NOT_SETTLED.format(
+        residual=arnoldi_residual, fraction=fraction, allowed=allowed, steps=steps))
+
+
+#: A width that reads as wider than any number of steps: what a caller
+#: that holds no count passes (:func:`_geometry_flags`).
+_UNCOUNTED_WIDTH = (math.inf, math.inf)
+
+
+def _flag_causes(group, *, bound: float, rho: float, arnoldi_residual: float,
+                 amplification: float, settled: bool, residual: float,
+                 precision_limited: bool, declared: bool, gradient_bound: float, width,
+                 fraction: float, steps: int, floor_measured: bool = True) -> tuple:
+    """``(spectral, own)``: every cause of a ``False`` ``spectral_usable``
+    and the gradient flag's own, each a ``(code, clause)`` pair, from the
+    numbers a report holds.  The one place a cause is given its code and
+    its words, for a plain group and for one whose geometry is a constant
+    of its pass alike.
+
+    ``spectral_usable`` is ``isfinite(bound) and settled and (declared or
+    not precision_limited)``, and *spectral* is empty exactly where that
+    holds (the branches below are that expression's, taken apart):
+
+    * no estimate (*rho* is NaN): why the step computed none, from
+      *group* -- its solver, its diagnostics switch, a budget of one
+      pass, a state that is not finite, or none of them (the state was
+      not written by this graph's step);
+    * *bound* is NaN beside an estimate: it could not be evaluated;
+    * ``rho >= 1`` or a resolvent that is not finite: the linearised
+      pass does not contract;
+    * the estimate did not settle: :func:`_unsettled_cause`, and where
+      its margin makes the bound ``inf`` the clause says that too;
+    * the residual at its float floor with an evaluation count that is
+      not declared.
+
+    *own* (only where an estimate was computed) tells a gradient bound
+    that was not computed (NaN) from one that did not certify (``inf``).
+    ``gradient_bound_usable`` is ``spectral_usable and
+    isfinite(gradient_bound)``.
+
+    With *floor_measured* ``False`` (a report whose float floor another
+    rule withholds) the two causes that read the floor are left to that
+    rule: a bound that is NaN, and the residual at its floor.
+    """
+    spectral: list = []
+    own: list = []
+    if rho != rho:
+        if group is not None and group.solver != "ift":
+            spectral.append((reason_codes.SOLVER_NOT_IFT,
+                             _CAUSE_SOLVER_NOT_IFT.format(solver=group.solver)))
+        elif group is not None and not group.diagnostics:
+            spectral.append((reason_codes.DIAGNOSTICS_OFF, _CAUSE_DIAGNOSTICS_OFF))
+        elif not math.isfinite(residual):
+            spectral.append((reason_codes.STATE_NOT_FINITE,
+                             _CAUSE_STATE_NOT_FINITE.format(residual=residual)))
+        elif group is not None and group.max_iterations <= 1:
+            spectral.append((reason_codes.SINGLE_PASS, _CAUSE_SINGLE_PASS))
+        else:
+            spectral.append((reason_codes.ESTIMATE_NOT_RECORDED,
+                             _CAUSE_ESTIMATE_NOT_RECORDED))
+    else:
+        if bound != bound:
+            if floor_measured:
+                spectral.append((reason_codes.BOUND_NOT_EVALUATED,
+                                 _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))
+        elif not rho < 1.0 or not math.isfinite(amplification):
+            spectral.append((reason_codes.NOT_CONTRACTING,
+                             _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))
+        elif not settled:
+            code, clause = _unsettled_cause(
+                width, rho=rho, arnoldi_residual=arnoldi_residual, fraction=fraction,
+                steps=steps)
+            spectral.append((code, clause))
+            if not math.isfinite(bound):
+                spectral.append((code, _CAUSE_BOUND_INF_BY_MARGIN.format(rho=rho)))
+        elif not math.isfinite(bound) and floor_measured:
+            spectral.append((reason_codes.BOUND_NOT_EVALUATED,
+                             _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))
+        if gradient_bound != gradient_bound:
+            own.append((reason_codes.GRADIENT_BOUND_NOT_COMPUTED,
+                        _CAUSE_GRADIENT_NAN.format(steps=steps)))
+        elif not math.isfinite(gradient_bound):
+            own.append((reason_codes.GRADIENT_BOUND_NOT_CERTIFIED, _CAUSE_GRADIENT_INF))
+    if precision_limited and not declared and floor_measured:
+        spectral.append((reason_codes.AT_FLOAT_FLOOR, _CAUSE_FLOOR))
+    return spectral, own
+
+
+def _causes_sentence(spectral, own, spectral_stands: bool = True) -> Optional[str]:
+    """The words of :func:`_flag_causes`' two lists (each clause once),
+    in the frame every report of a ``False`` flag whose numbers stand
+    uses; ``None`` where both are empty.  *spectral_stands* is ``False``
+    where another rule already holds ``spectral_usable`` down and only
+    the gradient flag's own causes are left to say."""
+    def clauses(causes) -> str:
+        return "; ".join(dict.fromkeys(clause for _code, clause in causes))
+
+    if spectral:
+        told = "spectral_usable is False, and gradient_bound_usable with it: " + clauses(spectral)
+        if own:
+            told += ". gradient_bound_usable has a cause of its own as well: " + clauses(own)
+    elif own and spectral_stands:
+        told = "gradient_bound_usable is False (spectral_usable stands): " + clauses(own)
+    elif own:
+        told = "gradient_bound_usable has a cause of its own as well: " + clauses(own)
+    else:
+        return None
+    return told + ". The numbers are reported as computed."
+
+
+def _codes_in_order(*codes) -> list:
+    """*codes* (iterables of reason codes), each once, in the order of
+    ``reason_codes.ALL``: what a report lists for a flag."""
+    seen = {code for group_codes in codes for code in group_codes}
+    return [code for code in reason_codes.ALL if code in seen]
+
+
+def _geometry_flag_causes(keys, *, solved, bound: float, gradient_bound: float, rho: float,
+                          arnoldi_residual: float, settled: bool, precision_limited: bool,
+                          declared: bool, limit, margin, fraction: float, steps: int,
+                          group=None, amplification: float = 1.0, residual: float = 0.0,
+                          width=_UNCOUNTED_WIDTH, floor_measured: bool = True) -> tuple:
+    """``(spectral_usable, gradient_bound_usable, reason, spectral, own)``:
+    :func:`_geometry_flags` with the causes behind its reason, each a
+    ``(code, clause)`` pair (*spectral*: of ``spectral_usable``; *own*:
+    the gradient flag's own).
+
+    *reason* is that function's: ``None`` where the step computed no
+    estimate (*rho* is NaN), though the causes are listed then too (why
+    there is none, from *group*); the report puts them into words.
+    *group*, *amplification*, *residual* and *width* are what
+    :func:`_flag_causes` reads beyond the flags' own inputs; their
+    defaults are a caller's that holds none of them.
+    """
+    def number(value) -> float:
+        try:
+            return float("nan") if value is None else float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    if solved:
+        reason = _GEOMETRY_SOLVED_REASON.format(solved=list(solved), keys=list(keys))
+        spectral = [(reason_codes.GEOMETRY_POSITIONS_SOLVED, reason)]
+        if rho != rho:
+            spectral += _flag_causes(
+                group, bound=bound, rho=rho, arnoldi_residual=arnoldi_residual,
+                amplification=amplification, settled=settled, residual=residual,
+                precision_limited=False, declared=declared, gradient_bound=gradient_bound,
+                width=width, fraction=fraction, steps=steps,
+                floor_measured=floor_measured)[0]
+        return False, False, (None if rho != rho else reason), spectral, []
+    margin, limit = number(margin), number(limit)
+    recorded = solved is not None and margin == math.inf and limit == math.inf
+    spectral, own = _flag_causes(
+        group, bound=bound, rho=rho, arnoldi_residual=arnoldi_residual,
+        amplification=amplification, settled=settled, residual=residual,
+        precision_limited=precision_limited, declared=declared,
+        gradient_bound=gradient_bound, width=width, fraction=fraction, steps=steps,
+        floor_measured=floor_measured)
+    if not recorded:
+        spectral.append((reason_codes.GEOMETRY_RECORD_MISSING, _CAUSE_NOT_RECORDED.format(
+            keys=list(keys), limit=limit, margin=margin)))
+    spectral_usable = not spectral
+    gradient_bound_usable = spectral_usable and not own
+    reason = None if rho != rho else _causes_sentence(spectral, own)
+    return spectral_usable, gradient_bound_usable, reason, spectral, own
+
+
 def _geometry_flags(keys, *, solved, bound: float, gradient_bound: float, rho: float,
                     arnoldi_residual: float, settled: bool, precision_limited: bool,
                     declared: bool, limit, margin, fraction: float,
@@ -1112,46 +1465,12 @@ def _geometry_flags(keys, *, solved, bound: float, gradient_bound: float, rho: f
     that did not certify (``inf``).  No reason of a group whose positions
     are constants names a lattice plane.
     """
-    def number(value) -> float:
-        try:
-            return float("nan") if value is None else float(value)
-        except (TypeError, ValueError):
-            return float("nan")
-
-    if solved:
-        reason = _GEOMETRY_SOLVED_REASON.format(solved=list(solved), keys=list(keys))
-        return False, False, (None if rho != rho else reason)
-    margin, limit = number(margin), number(limit)
-    recorded = solved is not None and margin == math.inf and limit == math.inf
-    smooth = []
-    if not math.isfinite(bound):
-        smooth.append(_CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}"))
-    elif not settled:
-        smooth.append(_CAUSE_NOT_SETTLED.format(
-            residual=arnoldi_residual, fraction=fraction, allowed=fraction * (1.0 - rho),
-            steps=steps))
-    if precision_limited and not declared:
-        smooth.append(_CAUSE_FLOOR)
-    if not recorded:
-        smooth.append(_CAUSE_NOT_RECORDED.format(keys=list(keys), limit=limit, margin=margin))
-    own = []
-    if gradient_bound != gradient_bound:
-        own.append(_CAUSE_GRADIENT_NAN.format(steps=steps))
-    elif not math.isfinite(gradient_bound):
-        own.append(_CAUSE_GRADIENT_INF)
-    spectral_usable = not smooth
-    gradient_bound_usable = spectral_usable and not own
-    if gradient_bound_usable or rho != rho:
-        return spectral_usable, gradient_bound_usable, None
-    if spectral_usable:
-        told = "gradient_bound_usable is False (spectral_usable stands): " + "; ".join(own)
-    else:
-        told = ("spectral_usable is False, and gradient_bound_usable with it: "
-                + "; ".join(smooth))
-        if own:
-            told += ". gradient_bound_usable has a cause of its own as well: " + "; ".join(own)
-    return (spectral_usable, gradient_bound_usable,
-            told + ". The numbers are reported as computed.")
+    spectral_usable, gradient_bound_usable, reason, _spectral, _own = _geometry_flag_causes(
+        keys, solved=solved, bound=bound, gradient_bound=gradient_bound, rho=rho,
+        arnoldi_residual=arnoldi_residual, settled=settled,
+        precision_limited=precision_limited, declared=declared, limit=limit, margin=margin,
+        fraction=fraction, steps=steps)
+    return spectral_usable, gradient_bound_usable, reason
 
 
 _WRITTEN_BEFORE_SAVE_REASON = (

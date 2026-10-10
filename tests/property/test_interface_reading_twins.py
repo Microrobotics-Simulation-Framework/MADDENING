@@ -70,6 +70,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import numpy as np
 import pytest
 
+from tests.core.coupling_reason_rules import same_causes
 from tests.property import coupled_graphs as cg
 from tests.property import coupled_topologies as ct
 from tests.property import geometry_graphs as gg
@@ -167,7 +168,11 @@ def compare(c: gg.Case, edge, twin, *, relay: bool, steps: int = 3) -> None:
         _same_states(c, gg.snapshot(edge), gg.snapshot(twin), step)
         ra, rb = _report(edge), _report(twin)
         where = (c.label, step)
-        assert "not_usable_reason" not in ra and "not_usable_reason" not in rb, where
+        # Nothing of either report is withheld (the numbers below are
+        # compared), and a flag that is False says the same causes in both.
+        gg.assert_no_geometry_reason(ra)
+        gg.assert_no_geometry_reason(rb)
+        assert same_causes(ra, rb), (where, ra["reason_codes"], rb["reason_codes"])
         assert int(ra["iterations"]) == int(rb["iterations"]), (where, ra, rb)
         for flag in FLAGS:
             assert bool(ra[flag]) is bool(rb[flag]), (where, flag, ra, rb)

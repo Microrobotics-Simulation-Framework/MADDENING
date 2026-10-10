@@ -1134,8 +1134,9 @@ _CAUSE_SELF_CHECK = (
 #: ``inf``: said after the cause, so that such a report is not told its
 #: pass does not contract.
 _CAUSE_BOUND_INF_BY_MARGIN = (
-    "spectral_error_bound is inf because twice that residual added to rho_spectral "
-    "({rho:.3g}) is not below 1: the pass may well contract, and the estimate cannot say"
+    "spectral_error_bound is inf because of that estimate's margin (twice that residual "
+    "added to rho_spectral, {rho:.3g}, is not below 1, or the resolvent the margin is "
+    "folded into is not finite): the pass may well contract, and the estimate cannot say"
 )
 
 
@@ -1277,10 +1278,11 @@ def _flag_causes(group, *, bound: float, rho: float, arnoldi_residual: float,
       pass, a state that is not finite, or none of them (the state was
       not written by this graph's step);
     * *bound* is NaN beside an estimate: it could not be evaluated;
-    * ``rho >= 1`` or a resolvent that is not finite: the linearised
-      pass does not contract;
+    * ``rho >= 1``: the linearised pass does not contract;
     * the estimate did not settle: :func:`_unsettled_cause`, and where
       its margin makes the bound ``inf`` the clause says that too;
+    * a settled estimate whose resolvent is not finite (the compressed
+      ``I - H`` is singular): the pass does not contract either;
     * the residual at its float floor with an evaluation count that is
       not declared.
 
@@ -1314,16 +1316,23 @@ def _flag_causes(group, *, bound: float, rho: float, arnoldi_residual: float,
             if floor_measured:
                 spectral.append((reason_codes.BOUND_NOT_EVALUATED,
                                  _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))
-        elif not rho < 1.0 or not math.isfinite(amplification):
+        elif not rho < 1.0:
             spectral.append((reason_codes.NOT_CONTRACTING,
                              _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))
         elif not settled:
+            # Before the resolvent is looked at: an estimate that did not
+            # settle carries a margin, which the step folds into the
+            # resolvent factor of a group with a dead-banded field, so a
+            # factor that is not finite is the margin's doing there.
             code, clause = _unsettled_cause(
                 width, rho=rho, arnoldi_residual=arnoldi_residual, fraction=fraction,
                 steps=steps)
             spectral.append((code, clause))
             if not math.isfinite(bound):
                 spectral.append((code, _CAUSE_BOUND_INF_BY_MARGIN.format(rho=rho)))
+        elif not math.isfinite(amplification):
+            spectral.append((reason_codes.NOT_CONTRACTING,
+                             _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))
         elif not math.isfinite(bound) and floor_measured:
             spectral.append((reason_codes.BOUND_NOT_EVALUATED,
                              _CAUSE_BOUND_NOT_FINITE.format(bound=f"{bound:g}")))

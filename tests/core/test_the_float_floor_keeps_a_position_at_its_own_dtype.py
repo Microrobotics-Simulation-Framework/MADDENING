@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.coupling import _group_layout
+from maddening.core.coupling import _group_layout, reason_codes
 from maddening.core.coupling.acceleration import (
     PRECISION_FLOOR_ULPS,
     _position_fields,
@@ -191,10 +191,11 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
     (Before that rule the two reports set their flags, which is how this
     corner was first pinned.)  The edge back, ``q.x -> p.u``, is a dense
     matrix 30 entries wide, which the float-floor guard on a mapped row
-    counts at its width (MADD-ANO-257); it is asked only of a flag that
-    is still set, so its reason is not the one given here, and with its
-    limit out of reach the report is the same.  Every number is the one
-    it was."""
+    counts at its width (MADD-ANO-257).  It finds no flag to withdraw
+    here and names its caveat all the same, after the group's own reason
+    and with its code: the float floor this entry reports does not count
+    the row.  With its limit out of reach the report is the same but for
+    that sentence and that code.  Every number is the one it was."""
     with x64(True):
         fine = _stalled("float32", "float64")
         coarse = _stalled("float32", "float32")
@@ -205,8 +206,15 @@ def test_float64_positions_set_from_float32_data_within_the_pass_still_stand_on_
         assert report["precision_limited"], report
         assert not report["spectral_usable"] and not report["gradient_bound_usable"], report
         assert "the group solves position(s)" in report["not_usable_reason"], report
-        assert "MADD-ANO-257" not in report["not_usable_reason"], report
-        assert report["not_usable_reason"] == bare["not_usable_reason"], (report, bare)
+        own, also, rows = report["not_usable_reason"].partition(" Also: ")
+        assert own == bare["not_usable_reason"] and "MADD-ANO-257" not in own, (report, bare)
+        assert also and "MADD-ANO-257" in rows, report
+        solved = [reason_codes.GEOMETRY_POSITIONS_SOLVED]
+        assert bare["reason_codes"]["spectral_usable"] == solved, bare["reason_codes"]
+        assert report["reason_codes"]["spectral_usable"] == [
+            *solved, reason_codes.LONG_MAPPED_ROW], report["reason_codes"]
+        for name in set(bare) - {"not_usable_reason", "reason_codes"}:
+            assert np.asarray(report[name]).tobytes() == np.asarray(bare[name]).tobytes(), name
         assert report["spectral_error_bound"] == bare["spectral_error_bound"], (report, bare)
         assert report["spectral_error_bound"] >= 10.0 * report["distance"] > 0.0, report
     assert fine["spectral_error_bound"] < coarse["spectral_error_bound"], (fine, coarse)

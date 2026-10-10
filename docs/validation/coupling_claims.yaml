@@ -6906,7 +6906,8 @@ claims:
     - tests/core/test_coupling_report_reason_codes.py::test_a_checkpoint_brings_the_codes_back_and_one_saved_after_a_write_says_so
     - tests/core/test_coupling_report_reason_codes.py::test_the_codes_read_the_report_and_move_nothing_in_it
     - tests/core/test_coupling_report_reason_codes.py::test_the_table_of_coupling_report_quotes_only_the_reasons_it_always_did
-    - tests/core/test_coupling_report_reason_codes.py::test_the_codes_are_lower_case_constants_each_in_one_kind_and_in_the_guide_s_table
+    - tests/core/test_coupling_report_reason_codes.py::test_the_codes_are_lower_case_constants_each_in_one_kind
+    - tests/compliance/test_reason_codes_in_the_guide.py::test_every_reason_code_has_one_row_in_the_guide_s_table_and_no_row_is_left_over
     - tests/api/test_a_coupling_report_survives_a_rest_state_write.py::test_a_checkpoint_saved_over_rest_after_a_put_reloads_the_state_and_withholds_the_bound
     - tests/property/test_coupling_geometry_interface_norm.py::test_a_group_withheld_on_account_of_its_norm_behind_a_long_mapped_row_names_both_causes
     - tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_guard_names_its_cause_beside_a_flag_another_cause_holds_down

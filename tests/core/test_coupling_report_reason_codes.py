@@ -31,7 +31,6 @@ import json
 import math
 import re
 import warnings
-from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
@@ -46,7 +45,6 @@ from maddening.serialization import json_codec
 from tests.core.coupling_reason_rules import USABLE, assert_reason_rules
 
 KEY = "body+field"
-REPO = Path(__file__).resolve().parents[2]
 
 
 class _Lin(SimulationNode):
@@ -143,10 +141,11 @@ def wide():
 # The constants
 # ---------------------------------------------------------------------------
 
-def test_the_codes_are_lower_case_constants_each_in_one_kind_and_in_the_guide_s_table():
+def test_the_codes_are_lower_case_constants_each_in_one_kind():
     """Each code is a module constant spelt as its own lower-case value,
-    listed once in ``ALL``, in exactly one of the three kinds, and has one
-    row in the guide's table."""
+    listed once in ``ALL`` and in exactly one of the three kinds.  (That
+    each has a row in the guide's table is checked where a docs-only
+    change runs: ``tests/compliance/test_reason_codes_in_the_guide.py``.)"""
     constants = {name: value for name, value in vars(rc).items()
                  if name.isupper() and isinstance(value, str)}
     assert sorted(constants.values()) == sorted(rc.ALL) and len(set(rc.ALL)) == len(rc.ALL)
@@ -156,9 +155,6 @@ def test_the_codes_are_lower_case_constants_each_in_one_kind_and_in_the_guide_s_
     kinds = (rc.EXPECTED, rc.CONFIGURATION, rc.WORRY)
     assert set().union(*kinds) == set(rc.ALL) and sum(map(len, kinds)) == len(rc.ALL)
     assert rc.FLAGS == ("spectral_usable", "gradient_bound_usable", "precision_limited")
-    guide = (REPO / "docs/developer_guide/coupling_algorithm_guide.md").read_text()
-    for code in rc.ALL:
-        assert len(re.findall(rf"^\| `{code}` \|", guide, re.M)) == 1, code
     documented = GraphManager.coupling_diagnostics.__doc__
     assert '"reason_codes"' in documented and '"residual_precision_floor"' in documented
 
@@ -330,6 +326,11 @@ def test_an_estimate_that_did_not_settle_is_too_wide_only_where_the_pass_is(narr
     assert over["reason_codes"]["spectral_usable"] == [rc.INTERFACE_TOO_WIDE]
     assert "does not contract" not in over["not_usable_reason"]
     assert "spectral_error_bound is inf because" in over["not_usable_reason"]
+    # The same where that margin reached the resolvent factor (the step
+    # folds it in for a group with a dead-banded field): still the estimate.
+    folded = _report_with(wide, spectral_amplification=math.inf)
+    assert folded["spectral_error_bound"] == math.inf
+    assert folded["reason_codes"]["spectral_usable"] == [rc.INTERFACE_TOO_WIDE]
 
 
 @pytest.mark.parametrize("mode, sizes, order, width", [

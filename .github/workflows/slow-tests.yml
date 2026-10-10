@@ -58,8 +58,10 @@ jobs:
         # tests/slow_lane_weights.json): by hash, one shard of four held
         # nearly half of the lane and ran into the timeout.  The
         # timeout/OOM classification below applies per shard.
-        # Ten is the ceiling: with two JAX versions that is twenty jobs,
-        # the most this repository runs at once.  The count is also
+        # Ten was chosen on 2026-10-10 against eight (15 minutes off the
+        # predicted slowest shard).  Twelve are predicted at 56 minutes
+        # and the organisation's plan runs that many jobs at once (60);
+        # they are the next step.  The count is also
         # written in MADDENING_TEST_SHARD, the durations step's title,
         # the artifact's name and the three issue titles below, and as
         # SLOW_LANE_SHARDS in tests/_sharding.py: change them together.

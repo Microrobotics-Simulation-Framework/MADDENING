@@ -581,8 +581,9 @@ The slow lane's count is separate (`SLOW_LANE_SHARDS` in
 `tests/_sharding.py`) and is written in `slow-tests.yml` as `shard:`,
 `MADDENING_TEST_SHARD`, the artifact name's `of10`, the "of 10" in the step
 title and the `/10` in the three issue titles. No pin depends on it: the
-table is dealt for whatever count the spec names. Ten is the ceiling while
-the repository runs twenty jobs at once: the lane has two JAX versions.
+table is dealt for whatever count the spec names. Twelve shards are
+predicted at 56 minutes for the slowest and fit what the organisation's plan
+runs at once (60 jobs; the lane would be 24): the next step after ten.
 
 The compliance tests pin these counts, so a change to one fails them until
 each place is updated: `test_ci_sharding.py` (`shard:`,

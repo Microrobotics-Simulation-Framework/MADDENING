@@ -77,10 +77,11 @@ WEIGHTED = "weighted"
 #: The job count ``slow-tests.yml`` runs per JAX version.  Ten, not the
 #: four of the per-push lane: the measured lane is 635 minutes of tests
 #: (each file's slower JAX version, 2026-10-10; 477 three days earlier),
-#: so eight balanced shards sit at 79 minutes each and ten at 64.  Ten is
-#: also the ceiling: with two JAX versions that is twenty jobs, the most
-#: the repository runs at once.  The heaviest file alone is 49 minutes, so
-#: the next step after ten is to split that file.
+#: so eight balanced shards sit at 79 minutes each and ten at 64.  Twelve
+#: would sit at 53 (the slowest predicted at 56 with a job's fixed cost),
+#: and the organisation's plan runs that many jobs at once (60 against the
+#: lane's 24): they are the next step.  The heaviest file alone is 49
+#: minutes, so past twelve the step is to split that file.
 SLOW_LANE_SHARDS = 10
 #: Measured seconds per test file for the weighted split, next to this
 #: module.  ``scripts/slow_lane_weights.py`` writes it from the JUnit

@@ -671,20 +671,17 @@ def _check_claim(cell, count=None) -> None:
 def _floor(cell) -> float:
     """The float floor of the pair's residual per evaluation, from the rule:
     ``4 eps / rtol`` pooled over the entries the norm reads -- an edge that
-    expands at its source field's entries and that field's own eps, any
-    other at the entries it delivers and the coarser of the delivered
-    dtype's eps and its source's."""
+    expands at its source field's entries, any other at the entries it
+    delivers -- every entry at the eps of the coarsest dtype among the
+    pair's fields (which is at least the delivered dtype's and its
+    source's: the pair's edges deliver one member's dtype or the other's)."""
     d, shape = cell.domain, cell.shape
-    dtype = {sg_name: (d.dtype_a if name == "a" else d.dtype_b)
-             for sg_name, name in cell.names.items()}
     sizes = sg.node_sizes(shape)
+    eps = max(_eps(d.dtype_a), _eps(d.dtype_b))
     total = count = 0.0
     for e in sg.edges_of(shape):
         n_source, n_delivered = sizes[e.src][0], sizes[e.dst][1]
-        if sg.side_of(n_source, n_delivered) == "source":
-            n, eps = n_source, _eps(dtype[e.src])
-        else:
-            n, eps = n_delivered, max(_eps(dtype[e.dst]), _eps(dtype[e.src]))
+        n = n_source if sg.side_of(n_source, n_delivered) == "source" else n_delivered
         total += n * eps * eps
         count += n
     return PRECISION_FLOOR_ULPS * math.sqrt(total / count) / cell.rtol
@@ -918,6 +915,17 @@ def _check_diagnosed(cell) -> None:
     direction where the twin's six weights are probed one by one, and the
     two bounds of one problem differ (measured: 1.27e-4 against 1.41e-4).
     That is the probe plan's, on either side of the norm.
+
+    **A flag withdrawn for a mapped row is still a bound to hold.**  The
+    dense form of the mapping is 36 entries wide, over the row limit of
+    the float-floor guard, which counts a dense matrix at its width
+    (MADD-ANO-257): where a solve's residual is within the float floor
+    times that width the report withdraws ``spectral_usable`` with its
+    reason and keeps every number.  Two cells accept there (the dense
+    form under a tolerance near float32's floor), one of them on every
+    solve.  Their bound covered the distance before that guard and is
+    held to it here as before; only a flag another rule took, or one
+    that was never set, leaves a solve out.
     """
     mapped, twin = _run(cell), _run(cell, twin=True)
     skipped = () if cell.form == "sparse" else ("gradient_relative_error_bound",)
@@ -929,13 +937,16 @@ def _check_diagnosed(cell) -> None:
         differ = {key: (ra[key], rb[key]) for key in ra if key not in skipped
                   and not _numbers_agree(ra[key], rb[key], 1e-6 if _one_program(cell) else 2e-2)}
         assert sorted(ra) == sorted(rb) and not differ, f"{where}: (edge-mapped, twin) {differ}"
-        if not ra["spectral_usable"]:
+        for_the_row = "MADD-ANO-257" in (ra.get("not_usable_reason") or "")
+        if not ra["spectral_usable"] and not for_the_row:
             continue
+        assert not for_the_row or cell.form == "matrix", (where, ra)
         usable += 1
         distance = ref.in_tolerances(ref.distance(cs.state_of(cell, s), "compact"))
         bound = float(ra["spectral_error_bound"])
         assert 0.0 < distance <= bound * (1.0 + 1e-6), (where, distance, bound)
-    assert usable, f"{cell.id}: fixture premise: no solve reports a usable spectrum"
+    assert usable, (f"{cell.id}: fixture premise: no solve reports a spectrum that is usable, "
+                    f"or withdrawn for a mapped row alone")
 
 
 def check_everything(cell) -> None:

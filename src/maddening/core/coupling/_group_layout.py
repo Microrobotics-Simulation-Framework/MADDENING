@@ -106,8 +106,104 @@ def _reads_mapping_weights(group, plan) -> bool:
     the three agree on which groups own the slot; every other group's
     ``_meta`` and compiled step are what they were.  *plan* is the
     group's description (``InterfacePlan.norm_reads_beyond_the_state``).
+
+    **With a dead band** (``atol > 0``) an edge read at its source counts
+    too: the band is asked of the source field and of what the edge
+    delivers, so which entries the floor counts depends on the weights
+    the step ran with, or on its target's pre-step geometry
+    (``InterfacePlan.band_reads_beyond_the_state``).  At the default
+    ``atol == 0`` no group gains the slot.
     """
-    return group.convergence_norm == "interface" and plan.norm_reads_beyond_the_state()
+    return group.convergence_norm == "interface" and (
+        plan.norm_reads_beyond_the_state()
+        or (group.atol > 0 and plan.band_reads_beyond_the_state()))
+
+
+#: The sentence every advisory about a dead band carries
+#: (:func:`_dead_band_advisories`); its tests find the advisory by it.
+_DEAD_BAND_ADVISORY = "a change that has to cross a field at or below atol is not seen"
+
+#: How the advisory opens for a group under Jacobi.  The test configuration
+#: filters ``compile()``'s copy of the advisory by THIS text, so only for
+#: such a group (the domain batteries and the searches run them on
+#: purpose); the advisory of a group of three or more members under
+#: Gauss-Seidel is filtered nowhere.
+_DEAD_BAND_UNDER_JACOBI = "declares a dead band under iteration_mode='jacobi'"
+
+#: The fewest members at which a dead band is advised on under
+#: Gauss-Seidel.  A pair held in both sweep orders in every case measured;
+#: a ring of three did not (MADD-ANO-254).
+_DEAD_BAND_MEMBERS = 3
+
+
+def _dead_band_advisories(group) -> list:
+    """The ``WARNING:`` line of a group whose dead band can hide a change.
+
+    One line for a group with ``atol > 0`` that has **three or more
+    members, or** ``iteration_mode="jacobi"``; none for any group at the
+    default ``atol == 0``, and none for a pair under Gauss-Seidel.
+
+    A field at or below ``atol`` leaves the residual, and the loop
+    accepts on the first residual it measures (between its first two
+    passes).  A change that has to cross such a field on its way to a
+    field the norm keeps is therefore not seen until it arrives there:
+
+    * **under Jacobi** every member reads the previous iterate, so with
+      ``p`` dropped the residual of a pair ``p <- f(q)``, ``q <- g(p)``
+      is ``|g(p_k) - q_k|``: nothing in that pass tests ``p = f(q)``.  A
+      pair whose three forces of 1e-8 fall inside ``atol = 1e-6`` and
+      are amplified by the member that reads them accepted after one
+      pass on every other step, 4.5e5 to 7.4e5 tolerances off, under
+      all three norms; where the dropped member carries state it
+      accepted after two to four passes, 5e5 to 6.3e5 off, on every
+      step after the first;
+    * **on three or more members under Gauss-Seidel** a member swept
+      before the one it reads still reads the previous pass.  A ring of
+      three swept against its data flow (members added A, B, C; edges
+      A -> C -> B -> A; two fields of 1e-8 inside ``atol = 1e-6`` in
+      series between the change and the one kept field) accepted after
+      one pass with the kept field 4.6e3 to 1.8e4 tolerances off, under
+      all three norms, with no acceleration, with Aitken and with
+      IQN-ILS: the change needs three passes to reach the kept field.
+
+    (CPU, jaxlib 0.11.0.)  A PAIR under Gauss-Seidel held on the same
+    data in both sweep orders in every case measured (0.5 to 4.9
+    tolerances), and so does ``atol = 0`` on every group: there only a
+    field that is exactly zero leaves the residual, and every non-zero
+    field, however small, is measured against its own magnitude.
+
+    Not refused, and not sharpened: the same ring swept along its data
+    flow held, and so does any group none of whose kept fields depends
+    on one that can fall inside the band, but which groups those are is
+    a criterion nobody has proved, so the condition is the member count
+    and the schedule and nothing read from the graph.  Static.  Read by
+    ``GraphManager._coupling_group_advisories`` (``validate()``, and
+    ``compile()`` as a ``UserWarning``).
+    """
+    members = len(group.nodes)
+    jacobi = group.iteration_mode == "jacobi"
+    if not (group.atol > 0 and (jacobi or members >= _DEAD_BAND_MEMBERS)):
+        return []
+    measured = []
+    if jacobi:
+        opening = f"{_DEAD_BAND_UNDER_JACOBI} (atol={group.atol!r}, {members} members)"
+        measured.append("a pair under Jacobi accepted after one pass 4.5e5 to 7.4e5 "
+                        "tolerances off")
+    else:
+        opening = (f"declares a dead band on {members} members (atol={group.atol!r}, "
+                   f"iteration_mode={group.iteration_mode!r})")
+    if members >= _DEAD_BAND_MEMBERS:
+        measured.append("a ring of three members under Gauss-Seidel, swept against its "
+                        "data flow, accepted after one pass 4.6e3 to 1.8e4 tolerances off")
+    return [
+        f"WARNING: coupling group {sorted(group.nodes)} {opening}: a field at or below atol "
+        f"leaves the residual, and {_DEAD_BAND_ADVISORY} until it reaches a field the norm "
+        f"keeps, so the group can report converged=True after one pass while a kept field "
+        f"is thousands of tolerances from its fixed point (MADD-ANO-254; measured under all "
+        f"three norms: {'; '.join(measured)}).  A pair under Gauss-Seidel is not affected in "
+        f"any case measured (it held in both sweep orders).  Set atol=0.0 (the default) on this group: "
+        f"then only a field that is exactly zero leaves the residual, and every non-zero "
+        f"field, however small, is measured against its own magnitude."]
 
 
 def _floor_needs_the_step(group, interface_edges) -> bool:
@@ -122,10 +218,14 @@ def _floor_needs_the_step(group, interface_edges) -> bool:
     was never written) then has nothing to measure on and says so,
     where a group that reads mapping weights falls back to the graph's
     own.  *interface_edges* is the group's plan, or the bare edges the
-    report keeps (``InterfacePlan.norm_edges``).
+    report keeps (``InterfacePlan.norm_edges``).  With a dead band
+    (``atol > 0``) an edge read at its source through a mapping anchored
+    at its target counts as well: the band is asked of what it delivers
+    at that geometry.
     """
     return group.convergence_norm == "interface" and any(
         record.reads_pre_step_geometry
+        or (group.atol > 0 and record.band_reads_pre_step_geometry)
         for record in _interface_plan.interface_records(interface_edges))
 
 
@@ -138,6 +238,276 @@ _FLOOR_NEEDS_THE_STEP_REASON = (
     "this graph's steps, or the recorded value is not finite); spectral_error_bound, "
     "precision_limited and the *_usable flags are not reported until the group steps."
 )
+
+
+#: The longest row of a static mapping whose own rounding the float floor
+#: is taken to cover (MADD-ANO-257, open).  One limit for every static
+#: kind: a dense matrix, a static sparse mapping in the gather layout or
+#: in the scatter layout, a registered kind's own static class.
+#:
+#: **Measured, not proved.**  The floor counts ``PRECISION_FLOOR_ULPS``
+#: units of ``eps`` per evaluation of a pass.  A mapped edge delivers
+#: sums over its rows, and a float sum of ``k`` terms of one sign rounds
+#: by up to ``(k - 1) / 2`` units of ``eps`` of the sum; nothing in the
+#: floor counts that.  Where the terms are nearly equal (a uniform
+#: field, or any field beside a much larger common value) and the sum
+#: is taken in order, the rounding is systematic, not a random walk: it
+#: grows like ``k``, and the pass then has a fixed point of its own that
+#: far from the exact one.
+#:
+#: The measurement: a pair of relays that declare one evaluation each
+#: (``m`` values, each fed by the sum of its own ``k`` values, each of
+#: which reads its one back), loop gains 0.9 and 0.99, both schedules,
+#: stalled at the float floor, CPU, jax 0.10.2, 0.11.0 and 0.11.2.  The
+#: smallest ``spectral_error_bound`` over the true distance among the
+#: reports that set ``spectral_usable``, by row length.
+#:
+#: **The scatter layout** (``StaticSparseMapping(layout="scatter")``,
+#: which ``sparse_nearest_neighbor_mapping(mode="conservative",
+#: transpose="scatter")`` builds) adds a target's row up one entry after
+#: another: a scatter-add, the in-order sum on the CPU.  One row; six
+#: random fields, four uniform ones and a ramp, 44 runs per cell;
+#: float32; the same digits on the three versions:
+#:
+#: ===============  ====  ====  ====  ====  ====  =====  =====  ======  ======
+#: row              3     10    30    100   300   1000   3000   1e4     3e4
+#: ===============  ====  ====  ====  ====  ====  =====  =====  ======  ======
+#: ``"interface"``  6.2   3.9   2.07  0.68  0.24  0.069  0.023  0.0068  0.0022
+#: ``"mixed"``      6.3   4.9   2.09  0.66  0.22  0.069  0.023  0.0067  0.0022
+#: ===============  ====  ====  ====  ====  ====  =====  =====  ======  ======
+#:
+#: At the float64 floor (``rtol=1e-16`` under x64) the same pair read
+#: 8.0, 5.0, 2.08, 0.63, 0.22, 0.068, 0.023, 0.0065 and 0.0022 under
+#: ``"interface"`` and 9.1, 5.0, 2.09, 0.63, 0.22, 0.069, 0.023, 0.0065
+#: and 0.0022 under ``"mixed"``, on the three versions alike.
+#:
+#: **The gather layout and the dense kinds** are reduced by XLA in an
+#: order of its choosing, which depends on the jax version, the dtype
+#: and the operator's shape.  Short rows (one, three and sixteen rows of
+#: ``k`` entries in float32, one and three at the float64 floor; two
+#: random fields, two uniform ones and a ramp; ``"interface"``; the same
+#: digits on the three versions):
+#:
+#: ===================  ====  ====  ====  ====
+#: row                  3     10    30    100
+#: ===================  ====  ====  ====  ====
+#: gather, float32      6.5   4.9   3.4   2.8
+#: dense, float32       6.5   4.9   2.24  2.8
+#: gather, float64      8.9   5.0   3.05  2.6
+#: dense, float64       8.9   5.0   2.08  2.6
+#: ===================  ====  ====  ====  ====
+#:
+#: Long rows, flags set throughout:
+#:
+#: * one row behind a uniform field, both forms alike: 1.8x the
+#:   distance at 300 entries, 1.2x at 1000, 1.09x at 3000, and 3.7x or
+#:   more at 1e4 and 3e4 (5x and more behind the other fields);
+#: * **the gather layout on jax 0.10.2 in float32: its rows of 1e4 and
+#:   3e4 entries are summed in order and read exactly as the scatter
+#:   layout's do, 0.0068 and 0.0022 of the distance** (not in float64,
+#:   and not on 0.11.0 or 0.11.2);
+#: * **the dense kind with three rows of 3000 entries: 0.18 of the
+#:   distance in float32 on the three versions, 0.09 at the float64
+#:   floor** (0.84 with three rows of 300 there); the gather layout of
+#:   the same operator held by 4x and more.
+#:
+#: So the limit is the largest power of ten at which every one of those
+#: runs held by a factor of two on the three jax versions, **in every
+#: kind**: the scatter layout sets it (30 entries hold by 2.07, 100 do
+#: not hold).  The reduced forms held by two up to 100 entries, but
+#: which rows XLA sums in order is its own to choose, per version, dtype
+#: and shape, so they are counted at the scatter layout's limit and not
+#: at one of their own.  Other fields, another backend or another jax
+#: may move it.
+#:
+#: **Fields whose terms cancel are another matter** (MADD-ANO-247, open:
+#: a delivered value is no finer than the terms it was computed from).
+#: Behind a field that changes sign within a row, the row's rounding is
+#: larger by the cancellation ``sum |t| / |sum t|`` whatever the row's
+#: length and whichever way it is summed.  Measured on the same pairs
+#: with ``b = 0`` and fields alternating in sign: with a cancellation of
+#: 3 or less every kind held by two as above (3.7x at 10 entries; the
+#: scatter layout 2.14x at 30); with a cancellation of 25, at 10 entries
+#: in every kind, 1.26x in float32 and **0.85x at the float64 floor,
+#: with the flag set**, and 0.80x and 0.72x behind a dense matrix of
+#: three rows of ten (which is thirty wide, and so over the limit).  The
+#: limit is not taken on those runs: no row length answers for a field's
+#: signs, and a row within the limit behind such a field keeps its flag.
+#:
+#: **What a row is** for each kind is in :func:`_longest_row`: counted
+#: whatever the weights are, a dense matrix by its width.
+#:
+#: **What it does not cover.**  A geometry-dependent mapping's rows
+#: (``multilinear_grid`` from points to a grid: a grid node adds up as
+#: many entries as there are points within one spacing of it, by the
+#: same scatter-add) are known only in the step and are not counted:
+#: with 8, 300 and 3000 markers in one cell behind a uniform field the
+#: bound read 13.8x, 3.8x and 1.3x the distance under ``"mixed"`` (it
+#: held, by less than two at 3000).  That group solves the markers'
+#: positions, and in 0.4.0 such a group has no usable flag whatever its
+#: rows (:func:`_geometry_flags`); one whose positions are constants of
+#: the pass keeps its flags behind the same uncounted rows, which was
+#: not measured.  MADD-ANO-257 records all of it.
+MAPPED_ROW_FLOOR_LIMIT = 10  # units: entries of one row of a static mapping
+
+#: Why ``spectral_usable`` and ``gradient_bound_usable`` are withdrawn
+#: from a report whose residual does not stand clear of the float floor
+#: a long row of a static mapping would give it
+#: (:func:`_mapped_row_reason`).  The numbers stay as computed.  The way
+#: out it names is the one that was measured to hold on every jax
+#: version, for every kind.  It names no other kind or layout: a row of
+#: the same length is counted alike in each (see the constant above).
+_MAPPED_ROW_REASON = (
+    "the group's internal edge {key} carries {what} whose longest row adds up {row} "
+    "entries (the limit is {limit}), and the residual ({residual:.3g}) is not above the "
+    "float floor ({floor:.3g}) times the row's length. The sum of a row rounds by more "
+    "than the fixed number of ulps per evaluation the float floor counts once the row "
+    "is longer than the limit, so spectral_error_bound (and the gradient bound built on "
+    "it) can read below the true distance here (MADD-ANO-257). spectral_usable and "
+    "gradient_bound_usable are therefore False; every number is reported as computed. "
+    "The way out: a wider dtype at the same tolerance, so that the residual stands clear "
+    "of the floor, for every floating field of the group's members (one no loop passes "
+    "through included) and for what its internal edges deliver: the floor is counted at "
+    "the coarsest of them.{others}"
+)
+
+
+def _longest_row(mapping) -> tuple:
+    """``(what, entries)`` of *mapping*, a static one: how it is applied,
+    in the words the report's reason uses, and the most entries it adds
+    up into one delivered value.
+
+    Counted on what is frozen, on the host, **whatever the weights are**:
+    they are a parameter a step may be handed, zeros included.
+
+    * A static sparse mapping in the scatter layout: the most valid
+      slots that name one target (the longest row of the operator, as
+      opposed to the longest row of its storage, which is a source's).
+    * In the gather layout: the most valid slots of one row (a padded
+      slot reads a zero whatever its weight is).
+    * A dense matrix (``StaticLinearMapping``, which every dense kind
+      builds): **the matrix's width, not its non-zeros.**  ``H @ field``
+      adds up one product per source entry, and which of them are zero
+      is for the weights to say, not the mapping: ``H`` is the mapping's
+      one parameter, and a step handed another matrix of the same shape
+      sums as many non-zero terms as that one holds.  So a selection
+      matrix (one non-zero a row, whose sum is exact) is counted at its
+      width too; that is part of the guard's price.
+    * A static mapping of another class (a registered kind's own): the
+      entries of its source side, the most one delivered value can add
+      up.  Its ``apply`` is its author's; nothing was measured on it.
+    """
+    kind = getattr(mapping, "kind", None)
+    named = "" if kind is None else f" ({kind})"
+    form = _interface_plan._mapping_form(mapping)
+    if form == _interface_plan.STATIC_DENSE:
+        return (f"a dense matrix mapping{named}, counted at the matrix's width,",
+                int(mapping.n_source))
+    if form != _interface_plan.STATIC_SPARSE:
+        source_lead, _target_lead = _interface_plan._mapping_leads(mapping)
+        return (f"a static mapping of class {type(mapping).__name__}{named}, counted at "
+                f"the entries of its source side,",
+                _interface_plan._entries(source_lead))
+    what = f"a static sparse mapping{named} in the {mapping.layout} layout"
+    index = np.asarray(mapping.indices)
+    counts = None if mapping.counts is None else np.asarray(mapping.counts)
+    if mapping.layout == "gather":
+        if counts is None:
+            return what, int(index.shape[1]) if index.shape[0] else 0
+        return what, int(counts.max()) if counts.size else 0
+    if counts is not None:
+        index = index[np.arange(index.shape[1])[None, :] < counts[:, None]]
+    if index.size == 0:
+        return what, 0
+    return what, int(np.bincount(index.ravel().astype(np.int64)).max())
+
+
+def _mapped_rows(interface_edges) -> tuple:
+    """``((edge key, what, longest row), ...)`` over a group's internal
+    edges that carry a static mapping, of every kind: a dense matrix, a
+    static sparse mapping in either layout, a registered kind's own
+    static class (:func:`_longest_row` has what a row is for each).
+
+    Read by ``compile()`` for the report's guard on the float floor
+    (:func:`_mapped_row_reason`).  *interface_edges* is the group's plan
+    or its bare internal edges.  Every norm: the row's rounding is in
+    what the edge delivers to its target, whichever fields or readings
+    the residual is taken on.  Not a geometry-dependent mapping: its
+    rows are not known before the step (a ``multilinear_grid`` scatter's
+    are the markers in a cell's support), and it is not counted here
+    (see :data:`MAPPED_ROW_FLOOR_LIMIT`).
+    """
+    static = (_interface_plan.STATIC_DENSE, _interface_plan.STATIC_SPARSE,
+              _interface_plan.STATIC_OTHER)
+    return tuple((record.key, *_longest_row(record.mapping))
+                 for record in _interface_plan.interface_records(interface_edges)
+                 if record.mapping_form in static)
+
+
+def _mapped_row_reason(rows, residual: float, floor: float) -> Optional[str]:
+    """Why a report withdraws the flags that rest on its float floor on
+    account of a long row of a static mapping; ``None`` where it does not.
+
+    *rows* is :func:`_mapped_rows` of the group the step was built from,
+    *residual* and *floor* the report's own.  Withdrawn where both hold:
+
+    * a row is longer than :data:`MAPPED_ROW_FLOOR_LIMIT` entries; and
+    * the residual is at or below ``floor * row``: the report is at the
+      float floor that row could give it.  An in-order sum of ``row``
+      terms of one sign rounds by at most ``(row - 1) / 2`` ``eps``,
+      which is ``(row - 1) / 8`` of the ``PRECISION_FLOOR_ULPS`` one
+      evaluation is counted at, so a flag is kept only where that worst
+      case is under an eighth of the residual.  Any other order of the
+      sum rounds by no more.
+
+    ``precision_limited`` (the residual at or below the floor as
+    counted) is the nearer part of the second condition and is not
+    enough: with a tolerance above the counted floor the scatter pair
+    accepts with its residual up to 1000 floors and its bound at 0.007
+    of the distance behind 3e4 entries (float32; 35 of the 83 such
+    reports measured below their distance on each jax version were not
+    ``precision_limited``, 56 of 112 at the float64 tolerances).
+    Measured with the rule (float32, tolerances from 1e-6 to 1e-1, rows
+    of 100, 1000 and 3e4): every flag that is kept reads at least 0.9925
+    of the distance on a pair (two evaluations a pass), which is where
+    the bound's own estimate reads in a residual-dominated report under
+    ``"mixed"`` whatever the mapping.  That is not the rule's floor: on a
+    group of ONE member with an edge to itself (one evaluation a pass,
+    so the threshold is half the pair's) a kept flag read 0.982 of the
+    distance by construction (a report just above the threshold, a
+    uniform field, gain 0.999, 1000 entries a row, ``"interface"``; 14
+    of 176 kept flags under 0.9925).  At the threshold the bound's
+    allowance for rounding is ``1 / row`` of the residual while the
+    row's rounding is up to ``1 / (8 evaluations)`` of it.
+
+    It only withdraws, and reads nothing but the report's own two
+    numbers: a group with no static mapping on an internal edge, a row
+    within the limit, and a residual that stands clear all keep their
+    flags, and no number of the report moves.
+    """
+    long_rows = [entry for entry in rows if entry[2] > MAPPED_ROW_FLOOR_LIMIT]
+    if not long_rows or not floor > 0.0:
+        return None
+    key, what, row = max(long_rows, key=lambda entry: entry[2])
+    if not residual <= floor * row:
+        return None
+    others = [k for k, _what, _row in long_rows if k != key]
+    return _MAPPED_ROW_REASON.format(
+        key=key, what=what, row=row, limit=MAPPED_ROW_FLOOR_LIMIT, residual=residual,
+        floor=floor,
+        others=(f" Other edges with a row over the limit: {others}." if others else ""))
+
+
+def _joined_reasons(earlier: Optional[str], reason: str) -> str:
+    """*reason*, after the reason another rule already gave the report.
+
+    A rule may leave a flag of its own ``False`` with its reason while
+    ``spectral_usable`` stands (a group with a geometry-dependent
+    mapping whose positions are constants of the pass and whose gradient
+    bound is not finite).  A later rule that withdraws
+    ``spectral_usable`` there keeps that reason and adds its own.
+    """
+    return reason if not earlier else f"{earlier} Also: {reason}"
 
 
 def _reading_is_the_fields(interface_edges, float_fields) -> bool:

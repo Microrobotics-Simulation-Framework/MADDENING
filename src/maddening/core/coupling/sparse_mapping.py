@@ -74,6 +74,15 @@ a gradient with respect to the source field through either layout may
 differ in its last bits between runs even where the forward result does
 not.
 
+A row's sum is also what a coupling report's float floor does not count:
+a row of ``k`` entries of one sign rounds by up to ``(k - 1) / 2`` ``eps``,
+systematically behind a uniform field where the sum is taken in order (the
+scatter layout on the CPU; the gather layout's float32 rows of 1e4 entries
+and more on jax 0.10.2).  ``coupling_diagnostics()`` withdraws
+``spectral_usable`` behind a row longer than ``MAPPED_ROW_FLOOR_LIMIT``
+entries at the float floor, in either layout as behind a dense matrix
+(MADD-ANO-257), so neither layout is a way round it.
+
 Summation order
 ---------------
 The row sum is deterministic for one compiled program.  It is not the
@@ -827,6 +836,10 @@ def sparse_nearest_neighbor_mapping(
         is the in-order sum, one result; measured on a GPU it gave a
         different result on every run.  Choose it when the gather form is
         refused and run-to-run reproducibility on a GPU is not needed.
+
+        In either form a coupling report withdraws ``spectral_usable``
+        behind a row of more than ten entries at the float floor
+        (MADD-ANO-257).
     source_ref, target_ref : optional
         Where the points come from, for serialisation, as in
         :func:`~maddening.core.coupling.mapping.rbf_mapping`.

@@ -307,10 +307,15 @@ class _Readings:
 @pytest.mark.parametrize("kind", gi.KINDS)
 @pytest.mark.parametrize("anchors", ANCHORS[:2])
 def test_the_float_floor_counts_each_part_at_its_own_resolution(dtype, geom_dtype, kind, anchors):
-    """``residual_precision_floor`` over the bare edges: a value at the eps
-    of its dtype, a delivered one no finer than the positions it was
-    gathered at (their dtype, and their rounding ``eps |u|`` in spacings),
-    and a position at ``eps |u|`` of one spacing."""
+    """``residual_precision_floor`` of the pair's two members over their
+    edges, two rules together: a value entry at the eps of the group's
+    coarsest dtype (the coarser of the values' and the positions'), a
+    delivered one no finer than the rounding ``eps |u|`` in spacings of
+    the positions it was gathered at; and a position at ``eps |u|`` of
+    one spacing in the positions' own dtype.  (Before the coarsest-dtype
+    rule a value read at its source was at its own dtype's eps: the
+    float64 values beside float32 positions of the scatter-only and
+    two-way cells are what that rule changed here.)"""
     shape = Shape(kind, 72, 4, anchors, d=2, dtype=dtype, geom_dtype=geom_dtype, origin=40.0)
     ref = Reference(shape, DRAWS[0])
     state = ref.one_pass(ref.pre)

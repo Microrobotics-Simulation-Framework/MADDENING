@@ -55,6 +55,7 @@ from tests.property.invariants import (
 )
 from tests.property.strategies import (
     COUPLING_ENUM_OPTIONS,
+    DRAWN_DEAD_BAND,
     CouplingGroupRecipe,
     graph_recipes,
 )
@@ -79,6 +80,10 @@ def _compile_drawn(gm: GraphManager) -> None:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
                                 category=UserWarning)
+        # ... and a drawn group of three members can declare a dead band,
+        # which compile() advises on (MADD-ANO-254): the round trip
+        # carries the group's ``atol`` like every other field.
+        warnings.filterwarnings("ignore", message=DRAWN_DEAD_BAND, category=UserWarning)
         gm.compile()
 
 
@@ -442,7 +447,7 @@ def test_a_checkpoint_beats_the_config_for_trained_mapping_weights(recipe):
         with pytest.warns(UserWarning, match="live mapping weights"):
             config = gm.to_dict()
         rebuilt = GraphManager.from_dict(config, recipe.registry)
-        rebuilt.compile()
+        _compile_drawn(rebuilt)
         # The recipe rebuild is *not* the trained state: if it were, this
         # property would be vacuous.
         assert any(

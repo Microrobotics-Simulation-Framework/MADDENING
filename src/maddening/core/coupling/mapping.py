@@ -153,6 +153,12 @@ class StaticLinearMapping:
     back as ``weights`` on every step.  Compared and hashed by identity
     (``eq=False``): an ``EdgeSpec`` holding a mapping must stay hashable,
     and two mappings with equal matrices are still two edges' weights.
+
+    Each delivered value is a sum over the matrix's width.  A coupling
+    report's float floor does not count that sum's rounding, and
+    ``coupling_diagnostics()`` withdraws ``spectral_usable`` at the
+    float floor of a group with such a mapping more than ten entries
+    wide on an internal edge, whatever the weights are (MADD-ANO-257).
     """
     H: Any
     kind: str = "matrix"

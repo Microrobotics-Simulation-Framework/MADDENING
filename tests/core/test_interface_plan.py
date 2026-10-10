@@ -484,8 +484,8 @@ def test_only_an_edge_read_through_its_mapping_makes_the_floor_depend_on_weights
     """A floating source, a mapping, and the delivered side: an edge the
     norm reads at its source is the stored field, whatever the weights."""
     back = EdgeSpec("b", "a", "x", "u0")
-    interface = types.SimpleNamespace(convergence_norm="interface")
-    mixed = types.SimpleNamespace(convergence_norm="mixed")
+    interface = types.SimpleNamespace(convergence_norm="interface", atol=0.0)
+    mixed = types.SimpleNamespace(convergence_norm="mixed", atol=0.0)
     mapped = _pair(EdgeSpec("a", "b", "x", "u0", mapping=DENSE), back)
     assert mapped.norm_reads_mapping_weights()
     assert layout._reads_mapping_weights(interface, mapped)
@@ -501,6 +501,19 @@ def test_only_an_edge_read_through_its_mapping_makes_the_floor_depend_on_weights
     assert not expanding.norm_reads_mapping_weights() and expanding.mapped_keys() == ()
     assert not layout._reads_mapping_weights(interface, expanding)
     assert layout._reading_is_the_fields(expanding, {"a": ("x",), "b": ("x",)})
+    # With a dead band declared, the band of an edge read at its source is
+    # asked of what the edge delivers too, through the weights the step ran
+    # with: the group then owns the slot.  Only under the interface norm,
+    # only for an edge read at its source, and never at the default atol.
+    banded = types.SimpleNamespace(convergence_norm="interface", atol=1e-6)
+    assert expanding.band_reads_beyond_the_state()
+    assert layout._reads_mapping_weights(banded, expanding)
+    assert not layout._reads_mapping_weights(
+        types.SimpleNamespace(convergence_norm="mixed", atol=1e-6), expanding)
+    assert not _pair(EdgeSpec("a", "b", "x", "u0"), back).band_reads_beyond_the_state()
+    assert not mapped.band_reads_beyond_the_state()
+    assert not _pair(EdgeSpec("a", "b", "n", "u0", mapping=WIDE_DENSE),
+                     back).band_reads_beyond_the_state()
     # One edge of each side: the group reads the weights of the gather alone.
     gather = EdgeSpec("b", "a", "x", "u0", mapping=matrix_mapping(np.ones((1, 2), np.float32)))
     two_way = _pair(scatter, gather)
@@ -777,7 +790,7 @@ def test_the_step_records_the_floor_where_the_returned_state_cannot_repeat_the_r
             assert not _geometry_pair(mode, anchor).norm_reads_mapping_weights()
     tie = _pair(EdgeSpec("a", "b", "x", "u0", mapping=DENSE), EdgeSpec("b", "a", "x", "u0"))
     assert tie.norm_reads_mapping_weights() and tie.norm_reads_beyond_the_state()
-    group = types.SimpleNamespace(convergence_norm="interface")
+    group = types.SimpleNamespace(convergence_norm="interface", atol=0.0)
     assert layout._reads_mapping_weights(group, _geometry_pair("consistent", "target"))
     assert not layout._reads_mapping_weights(group, _geometry_pair("consistent", "source"))
     # The report's fallback is asked of the bare edges it keeps.
@@ -785,7 +798,7 @@ def test_the_step_records_the_floor_where_the_returned_state_cannot_repeat_the_r
         edges = _geometry_pair("consistent", anchor).norm_edges()
         assert layout._floor_needs_the_step(group, edges) is needs
         assert not layout._floor_needs_the_step(
-            types.SimpleNamespace(convergence_norm="mixed"), edges)
+            types.SimpleNamespace(convergence_norm="mixed", atol=0.0), edges)
     assert not layout._floor_needs_the_step(group, tie.norm_edges()), (
         "weights: the graph's own are the fallback")
 

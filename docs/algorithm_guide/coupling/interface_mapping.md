@@ -86,6 +86,17 @@ With the mixed norm, which reads every field of the group whole, the
 same pair stops as early as the diluted criterion did: prefer the
 interface norm where a small field drives a large one.
 
+**This needs the transfer to be on the edge.**  The figures above are of
+a pair whose grid field comes back to the markers through a gather
+*mapping*.  A member that is handed the whole grid through a plain edge
+and samples it inside its own `update` is read at the grid's `N`
+entries, as any plain edge is, and the dilution returns: on the same
+pair the markers were 4.6 tolerances off at `N` = 300, 27 to 74 at 3e3,
+56 to 104 at 3e4 and 179 at 3e5 with `converged=True`, against 1.8 to
+6.2 with the gather on the edge.  Put the sampling on the edge: a static
+gather (a dense or sparse matrix), or `multilinear_grid` with
+`geometry=` where the sample points move.
+
 A geometry-dependent mapping inside a group is read by the same rule,
 with its positions (see "What the interface norm reads on a geometry
 edge" below).
@@ -766,6 +777,65 @@ held on the three jaxlib versions they were run on (0.10.2, 0.11.0,
 recorded in the spec, so a reloaded mapping is applied the way it was
 built.  The two forms hold the same matrix, and agree with one another
 and with the dense conservative kind to rounding.
+
+**The order of the sum and a coupling report's float floor**
+(MADD-ANO-257, open).  "To rounding" is `(k + 2) eps` of a row of `k`
+entries, and an in-order sum of `k` terms of one sign reaches a good
+part of it where the terms are nearly equal: the rounding is then
+systematic and grows like `k`.  The float floor of
+`coupling_diagnostics()` counts a fixed number of `eps` per evaluation
+and does not count a row's own sum.  So a group stalled at its float
+floor behind a long row is further from its fixed point than
+`spectral_error_bound` says.  Measured on a pair of relays (one value fed
+by a row of `k` values that each read it back; gains 0.9 and 0.99, both
+schedules, uniform, ramp and random fields; the smallest bound over the
+true distance among the reports with `spectral_usable` set; the same
+digits on jax 0.10.2, 0.11.0 and 0.11.2):
+
+| row `k`, scatter layout | 3 | 10 | 30 | 100 | 300 | 1000 | 3000 | 1e4 | 3e4 |
+|---|---|---|---|---|---|---|---|---|---|
+| float32, `"interface"` | 6.2 | 3.9 | 2.07 | 0.68 | 0.24 | 0.069 | 0.023 | 0.0068 | 0.0022 |
+| float32, `"mixed"` | 6.3 | 4.9 | 2.09 | 0.66 | 0.22 | 0.069 | 0.023 | 0.0067 | 0.0022 |
+| float64 floor, `"interface"` | 8.0 | 5.0 | 2.08 | 0.63 | 0.22 | 0.068 | 0.023 | 0.0065 | 0.0022 |
+
+The gather layout and the dense kinds carry the same rounding: XLA
+reduces a row in an order of its own, which depends on the jax version,
+the dtype and the shape.  Rows of up to 100 entries held by 2.2x or more
+in both forms (one, three and sixteen rows; float32; the three versions
+alike), and one row behind a uniform field held by 1.8x at 300 entries,
+1.2x at 1000 and 1.09x at 3000, and by 3.7x or more at 1e4 and 3e4; but
+jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries and
+more in order (0.0068 and 0.0022, as the scatter layout), and a dense
+matrix of three rows of 3000 entries read 0.18 of the distance in
+float32 on the three versions (0.09 at the float64 floor), all with the
+flags set.
+
+In 0.4.0 the report therefore withdraws `spectral_usable` and
+`gradient_bound_usable`, with a reason, where an internal edge carries a
+static mapping of any kind with a row longer than 10 entries and the
+residual is not above the float floor times the row's length; the
+numbers are reported as computed, and the floor itself is corrected in
+0.5.0 (a row's own `(k - 1) / 2` `eps`, which holds for any order of the
+sum, counted with the evaluations).  A row is the entries one delivered
+value adds up, whatever the weights are (they are a parameter a step may
+be handed): the valid slots of a sparse row in either layout, and the
+**width** of a dense matrix, so a dense selection matrix is counted at
+its width although its sums are exact.  The limit is the scatter
+layout's (30 entries hold by 2.07x, 100 do not hold): which rows the
+other forms sum in order is XLA's to choose, so they are not given a
+limit of their own.  A wider dtype at the same tolerance takes the
+report off its float floor in every kind: the scatter pair in float64 at
+`rtol=1e-7` kept its flags on a bound at 0.9995 of the distance or more.
+
+A geometry-dependent mapping is not counted.  A `multilinear_grid`
+gather adds up at most `2^d` entries; its conservative form is a
+scatter-add with as many entries on a grid node as there are markers in
+its support, a number decided in the step: with 8, 300 and 3000 markers
+in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3
+times the distance under `"mixed"`.  That group solves the markers'
+positions and has no usable flag in 0.4.0 (MADD-ANO-252); a group whose
+positions are constants of the pass keeps its flags behind the same
+uncounted rows, which was not measured.
 
 The reverse-mode derivative of a gather with respect to the *field* is
 itself a scatter-add.  On a GPU a gradient with respect to the source

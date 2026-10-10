@@ -76,7 +76,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core._pow2_frame import pow2_host_factor
 from maddening.core.edge import _delivered
@@ -388,16 +390,23 @@ class PartReading(tuple):
     * ``positions``: per state, the positions (in the kind's length
       scale) a value delivered through a geometry-dependent mapping was
       computed at -- its rounding carries theirs -- and ``None`` for
-      every other part.
+      every other part;
+    * ``delivered``: per state, what the edge delivers for a source field
+      **read at its source**, where the reader asked for it
+      (:meth:`InterfaceEdge.read` with ``band``: a group that declares a
+      dead band); ``None`` otherwise.  Only its magnitude is read, and
+      only by the dead band (``acceleration._kept_by_what_is_delivered``).
     """
 
     part: ReadingPart
     positions: tuple
+    delivered: Optional[tuple]
 
-    def __new__(cls, edge, source_dtype, values, part, positions):
+    def __new__(cls, edge, source_dtype, values, part, positions, delivered=None):
         self = super().__new__(cls, (edge, source_dtype, *values))
         self.part = part
         self.positions = tuple(positions)
+        self.delivered = None if delivered is None else tuple(delivered)
         return self
 
     @property
@@ -595,6 +604,36 @@ class InterfaceEdge:
         held = getattr(self.mapping, "params_pytree", None)
         return True if held is None else bool(held())
 
+    @property
+    def band_reads_weights_of_the_step(self) -> bool:
+        """With a dead band declared, does whether this edge's reading is
+        kept depend on mapping weights (which a caller may override for
+        one step)?
+
+        An edge read at its source through a mapping that holds weights:
+        the band is asked of what it delivers as well as of the field
+        (``acceleration._kept_by_what_is_delivered``).  Read by
+        :meth:`InterfacePlan.band_reads_beyond_the_state`.
+        """
+        if self.norm_side != SOURCE:
+            return False
+        if self.mapping_form != NEEDS_GEOMETRY:
+            return True
+        held = getattr(self.mapping, "params_pytree", None)
+        return True if held is None else bool(held())
+
+    @property
+    def band_reads_pre_step_geometry(self) -> bool:
+        """With a dead band declared, does whether this edge's reading is
+        kept depend on the target's pre-step geometry?
+
+        An edge read at its source through a geometry-dependent mapping
+        anchored at its target: what it delivers is taken at a geometry
+        the returned state does not hold.
+        """
+        return (self.norm_side == SOURCE and self.anchor is not None
+                and self.anchor[0] == "target")
+
     def geometry_at(self, state, pre_step=None):
         """The geometry this edge's mapping is read with at the iterate *state*.
 
@@ -622,7 +661,7 @@ class InterfaceEdge:
                      else pre_step[self.target[0]])
         return held[field]
 
-    def read(self, states, mappings=None, pre_step=None) -> tuple:
+    def read(self, states, mappings=None, pre_step=None, band: bool = False) -> tuple:
         """This edge's reading at each of *states*: one :class:`PartReading` per part.
 
         *states* are ``{node: {field: value}}`` dicts (one for a floor,
@@ -632,6 +671,14 @@ class InterfaceEdge:
         ``acceleration._interface_readings``, the one generator the
         residual, its float floor and the spectral analysis's reading
         iterate.
+
+        *band* is that the reader's group declares a dead band
+        (``atol > 0``).  The source-field part of an edge read at its
+        source then also carries what the edge delivers at each state
+        (``PartReading.delivered``: the step's edge rule on the stored
+        field, with *mappings* and the geometry the step uses), for the
+        dead band to ask of both.  Without it nothing more is built than
+        ever was.
         """
         node, field = self.source
         stored = tuple(s[node][field] for s in states)
@@ -639,6 +686,17 @@ class InterfaceEdge:
         out = []
         for part in self.parts:
             positions = (None,) * len(states)
+            if part.what == SOURCE:
+                delivered = None
+                if band:
+                    geoms = ((None,) * len(states) if self.anchor is None
+                             else tuple(self.geometry_at(s, pre_step) for s in states))
+                    delivered = tuple(_delivered(self.edge, v, mappings, g)
+                                      for v, g in zip(stored, geoms))
+                values = tuple(self.reading(v, mappings) for v in stored)
+                out.append(PartReading(self.edge, source_dtype, values, part, positions,
+                                       delivered))
+                continue
             if part.what == GEOMETRY:
                 g_node, g_field = part.field
                 held = tuple(s[g_node][g_field] for s in states)
@@ -660,6 +718,51 @@ class InterfaceEdge:
     def read_from_state(self) -> bool:
         """Is the source a field of the producer's state (floating or not)?"""
         return self.source_kind in _STATE_FIELD_KINDS
+
+    def delivered_leaves(self, state, mappings=None) -> tuple:
+        """``(dtype, size)`` of each array this edge hands its target, read from *state*.
+
+        Static: the edge's own rule (``maddening.core.edge._delivered``:
+        the mapping with the weights in *mappings*, then the transform)
+        evaluated on the **abstract** value of the source field
+        (:func:`jax.eval_shape`: shapes and dtypes, never values), so a
+        transform is traced once more and is never run on numbers, and
+        nothing is added to a program being traced around the call.  A
+        geometry-dependent mapping is handed the abstract value of its
+        geometry field in *state* (the pre-step field has the same shape
+        and dtype).
+
+        Empty where there is nothing to ask: an edge with neither a
+        mapping nor a transform delivers its source field, which the
+        caller already holds; a source that is not a field of *state* (a
+        boundary flux, an absent field) or a geometry field *state* does
+        not hold cannot be evaluated from it.
+
+        Read by ``acceleration._group_coarsest_eps``: a transform (or a
+        mapping) that delivers a coarser floating dtype than every field
+        of the group is a rounding the pass goes through.
+        """
+        if not self.read_from_state or (self.mapping is None and not self.has_transform):
+            return ()
+        geom: tuple = ()
+        if self.anchor is not None:
+            side, field = self.anchor
+            holder = (state.get(self.source[0] if side == "source" else self.target[0])
+                      or {})
+            if field not in holder:
+                return ()
+            geom = (holder[field],)
+        fields = state.get(self.source[0]) or {}
+        if self.source[1] not in fields:
+            return ()
+        edge = self.edge
+
+        def rule(value, *geometry):
+            return _delivered(edge, value, mappings, *geometry)
+
+        out = jax.eval_shape(rule, fields[self.source[1]], *geom)
+        return tuple((leaf.dtype, int(np.prod(leaf.shape, dtype=np.int64)))
+                     for leaf in jax.tree_util.tree_leaves(out))
 
 
 def _edge_record(edge, state=None, nodes=None, *, declared: int = 0,
@@ -860,6 +963,24 @@ class InterfacePlan:
         return self.norm_reads_mapping_weights() or any(
             rec.reads_pre_step_geometry and rec.source_kind == FLOATING
             for rec in self.internal)
+
+    def band_reads_beyond_the_state(self) -> bool:
+        """With a dead band declared (``atol > 0``), does it ask, on an
+        internal edge with a floating source, something the state a solve
+        returns does not hold?
+
+        The band of an edge read at its source is asked of the source
+        field **and of what the edge delivers**: through the weights of
+        its mapping (``params["mappings"]``, which a caller may override
+        for one step) or at its target's pre-step geometry.  Which
+        entries are in such a group's float floor then cannot be decided
+        from the returned state alone, and the step records the floor,
+        as it does for a group that reads an edge through its mapping
+        (:meth:`norm_reads_beyond_the_state`).  Read by
+        ``_group_layout._reads_mapping_weights``.
+        """
+        return any((rec.band_reads_weights_of_the_step or rec.band_reads_pre_step_geometry)
+                   and rec.source_kind == FLOATING for rec in self.internal)
 
     def measured_whole(self) -> frozenset:
         """``{(node, field)}``: the state fields the norm measures whole on

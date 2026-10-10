@@ -16729,8 +16729,19 @@ anomalies:
       (`|W| |x|` in place of `|W x|`), which a linear mapping kind can
       supply and an arbitrary transform cannot.  Until then the floor of a
       delivered value assumes it is of the size of the entries it was
-      computed from.
+      computed from.  The same mechanism is reached through the FIELD's
+      signs behind a mapping whose weights are all positive: a field whose
+      terms cancel in a row (`sum |t| / |sum t|` of 25) left a stalled
+      pair's bound at 1.26 of the distance behind a row of 10 entries in
+      float32 and at 0.85 at the float64 floor with `spectral_usable`
+      set, in the dense kind and in both sparse layouts, and a row of two
+      entries read as a row of ten does.  The mapped-row guard
+      (MADD-ANO-257) does not reach it: it counts a row's length, and no
+      row length answers for a field's signs.  Do not rely on
+      `spectral_usable` at the float floor behind a field whose terms
+      cancel within a mapping's row.
     verification:
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_short_row_of_a_cancelling_field_is_at_or_above_the_distance"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_whose_norm_reads_a_delivered_difference_is_bounded"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_norm_reads_the_fields"
       - "tests/core/test_coupling_interface_floor_of_a_delivered_difference.py::test_a_jacobi_pair_is_bounded_where_the_delivered_difference_cancels_nothing"
@@ -17181,3 +17192,472 @@ anomalies:
       - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_every_key_the_library_s_door_takes_is_applied_or_refused_by_the_route"
       - "tests/api/test_a_request_key_the_route_does_not_apply.py::test_the_other_request_models_drop_a_key_they_do_not_know_and_apply_the_rest"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-254"
+    title: "A change that has to cross a field inside the dead band is not seen until it reaches a kept field: with atol > 0 a Jacobi pair, or a Gauss-Seidel ring of three, reports converged=True after one pass thousands of tolerances from its fixed point"
+    description: >
+      A field whose magnitude is at or below a group's `atol` leaves the
+      residual (the 0.4.0 dead band), and the loop accepts on the first
+      residual it measures, between its first two passes.  A change that
+      has to cross such a field on its way to a field the norm keeps is
+      therefore not in the residual until it arrives, and a kept field can
+      be returned with `converged=True` far from its fixed point, against
+      the oracle the dead band is documented with (the distance of the
+      kept fields to their fixed point).  Two cases are measured (CPU,
+      jaxlib 0.11.0, `atol=1e-6`, `solver="ift"`), each under
+      `"interface"`, `"mixed"` and `"l2"` alike.
+      (1) Under Jacobi every member reads the previous iterate, so with
+      `p` dropped the residual of a pair `p <- f(q)`, `q <- g(p)` is
+      `|g(p_k) - q_k|`: it tests that `q` agrees with the `p` it was
+      computed from, and nothing in that pass tests `p = f(q)`.  On a
+      plain-edge float64 pair (`rtol=1e-6`) of three forces of about 1e-8
+      and thirty grid values whose grid member spreads and amplifies the
+      forces it reads, on every other step the group reports
+      `iterations=1, converged=True` with both fields 4.5e5 to 7.4e5
+      tolerances from the fixed point, in either order of the members;
+      where the dropped member carries state it accepts after two to four
+      passes, 5e5 to 6.3e5 tolerances off, on every step after the first.
+      (2) Under Gauss-Seidel a member swept before the one it reads still
+      reads the previous pass.  On a float32 ring of three (`rtol=1e-4`;
+      members added, and swept, A, B, C; edges A -> C -> B -> A; three
+      displacements of order 10 computed from two fields of 36 forces of
+      about 1e-8 in series, both inside the band, the load on C changing
+      each step) the change needs three passes to reach the one kept
+      field, and the group reports `iterations=1, converged=True` with it
+      4.6e3 (mixed), 8.0e3 (l2) and 1.8e4 (interface) tolerances off, on
+      every step under `"interface"` and on every other step under the
+      other two; with Aitken 4.6e3, 8.0e3 and 4.6e3, with IQN-ILS 4.6e3,
+      8.0e3 and 1.8e4 (the same four digits on jax 0.10.2, 0.11.0 and
+      0.11.2); a fixed relaxation of 0.7 held under `"mixed"` and `"l2"`
+      and not under `"interface"`.
+      What held: `atol=0` on every one of these groups (57 to 81 passes to
+      0.3 to 7.9 tolerances on the pairs; 22 to 32 passes to 0.2 to 3.0
+      on the ring); a PAIR under Gauss-Seidel with the band declared, the
+      dropped member swept first or second (31 to 41 passes to 0.5 to 4.9
+      on the float64 pair; 0.65 to 0.75 on the pair of the ring's two
+      kinds of member); and, as one measured instance and not a rule, the
+      same ring swept along its data flow (C, B, A: 0.65 to 0.75).
+      `strict_convergence` does not raise.  No release carried it: the dead
+      band is new in 0.4.0's development (before it `atol` was a floor
+      under the scale).  Found by two pre-merge audits of the interface
+      norm on static mapped edges (the Jacobi case on an edge whose source
+      the band dropped, the ring on sparse mapped edges); both are
+      reproduced on every norm, so neither is the mappings'.  Not fixed
+      in 0.4.0, by decision: the dead band stays as it is and its
+      criterion is redesigned in 0.5.0.  A rule that only delays the exit
+      (so many consecutive passes at or below the threshold) is provable
+      from the residuals the loop carries only for a loop in which every
+      kept member is reached from kept members through the same number of
+      dropped ones, where `d + 1` consecutive kept residuals bound the
+      residual of the composed map by their sum; in a general read graph
+      the bound needs the Lipschitz constant of the maps through the
+      dropped members, and the stateful Jacobi pair accepts after two
+      passes.  0.4.0 states the condition, advises on it at `validate()`
+      and `compile()` for every group with `atol > 0` that has three or
+      more members or runs under Jacobi, and pins both cases.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `converged=True` on a state far from its fixed point is a silent
+      wrong result, never `minor`.  Not `critical`: it needs a dead band
+      declared (`atol > 0`; the default is 0.0, where nothing of this
+      happens), a field that falls inside the band, and a kept member
+      whose output depends on that field enough to matter, which is the
+      declaration `atol` makes false; and `compile()` warns about every
+      configuration it was measured in (three or more members, or
+      Jacobi).  The second case runs under the default schedule, which is
+      why the advisory no longer offers Gauss-Seidel as the way out.
+      `context_dependent` because whether the verdict gates anything is
+      the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration._scaled_change"
+      - "maddening.core.coupling.group.CouplingGroup"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Leave `atol` at its default of 0.0 on any group of three or more
+      members and on any group under `iteration_mode="jacobi"` (verified
+      on every measured group: 0.2 to 7.9 tolerances).  At `atol=0.0` only
+      a field that is exactly zero leaves the residual; every non-zero
+      field, however small, is measured against its own magnitude.  A
+      pair under Gauss-Seidel may keep its dead band (held in both sweep
+      orders in every case measured).  Changing the schedule to
+      Gauss-Seidel is NOT a remedy for a group of three or more.  The
+      dead band is expected to be replaced in 0.5.0: do not tune to it.
+      Where a band is kept regardless, read `spectral_error_bound` with
+      `diagnostics=True`: the bound folds the dead-banded share in (1.9e6
+      to 3.7e6 on the audited Jacobi pair, and 2x to 11x the kept field's
+      distance on the ring, where the verdict read converged).
+    resolution_status: "open"
+    residual_risk: >
+      Until the dead band is redesigned (0.5.0), a group with `atol > 0`
+      that has three or more members, or runs under Jacobi, can accept
+      early as described.  The advisory is static (the member count, the
+      schedule and `atol`); it cannot tell whether a kept member depends
+      on a dead-banded field, so it also fires on groups that are sound,
+      and a pair under Gauss-Seidel is not advised on because it held in
+      every case measured, not because it is proved.
+    verification:
+      - "tests/core/test_the_dead_band_under_jacobi.py::test_a_converged_jacobi_step_holds_the_fields_computed_from_a_dead_banded_one"
+      - "tests/core/test_the_dead_band_under_jacobi.py::test_the_fixture_reaches_the_one_pass_acceptance"
+      - "tests/core/test_the_dead_band_under_jacobi.py::test_gauss_seidel_holds_the_pair_with_the_field_inside_the_dead_band"
+      - "tests/core/test_the_dead_band_under_jacobi.py::test_validate_advises_on_a_dead_band_declared_under_jacobi"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_converged_step_of_the_banded_ring_holds_its_kept_field"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_banded_ring_accepts_after_one_pass_far_from_its_fixed_point"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_pair_holds_with_the_force_inside_the_dead_band_in_both_sweep_orders"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_same_ring_with_no_dead_band_is_held"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_validate_advises_on_a_dead_band_declared_on_three_members"
+      - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_group_with_no_dead_band_gets_no_advisory"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-255"
+    title: "The float floor of a group of mixed dtypes took each field at its own dtype's eps: a float64 field downstream of a float32 member diluted it and spectral_error_bound read 0.21x the true distance with the flags set"
+    description: >
+      The residual's float floor (`residual_precision_floor`, and the
+      per-entry resolution the step's spectral analysis and gradient bound
+      use) counted each entry at the eps of its own field's dtype.  A
+      field a node computes from a coarser neighbour's output carries that
+      neighbour's rounding, so a float64 field of `n` values downstream of
+      one float32 value is as far from its fixed point, relative to its own
+      size, as that value is, while its `n` entries added nothing to the
+      pooled floor, which fell as `1/sqrt(1+n)`.  Measured on the base of
+      this fix (CPU, jaxlib 0.11.0, x64): a float32 member of one value
+      and a float64 member of `n` values, affine relays declaring one
+      evaluation, stalled 500 float32 ulps short of the fixed point (407
+      tolerances at every `n`); `spectral_error_bound` read 0.92x the
+      distance at `n = 1e3` and 0.21x at `n = 2e4` with `spectral_usable`
+      and `gradient_bound_usable` set, under Gauss-Seidel and under
+      `"interface"`, `"mixed"` and `"l2"` alike.  The same holds without
+      x64 for a float16 or a bfloat16 value beside 2e4 float32 ones (0.37x
+      and 0.36x).  Jacobi held on these pairs (its resolvent norm grows as
+      `sqrt(n)`).  No release carried it: the floor and the bounds are new
+      in 0.4.0's development.  Found by the pre-merge audit of the
+      interface norm on static mapped edges.  Resolved in 0.4.0: every
+      entry of a group's floor is counted at the eps of the coarsest
+      floating dtype among the group's fields and what its internal edges
+      deliver, by one function read by the report and by the step's
+      analysis; a group of one dtype has the floor it had, to the bit.
+      **What an edge delivers** was at first counted only for the one
+      reading of an edge read as delivered under `"interface"`: with every
+      field float64 and one internal edge carrying
+      `transform=lambda v: v.astype(float32)`, a pair stalled on the
+      float32 bottleneck with `residual` exactly 0.0 and
+      `converged=True` at `rtol=1e-12`, 2.8e5 to 3.6e5 tolerances from
+      its fixed point, and `spectral_error_bound` read 5e-8 to 1e-7 of the
+      distance with both usable flags set, under `"mixed"` and `"l2"` on
+      either edge, under `"interface"` on an edge read at its source, and
+      under both schedules (found by the second pre-merge audit).  The
+      delivered dtype of every internal edge (after its mapping and its
+      transform; read abstractly, the transform is never run on numbers)
+      now enters the group's coarsest eps under all three norms: the same
+      reports read the bound at 26x to 45x the distance.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs a group of two
+      floating dtypes whose finer field is large and downstream of the
+      coarser one, and a residual at its float floor; the iteration and
+      `converged` were unaffected.  `context_dependent` because whether
+      the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: hold a coupling group's fields in one dtype.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The rule assumes any field of a group may be downstream of its
+      coarsest member, that a node's own arithmetic is no coarser than the
+      fields it reads and writes, and that an input from outside the group
+      is a constant of the solve.  A node that rounds through a narrower
+      dtype inside `update` (a cast down and back) is outside it: nothing
+      outside the node can see it, and it is not counted.  So is an
+      internal edge whose source is not a state field (a boundary flux),
+      whose delivered dtype is not read.  Where a fine field is computed
+      from fine fields alone the floor is larger than it needs to be, and
+      `precision_limited` is reported sooner.  The rule is for value
+      entries: a position (a geometry field an internal edge anchors a
+      geometry-dependent mapping at, or a position part read in kernel
+      lengths) keeps its own dtype's eps, because a stored float64
+      position has float64 resolution.  That leaves one corner: a float64
+      position a member sets within the pass purely from float32 data is
+      counted finer than it is (on the pair that pins it the bound held
+      by 575x and more; the pair solves positions, so in 0.4.0 its
+      report carries no flag: MADD-ANO-252).
+    verification:
+      - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_float64_field_downstream_of_a_float32_member_is_floored_at_float32"
+      - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_a_set_flag_stands_on_a_bound_at_or_above_the_distance_in_a_group_of_two_dtypes"
+      - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_every_entry_of_the_floor_is_counted_at_the_groups_coarsest_eps"
+      - "tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_steps_analysis_counts_every_entry_at_the_groups_coarsest_eps"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_the_coarsest_eps_counts_a_floating_delivery_and_nothing_else"
+      - "tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_an_edge_that_keeps_its_dtype_changes_nothing_to_the_bit"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-256"
+    title: "The dead band of an interface edge read at its source was asked of the source field alone: forces of 1e-8 handed on as 17 to 520 left the norm at atol=1e-6 and a Jacobi pair accepted after one pass 34% to 74% from its fixed point"
+    description: >
+      Under `convergence_norm="interface"` an edge whose static mapping
+      delivers more entries than its source field holds is read at its
+      source (the compact-side rule of 0.4.0's development).  The dead
+      band was then asked of the source field, before the mapping and the
+      transform, although `atol` is documented in the interface
+      quantity's own units and such an edge has two quantities.  Measured
+      (CPU, jaxlib 0.11.0, float64): three forces of about 1e-8 scattered
+      onto thirty values through a mapping and `transform=lambda v: v *
+      1e9`, `atol=1e-6`, `rtol=1e-6`, Jacobi; the edge delivers 17 to 520
+      and was dropped, and on every other step the group reported
+      `iterations=1, converged=True` with both fields 3.4e5 to 7.4e5
+      tolerances from the fixed point.  Read as delivered (the rule before
+      the compact side) the same graph took 57 to 75 passes to 1.1 to 9
+      tolerances.  No release carried it.  Found by the pre-merge audit of
+      the interface norm on static mapped edges.  Resolved in 0.4.0: the
+      reading of an edge read at its source is dropped only where both
+      the source field and what the edge delivers are at or below `atol`,
+      decided by one function for the residual, the float floor and the
+      spectrum's weights; the reading, its scale and its floor stay the
+      source field's; nothing is built for a group with `atol == 0`.
+      What a dropped field does under Jacobi in general is MADD-ANO-254.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `converged=True` far from the fixed point is a silent wrong result,
+      never `minor`; registered although no release carried it, because it
+      is major.  Not `critical`: it needs a dead band declared, an edge
+      read at its source whose transform or mapping changes the
+      quantity's scale across `atol`, and Jacobi.  `context_dependent`
+      because whether the verdict gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: leave `atol` at 0.0 in a group with such an edge, or use
+      Gauss-Seidel.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      With `atol > 0` the delivered value is computed once more per state
+      read by the residual (the mapping and the transform, the size of
+      the target field).  A reading both of whose quantities are inside
+      the band is dropped as before, and under Jacobi a dropped field
+      un-holds the fields computed from it (MADD-ANO-254, open).
+    verification:
+      - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_source_reading_leaves_the_norm_only_where_field_and_delivered_are_both_inside"
+      - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_a_small_force_handed_on_in_other_units_is_held_to_the_criterion"
+      - "tests/core/test_the_dead_band_of_an_edge_read_at_its_source.py::test_the_spectrums_weights_keep_the_reading_the_residual_keeps"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-257"
+    title: "The float floor of a coupling report does not count the rounding of a mapped edge's row sum: stalled behind a scatter-layout row of 100 entries spectral_error_bound reads 0.68 of the true distance with spectral_usable=True, behind 3e4 entries 0.002"
+    description: >
+      The float floor of `coupling_diagnostics()` counts
+      `PRECISION_FLOOR_ULPS = 4` units of `eps` per evaluation of a pass
+      (CPL-101 measured that constant on dense updates of at most six
+      entries).  A mapped edge delivers sums over its rows, and a float
+      sum of `k` terms of one sign rounds by up to `(k - 1) / 2` `eps`
+      of the sum in any order; in an in-order sum of nearly equal terms
+      (a uniform field, or any field beside a much larger common value)
+      the rounding is systematic and grows like `k`.  Nothing in the
+      floor counts it, so the pass has a fixed point of its own that far
+      from the exact one, and a group that stalls there reports a bound
+      below its true distance with `spectral_usable` and
+      `gradient_bound_usable` set.  Measured (CPU, 24-core x86-64; jax
+      0.10.2, 0.11.0 and 0.11.2; float32 with `rtol=1e-7` and float64
+      with `rtol=1e-16`) on a pair of relays that declare one evaluation
+      each: one value `x <- b + a u` fed by the conservative
+      nearest-neighbour sum of `k` values `x_j <- c_j + u_j` that each
+      read it back; loop gains 0.9 and 0.99; both schedules; six random
+      fields, four uniform ones and a ramp (44 runs per cell); the true
+      distance from the closed-form fixed point of the constants as the
+      dtype holds them.  **The scatter layout**
+      (`sparse_nearest_neighbor_mapping(mode="conservative",
+      transpose="scatter")`, a scatter-add, which is the in-order sum on
+      the CPU): the smallest bound over distance among the reports with
+      the flag set was, for rows of 3, 10, 30, 100, 300, 1000, 3000, 1e4
+      and 3e4 entries, 6.2, 3.9, 2.07, 0.68, 0.24, 0.069, 0.023, 0.0068
+      and 0.0022 under `"interface"` in float32 (6.3, 4.9, 2.09, 0.66,
+      0.22, 0.069, 0.023, 0.0067, 0.0022 under `"mixed"`; `"l2"` as
+      `"mixed"`), and 8.0, 5.0, 2.08, 0.63, 0.22, 0.068, 0.023, 0.0065,
+      0.0022 at the float64 floor: the same digits on the three jax
+      versions.  From 100 entries on, 8 to 35 of each cell's 44 flagged
+      reports read below their distance; behind the random fields alone
+      the first failure is at 1000 entries (0.74), which is why the
+      pre-merge audit that found this put the limit there.  At a
+      tolerance above the counted floor (float32, `rtol` 1e-6 to 1e-3)
+      83 of 384 flagged reports per version read below their distance,
+      35 of them with `precision_limited=False` (the residual up to 1000
+      floors, the bound down to 0.007 of the distance behind 3e4
+      entries).  **The other forms are reduced by XLA in an order of its
+      choosing**, which depends on the jax version, the dtype and the
+      operator's shape.  One row, the gather layout and the dense kind
+      alike: 1.8 at 300 entries, 1.2 at 1000 and 1.09 at 3000 behind a
+      uniform field (1.7, 1.1, 1.1 in float64), 3.7 or more at 1e4 and
+      3e4, and 4.8 or more behind the other fields: they held.  They do
+      not hold everywhere: on jax 0.10.2 in float32 the gather layout's
+      rows of 1e4 and 3e4 entries are summed in order and read 0.0068
+      and 0.0022, 28 and 29 of 44 flagged reports below their distance
+      (not in float64, not on 0.11.0 or 0.11.2); and the dense kind with
+      three rows of 3000 entries read 0.18 in float32 on the three
+      versions (13 of 28 flagged reports below their distance), 0.09 at
+      the float64 floor on jax 0.11.0, and 0.84 there with three rows of
+      300, while the gather layout of the same three-row operator held
+      (1.7 at 300 entries, 4.3 or more at 3000).
+      Short rows of the reduced forms (one, three and sixteen rows of 3,
+      10, 30 and 100 entries; two random fields, two uniform ones and a
+      ramp; `"interface"`; the same digits on the three versions): in
+      float32 the gather layout read 6.5, 4.9, 3.4 and 2.8 times the
+      distance and the dense kind 6.5, 4.9, 2.24 and 2.8; at the float64
+      floor 8.9, 5.0, 3.05 and 2.6, and 8.9, 5.0, 2.08 and 2.6 (one row
+      on the three versions, three rows on jax 0.11.0). They held by a
+      factor of two up to 100 entries. **Fields whose terms cancel** are
+      MADD-ANO-247's mechanism, reached through the field's signs in
+      place of the mapping's: a delivered value is no finer than the
+      terms it was added up from, whatever the row's length and the
+      order of the sum. On the same pairs with `b = 0` and a field that
+      alternates in sign, a cancellation `sum |t| / |sum t|` of 3 or
+      less left every kind holding by two (3.7 at 10 entries, the
+      scatter layout 2.14 at 30), and a cancellation of 25 read 1.26 at
+      10 entries in every kind and 0.80 behind a dense matrix of three
+      rows of ten entries, flags set; at the float64 floor the same row
+      of 10 entries read 0.85 in every kind, flag set; and a row of two
+      entries reads as a row of ten does (1.44 against 1.26 in float32),
+      so the row's length is not what decides it. The limit below is not
+      taken on those runs: no row length answers for a field's signs. A
+      `multilinear_grid` mapping from points to a grid is the same
+      scatter-add with as many entries on a grid node as there are
+      points within one spacing of it, a number decided in the step:
+      with 8, 300 and 3000 markers in one cell behind a uniform field
+      the bound read 13.8, 3.8 and 1.3 of the distance under `"mixed"`
+      (it held, by less than two at 3000; larger counts were not
+      measured). That group solves the markers' positions, and in 0.4.0
+      such a group has no usable flag whatever its rows (MADD-ANO-252);
+      a group whose positions are constants of the pass keeps its flags
+      behind the same uncounted rows, which was not measured. Its gather
+      adds up at most `2^d` entries. No release carried it: sparse
+      mappings, the float floor's flags and the interface norm's
+      readings are new in 0.4.0's development. Found by the pre-merge
+      audit of the interface norm on static mapped edges. **What 0.4.0
+      does** (a guard on the flag, not a fix of the number): where an
+      internal edge of a group carries a static mapping of any kind (a
+      dense matrix, a static sparse mapping in the gather layout or in
+      the scatter layout, a registered kind's own static class) whose
+      longest row is over `MAPPED_ROW_FLOOR_LIMIT = 10` entries and the
+      residual is not above the float floor times that row's length, the
+      report withdraws `spectral_usable` and `gradient_bound_usable`
+      with a `not_usable_reason` that names the edge, how its mapping is
+      applied, the row and the limit; every number is reported as
+      computed, and `ratio_usable`, `precision_limited` and `converged`
+      are untouched. A row is the entries one delivered value adds up
+      whatever the weights are, since they are a parameter a step may be
+      handed: the valid slots of a sparse row in either layout; the
+      **width** of a dense matrix, so a dense selection matrix is
+      counted at its width although its sums are exact; and for a
+      registered kind's own class the entries of its source side (its
+      `apply` is its author's, and nothing was measured on it). One
+      limit for every kind: the largest power of ten at which every
+      measured run behind fields that do not cancel held by a factor of
+      two on the three versions. The scatter layout sets it (30 entries
+      hold by 2.07, 100 do not); the reduced forms held by two up to 100
+      entries, but which rows XLA sums in order is its own to choose, so
+      they are not given a limit of their own. With the guard, over
+      12,796 flagged reports behind rows of more than ten entries (the
+      three kinds, both dtypes, tolerances from the float floor to
+      1e-1), no report at its counted floor keeps a flag, and the 927
+      that keep one read at least 0.9925 of their distance (20 of them
+      below 1). That is the measured pairs' figure and not the rule's
+      floor: on a group of ONE member with an edge to itself (one
+      evaluation a pass, so half the pair's threshold) a kept flag read
+      0.982 of the distance by construction (a report just above the
+      threshold, a uniform field, gain 0.999, 1000 entries a row,
+      `"interface"`; 14 of 176 kept flags under 0.9925). **The price:** 9,862 of the 10,769 reports whose bound
+      was right lose their flag. At the counted floor every flag behind
+      a row over ten entries is withdrawn, so the price there is the
+      share that was right: 2,551 of the 4,123 flagged there (62%) in
+      the scatter layout, 2,457 of 2,584 (95%) in the gather layout and
+      2,566 of 2,626 (98%) behind a dense matrix, which is to say that
+      behind the reduced forms nearly every flag the guard withdraws
+      stood on a bound that held. Above the counted floor it withdraws
+      1,206 of 1,879 right reports in the scatter layout, 583 of 700 in
+      the gather layout and 499 of 616 behind a dense matrix (where none
+      of the 616 was under its distance). In practice a float32 group
+      whose mapping adds up a few hundred entries a row has both flags
+      withdrawn at any `rtol` of about 1e-4 or tighter (the floor is
+      0.005 of the threshold per evaluation there), and the same group
+      in float64 keeps them. A geometry-dependent mapping is NOT counted
+      by this guard.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound that reads below the true distance with its usable flag
+      set is a silent wrong result, never `minor`.  Not `critical`: it
+      needs `diagnostics=True`, a group at (or within a row's reach of)
+      its float floor, and a mapped internal edge with a row of tens of
+      entries or more; the state, the verdict `converged` and the
+      residual are not affected, and `precision_limited=True` already
+      says the residual is rounding.  `context_dependent` because
+      whether the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.coupling.sparse_mapping.StaticSparseMapping"
+      - "maddening.core.coupling.mapping.StaticLinearMapping"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Hold the group's fields in a wider dtype at the same tolerance, so
+      that the report is not at its float floor (verified: the scatter
+      pair in float64 at `rtol=1e-7`, rows of 300 and 3e4 entries, both
+      schedules, `"interface"` and `"mixed"`: 128 of 128 reports kept
+      their flags on a bound at 0.9995 of the distance or more, 1.4 or
+      more under `"interface"`; one row of 300 entries in the gather
+      layout and behind a dense matrix likewise keeps its flags on a
+      bound that holds). The same long row in another layout or as a
+      dense matrix is not a workaround: every static kind is counted
+      alike. A dense matrix that holds a selection or an interpolation
+      (one or two non-zeros a row) can be held as a sparse mapping
+      instead, whose rows are counted at those entries (verified on a
+      selection 40 entries wide: the dense form loses its flags at the
+      float floor, the sparse form keeps them, on the same bound). Where
+      a flag is withdrawn, `precision_limited`, `residual` and the bound
+      itself are still reported.
+    resolution_status: "open"
+    residual_risk: >
+      Until the floor counts a mapped edge's own rounding (0.5.0: the
+      row's `(k - 1) / 2` `eps` over the cancellation of its terms,
+      which holds for any order of the sum, added to the evaluation
+      count), `spectral_error_bound` and `gradient_relative_error_bound`
+      can read too small behind a long row in every kind; in 0.4.0 their
+      flags no longer say usable there, behind any static mapping. Not
+      covered by the guard: a geometry-dependent scatter whose positions
+      are constants of the pass (a `multilinear_grid` mapping from
+      points to a grid: the bound held by 1.3 with 3000 markers in a
+      cell on a group that solves its positions, which has no flag in
+      0.4.0; larger counts, and the form with constant positions, were
+      not measured); a row of ten entries or fewer behind a field whose
+      terms cancel (MADD-ANO-247: with a cancellation of 25, 1.26 of the
+      distance at ten entries in float32 and 0.85 at the float64 floor,
+      flag set); a registered kind's own static class, which is counted
+      at its source side's entries and was not measured. Where the guard
+      keeps a flag the bound can still be short by the row's rounding
+      over the residual (under an eighth in the worst case; 0.75% at
+      most measured). The guard is conservative behind the gather
+      layout, a dense matrix and above all a dense selection or
+      interpolation matrix, where it withdraws flags whose bound held.
+      The limit and the margins are measurements on one CPU family; a
+      GPU scatter-add is not the in-order sum (MAP-023) and was not
+      measured.
+    verification:
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_stalled_group_behind_a_long_row_withdraws_its_flags_and_says_why"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_bound_behind_a_long_row_is_at_or_above_the_distance"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_row_within_the_limit_keeps_its_flags_on_a_bound_that_holds"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_every_static_mapping_on_an_internal_edge_is_counted"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_dense_row_is_the_matrix_width_whatever_its_weights"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_guard_moves_no_number_of_the_report"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less_than_two"

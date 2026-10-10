@@ -499,6 +499,16 @@ class ExternalInputRecipe:
     shape: tuple[int, ...]
 
 
+#: ``compile()``'s advisory for a group that declares a dead band on three
+#: or more members under Gauss-Seidel (MADD-ANO-254), as a pattern for a
+#: warnings filter.  ``_coupling_groups`` draws a third member and a
+#: non-zero ``atol`` independently, so a drawn graph can carry such a
+#: group; whoever compiles a drawn graph by a route of its own (a reload,
+#: a round trip) expects the advisory by this name, as
+#: ``GraphRecipe.build`` does.  The test configuration does not filter it.
+DRAWN_DEAD_BAND = r"(?s).*declares a dead band on \d+ members"
+
+
 @dataclass(frozen=True)
 class CouplingGroupRecipe:
     """One ``add_coupling_group`` call: the node set and the eighteen
@@ -679,6 +689,10 @@ class GraphRecipe:
             # edge read late, are the same on every call.
             warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
                                     category=UserWarning)
+            # ... and a drawn group of three members can declare a dead
+            # band (``atol`` is drawn for every group), which compile()
+            # advises on under either schedule (MADD-ANO-254).
+            warnings.filterwarnings("ignore", message=DRAWN_DEAD_BAND, category=UserWarning)
             gm.compile()
         for node_name, key, factor in self.param_overrides:
             leaf = gm.params["nodes"][node_name][key]

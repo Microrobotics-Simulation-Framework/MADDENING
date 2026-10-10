@@ -18,6 +18,8 @@ Tolerance: none.
 
 from __future__ import annotations
 
+import warnings
+
 from hypothesis import given, note, settings
 from hypothesis import strategies as st
 from pxr import Usd
@@ -54,8 +56,15 @@ def _initial_states(gm: GraphManager) -> dict:
 def _reload_usd(gm: GraphManager, registry: dict) -> GraphManager:
     stage = Usd.Stage.CreateInMemory()
     save_graph_to_usd(gm, stage)
+    from tests.property.strategies import DRAWN_DEAD_BAND
+
     reloaded = load_graph_from_usd(stage, node_registry=registry)
-    reloaded.compile()
+    with warnings.catch_warnings():
+        # A drawn group of three members can declare a dead band, which
+        # compile() advises on (MADD-ANO-254); the round trip carries the
+        # group's ``atol`` like every other field.  Nothing else is filtered.
+        warnings.filterwarnings("ignore", message=DRAWN_DEAD_BAND, category=UserWarning)
+        reloaded.compile()
     return reloaded
 
 

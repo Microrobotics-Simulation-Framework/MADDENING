@@ -290,6 +290,9 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
+        # Per group key, ``(edge key, what, longest row)`` of the internal
+        # edges that carry a static mapping, of every kind.
+        self._committed_mapped_rows: dict[str, tuple] = {}
         # Per group key, the keys of the geometry-dependent mapped edges
         # the compiled step's pass resolves (experimental; empty for a
         # group without one).  Such a group reports no bound.
@@ -2621,7 +2624,12 @@ class GraphManager:
 
         ``HeatNode`` uses it for two rods coupled end to end past their
         coupled-pair Fourier limit (MADD-ANO-050).
+
+        The group's own settings are advised on first, whatever its
+        members: a dead band declared under Jacobi, or on three or more
+        members (``_group_layout._dead_band_advisories``).
         """
+        own = _group_layout._dead_band_advisories(group)
         members = {
             name: self._nodes[name] for name in sorted(group.nodes)
             if name in self._nodes
@@ -2632,7 +2640,7 @@ class GraphManager:
             if callable(hook) and not any(hook is h for h in hooks):
                 hooks.append(hook)
         if not hooks:
-            return []
+            return own
         # How many values arrive at each (node, input) from anywhere in the
         # graph: a hook reasoning about "this input is that node's value"
         # needs to know nothing else writes to it.
@@ -2649,7 +2657,7 @@ class GraphManager:
             feeds=dict(feeds),
             live_params=dict((self.params or {}).get("nodes") or {}),
         )
-        out: list[str] = []
+        out: list[str] = list(own)
         for hook in hooks:
             out.extend(hook(**context))
         return out
@@ -3276,6 +3284,15 @@ class GraphManager:
                 *_group_layout._group_evaluations(g, self._nodes, self._schedule, self._edges),
                 interface_plans["+".join(sorted(g.nodes))].norm_edges())
             for g in self._coupling_groups
+        }
+        # Per group key, the longest row of each internal edge that carries
+        # a static mapping (a dense matrix, a sparse one in either layout,
+        # a registered kind's own class), as the step was built: what the
+        # report's guard on the float floor reads
+        # (``_group_layout._mapped_rows``, MADD-ANO-257).
+        self._committed_mapped_rows = {
+            key: _group_layout._mapped_rows(plan)
+            for key, plan in interface_plans.items()
         }
         self._committed_geometry_edges = {
             key: tuple(r.key for r in plan.resolved_geometry_edges())
@@ -4381,9 +4398,12 @@ class GraphManager:
         returned" is, in every entry below, **the iterate the loop
         accepted**.  The step returns that iterate with each floating
         field the norm does not measure whole -- one no internal edge
-        reads, or one read only through a mapping or a transform --
+        reads, or one read only through a gather, a tie or a transform --
         recomputed by one plain pass at it (not counted in
-        ``iterations``), so the state held afterwards is within the
+        ``iterations``).  (The source field of a static mapping onto more
+        entries than it holds is read at its source, so it is measured
+        whole and kept, like one a plain edge reads.)  So the state held
+        afterwards is within the
         reported residual of the reported iterate on what the internal
         edges deliver, and is not itself an iterate of the loop.  Of the
         state held, in the norm taken at it, ``spectral_error_bound``
@@ -5042,6 +5062,43 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
+            **A long row of a static mapping** (MADD-ANO-257, open).
+            The float floor counts a fixed number of ``eps`` per
+            evaluation, and a static mapping adds a row's entries up,
+            which rounds by more than that once the row is long,
+            systematically behind a uniform field: a float32 pair
+            stalled behind one row in the scatter layout read
+            ``"spectral_error_bound"`` at 0.68 of its true distance
+            behind 100 entries, 0.24 behind 300 and 0.002 behind 3e4; a
+            dense matrix of three rows of 3000 entries read 0.18; the
+            gather layout's rows of 1e4 entries read 0.007 on jax
+            0.10.2.  Where an internal edge of the group carries a
+            static mapping of any kind (a dense matrix, a sparse mapping
+            in either layout, a registered kind's own static class) with
+            a row longer than ``MAPPED_ROW_FLOOR_LIMIT`` (10, a measured
+            constant) and ``"residual"`` is not above the float floor
+            times the row's length, ``"spectral_usable"`` and
+            ``"gradient_bound_usable"`` are ``False``, every number is
+            reported as computed, and the entry has a
+            ``"not_usable_reason"`` naming the edge, how its mapping is
+            applied, the row's length and the way out (a wider dtype at
+            the same tolerance).  A row is the entries one delivered
+            value adds up whatever the weights are: a sparse layout's
+            valid slots, and a dense matrix's **width** (its weights are
+            a parameter a step may be handed, so a selection matrix is
+            counted at its width too).  In practice a float32 group
+            whose mapping adds up a few hundred entries a row has these
+            two flags withdrawn at any ``rtol`` of about 1e-4 or
+            tighter; the same group in float64 keeps them.  **Not
+            counted:** a geometry-dependent mapping, whose rows are
+            decided in the step (a ``multilinear_grid`` scatter adds up
+            as many entries on a grid node as there are markers in its
+            support: measured at 13.8, 3.8 and 1.3 times the distance
+            with 8, 300 and 3000 markers under ``"mixed"``; a group
+            that solves those positions has no flag in 0.4.0, and one
+            whose positions are constants of the pass keeps its flags
+            behind such rows).
+
             **A group that resolves a geometry-dependent mapping**
             (experimental: an edge into a member, from inside the group
             or outside it, added with ``add_edge(..., geometry=...)``)
@@ -5090,8 +5147,9 @@ class GraphManager:
             ``False``.  Such an entry has one more key,
             ``"not_usable_reason"`` : str, which names the edges and
             says which case it is; besides the causes above of a group
-            with a geometry edge and a checkpoint saved after a state
-            write, no other group's entry has it.  The values are
+            with a geometry edge, a long row of a static mapping and a
+            checkpoint saved after a state write, no other group's entry
+            has it.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -5441,6 +5499,28 @@ class GraphManager:
                     })
                     if reason is not None:
                         result[key]["not_usable_reason"] = reason
+                # The float floor counts a fixed number of ulps per
+                # evaluation, and a static mapping adds a row's entries
+                # up (a dense matrix, a sparse one in either layout),
+                # which rounds by more than that once the row is long
+                # (MADD-ANO-257, open).  Where the residual does not
+                # stand clear of the floor such a row would give it, the
+                # flags that rest on the floor are withdrawn, with the
+                # reason; the numbers stay as computed.  Asked only of a
+                # flag that is still set.
+                row_reason = (
+                    _group_layout._mapped_row_reason(
+                        self._committed_mapped_rows.get(key, ()), residual, floor)
+                    if result[key]["spectral_usable"] else None)
+                if row_reason is not None:
+                    # (A reason another rule left beside a flag of its
+                    # own, with ``spectral_usable`` standing, is kept.)
+                    result[key].update({
+                        "spectral_usable": False,
+                        "gradient_bound_usable": False,
+                        "not_usable_reason": _group_layout._joined_reasons(
+                            result[key].get("not_usable_reason"), row_reason),
+                    })
         return result
 
     # ------------------------------------------------------------------
@@ -7636,6 +7716,9 @@ class GraphManager:
         * ``not_usable_reason`` for a group that solves the positions of
           a geometry-dependent mapping (experimental): it has no usable
           flag in 0.4.0 and its numbers are kept, uncertified;
+        * ``not_usable_reason`` for a group at its float floor behind a
+          long row of a static mapping of any kind (MADD-ANO-257):
+          ``spectral_usable`` is withdrawn and the numbers are kept;
         * why a group has no report (``solver="fori"`` without
           ``diagnostics``, no step since ``compile()`` /
           ``reset_state()``, added since the last compile).

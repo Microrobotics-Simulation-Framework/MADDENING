@@ -107,7 +107,7 @@ the iterate before it, which nothing compares.  So the step returns
   edge that delivers it as it is, with no mapping and no transform -- as
   `x` holds it, bit for bit;
 * **every other floating field of every member** -- read by no internal
-  edge, or only through a mapping or a transform -- as `F(x)` holds it:
+  edge, or only through a gather, a tie or a transform -- as `F(x)` holds it:
   one more evaluation of the pass, at `x`.
 
 A static mapping onto more entries than its source holds is read at its
@@ -229,13 +229,52 @@ diagnostics are on.
 The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
 every entry the norm reads, **per evaluation**, in the norm's units —
 `4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
-`"mixed"` and `"interface"` (`residual_precision_floor`), each field at
-its own dtype's `eps`.  Under `"interface"` the entries are what that
+`"mixed"` and `"interface"` (`residual_precision_floor`), **every entry
+at the `eps` of the coarsest floating dtype among the group's fields and
+what its internal edges deliver** (after the mapping and the transform:
+a transform that narrows to float32 between two float64 members puts a
+float32 rounding into every pass, and such a pair stalled with residual
+0.0 and read its bound at 5e-8 to 1e-7 of the distance with both flags
+set while only the fields' dtypes were read).
+A field a node computes from a coarser neighbour's output carries that
+neighbour's rounding: a float64 field of `n` values that is a function
+of one float32 value is as far from its fixed point, relative to its own
+size, as that value is.  Taken at each field's own `eps`, as the floor
+was, those `n` entries added nothing and the pooled floor fell as
+`1/√(1+n)`: a pair stalled 500 float32 ulps short read its bound at 0.92
+of the distance at `n = 1e3` and 0.21 at `n = 2e4` with the flags set
+(under all three norms; a float16 or bfloat16 value beside 2e4 float32
+ones read 0.37 and 0.36).  The rule assumes that any field of a group
+may be downstream of its coarsest member (which fields are is inside
+the nodes), that a node's own arithmetic is no coarser than the fields
+it reads and writes (a cast down and back inside `update` cannot be seen
+from outside and is not counted), and that what enters from outside the
+group is a constant of the solve; where a fine field is in fact computed from fine
+fields alone the floor is too large, never too small.  In a group of
+one dtype nothing changes.  **A position is exempt from that rule and
+keeps its own dtype's `eps`**: a geometry field that an internal edge
+anchors a geometry-dependent mapping at (under `"l2"` and `"mixed"`), a
+position part read in kernel lengths (under `"interface"`), and the
+stored rounding `eps · |u|` of the positions a value was delivered
+through.  A stored float64 position has float64 resolution, and what a
+float32 member adds to it in a pass is a rounding of the increment;
+counted at float32's `eps`, float64 positions tens of spacings from zero
+put hundreds of tolerances into the floor and read
+`precision_limited=True` where the iterate was within a thousandth of a
+tolerance of its fixed point, and float64 positions are the way out the
+float32-positions advisory names.  The corner this leaves: a float64
+position that a member *sets* within the pass purely from float32 data
+is as coarse as that data and is counted finer than it is (on a pair of
+three such markers the bound still held by hundreds, the evaluation
+count carrying the gain of the read through the scatter).  A geometry
+field anchored only by an edge from outside the group is not exempt.
+Under `"interface"` the entries are what that
 norm reads on the internal edges: what an edge delivers (mapping, then
-transform), at the coarser of its own dtype's `eps` and its source
-field's, or the source field itself, at its own `eps`, where a static
-mapping delivers more entries than the source holds (see "A mapped edge
-is read on its compact side" below).  Where an edge is read through its
+transform) or the source field itself where a static mapping delivers
+more entries than the source holds (see "A mapped edge is read on its
+compact side" below), each at the group's coarsest `eps` or, where it is
+coarser still, the `eps` of what the edge delivers (a transform that
+narrows).  Where an edge is read through its
 mapping, the delivered value depends on the weights the step ran with, so
 the step records the per-evaluation floor itself (`_meta`'s
 `coupling_<key>_reading_floor`) and the report reads that; a group whose
@@ -549,7 +588,14 @@ most `K` tolerances, with `K = ‖D (I − A)⁻¹ (I − L) D⁻¹‖₂` of th
 its compact readings (`A` the pass's stationary map, `L` its same-pass
 part, `D` dividing each reading by its own magnitude): the identity the
 bound above rests on, applied to a residual at its threshold.  `K` is
-about `1 / (1 − gain)` for a normal loop and does not see `N`.
+about `1 / (1 − gain)` for a normal loop and does not see `N`, **provided
+the transfer between the two sizes is on the edge**: a member handed the
+whole grid through a plain edge, which samples it inside its own
+`update`, is read at the grid's `N` entries, and the markers of such a
+pair were 4.6 (`N` = 300) to 179 (`N` = 3e5) tolerances off at
+`converged=True` (1.8 to 6.2 with the gather on the edge).  Put the
+sampling on the edge: a static gather, or `multilinear_grid` with
+`geometry=`.
 That is the iterate the loop accepted, which the report is of.  The state
 a solve returns is that iterate with every field the norm does not
 measure whole one plain pass on (the return rule above; CPL-191): a
@@ -608,7 +654,15 @@ not test it:
   and the bound 0.15–0.29x the kept field's distance.  It now keeps its
   own magnitude's weight in the spectrum, and its share of the residual
   — which `residual` does not contain — is measured and folded into
-  the factor (2.8–5.5x there);
+  the factor (2.8–5.5x there).  That is the *bound*; the loop's own exit
+  is another matter.  A change that has to cross a dead-banded field is
+  not in the residual until it reaches a kept one, and the loop accepts
+  on the first residual it measures: a group with `atol > 0` under
+  Jacobi, or with three or more members under Gauss-Seidel, can return
+  `converged=True` after one pass thousands of tolerances from its fixed
+  point (MADD-ANO-254, open; `compile()` warns).  Leave `atol` at `0.0`
+  on such a group in 0.4.0; a pair under Gauss-Seidel held in both sweep
+  orders in every case measured;
 * **a non-finite state reports NaN**, not a spectral radius computed at
   a state that has left float range.
 

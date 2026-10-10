@@ -1352,8 +1352,9 @@ def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list
     # (the group solves the mapping's positions: neither flag, on any
     # step; or, with every position fixed during the pass, the float
     # floor, an estimate that did not settle, a gradient bound that is
-    # not finite: the gradient's alone); experimental.  The caveats
-    # below still apply.
+    # not finite: the gradient's alone); experimental.  Or a group at
+    # its float floor behind a long row of a static mapping
+    # (MADD-ANO-257).  The caveats below still apply.
     flags_only = bool(reason) and all(
         isinstance(v, float) and not math.isnan(v) for v in (estimate, bound))
     if flags_only:

@@ -467,14 +467,19 @@ def test_the_gradient_bound_helper_never_reports_a_number_where_none_was_compute
 
 
 def test_the_floor_traces_under_jit_and_reads_nothing_inside_the_dead_band():
-    """CPL-100: traceable; 0.0 when every field is dead-banded; each field at its own eps."""
+    """CPL-100: traceable; 0.0 when every field is dead-banded; every entry
+    at the eps of the group's coarsest floating field (the float32 field
+    beside a float16 one is counted at float16's: a field computed from a
+    coarser one carries its rounding)."""
     s = {"n": {"x": jnp.ones(4, F32), "h": jnp.ones(9, jnp.float16), "k": jnp.int32(3)}}
     eager = residual_precision_floor(s, ["n"], "l2")
     jitted = jax.jit(lambda st: residual_precision_floor(st, ["n"], "l2"))(s)
     assert float(eager) == float(jitted)
     eps16 = float(np.finfo(np.float16).eps)
-    expected = PRECISION_FLOOR_ULPS * math.sqrt(4 * EPS32 ** 2 + 9 * eps16 ** 2)
+    expected = PRECISION_FLOOR_ULPS * eps16 * math.sqrt(4 + 9)
     assert float(eager) == pytest.approx(expected, rel=1e-6)
+    own = PRECISION_FLOOR_ULPS * math.sqrt(4 * EPS32 ** 2 + 9 * eps16 ** 2)
+    assert float(eager) > own       # never below each field at its own eps
     assert float(residual_precision_floor(s, ["n"], "l2", atol=2.0)) == 0.0
     assert float(residual_precision_floor(s, ["n"], "mixed", atol=2.0, rtol=1e-3)) == 0.0
     assert float(residual_precision_floor(s, ["n"], "interface", interface_edges=[])) == 0.0

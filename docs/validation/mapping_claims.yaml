@@ -2099,10 +2099,28 @@ claims:
     be told from one on it); every report key
     equal to the node-inlined twin's on every single-rate multilinear
     group case of the harness, a predictor among them; the report under a
-    state write and a checkpoint saved after one (save_state, load_state),
-    which withholds what rests on the float floor like any other group's;
+    state write and a checkpoint saved after one (save_state, load_state):
+    the step records the float floor of a group with a target-anchored
+    geometry edge itself (it counts the rounding of the weights the kernel
+    formed at the target's pre-step positions, which only the step
+    holds), so the loaded report is the step's own, nothing withheld;
     the report table, its printed text and its JSON encoding. The steps
-    compiled (jit) by the graph. Not claimed for mixed dtypes, 16-bit
+    compiled (jit) by the graph. THE FLOAT FLOOR OF SUCH A GROUP COUNTS
+    THE ROUNDING OF THE KERNEL'S WEIGHTS (MADD-ANO-261): every value
+    field no finer than one rounding of the lattice coordinate per
+    evaluation, eps of the positions' dtype times the magnitude the
+    positions are rounded at (MAP-050's r) over PRECISION_FLOOR_ULPS,
+    read at the positions the pass's kernel reads. So float32 positions
+    hundreds of spacings from the grid's first point put the report at
+    its floor (precision_limited, both flags withdrawn unless every
+    member declares its evaluations) and compile() warns of it by the
+    same count; float64 positions keep the flags. A count measured on a
+    float32 pair 3 to 4000 spacings into its grid, both norms and both
+    schedules, not a proof: it is the coarsest-eps heuristic (every
+    value field as coarse as what the edge delivers), it assumes a field
+    that varies across a cell by about the value delivered (MADD-ANO-247),
+    and a power-of-two spacing whose quotient is exact is counted like
+    any other. Not claimed for mixed dtypes, 16-bit
     dtypes, gradients through the report, vmap, multi-rate graphs,
     sub-cycled groups (MAP-047), run_adaptive or sharded graphs.
   oracle: >-
@@ -2112,12 +2130,18 @@ claims:
     error and the exact residual; the node-inlined twin's report, key for
     key; the printed and encoded text.
   tests:
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_an_ordinary_pair_is_at_its_floor_and_no_flag_stands'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_members_that_declare_keep_their_flags_on_a_bound_that_holds'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_three_spacings_into_its_grid_the_pair_keeps_both_flags'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_float64_positions_beside_float32_fields_keep_the_flags_far_into_the_grid'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_compile_says_what_the_report_will_say_far_into_a_grid_and_nothing_near_it'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_on_the_audits_cells_no_flag_stands_beside_a_bound_under_the_distance'
     - 'tests/property/test_coupling_geometry_search.py::test_a_reported_number_of_a_group_with_a_geometry_edge_holds_against_the_reference_per_push'
     - 'tests/property/test_coupling_geometry_search.py::test_the_reported_radius_has_the_geometry_term_in_it'
     - 'tests/property/test_coupling_geometry_search.py::test_the_product_at_another_iterate_s_geometry_is_another_radius'
     - 'tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin'
     - 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
-    - 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker'
+    - 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_keeps_its_report_under_a_write_and_through_a_checkpoint'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_report_of_a_single_rate_grid_group_has_its_numbers_and_no_flag_with_the_rule_s_reason'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_coupling_report_shows_the_reason_and_no_caveat_about_a_withheld_value'
     - 'tests/core/test_geometry_edge_surfaces.py::test_the_twin_s_report_keeps_its_own_caveats'
@@ -2161,7 +2185,7 @@ claims:
     sub_cycled: narrowed
     predictors_warm_starts: 'tests/property/test_differential_geometry_edges.py::test_every_drawn_edge_mapped_graph_steps_as_its_node_inlined_twin'
     adaptive: narrowed
-    checkpoint_restart: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_is_reported_like_any_other_under_a_write_and_a_marker'
+    checkpoint_restart: 'tests/core/test_coupling_report_describes_the_step_that_ran.py::test_a_group_with_a_geometry_edge_keeps_its_report_under_a_write_and_through_a_checkpoint'
     sharded: narrowed
 
 - id: MAP-037
@@ -3230,7 +3254,7 @@ claims:
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_same_positions_held_in_float64_compile_silently'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_float64_positions_warn_at_their_own_distance_and_are_not_told_to_widen'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_an_edge_is_warned_of_for_the_positions_its_reading_rests_on_and_no_others'
-    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_other_norms_measure_positions_against_their_own_size_and_are_not_warned'
+    - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_other_norms_are_warned_by_the_kernels_own_count'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_whole_problem_translated_far_from_zero_warns_and_translated_back_does_not'
     - 'tests/property/test_coupling_geometry_interface_norm.py::test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distances'
     - 'tests/property/test_coupling_geometry_search_under_the_interface_norm.py::test_what_a_group_with_a_geometry_edge_reports_under_the_interface_norm_per_push'
@@ -3473,6 +3497,11 @@ claims:
     of order one, at an origin forty spacings from zero and at a plane on
     zero of a lattice whose origin is far from it. The rule sets flags and
     reasons only: no returned state and no reported number depends on it.
+    A group whose positions are constants of the pass has those flags on
+    a float floor that counts the rounding of its kernels' weights
+    (MAP-036, MADD-ANO-261): float32 positions far into a grid put its
+    report at the floor, where the flags are withdrawn as any group's
+    are, and a few spacings in they stand as they did.
     Not claimed for float64 (x64) on every push for the limit (the slow
     plane hunt measures it), mixed dtypes, 16-bit dtypes, gradients, vmap,
     multi-rate graphs, sub-cycled groups, predictors, run_adaptive,
@@ -3486,6 +3515,8 @@ claims:
     from the returned state by its definition; the documented reading of
     the slots.
   tests:
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_an_ordinary_pair_is_at_its_floor_and_no_flag_stands'
+    - 'tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_three_spacings_into_its_grid_the_pair_keeps_both_flags'
     - 'tests/property/test_coupling_plane_sides.py::test_no_flag_stands_in_a_cell_whose_polynomial_has_no_fixed_point'
     - 'tests/property/test_coupling_geometry_search.py::test_every_block_of_the_hunt_has_a_cell_whose_positions_are_constants_of_the_pass'
     - 'tests/property/test_coupling_geometry_search.py::test_the_flag_is_withdrawn_with_the_fixed_point_across_a_lattice_plane'

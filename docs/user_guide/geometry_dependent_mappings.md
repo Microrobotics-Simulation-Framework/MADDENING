@@ -448,12 +448,11 @@ names the edge and says what to do.
   delivered value for a coordinate its mapping does not read, namely one
   on an axis of one lattice point and one of a point clamped to the
   hull (outside it by more than its rounding can cross: the weights are
-  exactly 0 and 1); a mapping read at its source and anchored at its
-  target, whose reading is its source value alone; and the `"l2"` and
-  `"mixed"` norms, which measure positions against their own size and
-  read no delivered value.  **The target-anchored scatter is a gap, not
-  a guarantee** (MADD-ANO-258, open): the mapping still forms its
-  weights from those positions in their dtype, and nothing counts that.
+  exactly 0 and 1); and a mapping read at its source and anchored at its
+  target, whose reading is its source value alone.  **The target-anchored
+  scatter is a gap, not a guarantee** under this norm (MADD-ANO-258,
+  open): the mapping still forms its weights from those positions in
+  their dtype, and the interface norm's floor counts nothing for that.
   Beside a gather at the same positions (the usual pair) the gather's
   floor flags the group.  With no such edge in the group, float32
   positions 8000 and 50000 spacings from the grid's first point read a
@@ -465,6 +464,48 @@ names the edge and says what to do.
   the spacing declared for that axis).  A delivered value anchored at
   its target is asked at the target's positions in the state `compile()`
   sees (what a step started from it reads).
+
+  **Under `"l2"` and `"mixed"`** the norm measures every field against
+  its own size, the positions among them, and reads no delivered value.
+  What a geometry edge delivers is still no finer than the weights its
+  kernel forms from the positions, so the float floor of these norms
+  counts that rounding too: every value field of the group is taken to
+  be no finer than **one rounding of the lattice coordinate per
+  evaluation of the pass**, `eps` of the positions' dtype times the same
+  `r` as above (the larger of a position's distance from the
+  coordinates' zero and of its lattice coordinate; the largest over the
+  group's geometry edges), read at the positions the pass's own kernel
+  reads.  For a target anchor those are the target's pre-step
+  positions, so the step records the floor and the report reads it from
+  there.  The floor is then `E * eps * r / rtol` tolerances wherever
+  that is above the fields' own `4 * E * eps / rtol` (under `"l2"`,
+  `E * eps * r` times the root of the group's value entries, against
+  `tolerance`): unchanged within four lengths of the zero and of the
+  grid's first point, and for float64 positions beside float32 fields
+  at any distance a simulation reaches.  `compile()` gives the advisory
+  above under these norms as well, by this count: where it reaches the
+  tolerance, which is where every step that meets the criterion reports
+  `precision_limited=True` and has `spectral_usable` and
+  `gradient_bound_usable` withdrawn unless every member declares
+  `update_evaluations()` (the bound is then the floor's).  Before the
+  floor counted it, a float32 pair whose markers were 1000 to 2000
+  spacings into their grid kept both usable flags beside a
+  `spectral_error_bound` at 0.03 to 0.19 of the distance to the fixed
+  point of the positions as stored, with no advisory (MADD-ANO-261;
+  counted, the same reports have no flag, or, where the members
+  declare, a bound 20 times the distance or more).  What to do is what
+  the message says: **hold the positions in float64** (the same pair
+  then keeps both flags on a bound 1.6 to 7 times the distance), or
+  **loosen `rtol`**.  Moving the coordinates' origin to the markers
+  does **not** help once the lattice coordinate is what rounds: it does
+  not depend on the origin.  The count is a count and not a proof: it
+  assumes a field that varies across one cell by about the size of the
+  value delivered (MADD-ANO-247 for a value far smaller than that), it
+  takes every value field of the group to be as coarse as what the edge
+  delivers, and it cannot see that a power-of-two spacing with the
+  grid's first point at zero divides exactly, so such a grid is counted
+  like any other and loses its flags far into it although its bound
+  held uncounted.
 * **No adaptive stepping** and **no sharded nodes** on a geometry edge.
 * **The geometry is a state field of the edge's own source or target.**
   To use positions another node holds, carry them in the source's or the

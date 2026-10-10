@@ -451,9 +451,10 @@ def _longest_row(mapping) -> tuple:
     if form == _interface_plan.NEEDS_GEOMETRY:
         declared: Any = getattr(mapping, "geometry_longest_row", None)
         if callable(declared):
+            row: Any = declared()
             return (f"a geometry-dependent mapping{named}, counted at the most entries one "
                     f"delivered value can add up wherever the positions are (a scatter: its "
-                    f"number of points),", int(declared()))
+                    f"number of points),", int(row))
         source_lead, _target_lead = _interface_plan._mapping_leads(mapping)
         return (f"a geometry-dependent mapping of class {type(mapping).__name__}{named}, "
                 f"counted at the entries of its source side,",

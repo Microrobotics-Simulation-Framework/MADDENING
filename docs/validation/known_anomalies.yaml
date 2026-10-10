@@ -17615,9 +17615,20 @@ anomalies:
       the bound read 13.8, 3.8 and 1.3 of the distance under `"mixed"`
       (it held, by less than two at 3000; larger counts were not
       measured). That group solves the markers' positions, and in 0.4.0
-      such a group has no usable flag whatever its rows (MADD-ANO-252);
-      a group whose positions are constants of the pass keeps its flags
-      behind the same uncounted rows, which was not measured. Its gather
+      such a group has no usable flag whatever its rows (MADD-ANO-252).
+      A group whose positions are constants of the pass (the grid node
+      holds them: a target anchor) kept its flags behind the same
+      uncounted rows: with members declaring one evaluation, stalled at
+      the float32 floor, the bound read 0.40 and 0.32 of the distance
+      behind 300 markers in one cell and 0.048 and 0.032 behind 3000
+      with both usable flags set (`"mixed"`; 0.048 under `"l2"`), and
+      0.61 with ordinary members at `rtol=1e-4` and
+      `precision_limited=False` (found by the last pre-merge audit of
+      the mapping tier). The guard now counts a geometry-dependent
+      mapping at the longest its row can be whatever the positions are
+      (the kind's `geometry_longest_row()`: a scatter's number of
+      points, a gather's `2^d` weights), whichever side it is anchored
+      at, and those reports have no flag. Its gather
       adds up at most `2^d` entries. No release carried it: sparse
       mappings, the float floor's flags and the interface norm's
       readings are new in 0.4.0's development. Found by the pre-merge
@@ -17668,8 +17679,9 @@ anomalies:
       whose mapping adds up a few hundred entries a row has both flags
       withdrawn at any `rtol` of about 1e-4 or tighter (the floor is
       0.005 of the threshold per evaluation there), and the same group
-      in float64 keeps them. A geometry-dependent mapping is NOT counted
-      by this guard.
+      in float64 keeps them. A geometry-dependent scatter is counted at
+      its number of points (a gather at the `2^d` weights of a cell,
+      within the limit).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -17711,13 +17723,13 @@ anomalies:
       which holds for any order of the sum, added to the evaluation
       count), `spectral_error_bound` and `gradient_relative_error_bound`
       can read too small behind a long row in every kind; in 0.4.0 their
-      flags no longer say usable there, behind any static mapping. Not
-      covered by the guard: a geometry-dependent scatter whose positions
-      are constants of the pass (a `multilinear_grid` mapping from
-      points to a grid: the bound held by 1.3 with 3000 markers in a
-      cell on a group that solves its positions, which has no flag in
-      0.4.0; larger counts, and the form with constant positions, were
-      not measured); a row of ten entries or fewer behind a field whose
+      flags no longer say usable there, behind any static mapping or a
+      geometry-dependent scatter of more than ten points (counted at its
+      number of points, which is conservative: how many markers share a
+      grid entry is state, and a scatter whose markers are spread one to
+      a cell loses flags whose bound held). Not
+      covered by the guard: a sum written inside an edge transform
+      (MADD-ANO-260); a row of ten entries or fewer behind a field whose
       terms cancel (MADD-ANO-247: with a cancellation of 25, 1.26 of the
       distance at ten entries in float32 and 0.85 at the float64 floor,
       flag set); a registered kind's own static class, which is counted
@@ -17738,7 +17750,10 @@ anomalies:
       - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_dense_row_is_the_matrix_width_whatever_its_weights"
       - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_flags_are_withdrawn_only_behind_a_long_row_at_the_floor_it_would_give"
       - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_the_guard_moves_no_number_of_the_report"
-      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_geometry_dependent_scatter_is_not_counted_and_its_bound_holds_by_less_than_two"
+      - "tests/core/test_the_float_floor_of_a_long_mapped_row.py::test_a_geometry_dependent_scatter_is_counted_at_its_points_and_its_bound_holds_by_less_than_two"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_behind_a_scatter_of_many_points_no_flag_stands_at_the_floor"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_behind_a_scatter_of_ten_points_the_flags_stand_on_a_bound_that_holds"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_a_scatter_is_a_row_of_its_points_and_a_gather_of_its_cells_corners"
 
   - anomaly_id: "MADD-ANO-258"
     title: "Under convergence_norm=\"interface\" the float floor counts no position for a multilinear_grid mapping read at its source and anchored at its target: far into a long float32 grid such a group reads a floor under one, no advisory and converged=True 2.6 to 16 tolerances from its float64 fixed point"
@@ -17946,4 +17961,125 @@ anomalies:
     verification:
       - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_a_sum_written_inside_an_edge_transform_is_not_counted_by_the_row_guard"
       - "tests/core/test_what_the_float_floor_does_not_count_on_an_edge.py::test_the_same_sum_declared_as_a_static_sparse_mapping_withdraws_the_flags"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-261"
+    title: "Under \"l2\" and \"mixed\" the float floor of a coupling report did not count the rounding of the weights a geometry-dependent mapping forms: float32 positions 1000 to 2000 spacings into a grid kept both usable flags beside a bound at 0.03 to 0.19 of the distance, with no advisory"
+    description: >
+      The `multilinear_grid` kernel forms the lattice coordinate
+      `(x - origin) / spacing` in the positions' dtype, so a weight is
+      resolved to `eps` times that coordinate (1.35e-4 of a cell for
+      float32 positions 2000 spacings from the grid's first point), the
+      same at every pass: the group converges to the fixed point of a
+      slightly different transfer.  Under `convergence_norm="interface"`
+      the float floor counted that rounding for a delivered value
+      (MAP-050); under `"l2"` and `"mixed"` it counted every value field
+      at the group's coarsest `eps` and a position field at its own, and
+      nothing for the kernel.  Measured (CPU, jaxlib 0.11.0, float32) on
+      a pair whose positions are constants of the pass, which is the
+      documented way to keep the usable flags: a grid field of
+      `2 * into + 1` points (spacing 0.75, first point `into` spacings
+      below zero), four markers near zero, a gather anchored at the
+      markers' own positions (a target anchor) and a plain edge back;
+      four seeds of the markers' places; distances to the fixed point of
+      the same pair with the gather in exact arithmetic at the positions
+      as stored.  `"mixed"` at `rtol=1e-5` under Gauss-Seidel: 1000
+      spacings in, 4 of 4 reports had `spectral_usable` and
+      `gradient_bound_usable` set, `precision_limited=False` and the
+      bound at 0.19 of the distance or more; 2000 in, 0.08 (the worst
+      entry 33 tolerances off); with members that declare
+      `update_evaluations()`, stalled at their floor, 0.24 and 0.22
+      (1000 in), 0.099 (`"mixed"`, 2000) and 0.031 (`"l2"`, 2000).  From
+      3000 in the geometry self-check withheld the report, and
+      `converged=True`, `precision_limited=False` stood beside a state
+      25 to 51 tolerances off.  `validate()` and `compile()` said
+      nothing.  The bound held against the float32 pass's own fixed
+      point (1.44 times or more), with the positions held in float64
+      (1.6 to 7 times) and on a power-of-two spacing with the grid's
+      first point at zero (3.1 to 4.3): the gap was the weights.  No
+      release carried it: geometry-dependent mappings and these flags
+      are new in 0.4.0's development.  Found by the last pre-merge audit
+      of the mapping tier.  **Fixed in 0.4.0**: under `"l2"` and
+      `"mixed"` every value field of a group with a geometry edge (of a
+      kind that declares a length scale) is counted no finer than one
+      rounding of the lattice coordinate per evaluation of the pass:
+      `eps` of the positions' dtype times the magnitude the positions
+      are rounded at (`_interface_plan._rounded_at`, the function the
+      interface norm's floor reads), over `PRECISION_FLOOR_ULPS`, as the
+      `eps` of the entry.  It is read at the positions the pass's own
+      kernel reads (the target's pre-step ones for a target anchor, so
+      the step records the floor), by the report's floor and by the
+      step's per-entry resolution alike, and `compile()` gives the
+      interface norm's advisory under these norms by the same count.
+      The loop's acceptance does not read the floor: `converged` and
+      `iterations` are what they were.  After (the same cells, both
+      norms, both schedules, 1000 to 4000 spacings in, four seeds): of
+      64 reports of ordinary members none has a usable flag and all
+      read `precision_limited=True`; the 64 of members that declare
+      keep their flags on a bound 19.8 times the distance or more; three
+      to seven spacings in, 32 of 32 reports keep the flags they had.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A usable flag beside a bound below the distance is a silent wrong
+      result, never `minor`; registered although no release carried it,
+      because it is major.  Not `critical`: it needs the experimental
+      geometry tier, positions held in a dtype that cannot resolve the
+      tolerance where they are (float32 hundreds of spacings from the
+      grid's first point at `rtol=1e-5`), and `"l2"` or `"mixed"`; the
+      iteration itself was unaffected.  `context_dependent` because
+      whether the bound or the flag gates anything is the program's
+      choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.coupling.grid_mapping.MultilinearGridMapping"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: "none"
+    workaround: >
+      None needed in 0.4.0.  Where `compile()` warns, or a report reads
+      `precision_limited=True` on this account: hold the positions in
+      float64 (the fields can stay float32), or loosen the tolerance.
+      Moving the coordinates' origin to the markers does not help once
+      the lattice coordinate is what rounds.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The rule is a count, measured on the cells above, not a proof.
+      (1) It is the coarsest-`eps` heuristic: every value field of the
+      group is taken to be as coarse as what the geometry edge delivers,
+      which is what makes the pooled floor reach a state perturbed in a
+      few entries only; a field the edge does not feed is then counted
+      too coarsely, never too finely.  (2) It counts ONE rounding of the
+      lattice coordinate per evaluation, where a value's own rounding is
+      counted `PRECISION_FLOOR_ULPS` times: counted four times, the same
+      pair three to seven spacings into its grid lost both flags on 16
+      of 16 reports whose bound held (1.4 to 1.7 times the distance).
+      The margin left on the cells measured is 19.8 or more; the
+      interface norm's floor keeps its own count
+      (`PRECISION_FLOOR_ULPS` per evaluation) for a delivered value.
+      (3) It assumes a field that varies across one cell by about the
+      size of the value delivered: a value far smaller than that
+      variation is moved by more (MADD-ANO-247, open).  (4) It reads
+      positions, not whether a spacing divides exactly: a power-of-two
+      spacing with the grid's first point at zero, whose bound held
+      uncounted, is counted like any other and loses its flags far into
+      the grid.  (5) A registered geometry-dependent kind that declares
+      no length scale is not counted (0.4.0's diagnostics report no
+      bound for such a kind).  (6) Members that declare
+      `update_evaluations()` keep their flags at the floor, as
+      everywhere, on the count's word.  The interface norm's own gap for
+      a mapping read at its source and anchored at its target
+      (MADD-ANO-258) is another path and stays open.
+    verification:
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_an_ordinary_pair_is_at_its_floor_and_no_flag_stands"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_far_into_its_grid_members_that_declare_keep_their_flags_on_a_bound_that_holds"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_three_spacings_into_its_grid_the_pair_keeps_both_flags"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_float64_positions_beside_float32_fields_keep_the_flags_far_into_the_grid"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_a_power_of_two_spacing_from_zero_is_counted_like_any_other"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_the_floor_is_counted_at_the_positions_the_pass_read_not_the_ones_it_left"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_the_floor_and_the_verdict_are_the_same_with_diagnostics_off"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_the_floor_takes_every_value_field_no_finer_than_that_and_a_position_at_its_own"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_compile_says_what_the_report_will_say_far_into_a_grid_and_nothing_near_it"
+      - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_on_the_audits_cells_no_flag_stands_beside_a_bound_under_the_distance"
     github_issue: null

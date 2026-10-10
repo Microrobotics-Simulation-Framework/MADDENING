@@ -399,7 +399,10 @@ exactly 0 and `spectral_usable=True` beside a bound 5.6e-8 to 7.5e-8 of the dist
 point, under `"mixed"` and `"l2"` and both schedules.  Carry a value that is narrowed on its way
 as a *state field*: the same pair with the same transform on a state field is counted, and its
 bound read 30 to 39 times the distance.  (`convergence_norm="interface"` refuses a flux edge at
-`compile()`.)
+`compile()`.)  **What a geometry-dependent mapping delivers is counted at the rounding of its
+kernel's weights as well** (experimental): float32 positions far into a grid make every value
+field of the group that coarse, whatever the fields' own dtype; see "Under `"l2"` and `"mixed"`"
+in the guide to geometry-dependent mappings (MADD-ANO-261).
 
 **In a batch (`jax.vmap` of the step).**  The step of a batch is another compiled program than the
 step alone.  A member's verdict, its pass count and every flag are the member's alone, and its
@@ -578,14 +581,22 @@ one evaluation and the residual at its float floor, the bound read 0.28, 0.034 a
 a static sparse mapping (`mapping=`): the guard then counts its rows and withdraws both flags
 with its reason, and the bound read 1.16 to 27 times the distance on the same operators.
 
-**Not counted: a geometry-dependent mapping.**  A `multilinear_grid` gather adds up at most `2^d`
-entries.  Its conservative form (points to a grid) is a scatter-add whose rows are the markers in
-a grid node's support, a number decided in the step, so the guard does not count it: with 8, 300
-and 3000 markers in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3 times the
-distance under `"mixed"` (it held, by less than the factor of two the limit is taken at; larger
-counts were not measured).  That group solves the markers' positions, and in 0.4.0 such a group
-has no usable flag whatever its rows (MADD-ANO-252); a group whose positions are constants of the
-pass keeps its flags behind the same uncounted rows, which was not measured.
+**A geometry-dependent mapping is counted at the longest its row can be.**  A `multilinear_grid`
+gather adds up at most `2^d` entries, which is within the limit.  Its conservative form (points
+to a grid) is a scatter-add whose rows are the markers in a grid node's support, a number decided
+in the step, so the guard counts the edge at what a row can reach whatever the positions are:
+**its number of points** (every marker can fall within a spacing of one grid entry), whichever
+side its positions are anchored at.  A scatter of more than ten points therefore has its flags
+withdrawn where the residual is not above the float floor times the number of points, like a
+static mapping with a row that long; ten points or fewer keep them.  Before the guard read such
+an edge, a pair whose scatter's positions are constants of the pass (the grid node holds them)
+read its bound at 0.40 and 0.32 of the distance behind 300 markers in one cell and 0.048 and
+0.032 behind 3000 with both usable flags set (members declaring one evaluation, the residual at
+its float32 floor), and 0.61 with ordinary members at `rtol=1e-4` and `precision_limited=False`
+(MADD-ANO-257).  A group that solves the markers' positions has no usable flag whatever its rows
+(MADD-ANO-252); its report now names the row as well where the residual is within its reach
+(with 8, 300 and 3000 markers in one cell behind a uniform field its bound read 13.8, 3.8 and
+1.3 times the distance under `"mixed"`).
 
 **A number whose flag is `False` is not a number to compare.**  Where `gradient_bound_usable` is
 `False` the value beside it can be finite, `inf` or NaN, and at the float floor it can differ in

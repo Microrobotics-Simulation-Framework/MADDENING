@@ -547,8 +547,8 @@ files, never a function of the test list. So:
 - shard *i* of a pull request holds the same files as shard *i* of the base
   branch, which is what lets a shard reuse that shard's compilation cache.
 
-`slow-tests.yml` is split by file too, but on eight runners per lane and by
-measured time, not by hash (`MADDENING_TEST_SHARD=i/8:weighted`). It
+`slow-tests.yml` is split by file too, but on ten runners per lane and by
+measured time, not by hash (`MADDENING_TEST_SHARD=i/10:weighted`). It
 restores no compilation cache, so nothing there needs a file to stay on its
 shard, and its files are far from equal: the heaviest takes 48 minutes, and
 by hash one shard of four held nearly half of the lane (166 to 172 minutes
@@ -557,8 +557,9 @@ split deals the files listed in `tests/slow_lane_weights.json` (seconds per
 file on its slower JAX lane, from a slow-lane run's JUnit artifacts),
 longest first, each onto the shard with the least time so far. A file the
 table does not list (a new one, or one under ten seconds) goes by the hash
-of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 79
-minutes of test time on every shard; the heaviest file alone is 49.
+of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 64
+minutes of test time on every shard (eight shards held 79 each); the
+heaviest file alone is 49.
 
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The
@@ -578,9 +579,10 @@ together:
 
 The slow lane's count is separate (`SLOW_LANE_SHARDS` in
 `tests/_sharding.py`) and is written in `slow-tests.yml` as `shard:`,
-`MADDENING_TEST_SHARD`, the artifact name's `of8`, the "of 8" in the step
-title and the `/8` in the three issue titles. No pin depends on it: the
-table is dealt for whatever count the spec names.
+`MADDENING_TEST_SHARD`, the artifact name's `of10`, the "of 10" in the step
+title and the `/10` in the three issue titles. No pin depends on it: the
+table is dealt for whatever count the spec names. Ten is the ceiling while
+the repository runs twenty jobs at once: the lane has two JAX versions.
 
 The compliance tests pin these counts, so a change to one fails them until
 each place is updated: `test_ci_sharding.py` (`shard:`,

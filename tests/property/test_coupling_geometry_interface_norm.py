@@ -574,6 +574,170 @@ def test_the_step_records_the_floor_of_a_reading_at_a_pre_step_geometry():
     assert np.isfinite(with_one["meta"][slot])
 
 
+# ---------------------------------------------------------------------------
+# Beside the rules of the other reports: a coarser dtype on an edge, a long row
+# ---------------------------------------------------------------------------
+
+#: The grid's first point 60 spacings below the coordinates' zero: the
+#: markers sit 24 to 96 spacings into the lattice and at most 36 from the
+#: zero, so each is rounded at its lattice coordinate.
+NARROWED = Shape("two-way", 120, 4, ("source", "target"), origin=-60.0, cap=2000)
+#: A tolerance one float32 rounding does not resolve: four roundings of
+#: each of a Gauss-Seidel pair's two evaluations are 0.95 of it.
+NARROWED_RTOL = 1e-6
+
+
+def _to_float32(value):
+    return value.astype(jnp.float32)
+
+
+def _floor_by_the_two_rules(ref: Reference, state: dict, eps_values: float,
+                            eps_positions: float, *, lattice: bool = True) -> float:
+    """The float floor of the pair's residual at *state*, in tolerances of
+    :data:`NARROWED_RTOL`, restated: a value entry at *eps_values*, a
+    delivered one no finer than ``eps_positions * r`` of the positions
+    it was gathered at, and a position at ``eps_positions * r`` of one
+    spacing; ``r`` the magnitude a position is rounded at (the larger of
+    its distance from the coordinates' zero and of its lattice
+    coordinate; with *lattice* false, from the zero alone)."""
+    def reach(positions) -> float:
+        if lattice:
+            return ref.reach(positions)
+        return float(np.max(gi.rounded_at(positions, ref.h)))
+
+    total, count = 0.0, 0
+    for i, value, unit in ref.parts(state):
+        if unit == gi.SPACINGS:
+            eps = eps_positions * reach(value * ref.h)
+        elif ref.way(i) == "gather":
+            eps = max(eps_values, eps_positions * reach(ref.geometry(i, state[gi.EDGES[i][0]])))
+        else:
+            eps = eps_values
+        total += value.size * (eps / NARROWED_RTOL) ** 2
+        count += value.size
+    return 4.0 * gi.EVALUATIONS[ref.shape.schedule] * math.sqrt(total / count)
+
+
+@pytest.mark.parametrize("geom_dtype", ["float64", "float32"])
+def test_a_narrowing_transform_on_a_geometry_edge_raises_the_values_and_not_the_positions(
+        geom_dtype):
+    """Two rules of the float floor in one group.  A value entry is
+    counted at the ``eps`` of the coarsest floating dtype the pass goes
+    through, **what an internal edge delivers included**
+    (``acceleration._group_coarsest_eps``); a position at the ``eps`` of
+    its **own** dtype times the magnitude it is rounded at, the larger of
+    its distance from the coordinates' zero and of its lattice coordinate
+    (``_interface_plan._rounded_at``).
+
+    The pair's values are float64 and its scatter, the edge read at its
+    source, hands its target float32 (a transform), so no field of the
+    group is float32.  The report of the step is held to the two rules
+    restated, at the state the step returned:
+
+    * positions in float64: the narrowing alone sets the floor (0.78 of
+      a tolerance against 1.1e-7 counted over the fields; measured),
+      and the positions keep float64's ``eps``: raised to the delivered
+      dtype's with the values they would read 60;
+    * positions in float32, a member's field, which is the group's
+      coarsest either way: their rounding at the lattice coordinate (96
+      spacings, where the distance from zero is 36) sets the floor (60
+      against 22 counted from the zero alone), and ``compile()`` warned.
+
+    The bounds under this norm are withheld either way; the entry keeps
+    the floor and ``precision_limited``, which is ``True`` on both (the
+    accepted residual, 0.24 and 0.28, is rounding), with the state inside
+    the claim's ``K`` tolerances of the reference's fixed point."""
+    from tests.property import geometry_graphs as gg  # noqa: PLC0415
+
+    shape = dataclasses.replace(NARROWED, geom_dtype=geom_dtype)
+    ref = Reference(shape, Draw(3, 0.6))
+    with precision(True):
+        gm = GraphManager()
+        for node in gi._nodes(shape).values():                               # noqa: SLF001
+            gm.add_node(node)
+        for (src, dst), way, anchor in zip(gi.EDGES, gi.WAYS[shape.kind], shape.anchors):
+            gm.add_edge(src, dst, "x", "u", mapping=gi._mapping(shape, way),  # noqa: SLF001
+                        geometry=(anchor, "pos"),
+                        **({"transform": _to_float32} if way == "scatter" else {}))
+        gm.add_coupling_group(["p", "q"], **dict(shape.group, rtol=NARROWED_RTOL))
+        advisories = _compile_warnings(gm)
+        ref.start(gm)
+        gm.step(params=ref.params(gm))
+        report = dict(gm.coupling_diagnostics()[KEY])
+        state = gi.state_of(gm)
+    gg.assert_not_diagnosed(report, ["p.x->q.u", "q.x->p.u"], "norm")
+    eps32, eps64 = (float(np.finfo(t).eps) for t in (np.float32, np.float64))
+    eps_positions = float(np.finfo(np.dtype(geom_dtype)).eps)
+    got = report[gg.FLOOR_KEY]
+    want = _floor_by_the_two_rules(ref, state, eps32, eps_positions)
+    assert abs(got - want) <= 1e-4 * want, (got, want)
+    if geom_dtype == "float64":
+        # Premises: counted over the fields alone the floor is another
+        # number, and so it is with the positions raised with the values.
+        assert want > 1e6 * _floor_by_the_two_rules(ref, state, eps64, eps64)
+        assert _floor_by_the_two_rules(ref, state, eps32, eps32) > 50.0 * want
+        assert advisories == [], advisories
+    else:
+        # Premise: counted from the coordinates' zero the floor is another number.
+        assert want > 2.0 * _floor_by_the_two_rules(ref, state, eps32, eps32, lattice=False)
+        assert set(_edges_warned(advisories)) == {"p.x->q.u", "q.x->p.u"}, advisories
+    assert report["converged"] and report["precision_limited"], report
+    assert report["not_usable_reason"].count("residual_precision_floor is the float") == 1
+    distance = ref.distance(state) * gi.RTOL / NARROWED_RTOL
+    assert distance <= ref.K(gi.measured_whole(shape)), (distance, report)
+
+
+def test_a_group_withheld_on_account_of_its_norm_behind_a_long_mapped_row_has_one_reason():
+    """Where two reasons could meet, one is given, once.  A static mapping
+    whose row adds up more than ``MAPPED_ROW_FLOOR_LIMIT`` entries has
+    the flags that rest on the float floor withdrawn where the residual
+    is not clear of it, with that rule's reason (MADD-ANO-257).  A group
+    under this norm that resolves a ``multilinear_grid`` mapping reports
+    no bound and no flag at all, with its own reason and the floor.  In
+    a group that is both -- a dense matrix of twelve entries a row one
+    way, a gather the other -- the report is the second kind's: the row
+    rule withdraws flags and finds none set, so it adds nothing, and the
+    reason is the norm's, with the floor's sentence, each once.
+
+    Premise: on this very report the row rule's own condition holds (it
+    would have spoken beside a standing flag).  Without ``diagnostics``:
+    the reason is committed by ``compile()`` and the row rule reads the
+    report's residual and floor, so the step's analysis adds nothing to
+    what is pinned (and costs four seconds of compilation)."""
+    from maddening.core.coupling import _group_layout  # noqa: PLC0415
+    from maddening.core.coupling.mapping import matrix_mapping  # noqa: PLC0415
+    from tests.property import geometry_graphs as gg  # noqa: PLC0415
+
+    shape = Shape("two-way", 48, 12, ("source", "target"), dtype="float32")
+    ref = Reference(shape, DRAWS[0])
+    with precision(False):
+        gm = GraphManager()
+        for node in gi._nodes(shape).values():                               # noqa: SLF001
+            gm.add_node(node)
+        spread = np.full((shape.n_large, shape.n_small), 1.0 / shape.n_small, np.float32)
+        gm.add_edge("p", "q", "x", "u", mapping=matrix_mapping(jnp.asarray(spread)))
+        gm.add_edge("q", "p", "x", "u", mapping=gi._mapping(shape, "gather"),   # noqa: SLF001
+                    geometry=("target", "pos"))
+        gm.add_coupling_group(["p", "q"], **shape.group)
+        _compile_warnings(gm)
+        ref.start(gm)
+        gm.step(params=ref.params(gm))
+        report = dict(gm.coupling_diagnostics()[KEY])
+        rows = gm._committed_mapped_rows[KEY]                                 # noqa: SLF001
+    assert [(key, row) for key, _what, row in rows] == [("p.x->q.u", shape.n_small)]
+    assert shape.n_small > _group_layout.MAPPED_ROW_FLOOR_LIMIT
+    gg.assert_not_diagnosed(report, ["q.x->p.u"], "norm")
+    floor = report[gg.FLOOR_KEY]
+    said = _group_layout._mapped_row_reason(rows, report["residual"], floor)   # noqa: SLF001
+    assert said is not None and "MADD-ANO-257" in said, (report["residual"], floor)
+    reason = report["not_usable_reason"]
+    assert "MADD-ANO-257" not in reason and " Also: " not in reason, reason
+    for once in ("the group resolves geometry-dependent mapping(s)",
+                 "under convergence_norm='interface'",
+                 "residual_precision_floor is the float resolution"):
+        assert reason.count(once) == 1, (once, reason)
+
+
 def _check_report_is_withheld(shape, tmp_path):
     from tests.property import geometry_graphs as gg  # noqa: PLC0415
 
@@ -908,7 +1072,8 @@ def test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_thres
         positions, origin = _markers(shape, reach, axis=axis, sign=sign)
         got = _edges_warned(_compile_warnings(_placed(shape, positions, origin, rtol=rtol)))
         floor = gi.EVALUATIONS[shape.schedule] * gi.positions_floor(
-            positions, shape.spacing, shape.geometry_dtype, rtol)
+            positions, shape.spacing, shape.geometry_dtype, rtol, origin=origin,
+            grid_shape=shape.grid_shape)
         floors[side] = floor
         if side == "under":
             assert not got, got
@@ -919,7 +1084,7 @@ def test_compile_warns_from_the_distance_at_which_a_positions_floor_is_the_thres
             assert "float32" in text and f"rtol={rtol:g}" in text, text
             said = float(text.split("They reach ")[1].split(" spacings")[0])
             assert abs(said - reach) <= 1e-5 * reach, (said, reach)
-            assert f"(axis {axis}, spacing {shape.spacing[axis]:g})" in text, text
+            assert f"(axis {axis}, spacing {shape.spacing[axis]:g};" in text, text
             times = float(text.split("which is ")[1].split(" times the tolerance")[0])
             assert abs(times - floor) <= 5e-3 * floor, (times, floor)
             for remedy in ("in float64", "coordinates local to the grid", "loosen rtol above"):
@@ -982,7 +1147,8 @@ def test_a_delivered_value_is_warned_of_for_its_positions_rounding_and_not_for_i
     rtol, E = 5e-7, gi.EVALUATIONS[base.schedule]
     positions, origin = _markers(base, 1_000.0)
     assert 4.0 * E * float(np.finfo(np.float32).eps) / rtol > 1.5, "premise: the value's floor"
-    assert E * gi.positions_floor(positions, base.spacing, "float64", rtol) < 1e-5
+    assert E * gi.positions_floor(positions, base.spacing, "float64", rtol, origin=origin,
+                                  grid_shape=base.grid_shape) < 1e-5
     with precision(True):
         assert _compile_warnings(_placed(wide, positions, origin, rtol=rtol)) == []
         narrow = _edges_warned(_compile_warnings(_placed(base, positions, origin, rtol=rtol)))
@@ -1137,7 +1303,8 @@ def test_the_advisory_and_the_float_floor_are_one_count_over_a_sweep_of_distance
                 entries[key] = v.size
         assert sorted(entries) == sorted(behind)
         own = {key: (E * gi.positions_floor(state[holder]["pos"], shape.spacing,
-                                            shape.geometry_dtype), entries[key])
+                                            shape.geometry_dtype, origin=shape.grid_origin,
+                                            grid_shape=shape.grid_shape), entries[key])
                for key, (holder, _how) in behind.items()}
         assert all(abs(floor - 1.0) > 0.02 for floor, _n in own.values()), own
         assert sorted(warned) == sorted(k for k, (floor, _n) in own.items() if floor >= 1.0), (

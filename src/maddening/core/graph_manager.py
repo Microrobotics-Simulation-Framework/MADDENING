@@ -5149,7 +5149,41 @@ class GraphManager:
             says which case it is; besides the causes above of a group
             with a geometry edge, a long row of a static mapping and a
             checkpoint saved after a state write, no other group's entry
-            has it.  The values are
+            has it.
+
+            **One of those groups keeps the float floor: one withheld
+            on account of** ``convergence_norm="interface"`` (its
+            bounds under that norm are not in 0.4.0; run it under
+            ``"mixed"`` or ``"l2"`` for a diagnostic run that reports
+            them).  Its ``"precision_limited"`` is reported as for
+            every group -- the residual is at or below its float floor
+            at the state the step returned -- and its entry has a
+            further key, ``"residual_precision_floor"`` : float, that
+            floor in the residual's units (tolerances;
+            :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
+            times the pass's **structural** evaluation count, with
+            ``diagnostics=True`` as without: the same floor either
+            way), NaN where it could not be measured (the reason then
+            says why: the state the step returned is not finite, or
+            the floor was not recorded).  Under this norm
+            the floor is where the rounding of stored positions is
+            counted: ``eps`` of their dtype times the larger of a
+            position's distance from the coordinates' zero and of its
+            lattice coordinate (the distance from the grid's first
+            point, which the mapping forms in the positions' dtype),
+            in grid spacings.  So the two keys are the run-time
+            reading of what ``compile()`` warns of once, on the state
+            it sees: markers that have drifted, a state write and a
+            loaded checkpoint are read where they are.  The floor is
+            **pooled** over every entry the norm reads, as the residual
+            is, where ``compile()``'s advisory quotes one part by
+            itself: compare the floor with ``"residual"`` and with one.
+            With
+            ``"precision_limited"`` ``True``, ``"residual"`` is rounding
+            rather than motion: ``"converged"`` does not say the
+            readings settled to the tolerance, and a group at
+            ``max_iterations`` may be held there by rounding alone.
+            No other group's entry has that key.  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -5327,7 +5361,16 @@ class GraphManager:
                     continue
                 evaluations, declared, internal_edges = committed
                 measured = float(meta.get(f"coupling_{key}_pass_evaluations", float("nan")))
-                if math.isfinite(measured):
+                # Experimental: a group withheld on account of the
+                # interface norm keeps the structural count, so that its
+                # floor is the same with diagnostics on or off (the
+                # measured count weights a read of positions by their
+                # distance from the coordinates' zero, which that floor
+                # already counts: ``_reports_the_structural_count``).
+                structural = _group_layout._reports_the_structural_count(
+                    group, self._committed_geometry_refusals.get(key)
+                    if self._committed_geometry_edges.get(key, ()) else None)
+                if math.isfinite(measured) and not structural:
                     evaluations = max(evaluations, measured)
                 if any(nn not in self._state for nn in group.nodes):
                     # A member removed since the step: its state, which the
@@ -5455,6 +5498,10 @@ class GraphManager:
                     # estimates: every bound is NaN (the gradient estimate
                     # ``inf``, as where the ratio is rejected), every
                     # ``*_usable`` flag False, and the report says why.
+                    # A group withheld on account of its norm keeps what
+                    # its entry says of the float floor (one helper).
+                    floor_reading = _group_layout._floor_reading_of_a_norm_withheld_report(
+                        group, geometry_reason, result[key], floor)
                     result[key].update({
                         "amplification": float("nan"),
                         "error_estimate": float("nan"),
@@ -5468,6 +5515,7 @@ class GraphManager:
                         "precision_limited": False,
                         "not_usable_reason": geometry_reason,
                     })
+                    result[key].update(floor_reading)
                     continue
                 if geometry_keys and "not_usable_reason" not in result[key]:
                     # Experimental: a group that solves the positions of a
@@ -7709,7 +7757,9 @@ class GraphManager:
           not read (experimental: any but a single-rate
           ``multilinear_grid`` group under ``"l2"`` or ``"mixed"``
           whose step passed its self-check): its bounds, estimates and
-          ``*_usable`` flags are withheld;
+          ``*_usable`` flags are withheld; a group withheld on account of
+          the interface norm still flags ``precision_limited=True``, with
+          its ``residual_precision_floor``;
         * ``not_usable_reason`` for a group loaded from a checkpoint saved
           after its state was written: the bound and the flags that rest
           on the float floor are withheld;

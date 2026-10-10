@@ -324,8 +324,11 @@ def _in_kernel_lengths(mapping, geom):
     ``(points,)`` on one axis).  Each axis is divided in a static
     power-of-two frame of its length, as the kernel divides it, so the
     quotient is exact in the frame at any spacing.  No origin is
-    subtracted: a difference of two readings does not see it, and the
-    rounding of a stored position is relative to the position itself.
+    subtracted: this is what the **residual** reads of positions, and a
+    difference of two readings does not see an origin.  It is not, by
+    itself, where a position is rounded: the kernel subtracts its own
+    origin in the positions' dtype (:func:`_rounded_at`, which the
+    float floor reads).
     """
     lengths = _kernel_lengths(mapping)
     geom = jnp.asarray(geom)
@@ -341,6 +344,155 @@ def _in_kernel_lengths(mapping, geom):
         scaled.append((cols[..., axis] * jnp.asarray(frame, dtype))
                       / jnp.asarray(length * frame, dtype))
     return jnp.stack(scaled, axis=-1).reshape(geom.shape)
+
+
+def _rounded_at(mappings, geom):
+    """The magnitude each coordinate of the geometry *geom* is **rounded
+    at**, in the length scale of the mapping kind that reads it: what the
+    float floor multiplies ``eps`` of the positions' dtype by
+    (``acceleration._positions_resolution``).  Non-negative, the shape
+    and dtype of *geom*.
+
+    **The one place the rounding of a position is located.**  Per
+    coordinate, the larger of two magnitudes, for each of *mappings*
+    (the mappings of the group's edges that read *geom*: one, or several
+    on different lattices; the largest over them):
+
+    * its **stored** magnitude, :func:`_in_kernel_lengths`: a position
+      ``u`` lengths from the coordinates' zero is stored to ``eps * |u|``
+      lengths;
+    * the magnitude of the **coordinate the kernel forms from it** in
+      the positions' dtype, where the kind declares one
+      (``geometry_kernel_coordinates``; for ``multilinear_grid`` the
+      lattice coordinate ``(x - origin) / spacing``) and reads that
+      coordinate (``geometry_coordinates_read``): the kernel's weights
+      are resolved to ``eps`` times *that*.
+
+    The second is what the first alone missed.  Counted from the
+    coordinates' zero only, four float32 markers within 4 spacings of
+    zero on a grid of 16001 points centred there (first point 8000
+    spacings away) read a floor of 0.26 to 0.50 tolerances, no advisory
+    and ``converged=True`` with the state 2 to 20 tolerances from the
+    float64 fixed point (pooled; 42 in the worst entry), and 34 on a
+    grid of 1e5 points (Gauss-Seidel at ``rtol=1e-5``, Jacobi at 3e-6;
+    jaxlib 0.11.0, CPU): the kernel had rounded each weight at ``eps *
+    8000`` and ``eps * 5e4`` of a cell.  And the same physical problem
+    read a floor of 623 with the coordinates' zero at the grid's first
+    point and 0.26 with it at the markers.  The larger of the two does
+    not depend on where the zero is put once the lattice coordinate is
+    the larger, which it is wherever the markers are further from the
+    grid's first point than from the zero.
+
+    A coordinate the kind does not read (an axis of one lattice point, a
+    point clamped to the hull from further out than its rounding can
+    cross) keeps its stored magnitude and takes nothing from the kernel:
+    the kernel forms no weight from it.  A kind that declares no kernel
+    coordinate has the stored magnitude alone.  Only ever at least the
+    stored magnitude: a floor that reads this is never below the one
+    that read :func:`_in_kernel_lengths`, and equals it, to the bit, for
+    a grid whose origin is the coordinates' zero.
+    """
+    return jnp.maximum(_stored_magnitude(mappings, geom), _kernel_magnitude(mappings, geom))
+
+
+def _stored_magnitude(mappings, geom):
+    """``|u|``: how far each coordinate of *geom* is from the
+    coordinates' zero, in the length scale of the kind that reads it
+    (:func:`_in_kernel_lengths`), the largest over *mappings*.  One of
+    the two magnitudes of :func:`_rounded_at`."""
+    out = None
+    for mapping in mappings:
+        stored = jnp.abs(_in_kernel_lengths(mapping, geom))
+        out = stored if out is None else jnp.maximum(out, stored)
+    if out is None:
+        raise ValueError("no mapping reads this geometry")
+    return out
+
+
+def _kernel_magnitude(mappings, geom):
+    """The magnitude of the coordinate the kernel forms from each
+    coordinate of *geom* in the positions' dtype (the kind's
+    ``geometry_kernel_coordinates``; for ``multilinear_grid`` the
+    lattice coordinate, the distance from the grid's first point in
+    spacings), the largest over *mappings*; zero for a coordinate no
+    mapping's kernel reads (``geometry_coordinates_read``) and for a
+    kind that declares no such coordinate.  The other magnitude of
+    :func:`_rounded_at`."""
+    geom = jnp.asarray(geom)
+    out = jnp.zeros(geom.shape, geom.dtype)
+    for mapping in mappings:
+        formed: Any = getattr(mapping, "geometry_kernel_coordinates", None)
+        if not callable(formed):
+            continue
+        kernel = jnp.abs(jnp.asarray(formed(geom))).astype(geom.dtype)
+        declared: Any = getattr(mapping, "geometry_coordinates_read", None)
+        if callable(declared):
+            read: Any = declared(geom)
+            kernel = jnp.where(read, kernel, jnp.zeros((), geom.dtype))
+        # units: the kind's lengths (dimensionless multiples of a spacing)
+        out = jnp.maximum(out, kernel)
+    return out
+
+
+def _read_in_kernel_lengths(mapping, geom, lattices=None):
+    """The magnitude at which the positions a value **delivered** through
+    *mapping* at the geometry *geom* depends on are rounded, in the
+    kind's length scale (:func:`_rounded_at`), with zero in place of
+    every coordinate the kind says its transfer does not read.
+
+    What the float floor of such a value takes the positions' rounding
+    from (``acceleration._part_resolution``): a coordinate the kernel
+    ignores -- for ``multilinear_grid`` one on an axis of one lattice
+    point, or one clamped to the hull from further out than its rounding
+    can cross (``geometry_coordinates_read``) -- moves nothing the edge
+    delivers, whatever its last digits, so its rounding is none of the
+    value's.  A kind that does not declare which coordinates it reads
+    has all of them counted.  Positions that are themselves a **part**
+    of a reading (a mapping read at its source and anchored there) are
+    not passed through this: the residual reads every coordinate of
+    them, and so does its floor.
+
+    *lattices* are the mappings of every edge that reads the same
+    geometry field (:func:`_position_lattices`; *mapping* alone where
+    none is given): a coordinate this mapping reads is rounded at the
+    largest magnitude over them.
+    """
+    reach = _rounded_at(lattices or (mapping,), geom)
+    declared: Any = getattr(mapping, "geometry_coordinates_read", None)
+    if not callable(declared):
+        return reach
+    read: Any = declared(geom)
+    return jnp.where(read, reach, jnp.zeros((), reach.dtype))
+
+
+def _position_lattices(records) -> dict:
+    """``{(node, field): (mapping, ...)}``: for each geometry field the
+    edges *records* are anchored at, the mappings that read it, each
+    once, in the order of *records*.
+
+    Only kinds that declare a length scale (``geometry_length_scale``:
+    the ones the interface norm reads a geometry of).  Two edges on one
+    field are usually a gather and a scatter on the same grid, which is
+    one lattice (the kind's ``geometry_lattice()`` says so; mappings of
+    a kind that declares none are each taken for their own); where they
+    are on different lattices, a position's rounding is counted at the
+    largest magnitude over them (:func:`_rounded_at`).  Read by
+    ``acceleration._interface_readings`` (the floor) and through it by
+    ``acceleration._positions_floors`` (``compile()``'s advisory), from
+    the same records, so the two cannot count different lattices.
+    """
+    lattices: dict = {}
+    for record in records:
+        if record.anchor is None or not callable(
+                getattr(record.mapping, "geometry_length_scale", None)):
+            continue
+        side, field = record.anchor
+        holder = ((record.source if side == "source" else record.target)[0], field)
+        declared: Any = getattr(record.mapping, "geometry_lattice", None)
+        lattice = ((getattr(record.mapping, "kind", None), declared()) if callable(declared)
+                   else id(record.mapping))
+        lattices.setdefault(holder, {}).setdefault(lattice, record.mapping)
+    return {holder: tuple(held.values()) for holder, held in lattices.items()}
 
 
 @dataclass(frozen=True)
@@ -387,10 +539,17 @@ class PartReading(tuple):
 
     * ``part``: the :class:`ReadingPart` (what the value is measured
       against);
-    * ``positions``: per state, the positions (in the kind's length
-      scale) a value delivered through a geometry-dependent mapping was
-      computed at -- its rounding carries theirs -- and ``None`` for
-      every other part;
+    * ``positions``: per state, the magnitude (in the kind's length
+      scale) at which the stored positions the part rests on are
+      rounded (:func:`_rounded_at`: the larger of a position's own
+      magnitude and of the coordinate the kernel forms from it).  For a
+      part that **is** positions, those positions'; for a value
+      delivered through a geometry-dependent mapping, that of the
+      positions it was computed at -- its rounding carries theirs --
+      with zero for a coordinate the kind does not read
+      (:func:`_read_in_kernel_lengths`); ``None`` for every other part.
+      Read by the float floor only (``acceleration._part_resolution``),
+      never by the residual;
     * ``delivered``: per state, what the edge delivers for a source field
       **read at its source**, where the reader asked for it
       (:meth:`InterfaceEdge.read` with ``band``: a group that declares a
@@ -661,7 +820,8 @@ class InterfaceEdge:
                      else pre_step[self.target[0]])
         return held[field]
 
-    def read(self, states, mappings=None, pre_step=None, band: bool = False) -> tuple:
+    def read(self, states, mappings=None, pre_step=None, band: bool = False,
+             lattices=None) -> tuple:
         """This edge's reading at each of *states*: one :class:`PartReading` per part.
 
         *states* are ``{node: {field: value}}`` dicts (one for a floor,
@@ -679,7 +839,18 @@ class InterfaceEdge:
         field, with *mappings* and the geometry the step uses), for the
         dead band to ask of both.  Without it nothing more is built than
         ever was.
+
+        *lattices* is ``{(node, field): (mapping, ...)}``, the mappings
+        of every edge of the reader's group that reads each geometry
+        field (:func:`_position_lattices`); ``None`` or a field it does
+        not name is this edge's mapping alone.  It decides only
+        ``PartReading.positions`` (where the positions a part rests on
+        are rounded: :func:`_rounded_at`), which the float floor reads
+        and the residual does not.
         """
+        def among(holder):
+            return (lattices or {}).get(holder) or (self.mapping,)
+
         node, field = self.source
         stored = tuple(s[node][field] for s in states)
         source_dtype = jnp.asarray(stored[0]).dtype
@@ -701,6 +872,7 @@ class InterfaceEdge:
                 g_node, g_field = part.field
                 held = tuple(s[g_node][g_field] for s in states)
                 values = tuple(_in_kernel_lengths(self.mapping, g) for g in held)
+                positions = tuple(_rounded_at(among(part.field), g) for g in held)
                 out.append(PartReading(self.edge, jnp.asarray(held[0]).dtype, values,
                                        part, positions))
                 continue
@@ -708,7 +880,10 @@ class InterfaceEdge:
                 geoms = tuple(self.geometry_at(s, pre_step) for s in states)
                 values = tuple(self.reading(v, mappings, g) for v, g in zip(stored, geoms))
                 if callable(getattr(self.mapping, "geometry_length_scale", None)):
-                    positions = tuple(_in_kernel_lengths(self.mapping, g) for g in geoms)
+                    side, g_field = self.anchor
+                    holder = ((self.source if side == "source" else self.target)[0], g_field)
+                    positions = tuple(
+                        _read_in_kernel_lengths(self.mapping, g, among(holder)) for g in geoms)
             else:
                 values = tuple(self.reading(v, mappings) for v in stored)
             out.append(PartReading(self.edge, source_dtype, values, part, positions))

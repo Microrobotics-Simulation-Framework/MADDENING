@@ -360,7 +360,11 @@ group fills `rho_spectral` and `spectral_error_bound`.
 with every floating field the norm does not measure whole -- one no internal edge reads, or one
 read only through a gather, a tie or a transform -- recomputed by one plain pass at it.  (The source
 field of a static mapping onto more entries than it holds is read at its source, so it is measured
-whole and kept, like one a plain edge reads.)  The state you
+whole and kept, like one a plain edge reads.  The side is decided by those entry counts and not by
+the mapping's direction, and a `multilinear_grid` mapping is read by the same counts: with more
+markers than grid entries its gather is the edge read at its source, whose grid field is kept, and
+its scatter is read as delivered, the markers' value recomputed; see
+[Geometry-dependent mappings](geometry_dependent_mappings.md).)  The state you
 read is therefore within the reported residual of the reported iterate on what the edges deliver,
 and is not itself an iterate of the loop; its own residual can be a few times the reported one.
 See "What a converged step returns under each norm" in

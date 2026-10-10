@@ -262,23 +262,47 @@ names the edge and says what to do.
   The internal `_meta` entry of the state (which `GET /graph/state`
   returns) still holds what the step computed for such a group; it is
   not a report and promises nothing.
-* **The interface norm solves, and reports no bound yet.**  See the next
-  section for what it reads.  A group under `convergence_norm="interface"`
-  with a geometry-dependent mapping reports its solve and withholds the
-  bounds, as above; with another mapping kind on an internal edge, or in a
-  sub-cycled group, it is refused at `compile()`: use `"l2"` or `"mixed"`.
+* **The interface norm solves, and its bounds are not reported in
+  0.4.0.**  See the next section for what it reads.  A group under
+  `convergence_norm="interface"` with a geometry-dependent mapping
+  reports its solve and the float floor of its residual
+  (`precision_limited` and `residual_precision_floor`, below), and
+  withholds the bounds and the estimates, as above.  For a diagnostic
+  run that reports them, run the same group under `"mixed"` or `"l2"`
+  with `diagnostics=True`.  With another mapping kind on an internal
+  edge, or in a sub-cycled group, the interface norm is refused at
+  `compile()`: use `"l2"` or `"mixed"`.
 * **Under the interface norm, positions need a dtype that resolves the
-  tolerance where they are.**  A position `u` spacings from zero is stored
-  to `eps * u` spacings (`eps` is 1.2e-7 in float32 and 2.2e-16 in
-  float64).  That rounding enters what the criterion reads in two ways:
-  - **a scatter anchored at its source** reads those positions themselves
-    and asks them to change by less than `rtol` of one spacing;
-  - **a gather** (and any mapping read as delivered, at either anchor)
-    reads a value interpolated at those positions.  A position moved by
-    `eps * u` spacings moves an interpolation weight by as much, and the
-    delivered value by up to that fraction of its own size (the worst
-    case: a field that varies by its own size across one cell), of which
-    the criterion asks a change below `rtol`.
+  tolerance where they are, on the grid as well as in your
+  coordinates.**  A position is rounded at the larger of two distances,
+  in spacings (`eps` is 1.2e-7 in float32 and 2.2e-16 in float64):
+  - its distance `u` from the **zero of your coordinates**: it is stored
+    to `eps * u` spacings;
+  - its **lattice coordinate**, its distance from the **grid's first
+    point** on that axis: the mapping forms `(x - origin) / spacing` in
+    the positions' dtype, so its weights are resolved to `eps` times
+    that, however small the position itself is.
+
+  Call the larger `r`.  **No choice of the coordinates' origin changes a
+  lattice coordinate**: markers in the middle of a grid of 16001 points
+  are 8000 spacings from its first point wherever you put the zero, and
+  float32 weights there are resolved to 9.5e-4 of a cell.
+
+  That rounding enters what the criterion reads in two ways.
+  Which one is decided by the entry counts of the mapping (the table in
+  the next section), not by its direction:
+  - **a mapping that delivers more entries than it reads, anchored at
+    its source** (a scatter of fewer points than the grid has entries)
+    reads those positions themselves and asks them to change by less
+    than `rtol` of one spacing;
+  - **a mapping that does not deliver more entries than it reads** (a
+    gather onto no more points than the grid has entries; either anchor)
+    reads a value computed at those positions.  A position moved by
+    `eps * r` spacings moves an interpolation weight by as much, and the
+    delivered value by that times the field's variation across the cell
+    over the value's own size.  **The count below takes that ratio to be
+    one**: a field that varies across a cell by about the size of the
+    value delivered.
 
   The float floor of the residual counts four such roundings per
   evaluation of a pass for every entry of either reading
@@ -288,37 +312,159 @@ names the edge and says what to do.
   positions put that count at the tolerance or above:
 
   ```text
-  4 * E * eps * max|u| >= rtol
+  4 * E * eps * max r >= rtol
   ```
 
-  with `u` taken axis by axis in that axis's spacing and `eps` that of the
+  with `r` taken axis by axis in that axis's spacing and `eps` that of the
   dtype the positions are stored in, on the state `compile()` is called
-  with.  In float32 at `rtol=1e-4` that is from 210 spacings from zero
-  (105 for a Gauss-Seidel pair); at the default `rtol=1e-6`, from two.
-  From there on the rounding counted for the positions is the tolerance
-  asked of the reading, or more: rounding alone can keep the group from
-  converging (it then runs to `max_iterations`), and where it does
-  converge the criterion says little of those positions, or of the last
-  digits of that value.  It is a warning, and the step is built as it
-  would be without it: where the positions settle to the last bit the
-  group converges as before, and a gathered field that varies little
-  across a cell is moved by less than the count allows for.  The message
-  names the edge, the node and field that store the positions, which of
-  the two readings it is, the distance and the dtype, and three remedies:
+  with.  In float32 at `rtol=1e-4` that is from 210 spacings (105 for a
+  Gauss-Seidel pair) from zero **or from the grid's first point**; at
+  `rtol=1e-5`, from 21 (10.5); at the default `rtol=1e-6`, from two.  So
+  on a grid longer than that, float32 positions are warned of over most
+  of the grid, and float64 positions are the remedy.  (Counted from the
+  coordinates' zero alone, as it was before, four float32 markers within
+  4 spacings of zero on grids of 16001 and 100001 points centred there
+  compiled silently and read a floor of 0.26 to 0.50 tolerances and
+  `converged=True` with the state 2 to 20 and 34 tolerances from the
+  float64 fixed point; the floor there is now 623 and 3890 under
+  Gauss-Seidel at `rtol=1e-5`, both grids are warned of, and the same
+  problem reads the same floor wherever the zero is put.)
+  For positions that are read themselves, the rounding counted is from
+  there on the tolerance asked of them, or more: rounding alone can keep
+  the group from converging (it then runs to `max_iterations`), and
+  where it does converge the criterion says little of those positions.
+  It is a warning, and the step is built as it would be without it:
+  where the positions settle to the last bit the group converges as
+  before.
+
+  **For a delivered value the count is an assumption, not a bound, and
+  it is off in both directions** (measured in float32 at `rtol=1e-4`,
+  jaxlib 0.11.0, CPU; MAP-050 has the tables):
+  - *a field that varies less across a cell is moved by less, and the
+    warning is early.*  On two pairs of gathers the count reached the
+    tolerance at 132 and 222 spacings; the float32 pairs took float64's
+    passes at every distance to 5032 spacings, their readings within
+    0.03 and 0.05 of a tolerance of float64's at the threshold and
+    within 1.4 at 48 and 24 times it;
+  - *a value delivered far smaller than the field's variation across a
+    cell is moved by more, and is not warned of.*  A gather that samples
+    a field near its zero (markers on the zero contour of a level set, a
+    velocity at a stagnation point) 100 spacings from zero, where the
+    count is 0.96 and `compile()` is silent, reported `converged=True`
+    7.3 tolerances from its fixed point where the field varies across a
+    cell by 250 times the value delivered, and 23 tolerances at 2500
+    times; at 10 spacings (count 0.097) and 2500 times, 2.8.  With the
+    same positions held in float64 every one of those is within 0.5.
+    Hold such positions in float64 (keeping the coordinates' zero at
+    the markers makes `u` small and leaves their lattice coordinate
+    where it was).  This is MADD-ANO-247 (open) entered through the
+    positions.
+
+  **The advisory is asked once; the report reads the floor at every
+  step.**  `compile()` asks of the state it is called with.  Markers
+  that move afterwards, by their own update, by `set_node_state` or
+  from a loaded checkpoint, are not asked again by it.  The run-time
+  reading is in the report: for such a group
+  `coupling_diagnostics()[key]` carries `residual_precision_floor`, the
+  float floor of the residual at the state that step returned (in
+  tolerances; the positions enter it at their rounding there), and
+  `precision_limited`, `True` where the residual is at or below it, by
+  the rule of every group's report.  **The report's floor is pooled;
+  the advisory's number is one part's.**  The floor is one root mean
+  square over every entry the norm reads in the group, as the residual
+  is; the number in a `compile()` warning is what the positions put
+  into the floor of the one part named, by itself.  With finer entries
+  beside that part the pooled floor is the smaller (four markers a
+  thousand spacings out beside two plain edges of 1e5 entries: 95.7 in
+  the warning, 0.61 in the report).  Compare the warning's number with
+  one to know whether those positions are resolved to the tolerance
+  asked of them, and the report's floor with its `residual` and with
+  one to know whether the group's criterion is.  **The floor is the
+  same with `diagnostics=True` and without**: it takes the pass's
+  structural evaluation count either way (the count a step measures
+  with diagnostics grows with the positions' distance from zero, which
+  this floor already counts).  **Read the floor's size against
+  the tolerance.**  A floor of one or more says that rounding alone is
+  the tolerance asked, which is what `compile()` warns of for the state
+  it sees; `precision_limited=True` beside a floor far under one (a
+  float64 group whose pass settled exactly, with a residual of 0.0) is
+  harmless.  A float32 Gauss-Seidel pair at
+  `rtol=1e-5` compiled 6 spacings from zero (the advisory starts at
+  10.5) whose markers then drift 950 spacings a step reports
+  `converged=True` and `residual=0.0` on every step with its positions
+  3 to 20 tolerances from the fixed point (one float32 rounding of a
+  position there is 6 to 46 tolerances): its report reads
+  `precision_limited=True` and a floor of 117 to 557 tolerances, where
+  the same pair in float64 reads a floor of a millionth of one.  A
+  pair like it without the drift, 7000 spacings out (written there, or
+  loaded from a checkpoint: the two behave alike to the bit), can run to
+  its cap with `converged=False` and a residual of 14.8: one marker's
+  position alternates between two neighbouring float32 numbers from pass
+  to pass, and one rounding there is 49 tolerances.  The report says
+  `precision_limited=True` beside a floor of 546.
+  `precision_limited` is more sensitive than the
+  advisory: it is `True` wherever the residual is at or below the
+  pooled floor, which a converged residual often is well under the
+  advisory's distance.  The floor counts a position at the rounding of
+  the dtype it is stored in, as the advisory does, and a value at the
+  coarsest floating dtype among the group's fields and what its
+  internal edges deliver (a field computed from a coarser member's
+  output, or from a value an edge's transform narrowed, may carry that
+  rounding).  So
+  float64 positions beside float32 fields put only float64's rounding
+  of their distance into it (1e-12 of a spacing 5000 spacings out):
+  the float32 pair above without its drift and with
+  its positions held in float64 reads a floor of 0.078 of a tolerance
+  (its values' share) placed 100 or 5000 spacings out or written 7000
+  out, where float32 positions read 8.1, 390 and 546, and
+  `precision_limited=False` wherever its residual is above that.
+
+  The message names the edge, the node and field that store the
+  positions, which of the two readings it is, the distance it counts
+  (from zero or from the grid's first point, whichever is the larger,
+  with the other beside it), the dtype, and the remedies that apply:
   - hold the positions in float64.  This needs `jax_enable_x64`; the
     mapping computes its weights in the geometry's dtype and casts them to
-    the field's, so the other fields can stay float32;
+    the field's, so the other fields can stay float32: the advisory,
+    the solve and the report's floor all take the positions at
+    float64's rounding (the floor is then the float32 values' own, as
+    above; hold the group's fields in float64 too for a floor at
+    float64's).  Compute the positions' update in float64 as well: a
+    move computed in float32 and added to float64 positions carries
+    float32's rounding of the move, which the floor does not count (a
+    950-spacing move left them 1.8 to 2.9 tolerances off at
+    `rtol=1e-5`, with `converged=True` and a floor of 0.078);
   - use coordinates local to the grid, so that the positions are small
-    numbers (the origin of the coordinates near the markers);
+    numbers.  This is offered only where the positions are near enough
+    to the **grid's first point** for it to help (within `rtol / (4 E
+    eps)` spacings of it): further into a grid the lattice coordinate
+    is what rounds, the message says that no choice of origin brings
+    the count under the tolerance, and float64 positions or a looser
+    tolerance are what is left;
   - loosen `rtol`.
 
-  Positions written after `compile()` (`set_node_state`) are not asked
-  again until the next `compile()`.  A gather anchored at its target is
-  asked at the target's positions in that state (what a step started from
-  it reads).  A scatter anchored at its target is not asked: its reading
-  is its source value alone, and the float floor counts no position for
-  it.  Neither are the `"l2"` and `"mixed"` norms, which measure positions
-  against their own size and read no delivered value.
+  **What is not asked**, because the floor counts nothing for it: a
+  delivered value the dead band drops (`atol` above its magnitude); a
+  delivered value for a coordinate its mapping does not read, namely one
+  on an axis of one lattice point and one of a point clamped to the
+  hull (outside it by more than its rounding can cross: the weights are
+  exactly 0 and 1); a mapping read at its source and anchored at its
+  target, whose reading is its source value alone; and the `"l2"` and
+  `"mixed"` norms, which measure positions against their own size and
+  read no delivered value.  **The target-anchored scatter is a gap, not
+  a guarantee** (MADD-ANO-258, open): the mapping still forms its
+  weights from those positions in their dtype, and nothing counts that.
+  Beside a gather at the same positions (the usual pair) the gather's
+  floor flags the group.  With no such edge in the group, float32
+  positions 8000 and 50000 spacings from the grid's first point read a
+  floor of 0.095, no warning and `converged=True` 2.6 and 16 tolerances
+  from the float64 fixed point (constructed); hold them in float64, or
+  anchor the scatter at its source.  Positions that are read themselves are
+  asked of every coordinate, because the criterion reads every
+  coordinate of them, one on an axis of one lattice point included (in
+  the spacing declared for that axis).  A delivered value anchored at
+  its target is asked at the target's positions in the state `compile()`
+  sees (what a step started from it reads).
 * **No adaptive stepping** and **no sharded nodes** on a geometry edge.
 * **The geometry is a state field of the edge's own source or target.**
   To use positions another node holds, carry them in the source's or the
@@ -345,13 +491,20 @@ Put the sampling on the edge, as below.
 The interface norm judges a group on what crosses its internal edges, and
 reads a mapped edge on its compact side (see
 [Interface mapping](../algorithm_guide/coupling/interface_mapping.md)).
-For a `multilinear_grid` edge inside a group that does not sub-cycle:
+The side is decided by the entry counts the mapping declares, never by
+its direction.  For a `multilinear_grid` edge between `M` points and a
+grid of `N` entries, inside a group that does not sub-cycle:
 
 | The edge | The norm reads |
 |---|---|
-| a gather (grid to points), and any mapping that does not deliver more entries than it reads | the delivered value, at the positions the step uses |
-| a scatter of a few points onto a larger grid, `geometry=("source", ...)` | the source value **and the positions**, each a reading of its own |
-| the same scatter with `geometry=("target", ...)` | the source value alone |
+| does not deliver more entries than it reads: a gather (grid to points) onto `M <= N` points; a scatter (points to grid) of `M >= N` points | the delivered value, at the positions the step uses |
+| delivers more entries than it reads, `geometry=("source", ...)`: a scatter of `M < N` points, whose positions the markers hold; a gather onto `M > N` points, whose positions the grid node holds | the source value **and the positions**, each a reading of its own |
+| delivers more entries than it reads, `geometry=("target", ...)` | the source value alone |
+
+With a few markers on a large grid, the usual case, the gather is the
+first row and the scatter the second or third.  With more markers than
+grid entries (several particles per cell) it is the other way round: the
+gather is read at the grid field and the scatter as delivered.
 
 * **Positions are measured in grid spacings**, axis by axis: a point's
   change over `rtol` spacings, pooled with the other entries.  Not
@@ -361,22 +514,45 @@ For a `multilinear_grid` edge inside a group that does not sub-cycle:
   not apply to a position.
 * **A target-anchored geometry is the target's state before the step**,
   the same at every pass.  It has no residual, so it is not a reading of
-  a scatter anchored there; a gather anchored there is read at it.
+  an edge anchored there that is read at its source; an edge read as
+  delivered and anchored there is read at it.
 * **A solve returns what the norm measures whole as it accepted it**: the
-  source value of such a scatter and, anchored at its source, its
-  positions.  Every other field is recomputed by one pass, as for any
-  group under this norm.
-* **A float32 position far from the origin limits the tolerance.**  A
-  position `u` spacings from zero is stored to about `1e-7 u` spacings;
-  at `rtol=1e-4` that is the whole tolerance by a thousand spacings, and
-  `compile()` warns from a quarter of that distance (an eighth for a
-  Gauss-Seidel pair; the limits above have the arithmetic), of a scatter
-  that reads the positions and of a gather whose value is interpolated at
-  them.  Hold the positions in float64, keep the origin near the grid, or
-  loosen `rtol`.
-* **No bound is reported under this norm yet**: `rho_spectral`,
-  `spectral_error_bound`, the gradient bound and `precision_limited` are
-  withheld with a `not_usable_reason`, as in the limits above.
+  source value of an edge that delivers more entries than it reads and,
+  anchored at its source, its positions.  Every other field is
+  recomputed by one pass, as for any group under this norm.  With a few
+  markers on a large grid that keeps the markers' value and positions;
+  with more markers than grid entries it keeps the grid field the gather
+  reads, and the markers' value and positions are recomputed.
+* **A float32 position far from the origin, or far into a grid, limits
+  the tolerance.**  A position `r` spacings from the coordinates' zero
+  or from the grid's first point, whichever is further, is resolved to
+  about `1e-7 r` spacings; at `rtol=1e-4` that is the whole tolerance by
+  a thousand spacings, and `compile()` warns from a quarter of that
+  distance (an eighth for a Gauss-Seidel pair; the limits above have
+  the arithmetic, and what the count assumes), of an edge that reads
+  the positions themselves and of one whose delivered value is computed
+  at them.  Hold the positions in float64, or loosen `rtol`; moving the
+  coordinates' origin helps only near the grid's first point.  At run
+  time the report's `precision_limited` and `residual_precision_floor`
+  say where the positions are then.
+* **`converged=True` is a local statement.**  It reads the contraction
+  the last passes showed, and it places the group within a few
+  tolerances of its fixed point only where the pass keeps that rate all
+  the way there.  A pass through this mapping can lose it in two ways:
+  a marker thrown across a lattice plane into a cell where the pass
+  contracts slowly (250 tolerances off, constructed), and, on a grid of
+  two or three axes, a pass that slows down **inside one cell**, where
+  the interpolation is not linear in the position (14,000 tolerances
+  off, constructed, with no plane crossed).  So "no marker crosses a
+  lattice plane" does not secure it.  Where it matters, tighten `rtol`
+  and compare, or run the group under `"mixed"` or `"l2"` with
+  `diagnostics=True` for a bound.
+* **No bound is reported under this norm in 0.4.0**: `rho_spectral`,
+  `spectral_error_bound`, the gradient bound and the estimates are
+  withheld with a `not_usable_reason`, as in the limits above;
+  `precision_limited` and `residual_precision_floor` are reported.  A
+  diagnostic run of the same group under `"mixed"` or `"l2"` reports the
+  bounds.
 
 ## The time level a geometry is read at, in short
 

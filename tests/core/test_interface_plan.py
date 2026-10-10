@@ -737,6 +737,81 @@ def test_a_position_is_read_in_the_kinds_own_length_on_each_axis():
         assert got[2].shape == flat.shape
 
 
+def test_a_position_is_rounded_at_the_larger_of_its_own_magnitude_and_the_kernels_coordinate():
+    """``_rounded_at``, the one place the rounding of a stored position is
+    located for the float floor and for ``compile()``'s advisory.  Per
+    coordinate, in spacings: the position's distance from the coordinates'
+    zero, or the kernel's own coordinate (the lattice coordinate, the
+    distance from the grid's first point, which the stencil forms in the
+    positions' dtype) where that is the larger and the kernel reads the
+    coordinate.  The residual's reading of the positions is not touched:
+    it subtracts no origin."""
+    from maddening.core.coupling.grid_mapping import multilinear_grid_mapping  # noqa: PLC0415
+
+    def grid(origin, shape=(16001, 2), mode="conservative"):
+        return multilinear_grid_mapping(origin, _SPACING, shape, n_points=3, mode=mode)
+
+    pos = jnp.asarray([[0.75, 0.0625], [-1.25, 0.03125], [0.5, 0.09375]], F32)
+    stored = np.abs(np.asarray(pos, np.float64) / np.asarray(_SPACING))
+    # The grid's first point at the coordinates' zero: the two magnitudes
+    # are one number wherever the point is inside the hull, to the bit.
+    here = ip._rounded_at((grid((0.0, 0.0)),), pos)
+    assert here.shape == pos.shape and here.dtype == jnp.float32
+    np.testing.assert_array_equal(here, stored.astype(np.float32))
+    # The first point 8000 spacings away on the first axis: the lattice
+    # coordinate there, and the stored magnitude on the other.
+    far = grid((-4000.0, 0.0))
+    got = np.asarray(ip._rounded_at((far,), pos), np.float64)
+    np.testing.assert_allclose(got[:, 0], 8000.0 + np.asarray(pos)[:, 0] / _SPACING[0], rtol=1e-6)
+    np.testing.assert_array_equal(got[:, 1], stored[:, 1].astype(np.float32))
+    np.testing.assert_allclose(np.asarray(far.geometry_kernel_coordinates(pos))[:, 0],
+                               got[:, 0], rtol=1e-7)
+    np.testing.assert_array_equal(ip._kernel_magnitude((far,), pos), np.where(
+        np.asarray(far.geometry_coordinates_read(pos)), np.abs(np.asarray(
+            far.geometry_kernel_coordinates(pos))), 0.0))
+    np.testing.assert_array_equal(ip._stored_magnitude((far,), pos), stored.astype(np.float32))
+    # What the residual reads of these positions has no origin in it.
+    np.testing.assert_array_equal(ip._in_kernel_lengths(far, pos),
+                                  ip._in_kernel_lengths(grid((0.0, 0.0)), pos))
+    # A coordinate the kernel does not read takes nothing from it: an axis
+    # of one lattice point whose origin is far, and a point clamped from
+    # far outside the hull.
+    one_point = grid((0.0, -500.0), shape=(4, 1))
+    assert float(np.max(np.asarray(one_point.geometry_kernel_coordinates(pos))[:, 1])) > 3000.0
+    np.testing.assert_array_equal(ip._rounded_at((one_point,), pos)[:, 1],
+                                  stored[:, 1].astype(np.float32))
+    clamped = grid((100.0, 0.0), shape=(4, 2))        # 200 spacings above every point
+    assert not np.asarray(clamped.geometry_coordinates_read(pos))[:, 0].any()
+    np.testing.assert_array_equal(ip._rounded_at((clamped,), pos)[:, 0],
+                                  stored[:, 0].astype(np.float32))
+    # Several lattices that read one field: the largest, coordinate by coordinate.
+    both = np.asarray(ip._rounded_at((grid((0.0, 0.0)), far), pos))
+    np.testing.assert_array_equal(both, np.maximum(np.asarray(here), got.astype(np.float32)))
+    # A gather and its scatter on one grid are one lattice; two grids are two.
+    records = [
+        ip._edge_record(EdgeSpec("a", "b", "x", "u0", mapping=grid((0.0, 0.0)),
+                                 geometry=("source", "pos"))),
+        ip._edge_record(EdgeSpec("b", "a", "y", "u1", geometry=("target", "pos"),
+                                 mapping=grid((0.0, 0.0), mode="consistent"))),
+        ip._edge_record(EdgeSpec("a", "b", "x", "u2", mapping=far, geometry=("source", "pos"))),
+        ip._edge_record(EdgeSpec("a", "b", "x", "u3")),
+    ]
+    lattices = ip._position_lattices(records)
+    assert list(lattices) == [("a", "pos")]
+    assert lattices[("a", "pos")] == (records[0].mapping, far)
+    # A kind that declares no coordinate of its own: the stored magnitude.
+
+    class _NoKernelCoordinate:
+        def geometry_length_scale(self):
+            return _SPACING
+
+    np.testing.assert_array_equal(ip._rounded_at((_NoKernelCoordinate(),), pos),
+                                  stored.astype(np.float32))
+    # A non-finite coordinate stays one: the floor of such a state is not a number.
+    broken = np.asarray(ip._rounded_at((far,), pos.at[1, 0].set(jnp.nan)))
+    assert np.isnan(broken[1, 0]) and np.isfinite(np.delete(broken.ravel(), 2)).all()
+
+
 def test_a_readings_geometry_is_at_the_time_level_the_step_uses():
     """A source-anchored geometry is the field of the same state the value
     is read from; a target-anchored one is the target's pre-step state,
@@ -753,8 +828,13 @@ def test_a_readings_geometry_is_at_the_time_level_the_step_uses():
     np.testing.assert_array_equal(at_source[2], mapping.apply(field, None, new_pos))
     np.testing.assert_array_equal(at_source[3], mapping.apply(2.0 * field, None, old_pos))
     assert not np.allclose(at_source[3], mapping.apply(2.0 * field, None, new_pos))
-    np.testing.assert_array_equal(
-        at_source.positions[1], np.asarray(old_pos) / np.asarray(_SPACING, np.float32))
+    # The positions a delivered value's floor counts: the old state's, with
+    # zero for the one coordinate the kernel does not read (the last point
+    # is 0.2 of a spacing past the two-point hull on axis 1: clamped).
+    counted = np.asarray(old_pos) / np.asarray(_SPACING, np.float32)
+    assert counted[2, 1] > 1.0 and np.all(np.delete(counted[:, 1], 2) < 1.0), counted
+    counted[2, 1] = 0.0
+    np.testing.assert_array_equal(at_source.positions[1], counted)
 
     record = _geometry_record("consistent", "target")
     for pre_step in ({"b": {"pos": pre_pos}}, lambda name: {"b": {"pos": pre_pos}}[name]):

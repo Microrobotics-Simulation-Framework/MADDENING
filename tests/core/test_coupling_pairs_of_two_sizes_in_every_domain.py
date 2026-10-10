@@ -1706,7 +1706,8 @@ def _geo_owed(cell, pre: dict) -> dict:
             continue
         holder = behind[0]
         dtype = str(jnp.dtype(cell.dtypes[holder]))
-        if E * gi.positions_floor(pre[holder]["pos"], shape.spacing, dtype) >= 1.0:
+        if E * gi.positions_floor(pre[holder]["pos"], shape.spacing, dtype,
+                                  origin=shape.grid_origin, grid_shape=shape.grid_shape) >= 1.0:
             owed[cell.keys[i]] = cell.names[holder]
     return owed
 

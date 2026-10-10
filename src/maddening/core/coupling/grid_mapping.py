@@ -172,6 +172,112 @@ class MultilinearGridMapping:
         """
         return self.spacing
 
+    def geometry_coordinates_read(self, geom):
+        """Which coordinates of *geom* a transfer depends on: boolean,
+        the geometry's shape.
+
+        ``False`` where the stencil is the same whatever the last digits
+        of the coordinate are, so that its stored rounding moves nothing
+        the mapping delivers:
+
+        * on an axis of **one lattice point**: the stencil does not read
+          that coordinate (the spacing of such an axis is an arbitrary
+          positive number);
+        * for a coordinate **outside the hull on its axis by more than
+          its rounding can cross**: the kernel clamps it to the face,
+          where its weights are exactly 0 and 1.  "More than its
+          rounding can cross" is ``sqrt(eps)`` of the magnitude the
+          coordinate is rounded at, both in spacings: 2,900 roundings of
+          a float32 position (6.7e7 of a float64 one), which is more
+          than the residual's float floor counts for a pass of up to 724
+          evaluations (``PRECISION_FLOOR_ULPS`` each).  That magnitude
+          is the larger of the coordinate's own distance from zero (it
+          is stored to ``eps`` of that) and of its lattice coordinate
+          (:meth:`geometry_kernel_coordinates`: the stencil forms it in
+          the geometry's dtype, to ``eps`` of *that*; beyond the last
+          point of a long grid it is the larger one wherever the
+          coordinates' zero is).  A coordinate nearer the face than
+          that is read: its rounding can bring it inside, where the
+          weights move with it.
+
+        ``True`` for every other coordinate, a non-finite one included
+        (it fails the interface criterion by itself).  The arithmetic is
+        the stencil's (:meth:`_lattice_coordinates`), so a coordinate the
+        stencil clamps is outside the hull here.
+
+        Read by ``convergence_norm="interface"`` for the float floor of a
+        value **delivered** through the mapping
+        (``_interface_plan.InterfaceEdge.read``): the positions' rounding
+        that value carries is that of the coordinates it depends on.
+        Optional for a kind: one that does not declare it has every
+        coordinate counted.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        T = cols.dtype
+        # units: dimensionless -- a fraction of a coordinate's own
+        # distance from zero (see the docstring for why this fraction).
+        slack = jnp.asarray(math.sqrt(float(jnp.finfo(T).eps)), T)
+        read = []
+        for a, u in enumerate(self._lattice_coordinates(cols)):
+            if self.shape[a] < 2:
+                read.append(jnp.zeros(u.shape, bool))
+                continue
+            top = jnp.asarray(self.shape[a] - 1, T)
+            outside = jnp.maximum(jnp.maximum(-u, u - top), jnp.zeros((), T))
+            p = pow2_host_factor(self.spacing[a], T)
+            stored = jnp.abs(cols[:, a] * jnp.asarray(p, T)) / jnp.asarray(self.spacing[a] * p, T)
+            # Both in spacings: where the stored coordinate rounds, and
+            # where the stencil's own difference from the origin does.
+            reach = jnp.maximum(stored, jnp.abs(u))
+            # ``~(outside > ...)``: a NaN on either side reads as "read".
+            read.append(jnp.logical_not(outside > slack * reach))
+        return jnp.stack(read, axis=1).reshape(geom.shape)
+
+    def geometry_lattice(self) -> tuple:
+        """``(origin, spacing, shape)``: the lattice the stencil forms its
+        coordinates on.
+
+        Two mappings on one lattice round a position alike whatever
+        their modes -- a gather and the scatter that is its transpose --
+        so ``convergence_norm="interface"`` counts a position they both
+        read once (``_interface_plan._position_lattices``), and says
+        "several lattices" only of mappings whose lattices differ.
+        Optional for a kind: mappings of one that declares none are
+        each taken for a lattice of their own.
+        """
+        return (self.origin, self.spacing, self.shape)
+
+    def geometry_kernel_coordinates(self, geom):
+        """The **lattice coordinate** of every coordinate of *geom*: its
+        distance from the grid's first point on its axis, in spacings
+        (``(x - origin[a]) / spacing[a]``).  The geometry's shape and
+        dtype.
+
+        What the stencil forms from a stored position, in the positions'
+        dtype, before it takes a cell and a weight from it
+        (:meth:`_stencil`; the arithmetic here is the stencil's own,
+        :meth:`_lattice_coordinates`).  **It is where the kernel
+        rounds.**  The difference ``x - origin`` is taken in the
+        geometry's dtype, so a weight is resolved to ``eps`` times the
+        lattice coordinate's magnitude, whatever the stored position's
+        distance from the coordinates' zero: float32 markers within 4
+        spacings of zero on a grid whose first point is 8000 spacings
+        away have weights resolved to ``eps * 8000`` = 9.5e-4 of a cell,
+        not to ``eps * 4``.  No choice of the coordinates' origin changes
+        a lattice coordinate.
+
+        Read by ``convergence_norm="interface"``: the float floor of a
+        reading that rests on stored positions counts a position's
+        rounding at the larger of its own magnitude and this one's
+        (``_interface_plan._rounded_at``, the one place the two are
+        compared).  Optional for a kind: one that declares none has a
+        position's rounding counted at its stored magnitude alone.
+        """
+        geom = jnp.asarray(geom)
+        cols = geom if geom.ndim == 2 else geom[:, None]
+        return jnp.stack(self._lattice_coordinates(cols), axis=1).reshape(geom.shape)
+
     def accepts_geometry_shape(self, shape) -> bool:
         """Whether a geometry of *shape* can be read: ``(n_points, d)``,
         or ``(n_points,)`` on a one-dimensional grid."""

@@ -312,6 +312,8 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
+# and tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged
 @pytest.mark.slow
 def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     doc = _load(dry_run_dir, "gradient")

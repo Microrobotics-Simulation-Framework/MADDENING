@@ -5660,13 +5660,14 @@ claims:
     - benchmarks/multigpu/run_pod.py:1580 (run_gradient_cg, gradient_cg_checks)
   conditions: >-
     CPU, four virtual devices, float32, jax 0.10.2, 0.11.0 and 0.11.2: the
-    part run as the goal runs it at 1024 unknowns with the dry run's cap of
-    300 (per push), unseeded and on a scratch copy of the runner with each
-    of four seeds; the goal itself in a dry run at 256 and 1024 unknowns on
-    the same seeds (slow); the committed record's results degraded one
-    solve at a time (a residual of 0.26, just over the limit, NaN, inf; a
-    flag that is not true). Measured once at 1e5, 3e5, 1e6 and 1e7 unknowns
-    with the session's cap of 3000 on the three jax versions: not a test.
+    part run as the goal runs it at 1024 unknowns and the dry run's 300
+    iterations at most (per push), unseeded and on a scratch copy of
+    run_pod.py with each of four seeds; the goal itself in a dry run at 256
+    and 1024 unknowns on the same seeds (slow); the committed record's
+    results degraded one solve at a time (a residual of 0.26, one a
+    thousandth over what is accepted, NaN, inf; a flag that is not true).
+    Measured once at 1e5, 3e5, 1e6 and 1e7 unknowns with the session's 3000
+    iterations at most on the three jax versions: not a test.
   oracle: >-
     the checks' statuses re-derived from value, limit and sense; a float64
     residual on the host by an operator written apart from the two JAX
@@ -5689,7 +5690,7 @@ claims:
     runner_active: n/a
     sim_run_active: n/a
     large_payload: n/a
-    hostile_input: n/a
+    hostile_input: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge
     shutdown: n/a
     wrapper_nodes: n/a
     checkpoint_restore: n/a
@@ -5715,10 +5716,10 @@ claims:
     - benchmarks/multigpu/run_pod.py:3140 (record_problems, gradient_cg_checks)
   conditions: >-
     the committed real dry-run record of the gradient goal, rewritten in the
-    layout of schema 7 (no solve, shift, rtol or max_iters entry; the parity
-    checks only, all passing) with either schema number, and with only its
-    convergence checks deleted; alone and among the eight files relabelled
-    as a four-GPU run.
+    layout of schema 7 (no entry for the system solved or for its solves;
+    the parity checks only, all passing) with either schema number, and
+    with only its convergence checks deleted; alone and among the eight
+    files relabelled as a four-GPU run.
   oracle: >-
     record_problems' lines, equal to the expected ones; the goal's verdict
     INVALID; the checklist status of every item.

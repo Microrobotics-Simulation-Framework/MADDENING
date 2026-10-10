@@ -108,7 +108,10 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float, kept=None):
     0.4.0 changed ``atol`` from a floor under the scale, where 1e-8
     merely *loosened* a small field's criterion, into this exclusion,
     where 1e-8 *removes* it; the default had to move with the meaning.
-    Set it to the field's noise floor when you have one.
+    Leave it at ``0.0`` in 0.4.0: a change that has to cross an excluded
+    field is not seen until it reaches a kept one, and every group that
+    sets ``atol > 0`` is advised on (MADD-ANO-254;
+    ``_group_layout._dead_band_advisories``).
 
     Dividing is safe by construction — the denominator is only ever
     used where ``ref > atol``, and elsewhere the ``where`` selects a

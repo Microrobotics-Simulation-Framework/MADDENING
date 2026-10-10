@@ -312,7 +312,9 @@ def demo_interface_norm():
     gm_l2.run_scan(n_steps)
     d_l2 = gm_l2.coupling_diagnostics()
 
-    gm_iface = _build("interface", atol=1e-8, rtol=1e-8)
+    # ``atol`` stays at its default of 0.0: a group that sets it is advised
+    # on at compile() (a dead band can hide a change, MADD-ANO-254).
+    gm_iface = _build("interface", rtol=1e-8)
     gm_iface.run_scan(n_steps)
     d_iface = gm_iface.coupling_diagnostics()
 

@@ -514,13 +514,12 @@ claims:
     - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
   conditions: >-
     WHAT HOLDS NOW: the oracle below (the distance of the kept field to its
-    fixed point) is claimed for any group with atol = 0, and with atol > 0
-    for a PAIR under Gauss-Seidel, as measured (both sweep orders: 0.5 to 4.9
-    tolerances on a float64 pair, 0.65 to 0.75 on a float32 one).  It is NOT
-    claimed with atol > 0 for a group of three or more members, nor under
-    iteration_mode="jacobi": a change that has to cross a field inside the
-    dead band is not in the residual until it reaches a kept field, and the
-    loop accepts on the first residual it measures.  Measured, each under all
+    fixed point) is claimed for any group with atol = 0, and for NO group
+    with atol > 0, whatever its member count and schedule: a change that has
+    to cross a field inside the dead band is not in the residual until it
+    reaches a kept field, and the loop accepts on the first residual it
+    measures.  It takes two lagged reads in series between a kept field and
+    itself.  Measured, each under all
     three norms: (1) under Jacobi (the residual of p <- f(q), q <- g(p) with
     p dropped tests only that q agrees with the p it was computed from) a
     plain-edge pair whose three forces of 1e-8 are inside atol = 1e-6 and are
@@ -531,14 +530,28 @@ claims:
     data flow (members added A, B, C; edges A -> C -> B -> A; two fields of
     1e-8 inside atol = 1e-6 in series) reported converged=True after one pass
     with its kept field 4.6e3 to 1.8e4 tolerances off, with no acceleration,
-    Aitken and IQN-ILS; the same ring swept C, B, A held (one instance, not a
-    rule), and so does atol = 0 on every one of these groups.  validate() and
-    compile() advise on atol > 0 wherever a group has three or more members
-    or runs under Jacobi (MADD-ANO-254, open; the dead band is to be
-    redesigned in 0.5.0).  Both cases are pinned as strict xfails with their
-    controls: tests/core/test_the_dead_band_under_jacobi.py and
-    tests/core/test_the_dead_band_of_a_ring_of_three.py (the ring is outside
-    this claim).
+    Aitken and IQN-ILS; (3) under Gauss-Seidel a PAIR whose loop passes its
+    one lagged read twice (a float32 pair of 2-vectors with one field a
+    member and one plain edge each way, a pair with two fields a member, a
+    pair with one edge from a member to itself) and a group of ONE member
+    with two edges to itself, forces of 1e-8 inside atol = 1e-6 and the kept
+    field's forcing moving from step to step, reported converged=True after
+    one pass on every other step with the kept field 4.3e3 to 7.7e3
+    tolerances off at rtol = 1e-5 (1.6e5 in the pairs' other sweep order;
+    6.4e7 to 1.6e9 in float64 at rtol = 1e-9), with no acceleration and with
+    IQN-ILS.  Some groups held with the band declared, as measured instances
+    and not as a rule: the ring swept C, B, A; a Gauss-Seidel pair with one
+    loop and one lagged read in both sweep orders (0.5 to 4.9 tolerances on
+    a float64 pair, 0.65 to 0.75 and 0.41 to 0.75 on two float32 ones, the
+    last with one scalar field a member).  Which groups hold is not a proved
+    criterion, so none is inside the claim.  atol = 0 held on every one of
+    these groups.  validate() and compile() advise on atol > 0 on EVERY
+    group (MADD-ANO-254, open; the dead band is to be redesigned in 0.5.0).
+    The three cases are pinned as strict xfails with their controls:
+    tests/core/test_the_dead_band_under_jacobi.py,
+    tests/core/test_the_dead_band_of_a_ring_of_three.py and
+    tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py (all three
+    are outside this claim).
     Under "interface" the reading of an edge read at its source is dropped
     only where both the source field and what the edge delivers are at or
     below atol (CPL-041).
@@ -553,6 +566,10 @@ claims:
     - tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_same_ring_with_no_dead_band_is_held
     - tests/core/test_the_dead_band_of_a_ring_of_three.py::test_validate_advises_on_a_dead_band_declared_on_three_members
     - tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_group_with_no_dead_band_gets_no_advisory
+    - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_validate_advises_on_the_dead_band_of_a_pair_and_of_one_member
+    - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_compile_warns_once_for_the_dead_band_of_a_pair_and_of_one_member
+    - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_the_same_pair_or_member_with_no_dead_band_is_held
+    - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_the_banded_pair_or_member_accepts_after_one_pass_far_from_its_fixed_point
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
     - tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
     - tests/core/test_coupling_error_bound.py::test_a_field_that_is_legitimately_zero_does_not_block_the_group
@@ -1580,9 +1597,9 @@ claims:
     records its floor in the step (the band depends on the step's weights).
     Positions read in a mapping kind's length scale are always read.  A
     change that has to cross a dropped field is not seen until it reaches a
-    kept one: with atol > 0 the distance to the fixed point is claimed for a
-    pair under Gauss-Seidel only, not under Jacobi nor for three or more
-    members (CPL-011, MADD-ANO-254).
+    kept one: with atol > 0 the distance to the fixed point is claimed for
+    no group, whatever its member count and schedule (CPL-011,
+    MADD-ANO-254).
     convergence_norm="interface"; state edges (a flux edge is refused at
     compile: CPL-075), with or without an interface mapping and a transform;
     an edge whose source field is not floating, or whose reading has no
@@ -6525,14 +6542,17 @@ claims:
     mapping on the edge.  With a dead band (atol > 0) the reading of an edge
     read at its source is kept wherever the source field or what the edge
     delivers is above atol (CPL-041).  WITH atol > 0 THE K TOLERANCES ARE
-    CLAIMED FOR A PAIR UNDER GAUSS-SEIDEL ONLY, as measured; with atol = 0
-    for every group below.  Under Jacobi, and on three or more members
-    under either schedule, a change that has to cross a dropped field is not
-    seen until it reaches a kept one, and a converged group was 4.5e5 to
-    7.4e5 (a Jacobi pair) and 4.6e3 to 1.8e4 (a Gauss-Seidel ring of three
-    swept against its data flow, pinned in
-    tests/core/test_the_dead_band_of_a_ring_of_three.py) tolerances off:
-    outside this claim (CPL-011, MADD-ANO-254, open).
+    CLAIMED FOR NO GROUP; with atol = 0 for every group below.  With a band
+    declared, under either schedule and on any member count, a change that
+    has to cross a dropped field is not seen until it reaches a kept one,
+    and a converged group was 4.5e5 to 7.4e5 (a Jacobi pair), 4.6e3 to
+    1.8e4 (a Gauss-Seidel ring of three swept against its data flow, pinned
+    in tests/core/test_the_dead_band_of_a_ring_of_three.py) and 4.3e3 to
+    1.6e5 (Gauss-Seidel pairs whose loop passes its lagged read twice, and
+    one member with two edges to itself, under "interface" as under the
+    other norms, pinned in
+    tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py)
+    tolerances off: outside this claim (CPL-011, MADD-ANO-254, open).
     an affine pass (linear nodes, linear static mappings, affine edge
     transforms; for a mapping that reads a moving geometry the claim is
     MAP-050's: the verdict is a local statement, which holds to first

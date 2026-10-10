@@ -17238,7 +17238,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-254"
-    title: "A change that has to cross a field inside the dead band is not seen until it reaches a kept field: with atol > 0 a Jacobi pair, or a Gauss-Seidel ring of three, reports converged=True after one pass thousands of tolerances from its fixed point"
+    title: "A change that has to cross a field inside the dead band is not seen until it reaches a kept field: with atol > 0 a group under either schedule (a Jacobi pair, a Gauss-Seidel ring of three, a Gauss-Seidel pair, one member with edges to itself) reports converged=True after one pass thousands of tolerances from its fixed point"
     description: >
       A field whose magnitude is at or below a group's `atol` leaves the
       residual (the 0.4.0 dead band), and the loop accepts on the first
@@ -17247,8 +17247,9 @@ anomalies:
       therefore not in the residual until it arrives, and a kept field can
       be returned with `converged=True` far from its fixed point, against
       the oracle the dead band is documented with (the distance of the
-      kept fields to their fixed point).  Two cases are measured (CPU,
-      jaxlib 0.11.0, `atol=1e-6`, `solver="ift"`), each under
+      kept fields to their fixed point).  It takes two lagged reads in
+      series between a kept field and itself.  Three cases are measured
+      (CPU, jaxlib 0.11.0, `atol=1e-6`, `solver="ift"`), each under
       `"interface"`, `"mixed"` and `"l2"` alike.
       (1) Under Jacobi every member reads the previous iterate, so with
       `p` dropped the residual of a pair `p <- f(q)`, `q <- g(p)` is
@@ -17274,13 +17275,36 @@ anomalies:
       8.0e3 and 1.8e4 (the same four digits on jax 0.10.2, 0.11.0 and
       0.11.2); a fixed relaxation of 0.7 held under `"mixed"` and `"l2"`
       and not under `"interface"`.
+      (3) Under Gauss-Seidel a PAIR has one lagged read each turn of its
+      loop (the first member swept reads the second's previous iterate),
+      so a loop that passes that read twice has the two, and so has an
+      edge from a member to itself.  Four shapes, plain edges, forces of
+      1e-8 `S (1 + 0.5 y)` inside the band and one kept field `b_n + 0.8
+      force / S` of order one whose forcing `b_n = 1 + n / 2` moves from
+      step to step (float32, `rtol=1e-5`): a pair of 2-vectors with ONE
+      field a member and one plain edge each way (the entries crossed);
+      a pair with two fields a member; a pair with one edge from a member
+      to itself; and a group of ONE member with two such edges.  Each
+      reports `iterations=1, converged=True` on every other step with the
+      kept field 7.69e3, 5.56e3 and 4.35e3 tolerances from its closed-form
+      fixed point, under the three norms alike; the three pairs swept in
+      the other order 1.56e5, 6.45e3 and 4.88e3; in float64 at
+      `rtol=1e-9`, 6.45e7 to 1.56e9; with IQN-ILS the same one-pass
+      acceptances (7.69e3, 5.56e3); Aitken held on these (at most 1.8
+      tolerances).  The same pair with ONE SCALAR field a member and no
+      edge to itself held with the band declared (0.41 to 0.75
+      tolerances, both sweep orders) and, run under Jacobi, failed on the
+      same steps at the same distances.
       What held: `atol=0` on every one of these groups (57 to 81 passes to
-      0.3 to 7.9 tolerances on the pairs; 22 to 32 passes to 0.2 to 3.0
-      on the ring); a PAIR under Gauss-Seidel with the band declared, the
-      dropped member swept first or second (31 to 41 passes to 0.5 to 4.9
-      on the float64 pair; 0.65 to 0.75 on the pair of the ring's two
-      kinds of member); and, as one measured instance and not a rule, the
-      same ring swept along its data flow (C, B, A: 0.65 to 0.75).
+      0.3 to 7.9 tolerances on the Jacobi pairs; 22 to 32 passes to 0.2 to
+      3.0 on the ring; 20 to 26 passes to 0.18 to 1.6 on the four
+      shapes); and, as measured instances and not rules, some groups with
+      the band declared: a pair with one loop and one lagged read under
+      Gauss-Seidel, the dropped member swept first or second (31 to 41
+      passes to 0.5 to 4.9 on the float64 pair; 0.65 to 0.75 on the pair
+      of the ring's two kinds of member; 0.41 to 0.75 on the scalar
+      pair), and the same ring swept along its data flow (C, B, A: 0.65
+      to 0.75).
       `strict_convergence` does not raise.  No release carried it: the dead
       band is new in 0.4.0's development (before it `atol` was a floor
       under the scale).  Found by two pre-merge audits of the interface
@@ -17297,8 +17321,12 @@ anomalies:
       the bound needs the Lipschitz constant of the maps through the
       dropped members, and the stateful Jacobi pair accepts after two
       passes.  0.4.0 states the condition, advises on it at `validate()`
-      and `compile()` for every group with `atol > 0` that has three or
-      more members or runs under Jacobi, and pins both cases.
+      and `compile()` for EVERY group with `atol > 0`, whatever its
+      member count and schedule (the advisory first excepted a pair under
+      Gauss-Seidel, on the measurements of the pairs that held; case (3)
+      was found by a later audit of the mapping tier, on plain edges, and
+      the exception was withdrawn before any release), and pins the
+      three cases.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -17308,9 +17336,10 @@ anomalies:
       happens), a field that falls inside the band, and a kept member
       whose output depends on that field enough to matter, which is the
       declaration `atol` makes false; and `compile()` warns about every
-      configuration it was measured in (three or more members, or
-      Jacobi).  The second case runs under the default schedule, which is
-      why the advisory no longer offers Gauss-Seidel as the way out.
+      group that declares a band, whatever its member count and
+      schedule.  The second and third cases run under the default
+      schedule, which is why the advisory does not offer Gauss-Seidel as
+      the way out.
       `context_dependent` because whether the verdict gates anything is
       the program's choice.
     affected_components:
@@ -17319,14 +17348,14 @@ anomalies:
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
-      Leave `atol` at its default of 0.0 on any group of three or more
-      members and on any group under `iteration_mode="jacobi"` (verified
-      on every measured group: 0.2 to 7.9 tolerances).  At `atol=0.0` only
-      a field that is exactly zero leaves the residual; every non-zero
-      field, however small, is measured against its own magnitude.  A
-      pair under Gauss-Seidel may keep its dead band (held in both sweep
-      orders in every case measured).  Changing the schedule to
-      Gauss-Seidel is NOT a remedy for a group of three or more.  The
+      Leave `atol` at its default of 0.0 on every group, whatever its
+      member count and schedule (verified on every measured group: 0.18
+      to 7.9 tolerances).  At `atol=0.0` only a field that is exactly
+      zero leaves the residual; every non-zero field, however small, is
+      measured against its own magnitude.  No group is excepted: a pair
+      under Gauss-Seidel with one scalar field a member held where it
+      was measured, and other pairs did not.  Changing the schedule to
+      Gauss-Seidel is NOT a remedy.  The
       dead band is expected to be replaced in 0.5.0: do not tune to it.
       Where a band is kept regardless, read `spectral_error_bound` with
       `diagnostics=True`: the bound folds the dead-banded share in (1.9e6
@@ -17334,13 +17363,12 @@ anomalies:
       distance on the ring, where the verdict read converged).
     resolution_status: "open"
     residual_risk: >
-      Until the dead band is redesigned (0.5.0), a group with `atol > 0`
-      that has three or more members, or runs under Jacobi, can accept
-      early as described.  The advisory is static (the member count, the
-      schedule and `atol`); it cannot tell whether a kept member depends
-      on a dead-banded field, so it also fires on groups that are sound,
-      and a pair under Gauss-Seidel is not advised on because it held in
-      every case measured, not because it is proved.
+      Until the dead band is redesigned (0.5.0), any group with `atol >
+      0` can accept early as described.  The advisory is static (`atol`
+      alone); it cannot tell whether a kept member depends on a
+      dead-banded field through two lagged reads, so it also fires on
+      groups that are sound (the scalar pair that held among them):
+      which groups those are is not a proved criterion.
     verification:
       - "tests/core/test_the_dead_band_under_jacobi.py::test_a_converged_jacobi_step_holds_the_fields_computed_from_a_dead_banded_one"
       - "tests/core/test_the_dead_band_under_jacobi.py::test_the_fixture_reaches_the_one_pass_acceptance"
@@ -17352,6 +17380,12 @@ anomalies:
       - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_the_same_ring_with_no_dead_band_is_held"
       - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_validate_advises_on_a_dead_band_declared_on_three_members"
       - "tests/core/test_the_dead_band_of_a_ring_of_three.py::test_a_group_with_no_dead_band_gets_no_advisory"
+      - "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_validate_advises_on_the_dead_band_of_a_pair_and_of_one_member"
+      - "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_compile_warns_once_for_the_dead_band_of_a_pair_and_of_one_member"
+      - "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_a_converged_step_of_a_banded_pair_or_member_holds_its_kept_field"
+      - "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_the_banded_pair_or_member_accepts_after_one_pass_far_from_its_fixed_point"
+      - "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_the_same_pair_or_member_with_no_dead_band_is_held"
+      - "tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_a_pair_with_one_scalar_field_a_member_held_with_the_dead_band_declared"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-255"

@@ -17,6 +17,7 @@ from maddening.core.coupling.acceleration import (
     _field_reference,
     _declares_a_band,
     _group_coarsest_eps,
+    _kernel_rounding_eps,
     _position_fields,
     _has_entries,
     _interface_readings,
@@ -1703,6 +1704,18 @@ def _run_coupled_block_impl(
                 # (``_position_fields``: the fields the report's floor
                 # exempts).
                 position_fields = _position_fields(plan)
+                # Experimental: what a geometry-dependent mapping delivers
+                # is no finer than the weights its kernel forms from the
+                # stored positions, in their dtype (``_kernel_rounding_eps``,
+                # the number the report's floor takes under "l2" and
+                # "mixed", from the positions the pass's own kernel reads:
+                # the returned state's for a source anchor, the target's
+                # pre-step ones for a target anchor).  ``None``, and nothing
+                # traced, for a group with no such edge; under the
+                # interface norm the reading counts it part by part
+                # (``_reading_resolution``).
+                kernel_eps = None if use_interface_norm else _kernel_rounding_eps(
+                    plan, _embed(jax.lax.stop_gradient(x_star_full)), pre_step=_pre)
 
                 def _entry_eps(nn, fld):
                     own = float(jnp.finfo(template_state[nn][fld].dtype).eps)
@@ -1710,7 +1723,12 @@ def _run_coupled_block_impl(
                         return own
                     # units: dimensionless -- both eps are relative to a
                     # field's own magnitude (the weights' coordinates).
-                    return max(own, map_eps)
+                    eps = max(own, map_eps)
+                    if kernel_eps is None:
+                        return eps
+                    # units: dimensionless -- a kernel weight's rounding in
+                    # lengths, taken as a fraction of the delivered value.
+                    return jnp.maximum(eps, kernel_eps)
 
                 resolution = (weight_scale * pass_evals) * _residual_resolution(_flatten_full({
                     nn: {fld: jnp.full(
@@ -2406,11 +2424,19 @@ def _run_coupled_block_impl(
             # no derivative.  It is the floor of the state the step leaves,
             # as every other group's is: ``run_adaptive*`` keeps the last
             # half step's (``_fold_kept_half_step_reports`` does not fold it).
+            # (Experimental: under "l2" and "mixed" the group owns the slot
+            # where a target-anchored geometry-dependent mapping forms its
+            # weights from the pre-step positions, whose rounding the floor
+            # counts: ``_kernel_rounding``.  Read with the weights the
+            # report's own call takes, which only a delivered dtype is
+            # asked of.)
             floor_meta[f"coupling_{group_key}_reading_floor"] = jnp.asarray(
                 residual_precision_floor(
                     {nn: result[nn] for nn in group_node_names}, group_node_names,
-                    "interface", group.atol, group.rtol, plan,
-                    evaluations=1.0, mappings=report_mappings, pre_step=_pre,
+                    group.convergence_norm, group.atol, group.rtol, plan,
+                    evaluations=1.0,
+                    mappings=report_mappings if use_interface_norm else step_mappings,
+                    pre_step=_pre,
                 ), dtype=res_dtype)
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {

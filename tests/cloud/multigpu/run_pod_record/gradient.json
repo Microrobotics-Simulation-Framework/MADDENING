@@ -1,12 +1,12 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "goal": "gradient",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-03T05:00:20Z",
+    "timestamp_utc": "2026-10-10T18:14:56Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "0acd52eebde2c2ccbf2a856626f3b25c38ac9561"
+    "git_commit": "90cf87b9ca57fa02174fc7bb202f5b2dac0aa1ce"
   },
   "config": {
     "goal": "all",
@@ -61,30 +61,30 @@
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.008772000001044944,
-              0.006238999048946425,
-              0.005637000867864117
+              0.009212992154061794,
+              0.005303008947521448,
+              0.005583002348430455
             ],
-            "min_ms": 0.005637000867864117,
-            "median_ms": 0.006238999048946425,
-            "mean_ms": 0.006882666639285162
+            "min_ms": 0.005303008947521448,
+            "median_ms": 0.005583002348430455,
+            "mean_ms": 0.006699667816671233
           },
-          "compile_s": 0.040221148999989964
+          "compile_s": 0.04844266800500918
         },
         "all_to_all": {
           "grad": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.27753200265578926,
-              0.24407700038864277,
-              0.2635160017234739
+              0.15320700185839087,
+              0.15363399870693684,
+              0.12231100117787719
             ],
-            "min_ms": 0.24407700038864277,
-            "median_ms": 0.2635160017234739,
-            "mean_ms": 0.2617083349226353
+            "min_ms": 0.12231100117787719,
+            "median_ms": 0.15320700185839087,
+            "mean_ms": 0.14305066724773496
           },
-          "compile_s": 0.3391902450021007,
+          "compile_s": 0.2892101910110796,
           "input_presharded": true,
           "parity": {
             "max_abs": 5.960464477539063e-08,
@@ -98,15 +98,15 @@
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.36600299790734425,
-              0.37896800131420605,
-              0.38033800228731707
+              0.3116300067631528,
+              0.25838900182861835,
+              0.2657690056366846
             ],
-            "min_ms": 0.36600299790734425,
-            "median_ms": 0.37896800131420605,
-            "mean_ms": 0.3751030005029558
+            "min_ms": 0.25838900182861835,
+            "median_ms": 0.2657690056366846,
+            "mean_ms": 0.2785960047428186
           },
-          "compile_s": 0.33474522100004833,
+          "compile_s": 1.1696166850015288,
           "input_presharded": true,
           "parity": {
             "max_abs": 5.960464477539063e-08,
@@ -118,46 +118,69 @@
       },
       "sharded_cg": {
         "dof": 256,
+        "shift": 0.03,
+        "rtol": 0.0001,
+        "max_iters": 300,
         "input_presharded": true,
         "grad_sharded": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            52.35247699965839,
-            52.793890001339605,
-            52.912737999577075
+            6.32448100077454,
+            7.045664999168366,
+            6.479945994215086
           ],
-          "min_ms": 52.35247699965839,
-          "median_ms": 52.793890001339605,
-          "mean_ms": 52.686368333525024
+          "min_ms": 6.32448100077454,
+          "median_ms": 6.479945994215086,
+          "mean_ms": 6.616697331385997
         },
         "grad_unsharded": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.3213759991922416,
-            1.0173490009037778,
-            1.0010060032072943
+            0.2774360036710277,
+            0.28044301143381745,
+            0.24630301049910486
           ],
-          "min_ms": 0.3213759991922416,
-          "median_ms": 1.0010060032072943,
-          "mean_ms": 0.7799103344344379
+          "min_ms": 0.24630301049910486,
+          "median_ms": 0.2774360036710277,
+          "mean_ms": 0.26806067520131666
         },
         "compile_s": {
-          "sharded": 0.42255331599881174,
-          "unsharded": 0.35089015499761445
+          "sharded": 0.33097324799746275,
+          "unsharded": 0.2641110950062284
         },
         "grad_parity": {
-          "max_abs": 70.0,
-          "max_rel": 3.4980854978070503e-06,
-          "reference_scale": 20010946.0,
+          "max_abs": 0.00030517578125,
+          "max_rel": 3.921254312007304e-07,
+          "reference_scale": 778.2606201171875,
           "finite": true
         },
         "jvp_parity": {
-          "max_abs": 0.0,
-          "max_rel": 0.0,
-          "reference_scale": 8256.0,
+          "max_abs": 5.7220458984375e-06,
+          "max_rel": 2.2922438186398085e-07,
+          "reference_scale": 24.9626407623291,
           "finite": true
+        },
+        "solve": {
+          "sharded": {
+            "converged": true,
+            "iterations": 55,
+            "true_residual": {
+              "solve": 8.437364555871544e-05,
+              "adjoint": 9.488778263114465e-05,
+              "tangent": 9.116509664712868e-05
+            }
+          },
+          "unsharded": {
+            "converged": true,
+            "iterations": 55,
+            "true_residual": {
+              "solve": 8.451213598501178e-05,
+              "adjoint": 9.484838976466515e-05,
+              "tangent": 9.123819469152142e-05
+            }
+          }
         }
       }
     },
@@ -173,30 +196,30 @@
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.008308998076245189,
-              0.00640600046608597,
-              0.0055249984143301845
+              0.008038012310862541,
+              0.0076260039350017905,
+              0.005816997145302594
             ],
-            "min_ms": 0.0055249984143301845,
-            "median_ms": 0.00640600046608597,
-            "mean_ms": 0.006746665652220448
+            "min_ms": 0.005816997145302594,
+            "median_ms": 0.0076260039350017905,
+            "mean_ms": 0.007160337797055642
           },
-          "compile_s": 0.07817664399772184
+          "compile_s": 0.08370628199190833
         },
         "all_to_all": {
           "grad": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.3043450014956761,
-              0.26833299853024073,
-              0.2956969983642921
+              0.23842199880164117,
+              0.16672900528647006,
+              0.1636870001675561
             ],
-            "min_ms": 0.26833299853024073,
-            "median_ms": 0.2956969983642921,
-            "mean_ms": 0.28945833279673633
+            "min_ms": 0.1636870001675561,
+            "median_ms": 0.16672900528647006,
+            "mean_ms": 0.18961266808522245
           },
-          "compile_s": 0.3083208989992272,
+          "compile_s": 0.3189808879978955,
           "input_presharded": true,
           "parity": {
             "max_abs": 1.1920928955078125e-07,
@@ -210,15 +233,15 @@
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.35929200021200813,
-              0.38034799945307896,
-              0.35538999873097055
+              0.23909499577712268,
+              0.1944390096468851,
+              0.19620099919848144
             ],
-            "min_ms": 0.35538999873097055,
-            "median_ms": 0.35929200021200813,
-            "mean_ms": 0.36500999946535256
+            "min_ms": 0.1944390096468851,
+            "median_ms": 0.19620099919848144,
+            "mean_ms": 0.2099116682074964
           },
-          "compile_s": 0.7202527980007289,
+          "compile_s": 0.2981287339935079,
           "input_presharded": true,
           "parity": {
             "max_abs": 1.1920928955078125e-07,
@@ -230,46 +253,69 @@
       },
       "sharded_cg": {
         "dof": 1024,
+        "shift": 0.03,
+        "rtol": 0.0001,
+        "max_iters": 300,
         "input_presharded": true,
         "grad_sharded": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            66.7657930025598,
-            66.78685499718995,
-            63.84289700145018
+            7.486121001420543,
+            7.41683499654755,
+            7.583707003504969
           ],
-          "min_ms": 63.84289700145018,
-          "median_ms": 66.7657930025598,
-          "mean_ms": 65.79851500039997
+          "min_ms": 7.41683499654755,
+          "median_ms": 7.486121001420543,
+          "mean_ms": 7.495554333824354
         },
         "grad_unsharded": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            6.144803999632131,
-            6.0998720000498,
-            6.053879002138274
+            0.4027130053145811,
+            0.3018409915966913,
+            0.3127919917460531
           ],
-          "min_ms": 6.053879002138274,
-          "median_ms": 6.0998720000498,
-          "mean_ms": 6.099518333940068
+          "min_ms": 0.3018409915966913,
+          "median_ms": 0.3127919917460531,
+          "mean_ms": 0.33911532955244184
         },
         "compile_s": {
-          "sharded": 0.36288269400029094,
-          "unsharded": 0.3304252909983916
+          "sharded": 0.3248895199940307,
+          "unsharded": 0.24499086900323164
         },
         "grad_parity": {
-          "max_abs": 58368.0,
-          "max_rel": 1.989998164488535e-05,
-          "reference_scale": 2933068032.0,
+          "max_abs": 0.00030517578125,
+          "max_rel": 3.494526523106858e-07,
+          "reference_scale": 873.2965087890625,
           "finite": true
         },
         "jvp_parity": {
-          "max_abs": 0.0,
-          "max_rel": 0.0,
-          "reference_scale": 108750.0,
+          "max_abs": 5.7220458984375e-06,
+          "max_rel": 3.1966151681307697e-07,
+          "reference_scale": 17.900327682495117,
           "finite": true
+        },
+        "solve": {
+          "sharded": {
+            "converged": true,
+            "iterations": 56,
+            "true_residual": {
+              "solve": 8.286084049120863e-05,
+              "adjoint": 9.963892038502877e-05,
+              "tangent": 9.163809528121944e-05
+            }
+          },
+          "unsharded": {
+            "converged": true,
+            "iterations": 56,
+            "true_residual": {
+              "solve": 8.284191705015268e-05,
+              "adjoint": 9.983100871946036e-05,
+              "tangent": 9.175009884922964e-05
+            }
+          }
         }
       }
     }
@@ -307,8 +353,8 @@
     },
     {
       "name": "256 dof sharded_cg grad vs unsharded max_rel",
-      "value": 3.4980854978070503e-06,
-      "limit": 0.001,
+      "value": 3.921254312007304e-07,
+      "limit": 0.0004,
       "sense": "<=",
       "passed": true
     },
@@ -322,8 +368,8 @@
     },
     {
       "name": "256 dof sharded_cg jvp vs unsharded max_rel",
-      "value": 0.0,
-      "limit": 0.001,
+      "value": 2.2922438186398085e-07,
+      "limit": 0.0004,
       "sense": "<=",
       "passed": true
     },
@@ -333,6 +379,64 @@
       "limit": true,
       "sense": "==",
       "detail": "",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg sharded solve stopped on its tolerance, not on the iteration cap",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "55 iterations, cap 300",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg sharded solve true residual",
+      "value": 8.437364555871544e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg sharded adjoint true residual",
+      "value": 9.488778263114465e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg sharded tangent true residual",
+      "value": 9.116509664712868e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg unsharded solve stopped on its tolerance, not on the iteration cap",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "55 iterations, cap 300",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg unsharded solve true residual",
+      "value": 8.451213598501178e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg unsharded adjoint true residual",
+      "value": 9.484838976466515e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "256 dof sharded_cg unsharded tangent true residual",
+      "value": 9.123819469152142e-05,
+      "limit": 0.0002,
+      "sense": "<=",
       "passed": true
     },
     {
@@ -367,8 +471,8 @@
     },
     {
       "name": "1024 dof sharded_cg grad vs unsharded max_rel",
-      "value": 1.989998164488535e-05,
-      "limit": 0.001,
+      "value": 3.494526523106858e-07,
+      "limit": 0.0004,
       "sense": "<=",
       "passed": true
     },
@@ -382,8 +486,8 @@
     },
     {
       "name": "1024 dof sharded_cg jvp vs unsharded max_rel",
-      "value": 0.0,
-      "limit": 0.001,
+      "value": 3.1966151681307697e-07,
+      "limit": 0.0004,
       "sense": "<=",
       "passed": true
     },
@@ -394,8 +498,66 @@
       "sense": "==",
       "detail": "",
       "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg sharded solve stopped on its tolerance, not on the iteration cap",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "56 iterations, cap 300",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg sharded solve true residual",
+      "value": 8.286084049120863e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg sharded adjoint true residual",
+      "value": 9.963892038502877e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg sharded tangent true residual",
+      "value": 9.163809528121944e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg unsharded solve stopped on its tolerance, not on the iteration cap",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "56 iterations, cap 300",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg unsharded solve true residual",
+      "value": 8.284191705015268e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg unsharded adjoint true residual",
+      "value": 9.983100871946036e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1024 dof sharded_cg unsharded tangent true residual",
+      "value": 9.175009884922964e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
     }
   ],
   "passed": true,
-  "wall_s": 5.445622341998387
+  "wall_s": 5.928261198991095
 }

@@ -18,6 +18,15 @@ other checklist goals pass.
 The seeds are exact text of the library.  When that code changes the
 per-push test below fails, naming the seed: update the seed to the new
 code rather than dropping it.
+
+No wrapper seed reaches the ``gradient`` goal's ``sharded_cg`` part: the
+operator it solves is the runner's own (a shard's two ghosts by
+``ppermute``, zero at the global ends).  Its seeds (``_CG_SEEDS``) are
+exact text of the runner, applied to a scratch copy of it: a ghost from the
+wrong neighbour or one not zeroed at a global end must fail the part by
+orders of magnitude, and the operator without its diagonal shift -- the
+system the goal solved until schema 7, on which no float32 solve converges
+-- must fail its convergence checks though its parity passes.
 """
 
 from __future__ import annotations
@@ -31,8 +40,10 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 
+import numpy as np
 import pytest
 
 import maddening
@@ -390,3 +401,209 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
     assert {1, 3, 4, 6} <= failing
     assert status == {i: "FAILED" if i in failing else "CLOSED" for i in rp.CHECKLIST}, status
     json.dumps(status)                                # (the verdicts are plain data)
+
+
+# --- the gradient goal's sharded_cg part ---------------------------------------
+
+
+class CgSeed(NamedTuple):
+    old: str
+    new: str
+    #: The fault is in the sharded operator: the sharded side's checks and the
+    #: parity fail, the unsharded side's pass.  ``False``: both sides solve
+    #: the same wrong system, and parity cannot tell.
+    sharded_only: bool = True
+    #: How many times its limit each parity check must read at least.  A
+    #: ghost from the wrong neighbour is wrong at every shard boundary; one
+    #: kept at a global end is one wrong entry, and the measure is relative
+    #: to the largest entry of the derivative.
+    parity_over: float = 100.0
+
+
+_CG_SEEDS = {
+    "ghosts_from_the_wrong_neighbours": CgSeed(
+        "        left_ghost = lax.ppermute(x[-1], MESH_AXIS, [(i, (i + 1) % D) for i in range(D)])\n"
+        "        right_ghost = lax.ppermute(x[0], MESH_AXIS, [(i, (i - 1) % D) for i in range(D)])\n",
+        "        # SEEDED FAULT: each ghost comes from the other neighbour\n"
+        "        left_ghost = lax.ppermute(x[-1], MESH_AXIS, [(i, (i - 1) % D) for i in range(D)])\n"
+        "        right_ghost = lax.ppermute(x[0], MESH_AXIS, [(i, (i + 1) % D) for i in range(D)])\n"),
+    "left_global_end_keeps_the_wrapped_ghost": CgSeed(
+        "        left_ghost = jnp.where(idx == 0, 0.0, left_ghost)\n",
+        "        left_ghost = left_ghost  # SEEDED FAULT: not zeroed at the global end\n",
+        parity_over=10.0),
+    "right_global_end_keeps_the_wrapped_ghost": CgSeed(
+        "        right_ghost = jnp.where(idx == D - 1, 0.0, right_ghost)\n",
+        "        right_ghost = right_ghost  # SEEDED FAULT: not zeroed at the global end\n",
+        parity_over=10.0),
+    "the_operator_without_its_shift": CgSeed(
+        "CG_SHIFT = 0.03\n",
+        "CG_SHIFT = 0.0  # SEEDED FAULT: the system the goal solved until schema 7\n",
+        sharded_only=False),
+}
+
+#: The dry run's larger size and its iteration cap: the unshifted operator
+#: is far from converged there (at 256 unknowns CG's finite termination
+#: brings it within a factor of a few of the limit).
+_CG_DOF, _CG_CAP = 1024, 300
+
+
+def _cg_seeded_runner(tmp: Path, name: str | None):
+    """The runner, or a scratch copy of it with one seed applied, as a module."""
+    if name is None:
+        return _runner()
+    seed = _CG_SEEDS[name]
+    text = _RUNNER.read_text(encoding="utf-8")
+    assert text.count(seed.old) == 1, (
+        f"the seed {name!r} no longer matches run_pod.py exactly once "
+        f"({text.count(seed.old)} matches): the runner changed; update the seed")
+    path = tmp / f"run_pod_cg_{name}.py"
+    path.write_text(text.replace(seed.old, seed.new), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(f"run_pod_cg_seeded_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "SEEDED FAULT" in path.read_text(encoding="utf-8")
+    return module
+
+
+def _cg_part(rp) -> tuple[dict, dict]:
+    """``(entry, {check name: check})`` of the goal's ``sharded_cg`` part,
+    run as the goal runs it, at the dry run's larger size and cap."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp._load_backend()
+    args = SimpleNamespace(cg_max_iters=_CG_CAP, warmup=0, repeats=1)
+    cg = rp.run_gradient_cg(args, rp._mesh_for(_N_DEV), _CG_DOF, np.random.default_rng(1))
+    checks = rp.gradient_cg_checks(cg)
+    assert len({c["name"] for c in checks}) == len(checks) == 12
+    return cg, {c["name"]: c for c in checks}
+
+
+def _cg_names(side: str) -> list[str]:
+    prefix = f"{_CG_DOF} dof sharded_cg {side}"
+    return [f"{prefix} solve stopped on its tolerance, not on the iteration cap",
+            *(f"{prefix} {which} true residual" for which in ("solve", "adjoint", "tangent"))]
+
+
+_CG_PARITY = [f"{_CG_DOF} dof sharded_cg {d} vs unsharded max_rel" for d in ("grad", "jvp")]
+
+
+def test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged(tmp_path):
+    """The control of the seeds below, and the claim itself at the dry
+    run's size: both derivatives agree with the unsharded ones to float32
+    round-off -- three orders of magnitude inside the limit, where the
+    check used to read within 8 % of it on solves that had not converged --
+    and each side's three solves have converged with iterations to spare."""
+    rp = _cg_seeded_runner(tmp_path, None)
+    cg, checks = _cg_part(rp)
+    assert {n: rp.check_status(c) for n, c in checks.items()} == {n: "passed" for n in checks}
+    # measured 4.7e-7 (grad) and 4.0e-7 (jvp) on jax 0.10.2, 0.11.0 and 0.11.2
+    assert all(checks[n]["value"] <= rp.LIMITS["krylov"] / 40 for n in _CG_PARITY), checks
+    for side in ("sharded", "unsharded"):
+        solve = cg["solve"][side]
+        assert solve["converged"] is True
+        # 56 iterations on each side: not a trivial solve, and well inside the cap
+        assert 20 < solve["iterations"] < _CG_CAP // 2, solve
+        # a converged solve reads just under its tolerance, never far under
+        assert all(rp.CG_RTOL / 4 < r <= rp.LIMITS["krylov_residual"]
+                   for r in solve["true_residual"].values()), solve
+        # ... and the three are the residuals of three systems, not one reported thrice
+        assert len(set(solve["true_residual"].values())) == 3, solve
+    assert cg["solve"]["sharded"]["iterations"] == cg["solve"]["unsharded"]["iterations"]
+
+
+def test_the_host_residual_is_that_of_the_shifted_operator_in_float64():
+    """What the convergence checks measure with: ``|rhs - A x| / |rhs|`` for
+    the tridiagonal ``A`` with ``2 + CG_SHIFT`` (as float32 rounds it) on
+    its diagonal and -1 beside it, against a dense matrix written here."""
+    rp = _runner()
+    n = 9
+    diagonal = float(np.float32(2 + rp.CG_SHIFT))
+    a = diagonal * np.eye(n) - np.eye(n, k=1) - np.eye(n, k=-1)
+    rng = np.random.default_rng(3)
+    x, off = rng.standard_normal(n), rng.standard_normal(n)
+    rhs = a @ x
+    assert rp._cg_true_residual(x, rhs) < 1e-15
+    assert rp._cg_true_residual(x.astype(np.float32), rhs) < 1e-6      # float32 in, float64 inside
+    want = np.linalg.norm(off) / np.linalg.norm(rhs + off)
+    assert rp._cg_true_residual(x, rhs + off) == pytest.approx(want, rel=1e-12)
+    assert rp._cg_true_residual(np.zeros(n), rhs) == 1.0
+    # the unshifted operator is another system: by CG_SHIFT |x| / |rhs|
+    unshifted = (a - rp.CG_SHIFT * np.eye(n)) @ x
+    assert rp._cg_true_residual(x, unshifted) > 1e-3
+
+
+@pytest.mark.parametrize("name", sorted(_CG_SEEDS))
+def test_a_seeded_fault_fails_the_cg_part_of_the_gradient_goal(name, tmp_path):
+    """A wrong ghost fails both parity checks and every true residual of the
+    sharded side, by orders of magnitude, and leaves the unsharded side
+    passing; the unshifted operator fails the convergence checks of both
+    sides by orders of magnitude with its parity inside the limit: parity
+    alone passed it, at every size of the session, until schema 7.
+
+    Measured (the same on jax 0.10.2, 0.11.0 and 0.11.2), as multiples of
+    the limits: ghosts from the wrong neighbours, parity 600 and 400, the
+    sharded side's worst residual 9300; a ghost kept at the left global
+    end, 111 and 81, and 595; at the right one, 41 and 35, and 155; the
+    unshifted operator, residuals 1300 to 39000 after all 300 iterations,
+    with its parity at 7.3e-6 and 5.6e-6 (0.02 of the limit)."""
+    seed = _CG_SEEDS[name]
+    rp = _cg_seeded_runner(tmp_path, name)
+    cg, checks = _cg_part(rp)
+    status = {n: rp.check_status(c) for n, c in checks.items()}
+
+    def over(check_name: str, limit: float, times: float) -> bool:
+        value = checks[check_name]["value"]
+        return status[check_name] == "failed" and not value <= times * limit   # NaN is over
+
+    residual_limit = rp.LIMITS["krylov_residual"]
+    if seed.sharded_only:
+        assert all(over(n, rp.LIMITS["krylov"], seed.parity_over) for n in _CG_PARITY), checks
+        _stopped, *residuals = _cg_names("sharded")
+        assert all(status[n] == "failed" for n in residuals), status
+        assert any(over(n, residual_limit, 100) for n in residuals), checks
+        assert all(status[n] == "passed" for n in _cg_names("unsharded")), status
+    else:
+        for side in ("sharded", "unsharded"):
+            stopped, *residuals = _cg_names(side)
+            assert status[stopped] == "failed" and cg["solve"][side]["iterations"] == _CG_CAP
+            assert all(over(n, residual_limit, 100) for n in residuals), checks
+        # ... and nothing else would have said so
+        assert all(status[n] == "passed" for n in _CG_PARITY), (status, checks)
+
+
+def _run_gradient_goal(tmp: Path, runner: Path) -> tuple[int, dict, str]:
+    out = tmp / "out"
+    proc = run_pod(runner, ["--goal", "gradient", "--dry-run", "--out", out],
+                   pythonpath=str(_PKG.parent), timeout=900, n_devices=_N_DEV)
+    (doc,) = _runner()._load_results(out, "gradient")
+    return proc.returncode, doc, proc.stdout[-4000:] + proc.stderr[-2000:]
+
+
+# Per push: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_fault_fails_the_cg_part_of_the_gradient_goal
+# and tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged
+@pytest.mark.slow
+@pytest.mark.parametrize("name", [None, *sorted(_CG_SEEDS)], ids=["no_seed", *sorted(_CG_SEEDS)])
+def test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault(name, tmp_path):
+    """The goal as the session's dry run starts it (both sizes, the default
+    cap), on a scratch copy of the runner: it exits 0 unseeded and 1 on
+    every seed, and every failed check is one of the ``sharded_cg`` part's
+    -- of the sharded side and the parity for a wrong ghost, of both sides'
+    convergence and not the parity for the unshifted operator."""
+    rp = _runner()
+    runner = _RUNNER if name is None else Path(_cg_seeded_runner(tmp_path, name).__file__)
+    rc, doc, log = _run_gradient_goal(tmp_path, runner)
+    failed = [c["name"] for c in doc["checks"] if rp.check_status(c) == "failed"]
+    if name is None:
+        assert rc == 0 and not failed and rp.goal_verdict([doc]) == "PASS", log
+        assert rp.record_problems(doc) == []
+        return
+    assert rc == 1, log
+    assert failed and all(" dof sharded_cg " in n for n in failed), failed
+    assert any(n.startswith(f"{_CG_DOF} dof") for n in failed), failed
+    if _CG_SEEDS[name].sharded_only:
+        assert not [n for n in failed if " sharded_cg unsharded " in n], failed
+    else:
+        assert not [n for n in failed if " vs unsharded " in n], failed
+    assert "CHECK FAILED" in log

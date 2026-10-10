@@ -264,6 +264,35 @@ def _a_stencil_refusal_that_recommends_the_unstructured_wrapper(rp, d):
     return ["indivisible"]
 
 
+def _is_cg_convergence_check(c: dict) -> bool:
+    return (" true residual" in c["name"]
+            or "stopped on its tolerance, not on the iteration cap" in c["name"])
+
+
+def _as_the_runner_wrote_gradient_before_its_solves_had_to_converge(doc: dict) -> None:
+    """``gradient.json`` in the layout of schema 7: no record of the system
+    solved or of the solves, and the parity checks only."""
+    for r in doc["results"]:
+        for key in ("solve", "shift", "rtol", "max_iters"):
+            del r["sharded_cg"][key]
+    doc["checks"] = [c for c in doc["checks"] if not _is_cg_convergence_check(c)]
+    doc["passed"] = bool(doc["checks"]) and all(c["passed"] for c in doc["checks"])
+
+
+def _a_gradient_file_of_schema_7_relabelled(rp, d):
+    """Until schema 7 the ``sharded_cg`` part compared two solves that had
+    not converged; such a file, its schema number edited to the current
+    one, must not close item 3 on its parity checks."""
+    _as_the_runner_wrote_gradient_before_its_solves_had_to_converge(d["gradient"][0])
+    return ["gradient"]
+
+
+def _the_convergence_checks_deleted_from_gradient(rp, d):
+    g = d["gradient"][0]
+    g["checks"] = [c for c in g["checks"] if not _is_cg_convergence_check(c)]
+    return ["gradient"]
+
+
 #: (seed, a phrase the status of every affected item must contain; ``None``:
 #: the item must read ``FAILED``).
 _SEEDS = [
@@ -275,12 +304,12 @@ _SEEDS = [
     (_r4_all_but_one_check_deleted,
      "lacks case(s) the runner runs for cells [256, 1024] on 4 devices: field 1d 4x1 "
      "16x20 edge, field 1d 4x1 16x20 dirichlet, lbm 1d 4x1 16x20 periodic (+13 more)"),
-    (_r5_an_older_runner_and_commit, "schema_version 3, not 7"),
+    (_r5_an_older_runner_and_commit, "schema_version 3, not 8"),
     (_r6_one_goal_from_another_commit_and_host, "its files come from 2 commits"),
     (_r7_more_devices_than_the_environment_saw,
      "n_devices 4, but its environment saw 1 device(s)"),
     (_r8_partitioned_checks_deleted, "check(s) the runner derives from its results"),
-    (_r9_schema_from_the_future, "schema_version 99, not 7"),
+    (_r9_schema_from_the_future, "schema_version 99, not 8"),
     (_config_says_fewer_sizes_than_were_run,
      "holds case(s) the runner does not run for its config: field 2d 2x2 32x36 periodic"),
     (_a_check_the_runner_never_emits,
@@ -297,6 +326,11 @@ _SEEDS = [
     (_the_pencil_mesh_cases_left_out, "case(s) the runner"),
     (_the_cases_on_spatial_axis_1_left_out,
      "lacks case(s) the runner runs for cells [256, 1024] on 4 devices"),
+    (_a_gradient_file_of_schema_7_relabelled,
+     "gradient.json cannot decide it (its results cannot be read (KeyError: 'solve'))"),
+    (_the_convergence_checks_deleted_from_gradient,
+     "lacks 16 check(s) the runner derives from its results: '256 dof sharded_cg sharded "
+     "solve stopped on its tolerance, not on the iteration cap'"),
     (_a_stencil_refusal_that_recommends_the_unstructured_wrapper,
      "check value(s) disagree with its results: 'stencil refusal names the cell count, "
      "the device count and that the unstructured wrapper is not a way out for a stencil "
@@ -513,6 +547,75 @@ def test_the_hybrid_goal_fails_a_correction_too_small_to_matter(rp, recorded):
                                    lambda rs, v=negligible: rs[0].__setitem__("correction_rel", v))
         assert rp.check_status(_check_named(before, name)) == "passed"
         assert rp.check_status(_check_named(after, name)) == "failed", negligible
+
+
+@pytest.mark.parametrize("which", ["solve", "adjoint", "tangent"])
+@pytest.mark.parametrize("side", ["unsharded", "sharded"])
+@pytest.mark.parametrize("dof", [256, 1024])
+def test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge(rp, recorded, dof, side,
+                                                                  which):
+    """Two solves that failed alike agree with each other: until schema 7
+    the ``sharded_cg`` part passed on parity with a true residual of 6e2 to
+    2e4 on both sides.  Each of the three solves behind the two derivatives
+    is held to the residual limit on each side, at every size, and the
+    residual of the unshifted operator at the dry run's cap (0.26, measured)
+    fails the one check that names it and no other."""
+    (doc,) = recorded["gradient"]
+    name = f"{dof} dof sharded_cg {side} {which} true residual"
+    index = [r["sharded_cg"]["dof"] for r in doc["results"]].index(dof)
+
+    for residual in (0.26, 1.001 * rp.LIMITS["krylov_residual"], float("nan"), float("inf")):
+        def degrade(results, residual=residual):
+            results[index]["sharded_cg"]["solve"][side]["true_residual"][which] = residual
+
+        before, after = _rederived(rp, doc, degrade)
+        assert rp.check_status(_check_named(before, name)) == "passed"
+        assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [name], residual
+    # at the limit it passes: the limit is the largest residual accepted
+    _, at_limit = _rederived(rp, doc, lambda rs: rs[index]["sharded_cg"]["solve"][side][
+        "true_residual"].__setitem__(which, rp.LIMITS["krylov_residual"]))
+    assert rp.check_status(_check_named(at_limit, name)) == "passed"
+
+
+@pytest.mark.parametrize("flag", [False, None, 0, 1, "True"],
+                         ids=["false", "none", "0", "1", "text"])
+@pytest.mark.parametrize("side", ["unsharded", "sharded"])
+def test_the_gradient_goal_fails_a_cg_solve_that_stopped_on_its_iteration_cap(rp, recorded,
+                                                                             side, flag):
+    """The loop's own flag: a solve the cap stopped is not a solve, whatever
+    it is compared with.  Only ``true`` passes."""
+    (doc,) = recorded["gradient"]
+    name = f"256 dof sharded_cg {side} solve stopped on its tolerance, not on the iteration cap"
+
+    def degrade(results):
+        results[0]["sharded_cg"]["solve"][side]["converged"] = flag
+
+    before, after = _rederived(rp, doc, degrade)
+    assert rp.check_status(_check_named(before, name)) == "passed"
+    assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [name]
+
+
+def test_a_gradient_file_written_before_schema_8_is_refused_twice_over(rp, recorded):
+    """A ``gradient.json`` of schema 7 checked another system (the unshifted
+    operator, on which neither side converged).  It is refused for its
+    schema number, as every older file is -- and, were that number edited,
+    because its results do not record the solves this runner derives its
+    checks from.  Neither refusal depends on the other."""
+    old = copy.deepcopy(recorded["gradient"][0])
+    _as_the_runner_wrote_gradient_before_its_solves_had_to_converge(old)
+    assert all(c["passed"] for c in old["checks"]) and old["passed"] is True
+    assert rp.record_problems(old) == ["its results cannot be read (KeyError: 'solve')"]
+    assert rp.goal_verdict([old]) == "INVALID"
+    old["schema_version"] = 7
+    assert rp.record_problems(old) == [
+        "schema_version 7, not 8: written by another version of this runner",
+        "its results cannot be read (KeyError: 'solve')"]
+    # the current record with only its schema number taken back is refused for that alone
+    relabelled = copy.deepcopy(recorded["gradient"][0])
+    relabelled["schema_version"] = 7
+    assert rp.record_problems(relabelled) == [
+        "schema_version 7, not 8: written by another version of this runner"]
+    assert rp.goal_verdict([relabelled]) == "INVALID"
 
 
 @pytest.mark.parametrize("iterations", [0, 1, 40, 41, None, True, 2.5],

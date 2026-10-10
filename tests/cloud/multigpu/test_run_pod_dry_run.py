@@ -90,7 +90,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 7
+    assert doc["schema_version"] == 8
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -312,6 +312,8 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
+# and tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged
 @pytest.mark.slow
 def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     doc = _load(dry_run_dir, "gradient")
@@ -328,8 +330,25 @@ def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     _check_timing(cg["grad_sharded"])
     _check_timing(cg["grad_unsharded"])
     assert cg["compile_s"]["sharded"] > 0 and cg["compile_s"]["unsharded"] > 0
-    assert cg["grad_parity"]["finite"] and cg["grad_parity"]["max_rel"] < 1e-3
-    assert cg["jvp_parity"]["finite"] and cg["jvp_parity"]["max_rel"] < 1e-3
+    # Two converged float32 solves on four virtual CPU devices agree to
+    # round-off (3.9e-7 and 2.3e-7 measured here): far inside the limit.
+    assert cg["grad_parity"]["finite"] and cg["grad_parity"]["max_rel"] < 1e-5
+    assert cg["jvp_parity"]["finite"] and cg["jvp_parity"]["max_rel"] < 1e-5
+    # ... and each side's solves converged, well inside the dry run's cap.
+    cap = doc["config"]["cg_max_iters"]
+    assert (cg["shift"], cg["rtol"], cg["max_iters"]) == (0.03, 1e-4, cap) and cap == 300
+    assert set(cg["solve"]) == {"sharded", "unsharded"}
+    for side, solve in cg["solve"].items():
+        assert solve["converged"] is True, side
+        assert 20 < solve["iterations"] < cap // 2, (side, solve["iterations"])
+        assert set(solve["true_residual"]) == {"solve", "adjoint", "tangent"}
+        assert all(0 < r <= 2e-4 for r in solve["true_residual"].values()), (side, solve)
+    names = {c["name"] for c in doc["checks"]}
+    for side in ("sharded", "unsharded"):
+        assert (f"{cg['dof']} dof sharded_cg {side} solve stopped on its tolerance, not on "
+                "the iteration cap") in names
+        for which in ("solve", "adjoint", "tangent"):
+            assert f"{cg['dof']} dof sharded_cg {side} {which} true residual" in names
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.

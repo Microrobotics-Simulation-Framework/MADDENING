@@ -22,13 +22,26 @@ pod except whether to stop.
 |---|---|---|---|---|
 | 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on every mesh below), `forward` | the unsharded node, same pod | rel 1e-5 |
 | 2 | halo exchange at the shard and global boundaries | `halo` | NumPy, every slot, forward and adjoint | **0** (bit for bit) |
-| 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 1e-3 (`sharded_cg`) |
+| 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 4e-4 (`sharded_cg`, each of whose solves must have converged: true residual within 2e-4) |
 | 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` (every mesh) | `HybridNode(inner)` in the same graph | rel 1e-5 |
 | 5 | an indivisible grid is refused | `indivisible` | the documented `ValueError`, naming both numbers | exact |
 | 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` (every mesh) | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
 
 The limits live in `LIMITS` in `run_pod.py`, each with its reason; a dry
-run is held to the same ones.  Item 6 has no expected value anywhere else,
+run is held to the same ones.  The `sharded_cg` rows of item 3 solve
+`(2 + s) x[i] - x[i-1] - x[i+1] = b[i]` with `s = CG_SHIFT = 0.03` to
+`CG_RTOL = 1e-4` in float32, for a white-noise `b`: a system both sides
+converge on in 55 to 58 iterations a solve at every size (condition number
+134), where the two derivatives then agree to float32 round-off (2e-7 to
+8e-7 on CPU from 256 to 1e7 unknowns, against the limit of 4e-4).  Each side's three
+solves -- the solve, the adjoint solve behind the gradient and the tangent
+solve behind the jvp -- must have converged: the loop stopped on its
+tolerance and not on its cap, and the true residual `|rhs - A x| / |rhs|`,
+computed on the host in float64, is within 2e-4.  Until schema 7 these
+rows solved the unshifted operator, on which no float32 solve converges
+(true residual 6e2 to 2e4 at the session's sizes after all 3000
+iterations), and passed on parity alone, within 8 % of their limit at
+1e6.  Item 6 has no expected value anywhere else,
 which is why its goal also carries an independent float64 model: a fault
 that moved the sharded and the unsharded group alike (a solver problem on
 the GPU backend, say) passes a sharded-versus-unsharded comparison and
@@ -109,7 +122,7 @@ one step of the goals' own node against each seeded wrapper in-process.
 |---|---|---|
 | `exchange` | NCCL time of `exchange_unstructured(method="all_to_all")` vs `"ppermute"` at 1e5, 3e5, 1e6 cells on 4 GPUs | whether `ppermute` becomes the default `exchange=` of `ShardedUnstructuredNode` (an API default: change it before the stability freeze or not at all).  Only a real-GPU run on **≥ 4 devices** decides (2–3 with `--allow-fewer-devices`, recorded in the JSON; 1 device exchanges nothing and is refused) |
 | `forward` | a 1e6-cell `ShardedUnstructuredNode` forward run on a real unstructured mesh, both transports | the v0.4.0 "real-mesh size" commitment (`docs/developer_guide/sharding_topology.md`) |
-| `gradient` | `jax.grad` through a sharded rollout (both transports) and through the Jacobi-preconditioned `sharded_cg` at 1e5–1e6 DOF | the real-GPU half of the gradient-parity-at-scale gate (the CPU-virtual half is `tests/cloud/multigpu/test_iterative_solver.py::TestGradientParityAtScale`) |
+| `gradient` | `jax.grad` through a sharded rollout (both transports) and through the Jacobi-preconditioned `sharded_cg` at 1e5–1e6 DOF, on solves that must have converged | the real-GPU half of the gradient-parity-at-scale gate (the CPU-virtual half is `tests/cloud/multigpu/test_iterative_solver.py::TestGradientParityAtScale`) |
 
 ## Checklist → coverage map
 
@@ -352,7 +365,7 @@ dominates; a GPU compile of the coupled group's adjoint is assumed to take
 | `hybrid` | `run_scan` and the gradient of the unsharded graph once per size, and of the sharded one on each of the four meshes at 1e5 cells and on the pencil at the others (9 graphs) | 4–8 min | 20 min |
 | `exchange` | per size, 2 transports | ~5 min | 10 min |
 | `forward` | per size, 2 transports, public and compiled step | ~10 min | 15 min |
-| `gradient` | per size, 3 rollout gradients and `sharded_cg` (3000-iteration cap) | ~15 min | 20 min |
+| `gradient` | per size, 3 rollout gradients and `sharded_cg` (55 to 58 iterations a solve; the 3000-iteration cap is never reached) | ~8 min | 20 min |
 
 About 55–75 minutes of goals, 1.4–1.9 h with setup and copy-back.
 Budget one and three-quarter pod-hours; the whole session is capped at
@@ -415,6 +428,7 @@ when they are up, stop, whatever is left.
 | step | expected | time box |
 |---|---|---|
 | (a) `forward`, `exchange` at 1e7 cells | 1 min each | 2 min each |
+| (a) `gradient` at 1e7 cells | 2–3 min | 4 min |
 | (a) `forward`, `exchange` at 3e7 cells | 2–3 min each | 4 min each |
 | (b) the pencil's ramp, five rungs | about 1 min a rung | 120 s a rung |
 | (b) the soak | 3 min, and its last block | 7 min |
@@ -452,6 +466,7 @@ big() { timeout "$1" python benchmarks/multigpu/run_pod.py --goal "$2" --cells "
             --out $T/cells-$3 2>&1 | tee $T/$2-$3.log; }
 big 2m forward  10000000;  echo $?
 big 2m exchange 10000000;  echo $?
+big 4m gradient 10000000;  echo $?
 big 4m forward  30000000;  echo $?
 big 4m exchange 30000000;  echo $?
 # then section (b); and only if the 30 minutes are not up after it:
@@ -476,15 +491,17 @@ leave the 1e8 run out on a pod with less than 70 GiB.  The commands pass
 and `--warmup 1 --repeats 3` because twenty timed repeats of twenty steps
 are for the ranking at the gate's sizes, not for this.
 
-**`gradient` is not in the tail.**  At 10,004,569 cells in the CPU dry
-run (its `sharded_cg` capped at 300 iterations) seven of its eight checks
-pass and `sharded_cg grad vs unsharded max_rel` reads 1.52e-3 against its
-limit of 1e-3 (3.0e-4 at 1e6), after 21 minutes.  The limit was set for
-the gate's sizes: a float32 conjugate-gradient solve that has not
-converged amplifies the different order in which the sharded and the
-unsharded side sum.  No `--cg-max-iters` was shown to hold it at 3e6 and
-1e7, so a `gradient` run there would exit 1 for a reason that is not a
-defect of the sharding.  It stays at the gate's sizes (section 2b).
+**`gradient` is in the tail at 1e7 cells, and no further.**  At 10,004,569
+cells in the CPU dry run (the command above with `--dry-run
+--cg-max-iters 3000`: a dry run alone caps `sharded_cg` at 300; sixteen
+cores, jaxlib 0.11.0) all sixteen of its checks pass in 154 s at a peak of 4.30 GiB of host memory (4,504,536 kB),
+about 450 bytes a cell: the rollout gradients agree to 1.3e-7 against
+1e-5, and each side's three `sharded_cg` solves stop after 56 iterations
+with true residuals of 8.8e-5 to 8.9e-5 (limit 2e-4) and derivatives that
+agree to 7.5e-7 and 4.4e-7 against 4e-4, as at the gate's sizes (the
+shifted system of the checklist's item 3 has the same condition number at
+every size).  It was not run at 3e7 cells, about 13 GiB of host memory at
+that rate, and is not asked for there.
 
 ### (b) The capacity ramp: a sharded run larger than one card
 
@@ -605,7 +622,7 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (7);
+* be on the current `schema_version` (8);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
@@ -695,7 +712,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 7)
+## Schema of the JSON (schema_version 8)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -772,11 +789,16 @@ compile without execution.
 * `gradient.json` results: `cells`, `mesh`, `partition`, `n_devices`,
   `grad_steps`, `rollout.{unsharded,all_to_all,ppermute}` (`grad`
   timing and `compile_s`; `input_presharded` and `parity` for the
-  sharded ones), `sharded_cg` (`dof`, `input_presharded`,
-  `grad_sharded`, `grad_unsharded`, `compile_s.{sharded,unsharded}`,
-  `grad_parity`, `jvp_parity`).
+  sharded ones), `sharded_cg` (`dof`, the system solved: `shift`, `rtol`,
+  `max_iters`; `input_presharded`, `grad_sharded`, `grad_unsharded`,
+  `compile_s.{sharded,unsharded}`, `grad_parity`, `jvp_parity`, and
+  `solve.{sharded,unsharded}` = `converged` and `iterations` (the loop's
+  own flag and count), `true_residual.{solve,adjoint,tangent}`).
 
-Schema 5 files ran the wrapper goals on the 1-D (axis 0) and the pencil
+Schema 7 files ran the `gradient` goal's `sharded_cg` part on the
+unshifted operator with a smooth right-hand side and `rtol=1e-6`, recorded
+neither the system nor its solves, and checked parity only: neither side
+had converged.  Schema 5 files ran the wrapper goals on the 1-D (axis 0) and the pencil
 mesh only (the graph goals on the pencil only), on square grids, with a
 source of period 1/2 in x and the coupled goal's `ambient` uniform; on
 four devices no case split spatial axis 1 over more than two devices.

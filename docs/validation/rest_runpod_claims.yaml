@@ -5535,9 +5535,11 @@ claims:
   claim: >-
     The checklist table's limits -- rel 1e-5 (forward and rollout
     adjoints), 0 bit for bit (halo), 1e-4 (coupled IFT gradient), 1e-5
-    ("fori"), 1e-3 (sharded_cg), 1e-4 against the float64 model -- "live in
+    ("fori"), 4e-4 (sharded_cg, "each of whose solves must have converged:
+    true residual within 2e-4"), 1e-4 against the float64 model -- "live in
     LIMITS in run_pod.py, each with its reason; a dry run is held to the
-    same ones".
+    same ones".  The two sharded_cg limits are 4 and 2 times CG_RTOL, the
+    tolerance its solves stop at.
   sources:
     - benchmarks/multigpu/README.md:21 (The sharding checklist)
     - benchmarks/multigpu/README.md:30 (The sharding checklist)
@@ -5568,7 +5570,7 @@ claims:
 - id: RPD-030
   area: run_pod-records
   claim: >-
-    "Schema of the JSON (schema_version 7)": the common keys (goal, dry_run,
+    "Schema of the JSON (schema_version 8)": the common keys (goal, dry_run,
     allow_fewer_devices, n_devices, environment with hostname ...
     git_commit, config, wall_s, results, checks {name, value, limit, sense,
     passed}, passed) on every file.
@@ -5607,7 +5609,8 @@ claims:
     results (GOAL_CHECKS), which the runner and --summarise share". Item 3's
     sharded_cg rows compare the library's solver with and without a mesh,
     run on run_pod's own sharded matvec: they test placement and that
-    matvec, not the solver or its adjoint.
+    matvec, not the solver or its adjoint (RPD-050: on solves that must
+    have converged).
   sources:
     - benchmarks/multigpu/README.md:21 (The sharding checklist)
     - benchmarks/multigpu/run_pod.py:231 (CHECKLIST)
@@ -5634,6 +5637,159 @@ claims:
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
     relabelled_records: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_dry_run_relabelled_as_a_four_gpu_run_closes_every_item
+    mixed_commits: n/a
+
+- id: RPD-050
+  area: run_pod-goals
+  claim: >-
+    The gradient goal's sharded_cg rows "solve (2 + s) x[i] - x[i-1] -
+    x[i+1] = b[i] with s = CG_SHIFT = 0.03 to CG_RTOL = 1e-4 in float32, for
+    a white-noise b: a system both sides converge on in 55 to 58 iterations
+    a solve at every size", where "the two derivatives then agree to
+    float32 round-off"; and "each side's three solves -- the solve, the adjoint
+    solve behind the gradient and the tangent solve behind the jvp -- must
+    have converged: the loop stopped on its tolerance and not on its cap,
+    and the true residual |rhs - A x| / |rhs|, computed on the host in
+    float64, is within 2e-4". A sharded operator with a ghost from the
+    wrong neighbour fails both parity checks by more than 100 times their
+    limit, and one not zeroed at a global end by more than 10 times (35 to
+    111 measured); either fails every true residual of the sharded side,
+    the worst by more than 100 times; the unshifted operator (the system
+    solved until schema 7) fails both sides' convergence checks by more than
+    100 times while its parity passes.
+  sources:
+    - benchmarks/multigpu/README.md:30 (The sharding checklist)
+    - benchmarks/multigpu/run_pod.py:262 (CG_SHIFT, CG_RTOL, CG_SOLVES, LIMITS)
+    - benchmarks/multigpu/run_pod.py:1580 (run_gradient_cg, gradient_cg_checks)
+  conditions: >-
+    CPU, four virtual devices, float32, jax 0.10.2, 0.11.0 and 0.11.2: the
+    part run as the goal runs it at 1024 unknowns and the dry run's 300
+    iterations at most (per push), unseeded and on a scratch copy of
+    run_pod.py with each of four seeds; the goal itself in a dry run at 256
+    and 1024 unknowns on the same seeds (slow); the committed record's
+    results degraded one solve at a time (a residual of 0.26, one a
+    thousandth over what is accepted, NaN, inf; a flag that is not true).
+    Measured once at 1e5, 3e5, 1e6 and 1e7 unknowns with the session's 3000
+    iterations at most on the three jax versions: not a test.
+  oracle: >-
+    the checks' statuses re-derived from value, limit and sense; a float64
+    residual on the host by an operator written apart from the two JAX
+    ones; the unsharded side as the control of a sharded fault.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_fault_fails_the_cg_part_of_the_gradient_goal
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_fails_a_cg_solve_that_stopped_on_its_iteration_cap
+    - tests/cloud/multigpu/test_run_pod_dry_run.py::test_gradient_json_reports_parity_for_rollout_and_sharded_cg
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_limits_are_the_runbooks
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-051
+  area: run_pod-records
+  claim: >-
+    "Schema 7 files ran the gradient goal's sharded_cg part on the unshifted
+    operator with a smooth right-hand side and rtol=1e-6, recorded neither
+    the system nor its solves, and checked parity only: neither side had
+    converged." Such a file decides nothing: it is refused for its schema
+    number, and with that number edited to the current one because its
+    results do not record the solves the runner derives its checks from; a
+    current file with its convergence checks deleted is refused as lacking
+    them. Among the eight files relabelled as four GPUs, each keeps item 3
+    open and leaves the other five items closed.
+  sources:
+    - benchmarks/multigpu/README.md:600 (Schema of the JSON)
+    - benchmarks/multigpu/run_pod.py:212 (SCHEMA_VERSION)
+    - benchmarks/multigpu/run_pod.py:3140 (record_problems, gradient_cg_checks)
+  conditions: >-
+    the committed real dry-run record of the gradient goal, rewritten in the
+    layout of schema 7 (no entry for the system solved or for its solves;
+    the parity checks only, all passing) with either schema number, and
+    with only its convergence checks deleted; alone and among the eight
+    files relabelled as a four-GPU run.
+  oracle: >-
+    record_problems' lines, equal to the expected ones; the goal's verdict
+    INVALID; the checklist status of every item.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_gradient_file_written_before_schema_8_is_refused_twice_over
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_corrupted_record_reopens_the_items_it_decides_and_says_why
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_gradient_file_written_before_schema_8_is_refused_twice_over
+    relabelled_records: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_corrupted_record_reopens_the_items_it_decides_and_says_why
+    mixed_commits: n/a
+
+- id: RPD-052
+  area: run_pod-goals
+  claim: >-
+    The gradient goal is "the real-GPU half of the gradient-parity-at-scale
+    gate (the CPU-virtual half is tests/cloud/multigpu/test_iterative_solver.py::TestGradientParityAtScale)":
+    the CPU half solves the same system (CG_SHIFT and CG_RTOL read from the
+    runner) with operators of its own at 1e5 unknowns over four shards, and
+    asserts in this order that each side's solves converged (the loop's
+    flag; the float64 true residual of the solve, the adjoint solve and the
+    tangent solve within the runner's residual limit), that each side's
+    derivatives are within half the parity limit of a float64 direct solve,
+    and that the sharded and the unsharded derivatives agree within the
+    runner's parity limit and, on CPU, within 1e-5.
+  sources:
+    - benchmarks/multigpu/README.md:126 (What the session settles)
+    - benchmarks/multigpu/run_pod.py:262 (CG_SHIFT, CG_RTOL, LIMITS)
+  conditions: >-
+    CPU, four virtual devices, float32; 1024 unknowns with a cap of 300
+    iterations per push and 1e5 unknowns with the cap of 3000 in the slow
+    lane; both run on jax 0.10.2, 0.11.0 and 0.11.2.
+  oracle: >-
+    a float64 direct solve of the system (the Thomas algorithm) and a
+    float64 residual, both by an operator written apart from the two JAX
+    ones; the unsharded side.
+  tests:
+    - tests/cloud/multigpu/test_iterative_solver.py::test_grad_and_jvp_through_sharded_cg_match_unsharded_on_solves_that_converged
+    - tests/cloud/multigpu/test_iterative_solver.py::TestGradientParityAtScale::test_grad_and_jvp_through_sharded_cg_at_1e5_dof
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_iterative_solver.py::test_grad_and_jvp_through_sharded_cg_match_unsharded_on_solves_that_converged
+    relabelled_records: n/a
     mixed_commits: n/a
 
 - id: RPD-032

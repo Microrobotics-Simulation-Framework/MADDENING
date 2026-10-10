@@ -849,6 +849,14 @@ MUTANTS: tuple[Mutant, ...] = (
         "test_the_coarsest_eps_counts_a_floating_delivery_and_nothing_else",),
        "the delivered dtype left out of the coarsest eps: a float64 pair stalled on a transform "
        "that narrows to float32 reads its bound at 1e-7 of the distance with both flags set"),
+    _M("CE2", "src/maddening/core/coupling/_coupled_block.py",
+       "                map_eps = _group_coarsest_eps(\n"
+       "                    template_state, group_node_names, plan, step_mappings)\n",
+       "                map_eps = _group_coarsest_eps(template_state, group_node_names)\n",
+       ("tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::"
+        "test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance",),
+       "the step's own analysis not handed the group's edges: the report's floor counts the "
+       "delivered dtype and the spectral analysis inside the step rounds at the fields' finer one"),
 )
 
 

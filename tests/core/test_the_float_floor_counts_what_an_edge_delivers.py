@@ -41,7 +41,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.coupling import _interface_plan
+from maddening.core.coupling import _coupled_block, _interface_plan
 from maddening.core.coupling.acceleration import _group_coarsest_eps, residual_precision_floor
 from maddening.core.coupling.sparse_mapping import (
     sparse_matrix_mapping,
@@ -178,12 +178,32 @@ def _check_stalled_on_the_narrow_edge(norm: str, report: dict, distance: float) 
 CASES = {"T": {"on_ab": narrow}, "T2": {"on_ba": narrow}}
 
 
+@pytest.fixture
+def step_eps(monkeypatch):
+    """The eps the STEP hands its own spectral analysis as the group's
+    coarsest, one entry per trace: the rule has two readers (the report's
+    floor and the step), and the report's numbers alone do not tell
+    whether the step was handed the edges."""
+    seen = []
+    real = _coupled_block._spectral_rate_at
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["map_eps"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_coupled_block, "_spectral_rate_at", spy)
+    return seen
+
+
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance(case):
+def test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance(
+        case, step_eps):
     """Per push: the mixed norm under Gauss-Seidel, both edges."""
     with x64(True):
         report, distance = solve(graph("mixed", "gauss-seidel", **CASES[case]))
     _check_stalled_on_the_narrow_edge("mixed", report, distance)
+    assert step_eps, "the patch did not reach the step's analysis"
+    assert set(step_eps) == {EPS32}, step_eps
 
 
 # Per push: tests/core/test_the_float_floor_counts_what_an_edge_delivers.py::test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance
@@ -191,10 +211,12 @@ def test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_th
 @pytest.mark.parametrize("case", sorted(CASES))
 @pytest.mark.parametrize("schedule", SCHEDULES)
 @pytest.mark.parametrize("norm", NORMS)
-def test_a_narrowing_transform_is_counted_under_every_norm_and_schedule(norm, schedule, case):
+def test_a_narrowing_transform_is_counted_under_every_norm_and_schedule(
+        norm, schedule, case, step_eps):
     with x64(True):
         report, distance = solve(graph(norm, schedule, **CASES[case]))
     _check_stalled_on_the_narrow_edge(norm, report, distance)
+    assert step_eps and set(step_eps) == {EPS32}, step_eps
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +270,10 @@ def test_the_reports_floor_is_counted_at_what_the_edge_delivers(norm):
     assert fine > 0 and coarse == pytest.approx(fine * EPS32 / EPS64, rel=1e-12)
 
 
-def test_an_edge_that_keeps_its_dtype_changes_nothing_to_the_bit(monkeypatch):
+def test_an_edge_that_keeps_its_dtype_changes_nothing_to_the_bit(monkeypatch, step_eps):
     """A float64 pair whose transform keeps float64: every number of the
-    report is the one it is with the deliveries not looked at."""
+    report is the one it is with the deliveries not looked at, and the
+    step's own analysis is handed the float64 eps."""
     def numbers():
         with x64(True):
             report, _distance = solve(graph("mixed", "gauss-seidel", on_ab=keep))
@@ -258,6 +281,7 @@ def test_an_edge_that_keeps_its_dtype_changes_nothing_to_the_bit(monkeypatch):
                 if isinstance(value, (bool, int, float))}
 
     counted = numbers()
+    assert step_eps and set(step_eps) == {EPS64}, step_eps
     asked = []
 
     def nothing(self, state, mappings=None):

@@ -407,8 +407,10 @@ names the edge and says what to do.
   pooled floor, which a converged residual often is well under the
   advisory's distance.  The floor counts a position at the rounding of
   the dtype it is stored in, as the advisory does, and a value at the
-  coarsest floating dtype among the group's fields (a field computed
-  from a coarser member's output may carry that member's rounding).  So
+  coarsest floating dtype among the group's fields and what its
+  internal edges deliver (a field computed from a coarser member's
+  output, or from a value an edge's transform narrowed, may carry that
+  rounding).  So
   float64 positions beside float32 fields put only float64's rounding
   of their distance into it (1e-12 of a spacing 5000 spacings out):
   the float32 pair above without its drift and with

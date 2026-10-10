@@ -279,6 +279,9 @@ def none_fields_are_kept(gm: GraphManager, dtype) -> bool:
 def _same(a, b) -> bool:
     if isinstance(a, (bool, str, type(None))) or isinstance(b, (bool, str, type(None))):
         return type(a) is type(b) and a == b
+    if isinstance(a, (dict, list)) or isinstance(b, (dict, list)):
+        # A report's ``reason_codes``: lists of strings in a dict.
+        return type(a) is type(b) and a == b
     if isinstance(a, float) and isinstance(b, float):
         return (math.isnan(a) and math.isnan(b)) or a == b
     a, b = np.asarray(a), np.asarray(b)

@@ -258,10 +258,13 @@ def test_the_returned_state_is_the_state_before_the_fix(
 
 
 def test_one_sweep_reports_exactly_what_it_did_before_the_fix(runs):
-    """Every key the report had, value for value; the new key equals ``iterations``."""
+    """Every key the report had, value for value; the new key equals ``iterations``.
+    (The keys added since say why a flag is False and what the float floor
+    was: they are read from the report and move none of these.)"""
     d = runs(waveform_iterations=1)["report"]
     before = dict(_ONE_SWEEP_REPORT_BEFORE_THE_FIX)
-    assert set(d) == set(before) | {"total_iterations"}
+    assert set(d) - {"not_usable_reason"} == set(before) | {
+        "total_iterations", "reason_codes", "residual_precision_floor"}
     for key, want in before.items():
         got = d[key]
         if isinstance(want, float) and np.isnan(want):

@@ -64,6 +64,7 @@ from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.coupling.sparse_mapping import StaticSparseMapping, sparse_matrix_mapping
 from maddening.core.edge import EdgeSpec, _delivered
 from maddening.core.simulation.checkpoint import load_state, save_state
+from tests.core.coupling_reason_rules import folded_codes, same_words
 from tests.property import interface_side_graphs as sg
 from tests.property.sysid_transform_grid import precision
 
@@ -454,7 +455,13 @@ def test_the_report_of_a_converged_pair_is_within_K_tolerances_in_the_compact_re
 def _assert_same_report(a, b, rel=0.0):
     assert sorted(a) == sorted(b)
     for key, value in a.items():
-        if isinstance(value, (bool, np.bool_, str, type(None))):
+        if key == "reason_codes":
+            # The causes, as causes (the two codes of an unsettled estimate
+            # follow each graph's own structure).
+            assert folded_codes(value) == folded_codes(b[key]), (value, b[key])
+        elif key == "not_usable_reason":
+            assert same_words(value, b[key], exact=not rel > 0.0), (value, b[key])
+        elif isinstance(value, (bool, np.bool_, str, type(None))):
             assert value == b[key], key
         else:
             assert float(value) == pytest.approx(float(b[key]), rel=rel, abs=0.0, nan_ok=True), key

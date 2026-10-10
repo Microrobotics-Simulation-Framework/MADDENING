@@ -173,6 +173,13 @@ def test_a_usable_report_has_no_code_no_reason_and_a_measured_floor(narrow):
     assert "not_usable_reason" not in report
     assert 0.0 < report["residual_precision_floor"] < report["residual"]
     assert report["precision_limited"] is False
+    # At its float floor too: every member declares its evaluation count,
+    # so the floor is the bound, the flags stand, and no code is attached
+    # to a flag that is True.
+    stalled = _report_with(narrow, residual=0.0)
+    assert stalled["precision_limited"] and stalled["spectral_usable"], stalled
+    assert stalled["reason_codes"] == {flag: [] for flag in rc.FLAGS}
+    assert "not_usable_reason" not in stalled
 
 
 def test_the_plain_float32_pair_at_the_default_norm_and_tolerance_says_why():
@@ -241,6 +248,41 @@ def test_each_cause_the_slots_can_show_has_its_code(narrow):
     assert report["precision_limited"] is False
 
 
+def test_a_solve_that_left_float_range_says_so():
+    """End to end: relays of gain three diverge to a state that is not
+    finite.  The step computes nothing there, and the report says which
+    cause it is.  (The float floor under this norm is a count of ``eps``,
+    the same at any state, so it is still a number; ``precision_limited``
+    is ``False`` because the residual is not finite.)"""
+    gm = _pair(4, 6, gain=3.0, max_iterations=200, strict_convergence=False,
+               diagnostics=True, convergence_norm="mixed", rtol=1e-4)
+    report = _report(gm)
+    assert not report["converged"] and not math.isfinite(report["residual"]), report
+    for flag in USABLE:
+        assert report["reason_codes"][flag] == [rc.STATE_NOT_FINITE], report["reason_codes"]
+    assert report["precision_limited"] is False
+
+
+def test_a_floor_that_could_not_be_measured_has_a_code_and_reads_nan(narrow, monkeypatch):
+    """``precision_limited`` reads ``False`` in two ways, and the codes tell
+    them apart: measured and above the floor (no code), and not measured
+    (a code, and NaN under ``residual_precision_floor``).  Constructed by
+    making the floor's own function return NaN, as it does for a state the
+    norm cannot read; the bound built on it is then not a number either."""
+    from maddening.core import graph_manager as module  # noqa: PLC0415
+
+    measured = _report(narrow)
+    assert measured["precision_limited"] is False
+    assert measured["reason_codes"]["precision_limited"] == []
+    monkeypatch.setattr(module, "residual_precision_floor",
+                        lambda *args, **kwargs: jnp.asarray(jnp.nan, jnp.float32))
+    report = _report(narrow)
+    assert math.isnan(report["residual_precision_floor"]), "the patch takes effect"
+    assert report["precision_limited"] is False
+    assert report["reason_codes"]["precision_limited"] == [rc.BOUND_NOT_EVALUATED]
+    assert report["reason_codes"]["spectral_usable"] == [rc.BOUND_NOT_EVALUATED]
+
+
 def test_several_causes_at_once_are_all_listed_in_the_table_s_order(narrow):
     """Not settled, at the float floor with a count that is not declared,
     and a gradient bound that did not certify: three codes, none picked."""
@@ -294,6 +336,8 @@ def test_an_estimate_that_did_not_settle_is_too_wide_only_where_the_pass_is(narr
     # Gauss-Seidel: what the loop closes through, in either sweep order.
     ("gauss-seidel", (6, 300), "body", (6, 306)),
     ("gauss-seidel", (6, 300), "field", (6, 306)),
+    ("gauss-seidel", (7, 300), "body", (7, 307)),
+    ("gauss-seidel", (8, 300), "field", (8, 308)),
     ("gauss-seidel", (13, 300), "body", (13, 313)),
     # Jacobi: both directions count; a whole state of eight is within.
     ("jacobi", (6, 300), "body", (306, 306)),

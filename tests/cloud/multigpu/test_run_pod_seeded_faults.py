@@ -27,6 +27,16 @@ wrong neighbour or one not zeroed at a global end must fail the part by
 orders of magnitude, and the operator without its diagonal shift -- the
 system the goal solved until schema 7, on which no float32 solve converges
 -- must fail its convergence checks though its parity passes.
+
+Nor did any seed reach the ``forward`` goal, which runs
+``ShardedUnstructuredNode``.  Its cross-shard sum is checked exactly, on a
+field of ones the node leaves a field of ones: the step's ``total`` is then
+the number of cells in any order of addition.  Its seeds (``_COUNT_SEEDS``)
+are exact text of the unstructured wrapper's reduction and of the runner's
+node: a shard left out of the reduction or counted twice, ghost rows
+counted, the node's ``own`` mask ignored at a size that has pad rows, each
+of which must read off by its number of cells; and a step that does not
+keep ones ones, which must fail the precondition's own check.
 """
 
 from __future__ import annotations
@@ -606,4 +616,267 @@ def test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault(nam
         assert not [n for n in failed if " sharded_cg unsharded " in n], failed
     else:
         assert not [n for n in failed if " vs unsharded " in n], failed
+    assert "CHECK FAILED" in log
+
+
+# --- the forward goal's exact count of its cells -------------------------------
+
+_UNSTRUCTURED = "cloud/multigpu/sharded_unstructured.py"
+_PSUM = "                        out[k] = lax.psum(v, axis_name=mesh_axis)\n"
+_TOTAL = '            return {"x": new, "total": jnp.sum(new * own)}\n'
+_RELAX = "            return (1.0 - self._w) * x[: tbl.shape[0]] + self._w * g\n"
+
+
+class CountSeed(NamedTuple):
+    old: str
+    new: str
+    #: The library file the seed is applied to, under ``maddening/``;
+    #: ``None``: the runner itself (its node under test).
+    file: str | None = None
+
+
+_COUNT_SEEDS = {
+    "shard_1_left_out_of_the_reduction": CountSeed(
+        _PSUM,
+        "                        out[k] = lax.psum(jnp.where(idx == 1, 0.0, v), "
+        "axis_name=mesh_axis)  # SEEDED FAULT\n", _UNSTRUCTURED),
+    "shard_1_counted_twice": CountSeed(
+        _PSUM,
+        "                        out[k] = lax.psum(jnp.where(idx == 1, 2.0 * v, v), "
+        "axis_name=mesh_axis)  # SEEDED FAULT\n", _UNSTRUCTURED),
+    # The ghost tail of the slab the step was handed, summed into the total.
+    "ghost_rows_counted": CountSeed(
+        _TOTAL,
+        '            return {"x": new, "total": jnp.sum(new * own)\n'
+        '                    + jnp.sum(state_padded["x"][n_local:])}  # SEEDED FAULT\n'),
+    # Pad rows counted: a pad row starts at zero and takes half of its
+    # shard's first cell in the step, so each reads half a cell.
+    "own_mask_ignored": CountSeed(
+        _TOTAL, '            return {"x": new, "total": jnp.sum(new)}  # SEEDED FAULT\n'),
+    # One ulp over 1 in every cell, on both sides: the field parity cannot
+    # tell, and a limit of 1e-5 on the precondition would pass it.
+    "a_step_that_does_not_keep_ones": CountSeed(
+        _RELAX,
+        "            return (1.0 - self._w) * x[: tbl.shape[0]] + self._w * g * (1.0 + 2.0 ** -22)"
+        "  # SEEDED FAULT\n"),
+}
+
+#: 225 = 15 x 15 cells do not divide by four: three of the four shards
+#: carry a pad row (57, 56, 56, 56 cells under reverse Cuthill-McKee).  The
+#: dry run's own 256 and 1024 divide, as 300,304 and 1,000,000 do, and have
+#: none: the ``own`` mask masks nothing there.
+_COUNT_CELLS = (225, 256)
+_ONES_UNSHARDED = "unsharded"
+
+
+def _count_seeded_source(seed: CountSeed) -> str:
+    path = _RUNNER if seed.file is None else _PKG / seed.file
+    text = path.read_text(encoding="utf-8")
+    assert text.count(seed.old) == 1, (
+        f"the seed no longer matches {path.name} exactly once ({text.count(seed.old)} "
+        "matches): the code changed; update the seed to the new code")
+    return text.replace(seed.old, seed.new)
+
+
+@pytest.mark.parametrize("name", sorted(_COUNT_SEEDS))
+def test_every_count_seed_applies_once_to_the_code_as_it_stands(name):
+    seeded = _count_seeded_source(_COUNT_SEEDS[name])
+    assert "SEEDED FAULT" in seeded
+    compile(seeded, name, "exec")
+
+
+def _count_seeded_runner(tmp: Path, name: str | None):
+    """The runner as a module with one seed in force: a scratch copy of it
+    for a seed of its node; the runner itself, with the wrapper's seeded
+    class in its namespace, for a seed of the wrapper (executed under a
+    module name outside the package with ``@stability`` a no-op, as
+    ``seeded_wrapper_classes`` does and for its reason)."""
+    if name is None:
+        return _runner()
+    seed = _COUNT_SEEDS[name]
+    if seed.file is None:
+        path = tmp / f"run_pod_count_{name}.py"
+        path.write_text(_count_seeded_source(seed), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(f"run_pod_count_seeded_{name}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    from maddening.core.compliance import stability as stab
+
+    before = dict(stab._STABILITY_REGISTRY)
+    real = stab.stability
+    stab.stability = lambda level: (lambda obj: obj)
+    try:
+        wrapper = _exec_module(f"run_pod_seeded_unstructured_{name}", _count_seeded_source(seed))
+    finally:
+        stab.stability = real
+    assert stab._STABILITY_REGISTRY == before, "a seeded copy registered a stable surface"
+    rp = _runner()
+    rp._load_backend()
+    rp.ShardedUnstructuredNode = wrapper.ShardedUnstructuredNode
+    return rp
+
+
+def _forward_part(rp) -> tuple[dict, dict, dict, list]:
+    """``(results by size, {check name: check}, layout by size, the sharded
+    nodes built)`` of the ``forward`` goal run in-process as the goal runs
+    it, one step and one timed call, at ``_COUNT_CELLS``."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp._load_backend()
+    built, layouts, real = [], {}, rp.build_pair
+
+    def recording(n, edges, mesh, pa, method):
+        ref, sharded, layout = real(n, edges, mesh, pa, method)
+        built.append(sharded)
+        layouts[n] = layout
+        return ref, sharded, layout
+
+    rp.build_pair = recording
+    try:
+        args = SimpleNamespace(mesh=None, synthetic="grid", partition="auto",
+                               cells=list(_COUNT_CELLS), n_devices=_N_DEV, steps=1, warmup=0,
+                               repeats=1)
+        doc = rp.run_forward(args, {})
+    finally:
+        rp.build_pair = real
+    checks = {c["name"]: c for c in doc["checks"]}
+    assert len(checks) == len(doc["checks"]) == 12 * len(_COUNT_CELLS)
+    return {r["cells"]: r for r in doc["results"]}, checks, layouts, built
+
+
+def _ones_names(cells: int, side: str) -> tuple[str, str]:
+    """The names of one side's count and of its precondition."""
+    return (f"{cells} cells {side} ones: |total - cells|",
+            f"{cells} cells {side} ones: max |x - 1| after the step")
+
+
+def test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides(tmp_path):
+    """The control of the seeds below, and the claim: one public step from
+    a field of ones returns ``total`` equal to the number of cells and a
+    field still all ones -- sharded under both transports and unsharded,
+    at a size with pad rows and at one without -- held to a limit of
+    exactly zero; and the step runs the program the goal had compiled.
+    (The goal's own function, in-process on four CPU virtual devices.)
+    The float total of the goal's own field is recorded and must be
+    finite, and is held to no limit: its sum cancels, and the order of
+    addition decides how two float32 sums of it compare."""
+    rp = _count_seeded_runner(tmp_path, None)
+    results, checks, layouts, built = _forward_part(rp)
+    assert {n: rp.check_status(c) for n, c in checks.items()} == {n: "passed" for n in checks}
+    assert rp.LIMITS["exact"] == 0.0
+    exact = {"total": None, "max_abs_from_one": 0.0, "entries_not_one": 0}
+    for cells in _COUNT_CELLS:
+        entry = results[cells]
+        assert entry["ones_unsharded"] == {**exact, "total": float(cells)}
+        for method in rp.METHODS:
+            m = entry["methods"][method]
+            assert m["ones"] == {**exact, "total": float(cells)}
+            assert set(m["parity_total"]) == {"max_abs", "max_rel", "reference_scale", "finite"}
+            assert f"{cells} cells {method} total vs unsharded max_rel" not in checks
+            assert checks[f"{cells} cells {method} total vs unsharded finite"]["value"] is True
+        for side in (*rp.METHODS, _ONES_UNSHARDED):
+            for name in _ones_names(cells, side):
+                c = checks[name]
+                assert (c["value"], c["limit"], c["sense"]) == (0.0, 0.0, "<="), c
+    # the sizes are what the seeds need: pad rows at the first, none at the second
+    pads = {cells: sum(layout.n_local_max - k for k in layout.n_local)
+            for cells, layout in layouts.items()}
+    assert pads[_COUNT_CELLS[0]] > 0, pads
+    # one compiled program a wrapper, the step from ones included
+    assert len(built) == len(_COUNT_CELLS) * len(rp.METHODS)
+    for sharded in built:
+        (step,) = sharded._sharded_cache.values()
+        assert step._cache_size() == 1
+
+
+@pytest.mark.parametrize("name", sorted(_COUNT_SEEDS))
+def test_a_seeded_miscount_fails_the_forward_goals_exact_count(name, tmp_path):
+    """Each fault reads off by its number of cells, exactly, on the sharded
+    side under both transports, and nothing else of the goal says so: the
+    field agrees with the unsharded one entry by entry and the float total
+    is finite.  Measured (reverse Cuthill-McKee, four shards; the same on
+    jax 0.10.2, 0.11.0 and 0.11.2), at 225 and 256 cells: shard 1 left out
+    or counted twice, 56 and 64; ghost rows counted, 76 and 78; the mask
+    ignored, 1.5 (three pad rows, half a cell each) and 0 -- at 256 cells
+    there is no pad row and nothing is miscounted.  And at the session's
+    sizes: a shard 25,122, 75,076 and 250,000 cells; ghost rows 1,532,
+    2,646 and 4,830; the mask 1.5 at 100,489 cells and 0 at 300,304 and
+    1,000,000.  A step that does not keep ones ones fails the precondition
+    on every side, by one ulp of 1."""
+    seed = _COUNT_SEEDS[name]
+    rp = _count_seeded_runner(tmp_path, name)
+    results, checks, layouts, _built = _forward_part(rp)
+    status = {n: rp.check_status(c) for n, c in checks.items()}
+    others = [n for n in checks if " ones: " not in n]
+    assert others and all(status[n] == "passed" for n in others), status
+    for cells in _COUNT_CELLS:
+        layout = layouts[cells]
+        count_un, still_un = _ones_names(cells, _ONES_UNSHARDED)
+        if name == "a_step_that_does_not_keep_ones":
+            for side in (*rp.METHODS, _ONES_UNSHARDED):
+                _count, still = _ones_names(cells, side)
+                assert status[still] == "failed" and checks[still]["value"] == 2.0 ** -23
+                assert not checks[still]["value"] > 1e-5      # what a loosened limit passes
+            continue
+        off_by = {"shard_1_left_out_of_the_reduction": layout.n_local[1],
+                  "shard_1_counted_twice": layout.n_local[1],
+                  "ghost_rows_counted": sum(layout.n_ghost),
+                  "own_mask_ignored": 0.5 * sum(layout.n_local_max - k for k in layout.n_local),
+                  }[name]
+        assert status[count_un] == status[still_un] == "passed"
+        for method in rp.METHODS:
+            count, still = _ones_names(cells, method)
+            assert checks[count]["value"] == off_by, (cells, method, checks[count], off_by)
+            assert status[count] == ("failed" if off_by else "passed")
+            assert status[still] == "passed" and checks[still]["value"] == 0.0
+            total = results[cells]["methods"][method]["ones"]["total"]
+            assert total == cells + (-off_by if "left_out" in name else off_by)
+    if name != "a_step_that_does_not_keep_ones":
+        # every seed miscounts at the size with pad rows
+        assert status[_ones_names(_COUNT_CELLS[0], rp.METHODS[0])[0]] == "failed"
+
+
+def _run_forward_goal(tmp: Path, runner: Path, src: Path) -> tuple[int, dict, str]:
+    out = tmp / "out"
+    proc = run_pod(runner, ["--goal", "forward", "--dry-run", "--cells",
+                            *map(str, _COUNT_CELLS), "--out", out],
+                   pythonpath=str(src), timeout=900, n_devices=_N_DEV)
+    (doc,) = _runner()._load_results(out, "forward")
+    return proc.returncode, doc, proc.stdout[-4000:] + proc.stderr[-2000:]
+
+
+# Per push: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_miscount_fails_the_forward_goals_exact_count
+# and tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides
+@pytest.mark.slow
+@pytest.mark.parametrize("name", [None, *sorted(_COUNT_SEEDS)],
+                         ids=["no_seed", *sorted(_COUNT_SEEDS)])
+def test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount(name, tmp_path):
+    """The goal as a dry run starts it, at a size with pad rows and one
+    without, on a scratch copy of the runner (a seed of its node) or of the
+    library (a seed of the wrapper): it exits 0 unseeded and 1 on every
+    seed, and every failed check is one of the checks on the field of
+    ones."""
+    rp = _runner()
+    seed = None if name is None else _COUNT_SEEDS[name]
+    runner, src = _RUNNER, _PKG.parent
+    if seed is not None and seed.file is None:
+        runner = Path(_count_seeded_runner(tmp_path, name).__file__)
+    elif seed is not None:
+        src = _scratch_library(tmp_path, Seed(seed.old, seed.new, file=seed.file))
+    rc, doc, log = _run_forward_goal(tmp_path, runner, src)
+    failed = [c["name"] for c in doc["checks"] if rp.check_status(c) == "failed"]
+    if name is None:
+        assert rc == 0 and not failed and rp.goal_verdict([doc]) == "PASS", log
+        assert rp.record_problems(doc) == []
+        return
+    assert rc == 1, log
+    assert failed and all(" ones: " in n for n in failed), failed
+    assert any(n.startswith(f"{_COUNT_CELLS[0]} cells") for n in failed), failed
+    if name == "a_step_that_does_not_keep_ones":
+        assert any("max |x - 1| after the step" in n for n in failed), failed
+    else:
+        assert not [n for n in failed if f" {_ONES_UNSHARDED} " in n], failed
     assert "CHECK FAILED" in log

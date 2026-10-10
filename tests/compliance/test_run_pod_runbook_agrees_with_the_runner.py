@@ -46,7 +46,11 @@ def test_the_limits_are_the_runbooks(rp, runbook):
     # The Krylov limits are multiples of the tolerance the solves stop at.
     assert (rp.CG_RTOL, rp.LIMITS["krylov"], rp.LIMITS["krylov_residual"]) == (
         1e-4, 4 * rp.CG_RTOL, 2 * rp.CG_RTOL)
+    # The forward goal counts its cells exactly, under the float32 integer limit.
+    assert rp.EXACT_COUNT_CELLS == 2 ** 24 == 16_777_216
     for fragment in ("rel 1e-5 |", "**0** (bit for bit)", "1e-4 (coupled, IFT)",
+                     "rel 1e-5 on every field; `forward`'s count of its cells **0** (exact) |",
+                     "under 2**24 = 16,777,216 cells",
                      "4e-4 (`sharded_cg`, each of whose solves must have converged: true "
                      "residual within 2e-4)", "1e-4 (IFT) / 1e-5 (`\"fori\"`), 1e-4 against "
                      "the model"):

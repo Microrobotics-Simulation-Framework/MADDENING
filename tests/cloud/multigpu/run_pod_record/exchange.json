@@ -1,12 +1,12 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "goal": "exchange",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-10T18:14:56Z",
+    "timestamp_utc": "2026-10-10T20:45:36Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "90cf87b9ca57fa02174fc7bb202f5b2dac0aa1ce"
+    "git_commit": "0b061d1c9ef52c4dda932ba0c1207d3e0c0c4d3a"
   },
   "config": {
     "goal": "all",
@@ -58,7 +58,7 @@
       "fields_per_cell": 1,
       "n_local_max": 64,
       "n_ghost_max": 27,
-      "layout_build_s": 0.00043871899833902717,
+      "layout_build_s": 0.00039260199991986156,
       "traffic_cells_per_shard": {
         "all_to_all": 108,
         "ppermute": 32,
@@ -72,40 +72,40 @@
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.40531800186727196,
-            0.3959840105380863,
-            0.17450499581173062
+            0.13746399781666696,
+            0.0771549966884777,
+            0.07019699842203408
           ],
-          "min_ms": 0.17450499581173062,
-          "median_ms": 0.3959840105380863,
-          "mean_ms": 0.32526900273902964,
-          "compile_s": 0.14085205800074618,
+          "min_ms": 0.07019699842203408,
+          "median_ms": 0.0771549966884777,
+          "mean_ms": 0.09493866430905958,
+          "compile_s": 0.08095725000021048,
           "bytes_per_shard": 432,
           "bytes_total": 1728,
           "messages": 1,
-          "bandwidth_GBps": 0.00990229530084227
+          "bandwidth_GBps": 0.024616437153210234
         },
         "ppermute": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.26098899252247065,
-            0.18193099822383374,
-            0.11400500079616904
+            0.2433540066704154,
+            0.24397698871325701,
+            0.1309729996137321
           ],
-          "min_ms": 0.11400500079616904,
-          "median_ms": 0.18193099822383374,
-          "mean_ms": 0.18564166384749115,
-          "compile_s": 0.10187448200304061,
+          "min_ms": 0.1309729996137321,
+          "median_ms": 0.2433540066704154,
+          "mean_ms": 0.2061013316658015,
+          "compile_s": 0.05713643800118007,
           "bytes_per_shard": 128,
           "bytes_total": 512,
           "messages": 2,
-          "bandwidth_GBps": 0.004491031063763696
+          "bandwidth_GBps": 0.003909202671619338
         }
       },
       "bit_identical": true,
-      "ppermute_speedup_median": 2.1765615227972224,
-      "ppermute_speedup_min": 1.5306784315867887
+      "ppermute_speedup_median": 0.317048392767874,
+      "ppermute_speedup_min": 0.5359654175216291
     },
     {
       "cells": 1024,
@@ -116,7 +116,7 @@
       "fields_per_cell": 1,
       "n_local_max": 256,
       "n_ghost_max": 55,
-      "layout_build_s": 0.0014516200026264414,
+      "layout_build_s": 0.0013583319960162044,
       "traffic_cells_per_shard": {
         "all_to_all": 220,
         "ppermute": 64,
@@ -130,40 +130,40 @@
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.43376500252634287,
-            0.24748699797783047,
-            0.06352399941533804
+            0.5520220001926646,
+            0.5494639917742461,
+            0.41863799560815096
           ],
-          "min_ms": 0.06352399941533804,
-          "median_ms": 0.24748699797783047,
-          "mean_ms": 0.24825866663983712,
-          "compile_s": 0.15338033100124449,
+          "min_ms": 0.41863799560815096,
+          "median_ms": 0.5494639917742461,
+          "mean_ms": 0.5067079958583539,
+          "compile_s": 0.08149191399570554,
           "bytes_per_shard": 880,
           "bytes_total": 3520,
           "messages": 1,
-          "bandwidth_GBps": 0.055412128209768964
+          "bandwidth_GBps": 0.008408219122314814
         },
         "ppermute": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.5245609936537221,
-            0.17151300562545657,
-            0.11431099846959114
+            0.23944900021888316,
+            0.38293500256258994,
+            0.37766300374642015
           ],
-          "min_ms": 0.11431099846959114,
-          "median_ms": 0.17151300562545657,
-          "mean_ms": 0.2701283325829233,
-          "compile_s": 0.10361126399948262,
+          "min_ms": 0.23944900021888316,
+          "median_ms": 0.37766300374642015,
+          "mean_ms": 0.3333490021759644,
+          "compile_s": 0.05786005899426527,
           "bytes_per_shard": 256,
           "bytes_total": 1024,
           "messages": 2,
-          "bandwidth_GBps": 0.00895801815843996
+          "bandwidth_GBps": 0.0042764847590257195
         }
       },
       "bit_identical": true,
-      "ppermute_speedup_median": 1.442963448021446,
-      "ppermute_speedup_min": 0.5557120510344996
+      "ppermute_speedup_median": 1.4549055277418192,
+      "ppermute_speedup_min": 1.7483388747727868
     }
   ],
   "checks": [
@@ -201,5 +201,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 0.6028000749938656
+  "wall_s": 0.33115844600251876
 }

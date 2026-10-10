@@ -401,6 +401,21 @@ as a *state field*: the same pair with the same transform on a state field is co
 bound read 30 to 39 times the distance.  (`convergence_norm="interface"` refuses a flux edge at
 `compile()`.)
 
+**In a batch (`jax.vmap` of the step).**  The step of a batch is another compiled program than the
+step alone.  A member's verdict, its pass count and every flag are the member's alone, and its
+state to a few roundings (measured on thirty graphs with a mapped internal edge and on plain
+pairs and rings, under both schedules: identical flags and reasons, node state within 9e-8).
+The report's numbers are good to their own float resolution, and one of them shows it:
+`gradient_relative_error_bound` is the bound's own arithmetic run by the batched program.  It
+agreed with the member's alone to 4e-6 on plain edges under either schedule and to 2.5e-7 on a
+mapped edge under Gauss-Seidel; on a Jacobi group with a mapped edge the two were 0.03% to 0.8%
+apart above the float floor and up to a factor of two apart where the report is at its float
+floor (`precision_limited=True`).  A member's number does not depend on the other members of
+the batch, their order or their count.  On a plain pair whose gradient is closed form each
+member's bound held against the true error in the batch as alone (1.1 to 3.2 times it, both
+schedules); behind a mapped edge under Jacobi at the float floor the batched number was not
+compared with a true error, so read its order of magnitude there, not its digits.
+
 **What a node declares for `spectral_usable` at the float floor.**  A group whose residual is at
 its float floor (`precision_limited=True`: any converged float32 group at the default tolerance)
 reports `spectral_usable=False`, and so `gradient_bound_usable=False`, unless every node in it

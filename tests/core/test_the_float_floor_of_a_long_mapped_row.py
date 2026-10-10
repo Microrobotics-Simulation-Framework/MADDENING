@@ -238,14 +238,23 @@ def _the_compiled_pairs_are_dropped_after_the_module():
     _COMPILED.clear()
 
 
+#: The compiled pairs the slow tests may hold before they are released.
+#: Their cells come pair by pair, so a release after every one of them made
+#: each cell compile its pair again: the slow tests took 1461 s; with every
+#: pair kept, 262 s and 5.9 GB at the peak; with this limit 276 s and 2.4 GB
+#: (jax 0.11.0, 8 cores).
+PAIRS_HELD = 16
+
+
 @pytest.fixture(autouse=True)
 def _a_slow_test_releases_what_it_compiled(request):
     """The slow tests compile a pair for every cell they sweep, and the
-    slow lane runs a whole shard in one process: each releases its pairs
-    and what JAX compiled for them when it ends.  The per-push tests keep
-    their pairs until the module ends."""
+    slow lane runs a whole shard in one process: a slow test that ends
+    with more than ``PAIRS_HELD`` pairs held releases them and what JAX
+    compiled for them.  The per-push tests keep their pairs until the
+    module ends."""
     yield
-    if request.node.get_closest_marker("slow") is not None:
+    if request.node.get_closest_marker("slow") is not None and len(_COMPILED) > PAIRS_HELD:
         _COMPILED.clear()
         gc.collect()
         jax.clear_caches()

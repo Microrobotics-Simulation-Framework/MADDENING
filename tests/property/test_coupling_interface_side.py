@@ -129,6 +129,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tests.core.coupling_reason_rules import WORDS, same_causes
 from tests.property import coupled_graphs as cg
 from tests.property import coupled_topologies as ct
 from tests.property import interface_side_graphs as sg
@@ -501,7 +502,12 @@ def _same_reports(shape: sg.Shape) -> tuple:
     assert sorted(a) == sorted(b)
     rtol = TWIN_RTOL[shape.dtype]
     differ = {}
+    # The causes of a False flag agree as causes (the words quote each
+    # graph's own numbers and structure, and are not compared).
+    assert same_causes(a, b), (_id(shape), a["reason_codes"], b["reason_codes"])
     for key in a:
+        if key in WORDS:
+            continue
         va, vb = a[key], b[key]
         if isinstance(va, (bool, np.bool_, str, type(None))) or isinstance(vb, (str, type(None))):
             same = va == vb
@@ -775,7 +781,13 @@ def test_a_settled_spectrum_and_its_bounds_are_the_marker_side_twin_s(shape, gra
             assert "MADD-ANO-257" in report["not_usable_reason"], report
             assert "adds up 500 entries" in report["not_usable_reason"], report
         else:
-            assert bool(report["spectral_usable"]) and "not_usable_reason" not in report, report
+            assert bool(report["spectral_usable"]), report
+            assert report["reason_codes"]["spectral_usable"] == [], report["reason_codes"]
             assert bool(report["gradient_bound_usable"]) is gradient, report
+            # A reason only for a gradient flag that is down, and then for
+            # a cause of its own (its bound is not a finite number).
+            assert ("not_usable_reason" in report) == (not gradient), report
+            assert bool(report["reason_codes"]["gradient_bound_usable"]) == (not gradient)
+            assert "MADD-ANO-257" not in report.get("not_usable_reason", ""), report
         assert math.isfinite(float(report["spectral_error_bound"])), report
         assert math.isfinite(float(report["gradient_relative_error_bound"])) is gradient, report

@@ -76,6 +76,7 @@ import jax
 import numpy as np
 import pytest
 
+from maddening.core.coupling import reason_codes
 from maddening.core.coupling import _bounds
 from tests.property import coupled_graphs as cg
 from tests.property import coupling_reference as cr
@@ -474,7 +475,11 @@ def test_the_self_check_is_traced_only_with_diagnostics_on_a_geometry_group():
         values = gc.values_of(Case(0, 7, 0.05, 0.1), cell)
         _pre, _state, d, meta = gc.run_once(gm, values)
     assert "geometry_gap" not in meta
-    assert "not_usable_reason" not in d and not d["spectral_usable"]
+    # No estimate, and the reason says that and what the group is: nothing
+    # of a self-check, which was not traced.
+    assert not d["spectral_usable"] and "finite difference" not in d["not_usable_reason"]
+    assert d["reason_codes"]["spectral_usable"] == [
+        reason_codes.DIAGNOSTICS_OFF, reason_codes.GEOMETRY_POSITIONS_SOLVED], d["reason_codes"]
     assert d["ratio_usable"] in (True, False) and math.isfinite(d["residual"])
 
 
@@ -676,7 +681,13 @@ def test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slo
 
         def numbers(report):
             return {k: v for k, v in report.items()
-                    if k not in (*both, "gradient_relative_error_bound", "not_usable_reason")}
+                    if k not in (*both, "gradient_relative_error_bound", "not_usable_reason",
+                                 "reason_codes")}
+
+        solved_code = [reason_codes.GEOMETRY_POSITIONS_SOLVED]
+        assert honest["reason_codes"] == {
+            "spectral_usable": solved_code, "gradient_bound_usable": solved_code,
+            "precision_limited": []}, honest["reason_codes"]
 
         above = float(np.nextafter(np.asarray(1.0, dtype), np.asarray(2.0, dtype)))
         limits = (bound, math.inf, 2.0 * bound, under, 0.0, math.nan, None)
@@ -690,6 +701,7 @@ def test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slo
                         assert report["spectral_usable"] is False, (limit, margin, gradient)
                         assert report["gradient_bound_usable"] is False
                         assert report["not_usable_reason"] == told, (limit, margin, gradient)
+                        assert report["reason_codes"] == honest["reason_codes"]
             report_with(math.inf, None, math.inf)
             (row,) = list(gm.coupling_report())
             assert f"spectral_usable=False: {told}" in row["flags"], row["flags"]
@@ -706,6 +718,7 @@ def test_the_report_of_a_pair_that_solves_positions_has_no_flag_whatever_its_slo
             assert numbers(standing) == numbers(honest)
             assert standing["spectral_usable"] is True and standing["gradient_bound_usable"] is True
             assert "not_usable_reason" not in standing
+            assert not any(standing["reason_codes"].values()), standing["reason_codes"]
             for gradient, said in ((math.inf, "did not pass"), (math.nan, "not computed")):
                 report = report_with(math.inf, gradient, math.inf)
                 assert report["spectral_usable"] is True
@@ -1217,7 +1230,8 @@ def test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound():
     """The geometry of each sub-step is not followed: the narrowing of
     phase 1 stands for a sub-cycled group, with a reason that says so and
     names the member (the group's diagnostics are off here, which the
-    reason does not depend on); the same pair at one rate has no reason."""
+    reason does not depend on); the same pair at one rate has no such reason
+    (its flags are down for its own causes, which it lists)."""
     from tests.property import geometry_graphs as gg  # noqa: PLC0415
 
     gm, report = _narrowed(dt_p=gc.DT / 2, subcycling=True)
@@ -1225,7 +1239,12 @@ def test_a_sub_cycled_group_with_a_geometry_edge_still_reports_no_bound():
     assert "['P']" in report["not_usable_reason"]
     assert "geometry_gap" not in cg.group_meta(gm, gc.KEY)
     gm, report = _narrowed()
-    assert "not_usable_reason" not in report and math.isfinite(report["error_estimate"])
+    # Nothing is withheld at one rate: the estimates are there, and the
+    # flags are down for the group's own two causes.
+    assert math.isfinite(report["error_estimate"])
+    assert "do not read a moving geometry" not in report["not_usable_reason"]
+    assert report["reason_codes"]["spectral_usable"] == [
+        reason_codes.DIAGNOSTICS_OFF, reason_codes.GEOMETRY_POSITIONS_SOLVED]
 
 
 def test_the_interface_norm_with_a_geometry_edge_from_outside_still_reports_no_bound():

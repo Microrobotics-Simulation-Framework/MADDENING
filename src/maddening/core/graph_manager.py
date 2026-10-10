@@ -86,6 +86,7 @@ from maddening.core import _adaptive_scan, _graph_specs, _param_probes
 from maddening.core.coupling import (
     _bounds, _coupled_block, _group_layout, _interface_plan, _reports,
 )
+from maddening.core.coupling import reason_codes as _reason_codes
 # Public names defined with the machinery that uses them stay importable from here.
 from maddening.core.coupling._bounds import GRADIENT_PROBE_ENTRY_LIMIT as GRADIENT_PROBE_ENTRY_LIMIT
 
@@ -299,6 +300,13 @@ class GraphManager:
         self._committed_geometry_edges: dict[str, tuple] = {}
         self._committed_geometry_solved: dict[str, tuple] = {}
         self._committed_geometry_refusals: dict[str, Optional[str]] = {}
+        # Per group key, the reason code of that refusal (``None`` with it),
+        # and ``(width, entries)`` of the group's pass: how many scalars it
+        # depends on the previous pass through, at most, and the entries of
+        # its floating state (``_group_layout._pass_width``).  What the
+        # report's ``"reason_codes"`` read beside the step's slots.
+        self._committed_geometry_refusal_codes: dict[str, Optional[str]] = {}
+        self._committed_pass_widths: dict[str, tuple] = {}
         # Per group key, the floating constants the gradient bound probed
         # as a whole rather than entry by entry (``_probe_plan``), as
         # ``(name, entries)``; written when the step is traced.
@@ -3248,6 +3256,19 @@ class GraphManager:
             name: spec.node.static_data_hash()
             for name, spec in self._nodes.items()
         }
+        # What the report's reason codes read beside the step's slots
+        # (host arithmetic on shapes; above the commit point with the
+        # rest of what could raise).
+        pass_widths = {
+            "+".join(sorted(g.nodes)): _group_layout._pass_width(
+                g, self._nodes, interface_plans["+".join(sorted(g.nodes))], state)
+            for g in self._coupling_groups
+        }
+        geometry_refusal_codes = {
+            "+".join(sorted(g.nodes)): _group_layout._geometry_refusal_code(
+                g, self._nodes, interface_plans["+".join(sorted(g.nodes))])
+            for g in self._coupling_groups
+        }
 
         # ------------------------------------------------------------------
         # Commit point.  Nothing below raises, so everything computed above
@@ -3314,6 +3335,8 @@ class GraphManager:
                 g, self._nodes, interface_plans["+".join(sorted(g.nodes))])
             for g in self._coupling_groups
         }
+        self._committed_geometry_refusal_codes = geometry_refusal_codes
+        self._committed_pass_widths = pass_widths
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -4777,8 +4800,12 @@ class GraphManager:
               ``False`` where nothing was computed (see
               ``"rho_spectral"``), where the bound is ``inf``, for
               a group whose Krylov space is still growing at the cap
-              -- more than seven independent interface scalars, or
-              more than eight where they are the whole state; there
+              -- one pass depends on the previous one through more
+              than seven independent scalars, or more than eight where
+              they are the whole state (what the loop closes through
+              under Gauss-Seidel, both directions under Jacobi: a
+              rank, not a count of points; the code
+              ``"interface_too_wide"`` of ``"reason_codes"``); there
               ``"rho_spectral"`` is an estimate (from below only for a
               normal ``dF/dx``) and the bound carries only the margin --
               where the residual never entered the Krylov space
@@ -5044,6 +5071,39 @@ class GraphManager:
               ``"gradient_bound_usable"`` and ``"precision_limited"``
               ``False`` and a ``"not_usable_reason"``, until the group
               steps.  The entry's other numbers are the slots' own.
+            - ``"residual_precision_floor"`` : float — experimental: the
+              float floor that ``"precision_limited"`` compares the
+              residual with and ``"spectral_error_bound"`` adds, in the
+              residual's units (tolerances), at the state the step
+              returned
+              (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`,
+              the number the step's own analysis takes).  Counted at the
+              coarsest floating dtype the pass goes through.  NaN where
+              it was not measured: ``"precision_limited"`` is then
+              ``False`` and says nothing of rounding, and
+              ``"reason_codes"["precision_limited"]`` says why.
+            - ``"reason_codes"`` : dict — experimental: why each of
+              ``"spectral_usable"``, ``"gradient_bound_usable"`` and
+              ``"precision_limited"`` reads ``False``, as a list of codes
+              per flag (the string constants of
+              :mod:`maddening.core.coupling.reason_codes`, whose
+              docstrings say what each means; the guide's table says
+              what to do).  A usable flag that is ``False`` has at least
+              one code and the entry a ``"not_usable_reason"`` : str
+              that says each in words; a flag that is ``True`` has
+              none.  Every cause that holds is listed, in a fixed order:
+              ``"interface_too_wide"`` (the pass depends on the previous
+              one through more scalars than the estimate's eight steps
+              span: expected, nothing is wrong) is told from
+              ``"spectral_self_check_failed"`` (a worry) and from
+              ``"at_float_floor"`` (a wider dtype or a looser tolerance)
+              and ``"diagnostics_off"``.  The gradient flag's list holds
+              the spectral flag's codes and then its own.
+              ``"precision_limited"`` has a code exactly where the float
+              floor was not measured.  Host bookkeeping on what the step
+              stored and what ``compile()`` recorded: lists of plain
+              strings, the same through JSON and a checkpoint, and no
+              number or flag of the entry is read from them.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -5082,7 +5142,13 @@ class GraphManager:
             reported as computed, and the entry has a
             ``"not_usable_reason"`` naming the edge, how its mapping is
             applied, the row's length and the way out (a wider dtype at
-            the same tolerance).  A row is the entries one delivered
+            the same tolerance).  An entry whose flags another cause
+            already holds down (no diagnostics, an estimate that did not
+            settle, a group withheld on account of its norm) says so
+            too, after that cause, with the code ``"long_mapped_row"``:
+            the float floor it reports does not count the row's
+            rounding either.  Nothing is withdrawn from such an entry.
+            A row is the entries one delivered
             value adds up whatever the weights are: a sparse layout's
             valid slots, and a dense matrix's **width** (its weights are
             a parameter a step may be handed, so a selection matrix is
@@ -5144,12 +5210,13 @@ class GraphManager:
             ``"gradient_error_estimate"`` is ``inf``, and
             ``"ratio_usable"``, ``"spectral_usable"``,
             ``"gradient_bound_usable"`` and ``"precision_limited"`` are
-            ``False``.  Such an entry has one more key,
-            ``"not_usable_reason"`` : str, which names the edges and
-            says which case it is; besides the causes above of a group
-            with a geometry edge, a long row of a static mapping and a
-            checkpoint saved after a state write, no other group's entry
-            has it.
+            ``False``.  Such an entry's ``"not_usable_reason"`` names
+            the edges and says which case it is, and its
+            ``"reason_codes"`` list that rule's code alone (with why the
+            float floor was not measured, where it says so): nothing
+            would be reported for it whatever else holds.  Where two of
+            the three rules hold (kind, norm, sub-cycling) the entry
+            names the first, in words and in code alike.
 
             **One of those groups keeps the float floor: one withheld
             on account of** ``convergence_norm="interface"`` (its
@@ -5158,7 +5225,7 @@ class GraphManager:
             them).  Its ``"precision_limited"`` is reported as for
             every group -- the residual is at or below its float floor
             at the state the step returned -- and its entry has a
-            further key, ``"residual_precision_floor"`` : float, that
+            number under ``"residual_precision_floor"``, that
             floor in the residual's units (tolerances;
             :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
             times the pass's **structural** evaluation count, with
@@ -5183,7 +5250,11 @@ class GraphManager:
             rather than motion: ``"converged"`` does not say the
             readings settled to the tolerance, and a group at
             ``max_iterations`` may be held there by rounding alone.
-            No other group's entry has that key.  The values are
+            The other groups whose bounds a geometry rule withholds
+            report NaN under that key (their floor is not reported, and
+            their ``"precision_limited"`` says nothing of rounding:
+            ``"reason_codes"["precision_limited"]`` has the rule's
+            code).  The values are
             withheld **here**: the internal ``_meta`` entry of the state
             (which ``GET /graph/state`` of the REST server and an FMU
             state archive carry verbatim) still holds what the step
@@ -5453,6 +5524,16 @@ class GraphManager:
                     ),
                     "precision_limited": precision_limited,
                 })
+                # Experimental: the causes of each ``False`` flag as codes
+                # (``"reason_codes"``), beside the sentence.  Host
+                # bookkeeping on the numbers above and on what
+                # ``compile()`` recorded: no flag and no number is read
+                # from it.  ``rule_codes`` are the rules below that
+                # withhold or withdraw; ``floor_codes`` say why the float
+                # floor was not measured, where it was not.
+                rule_codes: list[str] = []
+                floor_codes: list[str] = []
+                settled = bool(spectral_rate_settled(rho_spec, spec_resid))
                 if self._loaded_after_a_write(key) and not (
                         measured_floor is not None
                         and np.isfinite(np.asarray(measured_floor))):
@@ -5468,6 +5549,8 @@ class GraphManager:
                         "precision_limited": False,
                         "not_usable_reason": _group_layout._WRITTEN_BEFORE_SAVE_REASON,
                     })
+                    rule_codes.append(_reason_codes.WRITTEN_BEFORE_SAVE)
+                    floor_codes.append(_reason_codes.WRITTEN_BEFORE_SAVE)
                 if floor_unserved:
                     result[key].update({
                         "spectral_error_bound": float("nan"),
@@ -5476,10 +5559,32 @@ class GraphManager:
                         "precision_limited": False,
                         "not_usable_reason": _group_layout._FLOOR_NEEDS_THE_STEP_REASON,
                     })
+                    # One sentence stands, this rule's: so one code.
+                    rule_codes = [_reason_codes.FLOOR_NEEDS_THE_STEP]
+                    floor_codes = [_reason_codes.FLOOR_NEEDS_THE_STEP]
+                # The causes of the entry's own flags, as every group's are
+                # derived (``_group_layout._flag_causes``): empty exactly
+                # where the expression above set ``spectral_usable``.
+                spectral_causes, own_causes = _group_layout._flag_causes(
+                    group, bound=spectral_bound, rho=rho_spec, arnoldi_residual=spec_resid,
+                    amplification=spec_amp, settled=settled, residual=residual,
+                    precision_limited=precision_limited, declared=bool(declared),
+                    gradient_bound=grad_bound,
+                    width=self._committed_pass_widths.get(key, _group_layout._UNCOUNTED_WIDTH),
+                    fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS,
+                    floor_measured=not floor_codes)
+                # What the entry reports of its float floor: the floor the
+                # bound above was built with, NaN where it was not measured.
+                floor_reported = float("nan") if floor_codes else float(floor)
+                # Whether the entry's reason already puts those causes into
+                # words (the rule of a group with a geometry edge does).
+                told_causes = False
                 geometry_keys = self._committed_geometry_edges.get(key, ())
                 geometry_reason = (self._committed_geometry_refusals.get(key)
                                    if geometry_keys else None)
                 gap = meta.get(f"coupling_{key}_geometry_gap") if geometry_keys else None
+                geometry_code = (self._committed_geometry_refusal_codes.get(key)
+                                 if geometry_reason is not None else None)
                 if geometry_reason is None and gap is not None and math.isfinite(rho_spec):
                     # The step compared its own Jacobian-vector product
                     # along the geometry with a finite difference of the
@@ -5488,6 +5593,7 @@ class GraphManager:
                     if not float(gap) <= _bounds.GEOMETRY_GAP_TOLERANCE:
                         geometry_reason = _group_layout._geometry_self_check_reason(
                             geometry_keys, float(gap), _bounds.GEOMETRY_GAP_TOLERANCE)
+                        geometry_code = _group_layout._geometry_self_check_code(float(gap))
                 if geometry_reason is not None:
                     # Experimental: where the diagnostics do not read this
                     # group's moving geometry (another mapping kind, the
@@ -5516,8 +5622,28 @@ class GraphManager:
                         "not_usable_reason": geometry_reason,
                     })
                     result[key].update(floor_reading)
-                    continue
-                if geometry_keys and "not_usable_reason" not in result[key]:
+                    # One rule's sentence stands for such an entry, and so
+                    # one code: the geometry rule's, with the cause the
+                    # floor was not measured where a group withheld on
+                    # account of its norm says that too.  Its own causes
+                    # (computed on numbers the entry does not report) are
+                    # not listed.
+                    told_causes = True
+                    spectral_causes, own_causes = [], []
+                    # (Committed with the refusal; the self-check sets its own.)
+                    code = geometry_code or _reason_codes.GEOMETRY_KIND_NOT_DIAGNOSED
+                    if floor_reading:
+                        if not math.isfinite(float(floor)) and not math.isfinite(residual):
+                            # The helper's first case: a state that is not
+                            # finite, whatever else withheld the floor.
+                            floor_codes = [_reason_codes.STATE_NOT_FINITE]
+                        rule_codes = [code, *floor_codes]
+                        floor_reported = floor_reading["residual_precision_floor"]
+                    else:
+                        rule_codes = [code]
+                        floor_codes = [code]
+                        floor_reported = float("nan")
+                elif geometry_keys:
                     # Experimental: a group that solves the positions of a
                     # geometry-dependent mapping (its pass reads one from
                     # the iterate, or builds one and reads it in the same
@@ -5530,23 +5656,39 @@ class GraphManager:
                     # MADD-ANO-252).  The numbers stay; a ``False`` flag
                     # of a step that computed the estimate carries its
                     # reason.
-                    usable, gradient_usable, reason = _group_layout._geometry_flags(
+                    # (Where a rule above already withheld the floor, the
+                    # flags are down and its reason stands; the causes of
+                    # this group are listed after it all the same.)
+                    (usable, gradient_usable, reason, spectral_causes,
+                     own_causes) = _group_layout._geometry_flag_causes(
                         geometry_keys,
                         solved=self._committed_geometry_solved.get(key),
                         bound=result[key]["spectral_error_bound"],
                         gradient_bound=grad_bound, rho=rho_spec,
-                        arnoldi_residual=spec_resid,
-                        settled=bool(spectral_rate_settled(rho_spec, spec_resid)),
+                        arnoldi_residual=spec_resid, settled=settled,
                         precision_limited=precision_limited, declared=bool(declared),
                         limit=meta.get(f"coupling_{key}_geometry_plane_limit"),
                         margin=meta.get(f"coupling_{key}_geometry_plane_margin"),
-                        fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS)
-                    result[key].update({
-                        "spectral_usable": usable,
-                        "gradient_bound_usable": gradient_usable,
-                    })
-                    if reason is not None:
-                        result[key]["not_usable_reason"] = reason
+                        fraction=SPECTRAL_SETTLED_FRACTION, steps=SPECTRAL_KRYLOV_STEPS,
+                        group=group, amplification=spec_amp, residual=residual,
+                        width=self._committed_pass_widths.get(
+                            key, _group_layout._UNCOUNTED_WIDTH),
+                        floor_measured=not floor_codes)
+                    if "not_usable_reason" not in result[key]:
+                        result[key].update({
+                            "spectral_usable": usable,
+                            "gradient_bound_usable": gradient_usable,
+                        })
+                        if reason is not None:
+                            result[key]["not_usable_reason"] = reason
+                            # (Its words are the causes': nothing to add below.)
+                            told_causes = True
+                if not floor_codes and floor_reported != floor_reported:
+                    # A floor that is not a number although no rule
+                    # withheld it: the state is not finite where the norm
+                    # reads it.
+                    floor_codes = [_reason_codes.BOUND_NOT_EVALUATED if math.isfinite(residual)
+                                   else _reason_codes.STATE_NOT_FINITE]
                 # The float floor counts a fixed number of ulps per
                 # evaluation, and a static mapping adds a row's entries
                 # up (a dense matrix, a sparse one in either layout),
@@ -5554,12 +5696,16 @@ class GraphManager:
                 # (MADD-ANO-257, open).  Where the residual does not
                 # stand clear of the floor such a row would give it, the
                 # flags that rest on the floor are withdrawn, with the
-                # reason; the numbers stay as computed.  Asked only of a
-                # flag that is still set.
+                # reason; the numbers stay as computed.  Asked of every
+                # entry that reports a measured float floor, a flag
+                # standing or not: the floor shown does not count the
+                # row's rounding, and an entry whose flags another cause
+                # already holds down says so too (nothing is withdrawn
+                # from it).
                 row_reason = (
                     _group_layout._mapped_row_reason(
-                        self._committed_mapped_rows.get(key, ()), residual, floor)
-                    if result[key]["spectral_usable"] else None)
+                        self._committed_mapped_rows.get(key, ()), residual, floor_reported)
+                    if not floor_codes else None)
                 if row_reason is not None:
                     # (A reason another rule left beside a flag of its
                     # own, with ``spectral_usable`` standing, is kept.)
@@ -5569,6 +5715,37 @@ class GraphManager:
                         "not_usable_reason": _group_layout._joined_reasons(
                             result[key].get("not_usable_reason"), row_reason),
                     })
+                    rule_codes.append(_reason_codes.LONG_MAPPED_ROW)
+                # A flag that is ``False`` for a cause of its own has its
+                # causes put into words, after the reasons the rules above
+                # gave (each of which stays as it was, at the front): the
+                # one sentence of a group that solves positions by itself,
+                # every other cause in one frame.
+                if not told_causes and not (result[key]["spectral_usable"]
+                                            and result[key]["gradient_bound_usable"]):
+                    solved_code = _reason_codes.GEOMETRY_POSITIONS_SOLVED
+                    sentences = [clause for code, clause in spectral_causes
+                                 if code == solved_code]
+                    sentences.append(_group_layout._causes_sentence(
+                        [cause for cause in spectral_causes if cause[0] != solved_code],
+                        own_causes, spectral_stands=not rule_codes and not sentences))
+                    for sentence in sentences:
+                        if sentence is not None:
+                            result[key]["not_usable_reason"] = _group_layout._joined_reasons(
+                                result[key].get("not_usable_reason"), sentence)
+                spectral_codes = [] if result[key]["spectral_usable"] else (
+                    _group_layout._codes_in_order(
+                        rule_codes, (code for code, _clause in spectral_causes)))
+                result[key]["reason_codes"] = {
+                    "spectral_usable": spectral_codes,
+                    "gradient_bound_usable": (
+                        [] if result[key]["gradient_bound_usable"]
+                        else _group_layout._codes_in_order(
+                            spectral_codes, rule_codes,
+                            (code for code, _clause in own_causes))),
+                    "precision_limited": _group_layout._codes_in_order(floor_codes),
+                }
+                result[key]["residual_precision_floor"] = floor_reported
         return result
 
     # ------------------------------------------------------------------

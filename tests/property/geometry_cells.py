@@ -76,6 +76,7 @@ from hypothesis import strategies as st
 from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
+from tests.core.coupling_reason_rules import assert_reason_rules
 from tests.property import coupled_graphs as cg
 from tests.property import coupling_reference as cr
 from tests.property import test_coupling_targeted_search as linear
@@ -325,7 +326,11 @@ def run_once(gm: GraphManager, values: dict) -> tuple:
     set_initial(gm, values)
     pre = snapshot(gm)
     gm.step(params=params_for(gm, values))
-    return pre, snapshot(gm), dict(gm.coupling_diagnostics()[KEY]), cg.group_meta(gm, KEY)
+    report = dict(gm.coupling_diagnostics()[KEY])
+    # Every report the geometry search judges keeps the rules of its
+    # reason codes (a False flag has a code and a sentence, a True one none).
+    assert_reason_rules(report, KEY)
+    return pre, snapshot(gm), report, cg.group_meta(gm, KEY)
 
 
 def lattice_cells(cell: Cell, ref: cr.PassReference, x) -> list:

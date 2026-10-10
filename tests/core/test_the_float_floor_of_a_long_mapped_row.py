@@ -56,7 +56,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.coupling import _group_layout
+from maddening.core.coupling import _group_layout, reason_codes
 from maddening.core.coupling._group_layout import (
     MAPPED_ROW_FLOOR_LIMIT,
     _joined_reasons,
@@ -81,6 +81,8 @@ KEY = "coarse+fine"
 ROW_EDGE = "fine.x->coarse.u"
 BACK_EDGE = "coarse.x->fine.u"
 ANOMALY = "MADD-ANO-257"
+#: The guard's reason code (experimental).
+LONG_ROW = reason_codes.LONG_MAPPED_ROW
 LAYOUTS = ("scatter", "gather", "dense")
 #: How the reason names each form, and what it must not name beside it:
 #: the way out is a wider dtype, never another kind or layout.
@@ -357,8 +359,10 @@ def _withdrawn_for_the_row_where_a_flag_was_set(cell: Cell, report: dict, monkey
     """:func:`_withdrawn_for_the_row`, for a report the guard had a flag
     to withdraw from.  A pair of one row always has one.  A pair of
     several rows repeats one loop, and where its spectrum does not
-    resolve (a bound of ``inf``) another rule left the flag off before
-    this one was asked: the guard then adds nothing, which is read on
+    resolve (a bound of ``inf``) another cause held the flag down before
+    this one was asked: the guard then withdraws nothing and names its
+    caveat all the same (the floor the entry reports does not count the
+    row), before that cause's own words, which are the whole reason of
     the same state with the limit out of reach."""
     with x64(cell.pair.dtype == "float64"):
         monkeypatch.setattr(_group_layout, "MAPPED_ROW_FLOOR_LIMIT", 10 ** 9)
@@ -369,7 +373,12 @@ def _withdrawn_for_the_row_where_a_flag_was_set(cell: Cell, report: dict, monkey
         return
     assert cell.pair.rows > 1, (cell.id, "a pair of one row has a flag to withdraw", bare)
     assert not report["spectral_usable"] and not report["gradient_bound_usable"], (cell.id, report)
-    assert report.get("not_usable_reason") == bare.get("not_usable_reason"), (cell.id, report)
+    rows_said, also, own = report["not_usable_reason"].partition(" Also: ")
+    assert also and ANOMALY in rows_said and ANOMALY not in own, (cell.id, report)
+    assert own == bare["not_usable_reason"], (cell.id, report, bare)
+    kept = bare["reason_codes"]["spectral_usable"]
+    assert kept and LONG_ROW not in kept, (cell.id, bare["reason_codes"])
+    assert set(report["reason_codes"]["spectral_usable"]) == {*kept, LONG_ROW}, (cell.id, report)
 
 
 def _committed(pair: Pair) -> dict:
@@ -452,32 +461,51 @@ def test_the_bound_behind_a_long_row_is_at_or_above_the_distance(stalled_under):
 
 def test_the_guard_moves_no_number_of_the_report(stalled, monkeypatch):
     """With the limit out of reach the same state's report sets its
-    flags and has no reason; every other key is equal bit for bit.  (The
-    three-row dense pair's gradient flag is off without the guard too:
-    another rule's, with no reason of its own.)"""
+    flags and has no reason of the guard's, nor its code; every other key
+    is equal bit for bit.  (The three-row dense pair's gradient flag is
+    off without the guard too: a cause of its own, which that report
+    names, as the guarded one does after the guard's.)"""
     gm = stalled["graph"]
     guarded = dict(gm.coupling_diagnostics()[KEY])
     monkeypatch.setattr(_group_layout, "MAPPED_ROW_FLOOR_LIMIT", 10 ** 9)
     bare = dict(gm.coupling_diagnostics()[KEY])
     assert bare["spectral_usable"], bare
     assert bare["gradient_bound_usable"] == (stalled["cell"].pair.rows == 1), bare
-    assert "not_usable_reason" not in bare
-    moved = {"spectral_usable", "gradient_bound_usable", "not_usable_reason"}
-    assert set(guarded) - set(bare) == {"not_usable_reason"}
+    assert ("not_usable_reason" in bare) == (not bare["gradient_bound_usable"]), bare
+    assert ANOMALY not in bare.get("not_usable_reason", "")
+    own = bare["reason_codes"]["gradient_bound_usable"]
+    assert bare["reason_codes"]["spectral_usable"] == [] and LONG_ROW not in own, bare
+    assert guarded["reason_codes"]["spectral_usable"] == [LONG_ROW], guarded["reason_codes"]
+    assert guarded["reason_codes"]["gradient_bound_usable"] == [LONG_ROW, *own]
+    assert guarded["not_usable_reason"].startswith("the group's internal edge")
+    moved = {"spectral_usable", "gradient_bound_usable", "not_usable_reason", "reason_codes"}
+    assert set(guarded) - set(bare) <= {"not_usable_reason"}
     for name in set(bare) - moved:
         assert np.asarray(guarded[name]).tobytes() == np.asarray(bare[name]).tobytes(), name
 
 
-def test_the_guard_gives_its_reason_only_where_it_withdrew_a_flag(stalled, monkeypatch):
+def test_the_guard_names_its_cause_beside_a_flag_another_cause_holds_down(stalled, monkeypatch):
     """A flag that is already off for another cause (here a spectrum made
-    to read as not settled) is not this guard's: the report carries no
-    reason from it, and whatever reason another rule wrote stands."""
+    to read as not settled) still rests on a floor that does not count
+    the row: the report names both causes, in codes and in words, the
+    guard's first, and moves no number.  (Before every report gave the
+    causes of a ``False`` flag, the guard spoke only where it withdrew
+    one, and this report had no reason at all.)"""
     from maddening.core import graph_manager as module  # noqa: PLC0415
 
+    honest = dict(stalled["graph"].coupling_diagnostics()[KEY])
     monkeypatch.setattr(module, "spectral_rate_settled", lambda *args, **kwargs: False)
     report = dict(stalled["graph"].coupling_diagnostics()[KEY])
     assert not report["spectral_usable"] and report["precision_limited"], report
-    assert "not_usable_reason" not in report, "the patch takes effect, and no reason is added"
+    listed = report["reason_codes"]["spectral_usable"]
+    assert LONG_ROW in listed and set(listed) & {
+        reason_codes.INTERFACE_TOO_WIDE, reason_codes.SPECTRAL_SELF_CHECK_FAILED}, (
+        "the patch takes effect, and both causes are listed", listed)
+    reason = report["not_usable_reason"]
+    assert reason.startswith("the group's internal edge") and ANOMALY in reason
+    assert "the spectral estimate did not settle" in reason, reason
+    for name in set(report) - {"not_usable_reason", "reason_codes"}:
+        assert np.asarray(report[name]).tobytes() == np.asarray(honest[name]).tobytes(), name
 
 
 def test_the_report_table_gives_the_reason_beside_the_numbers(stalled):
@@ -839,8 +867,12 @@ def test_a_dense_selection_matrix_loses_its_flags_and_the_same_operator_held_spa
                  "whose longest row adds up 40 entries", ANOMALY, "a wider dtype"):
         assert said in dense["not_usable_reason"], (said, dense["not_usable_reason"])
     # (Forty loops that are one loop forty times: the gradient flag is
-    # off in both forms, by another rule and with no reason of its own.)
-    assert sparse["spectral_usable"] and "not_usable_reason" not in sparse, sparse
+    # off in both forms, for a cause of its own, which the sparse form's
+    # reason is the whole of.)
+    assert sparse["spectral_usable"] and not sparse["gradient_bound_usable"], sparse
+    assert sparse["reason_codes"]["spectral_usable"] == [], sparse["reason_codes"]
+    assert LONG_ROW not in sparse["reason_codes"]["gradient_bound_usable"]
+    assert ANOMALY not in sparse["not_usable_reason"], sparse["not_usable_reason"]
 
 
 # ---------------------------------------------------------------------------

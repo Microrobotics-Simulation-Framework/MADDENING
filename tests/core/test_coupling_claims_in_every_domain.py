@@ -66,9 +66,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import reason_codes
 from maddening.core.coupling.acceleration import residual_precision_floor
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
+from tests.core.coupling_reason_rules import assert_reason_rules
 
 KEY = "a+b"
 #: Exactly representable in every float dtype, bfloat16 included.
@@ -1297,6 +1299,40 @@ def _cotangent_scale(run: DomainRun):
     if run.cfg.runner != "adaptive":
         assert run.get("cotangent"), "no cotangent compared"
     _fail(problems, "a scaled cotangent changes the gradient")
+
+
+@check("CPL-195")
+def _a_false_usable_flag_says_why_in_a_code(run: DomainRun):
+    """Every report of the domain keeps the rules of its reason codes: a
+    usable flag that is ``False`` has at least one code and the entry a
+    sentence, a flag that is ``True`` has none, and ``precision_limited``
+    has a code exactly where its float floor was not measured.  And each
+    setting that computes no estimate says which it is: the group built
+    without diagnostics, and the one with a budget of one pass."""
+    problems = []
+    settings = (reason_codes.SOLVER_NOT_IFT, reason_codes.DIAGNOSTICS_OFF,
+                reason_codes.SINGLE_PASS)
+    records = {"main": run.main, "main_off": run.main_off, "plain": run.plain,
+               "single": run.single}
+    for family, group_records in records.items():
+        for r in _reported(group_records):
+            assert_reason_rules(r.report, f"{family}, {_where(r)}")
+            listed = r.report["reason_codes"]["spectral_usable"]
+            g = r.group
+            if g.solver != "ift":
+                want = reason_codes.SOLVER_NOT_IFT
+            elif not g.diagnostics:
+                want = reason_codes.DIAGNOSTICS_OFF
+            elif g.max_iterations <= 1 and r.finite:
+                want = reason_codes.SINGLE_PASS
+            else:
+                want = None
+            named = [code for code in listed if code in settings]
+            if named != ([] if want is None else [want]):
+                problems.append(f"{family}, {_where(r)}: the setting's code is "
+                                f"{want!r}, and the report lists {listed}")
+    assert _reported(run.main) and _reported(run.main_off), "no report to check"
+    _fail(problems, "a report's reason codes do not name its setting")
 
 
 # ---------------------------------------------------------------------------

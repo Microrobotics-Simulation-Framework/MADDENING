@@ -133,6 +133,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core.coupling import reason_codes
 from maddening.core.coupling.mapping import register_mapping
 from maddening.core.coupling.mapping_spec import MappingSpec
 from maddening.core.graph_manager import GraphManager
@@ -841,9 +842,27 @@ def withheld(c: "Case") -> Optional[str]:
     return None
 
 
-#: What the report of a group withheld on account of its norm adds: the
-#: residual's float floor at the state the step returned.
+#: The residual's float floor at the state the step returned: every
+#: report has the key; of the groups whose bounds are withheld, only one
+#: withheld on account of its norm has a number under it.
 FLOOR_KEY = "residual_precision_floor"
+#: The reason code of each way of withholding (experimental).
+WHY_CODE = {"kind": reason_codes.GEOMETRY_KIND_NOT_DIAGNOSED,
+            "sub-cycled": reason_codes.GEOMETRY_SUBCYCLED,
+            "norm": reason_codes.GEOMETRY_NORM_NOT_DIAGNOSED,
+            "self-check": reason_codes.GEOMETRY_SELF_CHECK_FAILED,
+            "self-check-unevaluated": reason_codes.GEOMETRY_SELF_CHECK_NOT_EVALUATED}
+#: Every reason code a geometry rule gives.
+GEOMETRY_CODES = frozenset(code for code in reason_codes.ALL if code.startswith("geometry_"))
+
+
+def assert_no_geometry_reason(report) -> None:
+    """*report* is that of a group no geometry rule touched: none of
+    their codes, and no word of them in a reason it may have for a flag
+    of its own (the float floor, no diagnostics)."""
+    listed = {code for codes in report["reason_codes"].values() for code in codes}
+    assert not listed & GEOMETRY_CODES, report["reason_codes"]
+    assert "geometry" not in report.get("not_usable_reason", ""), report["not_usable_reason"]
 
 
 def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
@@ -857,10 +876,19 @@ def assert_not_diagnosed(report, keys, why: Optional[str] = None) -> None:
     finite residual is at or below it) and the floor itself, or neither
     where the floor could not be measured, with the reason saying which.
     """
-    floor_kept = FLOOR_KEY in report
-    assert floor_kept == (why == "norm") or why is None, (why, sorted(report))
-    assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason",
-                           *((FLOOR_KEY,) if floor_kept else ())}, sorted(report)
+    codes = report["reason_codes"]
+    rules = [code for code in codes["spectral_usable"] if code in WHY_CODE.values()]
+    assert len(rules) == 1 and codes["gradient_bound_usable"] == codes["spectral_usable"], codes
+    if why is not None:
+        assert rules == [WHY_CODE[why]], (why, codes)
+    floor_kept = rules == [WHY_CODE["norm"]]
+    assert set(report) == {*SOLVE_OUTCOME, *_NOT_USABLE, "not_usable_reason", "reason_codes",
+                           FLOOR_KEY}, sorted(report)
+    if not floor_kept:
+        # No floor is reported, and the flag says nothing of rounding:
+        # the rule's code says why.
+        assert report[FLOOR_KEY] != report[FLOOR_KEY] and codes["precision_limited"] == rules, (
+            report[FLOOR_KEY], codes)
     for name, want in _NOT_USABLE.items():
         got = report[name]
         if floor_kept and name == "precision_limited":

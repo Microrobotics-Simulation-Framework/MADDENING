@@ -700,9 +700,18 @@ def test_a_false_flag_of_constant_positions_names_every_cause_and_no_lattice_pla
     assert "did not settle" in reason and "0.3" in reason and "8 Krylov steps" in reason
     assert "lattice plane" not in reason and "no tolerance changes that" in reason
 
-    spectral, gradient, reason = _flags(bound=np.inf, settled=False)
+    # A bound that is inf beside a radius under one: the unsettled
+    # estimate's own margin made it so, and the reason says that, not that
+    # the pass does not contract (a pass wider than the estimate's steps
+    # reads rho_spectral 0.23 with an Arnoldi residual of 0.44).
+    spectral, gradient, reason = _flags(bound=np.inf, settled=False, arnoldi_residual=0.3)
+    assert (spectral, gradient) == (False, False)
+    assert "did not settle" in reason and "spectral_error_bound is inf because" in reason
+    assert "does not contract" not in reason and "lattice plane" not in reason
+    # One that is inf beside a radius of one or more: the pass does not contract.
+    spectral, gradient, reason = _flags(bound=np.inf, settled=False, rho=1.25)
     assert (spectral, gradient) == (False, False) and "spectral_error_bound is inf" in reason
-    assert "did not settle" not in reason and "lattice plane" not in reason
+    assert "does not contract" in reason and "did not settle" not in reason
 
     for value, told, other in ((np.nan, "was not computed (NaN)", "is inf"),
                                (np.inf, "is inf", "was not computed")):

@@ -24,7 +24,10 @@
 #   RPD-NNN   benchmarks/multigpu/run_pod.py: its goals, record schema,
 #             GOAL_CHECKS, --summarise verdicts and exit codes, --keep-going;
 #             its runbook benchmarks/multigpu/README.md; and
-#             tests/cloud/multigpu/test_run_pod_*.
+#             tests/cloud/multigpu/test_run_pod_*.  From RPD-040:
+#             benchmarks/multigpu/run_capacity.py, the non-gating capacity
+#             test of the runbook's stress tail, and
+#             tests/cloud/multigpu/test_run_capacity_*.
 # Out of scope: EXPERIMENTAL in 0.4.0 and deferred to 0.5.0 by the
 # maintainer --
 #   * the surrogate-training endpoints (/surrogate/*);
@@ -6376,5 +6379,325 @@ claims:
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_refusal_exits_refused_with_its_reason_last
+    relabelled_records: n/a
+    mixed_commits: n/a
+- id: RPD-040
+  area: run_capacity-tiling
+  claim: >-
+    "Along every axis the mesh splits, K is odd and shares no factor with
+    the devices there, and the tile's extent is a multiple of them and at
+    least twice them: every shard then starts at a different phase of the
+    tile, and a halo taken from another shard, from the other side or from
+    the shard itself differs from the right one. A K or a tile that breaks
+    this is refused" (and so is a grid with two axes of the same extent, and
+    a size smaller than one tile), with exit 2 and the reason, before any
+    rung starts.
+  sources:
+    - benchmarks/multigpu/run_capacity.py::tiling_problem
+    - benchmarks/multigpu/run_capacity.py::tiling_for_cells
+    - benchmarks/multigpu/run_capacity.py::check_option_values
+  conditions: >-
+    The 2x2 pencil, the 4x1 mesh and a 3x1 mesh; every dry run: counts that
+    are even, a multiple of the devices, or coprime but even; tiles the
+    devices do not divide or with one row per device; the row arithmetic for
+    every allowed case; and one rung run on a refused tiling (two tiles over
+    four devices, the refusal bypassed) with each halo taken from the
+    neighbour on the other side.
+  oracle: >-
+    The rows of the tile each wrong source would deliver, computed apart
+    from the script; and the rung itself: on the refused tiling the broken
+    exchange passes every check, on three tiles it fails.
+  tests:
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_a_tiling_on_which_a_wrong_halo_could_hide_is_refused_with_the_reason
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_an_allowed_tiling_starts_every_shard_at_its_own_phase_of_the_tile
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_a_refused_count_is_one_that_makes_two_shards_alike
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_tiling_chosen_for_a_size_is_allowed_and_never_larger
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_command_line_refuses_it_with_exit_2_before_anything_runs
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_without_the_oddness_rule_a_halo_from_the_wrong_neighbour_passes
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_without_the_oddness_rule_a_halo_from_the_wrong_neighbour_passes
+    relabelled_records: n/a
+    mixed_commits: n/a
+- id: RPD-041
+  area: run_capacity-build
+  claim: >-
+    "The whole field never exists on one device or on the host. It is built
+    block by block, each device gathering its own block from the tile, and
+    compared the same way, a few planes at a time": the builder is asked
+    once per device, for that device's own block, and refuses a larger one;
+    nothing larger than the tile leaves the host; and the lattice the script
+    wraps never builds its whole initial state, which the library's own
+    node, wrapped the same way, builds twice on one device (MADD-ANO-262).
+  sources:
+    - benchmarks/multigpu/run_capacity.py::build_state
+    - benchmarks/multigpu/run_capacity.py::tiled_block
+    - benchmarks/multigpu/run_capacity.py::_make_lattice_class
+    - benchmarks/multigpu/run_capacity.py::compare_with_tiling
+  conditions: >-
+    Four CPU virtual devices, both meshes, a 24 x 12 x 6 grid of the tests'
+    8 x 4 x 6 tile (a block larger than the tile); the device transfers and
+    the builder's requests recorded while the state is built; a rung run
+    with LBMNode.initial_state counted. Memory itself is not measured at
+    these sizes: the claim is pinned by what is asked for, not by a peak.
+  oracle: >-
+    numpy.tile of the tile, each device's block against its own index range,
+    the coverage of the grid by the requested blocks (every cell once), and
+    the count of initial_state calls.
+  tests:
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_built_field_is_the_tile_repeated_with_each_block_on_its_own_device
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_builder_is_never_asked_for_more_than_one_shards_block
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_builder_refuses_a_block_larger_than_a_shard
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_comparison_reads_zero_for_the_tiled_field_and_counts_every_cell_once
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_never_has_the_lattice_build_its_whole_state_on_one_device
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_never_has_the_lattice_build_its_whole_state_on_one_device
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_never_has_the_lattice_build_its_whole_state_on_one_device
+    relabelled_records: n/a
+    mixed_commits: n/a
+- id: RPD-042
+  area: run_capacity-checks
+  claim: >-
+    "Per rung: every state field against the tiled reference (the limit is
+    the runner's forward limit, LIMITS["forward"] of run_pod.py), the total
+    mass against prod(K) times the tile's, every value finite." A halo taken
+    from the wrong neighbour or from the shard itself, and a reference of
+    another phase, fail the rung with outcome "check failed" and exit 1; one
+    wrong cell on one device is found in its field alone; a NaN cell reads
+    as not finite and as an infinite difference, never as none.
+  sources:
+    - benchmarks/multigpu/run_capacity.py::compare_with_tiling
+    - benchmarks/multigpu/run_capacity.py::_compare_state
+    - benchmarks/multigpu/run_capacity.py::pass_checks
+    - benchmarks/multigpu/run_capacity.py::LIMIT
+  conditions: >-
+    Four CPU virtual devices, both meshes, every dry run: the wrapper's
+    halo_exchange replaced (in the module that reads it, shown to be traced)
+    by one with the two permutations exchanged on the 4x1 mesh and by one
+    that wraps inside the shard along each axis of the pencil; the reference
+    rolled by one cell; one population off by 1e-3 or NaN; chunks of one
+    plane, of a divisor, of a non-divisor and larger than the block. On an
+    accelerator the differences are expected at float32 rounding, not at
+    exactly 0: not measured.
+  oracle: >-
+    The same rungs with the library's own exchange (pass), the size of the
+    seeded error, and the tile's mass in float64.
+  tests:
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_wrong_halo_fails_the_tiled_comparison_with_the_check_failed_status
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_same_rungs_pass_with_the_librarys_own_exchange
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_wrong_reference_tile_fails_the_comparison
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_one_wrong_cell_on_one_device_is_found_in_its_field_alone
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_comparison_reads_zero_for_the_tiled_field_and_counts_every_cell_once
+    - tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_limit_is_the_runners_forward_limit
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_one_wrong_cell_on_one_device_is_found_in_its_field_alone
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_wrong_halo_fails_the_tiled_comparison_with_the_check_failed_status
+    relabelled_records: n/a
+    mixed_commits: n/a
+- id: RPD-043
+  area: run_capacity-exit
+  claim: >-
+    The exit statuses of the header: "0 every rung that ran to its checks
+    passed them (an out-of-memory or a time-out above a passing rung is a
+    result, and is recorded); 1 a check failed, in a rung or in the soak; 2
+    an option was refused; 3 --summarise only: a record cannot be read, or
+    its recorded verdict disagrees with its own values; 5 this script itself
+    raised; 6 no ceiling: the first rung did not pass". "The ramp stops at
+    the first rung that did not pass; the summary names the ceiling -- the
+    largest size that passed, its fill, and what stopped the next one." A
+    rung ends as exactly one of passed, check failed, out of memory, timed
+    out, crashed, or never starts (refused by the host guard).
+  sources:
+    - benchmarks/multigpu/run_capacity.py::classify
+    - benchmarks/multigpu/run_capacity.py::ramp_status
+    - benchmarks/multigpu/run_capacity.py::run_ramp
+    - benchmarks/multigpu/run_capacity.py::summarise
+    - benchmarks/multigpu/run_capacity.py::rederive
+    - benchmarks/multigpu/run_capacity.py::host_guard
+    - benchmarks/multigpu/run_capacity.py::launch_child
+    - benchmarks/multigpu/README.md (the stress tail, (b))
+  conditions: >-
+    Every dry run. A second rung that ends killed (137 and SIGKILL), at its
+    time box, aborted with the runtime's resource-exhausted message on
+    stderr, with a segfault, with status 0 or 1 and no record -- each
+    replayed by a scripted launcher after a real passing rung -- and one
+    whose step raises the runtime's own error in the rung's process; the
+    same as a first rung; a failed check above a passing rung and in a soak
+    block; a host with too little memory; a real process past a time box of
+    0.05 s; a ramp ended by SIGTERM; and a passing run's records tampered
+    with eleven ways before --summarise. A real allocator refusal on an
+    accelerator is not exercised.
+  oracle: >-
+    The outcome each ending is given, the ramp's status, the ceiling and the
+    stopping rung in the summary, the header's own table, and for
+    --summarise the verdict the changed value and limit give.
+  tests:
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_that_dies_above_a_passing_one_is_the_ceilings_reason_and_exit_0
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_whose_runtime_reports_resource_exhaustion_is_out_of_memory
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_that_raises_anything_else_is_crashed_with_its_traceback_kept
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_first_rung_that_cannot_run_is_its_own_exit_status
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_failed_check_stops_the_ramp_with_the_check_failed_status
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_soak_block_that_fails_its_checks_is_the_check_failed_status
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_exit_statuses_are_the_ones_the_header_documents
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_host_guard_refuses_a_rung_before_anything_is_built
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_past_its_time_box_is_killed_and_recorded_as_timed_out
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_ramp_that_is_terminated_takes_its_rung_with_it
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_summarise_rederives_every_verdict_from_the_values_of_a_tampered_record
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_summarise_names_a_record_it_cannot_read_and_exits_3
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_summarise_rederives_every_verdict_from_the_values_of_a_tampered_record
+    shutdown: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_ramp_that_is_terminated_takes_its_rung_with_it
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_past_its_time_box_is_killed_and_recorded_as_timed_out
+    relabelled_records: n/a
+    mixed_commits: n/a
+- id: RPD-044
+  area: run_capacity-memory
+  claim: >-
+    "A rung's fill is the largest peak_bytes_in_use over --device-memory-gb
+    (GiB), over the devices. Where the backend has no statistics -- CPU --
+    the fill is recorded as not measured (a check not run, never a pass)."
+    "The first rung's size comes from an a-priori estimate (the state's
+    bytes per cell times APRIORI_STEP_MULTIPLE), every later rung's from the
+    bytes per cell the rung before it measured." A target the last rung
+    already reached is skipped, one above the allocator's own bytes_limit is
+    named, and the soak records how bytes_in_use moved from block to block.
+  sources:
+    - benchmarks/multigpu/run_capacity.py::fill_of
+    - benchmarks/multigpu/run_capacity.py::first_rung_cells
+    - benchmarks/multigpu/run_capacity.py::next_rung_cells
+    - benchmarks/multigpu/run_capacity.py::read_device_memory
+    - benchmarks/multigpu/run_capacity.py::soak_growth
+    - benchmarks/multigpu/run_capacity.py::_allocator_environment
+  conditions: >-
+    Every dry run on CPU, where Device.memory_stats() is None: the readings
+    are replaced by numbers (a peak of 400 bytes per cell on the fullest
+    device, not device 0; bytes_in_use a quarter of it; a bytes_limit; 1000
+    bytes more in use per reading) for a rung, a ramp of 0.25 and 0.9 of a
+    card of 2**-11 GiB, and a soak of two blocks; and left alone for a ramp,
+    whose first fill is then not measured. No reading has been taken on an
+    accelerator: which counters it has, and whether the pool's limit is what
+    the script assumes, are for the first rung of the session to show.
+  oracle: >-
+    The arithmetic by hand: the peak over the card, the cells the a-priori
+    and the measured bytes per cell give, and the growth the stub was told
+    to show.
+  tests:
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_fill_is_the_largest_peak_over_the_card_not_the_bytes_in_use
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_ramp_sizes_each_rung_from_what_the_last_measured_and_stops_at_its_last_target
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_target_the_last_rung_already_reached_is_skipped_and_one_above_the_allocators_limit_is_named
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_ramp_whose_first_fill_is_not_measured_stops_and_says_to_give_sizes
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_dry_run_ramp_over_three_sizes_passes_and_writes_what_the_summary_reads
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_soak_repeats_the_rung_at_a_share_of_the_ceiling_and_records_the_growth
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_allocator_environment_is_recorded_as_found_and_defaulted_only_where_unset
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_dry_run_ramp_over_three_sizes_passes_and_writes_what_the_summary_reads
+    relabelled_records: n/a
+    mixed_commits: n/a
+- id: RPD-045
+  area: run_capacity-scope
+  claim: >-
+    "It is not a gate: it has its own output directory, its own JSON files
+    and its own schema, run_pod.py --summarise reads none of them, and
+    nothing it writes changes the checklist's verdict. Like the runner it
+    never talks to a cloud provider; the only processes it starts are itself
+    (one per rung) and git rev-parse HEAD." An --out that holds goal files,
+    or an earlier run's records, is refused; --summarise needs no JAX.
+  sources:
+    - benchmarks/multigpu/run_capacity.py::check_option_values
+    - benchmarks/multigpu/run_capacity.py::launch_child
+    - benchmarks/multigpu/run_capacity.py::rung_file
+    - benchmarks/multigpu/README.md (the stress tail)
+  conditions: >-
+    A dry run's whole directory (two rungs, a soak, the summary, the stderr
+    logs) given to run_pod.py --summarise alone and beside the eight
+    recorded goal files of tests/cloud/multigpu/run_pod_record; the script's
+    source read as a syntax tree.
+  oracle: >-
+    run_pod.py --summarise itself: "no goal JSON" and exit 1 on the
+    directory alone, and the same output and status with and without the
+    capacity files beside goal files; one process start in the file, of
+    sys.executable on the file itself.
+  tests:
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_nothing_the_script_writes_is_taken_for_a_goal_file_by_the_runners_summary
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_an_out_directory_holding_goal_files_or_an_earlier_run_is_refused
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_script_starts_only_itself_and_reaches_nothing
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_summarise_does_not_import_jax
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_one_rung_runs_in_a_process_of_its_own_as_the_session_starts_it
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_harness_refuses_to_run_a_rung_that_is_not_a_dry_run
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_nothing_the_script_writes_is_taken_for_a_goal_file_by_the_runners_summary
     relabelled_records: n/a
     mixed_commits: n/a

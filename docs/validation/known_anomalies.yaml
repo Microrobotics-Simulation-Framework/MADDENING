@@ -18092,3 +18092,79 @@ anomalies:
       - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_compile_says_what_the_report_will_say_far_into_a_grid_and_nothing_near_it"
       - "tests/core/test_the_float_floor_counts_a_geometry_kernels_rounding.py::test_on_the_audits_cells_no_flag_stands_beside_a_bound_under_the_distance"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-262"
+    title: "ShardedStencilNode builds the wrapped node's whole initial state on the default device, at construction and in initial_state(): a grid that fits the mesh but not one device cannot be wrapped or started"
+    description: >
+      A sharded stencil node exists to hold a grid that one device cannot,
+      but three of its own steps build that grid whole on the default
+      device first.  (1) `ShardedStencilNode.__init__` calls the wrapped
+      node's `initial_state()` to read the field shapes for its
+      divisibility check (`_check_divisible_extents`; an exception there is
+      swallowed and the check skipped).  (2) The constructor then builds the
+      local update, which calls the node's `state_fields()`; the default
+      `SimulationNode.state_fields()` is `list(self.initial_state().keys())`,
+      so a node that does not override it (`LBMNode` does not) builds its
+      whole initial state a second time, and an exception there is not
+      swallowed.  (3) `ShardedStencilNode.initial_state()` builds it again
+      and only then places it on the mesh with `device_put`.  `LBMNode`'s own
+      constructor also keeps a bool per cell (`jnp.zeros(grid_shape)`, its
+      wall mask) on the default device.
+      Measured at 0.4.0.dev0 on four CPU virtual devices (jaxlib 0.11.0), a
+      D3Q19 `LBMNode` of 144 x 120 x 140 = 2,419,200 cells (97 bytes of state
+      per cell) wrapped on a 2 x 2 mesh: `LBMNode.initial_state()` ran twice
+      during the wrapper's construction, each time returning every field on
+      one device (`cpu:0`), and the process's peak resident memory rose by
+      436 bytes per cell, 4.5 times the state's bytes, before anything was
+      placed on the mesh; the wrapper's `initial_state()` was the third
+      call.  The same state built one device's block at a time (below)
+      peaked at 164 bytes per cell over all four devices together.  On an
+      accelerator the arrays of (1) to (3) are on device 0; that was not
+      measured (no accelerator run), and follows from where an uncommitted
+      `jnp` array is created.  So on four 24 GB cards the largest D3Q19 grid
+      the wrapper can be constructed around is set by one card at about 436
+      bytes per cell, where the sharded step itself peaks at about 520 bytes
+      per cell spread over all four (CPU measurement, 4,838,400 cells): the
+      construction, not the run, is the limit, by a factor of about three.
+      Loud: the allocation fails with the runtime's out-of-memory error at
+      construction or at `initial_state()`; no wrong number is produced.  A
+      `GraphManager` holding the wrapper reaches (3) through its own
+      `initial_state()` call.  Read at the tags, not run there: the wrapper's
+      `initial_state()` has built the wrapped node's state whole since 0.2.0,
+      and its constructor has called `state_fields()` since 0.2.1; the
+      construction-time divisibility check is new in 0.4.0.  Found by the
+      multi-GPU capacity test (`benchmarks/multigpu/run_capacity.py`), whose
+      lattice works around it.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An out-of-memory error before the first step: nothing is computed, so
+      nothing is computed wrongly.  The cost is a grid size the mesh could
+      step but the wrapper cannot be built around.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.core.node.SimulationNode.state_fields"
+    affected_versions: ">=0.2.0"
+    workaround: >
+      Give the wrapped node a `state_fields()` that returns the names
+      outright and an `initial_state()` that raises (the wrapper documents
+      that a node which cannot build its state at construction is not
+      checked there; check the divisibility of the grid yourself), and do
+      not call the wrapper's `initial_state()`: build the state one device's
+      block at a time, each block created on its own device, and assemble
+      it with `jax.make_array_from_single_device_arrays` under the sharding
+      the wrapper steps (a state field is split along the spatial axes of
+      `axis_map` and whole along the others).  Step it with the wrapper's
+      `update()`.  `benchmarks/multigpu/run_capacity.py` does exactly this
+      (`_make_lattice_class`, `build_state`).  The bool per cell `LBMNode`
+      keeps on the default device remains.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  Until the wrapper reads the shapes without building
+      the arrays and builds each block on its own device, the largest grid
+      a sharded stencil node can be constructed around, or started from its
+      own `initial_state()`, is bounded by one device's memory.
+    verification:
+      - "tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_never_has_the_lattice_build_its_whole_state_on_one_device"
+      - "tests/cloud/multigpu/test_run_capacity_tiling_and_build.py::test_the_builder_is_never_asked_for_more_than_one_shards_block"
+    github_issue: null

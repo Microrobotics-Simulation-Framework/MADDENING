@@ -179,8 +179,9 @@ the existing launcher, once the dry run above is clean.  Two equivalent
 manual routes:
 
 * **`maddening.cloud.launcher.CloudLauncher` + `JobConfig`** from a
-  Python REPL: `provider="runpod"`, `gpu_type` an A100 name from
-  `sky show-gpus --cloud runpod` (`A100-80GB-SXM` or `A100-80GB`),
+  Python REPL: `provider="runpod"`, `gpu_type="RTX4090"` (the name the
+  launcher's catalogue lists for RunPod, `src/maddening/cloud/providers.py`;
+  confirm it with `sky show-gpus --cloud runpod`),
   `gpu_count=4`, `use_spot=False` (a preempted benchmark is a wasted
   hour), `workdir=<MADDENING checkout>` so the tree is synced, and a
   `CostPolicy(max_cost_per_hour=12.0, max_total_budget=40.0,
@@ -191,8 +192,21 @@ manual routes:
   `~/.maddening/cloud_credentials.yaml` (`CloudLauncher._load_credentials`),
   the RunPod key lands in `~/.runpod/config.toml` only for the duration
   of the launch (`_credential_context`).
-* **SkyPilot's CLI** (`sky launch` with `--gpus A100-80GB:4
+* **SkyPilot's CLI** (`sky launch` with `--gpus RTX4090:4
   --cloud runpod --no-use-spot --workdir .`), typed by the maintainer.
+
+**The session is on 4 × RTX 4090, 24 GB each.**  What that changes:
+
+* The cards talk over PCIe; an RTX 4090 has no NVLink.  Every transport
+  timing of the session (`exchange`, and the exchange inside `forward`
+  and `gradient`) is a PCIe timing, and the ranking `exchange` decides is
+  a ranking on that interconnect.
+* The duration estimates of section 2 were made for A100s and have not
+  been made again; the time boxes are unchanged.
+* No goal needs more than one card: each compares a sharded run with the
+  unsharded node on one device of the same pod, at 1e5 to 1e6 cells.
+  Whether a run *larger* than one card works is not a checklist question;
+  the stress tail after section 4 asks it, and gates nothing.
 
 `src/maddening/examples/cloud/multigpu/09_real_gpu_benchmark.py` shows
 the launch → `ssh_run` → copy-back → `teardown` shape end to end (it is
@@ -323,7 +337,7 @@ the tests that need 8/16 devices.  It is not part of the session.
   region, the price per hour, the launch and teardown times, and the final
   cost (`job.cost_so_far()` or the provider console).
 
-### Expected durations on 4×A100 (estimates, not measurements)
+### Expected durations (estimated for 4×A100, not measurements; the session is on 4×RTX 4090)
 
 Estimated from the sizes and from the CPU dry run, where compile time
 dominates; a GPU compile of the coupled group's adjoint is assumed to take
@@ -386,6 +400,183 @@ the pod is gone.  Cost check: `job.cost_so_far()`.
 
 Store the JSON under `benchmarks/results/multigpu/` (tracked, small)
 and commit it with the summary output pasted into the commit body.
+
+## After the checklist: the stress tail (not a gate)
+
+Run only when the summary of section 2b has exited 0, the checklist's
+results are copied back (section 4, the copy without the teardown), and
+the 2-hour cap leaves 30 minutes.  **Nothing here changes the checklist's
+verdict**: every command below writes to a directory of its own,
+`run_pod.py --summarise results/multigpu` reads none of them, and a
+failure here is a finding to reproduce off the pod, not a reason to
+reopen an item.  The tail has **30 minutes** from its first command;
+when they are up, stop, whatever is left.
+
+| step | expected | time box |
+|---|---|---|
+| (a) `forward`, `exchange` at 1e7 cells | 1 min each | 2 min each |
+| (a) `forward`, `exchange` at 3e7 cells | 2–3 min each | 4 min each |
+| (b) the pencil's ramp, five rungs | about 1 min a rung | 120 s a rung |
+| (b) the soak | 3 min, and its last block | 7 min |
+| (b) the 1-D mesh, two rungs | about 1 min a rung | 120 s a rung |
+| (a) `forward` at 1e8 cells, last and only if time is left | 7–9 min | 9 min |
+
+The expected times are estimates: (a) from the CPU dry run below, (b)
+from nothing but the sizes (no accelerator has run it).  The time boxes
+add up to more than 30 minutes; the 30-minute rule is what holds.
+
+Before the session, on the laptop (about 15 s on four cores):
+
+```sh
+JAX_PLATFORMS=cpu python benchmarks/multigpu/run_capacity.py --dry-run \
+    --cells 8000 30000 100000 --soak-minutes 0.02 --out /tmp/capacity-dry
+python benchmarks/multigpu/run_capacity.py --summarise /tmp/capacity-dry    # needs no JAX
+```
+
+It must print three `passed` rungs with the fill as `n/m` (CPU keeps no
+device memory statistics: the fill is *not measured* there, a check not
+run, never a pass), `SOAK: ... passed`, and exit 0 both times.
+
+### (a) The runner at larger sizes
+
+The unstructured goals at ten, thirty and a hundred times the gate's
+largest size, with the runner's existing options only.  One size and one
+goal per command, each size in a directory of its own (a goal's file is
+written when the goal ends: a run killed at 1e8 must not take the 3e7
+result with it); stop at the first non-zero exit.
+
+```sh
+T=results/stress; mkdir -p $T
+big() { timeout "$1" python benchmarks/multigpu/run_pod.py --goal "$2" --cells "$3" \
+            --partition contiguous --warmup 1 --repeats 3 \
+            --out $T/cells-$3 2>&1 | tee $T/$2-$3.log; }
+big 2m forward  10000000;  echo $?
+big 2m exchange 10000000;  echo $?
+big 4m forward  30000000;  echo $?
+big 4m exchange 30000000;  echo $?
+# then section (b); and only if the 30 minutes are not up after it:
+big 9m forward  100000000; echo $?
+```
+
+**What bounds it is the host's RAM, not the cards.**  The unstructured
+path builds its mesh, its partition and its layout on the host and
+indexes with int32.  Measured in the CPU dry run (four cores, jaxlib
+0.11.0, the dry run's three steps), `--goal forward --dry-run --cells
+10000000` -- 10,004,569 cells, the smallest square that holds them --
+peaked at 3.41 GiB of host memory (3,577,584 kB) in 43 s with the default
+partitioner (reverse Cuthill-McKee there: PyMetis was not installed) and
+at 3.35 GiB (3,511,632 kB) in 41 s with `--partition contiguous`: about
+**360 bytes of host memory per cell** all told, either way, and about 4 s
+per million cells.  At that rate 3e7 cells need about 10 GiB and 2
+minutes and 1e8 about 34 GiB and 7 minutes, before the timed steps; and a
+pod should not be asked for more cells than half its RAM holds: 90
+million on 64 GiB, 180 million on 128 GiB.  Check `free -g` first, and
+leave the 1e8 run out on a pod with less than 70 GiB.  The commands pass
+`--partition contiguous` because PyMetis at these sizes was not measured,
+and `--warmup 1 --repeats 3` because twenty timed repeats of twenty steps
+are for the ranking at the gate's sizes, not for this.
+
+**`gradient` is not in the tail.**  At 10,004,569 cells in the CPU dry
+run (its `sharded_cg` capped at 300 iterations) seven of its eight checks
+pass and `sharded_cg grad vs unsharded max_rel` reads 1.52e-3 against its
+limit of 1e-3 (3.0e-4 at 1e6), after 21 minutes.  The limit was set for
+the gate's sizes: a float32 conjugate-gradient solve that has not
+converged amplifies the different order in which the sharded and the
+unsharded side sum.  No `--cg-max-iters` was shown to hold it at 3e6 and
+1e7, so a `gradient` run there would exit 1 for a reason that is not a
+defect of the sharding.  It stays at the gate's sizes (section 2b).
+
+### (b) The capacity ramp: a sharded run larger than one card
+
+`run_capacity.py` asks what no goal can: every goal compares with the
+unsharded node on one device, so none can be larger than one card.  It
+steps a periodic D3Q19 lattice (`LBMNode` in `ShardedStencilNode`) that
+is the same small tile repeated, and compares it with the tile's own
+unsharded run, tiled: by translation symmetry the two are equal at every
+step, and nothing unsharded is ever needed at full size.  The field is
+built and compared one device's block at a time, on the devices; the
+whole of it never exists on one card or on the host.  Its header gives
+the tiling rules that make a wrong halo show (an odd number of tiles
+along every split axis, sharing no factor with the devices there).
+
+```sh
+C="python benchmarks/multigpu/run_capacity.py --device-memory-gb 24 --rung-timeout-s 120"
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95       # with PREALLOCATE=false of section 2a
+timeout 18m $C --mesh 2x2 --ramp 0.25 0.5 0.75 0.85 0.9 --soak-minutes 3 \
+    --out results/capacity-2x2 2>&1 | tee results/capacity-2x2.log;  echo $?
+timeout 5m  $C --mesh 4x1 --ramp 0.25 0.85 \
+    --out results/capacity-4x1 2>&1 | tee results/capacity-4x1.log;  echo $?
+python benchmarks/multigpu/run_capacity.py --summarise results/capacity-2x2 | tee results/capacity-2x2.txt
+python benchmarks/multigpu/run_capacity.py --summarise results/capacity-4x1 | tee results/capacity-4x1.txt
+```
+
+Each rung is a process of its own under `--rung-timeout-s`, so an
+out-of-memory loses nothing and leaves no allocator state behind (and a
+ramp that `timeout` ends takes its rung with it).  The
+first rung's size is a guess (97 bytes of state per cell times 6: about
+44 million cells at 0.25 of four 24 GiB cards); every later rung is
+sized from the peak bytes per cell the rung before it measured.  The
+fill is the largest `peak_bytes_in_use` of `jax.devices()[i].memory_stats()`
+over the 24 GiB given, over the four cards.  The soak then repeats
+build, ten steps and comparison at 0.75 of the ceiling's cells for three
+minutes and reports how the memory moved from block to block.
+
+A rung ends as exactly one of:
+
+| outcome | meaning | the ramp |
+|---|---|---|
+| `passed` | every field within 1e-5 of the tiled reference (the runner's forward limit), the mass that of the tile times the number of tiles, every value finite | goes on |
+| `check failed` | a number is wrong: the one outcome that is a defect | stops, exit **1** |
+| `out of memory` | the allocator refused (the record keeps its message), or the process was killed (137) | stops: this is the ceiling's reason |
+| `timed out` | the rung's time box ran out | stops |
+| `crashed` | anything else; the record keeps the end of its stderr | stops |
+| `refused by the host guard` | the rung never started: the host would have had to hold more than half its available memory | stops |
+
+and the script exits **0** when every rung that reached its checks
+passed them (an out-of-memory or a time-out above a passing rung is the
+result), **1** when a check failed, **2** when it refused its options,
+**6** when the first rung did not pass (no ceiling), **5** if it raised
+itself; `--summarise` re-derives every verdict from the recorded values
+and exits **3** for a record that disagrees with itself.  The last lines
+name the ceiling: the largest size that passed, its fill, and what
+stopped the next rung.
+
+**The allocator, and what it does to the ceiling.**  With
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` (section 2a; the script sets it
+where it is unset) the pool takes memory from the card as the run asks
+for it and never gives it back or joins two pieces of it, so a block can
+be refused while the sum of what is free would hold it: the ceiling the
+ramp finds is the ceiling of a growing pool, which is what a run has by
+default here, and may be below what one preallocated pool would take.
+The pool is also understood to have an upper limit of its own,
+`XLA_PYTHON_CLIENT_MEM_FRACTION` of the card's free memory, 0.75 where
+unset -- below the ramp's last two targets -- which is why the commands
+export 0.95 (the script sets that too where it is unset).  JAX documents
+the fraction for a preallocated pool; that it also bounds a growing one
+is read from the allocator, and neither effect was measured before the
+session.  Each rung records the three variables as
+found and as used and every card's `bytes_limit`, and the summary prints
+the allocator's own limit beside the ceiling: **an out-of-memory at a
+fill just under `bytes_limit` over 24 GiB is the allocator's limit, not
+the card's.**
+
+Read in the first rung's record before trusting the rest (nothing below
+has run on an accelerator before): `environment.platform` is `gpu` and
+`device_kinds` names the card; `memory.readings` hold numbers on all four
+devices; `memory.bytes_limit` is about 0.95 of what the card had free;
+`memory.fill` against the 0.25 asked for says how good the factor 6 was; and
+`results.fields` gives each field's `max_rel` and whether it was exactly
+0 (in the CPU dry run it is, at the default tile).  Device 0 also holds
+a bool per cell that `LBMNode`'s constructor builds there, so it is the
+fullest by about a byte per cell.  The lattice is `LBMNode` with two methods the wrapper calls
+at construction answered by the script, because `ShardedStencilNode`
+otherwise builds the whole grid on the default device before placing a
+block (MADD-ANO-262).
+
+**Copy back** `results/stress/`, `results/capacity-2x2/`,
+`results/capacity-4x1/` and the `*.log` and `*.txt` beside them, with
+the rest (section 4), and store them under
+`benchmarks/results/multigpu-stress/`, apart from the checklist's files.
 
 ## 5. Read the result
 

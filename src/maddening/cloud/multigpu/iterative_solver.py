@@ -164,18 +164,30 @@ def _validate_solver_inputs(
     mesh: Optional[Mesh],
     in_specs: Optional[PartitionSpec],
     name: str,
+    rtol: Any,
     atol: Any = None,
 ) -> None:
     # ``atol`` is an absolute floor in ``b``'s units.  A negative one was
     # taken as it came: the loop backends' ``max(atol, rtol * ||b||)`` hid
     # it, and lineax's entrywise ``|r_i| <= atol + rtol * |b_i|`` did not
     # (its verdict then read True at 2e5 times the tolerance asked for).
-    # A traced value cannot be read here and is passed on.
+    # A traced value cannot be read here: ``_tolerances_are_numbers``
+    # tests it in the program, and ``_framed`` answers it.
     if (atol is not None and not isinstance(atol, jax.core.Tracer)
             and not bool(np.all(np.asarray(atol) >= 0))):
         raise ValueError(
             f"{name}: atol must be None (a purely relative test) or a number "
             f">= 0 (an absolute floor in b's units), got {atol!r}."
+        )
+    # ``rtol`` was not read at all until 0.4.0: a NaN stopped lineax on its
+    # zero start with a verdict of success (zeros, ``converged=True``), and
+    # a negative one was refused by lineax on its own routes only.  ``not
+    # (rtol >= 0)`` is True for a NaN.
+    if (not isinstance(rtol, jax.core.Tracer)
+            and not bool(np.all(np.asarray(rtol) >= 0))):
+        raise ValueError(
+            f"{name}: rtol must be a number >= 0 (a fraction of ||b||), "
+            f"got {rtol!r}."
         )
     if not callable(matvec):
         raise TypeError(f"{name}: matvec must be callable, got {type(matvec)!r}")
@@ -216,6 +228,28 @@ def _validate_solver_inputs(
                         )
 
 
+def _tolerances_are_numbers(rtol: Any, atol: Any) -> Any:
+    """Whether ``rtol`` and ``atol`` are numbers >= 0, for the tolerances
+    :func:`_validate_solver_inputs` could not read: ``True`` (the Python
+    value) where both came as concrete values, which were refused or are
+    valid, and otherwise a traced boolean, False for a traced tolerance
+    that is negative or NaN (``not (t >= 0)``).
+
+    A traced tolerance is one that is an argument of a jitted or vmapped
+    function.  It cannot raise, so :func:`_framed` answers it as it
+    answers a right-hand side that is not finite: NaN in every entry,
+    a NaN ``residual_norm``, ``converged=False``.  Until 0.4.0's fix it was
+    passed on, and the lineax routes read ``converged=True`` on a value
+    72 % off (a traced ``atol=-1``) or on zeros (a traced NaN)
+    (MADD-ANO-271).  Infinity is a number >= 0 and passes.
+    """
+    valid: Any = True
+    for tolerance in (rtol, atol):
+        if isinstance(tolerance, jax.core.Tracer):
+            valid = jnp.logical_and(valid, jnp.all(tolerance >= 0))
+    return valid
+
+
 def _materialise_b(
     b: jax.Array,
     *,
@@ -234,7 +268,7 @@ def _materialise_b(
 
 
 
-def _framed(solve, b, x0, atol):
+def _framed(solve, b, x0, atol, tolerances_are_numbers: Any = True):
     """Run ``solve(b_hat, x0_hat, atol_hat)`` on ``b`` rescaled by an exact
     power of two and scale its result back.
 
@@ -280,17 +314,44 @@ def _framed(solve, b, x0, atol):
     reports success at once), on ``backend="lineax"`` and on the default
     call; the CG loop returned zeros with ``converged=False``
     (MADD-ANO-269).
+
+    **The answer is tested after it is scaled back.**  The two fields are
+    tested as they are returned, ``value / p`` and ``residual_norm / p``,
+    not as the backend left them in the frame: a solution too large for
+    the dtype is finite in the frame and overflows on being scaled back,
+    and until 0.4.0's fix the result then held infinities beside a finite
+    ``residual_norm`` and the frame's ``converged`` (MADD-ANO-272).  The
+    same for a norm that is finite in the frame and overflows on being
+    scaled back (a ``b`` whose own norm overflows, left unsolved): it was
+    returned as ``inf``, beside ``converged=True`` where the tolerance was
+    infinite too.  So a result is one of two things on every route: every
+    entry of ``value`` finite beside a finite ``residual_norm``, or NaN in
+    both with ``converged=False``.
+
+    **A traced tolerance that is not a number >= 0** gets that second
+    answer too: ``tolerances_are_numbers`` is the verdict of
+    :func:`_tolerances_are_numbers` on the ``rtol`` and ``atol`` of the
+    CALL (not of this solve: the tangent and cotangent solves of
+    ``differentiable=True`` are purely relative, and are refused with the
+    call they belong to).  ``True``, the Python value, where both were
+    concrete: nothing is added to the program then.
     """
     p = jax.lax.stop_gradient(pow2_frame(b))
     finite = jnp.all(jnp.isfinite(b))
     res = solve(jnp.where(finite, b * p, jnp.zeros_like(b)),
                 jnp.where(finite, x0 * p, jnp.zeros_like(x0)),
                 None if atol is None else atol * p)
-    answered = jnp.logical_and(finite, jnp.isfinite(res.residual_norm))
+    value = res.value / p
+    residual_norm = res.residual_norm / p
+    answered = jnp.logical_and(
+        finite,
+        jnp.logical_and(jnp.all(jnp.isfinite(value)), jnp.isfinite(residual_norm)))
+    if tolerances_are_numbers is not True:
+        answered = jnp.logical_and(answered, tolerances_are_numbers)
     return SharedSolveResult(
-        value=jnp.where(answered, res.value / p, jnp.full_like(b, jnp.nan)),
+        value=jnp.where(answered, value, jnp.full_like(b, jnp.nan)),
         converged=jnp.logical_and(res.converged, answered), iters=res.iters,
-        residual_norm=jnp.where(answered, res.residual_norm / p, jnp.nan),
+        residual_norm=jnp.where(answered, residual_norm, jnp.nan),
     )
 
 
@@ -582,9 +643,39 @@ def _lineax_solve(
     has an "unavailable" outcome; the import stays lazy purely to keep
     equinox + jaxtyping off ``import maddening``'s critical path.
     Errors propagate — the caller sees the real failure.
+
+    **Where lineax's verdict is not used.**  lineax tests the quotients
+    ``|r_i| / (floor + rtol |b_i|)`` and ``|dx_i| / (floor + rtol |x_i|)``
+    against one, entry by entry, and takes their maximum.  With a floor of
+    zero the quotient is ``0 / 0 = NaN`` at every entry where the residual
+    and the right-hand side (or the update and the iterate) are both
+    exactly zero; the maximum is then NaN, ``NaN > 1`` is False, and lineax
+    stops and reports success, whatever the other entries hold.  Two calls
+    get there: ``rtol=0`` (the floor of a call without ``atol`` is
+    ``rtol * max|b|``), measured as ``converged=True`` at a residual of
+    5e-8 to 5e-5 of ``||b||`` on GMRES and of 0.4 on CG for a ``b`` that is
+    one unit vector; and an explicit ``atol=0.0`` beside any ``rtol``, for
+    a ``b`` with entries that are exactly zero (a local source behind a
+    stencil: every entry the Krylov space has not reached yet), measured
+    as ``converged=True`` after ONE step at a residual of 0.4 ``||b||``.
+    A floor that underflows does the same (XLA's CPU backend flushes a
+    subnormal to zero): ``rtol=1e-44`` in float32.
+
+    So lineax's verdict is ``converged`` only where the floor it was
+    handed is at least the smallest normal number of the dtype: every
+    quotient then has a positive denominator.  Under that, ``converged``
+    is the statement of the loop backends on the value lineax returned,
+    ``residual_norm <= max(atol, rtol * ||b||)``
+    (:func:`_residual_of_the_system`, from the product the report takes
+    anyway), which for a tolerance of exactly zero is
+    ``residual_norm == 0``.  ``value`` and ``iters`` are lineax's on
+    both sides: when it stops is not changed.  (An ``rtol`` of infinity
+    on a zero ``b`` makes the floor NaN, which is not "under": lineax's
+    verdict, as before.)
     """
     import lineax as lx  # noqa: PLC0415  (lazy: import-time cost only)
 
+    atol_given = atol
     if atol is None:
         # Relative to the largest entry of ``b``: lineax's test is entrywise
         # (``|r_i| <= atol + rtol |b_i|``), so an entry of ``b`` at zero needs
@@ -620,14 +711,17 @@ def _lineax_solve(
     # ``SharedSolveResult.converged`` to decide what to do — the same
     # contract the loop fallback follows.
     result = lx.linear_solve(op, b, solver=solver, throw=False)
-    res_norm = jnp.linalg.norm(b - matvec(result.value))
+    res_norm, within_the_norm = _residual_of_the_system(
+        matvec, b, result.value, rtol=rtol, atol=atol_given,
+    )
     # lineax's RESULTS object doesn't always populate iters; treat as -1.
     stats = result.stats or {}
     n_iters = jnp.int32(stats.get("num_steps", -1))
-    converged = result.result == lx.RESULTS.successful
+    verdict = jnp.asarray(result.result == lx.RESULTS.successful)
+    the_floor_is_zero = atol < jnp.finfo(b.dtype).tiny
     return SharedSolveResult(
         value=result.value,
-        converged=jnp.asarray(converged),
+        converged=jnp.where(the_floor_is_zero, within_the_norm, verdict),
         iters=n_iters,
         residual_norm=res_norm,
     )
@@ -778,24 +872,52 @@ def _differentiable_solve(
     """
     kw: dict[str, Any] = ({"symmetric": True} if symmetric
                           else {"transpose_solve": transpose_solve_value})
+    # Every product taken here is taken on the vector rescaled by the power
+    # of two that frames ``b`` (see ``_framed``) and scaled back: exact, and
+    # the same bits wherever the bare product stayed in the normal range.
+    # The bare product did not always: of a solution within a factor of the
+    # operator's diagonal of the dtype's largest number it overflowed in an
+    # intermediate, though the solution and ``A x`` are both representable
+    # (measured in float32 at a solution of 0.5 and 0.7 of the largest
+    # number behind a diagonal of 2.05: ``converged=False`` and an infinite
+    # ``residual_norm`` beside the right value, and NaN in every entry with
+    # an ``x0`` or an ``atol``, where the ordinary call answers).
+    p = jax.lax.stop_gradient(pow2_frame(b))
     if primal_value is None:
         x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
     else:
         x_primal = primal_value()
-        r = b - matvec(x_primal)
+        r = b - matvec(x_primal * p) / p
         x = x_primal + lax.custom_linear_solve(
             matvec, r - lax.stop_gradient(r), solve_value, **kw)
-    res = b - matvec(x)
-    # The test is taken on ``b`` and the residual rescaled by one power of
-    # two (see ``_framed``), so their norms do not flush at small units.
-    p = jax.lax.stop_gradient(pow2_frame(b))
-    res_norm_hat = jnp.linalg.norm(res * p)
+    # The test is taken in that frame, so the norms do not flush at small
+    # units either.
+    res_norm_hat = jnp.linalg.norm(b * p - matvec(x * p))
     tol_hat = rtol * jnp.linalg.norm(b * p)
     if atol is not None:
         tol_hat = jnp.maximum(atol * p, tol_hat)
+    # As at the exit of the ordinary routes (``_framed``): the two fields
+    # are tested as they are returned.  ``x`` is already NaN where a solve
+    # inside had no answer; a norm that overflows on being scaled back is
+    # the other case.
+    residual_norm = res_norm_hat / p
+    answered = jnp.logical_and(
+        jnp.all(jnp.isfinite(x)), jnp.isfinite(residual_norm))
+    # Where there is no answer there is no derivative either.  The tangent
+    # and cotangent solves have right-hand sides of their own, which can be
+    # solved where the primal overflowed (or was refused its tolerance):
+    # left alone they returned a finite derivative beside a NaN value.  A
+    # FACTOR of NaN carries to both modes (a ``jnp.where`` on the value
+    # would give a derivative of zero); the factor is exactly one where
+    # there is an answer, so the value and its derivatives keep their bits.
+    real = jnp.finfo(x.dtype).dtype
+    no_answer_is_nan = jnp.where(
+        answered, jnp.ones((), real), jnp.full((), jnp.nan, real))
     return SharedSolveResult(
-        value=x, converged=res_norm_hat <= tol_hat, iters=jnp.int32(-1),
-        residual_norm=res_norm_hat / p,
+        value=x * no_answer_is_nan,
+        converged=jnp.logical_and(res_norm_hat <= tol_hat, answered),
+        iters=jnp.int32(-1),
+        residual_norm=jnp.where(answered, residual_norm, jnp.nan),
     )
 
 
@@ -1269,8 +1391,10 @@ def sharded_cg(
     (sharded FVM in MIME) reads against this surface.
     """
     _validate_solver_inputs(
-        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_cg", atol=atol,
+        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_cg",
+        rtol=rtol, atol=atol,
     )
+    tolerances_are_numbers = _tolerances_are_numbers(rtol, atol)
     b = _materialise_b(b, mesh=mesh, in_specs=in_specs)
     x0_given = x0 is not None
     if x0 is None:
@@ -1315,7 +1439,7 @@ def sharded_cg(
         # One solve, in a power-of-two frame of its right-hand side (``_framed``).
         return _framed(
             lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat, M),
-            rhs, x_start, atol_given)
+            rhs, x_start, atol_given, tolerances_are_numbers)
 
     if not differentiable:
         return _refusing_a_derivative(
@@ -1458,8 +1582,10 @@ def sharded_gmres(
     FVM PISO pressure correction reads against this signature.
     """
     _validate_solver_inputs(
-        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_gmres", atol=atol,
+        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_gmres",
+        rtol=rtol, atol=atol,
     )
+    tolerances_are_numbers = _tolerances_are_numbers(rtol, atol)
     b = _materialise_b(b, mesh=mesh, in_specs=in_specs)
     x0_given = x0 is not None
     if x0 is None:
@@ -1499,7 +1625,7 @@ def sharded_gmres(
         return _framed(
             lambda b_hat, x_hat, atol_hat: _dispatch(
                 mv, b_hat, x_hat, atol_hat, M, of_a_derivative),
-            rhs, x_start, atol_given)
+            rhs, x_start, atol_given, tolerances_are_numbers)
 
     if not differentiable:
         return _refusing_a_derivative(

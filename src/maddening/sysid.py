@@ -4706,12 +4706,27 @@ def _relative_scale(theta0, selected, transformed, columns=None) -> np.ndarray:
 
 def _rotation_by_singular_values(M, k: int):
     """``(W, s)``: ``M``'s right singular vectors as a ``k x k`` rotation,
-    and its singular values padded with zeros to ``k`` -- an ``m x k``
-    ``M`` with ``m < k`` maps the missing directions to nothing."""
-    _, s, wt = np.linalg.svd(M, full_matrices=True)
-    padded = np.zeros(k, dtype=np.float64)
-    padded[:s.size] = s
-    return wt.T, padded
+    and its ``k`` singular values -- an ``m x k`` ``M`` with ``m < k`` maps
+    the missing directions to nothing, and is given the ``k - m`` zero rows
+    that say so (they change neither ``MᵀM`` nor a singular value).
+
+    The reduced decomposition: only the right singular vectors and the
+    values are read, and the left factor it forms is ``m x k``.  The full
+    one (``full_matrices=True``, which this asked for to get a square
+    ``W`` when ``m < k``) forms an ``m x m`` left factor as well, and
+    ``M`` is :func:`fit_lm`'s Jacobian over all ``m`` residual rows: 6.4 GB
+    at 20,000 rows, and at 100,000 a ``MemoryError`` raised after the fit
+    had converged.
+    """
+    M = np.asarray(M, dtype=np.float64)
+    m = M.shape[0]
+    if m < k:
+        M = np.concatenate([M, np.zeros((k - m, k))], axis=0)
+    _, s, wt = np.linalg.svd(M, full_matrices=False)
+    if m < k:
+        # Rank at most ``m``: the rest are the zeros the padding stands for.
+        s = np.concatenate([s[:m], np.zeros(k - m)])
+    return wt.T, s
 
 
 def _no_curvature(method: str, k: int, why: str) -> None:

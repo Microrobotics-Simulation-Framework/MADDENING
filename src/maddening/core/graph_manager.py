@@ -252,6 +252,10 @@ class GraphManager:
         # boundary input supplied, keyed by compile generation and by the
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
+        # True while compile() runs validate(): the groups' fluxes have
+        # just been asked (``_refuse_unsolved_group_fluxes``), and the
+        # hooks that needed tracing are not traced a second time.
+        self._group_fluxes_asked: bool = False
         # The underflow-range check (``_warn_underflow_range``): pending
         # until the first untraced step after each compile and after each
         # write of node states that is not a step's (``set_node_state``,
@@ -1965,8 +1969,11 @@ class GraphManager:
         delivers to a flux producer; a member's
         ``compute_boundary_fluxes`` is traced (never run) only for a
         group its edges alone would refuse.  Reads the graph and writes
-        nothing.
+        nothing.  ``compile()`` asks once and has ``validate()`` skip
+        the question it has just answered.
         """
+        if self._group_fluxes_asked:
+            return
         groups = self._coupling_groups if group is None else [group]
         for g in groups:
             g_plan = plan if (plan is not None and group is not None) else (
@@ -2792,7 +2799,11 @@ class GraphManager:
         # loop, or along a chain the pass's seed does not reach: one
         # ValueError for the first such group (validate() lists each).
         self._refuse_unsolved_group_fluxes()
-        issues = self.validate()
+        self._group_fluxes_asked = True
+        try:
+            issues = self.validate()
+        finally:
+            self._group_fluxes_asked = False
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:
             raise RuntimeError(

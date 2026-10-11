@@ -227,18 +227,19 @@ def _flux_reads(spec, state, node_params, handed, absent=()) -> Optional[dict]:
       value, without those alone.  A flux whose program
       (:func:`_programs`) is the same in those two traces does in sweep 1
       what it would do with only the inputs it reads by value left out:
-      it reads no other.  One whose program differs is reported to read
-      every absent input.
+      it reads no other.  One whose program differs, or whose hook
+      cannot be traced without them (it indexes one), is reported to
+      read every absent input.
 
     Only ``make_jaxpr`` and the equations' ``primitive`` / ``invars`` /
     ``outvars`` / ``params`` are read, which are the same on the jax
     versions the project supports.
 
     ``None`` when dependence cannot be established this way: the hook
-    raises under a trace, an input in *handed* is not declared (there is
-    no value to trace it with), the hook does not return a dict, or it
-    returns other fluxes without the absent inputs.  The caller then
-    takes every flux to read every input.
+    raises under the trace on every input it is handed, an input in
+    *handed* is not declared (there is no value to trace it with), or
+    the hook does not return a dict.  The caller then takes every flux
+    to read every input.
     """
     from maddening.core._graph_specs import _node_fluxes  # noqa: PLC0415
     from maddening.core._param_probes import (  # noqa: PLC0415
@@ -287,10 +288,14 @@ def _flux_reads(spec, state, node_params, handed, absent=()) -> Optional[dict]:
                     traces[key] = _programs(other[0], other[2], other[3], table)
                 return traces[key]
 
-            sweep_1 = programs_without(absent)
             for flux in reads:
                 by_value = reads[flux] & set(absent)
-                if programs_without(by_value).get(flux) != sweep_1.get(flux):
+                try:
+                    same = (programs_without(by_value).get(flux)
+                            == programs_without(absent).get(flux))
+                except Exception:  # noqa: BLE001 - a hook that indexes an absent input
+                    same = False
+                if not same:
                     reads[flux] |= set(absent)
         return reads
     except Exception:  # noqa: BLE001 - not traceable this way: the caller assumes dependence

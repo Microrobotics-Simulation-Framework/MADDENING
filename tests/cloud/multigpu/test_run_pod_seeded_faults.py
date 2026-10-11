@@ -1132,7 +1132,9 @@ def _paths_part(rp, cells: int) -> tuple[dict, dict, bool]:
     if len(jax.devices()) < _N_DEV:
         pytest.skip(f"needs >= {_N_DEV} devices")
     rp._load_backend()
-    args = SimpleNamespace(mesh=None, synthetic="grid", partition="auto", cells=[cells],
+    # reverse Cuthill-McKee by name: what "auto" picks without PyMetis, and
+    # the partition the two sizes are chosen for
+    args = SimpleNamespace(mesh=None, synthetic="grid", partition="rcm", cells=[cells],
                            n_devices=_N_DEV, steps=2, grad_steps=3, warmup=0, repeats=1)
     doc = rp.run_forward(args, {})
     (entry,) = doc["results"]

@@ -90,7 +90,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 9
+    assert doc["schema_version"] == 10
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -201,20 +201,24 @@ def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
     axis 1."""
     doc = _load(dry_run_dir, "stencil")
     cases = {(s["node"], s["mesh"], s["boundary"]): s for s in doc["results"]}
+    ends = ("periodic", "edge", "dirichlet")
     assert set(cases) == {(node, mesh, b) for mesh in _MESHES
-                          for node, b in (("field", "periodic"), ("field", "edge"),
-                                          ("field", "dirichlet"), ("lbm", "periodic"))}
-    assert len(doc["results"]) == 16
+                          for node, b in (*(("field", b) for b in ends), ("lbm", "periodic"),
+                                          # the field with a halo of two cells
+                                          *(("field-halo2", b) for b in ends))}
+    assert len(doc["results"]) == 28
     for (node, mesh, boundary), s in cases.items():
         assert tuple(s["shape"]) == _SHAPE and s["cells"] == 16 * 20
         assert s["mesh_shape"] == _MESHES[mesh]
         assert s["input_partitioned"] is True
-        fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"}}[node]
+        fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"},
+                  "field-halo2": {"f", "averages"}}[node]
         assert set(s["forward"]["parity"]) == fields
         assert all(p["max_rel"] < 1e-5 for p in s["forward"]["parity"].values())
         assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
         assert s["gradient"]["parity_grad_parameter"] < 1e-5
-        assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity"}[node]
+        assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity",
+                                  "field-halo2": "diffusivity"}[node]
         for side in ("sharded", "unsharded"):
             _check_timing(s["forward"][side]["rollout"])
             _check_timing(s["gradient"][side]["grad"])
@@ -261,6 +265,8 @@ def test_indivisible_json_records_the_refusals_and_the_uneven_unstructured_run(d
     un = r["unstructured"]
     assert un["cells"] % _N_DEV != 0 and len(set(un["cells_per_device"])) > 1
     assert un["parity_x"]["max_rel"] < 1e-5
+    # an uneven split has a pad row: its cells are never renumbered
+    assert un["renumbered"] is False
 
 
 def _check_timing(t: dict):
@@ -299,6 +305,10 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
     doc = _load(dry_run_dir, "forward")
     (r,) = doc["results"]
     assert r["cells"] == _CELLS and r["steps"] == doc["config"]["steps"]
+    # four equal shards: renumbered into partition order unless the
+    # partitioner left them in it (the per-cell source needs one or the other)
+    assert isinstance(r["renumbered"], bool)
+    assert r["n_local_max"] * _N_DEV != _CELLS or r["renumbered"] or r["partition"] != "rcm"
     for method in _METHODS:
         m = r["methods"][method]
         assert m["input_presharded"] is True
@@ -327,9 +337,13 @@ def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     assert r["grad_steps"] == doc["config"]["grad_steps"]
     _check_timing(r["rollout"]["unsharded"]["grad"])
     for method in _METHODS:
-        p = r["rollout"][method]["parity"]
         _check_timing(r["rollout"][method]["grad"])
-        assert p["finite"] and p["reference_scale"] > 0 and p["max_rel"] < 1e-5
+        # one reverse pass: with respect to the start, the per-cell source
+        # and the injected weight
+        for key in ("parity", "parity_source", "parity_weight"):
+            p = r["rollout"][method][key]
+            assert p["finite"] and p["reference_scale"] > 0 and p["max_rel"] < 1e-5, key
+    assert isinstance(r["renumbered"], bool)
     cg = r["sharded_cg"]
     assert cg["dof"] == (_CELLS // _N_DEV) * _N_DEV
     assert cg["input_presharded"] is True

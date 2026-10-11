@@ -736,12 +736,15 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         The ``"mappings"`` section of the graph's parameters: the weights
         the edges' mappings deliver with.
 
-    The edges are asked first, with every flux of a member taken to read
-    every input a flux edge delivers to it.  A group that passes that way
-    returns here, untraced.  Otherwise the members such edges deliver to
-    are traced (:func:`_flux_reads`) on the inputs the pass hands them
-    (:func:`_handed`), and the group is asked again with what their
-    fluxes read.
+    The edges are asked first (those whose value the pass hands on,
+    :func:`_handed_on`), with every flux of a member taken to read every
+    input a flux edge delivers to it.  A group that passes that way
+    returns here, untraced.  Otherwise the pass's sweeps are run on
+    shapes and dtypes until the fluxes settle (:func:`_abstract_fluxes`),
+    the members such edges deliver to are traced (:func:`_flux_reads`) on
+    the inputs the last sweep hands them and on those each seeding sweep
+    hands them (:func:`_handed`), and the group is asked again with what
+    their fluxes read.
     """
     names = sorted(group.nodes)
     if not all(n in nodes and n in state for n in names):

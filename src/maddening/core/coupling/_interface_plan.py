@@ -1250,6 +1250,17 @@ class InterfacePlan:
         return any(rec.source_kind == FLUX and rec.target[0] in self.flux_members
                    for rec in self._declared(INTERNAL, INBOUND))
 
+    def external_inputs(self, external_inputs) -> tuple:
+        """``(member, field)`` of each declared external input into a member.
+
+        Read by ``GraphManager._refuse_unsolved_group_fluxes`` for
+        ``_flux_loops._refuse_unsolved_fluxes``: the inputs a pass hands
+        a member's hooks beside what the edges deliver.  *external_inputs*
+        are the graph's ``ExternalInputSpec``, in the order declared.
+        """
+        return tuple((ei.target_node, ei.target_field) for ei in external_inputs
+                     if ei.target_node in self.members)
+
     # -- geometry -----------------------------------------------------------
 
     def geometry_edges(self) -> list:

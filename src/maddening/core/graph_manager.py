@@ -1944,14 +1944,13 @@ class GraphManager:
         The schedule :meth:`compile` builds, restricted to the group:
         the block order of the topological order of the nodes (within a
         loop, the order of the ``add_node`` calls).  Computed here from
-        the graph as it stands, so it can be asked before a compile; an
-        edge that names a node the graph does not hold is left out
-        (``validate()`` has its error, and nothing is compiled).
+        the graph as it stands, by ``compile()``'s own expression, so it
+        can be asked before a compile.  (An edge that names a node the
+        graph does not hold orders nothing here; ``validate()`` has its
+        error, and nothing is compiled.)
         """
-        edges = [e for e in self._edges
-                 if e.source_node in self._nodes and e.target_node in self._nodes]
         schedule = _group_layout._block_schedule(
-            topological_sort(list(self._nodes), edges), self._coupling_groups)
+            topological_sort(list(self._nodes), self._edges), self._coupling_groups)
         return [n for n in schedule if n in group.nodes]
 
     def _refuse_unsolved_group_fluxes(self, group=None, plan=None) -> None:
@@ -1991,7 +1990,7 @@ class GraphManager:
             _flux_loops._refuse_unsolved_fluxes(
                 g, g_plan, self._nodes, self._state, params_of,
                 lambda g=g: self._group_sweep_order(g),
-                [(ei.target_node, ei.target_field) for ei in self._external_inputs])
+                g_plan.external_inputs(self._external_inputs))
 
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*

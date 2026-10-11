@@ -2700,16 +2700,20 @@ claims:
     The group's non-floating fields are "the ones the pass computes at that
     state", on both solvers; and "every pass a solve measures starts from
     carried fields evaluated at its floating iterate" (the non-floating
-    fields a pass reads from the iterate: across an internal edge, or a flux
-    producer's own), on both solvers and both sweeps, so a residual of
-    exactly zero is reported only at a fixed point of the group's pass,
-    non-floating fields included, and the two solvers take the same passes.
-    A group whose carried fields feed one another in a closed loop is
-    refused at compile().
+    fields a pass reads from the iterate, as one abstract trace of the
+    group's Jacobi pass shows them), on both solvers and both sweeps, so a
+    residual of exactly zero is reported only at a fixed point of the group's
+    pass, non-floating fields included, and the two solvers take the same
+    passes.  A group in which that trace shows carried fields computed from
+    one another in a closed loop is refused at compile() and listed by
+    validate(); a step counter or a PRNG key a member advances from its
+    pre-step state is not carried, whatever edges and fluxes the member has,
+    and its group steps as it did.
   sources:
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
     - src/maddening/core/coupling/_carried_fields.py::carried_nonfloat_chain
-    - src/maddening/core/coupling/_carried_fields.py::_refuse_nonfloat_loops
+    - src/maddening/core/coupling/_carried_fields.py::traced_reads
+    - src/maddening/core/graph_manager.py::GraphManager._nonfloat_loop_refusals
     - docs/validation/known_anomalies.yaml (MADD-ANO-070, MADD-ANO-273)
   conditions: >-
     integer, boolean and key leaves; every acceleration; max_iterations >= 2
@@ -2718,9 +2722,12 @@ claims:
     fields move by no more than the tolerance over a pass started from the
     carried fields at the returned iterate: under Gauss-Seidel a carried
     field the sweep recomputes from floats it has already moved can come
-    back different (not under Jacobi).  A closed loop is decided from the
-    edges (a member is taken to use every field it reads), so it is also
-    refused where an update does not use what it reads.  Not claimed for
+    back different (not under Jacobi).  What a field is computed from is
+    read from the traced pass, which can overstate in one place: an
+    operation the walk does not look inside (a custom_jvp or custom_vjp
+    function, an unknown primitive) is taken to use all of its operands.
+    Where the pass cannot be traced on its own, dependence is assumed from
+    the edges and the refusal's message says so.  Not claimed for
     float64 (x64), mixed dtypes, 16-bit floats, predictors or warm starts,
     checkpoint restarts or sharded graphs.
   oracle: closed form (fixtures exact in binary floating point, one fixed point); fori against ift; the same passes on every route.
@@ -2731,7 +2738,12 @@ claims:
     - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_that_flips_on_every_pass_reaches_the_cap_unconverged
     - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_a_flux_is_computed_from_is_evaluated_at_the_iterate
     - tests/core/test_coupling_carried_nonfloat_fields.py::test_the_solvers_agree_under_every_acceleration
-    - tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_that_feed_one_another_in_a_loop_are_refused
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_computed_from_one_another_in_a_loop_are_refused
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_counter_and_a_key_beside_fluxes_both_ways_are_not_carried
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_counter_its_flux_reads_is_carried_and_evaluated_at_the_iterate
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_count_computed_from_a_flux_that_reads_it_is_a_loop_and_is_refused
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_flags_handed_both_ways_but_computed_from_floats_are_solved
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_where_the_pass_cannot_be_traced_the_refusal_says_the_loop_is_assumed
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_an_iterate_dependent_flag_is_the_one_the_returned_state_computes
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_flag_read_across_an_internal_edge_iterates_with_the_solve
     - tests/property/test_differential_coupling_solvers.py::test_a_flag_reading_a_coupled_input_agrees_between_the_solvers

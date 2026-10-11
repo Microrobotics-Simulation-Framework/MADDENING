@@ -6451,7 +6451,8 @@ anomalies:
       flag that a pass reads from the iterate at the iterate itself, by
       Jacobi evaluations of the members repeated to the length of the
       longest chain of such fields, so they take the same passes to the
-      same fixed point; a closed loop of such fields is refused at
+      same fixed point; such fields computed from one another in a
+      closed loop are refused at
       compile() (MADD-ANO-273, whose residual risk says what a non-zero
       tolerance leaves under Gauss-Seidel).  The IFT derivative treats a
       flag as locally constant (zero derivative), as the unrolled fori
@@ -19101,13 +19102,24 @@ anomalies:
       of solver and sweep has the pass's own fixed points; and the two
       solvers take the same passes (21 on every route above).  The rule
       and its proof are the docstring of
-      `maddening/core/coupling/_carried_fields.py`.  The fields a pass
-      reads from the iterate include a flux producer's own.  A group whose
-      non-floating fields feed one another in a closed loop has no such
-      evaluation and is refused: `compile()` raises a `ValueError` that
-      names the fields of the loop, what the iteration would do with them
-      and three ways out.  A group that carries no such field compiles to
-      the program it did.
+      `maddening/core/coupling/_carried_fields.py`.  Which fields a pass
+      reads from the iterate, and which of them is computed from which, is
+      read from one abstract trace of the group's own Jacobi pass
+      (`jax.make_jaxpr`, walked as the parameter probes walk a step), not
+      assumed from the edges: a flag a flux producer's own flux is
+      computed from is carried; a step counter or a PRNG key a member
+      advances from its pre-step state is not, whatever edges and fluxes
+      the member has, and a group of two members exchanging boundary
+      fluxes both ways with such a leaf steps bit for bit as it did
+      (state, passes, verdict and residual, both solvers, both sweeps,
+      both schedules, against the tree before this change).  A group in
+      which that trace shows non-floating fields computed from one another
+      in a closed loop has no such evaluation and is refused: `compile()`
+      raises a `ValueError` that names the fields of the loop, says the
+      loop was read from the trace, what the iteration would do with such
+      fields and three ways out; `validate()` lists it as an error.  A
+      group whose edges allow no carried field is not traced and compiles
+      to the program it did.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -19136,15 +19148,21 @@ anomalies:
       returned iterate; a Gauss-Seidel sweep recomputes a carried field
       from floats the sweep has already moved by up to that much, so a flag
       whose threshold lies within the tolerance of the iterate can come
-      back different (not under Jacobi).  The refusal of a closed loop is
-      decided from the edges: a member is taken to use every field it reads
-      in every field it computes, so a loop is also refused where an
-      `update` does not use what it reads (a counter held by a flux producer
-      on a loop of flux edges, for one); store one field of it in floating
-      point.  `max_iterations=1` iterates nothing and reads a carried field
-      as stored, one step behind.  A group that carries such fields pays
-      one Jacobi evaluation of its members per link of the longest chain on
-      every pass, less what XLA eliminates.
+      back different (not under Jacobi).  The walk over the traced pass
+      can overstate what a field is computed from in one place, an
+      operation it does not look inside (a `jax.custom_jvp` or
+      `jax.custom_vjp` function, a primitive it does not know), which it
+      takes to use all of its operands: a loop that exists only through
+      such an operation is refused although it is none.  Where the pass
+      cannot be traced on its own at all (a hook that raises under the
+      trace), what it reads is assumed from the edges, a member taken to
+      use every field an edge hands it and a boundary flux its producer's
+      whole state, and the refusal's message says that the loop is assumed
+      and why.  `max_iterations=1` iterates nothing and reads a carried
+      field as stored, one step behind.  A group that carries such fields
+      pays one Jacobi evaluation of its members per link of the longest
+      chain on every pass, less what XLA eliminates, and one more abstract
+      trace of its pass each time its step is traced.
     verification:
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_an_integer_on_the_loop_reaches_the_fixed_point_on_every_route"
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_field_relayed_through_more_non_floating_fields_is_settled_at_the_iterate"
@@ -19152,7 +19170,9 @@ anomalies:
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_that_flips_on_every_pass_reaches_the_cap_unconverged"
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_a_flux_is_computed_from_is_evaluated_at_the_iterate"
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_the_solvers_agree_under_every_acceleration"
-      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_that_feed_one_another_in_a_loop_are_refused"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_computed_from_one_another_in_a_loop_are_refused"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_counter_and_a_key_beside_fluxes_both_ways_are_not_carried"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_flags_handed_both_ways_but_computed_from_floats_are_solved"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-274"

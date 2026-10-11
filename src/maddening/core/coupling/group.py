@@ -60,17 +60,23 @@ class CouplingGroup:
 
         The group iterates its floating-point fields and reads
         convergence from them.  An integer, Boolean or key field that
-        one member computes and another reads across an edge of the
-        group is evaluated at every iterate from the fields that feed
-        it (as a Jacobi pass computes it, whatever ``iteration_mode``;
-        once per link where such fields are handed on in a chain), so a
-        solve that reports a zero residual has returned a state the
-        pass leaves unchanged, such fields included, under either
-        ``solver``.  Where such fields feed one another in a closed loop
-        of the group's edges they have no value at an iterate, and
-        ``GraphManager.compile()`` refuses the group (``ValueError``):
-        store one of them in floating point, or compute it in a node
-        outside the group.
+        a pass reads from the iterate -- a flag one member computes and
+        another reads across an edge of the group, or one a member's
+        boundary flux is computed from -- is evaluated at every iterate
+        from the fields it is computed from (as a Jacobi pass computes
+        it, whatever ``iteration_mode``; once per link where such
+        fields are handed on in a chain), so a solve that reports a
+        zero residual has returned a state the pass leaves unchanged,
+        such fields included, under either ``solver``.  Which fields
+        those are is read from a trace of the group's pass: a step
+        counter or a PRNG key that a node advances from its pre-step
+        state is not one, whatever edges and fluxes the node has.
+        Where the trace shows such fields computed from one another in
+        a closed loop (two members that each compute a flag from the
+        flag the other hands them) they have no value at an iterate,
+        and ``GraphManager.compile()`` refuses the group
+        (``ValueError``; ``validate()`` lists it): store one of them in
+        floating point, or compute it in a node outside the group.
     max_iterations : int
         Upper bound on coupling passes per timestep.
 

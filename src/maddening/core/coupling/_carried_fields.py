@@ -221,8 +221,11 @@ def carried_nonfloat_chain(plan, state) -> CarriedChain:
     for field in carried:
         loop = visit(field)
         if loop is not None:
-            # In feeding order: ``visit`` walked from a field to its feeders.
-            return CarriedChain(tuple(carried), 0, tuple(reversed(loop)))
+            # In feeding order (``visit`` walked from a field to its
+            # feeders), starting at the loop's first field in sorted order.
+            ring = list(reversed(loop))
+            start = ring.index(min(ring))
+            return CarriedChain(tuple(carried), 0, tuple(ring[start:] + ring[:start]))
     return CarriedChain(tuple(carried), max(depth.values(), default=0), None)
 
 

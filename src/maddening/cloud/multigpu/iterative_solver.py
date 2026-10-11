@@ -66,6 +66,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import jax
+# ``jax.core`` is not re-exported by ``jax/__init__.py``; imported by name
+# so ``jax.core.Tracer`` resolves for a type checker (as in graph_manager).
+import jax.core
 import jax.numpy as jnp
 from jax import lax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -633,9 +636,12 @@ def _lineax_cg_or_the_loop_where_it_breaks_down(
                 max_iters=max_iters, preconditioner=None,
             )
 
-        value, iters = lax.custom_linear_solve(
+        # Indexed, not unpacked: the checker infers no return type for
+        # ``custom_linear_solve`` and refuses to iterate over it.
+        solved = lax.custom_linear_solve(
             matvec, b, _loop_value_and_count, symmetric=True, has_aux=True,
         )
+        value, iters = solved[0], solved[1]
         res_norm, converged = _residual_of_the_system(
             matvec, b, value, rtol=rtol, atol=atol,
         )

@@ -2055,6 +2055,10 @@ class GraphManager:
                 chain = _carried_fields.possible_chain(plan, self._state)
             except Exception:  # noqa: BLE001 - validate() names what is wrong with it
                 continue
+            # The step traces wherever the bound has a field and refuses a
+            # loop the trace shows, a read counting only where the bound
+            # allows it too: a loop it shows is a loop of the bound.  So
+            # tracing only here refuses what the step refuses, at one state.
             if chain.loop is None:
                 continue
             chain = self._traced_carried_chain(group, members, chain)

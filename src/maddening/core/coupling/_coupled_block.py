@@ -934,10 +934,15 @@ def _run_coupled_block_impl(
         else:
             carried_chain = CarriedChain((), 0, None)
         if carried_chain.loop is not None:
-            # ``compile()`` refuses this group before any step is traced
-            # (``GraphManager._nonfloat_loop_refusal``, which asks this
-            # block the same question); this is the same refusal for a
-            # step built without it.
+            # ``compile()`` asks this block the same question of the state
+            # it holds (``GraphManager._nonfloat_loop_refusals``), and a
+            # loop here is always a loop of the edges' bound, which is
+            # where compile() traces (``_carried_fields``: a read counts
+            # only where the edges allow it too).  So this fires only for a
+            # state compile() did not see: a write that gave a field
+            # another dtype after it, or a pass that returns a field in
+            # another dtype than it is stored in.  ``validate()`` lists the
+            # same refusal for such a state.
             raise ValueError(nonfloat_loop_refusal(
                 group.nodes, carried_chain, state_after_first))
         carried_by_node: dict[str, list] = {}

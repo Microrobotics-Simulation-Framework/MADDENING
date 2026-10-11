@@ -33,23 +33,54 @@ as a function of its members' iterate, with everything a pass hands a node's
 hooks exactly as a step hands it -- every boundary input an edge delivers,
 whether or not the node declares it, each flux computed by the producer's
 own hook from the producer's state and inputs.  Output field ``g`` *reads*
-input field ``f`` when ``f`` can reach ``g`` through the traced equations
-(``_param_probes._live_jaxpr_inputs``, the walk the parameter probes use).
-"``f`` feeds ``g``" below means exactly that, for two non-floating fields.
+input field ``f`` when ``f`` can reach ``g`` through the traced equations,
+walked back from ``g`` alone (``_param_probes._live_jaxpr_inputs``, the walk
+the parameter probes use, with its two keywords for this walk:
+``effects=False`` and an ``opaque`` predicate).  "``f`` feeds ``g``" below
+means exactly that, for two non-floating fields.
 
-The walk can only overstate: a field it reports unread is never an operand
-on the way to the output.  It overstates in one place, an equation it does
-not look inside -- a function wrapped in ``jax.custom_jvp`` or
-``jax.custom_vjp``, a primitive it does not know, an equation with effects
--- which it takes to read all of its inputs for each of its outputs.
+*Effects.*  An equation is followed only through its results.  One whose
+results reach no output makes nothing a read, effects or not: a
+``jax.debug.print`` or ``jax.debug.callback`` has no result, so printing a
+field -- in a node's ``update``, its flux hook, a ``lax.cond`` branch, a
+jitted helper or a loop body -- makes it feed nothing.  An equation with an
+effect whose result *is* followed (an ``io_callback`` that returns a value,
+a read of a mutable array) may return anything the program handed out
+before it, so an output reached through one is taken to read every field
+of the iterate, and each of those reads is *assumed* (below).
+(``jax.pure_callback`` has no effect: it is taken at its word, a function
+of its operands -- assumed all the same, since the walk does not look
+inside it.)
+
+*Established and assumed reads.*  A read is **established** when ``f``
+reaches ``g`` through equations whose operands the walk knows to feed their
+results: every primitive with one result (each operand feeds it), every
+primitive with one operand, and the structured ones it follows into
+(``jit``, ``cond``, ``while``, ``scan``, ...).  A read is **assumed** when
+``f`` reaches ``g`` only through an equation the walk does not look inside
+and whose results need not each use every operand: a function wrapped in
+``jax.custom_jvp`` or ``jax.custom_vjp`` (the derivative rule may read what
+the primal does not, so it is not followed), a callback, a primitive with
+several operands and several results (``sort`` of several arrays), a
+structured primitive whose layout the walk does not recognise, or an
+equation with an effect as above.  Those are the only places the walk can
+overstate: a field it reports unread is never an operand on the way to the
+output.  Each read is classified by walking ``g`` twice, once with such an
+equation taken to use all of its operands and once with it taken to use
+none; a read the second walk still finds is established.
 
 The trace is taken only for a group that *may* carry such a field, which is
 asked of the edges first (:func:`possible_chain`, an upper bound: a member
 taken to use everything an edge hands it, a flux its producer's whole
 state).  A group whose edges allow none is not traced, and is compiled to
-the program it always was.
+the program it always was.  Where the trace is taken, a read counts only if
+the edges allow it too: two upper bounds of what the pass reads, of which
+what both allow is a third.  So a loop the trace shows is always a loop of
+the edges' bound, and the two places that ask (``compile()``, which traces
+a group only when its bound has a loop, and the step, which traces it
+wherever its bound has a field) decide alike from the same state.
 
-**When dependence is assumed instead.**  Only when that one trace cannot be
+**When dependence is assumed instead.**  When that one trace cannot be
 taken: the pass raises when traced on its own (:func:`carried_nonfloat_chain`
 catches the exception and keeps its text).  The bound from the edges then
 stands in, the refusal below can be of a loop that is not there, and its
@@ -142,13 +173,21 @@ to be carried from pass to pass outside the residual, and a solve could
 read ``converged=True`` while they still change.
 ``GraphManager.compile()`` raises a ``ValueError`` naming the fields
 (:func:`nonfloat_loop_refusal`), ``validate()`` lists it as an error, and
-the step raises it too if it is ever traced for such a group.
+the step raises it too if it is ever traced for such a group: compile and
+the step ask the same question of the state each holds, so the step's
+refusal is reached only for a state ``compile()`` did not see -- one a
+write gave other dtypes after it (``set_node_state`` says to call
+``validate()`` after such a write), or a pass that returns a field in
+another dtype than the one it is stored in.  For each link of the loop the
+message says whether it was established or assumed, and through which
+primitive.
 
 Not refused: a member that holds a step counter or a PRNG key and
 exchanges boundary fluxes with another, both ways -- the trace shows the
 counter is computed from the pre-step state and that no flux reads it, so it
-is not carried at all; and two members that hand each other flags which
-each computes from floating inputs alone -- carried, each of depth one.
+is not carried at all, printed or not; and two members that hand each other
+flags which each computes from floating inputs alone -- carried, each of
+depth one.
 """
 
 from __future__ import annotations
@@ -158,7 +197,12 @@ from typing import Callable, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 
-from maddening.core._param_probes import _live_jaxpr_inputs
+from maddening.core._param_probes import _CALL_PRIMITIVES, _live_jaxpr_inputs
+
+#: The structured primitives the walk follows into.  It asks
+#: :func:`_unfollowed_overstates` about one of them only when it does not
+#: recognise its layout.
+_FOLLOWED = frozenset({"while", "scan", "cond"}) | _CALL_PRIMITIVES
 
 
 class CarriedChain(NamedTuple):
@@ -181,12 +225,20 @@ class CarriedChain(NamedTuple):
         or for a group whose edges allow no carried field.  Otherwise why
         it could not be, in which case the fields and the loop are the
         bound the edges give (:func:`possible_chain`).
+    assumed_links : tuple
+        For a loop read from the trace, its links that are *assumed* (the
+        module docstring): ``((feeder, fed, primitives), ...)``, each
+        ``primitives`` the names of the equations the read passes through
+        that the walk does not look inside.  Empty when every link is
+        established, which a loop that has an established alternative is
+        reported as.
     """
 
     fields: tuple
     depth: int
     loop: Optional[tuple]
     assumed: Optional[str] = None
+    assumed_links: tuple = ()
 
 
 def _non_floating(value) -> bool:
@@ -243,11 +295,16 @@ def possible_chain(plan, state, assumed=None) -> CarriedChain:
     nodes compute; ``loop`` ``None`` means it carries none in a closed
     loop.  Anything else is a question for :func:`carried_nonfloat_chain`.
     """
+    return _chain(*_edge_relation(plan, state), assumed)
+
+
+def _edge_relation(plan, state) -> tuple:
+    """``(fields, fed_by)`` of :func:`possible_chain`: the edges' bound, before chaining."""
     reads = plan.iterate_reads()
     carried = {
         (nn, fld) for pairs in reads.values() for nn, fld in pairs
         if fld in state.get(nn, {}) and _non_floating(state[nn][fld])}
-    return _chain(carried, {(nn, fld): carried & reads[nn] for nn, fld in carried}, assumed)
+    return carried, {(nn, fld): carried & reads[nn] for nn, fld in carried}
 
 
 def _field_of(path) -> tuple:
@@ -255,16 +312,42 @@ def _field_of(path) -> tuple:
     return path[0].key, path[1].key
 
 
-def traced_reads(evaluate: Callable, members: dict) -> dict:
+def _unfollowed_overstates(eqn) -> bool:
+    """Whether "each result uses every operand" may overstate for *eqn*.
+
+    Asked by the walk only of an equation it does not follow into, which
+    it takes to use every operand for each result.  That is exact for a
+    primitive with one result or with one operand.  It may overstate for a
+    ``custom_*`` call or a callback (the walk does not look inside), a
+    primitive with several operands and several results, a structured
+    primitive whose layout the walk did not recognise (:data:`_FOLLOWED`),
+    and an equation with an effect, whose result may come from outside the
+    program.  The reads through such an equation are the *assumed* ones of
+    the module docstring.
+    """
+    name = eqn.primitive.name
+    return (bool(eqn.effects) or name.startswith("custom_") or "callback" in name
+            or name in _FOLLOWED
+            or (len(eqn.invars) > 1 and len(eqn.outvars) > 1))
+
+
+def traced_reads(evaluate: Callable, members: dict, *, assumed: Optional[dict] = None) -> dict:
     """``{output field: the input fields it reads}`` in one abstract trace of *evaluate*.
 
     *evaluate* maps ``{node: {field: array}}`` (the members' iterate) to a
     dict of the same layout (what one Jacobi pass computes from it);
     fields are ``(node, field)`` pairs.  ``jax.make_jaxpr`` traces it once
     -- nothing is compiled, nothing runs -- and each output is walked back
-    to the inputs that can reach it (``_live_jaxpr_inputs``; see the module
-    docstring for where that walk overstates).  Raises whatever the trace
-    raises.
+    to the inputs that can reach it (``_live_jaxpr_inputs``), following an
+    equation only through its results: an equation with no result that
+    reaches the output (a ``jax.debug.print``) makes nothing a read.
+
+    *assumed*, if given, is filled with ``{(output, input): primitives}``
+    for each read that is assumed rather than established (the module
+    docstring): ``primitives`` names the equations it passes through that
+    the walk does not look inside.  An output reached through such an
+    equation with an effect (an ``io_callback`` that returns a value) is
+    taken to read every input.  Raises whatever the trace raises.
     """
     closed, out_shape = jax.make_jaxpr(evaluate, return_shape=True)(members)
     in_fields = [_field_of(p) for p, _ in jax.tree_util.tree_flatten_with_path(members)[0]]
@@ -273,10 +356,34 @@ def traced_reads(evaluate: Callable, members: dict) -> dict:
     if len(in_fields) != len(jaxpr.invars) or len(out_fields) != len(jaxpr.outvars):
         raise ValueError("the pass's fields do not line up with its traced program")
     reads: dict[tuple, set] = {}
+    established: dict[tuple, set] = {}
+    through: dict[tuple, set] = {}
     for i, out_field in enumerate(out_fields):
-        live = _live_jaxpr_inputs(jaxpr, [j == i for j in range(len(out_fields))])
+        live_out = [j == i for j in range(len(out_fields))]
+        met: dict[str, bool] = {}
+
+        def note(eqn, met=met) -> bool:
+            """Record an equation the read may overstate through; take it whole."""
+            if _unfollowed_overstates(eqn):
+                met[eqn.primitive.name] = met.get(eqn.primitive.name, False) or bool(eqn.effects)
+            return False
+
+        live = _live_jaxpr_inputs(jaxpr, live_out, effects=False, opaque=note)
+        sure = live
+        if met:
+            sure = _live_jaxpr_inputs(jaxpr, live_out, effects=False,
+                                      opaque=_unfollowed_overstates)
+            if any(met.values()):
+                live = [True] * len(in_fields)
+            through.setdefault(out_field, set()).update(met)
         reads.setdefault(out_field, set()).update(
             in_field for in_field, keep in zip(in_fields, live) if keep)
+        established.setdefault(out_field, set()).update(
+            in_field for in_field, keep in zip(in_fields, sure) if keep)
+    if assumed is not None:
+        for out_field, fields in reads.items():
+            for in_field in fields - established[out_field]:
+                assumed[(out_field, in_field)] = tuple(sorted(through[out_field]))
     return reads
 
 
@@ -288,25 +395,44 @@ def carried_nonfloat_chain(plan, state, evaluate: Optional[Callable] = None) -> 
     field (:func:`possible_chain`) is not traced.  Otherwise the carried
     fields are the non-floating fields of *state* that any output of the
     traced pass reads, and one feeds another when the second's output
-    reads the first.  Where the trace raises, or *evaluate* is ``None``,
-    the bound from the edges is returned with ``assumed`` saying why.
+    reads the first -- each only where the edges' bound allows it too, so
+    that a loop returned here is a loop of that bound (the module
+    docstring: ``compile()`` and the step then decide alike).  Of a loop,
+    one whose links are all established is returned if there is one;
+    otherwise ``assumed_links`` names the links that are not.  Where the
+    trace raises, or *evaluate* is ``None``, the bound from the edges is
+    returned with ``assumed`` saying why.
     """
-    bound = possible_chain(plan, state)
+    bound_fields, bound_fed_by = _edge_relation(plan, state)
+    bound = _chain(bound_fields, bound_fed_by)
     if not bound.fields:
         return bound
     if evaluate is None:
         return bound._replace(assumed="no trace of the group's pass was asked for")
     members = {nn: state[nn] for nn in plan.order}
+    how: dict = {}
     try:
-        reads = traced_reads(evaluate, members)
+        reads = traced_reads(evaluate, members, assumed=how)
     except Exception as exc:  # noqa: BLE001 - whatever a node's hooks raise when traced alone
         return bound._replace(assumed=(
             f"its pass could not be traced on its own ({type(exc).__name__}: "
             f"{str(exc)[:200]})"))
     nonfloat = {(nn, fld) for nn, fields in members.items() for fld, value in fields.items()
                 if _non_floating(value)}
-    carried = nonfloat & set().union(*reads.values())
-    return _chain(carried, {field: carried & reads.get(field, set()) for field in carried})
+    carried = nonfloat & set().union(*reads.values()) & bound_fields
+    fed_by = {field: carried & reads.get(field, set()) & bound_fed_by[field]
+              for field in carried}
+    chain = _chain(carried, fed_by)
+    if chain.loop is None:
+        return chain
+    sure = _chain(carried, {field: {f for f in feeders if (field, f) not in how}
+                            for field, feeders in fed_by.items()})
+    if sure.loop is not None:
+        return sure
+    ring = chain.loop
+    return chain._replace(assumed_links=tuple(
+        (feeder, fed, how[(fed, feeder)])
+        for feeder, fed in zip(ring, ring[1:] + ring[:1]) if (fed, feeder) in how))
 
 
 def nonfloat_loop_refusal(group_nodes, chain: CarriedChain, state) -> Optional[str]:
@@ -319,12 +445,27 @@ def nonfloat_loop_refusal(group_nodes, chain: CarriedChain, state) -> Optional[s
         return f"{nn}.{fld} ({jnp.asarray(state[nn][fld]).dtype})"
 
     ring = " -> ".join(named(f) for f in (*chain.loop, chain.loop[0]))
-    if chain.assumed is None:
+    if chain.assumed is None and not chain.assumed_links:
         how = (
             "This is read from one trace of the group's pass: each field named is "
-            "an operand of the arithmetic that computes the next (an operation the "
-            "trace does not look inside, such as a custom_jvp or custom_vjp "
-            "function, is taken to use all of its operands).")
+            "an operand of the arithmetic that computes the next.")
+    elif chain.assumed is None:
+        shaky = {(feeder, fed): prims for feeder, fed, prims in chain.assumed_links}
+        links = []
+        for feeder, fed in zip(chain.loop, chain.loop[1:] + chain.loop[:1]):
+            pair = f"{feeder[0]}.{feeder[1]} -> {fed[0]}.{fed[1]}"
+            if (feeder, fed) in shaky:
+                links.append(f"{pair} is ASSUMED, through {', '.join(shaky[feeder, fed])}")
+            else:
+                links.append(f"{pair} is established through operands")
+        how = (
+            "Each link as a trace of the group's pass gives it: " + "; ".join(links) + ". "
+            "An assumed link passes through an operation the trace does not look "
+            "inside (a custom_jvp or custom_vjp function, a callback, a primitive "
+            "with several operands and several results, or one with an effect whose "
+            "result is used), which is taken to use every operand for each of its "
+            "results, so the loop may not be one; computing the field outside that "
+            "operation lets the trace see what it reads.")
     else:
         how = (
             f"This could not be read from the group's pass, because {chain.assumed}; "

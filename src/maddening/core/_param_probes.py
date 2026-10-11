@@ -29,7 +29,8 @@ from maddening.core._graph_specs import (
 # Which graph parameters the compiled step reads (structural liveness)
 # ------------------------------------------------------------------
 
-def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool]) -> list[bool]:
+def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool], *, effects: bool = True,
+                       opaque: Optional[Callable[[Any], bool]] = None) -> list[bool]:
     """Which inputs of ``jaxpr`` can reach one of its live outputs.
 
     A backward walk over the equations.  It is *conservative*: an
@@ -48,6 +49,22 @@ def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool]) -> list[bool]:
     "every input live".  ``custom_jvp_call`` / ``custom_vjp_call`` are not followed
     into, because the derivative rule may read an input the primal does
     not.
+
+    Two keywords, for the coupling group's carried-fields walk
+    (``coupling/_carried_fields.py``); their defaults are the walk above,
+    which the parameter probes use:
+
+    * ``effects=False`` follows an equation only through its outputs: one
+      none of whose outputs is live is skipped, effects or not (a
+      ``jax.debug.print`` or ``jax.debug.callback`` has no output, so it
+      makes nothing live), in every sub-jaxpr too.
+    * ``opaque``, a predicate on an equation: asked of each equation the
+      walk would take to read every input because it does not follow it
+      (the "everything" answers above: a ``custom_*`` call, a primitive
+      it does not know, a structured one whose layout it does not
+      recognise).  Where it returns ``True`` the equation is taken to read
+      *none* of its inputs instead.  Inputs live with it are then reached
+      through known equations alone.
     """
     from jax.extend.core import Literal
 
@@ -58,31 +75,41 @@ def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool]) -> list[bool]:
     for eqn in reversed(jaxpr.eqns):
         outs = [o in live for o in eqn.outvars]
         effectful = bool(eqn.effects)
-        if not any(outs) and not effectful:
+        if not any(outs) and not (effectful and effects):
             continue
-        for v, keep in zip(eqn.invars, _live_eqn_inputs(eqn, outs, effectful)):
+        for v, keep in zip(eqn.invars, _live_eqn_inputs(eqn, outs, effectful,
+                                                        effects=effects, opaque=opaque)):
             if keep and not isinstance(v, Literal):
                 live.add(v)
     return [v in live for v in jaxpr.invars]
 
 
-def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
+def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool, *, effects: bool = True,
+                     opaque: Optional[Callable[[Any], bool]] = None) -> list[bool]:
     """``_live_jaxpr_inputs`` for one equation; see there."""
     n_in = len(eqn.invars)
     name = eqn.primitive.name
     params = eqn.params
     everything = [True] * n_in
-    if name.startswith("custom_"):
+    walk = functools.partial(_live_jaxpr_inputs, effects=effects, opaque=opaque)
+
+    def unfollowed() -> list[bool]:
+        """``everything``, or no input where *opaque* says so (see ``_live_jaxpr_inputs``)."""
+        if opaque is not None and opaque(eqn):
+            return [False] * n_in
         return everything
+
+    if name.startswith("custom_"):
+        return unfollowed()
     try:
         if name == "while":
             cond = getattr(params["cond_jaxpr"], "jaxpr", params["cond_jaxpr"])
             body = getattr(params["body_jaxpr"], "jaxpr", params["body_jaxpr"])
             cn, bn = params["cond_nconsts"], params["body_nconsts"]
-            cond_in = _live_jaxpr_inputs(cond, [True])
+            cond_in = walk(cond, [True])
             carry = [a or b for a, b in zip(outs, cond_in[cn:])]
             while True:
-                body_in = _live_jaxpr_inputs(body, carry)
+                body_in = walk(body, carry)
                 grown = [a or b for a, b in zip(carry, body_in[bn:])]
                 if grown == carry:
                     break
@@ -99,13 +126,13 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
                 # so a changed layout falls back to "everything live".
                 groups = getattr(params["ft_in"], "elts", None)
                 if groups is None or len(groups) != 3:
-                    return everything
+                    return unfollowed()
                 nc, ncar = len(groups[0]), len(groups[1])
                 if nc + ncar + len(groups[2]) != n_in:
-                    return everything
+                    return unfollowed()
             carry, ys = list(outs[:ncar]), list(outs[ncar:])
             while True:
-                body_in = _live_jaxpr_inputs(body, carry + ys)
+                body_in = walk(body, carry + ys)
                 grown = [a or b for a, b in zip(carry, body_in[nc:nc + ncar])]
                 if grown == carry:
                     break
@@ -114,9 +141,9 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
         elif name == "cond":
             ops = [False] * (n_in - 1)
             for branch in params["branches"]:
-                branch_in = _live_jaxpr_inputs(getattr(branch, "jaxpr", branch), outs)
+                branch_in = walk(getattr(branch, "jaxpr", branch), outs)
                 if len(branch_in) != n_in - 1:
-                    return everything
+                    return unfollowed()
                 ops = [a or b for a, b in zip(ops, branch_in)]
             out = [True] + ops
         elif name in _CALL_PRIMITIVES:
@@ -125,16 +152,16 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
                 for key in ("jaxpr", "call_jaxpr", "fun_jaxpr") if key in params
             ]
             if len(subs) != 1:
-                return everything
+                return unfollowed()
             sub = subs[0]
             if len(sub.invars) != n_in or len(sub.outvars) != len(outs):
-                return everything
-            out = _live_jaxpr_inputs(sub, outs)
+                return unfollowed()
+            out = walk(sub, outs)
         else:
-            return everything
+            return unfollowed()
     except (KeyError, AttributeError, TypeError):
-        return everything
-    return out if len(out) == n_in else everything
+        return unfollowed()
+    return out if len(out) == n_in else unfollowed()
 
 
 #: Primitives that call their one sub-jaxpr once, operands in order: the

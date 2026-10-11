@@ -18227,10 +18227,30 @@ anomalies:
       is compared with it as it stands.  The docstrings now say so; no
       test pins that number.  Found on
       2026-10-10 while the conjugate-gradient part of the multi-GPU
-      runner's `gradient` goal was being repaired.  Not changed in 0.4.0:
-      having the loop test the residual of the system (one more product,
-      at the end or every few steps) changes when a STABLE function
-      stops and what it reports, and that is not decided.
+      runner's `gradient` goal was being repaired.
+      Fixed in 0.4.0 as to the report.  The CG loop (asked for by name,
+      reached through a preconditioner, or reached by the default route's
+      fallback of MADD-ANO-264) and the GMRES loop behind a preconditioner
+      report `||b - A x||` of the returned value from one extra product
+      with the caller's operator and right-hand side, and `converged` is
+      that norm against `max(atol, rtol * ||b||)` with no allowance for
+      rounding: the statement `differentiable=True` already made, so one
+      system gets one answer from the loop and from it.  When the loops
+      stop was not changed: `value` and `iters` are bit for bit what they
+      were (254 loop-route cases compared with the tree before the fix:
+      float32 and float64, with and without a preconditioner, a mesh, an
+      `atol` and a start, jitted and eager, on jax 0.10.2, 0.11.0 and
+      0.11.2).  The solves measured above now read `converged=False` with
+      a `residual_norm` of 1.17e-5 and 1.15e-4 `||b||`.  Code that
+      branches on `converged` takes the other branch on such a solve: in
+      float32 the default `rtol=1e-6` is met up to a condition number of
+      about 17 (the smallest `rtol` of 1e-3, 3e-4, 1e-4, ... that read
+      `converged=True` on the same operator at 4096 unknowns: 3e-7 at a
+      condition number of 2, 1e-6 at 9 and at 17, 3e-6 at 41, 1e-5 at
+      134, 1e-4 at 401, 1e-3 at 4001).  The multi-GPU runner's `gradient`
+      goal read this flag for "the solve stopped on its tolerance, not on
+      the iteration cap"; it reads the iteration count against the cap
+      instead, and the flag stays in its record as information.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -18249,32 +18269,45 @@ anomalies:
     affected_components:
       - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
       - "maddening.cloud.multigpu.iterative_solver.SharedSolveResult"
-    affected_versions: ">=0.3.0"
+    affected_versions: ">=0.3.0, <0.4.0"
     workaround: >
-      Do not read the loop backend's `converged` or `residual_norm` as a
-      statement about `b - A x` in float32.  Compute the residual with
-      one product (`jnp.linalg.norm(b - matvec(x))`), or read the result
-      of the same call with `differentiable=True`, whose flag and norm
-      are taken on the returned value (`iters` is then -1); or run the
-      solve in float64; or ask for no `rtol` under about `eps * kappa`
-      (in float32, `1e-7` times the condition number).
-    resolution_status: "open"
+      On 0.3.0 and 0.3.1: do not read the loop backend's `converged` or
+      `residual_norm` as a statement about `b - A x` in float32.  Compute
+      the residual with one product (`jnp.linalg.norm(b - matvec(x))`),
+      or read the result of the same call with `differentiable=True`,
+      whose flag and norm are taken on the returned value (`iters` is
+      then -1); or run the solve in float64; or ask for no `rtol` under
+      about `eps * kappa` (in float32, `1e-7` times the condition
+      number).  From 0.4.0 none is needed to read the report; to have the
+      flag read True, ask for an `rtol` a few times above `eps * kappa`
+      or solve in float64.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
     residual_risk: >
-      Open in 0.4.0; no release is named for a change.  Until the loop
-      tests and reports the residual of the system, a float32 solve on
-      the loop backend that is asked for an `rtol` under about
-      `eps * kappa` can come back `converged=True` with a
-      `residual_norm` under the tolerance and a true residual one to two
-      orders of magnitude above it.
+      What was not done.  The loop still STOPS on its recursively updated
+      residual, so in float32 it can stop before the residual of the
+      system has met the tolerance; it now says so (`converged=False` and
+      the true `residual_norm`) instead of vouching for the solve.  It
+      does not carry on to what the dtype allows (replacing the recursive
+      residual by the true one and iterating further), and the flag makes
+      no allowance at the float floor: a solve that stopped on its
+      tolerance within the float32 floor of it can read `False` by a hair
+      (measured: 1.06 times `rtol`).  `backend="lineax"` keeps lineax's
+      own verdict for `converged`, which is not a test of
+      `residual_norm`.
     verification:
-      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_answers_converged_on_a_solve_whose_true_residual_is_far_over_rtol"
-      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_differentiable_true_answers_not_converged_on_the_same_solve_with_the_true_residual"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_answers_not_converged_with_the_true_residual_where_it_stopped_early"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_when_the_loop_stops_did_not_change_only_what_it_reports"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_and_differentiable_true_give_one_answer_for_one_solve"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_reports_the_residual_of_the_system_in_float64"
-      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_differentiable_flag_is_its_own_norm_against_rtol_with_no_allowance"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_flag_is_the_reported_norm_against_rtol_with_no_allowance"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_tolerance_of_the_flag_is_the_larger_of_atol_and_rtol_times_b"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_gmres_loop_behind_a_preconditioner_reports_the_system_not_the_preconditioned_one"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_gmres_loop_reports_alike_whatever_the_scale_of_its_preconditioner"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-264"
-    title: "sharded_cg's default route (lineax CG) returns NaN with converged=False in float32 above about 1e5 unknowns, and for a smooth right-hand side from about a thousand: lineax's breakdown test needs p.A p / r.r above 2.4e-5 times the number of unknowns"
+    title: "lineax's CG returns NaN with converged=False in float32 above about 1e5 unknowns, and for a smooth right-hand side from about a thousand (its breakdown test needs p.A p / r.r above 2.4e-5 times the number of unknowns): sharded_cg's default call did until 0.4.0; backend='lineax' by name and ift_linear_solve(solver='cg') still do"
     description: >
       `sharded_cg` with `backend="auto"` and no preconditioner (the
       default call), and with `backend="lineax"`, runs lineax's
@@ -18328,9 +18361,35 @@ anomalies:
       `s = 0.01`) and after 2 steps at 1e5 (white noise, `s = 0.5`), the
       loop converging on both.  Found on 2026-10-10 while the
       conjugate-gradient part of the multi-GPU runner's `gradient` goal
-      was being repaired.  Not changed in 0.4.0: which route the default
-      call takes, in which dtype and at which size, is a change to a
-      STABLE function's default, and that is not decided.
+      was being repaired.
+      Fixed in 0.4.0 for the default call.  `backend="auto"` without a
+      preconditioner runs lineax's CG as before and, where the value it
+      returns is not all finite, solves the same system on the loop
+      backend from `x0` and returns the loop's value and iteration count,
+      with `residual_norm` the residual of the system from one extra
+      product and `converged` that norm against
+      `max(atol, rtol * ||b||)` (the loop's report, MADD-ANO-263).  Where
+      lineax's value is finite the result is lineax's, bit for bit (60
+      default-route cases compared with the tree before the fix on jax
+      0.10.2, 0.11.0 and 0.11.2: the 51 on which lineax answers are
+      identical in value, `converged`, `iters` and `residual_norm`).  On
+      the systems above the default call now returns: at 4096 unknowns
+      (smooth, `s = 0.01`, `rtol=1e-4`) 68 iterations, a true residual of
+      1.014e-4 `||b||` and `converged=False`, 1.5 % over the tolerance;
+      at 1e5 and at 1e6 unknowns (white noise, `s = 0.5`) 14 iterations,
+      8.6e-5 and `converged=True`.  Under `differentiable=True` the
+      forward, tangent and cotangent solves each get the fallback: at
+      1e5 unknowns reverse and forward mode are within 1.3e-4 of a
+      float64 direct solve, with and without a mesh of four devices.
+      Not changed: `backend="lineax"` asked for by name (no fallback:
+      NaN, `converged=False`), `ift_linear_solve(solver="cg")` (raises)
+      and the wavelet node's masked-CG frozen solve (not measured).
+      Without `differentiable=True` a derivative through a default-route
+      solve that falls back still runs lineax's own tangent solve of the
+      system it broke down on: forward mode with respect to `b` raises
+      lineax's error (on a multi-device mesh that error ends the process
+      after XLA's 40 s rendezvous timeout, as before the fix), and
+      reverse mode with respect to an operator coefficient is NaN.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -18349,24 +18408,41 @@ anomalies:
       - "maddening.core.solver_utils.ift_linear_solve"
     affected_versions: ">=0.3.0"
     workaround: >
-      Pass `backend="loop"` (measured to converge on every system above;
-      what its `converged` flag reports is MADD-ANO-263's), or run the
-      solve in float64.  A system written in units where its smallest
-      eigenvalue is above `2.4e-5 * n` passes too (multiply the operator
-      and the right-hand side through by one constant).  For
-      `ift_linear_solve`, use `solver="gmres"`.
-    resolution_status: "open"
+      From 0.4.0 the default call needs none.  For `backend="lineax"`
+      asked for by name, and for the default call on 0.3.0 and 0.3.1:
+      pass `backend="loop"` (measured to converge on every system above),
+      or run the solve in float64.  A system written in units where its
+      smallest eigenvalue is above `2.4e-5 * n` passes too (multiply the
+      operator and the right-hand side through by one constant).  For
+      `ift_linear_solve`, use `solver="gmres"`.  To differentiate through
+      a solve that falls back, pass `differentiable=True`.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
     residual_risk: >
-      Open in 0.4.0; no release is named for a change.  Until the default
-      route or lineax's test changes, the default `sharded_cg` call
-      cannot be used in float32 at 1e5 unknowns or more on a system of
-      order-one scale, and can fail far below that.  A later lineax
-      release may move the threshold: the test of the arithmetic below
-      is there to notice.
+      Still reachable in 0.4.0, loudly, through `backend="lineax"` asked
+      for by name (NaN in every entry, `converged=False`), through
+      `ift_linear_solve(solver="cg")` (lineax's error is raised) and
+      possibly through the wavelet node's `frozen_solver="cg"` (not
+      measured); no release is named for those.  A fix for
+      `ift_linear_solve` would take the same fallback there: the lineax
+      call with `throw=False`, and a second solve where its value is not
+      finite.  The default route's fallback has a cost: every jitted
+      default-route program compiles a second solver, and under `vmap`
+      the loop runs for every batch member.  A later lineax release may
+      move the threshold: the test of the arithmetic below is there to
+      notice.
     verification:
-      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_default_route_returns_nan_in_float32"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_default_route_answers_in_float32_where_lineax_breaks_down"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_fallback_reports_the_residual_of_the_system_not_the_one_the_loop_updates"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_fallback_starts_from_the_initial_guess"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_default_route_is_the_lineax_route_bit_for_bit_where_lineax_answers"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_grad_and_jvp_through_a_default_route_solve_that_falls_back_match_a_direct_solve"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_under_vmap_each_row_is_its_own_solve_whichever_route_answered_it"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_a_non_finite_right_hand_side_is_still_nan_on_the_default_route"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_a_system_neither_route_can_solve_is_not_reported_converged"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_lineax_backend_by_name_still_returns_nan_in_float32"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_route_breaks_down_on_the_step_whose_quotient_is_under_the_threshold"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_default_route_answers_in_float32_where_every_quotient_passes"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_same_call_in_float64_converges"
-      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_backend_converges_in_float32_on_the_same_system"
+      - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_backend_solves_the_same_system_in_float32"
     github_issue: null

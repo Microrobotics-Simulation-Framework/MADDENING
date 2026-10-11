@@ -114,7 +114,14 @@ class TestSingleDeviceCorrectness:
         x_ref = jnp.linalg.solve(A, b)
 
         matvec = _laplacian_1d_matvec_unsharded(n)
-        result = sharded_cg(matvec, b, max_iters=500, backend="loop")
+        # ``rtol=1e-4``: this operator's condition number is 441, and in
+        # float32 the loop leaves a residual of 1.5e-5 ``|b|`` (measured, in
+        # float64 on the host), 15 times the default ``rtol=1e-6``.  Until
+        # 0.4.0 the loop reported its recursively updated residual and
+        # answered ``converged=True`` at the default; it now reports the
+        # residual of the system (MADD-ANO-263), so the test asks float32
+        # for a tolerance it meets (by 6.6 times).
+        result = sharded_cg(matvec, b, max_iters=500, backend="loop", rtol=1e-4)
 
         assert isinstance(result, SharedSolveResult)
         assert bool(result.converged), (
@@ -589,20 +596,23 @@ def _gradient_parity_through_converged_solves(n_per_shard: int, max_iters: int) 
             return sharded_cg(matvec, bb, **where, **kw, differentiable=True).value
 
         def loop(bb, matvec=matvec, where=where):
-            r = sharded_cg(matvec, bb, **where, **kw)
-            return r.converged, r.iters
+            return sharded_cg(matvec, bb, **where, **kw).iters
 
         g = jax.jit(jax.grad(lambda bb, solve=solve: jnp.sum(solve(bb) ** 2)))(b)
         x, t = jax.jit(lambda bb, vv, solve=solve: jax.jvp(solve, (bb,), (vv,)))(b, v)
-        stopped, iters = jax.jit(loop)(b)
+        iters = jax.jit(loop)(b)
         got[side] = {k: np.asarray(jax.device_get(a), np.float64)
                      for k, a in (("x", x), ("g", g), ("t", t))}
-        # 1. Each side's solves converged: the loop stopped on its tolerance
-        #    with iterations to spare, and the true residual of the solve,
-        #    of the adjoint solve (right-hand side 2 x) and of the tangent
-        #    solve (right-hand side v), in float64 on the host, is within
-        #    the gate's residual limit.
-        assert bool(stopped), side
+        # 1. Each side's solves converged: the loop stopped before its cap,
+        #    with iterations to spare (it has two exits, its tolerance and
+        #    the cap), and the true residual of the solve, of the adjoint
+        #    solve (right-hand side 2 x) and of the tangent solve
+        #    (right-hand side v), in float64 on the host, is within the
+        #    gate's residual limit.  The loop's ``converged`` flag is not
+        #    read, as in the runner: from 0.4.0 it is the float32 residual
+        #    against ``rtol`` with no allowance (MADD-ANO-263), and this
+        #    solve stops within a few percent of ``rtol`` (the float64
+        #    residuals below read 0.79 to 0.98 times it).
         assert 20 < int(iters) < max_iters // 2, (side, int(iters))
         for name, sol, rhs in (("solve", got[side]["x"], b_host),
                                ("adjoint", got[side]["g"], 2 * got[side]["x"]),

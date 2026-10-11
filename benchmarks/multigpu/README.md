@@ -54,7 +54,12 @@ converge on in 55 to 58 iterations a solve at every size (condition number
 solves -- the solve, the adjoint solve behind the gradient and the tangent
 solve behind the jvp -- must have converged: the loop stopped on its
 tolerance and not on its cap, and the true residual `|rhs - A x| / |rhs|`,
-computed on the host in float64, is within 2e-4.  Until schema 7 these
+computed on the host in float64, is within 2e-4.  "Stopped on its
+tolerance" is read from the loop's iteration count, which must be under
+the cap (the loop has those two exits); the `converged` flag in the record
+is information, not a check: it is `sharded_cg`'s float32 residual against
+`rtol` with no allowance, which lands within about 12 % of `CG_RTOL` here.
+Until schema 7 these
 rows solved the unshifted operator, on which no float32 solve converges
 (true residual 6e2 to 2e4 at the session's sizes after all 3000
 iterations), and passed on parity alone, within 8 % of their limit at
@@ -821,7 +826,8 @@ compile without execution.
   `max_iters`; `input_presharded`, `grad_sharded`, `grad_unsharded`,
   `compile_s.{sharded,unsharded}`, `grad_parity`, `jvp_parity`, and
   `solve.{sharded,unsharded}` = `converged` and `iterations` (the loop's
-  own flag and count), `true_residual.{solve,adjoint,tangent}`).
+  own count, which the goal holds under `max_iters`, and the same call's
+  flag, recorded as information), `true_residual.{solve,adjoint,tangent}`).
 
 Schema 8 files held the `forward` goal's float `total` to 1e-5 of
 itself and did not count the cells: they record no step from a field of

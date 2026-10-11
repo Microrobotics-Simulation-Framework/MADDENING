@@ -625,22 +625,58 @@ def test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge(rp, recorded, 
     assert rp.check_status(_check_named(at_limit, name)) == "passed"
 
 
-@pytest.mark.parametrize("flag", [False, None, 0, 1, "True"],
-                         ids=["false", "none", "0", "1", "text"])
+@pytest.mark.parametrize("iterations", [300, 301, 0, -1, None, True, 2.5, "55"],
+                         ids=["the_cap", "over_the_cap", "0", "minus_1", "none", "bool", "float",
+                              "text"])
 @pytest.mark.parametrize("side", ["unsharded", "sharded"])
 def test_the_gradient_goal_fails_a_cg_solve_that_stopped_on_its_iteration_cap(rp, recorded,
-                                                                             side, flag):
-    """The loop's own flag: a solve the cap stopped is not a solve, whatever
-    it is compared with.  Only ``true`` passes."""
+                                                                             side, iterations):
+    """The loop has two exits, its tolerance and the cap: a solve the cap
+    stopped is not a solve, whatever it is compared with.  Only a count from
+    1 to one under the cap passes (-1 is what ``differentiable=True`` reports
+    for "no count"), and the cap is read from the same entry."""
     (doc,) = recorded["gradient"]
     name = f"256 dof sharded_cg {side} solve stopped on its tolerance, not on the iteration cap"
+    entry = doc["results"][0]["sharded_cg"]
+    cap, recorded_count = entry["max_iters"], entry["solve"][side]["iterations"]
+    assert cap == 300 and 0 < recorded_count < cap
+
+    def degrade(results):
+        results[0]["sharded_cg"]["solve"][side]["iterations"] = iterations
+
+    before, after = _rederived(rp, doc, degrade)
+    assert rp.check_status(_check_named(before, name)) == "passed"
+    assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [name]
+    # one under the cap is the last count that passes ...
+    _, under = _rederived(rp, doc, lambda rs: rs[0]["sharded_cg"]["solve"][side].__setitem__(
+        "iterations", cap - 1))
+    assert rp.check_status(_check_named(under, name)) == "passed"
+    # ... and a cap lowered to the recorded count fails both sides' checks.
+    _, capped = _rederived(rp, doc, lambda rs: rs[0]["sharded_cg"].__setitem__(
+        "max_iters", recorded_count))
+    assert rp.check_status(_check_named(capped, name)) == "failed"
+
+
+@pytest.mark.parametrize("flag", [False, None, 0, "True"], ids=["false", "none", "0", "text"])
+@pytest.mark.parametrize("side", ["unsharded", "sharded"])
+def test_the_gradient_goal_does_not_read_the_recorded_flag(rp, recorded, side, flag):
+    """``converged`` is recorded as information.  From 0.4.0 it is
+    ``sharded_cg``'s float32 residual against ``rtol`` with no allowance
+    (MADD-ANO-263), which a converged solve misses by rounding when the
+    loop stopped within the float32 floor of its tolerance: on this goal's
+    system it reads within about 12 % of ``CG_RTOL``.  So the check named
+    "stopped on its tolerance, not on the iteration cap" reads the count,
+    the three float64 residuals decide convergence, and a record whose
+    flag is not true passes every check it passed."""
+    (doc,) = recorded["gradient"]
 
     def degrade(results):
         results[0]["sharded_cg"]["solve"][side]["converged"] = flag
 
     before, after = _rederived(rp, doc, degrade)
-    assert rp.check_status(_check_named(before, name)) == "passed"
-    assert [c["name"] for c in after if rp.check_status(c) == "failed"] == [name]
+    assert [rp.check_status(c) for c in before] == ["passed"] * len(before)
+    assert [(c["name"], rp.check_status(c)) for c in after] == [
+        (c["name"], "passed") for c in before]
 
 
 def test_a_gradient_file_written_before_schema_8_is_refused_twice_over(rp, recorded):

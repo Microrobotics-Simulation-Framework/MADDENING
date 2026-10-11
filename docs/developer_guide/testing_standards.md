@@ -801,10 +801,19 @@ sharding, checkpoints, the CI gates), say one of two things there as well:
 can fail there, so that a fault in the property turns a push red. It is
 therefore:
 
-- not slow-marked, and collected under the id you wrote;
+- not slow-marked, and collected under the id you wrote, by the per-push
+  lane itself: not under a path its pytest command passes `--ignore` for
+  (`tests/viz`) or that `scripts/check_anomalies.py` records in
+  `PATHS_CI_NEVER_RUNS`, not deselected, and in a file whose name matches
+  pytest's `python_files` (`test_*.py`): the lane runs `pytest tests/`,
+  which collects nothing else, even where a run naming the file would;
 - not skipped: no `skip` mark, no `skipif` whose condition is true in the
-  default lane, no `pytest.skip()` that its body (or a helper it calls, or
-  a fixture it requests) reaches on every run. A `skipif` whose condition
+  default lane, no `pytest.skip()` that its body (or a helper it calls, a
+  fixture it requests, or an xunit `setup_function` / `setup_method`)
+  reaches on every run, no `unittest.skip` and no `raise
+  unittest.SkipTest`; and no mark whose condition reads
+  `MADDENING_TEST_SHARD`, which the guard's collection unsets and the
+  sharded lanes set. A `skipif` whose condition
   is false in the default lane is fine: the multi-device tests under
   `tests/cloud/multigpu` are skipped only where there are too few devices,
   and that directory's conftest provides them. The guard takes the
@@ -815,8 +824,8 @@ therefore:
   `CONDITIONAL_BODY_SKIPS` with the reason the condition is false on a
   push;
 - not expected to fail: no `xfail` mark in any form (strict or not, with
-  `raises=`, on one parameter, on the class or the module) and no
-  `pytest.xfail()` call. An xfail test reports success when its assertions
+  `raises=` or `run=False`, on one parameter, on the class or the module),
+  no `pytest.xfail()` call and no `unittest.expectedFailure`. An xfail test reports success when its assertions
   fail, so it stays green on exactly the fault the slow test would catch.
   Name a test that passes and checks the property; if there is none, write
   the cheapest case of the slow test as one, and say in its docstring what
@@ -829,8 +838,9 @@ push that fixes the defect. "The same anomaly" is decided from the marks
 pytest collects and from the registry, never from prose: one registry id
 (`MADD-ANO-<n>`) is written in the `reason=` of the witness's mark and of
 the mark of every slow-marked parametrisation of the slow test, all of
-those marks are `strict=True`, and the registry holds that entry as `open`
-or `partially_resolved`. A slow test that is expected to pass never takes
+those marks are `strict=True`, the witness's mark does not say
+`run=False` (pytest would never run it), and the registry holds that
+entry as `open` or `partially_resolved`. A slow test that is expected to pass never takes
 the exception.
 
 `tests/compliance/test_slow_only_rule.py` checks this rule on every push

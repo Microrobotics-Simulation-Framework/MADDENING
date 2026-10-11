@@ -924,10 +924,11 @@ def _run_coupled_block_impl(
         # Stated and proved in ``coupling/_carried_fields.py``.  Static: a
         # group that carries no such field builds none of this, and its
         # compiled step is the one it was (a step counter or a PRNG key
-        # that a member advances from its pre-step state is not carried,
-        # whatever edges and fluxes the member has: the trace of the pass
-        # says so).  ``max_iterations=1`` iterates nothing and takes none
-        # of it either.
+        # that a member advances from its pre-step state is not carried
+        # unless another member reads it or a flux is computed from it,
+        # whatever other edges and fluxes the member has: the trace of the
+        # pass says so).  ``max_iterations=1`` iterates nothing and takes
+        # none of it either.
         if max_iters > 1:
             carried_chain = _carried_chain_at(state_after_first)
         else:

@@ -2707,8 +2707,10 @@ claims:
     passes.  A group in which that trace shows carried fields computed from
     one another in a closed loop is refused at compile() and listed by
     validate(); a step counter or a PRNG key a member advances from its
-    pre-step state is not carried, whatever edges and fluxes the member has,
-    and its group steps as it did.
+    pre-step state is on no such loop, and is not carried unless another
+    member reads it or a flux is computed from it, whatever other edges and
+    fluxes the member has; a pair exchanging fluxes both ways with such a
+    leaf steps as it did.
   sources:
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
     - src/maddening/core/coupling/_carried_fields.py::carried_nonfloat_chain

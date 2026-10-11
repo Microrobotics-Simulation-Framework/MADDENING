@@ -19108,8 +19108,10 @@ anomalies:
       (`jax.make_jaxpr`, walked as the parameter probes walk a step), not
       assumed from the edges: a flag a flux producer's own flux is
       computed from is carried; a step counter or a PRNG key a member
-      advances from its pre-step state is not, whatever edges and fluxes
-      the member has, and a group of two members exchanging boundary
+      advances from its pre-step state is not unless another member reads
+      it or a flux is computed from it (it is then carried with nothing
+      feeding it, on no loop), whatever other edges and fluxes the member
+      has, and a group of two members exchanging boundary
       fluxes both ways with such a leaf steps bit for bit as it did
       (state, passes, verdict and residual, both solvers, both sweeps,
       both schedules, against the tree before this change).  A group in

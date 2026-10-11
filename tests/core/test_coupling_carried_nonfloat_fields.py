@@ -540,7 +540,8 @@ class FluxPair(SimulationNode):
         if self._flux_reads_count:
             flux = flux + 0.125 * state["n"].astype(_F32)
         if self._flux_reads_input:
-            flux = flux + 0.5 * boundary_inputs["u"]
+            # With a default: ``validate()`` calls a flux hook with no inputs.
+            flux = flux + 0.5 * boundary_inputs.get("u", _zero(_F32))
         return {"f": flux.astype(_F32)}
 
 
@@ -624,11 +625,14 @@ def test_a_count_computed_from_a_flux_that_reads_it_is_a_loop_and_is_refused(sol
     ``a``'s flux reads ``n``; ``b``'s flux reads its input, which is
     ``a``'s flux; ``a``'s count reads its input, which is ``b``'s flux.  The
     trace shows ``n`` to be an operand of its own value, and no number of
-    evaluations gives it a value at an iterate.
+    evaluations gives it a value at an iterate.  ``validate()`` finds
+    nothing else wrong with the graph: the refusal is its one error.
     """
     gm = _flux_pair(
         FluxPair("a", "count", flux_reads_count=True, count_reads_input=True),
         FluxPair("b", flux_reads_input=True), solver=solver, mode=mode)
+    (error,) = [issue for issue in gm.validate() if issue.startswith("ERROR")]
+    assert "a.n (int32) -> a.n (int32)" in error
     with pytest.raises(ValueError, match=r"a\.n \(int32\) -> a\.n \(int32\)") as refused:
         gm.compile()
     assert "read from one trace of the group's pass" in str(refused.value)

@@ -70,7 +70,9 @@ class CouplingGroup:
         such fields included, under either ``solver``.  Which fields
         those are is read from a trace of the group's pass: a step
         counter or a PRNG key that a node advances from its pre-step
-        state is not one, whatever edges and fluxes the node has.
+        state is not one unless another member reads it or a boundary
+        flux is computed from it, and is on no loop either way,
+        whatever edges and fluxes the node has.
         Where the trace shows such fields computed from one another in
         a closed loop (two members that each compute a flag from the
         flag the other hands them) they have no value at an iterate,

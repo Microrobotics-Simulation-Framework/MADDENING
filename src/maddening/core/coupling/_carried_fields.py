@@ -18,9 +18,12 @@ Write the group's state as ``s = (x, c, o)``:
   computed from, where another member reads that flux;
 * ``o``, the remaining non-floating fields.  No pass reads them (a member
   integrates from its pre-step state, not from its own iterate), so they
-  are outputs only: ``P`` is a function of ``(x, c)``.  A step counter and
-  a PRNG key that a node advances from its pre-step state are of this
-  kind, whatever edges and fluxes the node has.
+  are outputs only: ``P`` is a function of ``(x, c)``.  A step counter or
+  a PRNG key that a node advances from its pre-step state is of this kind
+  unless a pass reads it from the iterate -- another member across an
+  edge, or a boundary flux computed from it.  Then it is carried, with no
+  field feeding it (depth one), and so never on a loop.  Edges and fluxes
+  of the node that do not read it change neither.
 
 How "reads" is established
 --------------------------

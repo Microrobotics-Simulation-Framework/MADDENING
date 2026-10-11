@@ -39,6 +39,8 @@ _GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid", "exchange", "fo
 #: The meshes every wrapper goal runs at its smallest size on four devices,
 #: as (devices along spatial axis 0, along spatial axis 1).
 _MESHES = {"1d": [4, 1], "1d-axis1": [1, 4], "2d-flat": [1, 4], "2d": [2, 2]}
+#: ... and the crossed pencil, on which the stencil goal runs one case.
+_CROSSED = {"2d-crossed": [2, 2]}
 #: The grid of 256 cells on four devices: never square (nx = ny + 4).
 _SHAPE = (16, 20)
 
@@ -90,7 +92,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 11
+    assert doc["schema_version"] == 12
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -208,21 +210,23 @@ def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
                                           *(("field-halo2", b) for b in ends),
                                           # and under the zero fill, with two integrals
                                           # the wrapper stacks over the mesh
-                                          ("field-shares", "zero"))}
-    assert len(doc["results"]) == 32
+                                          ("field-shares", "zero"))} | {
+        # the static split along the second axis, on the pencil; the crossed pencil
+        ("field-mask1", "2d", "periodic"), ("field", "2d-crossed", "periodic")}
+    assert len(doc["results"]) == 34
     for (node, mesh, boundary), s in cases.items():
         assert tuple(s["shape"]) == _SHAPE and s["cells"] == 16 * 20
-        assert s["mesh_shape"] == _MESHES[mesh]
+        assert s["mesh_shape"] == {**_MESHES, **_CROSSED}[mesh]
         assert s["input_partitioned"] is True
         fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"},
-                  "field-halo2": {"f", "averages"},
+                  "field-halo2": {"f", "averages"}, "field-mask1": {"f", "averages"},
                   "field-shares": {"f", "averages", "shares", "strips"}}[node]
         assert set(s["forward"]["parity"]) == fields
         assert all(p["max_rel"] < 1e-5 for p in s["forward"]["parity"].values())
         assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
         assert s["gradient"]["parity_grad_parameter"] < 1e-5
         assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity",
-                                  "field-halo2": "diffusivity",
+                                  "field-halo2": "diffusivity", "field-mask1": "diffusivity",
                                   "field-shares": "diffusivity"}[node]
         for side in ("sharded", "unsharded"):
             _check_timing(s["forward"][side]["rollout"])
@@ -449,8 +453,13 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
         smallest += [(256, "field-halo2", b, mesh) for b in rp.STENCIL_BOUNDARIES]
         # and once under the zero fill, with integrals the wrapper stacks a shard
         smallest.append((256, "field-shares", "zero", mesh))
+    # where the pencil fits: its static split along the second axis, and the crossed pencil
+    smallest += [(256, "field-mask1", "periodic", "2d"), (256, "field", "periodic", "2d-crossed")]
     assert rp.stencil_cases([1024, 256], 4) == [(1024, "field", "periodic", "2d"), *smallest]
-    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2", "field-shares"}
+    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2", "field-shares",
+                                     "field-mask1"}
+    assert rp.stencil_goal_meshes(4) == (*_MESHES, *_CROSSED)
+    assert rp.stencil_goal_meshes(2) == rp.meshes_that_fit(2) == ("1d", "1d-axis1", "2d-flat")
     assert rp.FIELD_BOUNDARIES == (*rp.STENCIL_BOUNDARIES, "zero")
     # no pencil mesh on 2 or 3 devices: the other three carry every case,
     # and the larger sizes run on the 1-D mesh
@@ -467,7 +476,9 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
     assert gpu[4:7] == [(100_000, "field-halo2", b, "1d") for b in rp.STENCIL_BOUNDARIES]
     assert gpu[-2:] == [(300_000, "field", "periodic", "2d"),
                         (1_000_000, "field", "periodic", "2d")]
-    assert len(gpu) == 4 * 8 + 2 == 34
+    assert gpu[-4:-2] == [(100_000, "field-mask1", "periodic", "2d"),
+                          (100_000, "field", "periodic", "2d-crossed")]
+    assert len(gpu) == 4 * 8 + 2 + 2 == 36
     # the graph goals: every mesh at the smallest size, the pencil after
     assert rp.graph_cases([256, 1024], 4) == [(256, m) for m in _MESHES] + [(1024, "2d")]
     assert rp.graph_cases([256], 3) == [(256, m) for m in ("1d", "1d-axis1", "2d-flat")]

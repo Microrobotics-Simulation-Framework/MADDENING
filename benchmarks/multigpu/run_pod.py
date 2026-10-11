@@ -242,7 +242,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 #: Exit status of a run this runner refused before a check decided anything
 #: (argparse's own status for an option it does not take).

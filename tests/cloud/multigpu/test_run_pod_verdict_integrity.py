@@ -9,7 +9,7 @@ checks, all but one check deleted, the stencil cases of an older runner,
 a goal from another commit, ``n_devices`` 4 on an environment that saw one
 device, or ``schema_version`` 99 all read ``CLOSED``.
 
-``run_pod_record/`` is a real ``--goal all --dry-run --cells 256 1024``
+``run_pod_record/`` is a real ``--goal all --dry-run`` (its default sizes, 256 and 961)
 output of this runner (``environment.hostname`` and ``config.out``
 replaced).  Relabelled as a real 4-GPU run it must close all six items --
 the control that shows the rules are not simply refusing everything.  Each
@@ -22,7 +22,7 @@ first test fails: the recorded files are no longer what the runner would
 write, which is exactly what ``--summarise`` now refuses.  Regenerate them::
 
     JAX_PLATFORMS=cpu python benchmarks/multigpu/run_pod.py --goal all --dry-run \\
-        --cells 256 1024 --out tests/cloud/multigpu/run_pod_record
+        --out tests/cloud/multigpu/run_pod_record
 
 and replace ``environment.hostname`` and ``config.out`` in each file.
 """
@@ -366,7 +366,7 @@ def _the_cases_with_a_halo_of_two_left_out(rp, d):
     st = d["stencil"][0]
     st["results"] = [r for r in st["results"] if r["node"] != "field-halo2"]
     st["checks"] = rp.stencil_checks(st["results"], 4)
-    assert len(st["checks"]) == 226 and all(c["passed"] for c in st["checks"])
+    assert len(st["checks"]) == 246 and all(c["passed"] for c in st["checks"])
     return ["stencil"]
 
 
@@ -386,13 +386,13 @@ _SEEDS = [
     (_r3_results_disagree_with_checks, "check value(s) disagree with its results"),
     (_r4_all_but_one_check_deleted,
      "lacks case(s) the runner runs for cells [256, 961] on 4 devices: field 1d 4x1 "
-     "16x20 edge, field 1d 4x1 16x20 dirichlet, lbm 1d 4x1 16x20 periodic (+29 more)"),
-    (_r5_an_older_runner_and_commit, "schema_version 3, not 11"),
+     "16x20 edge, field 1d 4x1 16x20 dirichlet, lbm 1d 4x1 16x20 periodic (+31 more)"),
+    (_r5_an_older_runner_and_commit, "schema_version 3, not 12"),
     (_r6_one_goal_from_another_commit_and_host, "its files come from 2 commits"),
     (_r7_more_devices_than_the_environment_saw,
      "n_devices 4, but its environment saw 1 device(s)"),
     (_r8_partitioned_checks_deleted, "check(s) the runner derives from its results"),
-    (_r9_schema_from_the_future, "schema_version 99, not 11"),
+    (_r9_schema_from_the_future, "schema_version 99, not 12"),
     (_config_says_fewer_sizes_than_were_run,
      "holds case(s) the runner does not run for its config: field 2d 2x2 32x36 periodic"),
     (_a_check_the_runner_never_emits,
@@ -738,13 +738,13 @@ def test_a_gradient_file_written_before_schema_8_is_refused_twice_over(rp, recor
     assert rp.goal_verdict([old]) == "INVALID"
     old["schema_version"] = 7
     assert rp.record_problems(old) == [
-        "schema_version 7, not 11: written by another version of this runner",
+        "schema_version 7, not 12: written by another version of this runner",
         "its results cannot be read (KeyError: 'solve')"]
     # the current record with only its schema number taken back is refused for that alone
     relabelled = copy.deepcopy(recorded["gradient"][0])
     relabelled["schema_version"] = 7
     assert rp.record_problems(relabelled) == [
-        "schema_version 7, not 11: written by another version of this runner"]
+        "schema_version 7, not 12: written by another version of this runner"]
     assert rp.goal_verdict([relabelled]) == "INVALID"
 
 
@@ -763,13 +763,13 @@ def test_a_forward_file_written_before_schema_9_is_refused_twice_over(rp, record
     assert rp.goal_verdict([old]) == "INVALID"
     old["schema_version"] = 8
     assert rp.record_problems(old) == [
-        "schema_version 8, not 11: written by another version of this runner",
+        "schema_version 8, not 12: written by another version of this runner",
         "its results cannot be read (KeyError: 'ones')"]
     # the current record with only its schema number taken back is refused for that alone
     relabelled = copy.deepcopy(recorded["forward"][0])
     relabelled["schema_version"] = 8
     assert rp.record_problems(relabelled) == [
-        "schema_version 8, not 11: written by another version of this runner"]
+        "schema_version 8, not 12: written by another version of this runner"]
     assert rp.goal_verdict([relabelled]) == "INVALID"
 
 
@@ -797,12 +797,12 @@ def test_an_unstructured_goals_file_written_before_schema_10_is_refused_twice_ov
     assert rp.goal_verdict([old]) == "INVALID"
     old["schema_version"] = 9
     assert rp.record_problems(old) == [
-        "schema_version 9, not 11: written by another version of this runner", unreadable]
+        "schema_version 9, not 12: written by another version of this runner", unreadable]
     # the current record with only its schema number taken back is refused for that alone
     relabelled = copy.deepcopy(now)
     relabelled["schema_version"] = 9
     assert rp.record_problems(relabelled) == [
-        "schema_version 9, not 11: written by another version of this runner"]
+        "schema_version 9, not 12: written by another version of this runner"]
     assert rp.goal_verdict([relabelled]) == "INVALID"
     # and a record that says something other than yes or no is no record of it
     odd = copy.deepcopy(now)

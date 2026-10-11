@@ -5577,7 +5577,7 @@ claims:
 - id: RPD-030
   area: run_pod-records
   claim: >-
-    "Schema of the JSON (schema_version 11)": the common keys (goal, dry_run,
+    "Schema of the JSON (schema_version 12)": the common keys (goal, dry_run,
     allow_fewer_devices, n_devices, environment with hostname ...
     git_commit, config, wall_s, results, checks {name, value, limit, sense,
     passed}, passed) on every file.

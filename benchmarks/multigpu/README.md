@@ -98,6 +98,14 @@ source, the lattice's body force, the coupled field's `ambient` -- differs
 on every block of every mesh.  The smallest size runs every mesh; the
 larger sizes run the pencil only.
 
+The `stencil` goal runs one case more on a fifth mesh, `2d-crossed`
+(`CROSSED_MESH`, 2 × 2 on four devices): the pencil with its mesh axes
+crossed, its first mesh axis splitting spatial axis 1 and its second
+spatial axis 0, the one `axis_map` whose order is not the mesh's.  And
+one more on the pencil, `field-mask1`, whose static is split along the
+second axis `axis_map` lists; every other case splits it along the first.
+Both run `Field2D` with periodic ends at the smallest size only.
+
 ### What a broken wrapper does to the goals
 
 A sharded-versus-unsharded comparison proves the wrapper only on the paths
@@ -152,6 +160,19 @@ once relabelled as a GPU run:
   own value is 0.5), on every step of `forward`, `gradient` and
   `indivisible`.  The `gradient` goal's rollout is differentiated with
   respect to its start, the source and the weight in one reverse pass.
+
+Three faults passed every goal on four devices until schema 12, each on a
+part of a path the table below marked run that no goal's node carried
+into an answer: a sharded static halo-exchanged along the first mesh axis
+`axis_map` lists whatever axis it is split along (every case split it
+along that axis), the fields split as if every mesh's axes were in the
+spatial axes' order (every 2-D mesh mapped them in order), and a REDUCED
+domain integral carried in the state handed back to the node as zeros
+(`Field2D` read back the per-shard one only).  The `stencil` goal now runs
+the `field-mask1` case and the `2d-crossed` case (above), and in its
+`field-shares` cases `Field2D` relaxes towards the mean in its old
+`averages`, the reduced integral, read back the same way sharded and
+unsharded.
 
 Four more were on no goal's path until schema 11:
 
@@ -909,7 +930,7 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (11);
+* be on the current `schema_version` (12);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
@@ -999,7 +1020,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 11)
+## Schema of the JSON (schema_version 12)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -1043,11 +1064,12 @@ compile without execution.
   `parity_loss`, `parity_grad`, `model.<side>.{f, averages, u, loss,
   grad}`.
 * `stencil.json` results, one per case: `node` (`field`, `lbm`,
-  `field-halo2`, the field with a halo of two cells, or `field-shares`,
-  the field under the zero fill with the integrals `shares` and `strips`
-  stacked over the mesh, each compared slot by slot under
-  `forward.parity`), `mesh`
-  (`1d`, `1d-axis1`, `2d-flat` or `2d`), `mesh_shape`, `cells`, `shape`,
+  `field-halo2`, the field with a halo of two cells, `field-mask1`, the
+  field with its static split along the second axis `axis_map` lists, or
+  `field-shares`, the field under the zero fill with the integrals
+  `shares` and `strips` stacked over the mesh, each compared slot by slot
+  under `forward.parity`), `mesh`
+  (`1d`, `1d-axis1`, `2d-flat`, `2d` or `2d-crossed`), `mesh_shape`, `cells`, `shape`,
   `boundary`
   (`periodic`, `edge` or `dirichlet`), `steps`, `grad_steps`,
   `parameter` (`diffusivity` or `viscosity`), `input_partitioned`,

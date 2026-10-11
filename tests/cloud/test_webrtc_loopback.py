@@ -202,6 +202,7 @@ class Peer:
         self._stack = contextlib.ExitStack()
         self._send_lock = threading.Lock()
         self._reader: Optional[threading.Thread] = None
+        self._decode: Any = None
 
         self.pipe = Gst.Pipeline.new("peer")
         self.webrtc = Gst.ElementFactory.make("webrtcbin", "peer-webrtc")
@@ -288,9 +289,10 @@ class Peer:
         if pad.get_direction() != Gst.PadDirection.SRC:
             return
         decode = Gst.parse_bin_from_description(
-            "queue ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! "
+            "queue ! rtph264depay ! h264parse name=parse ! avdec_h264 ! videoconvert ! "
             "video/x-raw,format=RGB ! appsink name=frames emit-signals=true sync=false",
             True)
+        self._decode = decode
         self.pipe.add(decode)
         decode.sync_state_with_parent()
         decode.get_by_name("frames").connect("new-sample", self._on_sample)
@@ -312,6 +314,13 @@ class Peer:
             finally:
                 buffer.unmap(info)
         return Gst.FlowReturn.OK
+
+    def h264_profile(self) -> Optional[str]:
+        """The H.264 profile of the stream received, as ``h264parse`` reads it."""
+        if self._decode is None:
+            return None
+        caps = self._decode.get_by_name("parse").get_static_pad("src").get_current_caps()
+        return None if caps is None else caps.get_structure(0).get_value("profile")
 
     def pipeline_errors(self) -> list[str]:
         """Errors the peer's pipeline posted (no main loop runs here: polled)."""
@@ -415,6 +424,9 @@ def _assert_decoded_the_palette(peer: Peer) -> None:
     steps = [(b - a) % len(PALETTE) for a, b in zip(runs, runs[1:])]
     assert all(1 <= step <= 2 for step in steps), (
         f"the decoded colours {runs} are not in the order they were pushed")
+    # The answer promises the viewer constrained baseline (42e01f), the one
+    # profile every browser decodes; the stream must be what it promised.
+    assert peer.h264_profile() == "constrained-baseline", peer.h264_profile()
 
 
 def _server_remote_candidates(session: SelkiesSession) -> set[tuple[str, int, str]]:
@@ -620,6 +632,74 @@ def test_a_frame_of_the_wrong_size_is_refused(started):
         session.update_framebuffer_cpu(b"\x00" * (160 * 120 * 4), 160, 120, "RGBA")
     with pytest.raises(ValueError, match="bytes"):
         session.update_framebuffer_cpu(b"\x00" * 10, WIDTH, HEIGHT, "RGBA")
+
+
+# ---------------------------------------------------------------------------
+# Ordering inside the negotiator (direct calls, no peer)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Stands in for a signaling connection: records what would be sent."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.closed: list[tuple[int, str]] = []
+
+    def send(self, message: dict) -> None:
+        self.sent.append(message)
+
+    def close(self, code: int, reason: str) -> None:
+        self.closed.append((code, reason))
+
+
+class _RecordingWebRTC:
+    """Stands in for ``webrtcbin``: records the signals emitted on it."""
+
+    def __init__(self) -> None:
+        self.emitted: list[tuple] = []
+
+    def emit(self, *args) -> None:
+        self.emitted.append(args)
+
+
+def _negotiator_with_a_viewer():
+    from maddening.cloud.selkies_session import _WebRTCNegotiator
+
+    negotiator = _WebRTCNegotiator(lambda payload_type: "", lambda appsrc, encoder: None)
+    client, webrtc = _RecordingClient(), _RecordingWebRTC()
+    negotiator._client, negotiator._webrtc = client, webrtc  # noqa: SLF001
+    negotiator._mids = {"video0": 0}  # noqa: SLF001
+    return negotiator, client, webrtc
+
+
+def test_candidates_gathered_before_the_answer_is_sent_follow_it():
+    """A browser rejects a candidate for a description it does not have yet.
+
+    On a loopback run webrtcbin happens to gather after the answer is
+    applied, so the end-to-end test cannot see this ordering broken; the
+    negotiator's own steps are driven here in the order that would.
+    """
+    negotiator, client, webrtc = _negotiator_with_a_viewer()
+    negotiator._local_ice(webrtc, 0, "candidate:1 1 UDP 1 192.0.2.1 5000 typ host")
+    assert client.sent == []
+    negotiator._answer_applied(webrtc, None, "v=0\r\n")
+    assert [m["type"] for m in client.sent] == ["sdp", "ice"]
+    assert client.sent[1]["candidate"] == {
+        "candidate": "candidate:1 1 UDP 1 192.0.2.1 5000 typ host",
+        "sdpMLineIndex": 0, "sdpMid": "video0"}
+
+
+def test_viewer_candidates_that_arrive_before_the_offer_is_applied_are_applied_after_it():
+    negotiator, client, webrtc = _negotiator_with_a_viewer()
+    early = {"type": "ice", "candidate": {"candidate": "candidate:1 1 UDP 1 192.0.2.1 5000 typ host",
+                                          "sdpMid": "video0"}}
+    negotiator._remote_ice(client, early)
+    assert webrtc.emitted == []
+    negotiator._remote_description_set(webrtc, None)
+    assert webrtc.emitted[0] == ("add-ice-candidate", 0,
+                                 "candidate:1 1 UDP 1 192.0.2.1 5000 typ host")
+    assert webrtc.emitted[1][0] == "create-answer"
 
 
 # ---------------------------------------------------------------------------

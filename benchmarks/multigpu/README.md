@@ -164,7 +164,9 @@ before they build anything (`renumbered: true` in the record): the same
 graph and partition, each shard's cells in the order they had, the node's
 start, source and loss weights laid over the new numbering.  A partition
 with a pad row (100,489 cells) runs with its cells as the partitioner left
-them.
+them.  Both sizes of the default dry run divide by four, so under reverse
+Cuthill-McKee `forward` and `gradient` run renumbered there; `--cells 225
+256` adds a size that does not (the seeded-fault tests run both).
 
 | fault (seed) | where | goals that must fail | items |
 |---|---|---|---|

@@ -533,12 +533,14 @@ def never_run(packages: list[str]) -> dict[str, list[str]]:
     """``{package: [paths no CI lane runs]}`` for the packages they touch.
 
     Read from ``check_anomalies.PATHS_CI_NEVER_RUNS``, the one record of
-    the paths every CI test command ignores, which
-    ``tests/compliance/test_gate_scripts.py`` derives from
-    ``.github/workflows`` and holds equal.  A package maps to
-    ``["tests/<name>"]`` when no lane runs any of it, and to the sub-paths
-    when a lane runs the rest.  This page listed ``tests/viz/`` as a test
-    package, with nothing to say no lane ever ran it (audit_040_p4_4, L1).
+    the paths no CI lane runs (a directory every test command ignores, a
+    test file that skips itself at import for want of a package no job
+    installs), which ``tests/compliance/test_gate_scripts.py`` derives from
+    ``.github/workflows``, the extras and the test files and holds equal.
+    A package maps to ``["tests/<name>"]`` when no lane runs any of it, and
+    to the sub-paths when a lane runs the rest.  This page listed
+    ``tests/viz/`` as a test package, with nothing to say no lane ever ran
+    it (audit_040_p4_4, L1).
     """
     out: dict[str, list[str]] = {}
     for name in packages:
@@ -554,6 +556,17 @@ def never_run(packages: list[str]) -> dict[str, list[str]]:
     return out
 
 
+def _never_run_path(path: str) -> str:
+    """One sub-path no lane runs, as the page writes it: a directory with
+    its slash, a file with the package its import waits for."""
+    needs = _anomaly_gate.IMPORTS_NO_CI_JOB_INSTALLS.get(path)
+    if needs is None:
+        return f"`{path}/`"
+    wanted = ", ".join(f"`{module}`" for module in needs)
+    return (f"`{path}` (it skips itself where {wanted} is not installed, and no CI job "
+            f"installs it)")
+
+
 def render_test_organization(packages: list[str]) -> str:
     unrun = never_run(packages)
     rows = []
@@ -565,7 +578,7 @@ def render_test_organization(packages: list[str]) -> str:
                       f"so nothing in it is verification evidence")
         elif name in unrun:
             scope += " — **not run by CI**: " + ", ".join(
-                f"`{path}/`" for path in unrun[name])
+                _never_run_path(path) for path in unrun[name])
         rows.append([f"`tests/{name}/`", scope])
     return _table(["Directory", "Scope"], rows)
 
@@ -613,9 +626,13 @@ def _test_packages_row(packages: list[str]) -> str:
         text += (f"; the CI test lanes collect {len(packages) - len(whole)} "
                  f"of them, and no lane collects "
                  + ", ".join(f"`tests/{n}/`" for n in whole))
-    if part:
-        text += ("; no lane collects "
-                 + ", ".join(f"`{p}/`" for n in part for p in unrun[n]))
+    skipped = _anomaly_gate.IMPORTS_NO_CI_JOB_INSTALLS
+    ignored = [p for n in part for p in unrun[n] if p not in skipped]
+    if ignored:
+        text += "; no lane collects " + ", ".join(f"`{p}/`" for p in ignored)
+    files = [p for n in part for p in unrun[n] if p in skipped]
+    if files:
+        text += "; every lane skips " + ", ".join(f"`{p}`" for p in files)
     return text
 
 

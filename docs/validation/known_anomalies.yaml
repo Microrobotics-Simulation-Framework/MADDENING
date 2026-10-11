@@ -19151,4 +19151,67 @@ anomalies:
       - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_value_too_long_to_echo_is_not_walked"
       - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_small_refused_value_is_still_echoed_by_every_kind_of_parameter"
       - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_handler_cuts_a_list_of_errors_however_it_came_about"
+  - anomaly_id: "MADD-ANO-275"
+    title: "IQN acceleration under the Jacobi schedule can stall, unconverged, on a coupling group the plain Jacobi loop solves"
+    description: >
+      With `iteration_mode="jacobi"`, `acceleration="iqn-ils"` or
+      `"iqn-imvj"` can turn a group that the plain Jacobi loop solves into
+      one that does not converge.  Measured on a float32 pair of `tanh`
+      nodes with 2 and 4 entries, each reading the other through a matrix
+      mapping (default norm and solver; the same with dense or sparse
+      mappings, or with the matrices in edge transforms): plain Jacobi is
+      5e-8 from the fixed point after 12 passes, while `iqn-ils` under
+      Jacobi takes the error from 0.82 at a cap of 3 passes to 4.0 at a cap
+      of 5 and is still 0.18 away at a cap of 40.  At tolerances of 1e-4
+      and 1e-6 with `max_iterations=50` both IQN accelerations stop at the
+      cap with a residual of 0.18, 0.14 from the fixed point.  Gauss-Seidel
+      with either IQN converges on the pair in 6 to 10 passes, and Jacobi
+      with no acceleration (9 to 12) or with Aitken (33 to 35) does too.
+      The stall is occasional: 2 of 7 pairs drawn with those sizes, none of
+      36 pairs of equal sizes.  It does not hang on one rounding: with
+      every constant of the pair perturbed by a relative 1e-7 to 1e-2,
+      neither IQN acceleration converged on any of 48 pairs and plain
+      Jacobi converged on all of them.
+
+      It is loud: the report says `converged=False` with
+      `iterations == max_iterations`, and `strict_convergence=True` raises.
+      Registered because the coupling guide presented the combination as
+      working ("marginally better than Gauss-Seidel + IQN on the chain and
+      ring families"), and here the accelerator loses a solve the plain
+      loop wins.  The guide's paragraph on Jacobi with IQN now says so.
+
+      The releases from 0.1.0 to 0.3.1 end the same pair the same way: 50
+      passes of 50 under either IQN acceleration with a residual of 0.44,
+      0.96 from the fixed point, where their plain Jacobi loop stops after
+      11 passes, 7e-7 away (each tag run with the matrices in edge
+      transforms; those releases report `iterations` and `residual` for a
+      group built with `diagnostics=True`, and have no `converged` key).
+      Aitken under Jacobi ended there as well in those releases and
+      converges in 0.4.0.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      `minor`: the solve is reported unconverged (`converged=False` at the
+      cap; an error under `strict_convergence=True`), so nothing wrong is
+      presented as a result.  What is lost is a solve that another
+      configuration of the same group completes.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.acceleration"
+      - "maddening.core.coupling.group.CouplingGroup.iteration_mode"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Read `converged` (or set `strict_convergence=True`).  Where an IQN
+      acceleration under `iteration_mode="jacobi"` ends at the cap on a
+      group the plain Jacobi loop solves, use
+      `iteration_mode="gauss-seidel"` with IQN, or keep Jacobi with
+      `acceleration="none"` or `"aitken"`.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      # A strict xfail: a change that ends the stall is noticed.
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_iqn_under_jacobi_converges_where_plain_jacobi_does"
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_iqn_under_jacobi_reports_the_solve_it_did_not_finish"
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_strict_convergence_raises_on_the_stalled_solve"
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_the_plain_loop_and_the_recommended_combinations_converge_on_the_pair"
     github_issue: null

@@ -281,7 +281,7 @@ def _cg_iterations(
     x0: jax.Array,
     rtol: float,
     atol: Any,  # a float, or a traced scalar in the solve's frame
-    max_iters: int,
+    max_iters: Any,  # an int, or a traced count (the default route's cap)
     preconditioner: Optional[Callable[[jax.Array], jax.Array]],
 ) -> tuple[jax.Array, jax.Array]:
     """The preconditioned conjugate-gradient iteration on a global sharded
@@ -336,7 +336,7 @@ def _cg_loop(
     x0: jax.Array,
     rtol: float,
     atol: Any,  # a float, or a traced scalar in the solve's frame
-    max_iters: int,
+    max_iters: Any,  # an int, or a traced count (the default route's cap)
     preconditioner: Optional[Callable[[jax.Array], jax.Array]],
 ) -> SharedSolveResult:
     """The CG loop backend: :func:`_cg_iterations`, and the report of
@@ -592,70 +592,64 @@ def _lineax_cg_or_the_loop_where_it_breaks_down(
     (``_framed`` hands a non-finite ``b`` on as zeros), so a non-finite
     value is lineax's breakdown or an operator neither route can solve.
 
-    Where lineax's value is finite its result is returned as it is: the
-    lineax solve is the same program as ``backend="lineax"`` and nothing
-    of the other branch touches it.
+    Where lineax's value is finite its result is returned as it is, all
+    four fields: the lineax solve is the same program as
+    ``backend="lineax"``, and what follows only selects.
 
-    Otherwise the loop solves the system from ``x0`` and:
+    Otherwise the loop solves the system from ``x0`` and the result is
+    :func:`_cg_loop`'s: its ``value``, its ``iters``, and
+    ``residual_norm`` / ``converged`` from
+    :func:`_residual_of_the_system` on that value (one extra product, NOT
+    the loop's recursively updated residual, which reads under the
+    tolerance on solves that have not met it, MADD-ANO-263).
 
-    * ``value`` is the loop's;
-    * ``iters`` is the loop's count;
-    * ``residual_norm`` and ``converged`` are
-      :func:`_residual_of_the_system` of that value -- one extra product,
-      NOT the loop's recursively updated residual (which reads under the
-      tolerance on solves that have not met it, MADD-ANO-263).
+    **How the choice is made.**  Called eagerly the predicate ("is
+    lineax's value all finite?") is a number and the branch is taken in
+    Python: where lineax answered, nothing else runs.  Under a trace
+    (``jit``, ``vmap``, a ``shard_map`` body) the predicate is traced, and
+    the loop is run with an iteration cap of ``max_iters`` where lineax
+    broke down and of ZERO where it answered; each field is then selected
+    with ``jnp.where`` on the predicate.  A loop capped at zero does no
+    iteration, but its set-up and its report are still executed: a
+    default call that does not fall back costs TWO operator products more
+    than ``backend="lineax"`` (``b - A x0`` before the loop, and the
+    product of the report), counted by
+    ``tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py``.
 
-    Under a trace (``jit``, ``vmap``, ``grad``) the choice is one
-    ``lax.cond`` on the traced predicate, so one branch executes; both are
-    compiled, and under ``vmap`` a ``cond`` is a select and both run.
-    Called eagerly the predicate is a number and the branch is taken in
-    Python: where lineax answered, nothing else is traced or compiled.
-
-    The loop runs inside ``lax.custom_linear_solve``: lineax's own solve
-    is differentiable in both modes, a ``lax.while_loop`` has no
-    transpose, and a ``cond`` needs both branches transposable even where
-    only one is taken.  That keeps what could be differentiated through
-    the default route differentiable; it does not make a derivative
-    through a solve that fell back right without ``differentiable=True``
-    (lineax's own tangent solve of the system it broke down on still
-    runs, and raises or is NaN).
+    Only a ``lax.while_loop`` and ``jnp.where`` are used, which is what
+    ``backend="loop"`` uses, so the default route can be traced wherever
+    the loop backend can: inside a ``shard_map`` body too (one solve per
+    device).  A ``lax.cond`` between the two solvers cannot be traced
+    there (lineax's result and the loop's differ in the mesh axes they
+    are typed as varying over), and neither can a
+    ``lax.custom_linear_solve`` around the loop; the first form of this
+    fallback used both and raised on every default call in such a body.
+    Nothing here needs to be differentiable: a call without
+    ``differentiable=True`` refuses to be differentiated
+    (:func:`_refusing_a_derivative`), and with it the whole route sits
+    inside ``lax.custom_linear_solve`` and is never differentiated.
     """
     by_lineax = _lineax_solve(
         "cg", matvec, b, rtol=rtol, atol=atol, restart=0, max_iters=max_iters,
     )
     broke_down = jnp.logical_not(jnp.all(jnp.isfinite(by_lineax.value)))
-
-    def _as_lineax_answered(_):
-        return (by_lineax.value, by_lineax.converged, by_lineax.iters,
-                by_lineax.residual_norm)
-
-    def _by_the_loop(_):
-        def _loop_value_and_count(mv, rhs):
-            return _cg_iterations(
-                mv, rhs, x0=x0, rtol=rtol, atol=atol,
-                max_iters=max_iters, preconditioner=None,
-            )
-
-        # Indexed, not unpacked: the checker infers no return type for
-        # ``custom_linear_solve`` and refuses to iterate over it.
-        solved = lax.custom_linear_solve(
-            matvec, b, _loop_value_and_count, symmetric=True, has_aux=True,
+    if not isinstance(broke_down, jax.core.Tracer):
+        if not bool(broke_down):
+            return by_lineax
+        return _cg_loop(
+            matvec, b, x0=x0, rtol=rtol, atol=atol, max_iters=max_iters,
+            preconditioner=None,
         )
-        value, iters = solved[0], solved[1]
-        res_norm, converged = _residual_of_the_system(
-            matvec, b, value, rtol=rtol, atol=atol,
-        )
-        return value, converged, iters, res_norm
-
-    if isinstance(broke_down, jax.core.Tracer):
-        answer = lax.cond(broke_down, _by_the_loop, _as_lineax_answered, None)
-    elif bool(broke_down):
-        answer = _by_the_loop(None)
-    else:
-        return by_lineax
-    value, converged, iters, res_norm = answer
+    by_loop = _cg_loop(
+        matvec, b, x0=x0, rtol=rtol, atol=atol,
+        max_iters=jnp.where(broke_down, max_iters, 0), preconditioner=None,
+    )
     return SharedSolveResult(
-        value=value, converged=converged, iters=iters, residual_norm=res_norm,
+        value=jnp.where(broke_down, by_loop.value, by_lineax.value),
+        converged=jnp.where(broke_down, by_loop.converged, by_lineax.converged),
+        iters=jnp.where(broke_down, by_loop.iters, by_lineax.iters),
+        residual_norm=jnp.where(
+            broke_down, by_loop.residual_norm, by_lineax.residual_norm),
     )
 
 

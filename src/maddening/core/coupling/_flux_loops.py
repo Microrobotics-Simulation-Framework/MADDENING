@@ -227,11 +227,14 @@ these are its edges:
   no update reads (directly or through other fluxes) is refused though
   it changes no state.
 
-(A seeding sweep hands a member its inputs without the ones a flux not
-yet computed delivers, so a hook must return its fluxes without such a
-key, ``boundary_inputs.get(...)``; what it returns then is replaced in
-sweep 2.  ``validate()`` asks every flux hook for its flux names with no
-inputs at all, and refuses by name one that indexes an input.)
+(The first seeding sweep hands a member its inputs without the ones
+only a flux not yet computed delivers, and an input an earlier edge
+reaches holds that edge's value there, though a later edge replaces it
+from the second sweep on; so a hook must return its fluxes without such
+a key, ``boundary_inputs.get(...)``, and at whatever shape the earlier
+edge delivers; what it returns then is replaced in sweep 2.
+``validate()`` asks every flux hook for its flux names with no inputs at
+all, and refuses by name one that indexes an input.)
 """
 
 from __future__ import annotations

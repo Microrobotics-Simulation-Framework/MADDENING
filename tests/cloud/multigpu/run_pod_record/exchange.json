@@ -1,12 +1,12 @@
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "goal": "exchange",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-11T08:54:53Z",
+    "timestamp_utc": "2026-10-11T10:44:35Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "f4d4e7a49ea1ce5e43da7852af82d7799f2fc950"
+    "git_commit": "0c486897d952bc27214b13cb2f8b6f9c3c568bd3"
   },
   "config": {
     "goal": "all",
@@ -33,7 +33,7 @@
     "keep_going": false,
     "dry_run": true,
     "cells": [
-      256,
+      225,
       1024
     ],
     "n_devices": 4,
@@ -50,18 +50,18 @@
   },
   "results": [
     {
-      "cells": 256,
-      "requested_cells": 256,
+      "cells": 225,
+      "requested_cells": 225,
       "mesh": "grid",
       "partition": "rcm",
       "n_devices": 4,
       "fields_per_cell": 1,
-      "n_local_max": 64,
-      "n_ghost_max": 27,
-      "layout_build_s": 0.0006907219940330833,
+      "n_local_max": 57,
+      "n_ghost_max": 26,
+      "layout_build_s": 0.0008756360039114952,
       "traffic_cells_per_shard": {
-        "all_to_all": 108,
-        "ppermute": 32,
+        "all_to_all": 104,
+        "ppermute": 30,
         "useful": 19,
         "ppermute_messages": 2
       },
@@ -72,40 +72,40 @@
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.31632800528313965,
-            0.2947679895441979,
-            0.26626700127962977
+            0.26131499907933176,
+            0.36044100124854594,
+            0.12708599388133734
           ],
-          "min_ms": 0.26626700127962977,
-          "median_ms": 0.2947679895441979,
-          "mean_ms": 0.2924543320356558,
-          "compile_s": 0.15160850500978995,
-          "bytes_per_shard": 432,
-          "bytes_total": 1728,
+          "min_ms": 0.12708599388133734,
+          "median_ms": 0.26131499907933176,
+          "mean_ms": 0.24961399806973836,
+          "compile_s": 0.2157484279887285,
+          "bytes_per_shard": 416,
+          "bytes_total": 1664,
           "messages": 1,
-          "bandwidth_GBps": 0.00648972644636982
+          "bandwidth_GBps": 0.013093496373437572
         },
         "ppermute": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.5418639921117574,
-            0.3022430028067902,
-            0.20402000518515706
+            0.46166899846866727,
+            0.2570289943832904,
+            0.24140399182215333
           ],
-          "min_ms": 0.20402000518515706,
-          "median_ms": 0.3022430028067902,
-          "mean_ms": 0.3493756667012349,
-          "compile_s": 0.1030431779945502,
-          "bytes_per_shard": 128,
-          "bytes_total": 512,
+          "min_ms": 0.24140399182215333,
+          "median_ms": 0.2570289943832904,
+          "mean_ms": 0.32003399489137035,
+          "compile_s": 0.16182549299264792,
+          "bytes_per_shard": 120,
+          "bytes_total": 480,
           "messages": 2,
-          "bandwidth_GBps": 0.002509557822701444
+          "bandwidth_GBps": 0.001988368114283813
         }
       },
       "bit_identical": true,
-      "ppermute_speedup_median": 0.975268200774955,
-      "ppermute_speedup_min": 1.305102414040137
+      "ppermute_speedup_median": 1.0166751798034501,
+      "ppermute_speedup_min": 0.5264452875119144
     },
     {
       "cells": 1024,
@@ -116,7 +116,7 @@
       "fields_per_cell": 1,
       "n_local_max": 256,
       "n_ghost_max": 55,
-      "layout_build_s": 0.0033703320077620447,
+      "layout_build_s": 0.0031929099932312965,
       "traffic_cells_per_shard": {
         "all_to_all": 220,
         "ppermute": 64,
@@ -130,45 +130,45 @@
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.43884399929083884,
-            0.2415630005998537,
-            0.1251199864782393
+            0.38507299905177206,
+            0.2890530013246462,
+            0.26644500030670315
           ],
-          "min_ms": 0.1251199864782393,
-          "median_ms": 0.2415630005998537,
-          "mean_ms": 0.26850899545631063,
-          "compile_s": 0.17484355000487994,
+          "min_ms": 0.26644500030670315,
+          "median_ms": 0.2890530013246462,
+          "mean_ms": 0.3135236668943738,
+          "compile_s": 0.22464511600264814,
           "bytes_per_shard": 880,
           "bytes_total": 3520,
           "messages": 1,
-          "bandwidth_GBps": 0.028132995367708052
+          "bandwidth_GBps": 0.013210981613271597
         },
         "ppermute": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.16898498870432377,
-            0.11958699906244874,
-            0.15009001072030514
+            0.30833198979962617,
+            0.25333400117233396,
+            0.1699860004009679
           ],
-          "min_ms": 0.11958699906244874,
-          "median_ms": 0.15009001072030514,
-          "mean_ms": 0.1462206661623592,
-          "compile_s": 0.1012962550012162,
+          "min_ms": 0.1699860004009679,
+          "median_ms": 0.25333400117233396,
+          "mean_ms": 0.24388399712430933,
+          "compile_s": 0.14942639200307894,
           "bytes_per_shard": 256,
           "bytes_total": 1024,
           "messages": 2,
-          "bandwidth_GBps": 0.008562803716357693
+          "bandwidth_GBps": 0.006024025493773365
         }
       },
       "bit_identical": true,
-      "ppermute_speedup_median": 1.6094542164435564,
-      "ppermute_speedup_min": 1.0462674660219646
+      "ppermute_speedup_median": 1.1409956815390678,
+      "ppermute_speedup_min": 1.5674526118515935
     }
   ],
   "checks": [
     {
-      "name": "256 cells: all_to_all == ppermute bit for bit",
+      "name": "225 cells: all_to_all == ppermute bit for bit",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -176,7 +176,7 @@
       "passed": true
     },
     {
-      "name": "256 cells: timed input pre-placed on the mesh",
+      "name": "225 cells: timed input pre-placed on the mesh",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -201,5 +201,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 0.6319026099954499
+  "wall_s": 0.8706570009962888
 }

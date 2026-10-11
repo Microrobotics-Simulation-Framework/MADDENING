@@ -1,12 +1,12 @@
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "goal": "halo",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-11T08:54:53Z",
+    "timestamp_utc": "2026-10-11T10:44:35Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "f4d4e7a49ea1ce5e43da7852af82d7799f2fc950"
+    "git_commit": "0c486897d952bc27214b13cb2f8b6f9c3c568bd3"
   },
   "config": {
     "goal": "all",
@@ -33,7 +33,7 @@
     "keep_going": false,
     "dry_run": true,
     "cells": [
-      256,
+      225,
       1024
     ],
     "n_devices": 4,
@@ -798,5 +798,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 3.0821095519931987
+  "wall_s": 3.813506257996778
 }

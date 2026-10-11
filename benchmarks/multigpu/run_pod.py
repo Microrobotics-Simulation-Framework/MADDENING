@@ -239,12 +239,14 @@ EXIT_CRASHED = 5
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
-#: A dry run's sizes: the unstructured goals run the first with its cells as
-#: the partitioner scatters them (15 x 15 cells do not divide by four: a pad
-#: row on three shards) and the second renumbered into partition order
-#: (four equal shards; ``cells_in_an_order_the_wrapper_takes``).  The
-#: stencil goals' grids are what 256 and 1024 gave (``field_shape``).
-DRY_RUN_CELLS = (225, 1024)
+#: A dry run's sizes, one of each kind for the unstructured goals: 256 cells
+#: cut into four equal shards, which they renumber into partition order
+#: (``cells_in_an_order_the_wrapper_takes``), and 961 = 31 x 31, which do
+#: not divide by four: a pad row on three shards, and the cells left as the
+#: partitioner scatters them.  (1024 until schema 11: both sizes ran
+#: renumbered.  The stencil goals' grids are the ones 1024 gave:
+#: ``field_shape`` rounds 31 up to 32.)
+DRY_RUN_CELLS = (256, 961)
 #: The session's question is "on 4 GPUs".  A transport ranking may decide
 #: on fewer with ``--allow-fewer-devices``; a checklist item never closes on
 #: fewer, whatever that flag says: on 2 devices a shard's left and right

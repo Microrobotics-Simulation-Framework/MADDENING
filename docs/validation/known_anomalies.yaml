@@ -19041,7 +19041,7 @@ anomalies:
       things on every route: every entry of `value` finite beside a finite
       `residual_norm`, or NaN in both (one case under
       `differentiable=True` is outside it and is registered apart:
-      MADD-ANO-275).
+      MADD-ANO-282).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -19082,7 +19082,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-273"
+  - anomaly_id: "MADD-ANO-280"
     title: "sharded_gmres on its default (lineax) route counts max_iters and .iters in restart cycles, not steps: a budget of 10 executed 1,583 to 4,490 operator products over 24 right-hand sides and reported iters of 32 to 89"
     description: >
       `sharded_gmres` documents `max_iters` as an iteration budget and
@@ -19156,7 +19156,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_the_loop_backend_bounds_the_work_of_gmres_by_its_budget"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-274"
+  - anomaly_id: "MADD-ANO-281"
     title: "With a floor of zero for lineax's entrywise test (an explicit atol=0.0, or rtol=0) sharded_cg and sharded_gmres read converged=True on their lineax routes after a step or a cycle, at a residual of 0.4 ||b||"
     description: >
       On the lineax routes (`sharded_cg`'s default call and
@@ -19254,7 +19254,7 @@ anomalies:
       too, with the floor `rtol * max|b|` of its own `rtol`, which is
       positive and normal; it was not changed here.  `ift_linear_solve`
       stopped on the same `0 / 0` and is entered separately
-      (MADD-ANO-276).
+      (MADD-ANO-283).
     verification:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_lineax_stopping_on_zero_over_zero_is_not_reported_as_converged"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_floor_folded_when_the_call_is_compiled_is_a_floor_of_zero_too"
@@ -19266,7 +19266,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_either_side_of_tiny_over_p_the_rule_that_decides_converged_is_pinned"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-275"
+  - anomaly_id: "MADD-ANO-282"
     title: "With differentiable=True a solution within a factor of the operator's diagonal of the dtype's largest number is reported as not converged beside an infinite residual_norm, or returned as NaN with an x0 or an atol, where the ordinary call answers"
     description: >
       `sharded_cg` and `sharded_gmres` run the solve on the right-hand side
@@ -19334,7 +19334,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-276"
+  - anomaly_id: "MADD-ANO-283"
     title: "ift_linear_solve with solver=\"cg\" or \"gmres\" returned a value that was not the solution, with no error, where the floor of lineax's stopping test was zero, underflowed, or was negative or NaN"
     description: >
       `ift_linear_solve` hands lineax's CG and GMRES the floor `atol` (in the
@@ -19366,7 +19366,7 @@ anomalies:
       (`1e-44` in float32), a negative `atol`, and a positive `atol` whose
       rescaled value is subnormal (`atol=1e-12` beside a right-hand side of
       `2**100`).  Found on 2026-10-11 by the pre-merge audit of the fix of
-      MADD-ANO-274, which has the same cause in `sharded_cg` and
+      MADD-ANO-281, which has the same cause in `sharded_cg` and
       `sharded_gmres`.
       Fixed in 0.4.0: where the floor is not a normal positive number the
       solve is judged by `||rhs - A x|| <= max(atol, rtol * ||rhs||)` (the

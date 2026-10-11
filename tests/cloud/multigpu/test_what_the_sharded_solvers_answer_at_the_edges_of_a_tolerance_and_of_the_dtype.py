@@ -283,7 +283,7 @@ def test_a_solution_just_under_the_top_of_the_dtype_is_answered(route, primal):
 
 def test_with_the_flag_an_infinite_rtol_does_not_read_converged_beside_an_infinite_norm():
     """The one place under ``differentiable=True`` where a norm that is
-    not finite stands beside a finite value (MADD-ANO-275, open: the
+    not finite stands beside a finite value (MADD-ANO-282, open: the
     report's product on the bare value overflows just under the top of
     the dtype).  The GMRES loop always runs its first cycle, so with an
     infinite ``rtol`` its value is still the solution; the norm of the

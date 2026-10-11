@@ -60,7 +60,7 @@ Design:
   as a concrete number such a tolerance is refused.  A result is every
   entry of ``value`` finite beside a finite ``residual_norm``, or NaN in
   both (one exception under ``differentiable=True`` at the top of the
-  dtype's range: MADD-ANO-275, ``Returns`` of :func:`sharded_cg`).
+  dtype's range: MADD-ANO-282, ``Returns`` of :func:`sharded_cg`).
 * lineax's verdict is ``converged`` only where the floor of its entrywise
   test, as lineax is handed it, is at least the dtype's smallest normal
   number ``tiny``.  Under it (``rtol=0``, an explicit ``atol=0.0``, a
@@ -68,7 +68,7 @@ Design:
   ``p`` the power of two the solve rescales ``b`` by) lineax's quotient
   is ``0 / 0`` at every entry that is exactly zero and it reports
   success; ``converged`` is then the loop backends' statement on the
-  value lineax returned (``_lineax_solve``, MADD-ANO-274).
+  value lineax returned (``_lineax_solve``, MADD-ANO-281).
 
 Differentiability: pass ``differentiable=True``.  The solve then goes
 through ``lax.custom_linear_solve``: forward and reverse mode are linear
@@ -164,7 +164,7 @@ class SharedSolveResult:
         restart cycles (a multiple of ``restart``).
         :func:`sharded_gmres` on the lineax backend, which is its
         default: restart CYCLES, of up to ``restart`` products each
-        (lineax's ``num_steps``; MADD-ANO-273, see ``max_iters``
+        (lineax's ``num_steps``; MADD-ANO-280, see ``max_iters``
         there).
     residual_norm : jax.Array
         ``||b - A x||_2`` of the returned ``value``: one product in the
@@ -181,7 +181,7 @@ class SharedSolveResult:
         they are returned, after the scaling back; MADD-ANO-272); an
         ``rtol`` or ``atol`` that is negative or NaN and arrived as a
         traced value (MADD-ANO-271).  Finite otherwise, with one
-        exception under ``differentiable=True`` (MADD-ANO-275,
+        exception under ``differentiable=True`` (MADD-ANO-282,
         ``Returns`` of :func:`sharded_cg`).
     """
     value: jax.Array
@@ -700,7 +700,7 @@ def _lineax_solve(
     stencil: every entry the Krylov space has not reached yet), measured
     as ``converged=True`` after ONE step at a residual of 0.4 ``||b||``.
     A floor that underflows does the same (XLA's CPU backend flushes a
-    subnormal to zero): ``rtol=1e-44`` in float32.  MADD-ANO-274; the
+    subnormal to zero): ``rtol=1e-44`` in float32.  MADD-ANO-281; the
     ``atol=0.0`` form was in 0.3.0 and 0.3.1.
 
     So lineax's verdict is ``converged`` only where the floor it was
@@ -981,7 +981,7 @@ def _differentiable_solve(
     # overflows in an intermediate although ``x`` and ``A x`` are
     # representable, and the report is then ``converged=False`` beside an
     # infinite ``residual_norm`` where the ordinary call answers
-    # (MADD-ANO-275, open; with an ``x0`` or an ``atol`` the residual ``r``
+    # (MADD-ANO-282, open; with an ``x0`` or an ``atol`` the residual ``r``
     # above overflows the same way and the value is NaN).
     return SharedSolveResult(
         value=x * no_answer_is_nan,
@@ -1422,7 +1422,7 @@ def sharded_cg(
           the statement gives is true of ``.residual_norm``.  Until 0.4.0's
           fix: ``converged=True`` after one step at a residual of 0.4
           ``||b||``, for a ``b`` that is one unit vector, with
-          ``atol=0.0`` or with ``rtol=0`` (MADD-ANO-274; ``atol=0.0``
+          ``atol=0.0`` or with ``rtol=0`` (MADD-ANO-281; ``atol=0.0``
           in 0.3.0 and 0.3.1).  ``.value`` and ``.iters``
           are lineax's as they were: such a call still stops early,
           and now says so.
@@ -1481,7 +1481,7 @@ def sharded_cg(
         finite ``.residual_norm``, or NaN in both with
         ``converged=False``.
 
-        One exception, under ``differentiable=True`` only (MADD-ANO-275,
+        One exception, under ``differentiable=True`` only (MADD-ANO-282,
         open): the report of that route, and the residual it attaches
         the derivative to, are products on the vectors as they are, not
         in the frame of ``b``.  For a solution within a factor of the
@@ -1683,7 +1683,7 @@ def sharded_gmres(
         and one more (measured: 53 for one cycle of 50, 209 for four).
 
         **On the lineax backend, which is the default, it is not a
-        bound on the work (MADD-ANO-273, open).**  lineax is handed
+        bound on the work (MADD-ANO-280, open).**  lineax is handed
         ``max_steps = max(4 * restart, max_iters)``, and lineax counts
         one step per restart CYCLE of up to ``restart`` operator
         products.  So the budget is in cycles, ``restart`` times what
@@ -1763,7 +1763,7 @@ def sharded_gmres(
           unit vector with ``restart=2``; ``_lineax_solve``).  ``.iters`` counts
           restart CYCLES (lineax's ``num_steps``), not steps: about
           ``.iters * restart`` operator products were executed
-          (``max_iters``; MADD-ANO-273).  The NaN of
+          (``max_iters``; MADD-ANO-280).  The NaN of
           MADD-ANO-264 is lineax CG's alone: this route was measured to
           converge in float32 up to 1e6 unknowns on the systems where
           :func:`sharded_cg`'s default route returns NaN.

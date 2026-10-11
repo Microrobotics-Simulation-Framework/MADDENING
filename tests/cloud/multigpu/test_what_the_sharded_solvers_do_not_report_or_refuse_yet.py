@@ -9,7 +9,7 @@ turns the matching tests red, and the entry is then closed with it.
   A primal that needs fewer steps than a cold solve (a warm start, an
   ``atol`` above ``||b||``, a right-hand side that is one eigenvector)
   reads ``converged=True`` beside a derivative that is far off.
-* **MADD-ANO-275.**  The report of ``differentiable=True``, and the
+* **MADD-ANO-282.**  The report of ``differentiable=True``, and the
   residual it attaches the derivative to, are products on the vectors as
   they are, not in the power-of-two frame the solve itself runs in.  For
   a solution within a factor of the operator's diagonal of the dtype's
@@ -132,7 +132,7 @@ def test_the_same_derivatives_are_right_when_the_budget_covers_a_cold_solve(rout
 
 
 # ---------------------------------------------------------------------------
-# MADD-ANO-275: ``differentiable=True`` just under the top of the dtype
+# MADD-ANO-282: ``differentiable=True`` just under the top of the dtype
 # ---------------------------------------------------------------------------
 
 _M = 64

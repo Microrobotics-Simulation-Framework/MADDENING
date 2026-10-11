@@ -275,10 +275,10 @@ class _Opaque:
 def _aval_form(v) -> Any:
     """The shape, dtype and weak type of a variable or literal of a program."""
     aval = getattr(v, "aval", None)
-    try:
-        return (tuple(aval.shape), str(aval.dtype), bool(getattr(aval, "weak_type", False)))
-    except Exception:  # noqa: BLE001 - an abstract value with no shape (a token, a reference)
-        return ("aval", str(aval))
+    shape, dtype = getattr(aval, "shape", None), getattr(aval, "dtype", None)
+    if shape is None or dtype is None:
+        return ("aval", str(aval))      # an abstract value with no shape (a token, a reference)
+    return (tuple(shape), str(dtype), bool(getattr(aval, "weak_type", False)))
 
 
 #: Primitives whose callable parameters are rules for derivatives: the

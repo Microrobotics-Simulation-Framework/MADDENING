@@ -27,6 +27,18 @@ only for its ``slow`` and ``skip`` marks let through a witness that reports
 success when its assertions fail, and one that is collected and never runs.
 So a named witness is refused when every item it names is one of these:
 
+* **in a file the per-push lane never collects**.  The collection below
+  hands every named file to pytest by path, and pytest collects a file it
+  is handed whatever its name and whatever ``--ignore`` says; the lane
+  runs ``pytest tests/``, which does neither.  So the lane's own selection
+  is read (:func:`lane_exclusions`): the paths and ``--ignore`` /
+  ``--deselect`` arguments of its pytest command in
+  ``.github/workflows/ci.yml``, read as ``test_ci_sharding.py`` reads them
+  (an argument that selects in any other way is refused, not guessed at);
+  the paths ``scripts/check_anomalies.py`` records in
+  ``PATHS_CI_NEVER_RUNS``; and pytest's ``python_files`` patterns from the
+  project's configuration, which a file must match to be collected from a
+  directory;
 * **skipped by a mark**: ``skip``, or a ``skipif`` whose condition is true
   in this lane.  The condition is the value pytest itself holds for the
   collected item (:data:`_COLLECT`), never the decorator's text: the
@@ -34,24 +46,46 @@ So a named witness is refused when every item it names is one of these:
   ``skipif(len(jax.devices()) < 4)``, which is false there because that
   directory's conftest provides the devices, and they stay witnesses.  A
   condition written as a string is evaluated by pytest only when the test
-  is set up; it is not decided here and is refused: write the expression;
+  is set up; it is not decided here and is refused: write the expression.
+  A mark whose condition reads a variable this collection takes out of its
+  environment (:data:`_UNSET_FOR_COLLECTION`: the sharded lanes set
+  ``MADDENING_TEST_SHARD``) is decided here otherwise than in the lane, and
+  is refused when the mark, or a module-level name or function it uses,
+  spells the variable out;
 * **expected to fail**: an ``xfail`` mark that applies to the item in this
   lane -- strict or not, with ``raises=`` or without, ``run=False``, on the
   function, its class, the module or one parameter -- or a ``pytest.xfail()``
-  call in its body.  Its conditions are decided as a ``skipif``'s are;
+  call in its body, or ``unittest.expectedFailure``.  Its conditions are
+  decided as a ``skipif``'s are;
 * **skipped by its own body**: a ``pytest.skip()`` every run reaches, in the
-  test, in a module-level helper it calls or in a fixture of its module it
-  requests.  ``scripts/check_anomalies.py`` already reads these for the
+  test, in a module-level helper it calls, in a fixture of its module it
+  requests or in an xunit ``setup_module`` / ``setup_function`` (or a
+  ``setup_class`` / ``setup_method`` / ``setUp`` / ``setUpClass`` of its
+  class).  ``scripts/check_anomalies.py`` already reads these for the
   registry's evidence, and its reader is the one used here
-  (:func:`body_outcomes`).  A skip under a condition, and a
+  (:func:`body_outcomes`).  ``unittest.skip`` on the test or its class, and
+  a ``raise unittest.SkipTest`` in its body, are read too.  A skip under a
+  condition (``unittest.skipIf`` / ``skipUnless`` included), and a
   ``pytest.importorskip()``, cannot be decided from the source: such a
   witness is refused unless :data:`CONDITIONAL_BODY_SKIPS` names it with
-  the reason its condition is false in the default lane.
+  the reason its condition is false in the default lane.  The test read is
+  the one pytest collects: the LAST binding of its name in its module or
+  class, and a name whose last binding is not a ``def`` is not read.
 
 What this does not see, as the reader it borrows does not: a skip in a
 fixture or helper of another module (a ``conftest.py`` included), in a
 method reached through ``self``, behind a ``usefixtures`` mark or in a
-collection hook.  Those are the run's to show, not the source's.
+collection hook; a skip in a helper nested in the test, one called through
+a local alias (``leave = pytest.skip``) or imported from ``_pytest``
+(``from _pytest.outcomes import skip``); a mark applied while the test
+runs (``request.applymarker``, ``request.node.add_marker`` in the body or
+a fixture); a conftest's ``pytest_runtest_setup`` or autouse fixture that
+calls ``pytest.skip`` / ``pytest.xfail``; a condition that reads an unset
+variable through an imported name, or by building the variable's name;
+and a witness that runs and asserts nothing.  Those are the
+run's to show, not the source's.  (A conftest that deselects, ignores or
+marks items is refused by ``test_ci_sharding.py`` and
+:func:`test_no_conftest_or_plugin_adds_a_mark`.)
 
 **The one exception** is an xfail witness of an xfail pin.  A slow test that
 is itself the pin of an open anomaly has nothing that passes to point at:
@@ -64,6 +98,8 @@ for a slow test when all of this holds, and only then
   gone), and so is the mark of **every** slow-marked item of the slow test
   (one parametrisation that is expected to pass needs a witness that can
   fail);
+* the witness's mark does not say ``run=False``: pytest never runs such a
+  test, so it cannot turn red on the push that fixes the defect;
 * **the same anomaly**: one registry id, ``MADD-ANO-<n>``, is written in the
   ``reason=`` of the witness's mark and of each of those slow items' marks.
   The ids are read from the marks pytest collected; nothing is inferred
@@ -84,6 +120,7 @@ both JAX lanes.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib.util
 import json
 import os
@@ -138,6 +175,13 @@ CONDITIONAL_BODY_SKIPS: dict[str, str] = {
         "history, the same under any jax",
 }
 
+#: Variables :func:`collected` takes out of its subprocess's environment: the
+#: shard would deselect most of the files, the timing plugin and extra
+#: arguments would change what is collected.  The sharded lanes set the
+#: first, so a mark whose condition reads one of them is decided here
+#: otherwise than there (:func:`_marks_read_an_unset_variable`).
+_UNSET_FOR_COLLECTION = ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")
+
 #: Where a slow-marked test is presumed to check a framework property: the
 #: coupling solvers and their reports, gradients, the params pytree, sysid,
 #: sharding, checkpoints and serialisation, the REST and FMU surfaces, the
@@ -189,7 +233,14 @@ NOT_FRAMEWORK = {
 }
 
 #: ``tests/<path>.py::<name>[::<name>][<params>]``: a pytest node id below a file.
-_NODE_ID = re.compile(r"tests/[\w/.\-]+?\.py(?:::[A-Za-z_]\w*)+(?:\[[^\]\s]*\])?")
+#: The parameter id is read up to the bracket that closes the one opening it,
+#: written directly after the name: it may hold spaces and any other
+#: character but a line break, and brackets nested one deep in balanced
+#: pairs (``test_w[the case]``, ``test_w[a[1]-b]``).  An id holding an
+#: unbalanced bracket is read up to that bracket and then names no item, so
+#: it is refused rather than read as another test.
+_NODE_ID = re.compile(r"tests/[\w/.\-]+?\.py(?:::[A-Za-z_]\w*)+"
+                      r"(?:\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\])?")
 _TEST_NAME = re.compile(r"\btest_\w+|\bTest[A-Z0-9_]\w*")
 _PER_PUSH = re.compile(r"^\s*#\s*Per push:")
 
@@ -359,7 +410,8 @@ def xfail(item, strict_default):
         a = applies(mark)
         if a:
             return [str(mark.kwargs.get("reason", "")),
-                    bool(mark.kwargs.get("strict", strict_default)), a]
+                    bool(mark.kwargs.get("strict", strict_default)), a,
+                    bool(mark.kwargs.get("run", True))]
     return None
 
 def strict_by_default(config):
@@ -399,6 +451,9 @@ class Xfail:
     #: ``"always"`` (no condition), ``"true"``, or ``"string"`` (a condition
     #: written as a string: not decided here, and read as applying).
     applies: str = "always"
+    #: ``False`` for ``run=False``: pytest reports the item xfailed without
+    #: running it.
+    run: bool = True
 
 
 @dataclass(frozen=True)
@@ -413,6 +468,10 @@ class Collection:
     skipif: dict[str, str] = field(default_factory=dict)
     #: Every item, slow-marked or not, an ``xfail`` mark applies to.
     xfail: dict[str, Xfail] = field(default_factory=dict)
+    #: ``{file or node id: why}`` for what the per-push lane never runs
+    #: although this collection, handed the file by path, holds it
+    #: (:func:`lane_exclusions`).  Filled by the ``collection`` fixture.
+    not_collected: dict[str, str] = field(default_factory=dict)
 
 
 def partition(items: list[list]) -> Collection:
@@ -454,22 +513,125 @@ def may_hold_a_slow_mark(text: str) -> bool:
 
 
 @pytest.fixture(scope="module")
-def collection(tmp_path_factory) -> Collection:
+def collection(tmp_path_factory, pytestconfig) -> Collection:
     """Every item in a framework file that can hold a slow mark, plus the
     files the comments and the table name, collected once with
-    ``-m "slow or not slow"``."""
+    ``-m "slow or not slow"``; and what of it the per-push lane never runs."""
     paths = sorted({rel for rel in _framework_files()
                     if may_hold_a_slow_mark((REPO_ROOT / rel).read_text(encoding="utf-8"))}
                    | {f for f in _files_named() if (REPO_ROOT / f).is_file()})
-    return partition(collected(paths, REPO_ROOT, tmp_path_factory.mktemp("slow_rule") / "items.json"))
+    rows = collected(paths, REPO_ROOT, tmp_path_factory.mktemp("slow_rule") / "items.json")
+    return dataclasses.replace(partition(rows), not_collected=lane_exclusions(
+        paths, per_push_lane_args(), pytestconfig.getini("python_files"),
+        _anomaly_gate()._ci_never_runs))  # noqa: SLF001
+
+
+# --------------------------------------------------------------------------
+# What the per-push lane never collects, although a run naming the file would
+# --------------------------------------------------------------------------
+def per_push_lane_args() -> list[str]:
+    """The arguments of the per-push lane's pytest, read from
+    ``.github/workflows/ci.yml`` by ``test_ci_sharding.py``'s reader, at
+    the job and step it names as the sharded per-push lane."""
+    from tests.compliance import test_ci_sharding as sharding  # noqa: PLC0415
+
+    job, step = sharding.SHARD_SETTING["ci.yml"]
+    return sharding._pytest_args(sharding._workflow("ci.yml")["jobs"][job], step)  # noqa: SLF001
+
+
+def lane_selection(args: list[str], reporting=None) -> tuple[list[str], list[str], list[str]]:
+    """``(paths, ignores, deselects)`` of a pytest command's arguments.
+
+    ``reporting`` are the arguments that change only what is reported
+    (``test_ci_sharding.REPORTING_ARGS`` by default).  Any other argument
+    starting with ``-`` selects in a way this reader does not model
+    (``-k``, ``-m``, ``--ignore-glob``, ...) and is refused: guessing would
+    accept a witness the lane drops.
+    """
+    if reporting is None:
+        from tests.compliance import test_ci_sharding as sharding  # noqa: PLC0415
+
+        reporting = sharding.REPORTING_ARGS
+    paths, ignores, deselects = [], [], []
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg in reporting:
+            continue
+        option, eq, value = arg.partition("=")
+        if option in ("--ignore", "--deselect"):
+            if not eq:
+                if not rest:
+                    raise AssertionError(f"the per-push lane's pytest ends with {arg!r} and no value")
+                value = rest.pop(0)
+            (ignores if option == "--ignore" else deselects).append(value)
+        elif arg.startswith("-"):
+            raise AssertionError(
+                f"the per-push lane's pytest takes {arg!r}, which is neither a path, --ignore, "
+                "--deselect nor a reporting argument (test_ci_sharding.REPORTING_ARGS): say in "
+                "lane_selection how it selects, or no witness can be judged")
+        else:
+            paths.append(arg)
+    norm = [os.path.normpath(p).replace(os.sep, "/") for p in paths]
+    return norm, [os.path.normpath(i).replace(os.sep, "/") for i in ignores], deselects
+
+
+def _within(rel: str, top: str) -> bool:
+    return rel == top or top == "." or rel.startswith(top.rstrip("/") + "/")
+
+
+def lane_exclusions(files: list[str], args: list[str], python_files: list[str], never_runs, *,
+                    root: Path = REPO_ROOT, reporting=None) -> dict[str, str]:
+    """``{file or node id: why}`` for what the lane whose pytest takes
+    ``args`` never runs, among ``files`` (repository-relative).
+
+    ``python_files`` are pytest's patterns for a test file (the project's
+    ``python_files``), matched as pytest matches them
+    (``_pytest.pathlib.fnmatch_ex`` on the absolute path); ``never_runs``
+    is ``scripts/check_anomalies.py``'s ``_ci_never_runs`` (the entry of
+    ``PATHS_CI_NEVER_RUNS`` holding a path, or ``None``).  A file is
+    collected by the lane only when it is under one of the command's paths
+    (a path that names a file or a node id stands for that file), under
+    none of its ``--ignore`` paths, matches a ``python_files`` pattern
+    unless the command names it, and is not recorded as never run.  A
+    ``--deselect`` drops the node id it names.
+    """
+    from _pytest.pathlib import fnmatch_ex  # noqa: PLC0415  (pytest's own matcher)
+
+    paths, ignores, deselects = lane_selection(args, reporting)
+    out = {}
+    for rel in files:
+        named = [p for p in paths if p.split("::", 1)[0] == rel]
+        under = [p for p in paths if _within(rel, p.split("::", 1)[0])]
+        ignored = next((i for i in ignores if _within(rel, i)), None)
+        recorded = never_runs(rel)
+        if not under:
+            out[rel] = (f"the per-push lane runs pytest on {paths} only, and this file is under "
+                        "none of them")
+        elif ignored:
+            out[rel] = f"the per-push lane passes --ignore={ignored}"
+        elif recorded:
+            out[rel] = (f"scripts/check_anomalies.py records {recorded} in PATHS_CI_NEVER_RUNS: "
+                        "no CI lane runs it")
+        elif not named and not any(fnmatch_ex(p, root / rel) for p in python_files):
+            out[rel] = (f"its name matches none of pytest's python_files {list(python_files)}, so "
+                        "`pytest tests/` never collects it; only a run naming the file does")
+    for nodeid in deselects:
+        out[nodeid] = f"the per-push lane passes --deselect {nodeid}"
+    return out
+
+
+def _lane_drops(nodeid: str, collection: Collection) -> str:
+    """Why the per-push lane never runs ``nodeid`` (an item, or a test or
+    class above items), or ``""``."""
+    return next((why for key, why in collection.not_collected.items() if _covers(key, nodeid)), "")
 
 
 def collected(paths: list[str], cwd: Path, dump: Path) -> list[list]:
     """The rows :data:`_COLLECT` writes for ``paths``: one pytest
     ``--collect-only`` over them with ``-m "slow or not slow"``, in a process
     of its own started in ``cwd``."""
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
+    env = {k: v for k, v in os.environ.items() if k not in _UNSET_FOR_COLLECTION}
     env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", JAX_PLATFORMS="cpu", SLOW_RULE_DUMP=str(dump))
     proc = subprocess.run(
         [sys.executable, "-c", _COLLECT, "--collect-only", "-q", "-p", "no:cacheprovider",
@@ -527,21 +689,153 @@ def outcomes_in(tree: ast.Module, name: str) -> tuple[str, ...]:
     it calls, a fixture of the module it requests), ``"skipif"`` for one
     under a condition and for any ``pytest.importorskip()``, ``"xfail"``
     for a ``pytest.xfail()`` anywhere.  ``("unread",)`` when the test is
-    not written in the module (inherited from, or generated in, another):
-    nothing can be said of a body that was not read."""
+    not written in the module (inherited from, or generated in, another),
+    or when the last binding of its name (or its class's) is not a
+    definition: nothing can be said of a body that was not read.
+
+    Read here besides (:func:`_more_outcomes`): xunit setups,
+    ``unittest.skip`` / ``skipIf`` / ``skipUnless`` / ``expectedFailure``
+    on the test or its classes, ``raise unittest.SkipTest`` in its body,
+    and ``"unset"`` for a mark whose condition reads a variable of
+    :data:`_UNSET_FOR_COLLECTION`."""
     gate = _anomaly_gate()
     scope, classes, node = tree.body, [], None
     for part in name.split("::"):
-        node = next((n for n in scope if getattr(n, "name", None) == part and isinstance(
-            n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))), None)
-        if node is None:
+        node = _last_binding(scope, part)
+        if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             return ("unread",)
         if isinstance(node, ast.ClassDef):
             classes.append(node)
             scope = node.body
     if isinstance(node, ast.ClassDef):
         return ("unread",)
-    return tuple(gate._test_function_kinds(node, classes, tree, gate._pytest_aliases(tree)))  # noqa: SLF001
+    aliases = gate._pytest_aliases(tree)  # noqa: SLF001
+    return (tuple(gate._test_function_kinds(node, classes, tree, aliases))  # noqa: SLF001
+            + _more_outcomes(node, classes, tree, aliases))
+
+
+def _last_binding(scope: list[ast.stmt], name: str) -> ast.stmt | None:
+    """The last statement of ``scope`` that binds ``name`` (a ``def``, a
+    ``class``, an assignment, an import, a ``del``): the one the module or
+    class holds when pytest collects it."""
+    last = None
+    for stmt in scope:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound = {stmt.name}
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+            targets = stmt.targets if isinstance(stmt, (ast.Assign, ast.Delete)) else [stmt.target]
+            bound = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            bound = {(a.asname or a.name).split(".")[0] for a in stmt.names}
+        else:
+            continue
+        if name in bound:
+            last = stmt
+    return last
+
+
+#: What a ``unittest`` name reached from a test's decorators or body does.
+_UNITTEST_OUTCOMES = {"unittest.skip": "skip", "unittest.skipIf": "skipif",
+                      "unittest.skipUnless": "skipif", "unittest.expectedFailure": "xfail",
+                      "unittest.SkipTest": "skip"}
+#: The xunit setups pytest runs before a test: at module level, and in its class.
+_MODULE_SETUPS = ("setup_module", "setUpModule")
+_FUNCTION_SETUPS = ("setup_function",)
+_CLASS_SETUPS = ("setup_class", "setup_method", "setUp", "setUpClass")
+
+
+def _unittest_name(expr: ast.expr, tree: ast.Module) -> str:
+    """``expr`` as ``unittest.<name>`` when it is one, through the module's
+    imports (``import unittest as ut``, ``from unittest import skip``,
+    ``unittest.case``), or ``""``."""
+    names = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Import):
+            names.update({a.asname or a.name: a.name for a in stmt.names
+                          if a.name in ("unittest", "unittest.case")})
+        elif isinstance(stmt, ast.ImportFrom) and stmt.module in ("unittest", "unittest.case"):
+            names.update({a.asname or a.name: f"unittest.{a.name}" for a in stmt.names})
+    parts = []
+    while isinstance(expr, ast.Attribute):
+        parts.insert(0, expr.attr)
+        expr = expr.value
+    if not isinstance(expr, ast.Name) or expr.id not in names:
+        return ""
+    dotted = ".".join([names[expr.id], *parts]).replace("unittest.case.", "unittest.")
+    return dotted if dotted in _UNITTEST_OUTCOMES else ""
+
+
+def _more_outcomes(func, classes: list[ast.ClassDef], tree: ast.Module, aliases) -> tuple[str, ...]:
+    """What :func:`outcomes_in` reads beyond the anomaly gate's reader."""
+    gate = _anomaly_gate()
+    kinds = []
+    # unittest's decorators on the test and on each class around it.
+    for deco in func.decorator_list + [d for cls in classes for d in cls.decorator_list]:
+        kind = _UNITTEST_OUTCOMES.get(_unittest_name(deco.func if isinstance(deco, ast.Call) else deco,
+                                                     tree))
+        if kind:
+            kinds.append(kind)
+    # raise unittest.SkipTest(...): every run when straight in the body, else under a condition.
+    for node in _own_nodes(func.body):
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if _unittest_name(exc, tree) == "unittest.SkipTest":
+                kinds.append("skip" if node in func.body else "skipif")
+    # xunit setups, read as the test's own body is.
+    wanted = set(_MODULE_SETUPS) | (set() if classes else set(_FUNCTION_SETUPS))
+    setups = [s for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and s.name in wanted]
+    setups += [s for cls in classes for s in cls.body
+               if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.name in _CLASS_SETUPS]
+    helpers = gate._module_functions(tree)  # noqa: SLF001
+    for setup in setups:
+        kinds += gate._imperative_kinds(setup.body, aliases, helpers)  # noqa: SLF001
+    if _marks_read_an_unset_variable(func, classes, tree):
+        kinds.append("unset")
+    return tuple(kinds)
+
+
+def _own_nodes(body: list[ast.stmt]):
+    """Every node of ``body`` that runs where it is written: nested
+    ``def`` / ``class`` / ``lambda`` bodies are not entered."""
+    todo = list(body)
+    while todo:
+        node = todo.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            todo += ast.iter_child_nodes(node)
+
+
+def _marks_read_an_unset_variable(func, classes: list[ast.ClassDef], tree: ast.Module) -> list[str]:
+    """The variables of :data:`_UNSET_FOR_COLLECTION` that the marks on
+    ``func`` read: its decorators, its classes' decorators and
+    ``pytestmark``, the module's ``pytestmark``, and every module-level
+    name or function those use, followed to the end."""
+    def pytestmark(body):
+        return [s.value for s in body if isinstance(s, (ast.Assign, ast.AnnAssign)) and s.value
+                is not None and any(isinstance(t, ast.Name) and t.id == "pytestmark"
+                                    for t in (s.targets if isinstance(s, ast.Assign) else [s.target]))]
+
+    exprs = list(func.decorator_list) + pytestmark(tree.body)
+    for cls in classes:
+        exprs += list(cls.decorator_list) + pytestmark(cls.body)
+    module_names = {}
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names[stmt.name] = stmt
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+            for t in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]):
+                module_names.update({n.id: stmt for n in ast.walk(t) if isinstance(n, ast.Name)})
+    texts, seen, todo = [], set(), exprs
+    while todo:
+        node = todo.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        texts.append(ast.unparse(node))
+        todo += [module_names[n.id] for n in ast.walk(node)
+                 if isinstance(n, ast.Name) and n.id in module_names]
+    return sorted({v for v in _UNSET_FOR_COLLECTION for t in texts if v in t})
 
 
 @cache
@@ -624,7 +918,13 @@ def cannot_fail(nodeid: str, slow_items: list[str], collection: Collection, *,
         return ("its body skips on every run: a pytest.skip() in the test, a helper it calls "
                 "or a fixture it requests")
     if "xfail" in reached:
-        return "its body calls pytest.xfail(): it reports success when its assertions fail"
+        return ("its body calls pytest.xfail(), or it is marked unittest.expectedFailure: it "
+                "reports success when its assertions fail")
+    if "unset" in reached:
+        return (f"a skipif or xfail mark on it, its class or its module reads one of "
+                f"{list(_UNSET_FOR_COLLECTION)}, which this guard's collection takes out of its "
+                "environment and the sharded lanes set: the condition is decided here otherwise "
+                "than in the lane; name a test whose marks do not read them")
     if "skipif" in reached and function not in excused:
         return ("its body skips under a condition (a pytest.skip() under an `if`, or a "
                 "pytest.importorskip()) that the source does not decide; name a test that "
@@ -636,6 +936,9 @@ def cannot_fail(nodeid: str, slow_items: list[str], collection: Collection, *,
     if mark.applies == "string":
         return ("xfail-marked on a condition written as a string, which is not decided "
                 "here; write the expression")
+    if not mark.run:
+        return ("xfail-marked with run=False: pytest never runs it, so it cannot fail, nor turn "
+                "red on the push that fixes a defect it pins; name a test that runs")
     if shared_open_pin(mark, slow_items, collection, status):
         return ""
     pins = sorted(set(_ANOMALY_ID.findall(mark.reason)))
@@ -673,10 +976,14 @@ def witness_problems(rel: str, comments: list[tuple[int, str]], collection: Coll
                             "tests/<file>.py::[<Class>::]<test>")
         for target in ids:
             in_file = _by_file(collection.default_lane).get(target.split("::", 1)[0], ())
-            runs = [n for n in in_file if _covers(target, n)]
+            named = [n for n in in_file if _covers(target, n)]
+            runs = [n for n in named if not _lane_drops(n, collection)]
             if not runs:
                 skipif = sorted({v for n, v in collection.skipif.items() if _covers(target, n)})
-                why = ("slow-marked itself" if any(_covers(target, n) for n in collection.slow)
+                dropped = _lane_drops(target, collection) or next(
+                    (d for d in map(lambda n: _lane_drops(n, collection), named) if d), "")
+                why = (dropped if dropped
+                       else "slow-marked itself" if any(_covers(target, n) for n in collection.slow)
                        else "skip-marked" if any(_covers(target, n) for n in collection.skipped)
                        else "skipif-marked on a condition written as a string, which is not "
                             "decided here; write the expression" if skipif == ["string"]
@@ -826,6 +1133,18 @@ def test_the_comment_reader_finds_what_it_is_for():
     assert witness_ids("tests/a/test_x.py::test_q (below) and TestA::test_r") == (
         ["tests/a/test_x.py::test_q"], ["TestA", "test_r"])
     assert witness_ids("tests/a/test_x.py, every case") == ([], ["test_x"])
+    # A parameter id is read to the bracket closing it: spaces, and brackets
+    # nested in pairs, are part of it (it was cut at the first space, and the
+    # comment then named the test's other parameters).
+    assert witness_ids("tests/a/test_x.py::test_w[the case] and tests/a/test_x.py::test_v[a[1]-b], "
+                       "then tests/a/test_x.py::test_u[] (empty)") == (
+        ["tests/a/test_x.py::test_w[the case]", "tests/a/test_x.py::test_v[a[1]-b]",
+         "tests/a/test_x.py::test_u[]"], [])
+    # A bracket after a space is prose; an unbalanced one ends the id, which
+    # then names no item and is refused.
+    assert witness_ids("tests/a/test_x.py::test_w [the fast case]") == (["tests/a/test_x.py::test_w"], [])
+    assert witness_ids("tests/a/test_x.py::test_w[a]b] x")[0] == ["tests/a/test_x.py::test_w[a]"]
+    assert _NODE_ID.fullmatch("tests/a/test_x.py::TestA::test_w[x y-1.5e-3]")
 
 
 def test_the_table_reader_finds_what_it_is_for():
@@ -888,6 +1207,70 @@ def test_a_witness_resolves_only_to_an_item_the_default_lane_runs():
     assert "names no node id" in problems("below")[0]
 
 
+def test_a_witness_in_a_file_the_per_push_lane_never_collects_is_refused(tmp_path):
+    """The lane runs ``pytest tests/``; the collection here names each file.
+    What only a run naming the file collects is no witness: a path the
+    lane ignores, one recorded as never run, a file whose name pytest's
+    ``python_files`` does not match, an item it deselects."""
+    args = ["tests/", "-v", "--ignore=tests/viz", "--deselect", "tests/core/test_d.py::test_gone"]
+    never = {"tests/api/test_3d.py": "tests/api/test_3d.py"}.get
+    files = ["tests/core/test_ok.py", "tests/core/ok_test.py", "tests/viz/test_v.py",
+             "tests/core/zz_cases.py", "tests/api/test_3d.py", "tests/core/test_d.py",
+             "docs/test_elsewhere.py"]
+    patterns = ["test_*.py", "*_test.py"]
+    out = lane_exclusions(files, args, patterns, never, root=tmp_path, reporting={"-v"})
+    assert set(out) == {"tests/viz/test_v.py", "tests/core/zz_cases.py", "tests/api/test_3d.py",
+                        "docs/test_elsewhere.py", "tests/core/test_d.py::test_gone"}, out
+    assert "--ignore=tests/viz" in out["tests/viz/test_v.py"]
+    assert "python_files" in out["tests/core/zz_cases.py"]
+    assert "PATHS_CI_NEVER_RUNS" in out["tests/api/test_3d.py"]
+    assert "under none of them" in out["docs/test_elsewhere.py"]
+    assert "--deselect" in out["tests/core/test_d.py::test_gone"]
+    # The patterns are the project's: a file one matches is collected, and a
+    # file the command names is collected whatever its name.
+    assert "tests/core/zz_cases.py" not in lane_exclusions(files, args, ["zz_*.py"], never,
+                                                          root=tmp_path, reporting={"-v"})
+    assert "tests/core/zz_cases.py" not in lane_exclusions(
+        files, [*args, "tests/core/zz_cases.py::test_x"], patterns, never, root=tmp_path,
+        reporting={"-v"})
+    # A selection the reader does not model is refused, not guessed at.
+    for selecting in (["-k", "fast"], ["-m", "fast"], ["--ignore-glob=*viz*"], ["-x"]):
+        with pytest.raises(AssertionError, match="neither a path"):
+            lane_selection(["tests/", *selecting], reporting=set())
+    # And a witness the lane drops is refused, with the reason.
+    c = dataclasses.replace(partition([
+        _row("tests/viz/test_v.py::TestV::test_w"), _row("tests/core/zz_cases.py::test_w"),
+        _row("tests/core/test_d.py::test_gone[0]"), _row("tests/core/test_d.py::test_gone[1]"),
+        _row("tests/core/test_d.py::test_mixed[0]"), _row("tests/core/test_ok.py::test_w"),
+        _row("tests/b.py::test_s", slow=True)]),
+        not_collected={**out, "tests/core/test_d.py::test_mixed[1]": "deselected"})
+
+    def problems(target):
+        return witness_problems("tests/b.py", [(1, target)], c, ["tests/b.py::test_s"],
+                                outcomes=_reads_nothing)
+
+    assert "--ignore=tests/viz" in problems("tests/viz/test_v.py::TestV::test_w")[0]
+    assert "python_files" in problems("tests/core/zz_cases.py::test_w")[0]
+    assert "--deselect" in problems("tests/core/test_d.py::test_gone")[0]
+    assert "--deselect" in problems("tests/core/test_d.py::test_gone[1]")[0]
+    assert problems("tests/core/test_d.py::test_mixed") == []     # one case runs
+    assert problems("tests/core/test_ok.py::test_w") == []
+
+
+def test_the_lane_reader_reads_the_per_push_lane_of_this_tree(pytestconfig):
+    """On the real workflow, configuration and record: ``tests/viz`` is
+    ignored, a file the lane collects is not dropped, and a file named
+    outside ``python_files`` is."""
+    args = per_push_lane_args()
+    paths, ignores, _deselects = lane_selection(args)
+    assert paths == ["tests"] and "tests/viz" in ignores, (paths, ignores)
+    patterns = pytestconfig.getini("python_files")
+    out = lane_exclusions(["tests/viz/test_serialization.py", "tests/core/test_transforms.py",
+                           "tests/core/inspection_graphs.py"], args, patterns,
+                          _anomaly_gate()._ci_never_runs)  # noqa: SLF001
+    assert set(out) == {"tests/viz/test_serialization.py", "tests/core/inspection_graphs.py"}, out
+
+
 _PIN = ["MADD-ANO-7: open, pinned", True, "always"]
 
 
@@ -939,6 +1322,9 @@ def test_a_witness_whose_own_body_skips_or_expects_to_fail_is_refused():
     assert "its body skips on every run" in problems(("skip",))[0]
     assert "its body calls pytest.xfail()" in problems(("xfail",))[0]
     assert "its definition is not in its file" in problems(("unread",))[0]
+    assert "MADDENING_TEST_SHARD" in problems(("unset",))[0]
+    # The table excuses a condition in the body, never one the lane decides otherwise.
+    assert problems(("unset",), {"tests/a.py::test_w": "reason"}) == problems(("unset",))
     conditional = problems(("skipif",))
     assert len(conditional) == 1 and "CONDITIONAL_BODY_SKIPS" in conditional[0], conditional
     # Named with its reason, by the function (its parameters share one body).
@@ -982,6 +1368,9 @@ def test_an_xfail_pin_is_a_witness_only_of_a_slow_pin_of_the_same_open_anomaly()
     assert not accepted(pin7, ["MADD-ANO-7", False, "always"])
     assert not accepted(["MADD-ANO-7", True, "string"], pin7)
     assert not accepted(pin7, ["MADD-ANO-7", True, "string"])
+    # A witness pytest never runs (run=False) cannot turn red when the defect goes.
+    assert not accepted(["MADD-ANO-7: pinned, never run", True, "always", False], pin7)
+    assert accepted(["MADD-ANO-7: pinned", True, "always", True], pin7)
     # No slow items handed in (a caller that forgot them) excuses nothing.
     c = partition([_row("tests/a.py::test_w", xfail=pin7)])
     assert witness_problems("tests/b.py", [(1, "tests/a.py::test_w")], c, outcomes=_reads_nothing,
@@ -990,8 +1379,14 @@ def test_an_xfail_pin_is_a_witness_only_of_a_slow_pin_of_the_same_open_anomaly()
 
 
 _BODIES = '''
+import os
+import unittest
+import unittest as ut
 import pytest
 from pytest import skip as leave
+from unittest import SkipTest, skip as quietly
+
+SHARDED = "MADDENING_TEST_SHARD" in os.environ
 
 
 def _need_devices():
@@ -1051,6 +1446,126 @@ class TestA:
 
     def test_plain(self):
         assert True
+
+
+@unittest.skip("on a plain function")
+def test_unittest_skip():
+    assert False
+
+
+@quietly("imported under another name")
+def test_unittest_skip_imported():
+    assert False
+
+
+@ut.skipIf(1 + 1 == 2, "a condition")
+def test_unittest_skipif():
+    assert False
+
+
+@unittest.expectedFailure
+def test_unittest_expected_failure():
+    assert False
+
+
+@unittest.skip("on the class")
+class TestSkippedCase(unittest.TestCase):
+    def test_in_it(self):
+        assert False
+
+
+class TestCaseMethods(unittest.TestCase):
+    def setUp(self):
+        self.skipTest("unittest's own skip, through self: not seen")
+
+    @unittest.skip("on the method")
+    def test_skipped(self):
+        assert False
+
+
+def test_raises_skiptest():
+    raise unittest.SkipTest("in the body")
+
+
+def test_raises_skiptest_imported_on_a_condition():
+    if len(os.sep) == 1:
+        raise SkipTest("under a condition")
+    assert False
+
+
+def test_redefined():
+    assert False
+
+
+def test_redefined():  # noqa: F811  (the one pytest collects)
+    pytest.skip("the second definition")
+
+
+def test_redefined_back():
+    pytest.skip("the first definition")
+
+
+def test_redefined_back():  # noqa: F811
+    assert True
+
+
+def test_rebound():
+    assert True
+
+
+test_rebound = None
+
+
+@pytest.mark.skipif("MADDENING_TEST_SHARD" in os.environ, reason="sharded lanes only")
+def test_skipif_on_the_shard():
+    assert False
+
+
+@pytest.mark.skipif(SHARDED, reason="through a module name")
+def test_skipif_on_the_shard_by_name():
+    assert False
+
+
+def _sharded():
+    return bool(os.environ.get("MADDENING_TEST_SHARD"))
+
+
+@pytest.mark.xfail(_sharded(), reason="through a module function")
+def test_xfail_on_the_shard_by_function():
+    assert False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="another variable")
+def test_skipif_on_another_condition():
+    assert True
+'''
+
+_MODULE_WIDE = '''
+import os
+import pytest
+
+pytestmark = pytest.mark.skipif(os.environ.get("MADDENING_TEST_JAX_TIMING") == "1", reason="x")
+
+
+def setup_module(module):
+    pass
+
+
+def setup_function(function):
+    pytest.skip("xunit setup of every module-level test")
+
+
+def test_plain():
+    assert True
+
+
+class TestC:
+    def setup_method(self, method):
+        if os.sep == "/":
+            pytest.skip("xunit setup of the class's tests, on a condition")
+
+    def test_in_class(self):
+        assert True
 '''
 
 
@@ -1070,6 +1585,30 @@ def test_the_body_reader_finds_what_it_is_for():
     assert outcomes_in(tree, "test_generated_elsewhere") == ("unread",)
     assert outcomes_in(tree, "TestA::test_inherited") == ("unread",)
     assert outcomes_in(tree, "TestA") == ("unread",)
+    # unittest's skips and expected failure, under any import of them.
+    assert outcomes_in(tree, "test_unittest_skip") == ("skip",)
+    assert outcomes_in(tree, "test_unittest_skip_imported") == ("skip",)
+    assert outcomes_in(tree, "test_unittest_skipif") == ("skipif",)
+    assert outcomes_in(tree, "test_unittest_expected_failure") == ("xfail",)
+    assert outcomes_in(tree, "TestSkippedCase::test_in_it") == ("skip",)
+    assert outcomes_in(tree, "TestCaseMethods::test_skipped") == ("skip",)
+    assert outcomes_in(tree, "test_raises_skiptest") == ("skip",)
+    assert outcomes_in(tree, "test_raises_skiptest_imported_on_a_condition") == ("skipif",)
+    # The definition pytest collects is the last one; a name rebound to
+    # something else is not read.
+    assert outcomes_in(tree, "test_redefined") == ("skip",)
+    assert outcomes_in(tree, "test_redefined_back") == ()
+    assert outcomes_in(tree, "test_rebound") == ("unread",)
+    # A mark whose condition reads the shard variable, spelled out, through a
+    # module-level name or a module-level function.
+    assert outcomes_in(tree, "test_skipif_on_the_shard") == ("unset",)
+    assert outcomes_in(tree, "test_skipif_on_the_shard_by_name") == ("unset",)
+    assert outcomes_in(tree, "test_xfail_on_the_shard_by_function") == ("unset",)
+    assert outcomes_in(tree, "test_skipif_on_another_condition") == ()
+    # xunit setups, and a module mark reading an unset variable.
+    wide = ast.parse(_MODULE_WIDE)
+    assert outcomes_in(wide, "test_plain") == ("skip", "unset")
+    assert outcomes_in(wide, "TestC::test_in_class") == ("skipif", "unset")
 
 
 _MARKS = '''
@@ -1129,6 +1668,11 @@ def test_not_run():
     pass
 
 
+@pytest.mark.xfail(strict=True, run=False, reason="MADD-ANO-7: pinned, never run")
+def test_pin_not_run():
+    assert False
+
+
 @pytest.mark.xfail(DEVICES < 4, strict=True, reason="a false condition: the test can fail")
 def test_xfail_on_a_false_condition():
     pass
@@ -1175,13 +1719,14 @@ def test_the_collection_holds_the_marks_as_pytest_decides_them(tmp_path):
                         name("test_skipif_without_a_condition"): "always",
                         name("test_skipif_string"): "string"}
     assert c.default_lane == {name(t) for t in (
-        "test_enough_devices", "test_pin", "test_loose", "test_not_run",
+        "test_enough_devices", "test_pin", "test_loose", "test_not_run", "test_pin_not_run",
         "test_xfail_on_a_false_condition", "test_xfail_on_a_true_condition", "test_cases[0]",
         "test_cases[1]", "TestMarked::test_in_class", "TestMarked::test_closer")}
     assert c.xfail == {
         name("test_pin"): Xfail("MADD-ANO-7: pinned", True, "always"),
         name("test_loose"): Xfail("loose", False, "always"),
-        name("test_not_run"): Xfail("never run", False, "always"),
+        name("test_not_run"): Xfail("never run", False, "always", run=False),
+        name("test_pin_not_run"): Xfail("MADD-ANO-7: pinned, never run", True, "always", run=False),
         name("test_xfail_on_a_true_condition"): Xfail("true here", True, "true"),
         name("test_cases[1]"): Xfail("p", True, "always"),
         name("test_slow_pin"): Xfail("MADD-ANO-7: the slow pin", True, "always"),
@@ -1197,6 +1742,10 @@ def test_the_collection_holds_the_marks_as_pytest_decides_them(tmp_path):
                             **readers) == []
     assert "xfail-marked" in witness_problems("tests/x.py", pin, under_tests,
                                               ["tests/test_marks.py::test_slow"], **readers)[0]
+    # A strict pin of the same open entry that never runs is no witness.
+    (never_run,) = witness_problems("tests/x.py", [(1, "tests/test_marks.py::test_pin_not_run")],
+                                    under_tests, ["tests/test_marks.py::test_slow_pin"], **readers)
+    assert "run=False: pytest never runs it" in never_run, never_run
     for target in ("test_xfail_on_a_false_condition", "test_enough_devices", "test_cases"):
         assert witness_problems("tests/x.py", [(1, f"tests/test_marks.py::{target}")], under_tests,
                                 ["tests/test_marks.py::test_slow"], **readers) == [], target

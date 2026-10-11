@@ -1043,7 +1043,10 @@ class TestPrecisionLimitedRank:
         warning's band -- how many reports there were and how many
         warned, with the long-residual share of the inside ones."""
         rng = np.random.default_rng(seed)
-        factor, guard = _PRECISION_WARN_FACTOR, cls._GUARD
+        # The documented band, half to twice the cutoff, as a literal: read
+        # from the module, the band asserted would move with a seeded factor.
+        factor, guard = 2.0, cls._GUARD
+        assert _PRECISION_WARN_FACTOR == factor
         dis = inside = inside_warned = outside = outside_warned = long_inside = 0
         for n in (2, 3, 5):
             for m in (12, 40, 400):

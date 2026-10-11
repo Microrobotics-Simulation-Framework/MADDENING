@@ -19128,9 +19128,10 @@ anomalies:
       at `J`'s precision is the conventional `max(m, n) * eps`, not a
       theorem about the routine in use; the constant-sensitivity
       populations measure what it leaves.  `cond` of a rank-deficient
-      float32 report is now a large finite number where the rounding of
-      `F` used to give `inf` or a number near `1e7` at random: read
-      `rank`.
+      float32 report is now `inf` (exactly proportional columns) or a
+      very large finite number (`2e14` for the spring's scale direction)
+      where the rounding of `F` used to give `inf` or a number near `1e7`
+      at random: read `rank`.
     verification:
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_in_float32"
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_with_float64_leaves"

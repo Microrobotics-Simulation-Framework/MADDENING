@@ -2961,8 +2961,9 @@ def _jacobian_spectrum(J, *, gram_is_zero: bool = False):
     gives the ``n - m`` directions no row reads the eigenvalue ``0`` they
     have.
 
-    A singular value at or under ``max(m, n) * eps64`` of the largest --
-    the float64 decomposition's own conventional bound,
+    A singular value at or under ``max(m, n) * n * eps64`` of the largest
+    -- the float64 decomposition's own bound, in the form Householder's
+    backward error takes (``gamma_mn``, twice over), ``n`` times
     ``numpy.linalg.matrix_rank``'s tolerance -- was not measured, and is
     reported as the zero it stands for: two columns that are exactly
     proportional give an eigenvalue of exactly ``0.0`` and a ``cond`` of
@@ -2982,7 +2983,7 @@ def _jacobian_spectrum(J, *, gram_is_zero: bool = False):
     if m < n:
         Jd = np.concatenate([Jd, np.zeros((n - m, n))], axis=0)
     _, s, vt = np.linalg.svd(np.linalg.qr(Jd, mode="r"))
-    measured = s > max(m, n) * float(np.finfo(np.float64).eps) * s[0]
+    measured = s > max(m, n) * n * float(np.finfo(np.float64).eps) * s[0]
     s = np.where(measured, s, np.zeros_like(s))
     lam = np.zeros(n) if gram_is_zero else (s * s)[::-1]
     # A largest eigenvalue past the precision's range is ``inf`` here and

@@ -135,8 +135,8 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
                                         J64.shape[1]))])
     _, sing, vt = np.linalg.svd(np.linalg.qr(J64, mode="r"))
     # a singular value under the float64 decomposition's own bound is zero
-    sing = np.where(sing > max(J_host.shape) * np.finfo(np.float64).eps * sing[0],
-                    sing, 0.0)
+    floor = max(J_host.shape) * J_host.shape[1] * np.finfo(np.float64).eps
+    sing = np.where(sing > floor * sing[0], sing, 0.0)
     eigvals = (sing[::-1] ** 2).astype(J_host.dtype)
     eigvecs = np.ascontiguousarray(vt[::-1].T).astype(J_host.dtype)
     if not np.any(np.asarray(F)):

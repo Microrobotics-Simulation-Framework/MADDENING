@@ -31,11 +31,18 @@
 
 FROM ubuntu:24.04
 
+# The tree is mounted read-only at /src, so nothing may need to write
+# there: no bytecode, Hypothesis's files under /tmp, and pytest's plugin
+# autoload off as on every CI lane (the Hypothesis plugin's report header
+# otherwise opens the example database in the tree, and an existing but
+# read-only .hypothesis/ there is a warning, hence an error).
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    JAX_PLATFORMS=cpu
+    JAX_PLATFORMS=cpu \
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+    HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis
 
 # GStreamer with the plugins webrtcbin and the test's peer need:
 #   base   appsrc, videoconvert, videotestsrc, appsink, the GstSdp/GstApp typelibs

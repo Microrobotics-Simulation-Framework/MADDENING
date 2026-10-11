@@ -15,6 +15,14 @@ here is one such fault, applied to a scratch copy of the library (never to
 the tree under test), and the goals it names must fail on it while the
 other checklist goals pass.
 
+The last three are faults of a halo two cells wide, which no node of the
+goals had until schema 10 (``Field2D`` and the lattice read one cell): a
+wrapper that zero-filled every wider halo at the global edges passed all
+eight goals.  The ``stencil`` goal now runs ``Field2D(reach=2)`` under each
+boundary on every mesh (its ``field-halo2`` cases), and each of these must
+fail every one of those cases its fault can reach, and no case with a halo
+of one.
+
 The seeds are exact text of the library.  When that code changes the
 per-push test below fails, naming the seed: update the seed to the new
 code rather than dropping it.
@@ -102,6 +110,16 @@ class Seed(NamedTuple):
     #: The fault makes the step raise rather than compute a wrong number
     #: (``shard_map`` refuses it): the goals must record that as a failure.
     raises: bool = False
+    #: The ``stencil`` goal's node (``run_pod.STENCIL_NODES``) whose cases
+    #: the fault is confined to; ``"field"``: every node's.  A fault of
+    #: halos two wide is ``"field-halo2"``'s alone, and the ``stencil``
+    #: goal's: ``hybrid`` and ``coupled`` build ``Field2D`` with a halo of
+    #: one.
+    kind: str = "field"
+    #: The boundaries (``run_pod.STENCIL_BOUNDARIES``) the fault is
+    #: confined to (empty: any), and the one the per-push test looks under.
+    only_under: tuple = ()
+    boundary: str = "periodic"
 
 
 _SEEDS = {
@@ -172,6 +190,37 @@ _SEEDS = {
         "                f\"state field {f!r}\": int(jnp.shape(arr)[spatial_axis])\n",
         "                f\"state field {f!r}\": int(jnp.shape(arr)[0])  # SEEDED FAULT: axis 0\n",
         only_in=("1d-axis1", "2d-flat", "2d"), mesh="2d"),
+    # The three below are faults of a halo two cells wide.  The first
+    # passed every goal until schema 10: the state's and a grid input's
+    # global-edge halos zero whenever a halo is two or more cells wide.
+    # Under "dirichlet" the node overwrites the field's with the wall, and
+    # the source's -- the wrapper's own fill -- shows it.
+    "halos_two_wide_are_zero_at_the_global_edges": Seed(
+        "                    arr2, mesh=mesh, axes=exchange_axes, boundary=boundary,\n",
+        "                    arr2, mesh=mesh, axes=exchange_axes,\n"
+        '                    boundary=("zero" if any(h >= 2 for _, _, h in exchange_axes) '
+        "else boundary),  # SEEDED FAULT\n",
+        fails=("stencil",), kind="field-halo2"),
+    # The second halo cell taken from the first: every halo that comes
+    # from a neighbouring shard is its innermost cell repeated.
+    "outer_halo_cells_copy_the_innermost_one": Seed(
+        "    right_halo = lax.ppermute(left_slice, mesh_axis, perm_backward)\n",
+        "    right_halo = lax.ppermute(left_slice, mesh_axis, perm_backward)\n"
+        "    if halo >= 2:  # SEEDED FAULT: each outer halo cell copies the innermost one\n"
+        "        left_halo = jnp.broadcast_to(lax.slice_in_dim(\n"
+        "            left_halo, halo - 1, halo, axis=spatial_axis), left_halo.shape)\n"
+        "        right_halo = jnp.broadcast_to(lax.slice_in_dim(\n"
+        "            right_halo, 0, 1, axis=spatial_axis), right_halo.shape)\n",
+        file=_HALO, fails=("halo", "stencil"), kind="field-halo2"),
+    # A two-cell halo exchanged across shards and filled by the one-cell
+    # rule at a global edge: the block's two outermost cells in order, not
+    # its edge cell twice (what "edge" did before 0.4.0, MADD-ANO-029).
+    "wide_edge_halos_repeat_the_block_not_its_edge_cell": Seed(
+        "    if halo == 1:\n        return left_slice, right_slice\n",
+        "    if halo >= 1:  # SEEDED FAULT: the one-cell rule at every width\n"
+        "        return left_slice, right_slice\n",
+        file=_HALO, fails=("halo", "stencil"), kind="field-halo2",
+        only_under=("edge", "dirichlet"), boundary="edge"),
 }
 
 
@@ -210,11 +259,23 @@ def test_every_seed_names_goals_meshes_and_a_mesh_the_runner_has():
     meshes the runner builds on four devices."""
     rp = _runner()
     meshes = set(rp.meshes_that_fit(_N_DEV))
+    text = _RUNNER.read_text(encoding="utf-8")
     for name, seed in _SEEDS.items():
         assert set(seed.fails) <= set(rp.CHECKLIST_GOALS), name
-        assert set(_WRAPPER_GOALS) <= set(seed.fails), name
         assert set(seed.only_in) <= meshes and seed.mesh in meshes, name
         assert not seed.only_in or seed.mesh in seed.only_in, name
+        assert seed.kind in rp.STENCIL_NODES, name
+        assert set(seed.only_under) <= set(rp.STENCIL_BOUNDARIES), name
+        assert seed.boundary in (seed.only_under or rp.STENCIL_BOUNDARIES), name
+        if seed.kind == "field":
+            assert set(_WRAPPER_GOALS) <= set(seed.fails), name
+        else:
+            assert set(seed.fails) - {"halo"} == {"stencil"}, name
+    # ... and a halo of two is the stencil goal's alone: one call builds
+    # Field2D with a reach, for the stencil goal's cases
+    builds = [line for line in text.splitlines() if "reach=" in line and "``" not in line]
+    assert len(builds) == 1, builds
+    assert "reach=2 if kind ==" in text.split("def _stencil_pair(")[1].split("\ndef ")[0]
 
 
 @pytest.mark.parametrize("argv", [
@@ -306,24 +367,28 @@ def rp_backend():
     return rp
 
 
-def _one_step_forward(rp, wrapper_class, mesh_label: str) -> dict:
-    """``{field: max_rel}`` of one step of the ``stencil`` goal's periodic
-    ``Field2D`` case (8 x 12, its source fed), sharded by ``wrapper_class``
-    on ``mesh_label``, against the unsharded node."""
+def _one_step_forward(rp, wrapper_class, mesh_label: str, kind: str = "field",
+                      boundary: str = "periodic") -> dict:
+    """``{field: max_rel}`` of one step of a ``Field2D`` case of the
+    ``stencil`` goal (8 x 12, its source fed; ``kind`` and ``boundary`` as
+    the goal names them), sharded by ``wrapper_class`` on ``mesh_label``,
+    against the unsharded node."""
     ny, nx = rp.field_shape(64, _N_DEV)
     mesh, axis_map, _ = rp.stencil_mesh(mesh_label, _N_DEV)
     real = rp.ShardedStencilNode
     rp.ShardedStencilNode = wrapper_class
     try:
-        ref, sharded, bi, p = rp._stencil_pair("field", ny, nx, "periodic", mesh, axis_map)
+        ref, sharded, bi, p = rp._stencil_pair(kind, ny, nx, boundary, mesh, axis_map)
     finally:
         rp.ShardedStencilNode = real
+    assert ref.halo_width() == sharded.halo_width() == dict.fromkeys(
+        (0, 1), 2 if kind == "field-halo2" else 1)
     start = dict(ref.initial_state())
     got = {label: rp._host(node.update(state, bi, ref.delta_t, params={"diffusivity": p}))
            for label, node, state in (("unsharded", ref, start),
                                       ("sharded", sharded, rp._placed_like(sharded, start)))}
     return {field: rp._diff(got["sharded"][field], got["unsharded"][field])["max_rel"]
-            for field in rp.STENCIL_NODES["field"]["fields"]}
+            for field in rp.STENCIL_NODES[kind]["fields"]}
 
 
 @pytest.mark.parametrize("name", [None, *sorted(_SEEDS)],
@@ -334,19 +399,45 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
     ``stencil`` goal's own node and inputs, sharded by the seeded wrapper,
     is off the unsharded step by more than the goal's forward limit -- and
     by the real wrapper, within it on every mesh.  A fault confined to some
-    meshes is looked for on one of them (``Seed.mesh``)."""
+    meshes is looked for on one of them (``Seed.mesh``), and one confined
+    to halos two wide in the ``field-halo2`` case, under ``Seed.boundary``
+    -- where the case with a halo of one must still agree."""
     rp = rp_backend
     limit = rp.LIMITS["forward"]
     if name is None:
         for mesh_label in rp.meshes_that_fit(_N_DEV):
             rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label)
             assert all(v <= limit for v in rel.values()), (mesh_label, rel)
-    elif _SEEDS[name].raises:
+        return
+    seed, wrapper = _SEEDS[name], seeded_wrapper_classes[name]
+    if seed.raises:
         with pytest.raises(Exception):
-            _one_step_forward(rp, seeded_wrapper_classes[name], _SEEDS[name].mesh)
-    else:
-        rel = _one_step_forward(rp, seeded_wrapper_classes[name], _SEEDS[name].mesh)
-        assert any(not v <= limit for v in rel.values()), rel
+            _one_step_forward(rp, wrapper, seed.mesh)
+        return
+    rel = _one_step_forward(rp, wrapper, seed.mesh, seed.kind, seed.boundary)
+    assert any(not v <= limit for v in rel.values()), rel
+    if seed.kind != "field":
+        rel = _one_step_forward(rp, wrapper, seed.mesh, "field", seed.boundary)
+        assert all(v <= limit for v in rel.values()), rel
+        for boundary in set(rp.STENCIL_BOUNDARIES) - set(seed.only_under or
+                                                         rp.STENCIL_BOUNDARIES):
+            rel = _one_step_forward(rp, wrapper, seed.mesh, seed.kind, boundary)
+            assert all(v <= limit for v in rel.values()), (boundary, rel)
+
+
+@pytest.mark.parametrize("boundary", ["periodic", "edge", "dirichlet"])
+def test_one_step_with_a_halo_of_two_agrees_on_every_mesh_under_each_boundary(
+        boundary, rp_backend):
+    """The control of the seeds of halos two wide: one step of the
+    ``stencil`` goal's ``field-halo2`` node, sharded by the wrapper as it
+    stands, is the unsharded step within the goal's forward limit on every
+    mesh -- 8 x 12 cells, so on the 1-D mesh a shard's two rows are all
+    halo to its neighbours."""
+    rp = rp_backend
+    assert boundary in rp.STENCIL_BOUNDARIES and len(rp.STENCIL_BOUNDARIES) == 3
+    for mesh_label in rp.meshes_that_fit(_N_DEV):
+        rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label, "field-halo2", boundary)
+        assert all(v <= rp.LIMITS["forward"] for v in rel.values()), (mesh_label, rel)
 
 
 # --- slow: the goals themselves, as the session runs them ---------------------
@@ -413,15 +504,26 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
         (doc,) = docs[goal]
         assert rp.record_problems(doc) == [], (goal, rp.record_problems(doc))
         assert ("raised" in doc) == seed.raises, (goal, doc.get("raised"))
+    (stencil,) = docs["stencil"]
+    failed = [c["name"] for c in stencil["checks"] if rp.check_status(c) == "failed"]
     if seed.only_in:
-        (stencil,) = docs["stencil"]
-        failed = [c["name"] for c in stencil["checks"] if rp.check_status(c) == "failed"]
         assert failed and all(any(f" {m} " in c for m in seed.only_in) for c in failed), failed
+    if seed.kind != "field":
+        # A fault of halos two wide: every failed check is one of that
+        # node's, under a boundary the fault can reach -- and every such
+        # case on every mesh has one, so each of them guards the path.
+        assert failed and all(c.startswith(f"{seed.kind} ") for c in failed), failed
+        under = seed.only_under or rp.STENCIL_BOUNDARIES
+        assert all(c.split(":")[0].split(" vs ")[0].split()[4] in under for c in failed), failed
+        for mesh in seed.only_in or rp.meshes_that_fit(_N_DEV):
+            for boundary in under:
+                assert any(c.startswith(f"{seed.kind} {mesh} ") and f" {boundary} " in c
+                           for c in failed), (mesh, boundary, failed)
     # What --summarise would say had the same checks failed the same way on
     # four GPUs: every item a failing goal decides has FAILED, the rest closed.
     status = {i: s for i, (s, _) in rp.checklist_status(_as_four_gpus(docs)).items()}
     failing = {i for i, (_c, goals) in rp.CHECKLIST.items() if set(goals) & set(seed.fails)}
-    assert {1, 3, 4, 6} <= failing
+    assert ({1, 3, 4, 6} if seed.kind == "field" else {1, 3}) <= failing
     assert status == {i: "FAILED" if i in failing else "CLOSED" for i in rp.CHECKLIST}, status
     json.dumps(status)                                # (the verdicts are plain data)
 

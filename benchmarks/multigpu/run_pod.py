@@ -1001,19 +1001,46 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         ``wall`` there: the wrapper fills ``"edge"`` and ``update_padded``
         overwrites the halos at the *global* edges, finding them on each
         sharded axis from ``shard_info``.
+
+        ``reach`` is how many cells the node reads beyond a block, its
+        ``halo_width()`` on both axes: 1, or 2 (the ``stencil`` goal's
+        ``field-halo2`` cases).  At 2 every part above reads the second
+        cell as well, so that the wrapper's fill of the *outer* halo cell
+        moves the answer -- where it comes from the next shard, and at a
+        global edge under each boundary:
+
+        * the diffusion gains the four second neighbours (two cells along
+          an axis) at ``FAR_SHARE`` of the weight of the first, each
+          through the mean of the two cells' ``mask``: the field's and the
+          static's second halo cell;
+        * the smoothing of ``source`` gains the same four cells: the
+          second halo cell of a grid-shaped input, which under
+          ``"dirichlet"`` is the one array whose global-edge halo is the
+          wrapper's own fill (the field's is overwritten with ``wall``,
+          two cells deep);
+        * a block may be no wider than the halo (two rows a shard at the
+          smallest grid): the whole of a neighbour's block is then halo.
+
+        At 1 the arithmetic is what it was before the option existed.
         """
+
+        #: The weight of a second neighbour against a first one (``reach=2``).
+        FAR_SHARE = 0.25
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
                      exchange: float = 0.0, timestep: float = 0.1,
-                     boundary: str = "periodic", mask_axis: int = 0) -> None:
+                     boundary: str = "periodic", mask_axis: int = 0, reach: int = 1) -> None:
             super().__init__(name=name, timestep=timestep, diffusivity=diffusivity,
                              exchange=exchange)
             if boundary not in STENCIL_BOUNDARIES:
                 raise ValueError(f"boundary {boundary!r} is not one of {STENCIL_BOUNDARIES}")
             if mask_axis not in (0, 1):
                 raise ValueError(f"mask_axis {mask_axis!r} is not 0 or 1")
+            if reach not in (1, 2):
+                raise ValueError(f"reach {reach!r} is not 1 or 2")
             self.boundary = boundary
             self._mask_axis = int(mask_axis)
+            self._reach = int(reach)
             self._shape = (int(ny), int(nx))
             j = np.arange(ny, dtype=np.float32)[:, None]
             i = np.arange(nx, dtype=np.float32)[None, :]
@@ -1023,7 +1050,7 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
                                                 shard_axis=self._mask_axis)}
 
         def halo_width(self) -> dict:
-            return {0: 1, 1: 1}
+            return {0: self._reach, 1: self._reach}
 
         def state_fields(self) -> list:
             return ["f"]
@@ -1074,58 +1101,72 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             """How a sharded static's halo is filled: the wrapper's rule."""
             return "wrap" if self.boundary == "periodic" else "edge"
 
-        @staticmethod
-        def _new(f_pad, mask_pad, ambient, source_pad, p, dt):
-            f = f_pad[1:-1, 1:-1]
-            m = mask_pad[1:-1, 1:-1]
-            div = sum(0.5 * (m + mask_pad[sl]) * (f_pad[sl] - f)
-                      for sl in ((slice(None, -2), slice(1, -1)), (slice(2, None), slice(1, -1)),
-                                 (slice(1, -1), slice(None, -2)), (slice(1, -1), slice(2, None))))
+        def _new(self, f_pad, mask_pad, ambient, source_pad, p, dt):
+            h = self._reach
+
+            def at(a, dy, dx):
+                """The block's cells of a padded array, shifted by ``(dy, dx)``."""
+                return a[h + dy: a.shape[0] - h + dy, h + dx: a.shape[1] - h + dx]
+
+            def ring(distance):
+                return ((-distance, 0), (distance, 0), (0, -distance), (0, distance))
+
+            f, m = at(f_pad, 0, 0), at(mask_pad, 0, 0)
+            div = sum(0.5 * (m + at(mask_pad, *to)) * (at(f_pad, *to) - f) for to in ring(1))
+            if h == 2:
+                div = div + self.FAR_SHARE * sum(
+                    0.5 * (m + at(mask_pad, *to)) * (at(f_pad, *to) - f) for to in ring(2))
             out = f + dt * (p["diffusivity"] * div + p["exchange"] * (ambient - f))
             if source_pad is not None:
-                s = (0.5 * source_pad[1:-1, 1:-1]
-                     + 0.125 * (source_pad[:-2, 1:-1] + source_pad[2:, 1:-1]
-                                + source_pad[1:-1, :-2] + source_pad[1:-1, 2:]))
+                (up, down, left, right) = (at(source_pad, *to) for to in ring(1))
+                s = 0.5 * at(source_pad, 0, 0) + 0.125 * (up + down + left + right)
+                if h == 2:
+                    (up, down, left, right) = (at(source_pad, *to) for to in ring(2))
+                    s = s + (0.125 * self.FAR_SHARE) * (up + down + left + right)
                 out = out + dt * s
             return out
 
         def _hold_walls(self, f_pad, wall, shard_info):
-            """Dirichlet halos: the rows and columns beyond a *global* edge.
-            A block holds an edge of a sharded axis when ``shard_info`` puts
-            it there; an axis not in ``shard_info`` is whole on the block."""
+            """Dirichlet halos: the rows and columns beyond a *global* edge,
+            ``reach`` deep.  A block holds an edge of a sharded axis when
+            ``shard_info`` puts it there; an axis not in ``shard_info`` is
+            whole on the block."""
+            h = self._reach
             info = shard_info or {}
             held = []
             for axis in (0, 1):
-                local = f_pad.shape[axis] - 2
+                local = f_pad.shape[axis] - 2 * h
                 offset, extent = info.get(axis, (0, local))
                 held.append((offset == 0, offset + extent == self._shape[axis]))
             (top, bottom), (left, right) = held
-            f_pad = f_pad.at[0, :].set(jnp.where(top, wall, f_pad[0, :]))
-            f_pad = f_pad.at[-1, :].set(jnp.where(bottom, wall, f_pad[-1, :]))
-            f_pad = f_pad.at[:, 0].set(jnp.where(left, wall, f_pad[:, 0]))
-            return f_pad.at[:, -1].set(jnp.where(right, wall, f_pad[:, -1]))
+            f_pad = f_pad.at[:h, :].set(jnp.where(top, wall, f_pad[:h, :]))
+            f_pad = f_pad.at[-h:, :].set(jnp.where(bottom, wall, f_pad[-h:, :]))
+            f_pad = f_pad.at[:, :h].set(jnp.where(left, wall, f_pad[:, :h]))
+            return f_pad.at[:, -h:].set(jnp.where(right, wall, f_pad[:, -h:]))
 
         def update(self, state, boundary_inputs, dt, *, params=None):
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
             source = boundary_inputs.get("source")
+            h = self._reach
             source_pad = None if source is None else jnp.pad(
-                jnp.asarray(source, jnp.float32), 1, mode=self._pad_mode)
-            f_pad = jnp.pad(state["f"], 1, mode=self._pad_mode)
+                jnp.asarray(source, jnp.float32), h, mode=self._pad_mode)
+            f_pad = jnp.pad(state["f"], h, mode=self._pad_mode)
             if self.boundary == "dirichlet":
                 wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
                 f_pad = self._hold_walls(f_pad, wall, None)
-            mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), 1,
+            mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), h,
                                mode=self._static_mode)
             new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
             return {"f": new, "averages": self._averages(new)}
 
         def update_padded(self, state_padded, boundary_inputs, dt, *, static_padded=None,
                           shard_info=None, params=None):
+            h = self._reach
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
             if ambient.ndim == 2:                  # grid-shaped: arrives halo-padded
-                ambient = ambient[1:-1, 1:-1]
+                ambient = ambient[h:-h, h:-h]
             source_pad = boundary_inputs.get("source")
             f_pad = state_padded["f"]
             if self.boundary == "dirichlet":
@@ -1137,13 +1178,13 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             # that axis is sharded too).
             other = 1 - self._mask_axis
             pad = [(0, 0), (0, 0)]
-            pad[other] = (1, 1)
+            pad[other] = (h, h)
             mask_pad = jnp.pad(static_padded["mask"], pad, mode=self._static_mode)
             width = f_pad.shape[other]
-            offset = (shard_info or {}).get(other, (0, width - 2))[0]
+            offset = (shard_info or {}).get(other, (0, width - 2 * h))[0]
             mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=other)
             new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
-            return {"f": f_pad.at[1:-1, 1:-1].set(new), "averages": self._averages(new)}
+            return {"f": f_pad.at[h:-h, h:-h].set(new), "averages": self._averages(new)}
 
     class FarField(SimulationNode):
         """A replicated scalar solver: ``u <- u + dt * conductance * (field_mean - u)``."""
@@ -2594,6 +2635,8 @@ def _lbm_force(ny: int, nx: int) -> np.ndarray:
 #: of cancellation, 5e-5 apart between two correct programs.
 STENCIL_NODES = {
     "field": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
+    # ``Field2D(reach=2)``: every halo two cells wide (the node's docstring).
+    "field-halo2": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
     "lbm": {"fields": ("f", "velocity"), "parameter": "viscosity", "loss_of": "velocity"},
 }
 
@@ -2631,10 +2674,11 @@ def stencil_cases(cells, n_devices: int) -> list:
     """``(cells, node, boundary, mesh)`` cases the ``stencil`` goal runs.
 
     At the smallest size: ``Field2D`` under every ``STENCIL_BOUNDARIES``
-    entry and the D2Q9 lattice, on every mesh this device count can build
-    (:func:`meshes_that_fit`).  At the other sizes: ``Field2D`` with
-    periodic ends on the goal's own mesh (:func:`graph_mesh`, the pencil
-    where it fits).
+    entry, the D2Q9 lattice, and ``Field2D`` with a halo of two under every
+    ``STENCIL_BOUNDARIES`` entry again (``field-halo2``), on every mesh this
+    device count can build (:func:`meshes_that_fit`).  At the other sizes:
+    ``Field2D`` with periodic ends on the goal's own mesh
+    (:func:`graph_mesh`, the pencil where it fits).
     """
     smallest = min(cells)
     cases = []
@@ -2643,6 +2687,7 @@ def stencil_cases(cells, n_devices: int) -> list:
             for mesh in meshes_that_fit(n_devices):
                 cases += [(n, "field", b, mesh) for b in STENCIL_BOUNDARIES]
                 cases.append((n, "lbm", "periodic", mesh))
+                cases += [(n, "field-halo2", b, mesh) for b in STENCIL_BOUNDARIES]
         else:
             cases.append((n, "field", "periodic", graph_mesh(n_devices)))
     return cases
@@ -2671,7 +2716,7 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
 
     def make():
         return Field2D("field", ny, nx, exchange=0.3, boundary=boundary,
-                       mask_axis=mask_axis_for(axis_map))
+                       mask_axis=mask_axis_for(axis_map), reach=2 if kind == "field-halo2" else 1)
     # "dirichlet" is the node's own condition over the wrapper's default
     # "edge" fill; the other two are the wrapper's fill of that name.
     sharded = ShardedStencilNode(make(), mesh, axis_map=axis_map,

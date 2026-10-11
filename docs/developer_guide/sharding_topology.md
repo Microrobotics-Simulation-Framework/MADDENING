@@ -167,7 +167,11 @@ which wrapper a node is written for:
   `rtol` or `atol` that is negative or NaN and arrives as a traced value;
   given as a concrete number such a tolerance raises a `ValueError`
   (MADD-ANO-271).  A result is so every entry of `value` finite beside a
-  finite `residual_norm`, or NaN in both.  With a floor of zero
+  finite `residual_norm`, or NaN in both (one exception, open: under
+  `differentiable=True` a solution within a factor of the operator's
+  diagonal of the dtype's largest number reads `converged=False` beside an
+  infinite `residual_norm`, or NaN with an `x0` or an `atol`, where the
+  ordinary call answers: MADD-ANO-275).  With a floor of zero
   (`rtol=0`, an explicit `atol=0.0`) lineax's entrywise test is `0 / 0`
   at an exactly zero entry and lineax stops there reporting success:
   `converged` on the lineax backend is then not its verdict but

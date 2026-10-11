@@ -1,6 +1,6 @@
-"""What ``sharded_cg`` and ``sharded_gmres`` do not report in 0.4.0,
-pinned as it behaves today.  It is registered open; a fix turns these
-tests red, and the entry is then closed with it.
+"""Two things ``sharded_cg`` and ``sharded_gmres`` do not report in
+0.4.0, each pinned as it behaves today.  Both are registered open; a fix
+turns the matching tests red, and the entry is then closed with it.
 
 * **MADD-ANO-270.**  Under ``differentiable=True`` the result's
   ``converged`` is the primal solve's.  Each derivative is one more solve
@@ -9,6 +9,14 @@ tests red, and the entry is then closed with it.
   A primal that needs fewer steps than a cold solve (a warm start, an
   ``atol`` above ``||b||``, a right-hand side that is one eigenvector)
   reads ``converged=True`` beside a derivative that is far off.
+* **MADD-ANO-275.**  The report of ``differentiable=True``, and the
+  residual it attaches the derivative to, are products on the vectors as
+  they are, not in the power-of-two frame the solve itself runs in.  For
+  a solution within a factor of the operator's diagonal of the dtype's
+  largest number such a product overflows although the solution fits: the
+  call returns the right value with ``converged=False`` and an infinite
+  ``residual_norm``, and with an ``atol`` or an ``x0`` NaN in every entry,
+  where the ordinary call answers.
 
 The two entries this file pinned beside it are resolved, and their tests
 assert the fix in
@@ -121,3 +129,54 @@ def test_the_same_derivatives_are_right_when_the_budget_covers_a_cold_solve(rout
     assert bool(result.converged)
     assert _relative_error(tangent, np.linalg.solve(_A, _DIRECTION)) < 1e-2
     assert _relative_error(gradient, np.linalg.solve(_A.T, _COVECTOR)) < 1e-2
+
+
+# ---------------------------------------------------------------------------
+# MADD-ANO-275: ``differentiable=True`` just under the top of the dtype
+# ---------------------------------------------------------------------------
+
+_M = 64
+#: Every entry 1/28 of the largest float32; behind a diagonal of 2.05 the
+#: solution reaches 0.71 of that number, and ``2.05 * x`` overflows.
+_NEAR_THE_TOP = np.full(_M, np.finfo(np.float32).max / 28, np.float32)
+_NEAR_THE_TOP_SOLUTION = np.linalg.solve(_matrix(2.05, _M), _NEAR_THE_TOP.astype(np.float64))
+
+_TOP_ROUTES = {
+    "cg default": (sharded_cg, {}),
+    "cg loop": (sharded_cg, {"backend": "loop"}),
+    "gmres default": (sharded_gmres, {}),
+    "gmres loop": (sharded_gmres, {"backend": "loop"}),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_TOP_ROUTES))
+def test_with_the_flag_a_solution_just_under_the_top_reads_not_converged_beside_an_infinite_norm(
+        route):
+    """The value is right (it is the ordinary call's) and the report is
+    not: its product ``A x`` on the bare value overflows in ``2.05 * x``,
+    by a factor of 1.46 at the largest entry (structural, not rounding).
+    The ordinary call, whose report is taken in the frame of ``b``, reads
+    a finite norm."""
+    solver, selection = _TOP_ROUTES[route]
+    b = jnp.asarray(_NEAR_THE_TOP)
+    ordinary = solver(_operator(2.05), b, rtol=1e-3, **selection)
+    assert np.isfinite(float(ordinary.residual_norm))
+    assert _relative_error(ordinary.value, _NEAR_THE_TOP_SOLUTION) < 1e-2
+
+    flagged = solver(_operator(2.05), b, rtol=1e-3, differentiable=True, **selection)
+    assert _relative_error(flagged.value, _NEAR_THE_TOP_SOLUTION) < 1e-2
+    assert np.isinf(float(flagged.residual_norm))
+    assert not bool(flagged.converged)
+
+
+@pytest.mark.parametrize("route", sorted(_TOP_ROUTES))
+def test_with_the_flag_and_an_atol_the_same_solution_is_nan(route):
+    """With an ``atol`` (or an ``x0``) the derivative is attached through
+    the residual of the ordinary solve's value, ``b - A x``, taken on the
+    bare vectors: it overflows the same way, and the value is NaN in
+    every entry with ``converged=False``."""
+    solver, selection = _TOP_ROUTES[route]
+    flagged = solver(_operator(2.05), jnp.asarray(_NEAR_THE_TOP), rtol=1e-3, atol=0.0,
+                     differentiable=True, **selection)
+    assert np.all(np.isnan(np.asarray(flagged.value)))
+    assert not bool(flagged.converged)

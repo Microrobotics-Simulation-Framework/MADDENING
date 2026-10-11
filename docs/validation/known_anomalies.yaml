@@ -19039,14 +19039,9 @@ anomalies:
       `atol=inf, max_iters=1` on its default, lineax and loop routes, and
       `sharded_gmres` on its default route).  A result is so one of two
       things on every route: every entry of `value` finite beside a finite
-      `residual_norm`, or NaN in both.  The same change takes every
-      product of `differentiable=True`'s own report in the frame of `b`:
-      taken on the bare vectors they overflowed in an intermediate for a
-      REPRESENTABLE solution within a factor of the operator's diagonal of
-      the largest number (measured at a solution of 0.5 and 0.7 of the
-      largest float32 behind a diagonal of 2.05: `converged=False` and an
-      infinite `residual_norm` beside the right value, and NaN in every
-      entry with an `x0` or an `atol`, where the ordinary call answered).
+      `residual_norm`, or NaN in both (one case under
+      `differentiable=True` is outside it and is registered apart:
+      MADD-ANO-275).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -19083,7 +19078,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_result_is_a_finite_value_beside_a_finite_norm_or_nan_in_both"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_an_infinite_atol_does_not_read_converged_beside_a_norm_that_overflowed"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_under_vmap_only_the_member_whose_solution_overflows_is_nan"
-      - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered_under_differentiable_too"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-273"
@@ -19246,4 +19241,64 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_an_explicit_atol_of_zero_is_the_relative_test_on_every_route"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_none_and_zero_are_the_relative_test"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_where_its_floor_is_positive_the_lineax_route_reports_lineaxs_verdict"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-275"
+    title: "With differentiable=True a solution within a factor of the operator's diagonal of the dtype's largest number is reported as not converged beside an infinite residual_norm, or returned as NaN with an x0 or an atol, where the ordinary call answers"
+    description: >
+      `sharded_cg` and `sharded_gmres` run the solve on the right-hand side
+      rescaled by a power of two into `[0.5, 1)`, and the ordinary call
+      takes its report (`residual_norm`, `converged`) in that frame.  Under
+      `differentiable=True` two products are taken on the vectors as they
+      are instead: the report's `b - A x`, and, for a call with an `x0` or
+      an `atol`, the residual `b - A x_p` of the ordinary solve's value
+      that the derivative is attached to.  For a solution within a factor
+      of the operator's diagonal of the dtype's largest number such a
+      product overflows in an intermediate (`d * x[i]` before the
+      neighbours are subtracted), although the solution and `A x` are both
+      representable.
+      Measured on 2026-10-11 (CPU, float32, 64 unknowns, the operator
+      `2.05 x[i] - x[i-1] - x[i+1]`, every entry of the right-hand side
+      1/28 and 1/40 of the largest float32, so that the solution reaches
+      0.71 and 0.50 of that number; `rtol=1e-3`; jax 0.11.0 with lineax
+      0.0.7; `sharded_cg` default and loop, `sharded_gmres` default and
+      loop).  The ordinary call: the solution, `converged=True`, a finite
+      `residual_norm`.  With `differentiable=True`: the same value with
+      `converged=False` and `residual_norm=inf`; and with `atol=0.0` (or an
+      `x0`) NaN in every entry, a NaN `residual_norm` and
+      `converged=False`.  At a solution of 0.31 of the largest number the
+      two calls agree.
+      `differentiable=` is new in 0.4.0, so no released version has this.
+      Found on 2026-10-11 while fixing MADD-ANO-272.  Not fixed in 0.4.0:
+      taking those two products in the frame of `b` answers all of the
+      cases above, and it moved `residual_norm` by rounding in 24 of 894
+      compared calls (all with `differentiable=True` on a device mesh,
+      where the compiled product is fused differently), which the fix of
+      MADD-ANO-272 was required not to do.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud, so `minor`: the call reads `converged=False` beside an infinite
+      `residual_norm`, or returns NaN, and never vouches for a value that
+      is not the solution.  It needs a solution within a factor of the
+      operator's diagonal of the largest number of the dtype together with
+      `differentiable=True`, and rescaling the system or float64 avoids it.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Rescale a system whose solution is within a few factors of the
+      dtype's largest number (divide the right-hand side by a power of two
+      and multiply the solution back), or solve it in float64.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0; no release is named for the fix.  The value of a call
+      without `x0` and `atol` is right and only its report is not; with an
+      `x0` or an `atol` there is no value.  A derivative taken there is
+      NaN.
+    verification:
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_with_the_flag_a_solution_just_under_the_top_reads_not_converged_beside_an_infinite_norm"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_with_the_flag_and_an_atol_the_same_solution_is_nan"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered"
     github_issue: null

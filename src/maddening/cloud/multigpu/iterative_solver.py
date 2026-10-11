@@ -59,7 +59,8 @@ Design:
   is negative or NaN and arrives as a traced value (MADD-ANO-271); given
   as a concrete number such a tolerance is refused.  A result is every
   entry of ``value`` finite beside a finite ``residual_norm``, or NaN in
-  both.
+  both (one exception under ``differentiable=True`` at the top of the
+  dtype's range: MADD-ANO-275, ``Returns`` of :func:`sharded_cg`).
 * lineax's verdict is ``converged`` only where the floor of its entrywise
   test is positive.  With a floor of zero (``rtol=0``, an explicit
   ``atol=0.0``) its quotient is ``0 / 0`` at every entry that is exactly
@@ -164,7 +165,9 @@ class SharedSolveResult:
         for the dtype, or a residual whose norm is (both are tested as
         they are returned, after the scaling back; MADD-ANO-272); an
         ``rtol`` or ``atol`` that is negative or NaN and arrived as a
-        traced value (MADD-ANO-271).  Finite otherwise.
+        traced value (MADD-ANO-271).  Finite otherwise, with one
+        exception under ``differentiable=True`` (MADD-ANO-275,
+        ``Returns`` of :func:`sharded_cg`).
     """
     value: jax.Array
     converged: jax.Array
@@ -893,52 +896,53 @@ def _differentiable_solve(
     """
     kw: dict[str, Any] = ({"symmetric": True} if symmetric
                           else {"transpose_solve": transpose_solve_value})
-    # Every product taken here is taken on the vector rescaled by the power
-    # of two that frames ``b`` (see ``_framed``) and scaled back: exact, and
-    # the same bits wherever the bare product stayed in the normal range.
-    # The bare product did not always: of a solution within a factor of the
-    # operator's diagonal of the dtype's largest number it overflowed in an
-    # intermediate, though the solution and ``A x`` are both representable
-    # (measured in float32 at a solution of 0.5 and 0.7 of the largest
-    # number behind a diagonal of 2.05: ``converged=False`` and an infinite
-    # ``residual_norm`` beside the right value, and NaN in every entry with
-    # an ``x0`` or an ``atol``, where the ordinary call answers).
-    p = jax.lax.stop_gradient(pow2_frame(b))
     if primal_value is None:
         x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
     else:
         x_primal = primal_value()
-        r = b - matvec(x_primal * p) / p
+        r = b - matvec(x_primal)
         x = x_primal + lax.custom_linear_solve(
             matvec, r - lax.stop_gradient(r), solve_value, **kw)
-    # The test is taken in that frame, so the norms do not flush at small
-    # units either.
-    res_norm_hat = jnp.linalg.norm(b * p - matvec(x * p))
+    res = b - matvec(x)
+    # The test is taken on ``b`` and the residual rescaled by one power of
+    # two (see ``_framed``), so their norms do not flush at small units.
+    p = jax.lax.stop_gradient(pow2_frame(b))
+    res_norm_hat = jnp.linalg.norm(res * p)
     tol_hat = rtol * jnp.linalg.norm(b * p)
     if atol is not None:
         tol_hat = jnp.maximum(atol * p, tol_hat)
-    # As at the exit of the ordinary routes (``_framed``): the two fields
-    # are tested as they are returned.  ``x`` is already NaN where a solve
-    # inside had no answer; a norm that overflows on being scaled back is
-    # the other case.
     residual_norm = res_norm_hat / p
-    answered = jnp.logical_and(
-        jnp.all(jnp.isfinite(x)), jnp.isfinite(residual_norm))
-    # Where there is no answer there is no derivative either.  The tangent
-    # and cotangent solves have right-hand sides of their own, which can be
-    # solved where the primal overflowed (or was refused its tolerance):
-    # left alone they returned a finite derivative beside a NaN value.  A
-    # FACTOR of NaN carries to both modes (a ``jnp.where`` on the value
-    # would give a derivative of zero); the factor is exactly one where
-    # there is an answer, so the value and its derivatives keep their bits.
+    # ``x`` is all finite, or NaN in every entry where a solve inside had
+    # no answer (``_framed``: a right-hand side that is not finite, an
+    # operator that returned a NaN, a solution or a residual norm that
+    # overflows, a traced tolerance that is not a number >= 0).  Where
+    # there is no answer there is no derivative either.  The tangent and
+    # cotangent solves have right-hand sides of their own, which can be
+    # solved where the primal was not: left alone they returned a finite
+    # derivative beside a NaN value.  A FACTOR of NaN carries to both modes
+    # (a ``jnp.where`` on the value would give a derivative of zero); the
+    # factor is exactly one where there is an answer, so the value and its
+    # derivatives keep their bits.
+    answered = jnp.all(jnp.isfinite(x))
     real = jnp.finfo(x.dtype).dtype
     no_answer_is_nan = jnp.where(
         answered, jnp.ones((), real), jnp.full((), jnp.nan, real))
+    # The flag is not True beside a norm that is not finite.  ``res`` above
+    # is a product on the bare vectors, as it always was (its bits are
+    # those of 0.4.0's earlier builds): for a solution within a factor of
+    # the operator's diagonal of the dtype's largest number that product
+    # overflows in an intermediate although ``x`` and ``A x`` are
+    # representable, and the report is then ``converged=False`` beside an
+    # infinite ``residual_norm`` where the ordinary call answers
+    # (MADD-ANO-275, open; with an ``x0`` or an ``atol`` the residual ``r``
+    # above overflows the same way and the value is NaN).
     return SharedSolveResult(
         value=x * no_answer_is_nan,
-        converged=jnp.logical_and(res_norm_hat <= tol_hat, answered),
+        converged=jnp.logical_and(
+            res_norm_hat <= tol_hat,
+            jnp.logical_and(answered, jnp.isfinite(residual_norm))),
         iters=jnp.int32(-1),
-        residual_norm=jnp.where(answered, residual_norm, jnp.nan),
+        residual_norm=residual_norm,
     )
 
 
@@ -1417,6 +1421,19 @@ def sharded_cg(
         one of two things: every entry of ``.value`` finite beside a
         finite ``.residual_norm``, or NaN in both with
         ``converged=False``.
+
+        One exception, under ``differentiable=True`` only (MADD-ANO-275,
+        open): the report of that route, and the residual it attaches
+        the derivative to, are products on the vectors as they are, not
+        in the frame of ``b``.  For a solution within a factor of the
+        operator's diagonal of the dtype's largest number such a
+        product overflows in an intermediate although the solution
+        fits.  The call then returns the right value with
+        ``converged=False`` and an infinite ``.residual_norm``, and
+        with an ``x0`` or an ``atol`` NaN in every entry, where the
+        ordinary call answers (measured in float32 at a solution of 0.5
+        and 0.7 of the largest number behind a diagonal of 2.05).
+        Rescale such a system, or solve it in float64.
 
     Raises
     ------

@@ -120,6 +120,11 @@ class Seed(NamedTuple):
     #: confined to (empty: any), and the one the per-push test looks under.
     only_under: tuple = ()
     boundary: str = "periodic"
+    #: The fault is that node's alone: the plain ``field`` case under the
+    #: same boundary still agrees.  ``False``: a fault of the boundary, which
+    #: any node under it shows (the zero fill, which only ``field-shares``
+    #: runs under in the goal).
+    confined_to_kind: bool = True
 
 
 _SEEDS = {
@@ -221,7 +226,46 @@ _SEEDS = {
         "        return left_slice, right_slice\n",
         file=_HALO, fails=("halo", "stencil"), kind="field-halo2",
         only_under=("edge", "dirichlet"), boundary="edge"),
+    # The five below are on the path of the ``stencil`` goal's ``field-shares``
+    # cases alone (schema 11): the wrapper's zero fill, which no goal ran,
+    # and domain integrals the node asks it not to sum over every mesh axis.
+    "the_zero_fill_is_the_edge_fill": Seed(
+        "        self._boundary = boundary\n",
+        '        self._boundary = "edge" if boundary == "zero" else boundary  # SEEDED FAULT\n',
+        fails=("stencil",), kind="field-shares", only_under=("zero",), boundary="zero",
+        confined_to_kind=False),
+    "zero_filled_halos_are_ones": Seed(
+        "        zeros = jnp.zeros_like(left_slice)\n",
+        "        zeros = jnp.ones_like(left_slice)  # SEEDED FAULT\n",
+        file=_HALO, fails=("halo", "stencil"), kind="field-shares", only_under=("zero",),
+        boundary="zero", confined_to_kind=False),
+    # An integral declared as one value a shard, summed over the mesh all the
+    # same: every slot of the stack holds the total.
+    "per_shard_integrals_are_summed_over_every_axis": Seed(
+        "                    red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v\n",
+        "                    red = lax.psum(v, axis_name=reduce_axes + unreduced)  # SEEDED FAULT\n",
+        fails=("stencil",), kind="field-shares", boundary="zero"),
+    # Each shard's value stacked into the next shard's slot.
+    "per_shard_integrals_land_in_the_next_shards_slot": Seed(
+        "                    out[k] = red[(None,) * len(unreduced)] if unreduced else red\n",
+        "                    if unreduced:  # SEEDED FAULT: each value from the shard before\n"
+        "                        _n = int(mesh.shape[unreduced[-1]])\n"
+        "                        red = lax.ppermute(red, unreduced[-1],\n"
+        "                                           [(s, (s + 1) % _n) for s in range(_n)])\n"
+        "                    out[k] = red[(None,) * len(unreduced)] if unreduced else red\n",
+        fails=("stencil",), kind="field-shares", boundary="zero"),
+    # An integral carried in the state reaches ``update_padded`` as zeros.
+    "integrals_in_the_state_are_zeroed_on_the_way_in": Seed(
+        "                f: (arr if f in integrals else _pad_like_state(arr))\n",
+        "                f: (arr * 0 if f in integrals else _pad_like_state(arr))  # SEEDED FAULT\n",
+        fails=("stencil",), kind="field-shares", boundary="zero"),
 }
+
+
+def _boundaries_of(rp, kind: str) -> tuple:
+    """The boundaries the ``stencil`` goal runs node ``kind`` under."""
+    return tuple(dict.fromkeys(b for _n, k, b, _m in rp.stencil_cases([64], _N_DEV)
+                               if k == kind))
 
 
 def _runner():
@@ -265,8 +309,9 @@ def test_every_seed_names_goals_meshes_and_a_mesh_the_runner_has():
         assert set(seed.only_in) <= meshes and seed.mesh in meshes, name
         assert not seed.only_in or seed.mesh in seed.only_in, name
         assert seed.kind in rp.STENCIL_NODES, name
-        assert set(seed.only_under) <= set(rp.STENCIL_BOUNDARIES), name
-        assert seed.boundary in (seed.only_under or rp.STENCIL_BOUNDARIES), name
+        assert set(seed.only_under) <= set(_boundaries_of(rp, seed.kind)), name
+        assert seed.boundary in (seed.only_under or _boundaries_of(rp, seed.kind)), name
+        assert seed.confined_to_kind or seed.kind != "field", name
         if seed.kind == "field":
             assert set(_WRAPPER_GOALS) <= set(seed.fails), name
         else:
@@ -418,7 +463,10 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
     assert any(not v <= limit for v in rel.values()), rel
     if seed.kind != "field":
         rel = _one_step_forward(rp, wrapper, seed.mesh, "field", seed.boundary)
-        assert all(v <= limit for v in rel.values()), rel
+        if seed.confined_to_kind:
+            assert all(v <= limit for v in rel.values()), rel
+        else:                              # the boundary's fault, whatever the node
+            assert any(not v <= limit for v in rel.values()), rel
         for boundary in set(rp.STENCIL_BOUNDARIES) - set(seed.only_under or
                                                          rp.STENCIL_BOUNDARIES):
             rel = _one_step_forward(rp, wrapper, seed.mesh, seed.kind, boundary)
@@ -437,6 +485,22 @@ def test_one_step_with_a_halo_of_two_agrees_on_every_mesh_under_each_boundary(
     assert boundary in rp.STENCIL_BOUNDARIES and len(rp.STENCIL_BOUNDARIES) == 3
     for mesh_label in rp.meshes_that_fit(_N_DEV):
         rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label, "field-halo2", boundary)
+        assert all(v <= rp.LIMITS["forward"] for v in rel.values()), (mesh_label, rel)
+
+
+def test_one_step_under_the_zero_fill_with_integrals_a_shard_agrees_on_every_mesh(rp_backend):
+    """The control of the five seeds of the ``field-shares`` cases: one step
+    under the wrapper's zero fill, with one integral stacked a shard and
+    one summed over the first mesh axis only, is the unsharded step slot
+    by slot on every mesh -- and ``"zero"`` is the one boundary the goal
+    runs that node under, on every mesh."""
+    rp = rp_backend
+    assert _boundaries_of(rp, "field-shares") == (rp.SHARES_BOUNDARY,) == ("zero",)
+    assert {m for _n, k, _b, m in rp.stencil_cases([64], _N_DEV) if k == "field-shares"} == set(
+        rp.meshes_that_fit(_N_DEV))
+    for mesh_label in rp.meshes_that_fit(_N_DEV):
+        rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label, "field-shares", "zero")
+        assert set(rel) == {"f", "averages", "shares", "strips"}
         assert all(v <= rp.LIMITS["forward"] for v in rel.values()), (mesh_label, rel)
 
 
@@ -513,7 +577,7 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
         # node's, under a boundary the fault can reach -- and every such
         # case on every mesh has one, so each of them guards the path.
         assert failed and all(c.startswith(f"{seed.kind} ") for c in failed), failed
-        under = seed.only_under or rp.STENCIL_BOUNDARIES
+        under = seed.only_under or _boundaries_of(rp, seed.kind)
         assert all(c.split(":")[0].split(" vs ")[0].split()[4] in under for c in failed), failed
         for mesh in seed.only_in or rp.meshes_that_fit(_N_DEV):
             for boundary in under:
@@ -741,7 +805,10 @@ def test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault(nam
 
 _UNSTRUCTURED = "cloud/multigpu/sharded_unstructured.py"
 _PSUM = "                        out[k] = lax.psum(v, axis_name=mesh_axis)\n"
-_TOTAL = '            return {"x": new, "total": jnp.sum(new * own)}\n'
+_TOTAL = "            total = jnp.sum(new * own)\n"
+_SHARD_INFO = "                0: (idx * n_local_max, n_local_max),\n"
+_OWNED = '                "n_local": jnp.asarray(n_local_per_shard)[idx],\n'
+_STACKED = "                        out[k] = v[None]          # stacked along the mesh axis\n"
 _RELAX = "            new = own + w * (jnp.take(x, tbl, axis=0).mean(axis=-1) - own)\n"
 
 
@@ -765,13 +832,13 @@ _COUNT_SEEDS = {
     # The ghost tail of the slab the step was handed, summed into the total.
     "ghost_rows_counted": CountSeed(
         _TOTAL,
-        '            return {"x": new, "total": jnp.sum(new * own)\n'
-        '                    + jnp.sum(state_padded["x"][n_local:])}  # SEEDED FAULT\n'),
+        '            total = (jnp.sum(new * own)\n'
+        '                     + jnp.sum(state_padded["x"][n_local:]))  # SEEDED FAULT\n'),
     # Pad rows counted: a pad row starts at zero and moves towards its
     # shard's first cell by the injected weight in the step, so each reads
     # ``NODE_WEIGHT`` of a cell (a quarter).
     "own_mask_ignored": CountSeed(
-        _TOTAL, '            return {"x": new, "total": jnp.sum(new)}  # SEEDED FAULT\n'),
+        _TOTAL, "            total = jnp.sum(new)  # SEEDED FAULT\n"),
     # One ulp over 1 in every cell, on both sides: the field parity cannot
     # tell, and a limit of 1e-5 on the precondition would pass it.  (The
     # mean is 2**-21 over 1, and the injected weight is a quarter.)
@@ -779,6 +846,39 @@ _COUNT_SEEDS = {
         _RELAX,
         "            new = own + w * (jnp.take(x, tbl, axis=0).mean(axis=-1) * (1.0 + 2.0 ** -21)"
         " - own)  # SEEDED FAULT\n"),
+    # The four below leave the field and its total right: only the node's
+    # ``per_shard`` integral, which the wrapper stacks a shard, reads them
+    # (schema 11; no goal read ``shard_info``'s offset or cell count, or an
+    # integral not summed over the mesh, before it).
+    "shard_info_offset_is_zero_on_every_shard": CountSeed(
+        _SHARD_INFO, "                0: (0 * idx, n_local_max),  # SEEDED FAULT\n", _UNSTRUCTURED),
+    # What a node was told before 0.4.0: the padded block length, nothing
+    # about its pad rows.  Right wherever no shard has one.
+    "shard_info_n_local_is_the_padded_length": CountSeed(
+        _OWNED, '                "n_local": jnp.asarray(n_local_max, jnp.int32) + 0 * idx,'
+        "  # SEEDED FAULT\n", _UNSTRUCTURED),
+    "unreduced_integrals_are_summed_over_the_mesh": CountSeed(
+        _STACKED, "                        out[k] = lax.psum(v, axis_name=mesh_axis)[None]"
+        "  # SEEDED FAULT\n", _UNSTRUCTURED),
+    "unreduced_integrals_land_in_the_next_shards_slot": CountSeed(
+        _STACKED, "                        out[k] = lax.ppermute(v, mesh_axis, [(s, (s + 1) % "
+        "layout.n_devices) for s in range(layout.n_devices)])[None]  # SEEDED FAULT\n",
+        _UNSTRUCTURED),
+}
+
+#: The seeds only the per-shard check can see, and how many of its ``2 * D``
+#: entries each puts off the layout's, from the layout: every offset but
+#: shard 0's; the count of each shard with a pad row (a quarter of a cell
+#: over: the injected weight); every entry; every offset, and the count
+#: of each shard that owns another number of cells than the one before it.
+_PER_SHARD_SEEDS = {
+    "shard_info_offset_is_zero_on_every_shard": lambda lay: lay.n_devices - 1,
+    "shard_info_n_local_is_the_padded_length":
+        lambda lay: sum(int(k) != lay.n_local_max for k in lay.n_local),
+    "unreduced_integrals_are_summed_over_the_mesh": lambda lay: 2 * lay.n_devices,
+    "unreduced_integrals_land_in_the_next_shards_slot":
+        lambda lay: lay.n_devices + sum(int(lay.n_local[d]) != int(lay.n_local[d - 1])
+                                        for d in range(lay.n_devices)),
 }
 
 #: 225 = 15 x 15 cells do not divide by four: three of the four shards
@@ -869,8 +969,12 @@ def _forward_part(rp) -> tuple[dict, dict, dict, list]:
     finally:
         rp.build_pair = real
     checks = {c["name"]: c for c in doc["checks"]}
-    assert len(checks) == len(doc["checks"]) == 12 * len(_COUNT_CELLS)
+    assert len(checks) == len(doc["checks"]) == 14 * len(_COUNT_CELLS)
     return {r["cells"]: r for r in doc["results"]}, checks, layouts, built
+
+
+def _per_shard_name(cells: int, method: str) -> str:
+    return f"{cells} cells {method} ones: per-shard (offset, cells) entries off the layout's"
 
 
 def _ones_names(cells: int, side: str) -> tuple[str, str]:
@@ -899,7 +1003,11 @@ def test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides(tmp_path)
         assert entry["ones_unsharded"] == {**exact, "total": float(cells)}
         for method in rp.METHODS:
             m = entry["methods"][method]
-            assert m["ones"] == {**exact, "total": float(cells)}
+            layout = layouts[cells]
+            assert m["ones"] == {**exact, "total": float(cells), "per_shard": [
+                [float(d * layout.n_local_max), float(k)] for d, k in enumerate(layout.n_local)]}
+            c = checks[_per_shard_name(cells, method)]
+            assert (c["value"], c["limit"], c["sense"]) == (0.0, 0.0, "<="), c
             assert set(m["parity_total"]) == {"max_abs", "max_rel", "reference_scale", "finite"}
             assert f"{cells} cells {method} total vs unsharded max_rel" not in checks
             assert checks[f"{cells} cells {method} total vs unsharded finite"]["value"] is True
@@ -941,6 +1049,23 @@ def test_a_seeded_miscount_fails_the_forward_goals_exact_count(name, tmp_path):
     for cells in _COUNT_CELLS:
         layout = layouts[cells]
         count_un, still_un = _ones_names(cells, _ONES_UNSHARDED)
+        if name in _PER_SHARD_SEEDS:
+            # the field and its total are right on every side: the stacked
+            # pairs alone are off, by the entries the layout says
+            off = _PER_SHARD_SEEDS[name](layout)
+            for side in (*rp.METHODS, _ONES_UNSHARDED):
+                assert {status[n] for n in _ones_names(cells, side)} == {"passed"}
+            for method in rp.METHODS:
+                check = checks[_per_shard_name(cells, method)]
+                assert check["value"] == off, (cells, method, check, off)
+                assert status[_per_shard_name(cells, method)] == (
+                    "failed" if off else "passed")
+            assert off or name == "shard_info_n_local_is_the_padded_length"
+            continue
+        for method in rp.METHODS:              # a miscount leaves the pairs right
+            if name not in ("a_step_that_does_not_keep_ones", "own_mask_ignored",
+                            "ghost_rows_counted"):
+                assert status[_per_shard_name(cells, method)] == "passed"
         if name == "a_step_that_does_not_keep_ones":
             for side in (*rp.METHODS, _ONES_UNSHARDED):
                 _count, still = _ones_names(cells, side)
@@ -961,7 +1086,10 @@ def test_a_seeded_miscount_fails_the_forward_goals_exact_count(name, tmp_path):
             assert status[still] == "passed" and checks[still]["value"] == 0.0
             total = results[cells]["methods"][method]["ones"]["total"]
             assert total == cells + (-off_by if "left_out" in name else off_by)
-    if name != "a_step_that_does_not_keep_ones":
+    if name in _PER_SHARD_SEEDS:
+        # every one of them shows at the size with pad rows
+        assert status[_per_shard_name(_COUNT_CELLS[0], rp.METHODS[0])] == "failed"
+    elif name != "a_step_that_does_not_keep_ones":
         # every seed miscounts at the size with pad rows
         assert status[_ones_names(_COUNT_CELLS[0], rp.METHODS[0])[0]] == "failed"
 

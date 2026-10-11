@@ -131,6 +131,14 @@ replace whatever the edge delivers on every step, with zeros when it is
 not fed, so `gm.compile()` raises a `ValueError` naming the pair and
 `gm.validate()` lists it.  Keep one of the two: leave the declaration
 out where the graph is built, or `gm.remove_edge(...)`.
+
+A field also has one declaration.  `gm.add_external_input` for a field
+that is already declared with another shape or dtype raises a
+`ValueError` naming both, and so does loading a file that holds two: the
+shape and dtype are what the step casts a supplied value to, what the
+FMU export types the input as and what `to_dict()` saves, and until 0.4.0
+the last of two won.  Declaring it again with the same shape and dtype is
+accepted and changes nothing.
 ```
 
 ### An edge from a node to itself

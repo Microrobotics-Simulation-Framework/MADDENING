@@ -44,15 +44,29 @@ Design:
 * lineax's CG returns NaN in float32 above about 1e5 unknowns
   (MADD-ANO-264).  The default route of :func:`sharded_cg` then solves
   the system on the loop backend instead; ``backend="lineax"`` by name
-  still returns the NaN.  See ``backend`` and ``Returns`` of
-  :func:`sharded_cg`.
+  still returns the NaN.  Under a trace the choice is a ``jnp.where`` on
+  a loop whose iteration cap is zero where lineax answered, so the
+  default route can be traced wherever the loop can (inside a
+  ``shard_map`` body too) at two operator products per call.  See
+  ``backend`` and ``Returns`` of :func:`sharded_cg`.
+* An operator that returns a NaN or an infinity is answered as a
+  non-finite right-hand side is, on every route: NaN in every entry of
+  ``value``, a NaN ``residual_norm``, ``converged=False``
+  (MADD-ANO-269; ``_framed``).  On no route is ``converged`` True beside
+  a ``residual_norm`` that is not finite.
 
-Differentiability: forward-mode JVP composes naturally with stock
-JAX operators in both the lineax and the fori_loop fallback; the
-``custom_vjp`` adjoint pattern from the IFT branch extends here too,
-but the v0.3.0 substrate exposes the primal solver only — adjoint
-plumbing through the user-supplied matvec is the caller's responsibility
-(``jax.linear_transpose`` on the matvec gives the transpose action).
+Differentiability: pass ``differentiable=True``.  The solve then goes
+through ``lax.custom_linear_solve``: forward and reverse mode are linear
+solves with the same backend and preconditioner, started from zero and
+purely relative to their own right-hand side, and the derivative with
+respect to what the matvec closes over flows through
+(``_differentiable_solve``).  A call WITHOUT it refuses to be
+differentiated: ``jax.jvp``, ``jax.grad``, ``jax.jacfwd`` and
+``jax.jacrev`` through it raise a ``ValueError`` that says so
+(``_refusing_a_derivative``).  Differentiating the iteration is not
+differentiating the solve, and until 0.4.0 it gave a silently wrong
+derivative whenever the tangent or cotangent was not of the right-hand
+side's size (MADD-ANO-266).
 
 Preconditioning: Jacobi only.  The interface
 accepts an optional ``preconditioner`` callable for forward compat
@@ -92,7 +106,8 @@ class SharedSolveResult:
     Attributes
     ----------
     value : jax.Array
-        The approximate solution ``x`` to ``A x = b``.
+        The approximate solution ``x`` to ``A x = b``.  NaN in every
+        entry where there is no answer: see ``residual_norm``.
     converged : jax.Array
         Boolean scalar.  On the loop backends, on :func:`sharded_cg`'s
         default route where it falls back to the loop, and under
@@ -100,7 +115,8 @@ class SharedSolveResult:
         for the returned ``value``, in the working dtype, with no
         allowance for rounding.  On the lineax backend: lineax's own
         verdict (``Returns`` of :func:`sharded_cg`).  False where
-        ``value`` is NaN.  Until 0.4.0 the CG loop answered from the
+        ``value`` is NaN, and never True beside a ``residual_norm`` that
+        is not finite.  Until 0.4.0 the CG loop answered from the
         residual it updates by recurrence, and the GMRES loop behind a
         preconditioner from the preconditioned residual: ``True`` on
         float32 solves whose ``||b - A x||`` was far above the tolerance
@@ -111,9 +127,12 @@ class SharedSolveResult:
     residual_norm : jax.Array
         ``||b - A x||_2`` of the returned ``value``: one product in the
         working dtype, with the operator and the right-hand side the
-        caller gave, on every route.  NaN where ``value`` is NaN (a
-        non-finite ``b``; ``backend="lineax"`` CG in float32 at scale,
-        MADD-ANO-264).
+        caller gave, on every route.  NaN, with NaN in every entry of
+        ``value`` and ``converged=False``, where that norm is not
+        finite: a ``b`` with a NaN or infinite entry (MADD-ANO-155); an
+        operator that returned a NaN or an infinity, or a value so far
+        off that the norm overflows (MADD-ANO-269); ``backend="lineax"``
+        CG in float32 at scale (MADD-ANO-264).
     """
     value: jax.Array
     converged: jax.Array
@@ -238,6 +257,17 @@ def _framed(solve, b, x0, atol):
     passed its test at once, and the loop CG's tolerance went ``inf`` with
     ``||b||``: CG (both backends) and lineax GMRES returned zeros, mostly
     reported ``converged=True`` (MADD-ANO-155).
+
+    The same answer where the backend's ``residual_norm`` is not finite:
+    an operator that returned a NaN or an infinity (or a value so far off
+    that the norm of its residual overflows).  This is the one exit of
+    every route of both solvers, so the rule holds on all of them, and
+    ``converged`` is never True beside a norm that is not finite.  Until
+    0.4.0 lineax's CG answered such an operator with its zero start,
+    ``converged=True`` and ``iters=0`` (the start is finite, so lineax
+    reports success at once), on ``backend="lineax"`` and on the default
+    call; the CG loop returned zeros with ``converged=False``
+    (MADD-ANO-269).
     """
     p = jax.lax.stop_gradient(pow2_frame(b))
     finite = jnp.all(jnp.isfinite(b))
@@ -946,13 +976,37 @@ def sharded_cg(
     result contract (iteration count) is unchanged; a node whose
     ``update`` calls this inside a differentiated step must set it.
 
+    From 0.4.0 that "must" is enforced: a call without
+    ``differentiable=True`` refuses to be differentiated (``Raises``).
+    Until then ``jax.jvp`` / ``jax.grad`` through such a call
+    differentiated the iteration itself, which is not the derivative of
+    the solve: it was silently wrong whenever the tangent or cotangent
+    was not of ``b``'s size (measured in float32 on 256 unknowns with a
+    unit direction: off 6.4e-4 at ``|b|`` about 1e3 and 0.65 at 1e10;
+    MADD-ANO-266).  With the flag the same derivatives were measured
+    within 7e-7 of a float64 solve at every ``|b|`` from 1e-10 to 1e10.
+
+    The tangent and cotangent solves of ``differentiable=True`` start
+    from zero and are purely relative to their own right-hand side,
+    whatever ``x0`` and ``atol`` the call was given: those two belong to
+    the primal solve (``x0``, ``atol``).  The preconditioner and ``x0``
+    carry no derivative.  The value is the ordinary call's, bit for bit;
+    with an ``x0`` or an ``atol`` the call executes three to six
+    operator products more than the ordinary one (one without them).
+
     Parameters
     ----------
     matvec : callable
         ``matvec(x) -> A @ x``.  The matvec is responsible for any
         ``shard_map`` it requires; the solver itself runs at the outer
         (global) level.  Must be self-adjoint and positive-definite —
-        for general operators use :func:`sharded_gmres` instead.
+        for general operators use :func:`sharded_gmres` instead.  One
+        that returns a NaN or an infinity gets NaN (``Returns``).  The
+        solver can also be called inside a ``shard_map`` body, one solve
+        per device; the lineax route (the default) then takes only a
+        plain function that closes over nothing, and ``backend="loop"``
+        any callable (lineax converts a closure once, on an abstract
+        vector that carries no mesh axis).
     b : jax.Array
         Right-hand side.  1-D.  Sharded according to ``in_specs`` when
         ``mesh`` is provided.
@@ -962,7 +1016,14 @@ def sharded_cg(
         whatever device(s) JAX chooses for ``b`` — single-device or a
         pre-sharded input.
     x0 : jax.Array, optional
-        Initial guess.  Defaults to zeros_like(b).
+        Initial guess.  Defaults to zeros_like(b).  Used by the loop
+        backend (lineax's CG is not given it).  Under
+        ``differentiable=True`` it starts the primal solve only: the
+        tangent and cotangent solves start from zero.  Until 0.4.0 they
+        started from this ``x0`` rescaled to their own right-hand side
+        (with ``max_iters=0`` the derivative was ``x0`` itself; at
+        ``|b|`` about 1e5 with ``x0`` the solution a unit-direction JVP
+        was off 2.6e-2; MADD-ANO-267).
     rtol : float
         Relative tolerance: stop when ``||r|| <= max(atol, rtol * ||b||)``.
         On the loop backend ``r`` is the residual the iteration updates
@@ -986,7 +1047,15 @@ def sharded_cg(
         ``1e-8`` passed the test with the zero initial guess before its
         first step and came back wrong with ``converged=True``.  On the loop
         backend a ``b`` with ``||b|| >= 1e-8 / rtol`` stops exactly where it
-        did.
+        did.  A negative (or NaN) ``atol`` is refused with a
+        ``ValueError``.  Under ``differentiable=True`` an ``atol`` bounds
+        the primal solve only: the tangent and cotangent solves are
+        purely relative (``||r|| <= rtol * ||rhs||`` of their own
+        right-hand side), so that a derivative is linear in its
+        direction.  Until 0.4.0 the floor was applied to them too, in
+        their own frame: at ``atol=1e-3`` a direction of norm 1e-5 gave
+        a derivative of zero on the loop backend and of half the size on
+        lineax (MADD-ANO-268).
     max_iters : int
         Iteration budget.
     preconditioner : callable, optional
@@ -1022,15 +1091,17 @@ def sharded_cg(
         steps.  (lineax's CG is not given ``x0``: where it answers, the
         initial guess is not used.)
 
-        What the fallback costs.  Under ``jit`` both solvers are compiled
-        into the program and one of them runs (a ``lax.cond`` on whether
-        lineax's value is finite).  Under ``vmap`` a ``cond`` is a select:
-        the loop then runs for every member of the batch, whichever
-        answer is kept.  Called eagerly, only lineax runs where lineax
-        answers.  To differentiate through a solve that falls back, set
-        ``differentiable=True``: without it lineax's own tangent solve of
-        the system it broke down on still runs (it raises or gives NaN,
-        as it did before 0.4.0).
+        What the fallback costs.  Under a trace (``jit``, ``vmap``, a
+        ``shard_map`` body) both solvers are in the program.  The loop
+        is given an iteration cap of ``max_iters`` where lineax's value
+        is not finite and of zero where it is, and each field of the
+        result is then selected: a default call that does not fall back
+        executes two operator products more than ``backend="lineax"``
+        (the loop's ``b - A x0`` and the product of its report) and no
+        iteration.  Under ``vmap`` the loop iterates as long as any
+        member of the batch that fell back needs.  Called eagerly, only
+        lineax runs where lineax answers.  To differentiate through a
+        solve, whether it falls back or not, set ``differentiable=True``.
 
     Returns
     -------
@@ -1050,16 +1121,20 @@ def sharded_cg(
           before the system's residual met the tolerance, the result
           reads ``converged=False`` with the value the loop reached and
           the residual that value has.  Measured in float32 on a shifted
-          1-D Laplacian of 4096 unknowns with a white-noise ``b``, the
-          smallest ``rtol`` of 1e-3, 3e-4, 1e-4, ... that reads
-          ``converged=True``::
+          1-D Laplacian of 4096 unknowns with one white-noise ``b``
+          (``numpy.random.default_rng(0)``), the smallest ``rtol`` of
+          1e-3, 3e-4, 1e-4, ... that reads ``converged=True``::
 
               condition number     2     9     17    41    134   401   4001
               smallest rtol met    3e-7  1e-6  1e-6  3e-6  1e-5  1e-4  1e-3
 
-          So the default ``rtol=1e-6`` is met up to a condition number
-          of about 17; at 401 the loop stops at a residual of 1.2e-5
-          ``||b||`` and at 4001 of 1.2e-4.  A solve that stopped on its
+          A second right-hand side (seed 1) gives the same row; a third
+          (seed 2) reads 3e-5 at 401 and 3e-4 at 4001, one rung lower:
+          the last two columns are within a factor of about three of the
+          rung, not on it.  So the default ``rtol=1e-6`` is met up to a
+          condition number of about 17; at 401 the loop stops at a
+          residual of 1.1e-5 to 1.2e-5 ``||b||`` and at 4001 of 1.1e-4
+          to 1.2e-4 (the three right-hand sides).  A solve that stopped on its
           tolerance within the float32 floor of it can read ``False`` by
           a hair (measured: 1.06 times ``rtol``).  Choose an ``rtol`` a
           few times above ``eps * kappa``, or solve in float64, or read
@@ -1091,6 +1166,41 @@ def sharded_cg(
         NaN derivative).  Until 0.4.0 it gave zeros, on lineax and for
         ``+-inf`` on the loop backend with ``converged=True``
         (MADD-ANO-155).
+
+        An operator that returns a NaN or an infinity gets the same
+        answer on every route, and so does any solve whose
+        ``.residual_norm`` is not finite: ``converged`` is never True
+        beside such a norm.  Until 0.4.0 the default call and
+        ``backend="lineax"`` answered a non-finite operator with zeros,
+        ``converged=True`` and ``iters=0`` (MADD-ANO-269).
+
+        At the bottom of the dtype's range the value cannot hold the
+        solution: entries of it under the smallest normal number
+        (float32: 1.2e-38) are flushed to zero when the result is scaled
+        back, ``.residual_norm`` reads 0.0, and ``.converged`` is the
+        verdict of the scaled solve.  Measured in float32 on 64
+        unknowns, by ``max|b|``: a relative error of 2e-2 at ten times
+        that number, 1e-3 at a hundred times, none (5e-7) at 1e4 times.
+        Rescale such a system.
+
+    Raises
+    ------
+    ValueError
+        When the result of a call without ``differentiable=True`` is
+        differentiated (``jax.jvp``, ``jax.grad``, ``jax.jacfwd``,
+        ``jax.jacrev``, or a transformation built on them), with respect
+        to ``b``, ``x0`` or a value ``matvec`` closes over.  Pass
+        ``differentiable=True``; or, if the solve is meant to be a
+        constant, stop the gradient on what goes INTO the call
+        (``jax.lax.stop_gradient`` on ``b``, on ``x0``, and inside
+        ``matvec`` on the values it closes over): a ``stop_gradient`` on
+        the result comes too late.  A call that is not differentiated,
+        or whose inputs do not depend on what is differentiated, is not
+        affected: same bits, same compiled program.
+    ValueError
+        For a negative or NaN ``atol``, an unknown ``backend``, a
+        ``preconditioner`` with ``backend="lineax"``, or a ``mesh``
+        without ``in_specs``.
 
     Stability
     ---------
@@ -1200,16 +1310,28 @@ def sharded_gmres(
 
     ``differentiable=True`` as for :func:`sharded_cg`; the transpose
     solve is GMRES on the transposed operator (``jax.linear_transpose``),
-    with the same preconditioner.
+    with the same preconditioner.  As there, a call without it refuses to
+    be differentiated (a ``ValueError``, MADD-ANO-266: until 0.4.0 the
+    default route returned a derivative of zeros in float32 at ``|b|``
+    of 1e10 and of 1e-10), and with it the tangent and cotangent solves
+    start from zero and are purely relative, whatever ``x0`` and
+    ``atol`` were given.
 
     See :func:`sharded_cg` for the matvec / mesh / in_specs contract, and
-    for the answer to a ``b`` with a NaN or infinite entry: NaN, with
-    ``converged=False`` (MADD-ANO-155).
+    for the answer to a ``b`` with a NaN or infinite entry and to an
+    operator that returns one: NaN, with ``converged=False``
+    (MADD-ANO-155, MADD-ANO-269).
 
     Parameters
     ----------
     rtol, atol : float, float or None
-        As for :func:`sharded_cg`: ``atol=None`` (the default) is relative.
+        As for :func:`sharded_cg`: ``atol=None`` (the default) is
+        relative, and a negative or NaN ``atol`` is refused.
+    max_iters : int
+        Iteration budget.  On the loop backend it is counted in whole
+        restart cycles, rounded up, and at least one cycle runs: a
+        budget of 0 or 1 is ``restart`` steps.  On the lineax backend
+        the budget is at least ``4 * restart`` steps.
     restart : int
         Krylov subspace dimension before restart.  Capped to ``b.shape[0]``
         inside the solver, on both backends (the loop backend returned NaN

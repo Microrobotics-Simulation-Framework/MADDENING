@@ -18384,12 +18384,18 @@ anomalies:
       Not changed: `backend="lineax"` asked for by name (no fallback:
       NaN, `converged=False`), `ift_linear_solve(solver="cg")` (raises)
       and the wavelet node's masked-CG frozen solve (not measured).
-      Without `differentiable=True` a derivative through a default-route
-      solve that falls back still runs lineax's own tangent solve of the
-      system it broke down on: forward mode with respect to `b` raises
-      lineax's error (on a multi-device mesh that error ends the process
-      after XLA's 40 s rendezvous timeout, as before the fix), and
-      reverse mode with respect to an operator coefficient is NaN.
+      How the two solvers are combined: called eagerly the branch is
+      taken in Python; under a trace (`jit`, `vmap`, a `shard_map` body)
+      the loop is run with an iteration cap of `max_iters` where lineax's
+      value is not finite and of zero where it is, and each of the four
+      fields is selected with `jnp.where`.  Only what the loop backend
+      already uses, so the default call can be traced wherever
+      `backend="loop"` can, inside a `shard_map` body too.  (The first
+      form of the fallback, a `lax.cond` holding a
+      `lax.custom_linear_solve`, raised on every default call in such a
+      body; it was never on the release branch.)  Without
+      `differentiable=True` the call refuses to be differentiated, on
+      this route as on every other (MADD-ANO-266).
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -18426,9 +18432,16 @@ anomalies:
       measured); no release is named for those.  A fix for
       `ift_linear_solve` would take the same fallback there: the lineax
       call with `throw=False`, and a second solve where its value is not
-      finite.  The default route's fallback has a cost: every jitted
-      default-route program compiles a second solver, and under `vmap`
-      the loop runs for every batch member.  A later lineax release may
+      finite.  The default route's fallback has a cost: every traced
+      default-route program holds a second solver, and where lineax
+      answers it still executes two operator products of it (the loop's
+      `b - A x0` and the product of its report, no iteration); under
+      `vmap` the loop iterates as long as any batch member that fell
+      back needs.  Called eagerly it costs nothing where lineax answers.
+      Inside a `shard_map` body the lineax route, and so the default
+      call, takes only an operator that closes over nothing (lineax
+      converts a closure on a vector that carries no mesh axis, before
+      0.4.0 as now); `backend="loop"` takes any.  A later lineax release may
       move the threshold: the test of the arithmetic below is there to
       notice.
     verification:
@@ -18445,6 +18458,10 @@ anomalies:
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_default_route_answers_in_float32_where_every_quotient_passes"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_same_call_in_float64_converges"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_backend_solves_the_same_system_in_float32"
+      - "tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py::test_inside_a_shard_map_body_each_device_gets_the_route_its_system_needs"
+      - "tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py::test_the_default_call_answers_inside_a_shard_map_body_that_is_not_jitted"
+      - "tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py::test_a_default_call_that_does_not_fall_back_costs_two_products_under_a_trace"
+      - "tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py::test_a_default_call_that_falls_back_costs_the_lineax_attempt_and_the_loop"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-265"
@@ -18525,4 +18542,283 @@ anomalies:
       - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_a_config_that_holds_both_loads_and_is_refused_when_it_is_compiled"
       - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_no_fmu_is_described_from_such_a_graph"
       - "tests/api/test_an_edge_onto_an_external_input_is_refused_over_rest.py::test_an_edge_posted_onto_an_external_input_is_a_400_wherever_the_graph_is_compiled"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-266"
+    title: "A derivative taken through sharded_cg or sharded_gmres called without differentiable=True was silently wrong when the tangent or cotangent was not of the right-hand side's size; such a call now refuses to be differentiated"
+    description: >
+      `sharded_cg` and `sharded_gmres` have a `differentiable=True` flag
+      (0.4.0) that takes the derivative as a linear solve.  Without it,
+      `jax.jvp` or `jax.grad` through a call differentiated the iteration
+      itself, and nothing said that this is not the derivative of the solve:
+      the docstring asked a differentiated caller to set the flag, and the
+      module docstring said forward mode "composes naturally".
+      On the lineax backend (the default) lineax's own tangent and
+      transpose solves reuse the primal's tolerance, which the solver poses
+      as an absolute floor in the primal right-hand side's power-of-two
+      frame: a tangent or cotangent of another size was solved to the wrong
+      accuracy or not at all.  Measured before the fix (CPU, jax 0.11.0,
+      lineax 0.0.7, float32, 256 unknowns, the operator
+      `(2 + 0.5) x[i] - x[i-1] - x[i+1]` with zero ends, default `rtol`,
+      a unit-size direction and loss weight, against a float64 solve): the
+      JVP with respect to `b` of `sharded_cg`'s default call was off 6.4e-4
+      at `|b|` about 1e3, 8.0e-2 at 1e5 and 0.65 at 1e10; the gradient of
+      `c . x` was off 1.3e-3 at 1e-5 and 0.66 at 1e-10; `sharded_gmres`'s
+      default call returned a derivative of all zeros at 1e10 and at 1e-10;
+      in the other direction of scale reverse mode raised lineax's error.
+      The same in float64.  With `differentiable=True` the same derivatives
+      were within 7e-7 at every scale.
+      On the loop backends forward mode differentiates the `while_loop`
+      (reverse mode has always raised: a `while_loop` has no transpose).
+      Released versions, measured on `git archive` of v0.3.0 and of v0.3.1
+      (CPU, jax 0.11.0, lineax 0.0.7; the flag did not exist there): the
+      loop backend's JVP was within 7e-7 for `|b|` from 1 to 1e5, off
+      8.7e-4 at 1e10 and 5.5e-5 at 1e-5, and wholly wrong at 1e-10 (where
+      the primal itself was MADD-ANO-113's); the lineax route was right at
+      every scale there (1.0e-7 and 1.4e-7: its tolerance was then the
+      absolute 1e-8), and `sharded_gmres`'s default call raised in both
+      modes.  The lineax-route form above entered with the relative default
+      tolerance of the 0.4.0 cycle and was never released.
+      Found on 2026-10-11 by the audit of the solver change before it
+      merged.
+      Fixed in 0.4.0 by enforcing what was documented.  The two
+      floating-point fields of a result computed without the flag pass
+      through an identity whose JVP rule raises a `ValueError` that names
+      the function and says what to do: pass `differentiable=True` (`iters`
+      is then -1), or stop the gradient on what goes into the call if the
+      solve is meant to be a constant.  `jax.jvp`, `jax.grad`, `jax.jacfwd`
+      and `jax.jacrev` are refused on every backend of both solvers, with
+      respect to `b` and to a value the operator closes over, also under
+      `jit` and `vmap`.  A call that is not differentiated is untouched
+      (the four fields and the lowered program were compared with the
+      refusal taken out: identical on all eight routes), and so is a call
+      whose inputs do not depend on what is differentiated.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a derivative that is off by a
+      part in a thousand to all of it, with no flag or warning, from a
+      STABLE function on its default backend.  Not `critical`: it needs a
+      caller that differentiates through the solve without the flag the
+      docstring asked for, and a tangent or cotangent whose size differs
+      from the right-hand side's.  `context_dependent` because what the
+      derivative feeds (an optimiser, a sensitivity, an exported directional
+      derivative) decides the consequence.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      From 0.4.0: pass `differentiable=True` to a call that is
+      differentiated.  On 0.3.0 and 0.3.1 (no such flag): do not
+      differentiate through `backend="loop"` for a right-hand side far from
+      unit size (rescale the system so that `max|b|` is of order one), or
+      wrap the solve in `jax.lax.custom_linear_solve` by hand.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Code that differentiated through these solvers without the flag now
+      gets a `ValueError` at trace time and has to add
+      `differentiable=True`; `.iters` then reads -1.  The refusal is of the
+      call, not of the field that is read: a differentiated call is refused
+      even where only `.iters` or `.converged` is used afterwards, and a
+      `stop_gradient` on the result does not avoid it (the message says to
+      stop the gradient on the inputs).  An input that carries an explicit
+      zero tangent counts as differentiated.
+    verification:
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_a_call_without_the_flag_refuses_a_derivative_with_respect_to_b"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_a_call_without_the_flag_refuses_a_derivative_with_respect_to_the_operator"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_the_refusal_holds_under_jit_and_vmap_and_for_either_floating_field"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_the_refusal_names_the_function_and_says_what_to_do"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_a_stop_gradient_on_the_result_is_too_late_and_one_on_the_inputs_is_not"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_a_value_that_does_not_depend_on_what_is_differentiated_is_not_refused"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_a_call_that_is_not_differentiated_has_the_same_bits_and_the_same_program"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_the_flag_a_derivative_is_right_whatever_the_size_of_b"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-267"
+    title: "sharded_cg(differentiable=True) given an x0 started its tangent and cotangent solves from that x0: with max_iters=0 the derivative was x0 itself, and at |b| of 1e5 a unit-direction JVP was off 2.6e-2 (never released)"
+    description: >
+      `differentiable=True` (new in 0.4.0) routes the solve through
+      `jax.lax.custom_linear_solve`, which traces its `solve` function once
+      and uses that one program for the primal solve, for the tangent solve
+      and, for a symmetric operator, for the cotangent solve.  The program
+      held the caller's `x0`: a comment said the tangent and cotangent
+      solves "start at 0", and the test behind it (`mv is matvec`) is true
+      for all three solves of `sharded_cg`, and for the primal and the
+      tangent solve of `sharded_gmres`.  The start was `x0` rescaled to the
+      derivative solve's own right-hand side, a vector unrelated to that
+      system.
+      Measured before the fix (CPU, jax 0.11.0, float32, 256 unknowns, the
+      operator `(2 + 0.5) x[i] - x[i-1] - x[i+1]`, `backend="loop"`):
+      with `max_iters=0` the JVP and the gradient were `x0`, bit for bit;
+      at `|b|` about 1e5 with `x0` the solution and a unit direction the
+      JVP was off 2.6e-2 and the gradient 1.3e-2 against a float64 solve,
+      where the same call without `x0` was within 7e-7 (the CG loop stops
+      on its recursively updated residual, which a start 1e5 times the
+      solution leaves far from the true one).  Behind a Jacobi
+      preconditioner the same.  The lineax route ignores `x0`, and the
+      GMRES loop restarts from a true residual: both were within 1e-6.
+      Never released: v0.3.0 and v0.3.1 have no `differentiable` parameter
+      (checked on `git archive` of both tags).  Found on 2026-10-11 by the
+      audit of the solver change before it merged.
+      Fixed in 0.4.0.  The derivative solves are a program of their own,
+      from a zero start.  With an `x0` (or an `atol`, MADD-ANO-268) the
+      primal value is the ordinary solve's, computed on inputs whose
+      gradient is stopped, and the derivative is attached by a
+      `custom_linear_solve` of a right-hand side that is zero in value and
+      carries the tangent of the residual, `r - stop_gradient(r)` with
+      `r = b - A x`: the value is unchanged bit for bit, and its
+      derivatives of every order are those of the exact solve of the system
+      the value satisfies.  After the fix the JVP and gradient above are
+      exactly zero at `max_iters=0` and within 7e-7 at `|b|` of 1e5.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a derivative off by percent,
+      from the route the documentation names as the one to differentiate
+      through.  Not `critical`: it needs `differentiable=True`, an `x0`, a
+      loop backend, and a tangent or cotangent whose size differs from the
+      right-hand side's.  `context_dependent` because what the derivative
+      feeds decides the consequence.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: "none"
+    workaround: >
+      None is needed on a release: the parameter is new in 0.4.0.  On a
+      development tree before the fix, leave `x0` out of a call that is
+      differentiated.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A differentiable call with an `x0` or an `atol` now executes three to
+      six operator products more than the ordinary call (one without them):
+      the residual, and a solve of a zero right-hand side that does no
+      iteration.  The preconditioner and `x0` are constants of the
+      differentiation by construction: a derivative with respect to a value
+      only they depend on is zero, not an error.
+    verification:
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_x0_the_tangent_and_cotangent_solves_start_from_zero"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_x0_a_derivative_is_as_accurate_as_without"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_x0_or_an_atol_the_value_is_the_ordinary_calls_bit_for_bit"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_x0_and_an_atol_the_derivative_with_respect_to_the_operator_is_right"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_x0_and_an_atol_a_second_derivative_is_right"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_the_start_and_the_preconditioner_carry_no_derivative"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-268"
+    title: "With differentiable=True an atol was applied to the tangent and cotangent solves of sharded_cg and sharded_gmres as well: a derivative was not linear in its direction, and zero for a direction under the floor (never released)"
+    description: >
+      `atol` is an absolute floor in the units of the primal right-hand
+      side.  Under `differentiable=True` (new in 0.4.0) the one program
+      that `jax.lax.custom_linear_solve` uses for the primal, tangent and
+      cotangent solves held the caller's `atol`, so the floor was applied
+      to each derivative solve in the frame of ITS right-hand side: a
+      tangent or cotangent whose norm was under the floor passed the test
+      before its first step.
+      Measured before the fix (CPU, jax 0.11.0, float32, 256 unknowns,
+      `atol=1e-3`, `|b|` about 16; the ratio `|jvp(eps v)| / (eps |jvp(v)|)`,
+      which is 1 for a linear map): at `eps = 1e-5` the JVP and the
+      gradient were all zero on `sharded_cg`'s loop backend, 0.505 of the
+      right size on its lineax and default routes, and 0.975 on
+      `sharded_gmres`; at `eps = 1e-2` all were within 0.2 %.  With
+      `atol=None` every route was right.
+      Never released: v0.3.0 and v0.3.1 have no `differentiable` parameter
+      (checked on `git archive` of both tags).  Found on 2026-10-11 by the
+      audit of the solver change before it merged.
+      Fixed in 0.4.0, with MADD-ANO-267: the derivative solves are a
+      program of their own, from zero and purely relative to their own
+      right-hand side, and an `atol` bounds the primal solve only (the
+      docstring of `atol` says so).  After the fix every ratio above is
+      1.000, and a direction scaled by a power of two gives the scaled
+      derivative bit for bit on all eight routes.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a derivative of zero, or of
+      half its size, with no flag.  Not `critical`: it needs
+      `differentiable=True`, an explicit `atol`, and a tangent or cotangent
+      whose norm is near or under that floor.  `context_dependent` because
+      what the derivative feeds decides the consequence.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: "none"
+    workaround: >
+      None is needed on a release: the parameter is new in 0.4.0.  On a
+      development tree before the fix, leave `atol` at `None` in a call
+      that is differentiated.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The tangent and cotangent solves no longer stop on the caller's
+      floor: a derivative solve whose right-hand side is far smaller than
+      `atol` now iterates to `rtol` where it returned at once.  The flag
+      of the primal still tests `max(atol, rtol * ||b||)`.
+    verification:
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_atol_a_derivative_is_linear_in_its_direction"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_an_atol_above_the_right_hand_side_stops_the_primal_solve_and_not_its_derivative"
+      - "tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py::test_with_an_x0_or_an_atol_the_value_is_the_ordinary_calls_bit_for_bit"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-269"
+    title: "sharded_cg's default call and backend='lineax' answered an operator that returns NaN or infinity with zeros, converged=True and iters=0"
+    description: >
+      An operator whose product is not finite (a NaN or infinite
+      coefficient, at one unknown or at all of them) has no solution to
+      report.  `sharded_cg` on the lineax backend, which is also the
+      default call, returned all zeros with `converged=True`, `iters=0`
+      and a NaN `residual_norm`: lineax's CG stops at once on its zero
+      start, which is finite, and reports success; neither lineax's own
+      check of a non-finite output nor the default route's fallback (which
+      asks whether the value is finite) sees anything.  The CG loop
+      returned the same zeros with `converged=False`, and both backends of
+      `sharded_gmres` and `differentiable=True` answered NaN or zeros with
+      `converged=False`.  A non-finite right-hand side had been given one
+      answer on every route in 0.4.0 (MADD-ANO-155); a non-finite operator
+      had not.
+      Measured before the fix (CPU, jax 0.11.0, lineax 0.0.7, float32, 256
+      unknowns, a diagonal shift of NaN and of infinity): the four fields
+      as above.  The same on `git archive` of v0.3.0 and of v0.3.1 (lineax
+      installed): `converged=True`, `iters=0`, zeros, on the default call
+      and on `backend="lineax"`.  Found on 2026-10-11 by the audit of the
+      solver change before it merged.
+      Fixed in 0.4.0 at the one exit every route of both solvers shares:
+      where the residual norm of the returned value is not finite the
+      answer is that of a non-finite right-hand side, NaN in every entry of
+      `value`, a NaN `residual_norm` and `converged=False`.  In general
+      form: on no route is `converged` True beside a `residual_norm` that
+      is not finite (an infinite `atol` made `inf <= inf` read True on the
+      loop backends).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: zeros reported as a converged
+      solution, on the default backend of a STABLE function, where the
+      `residual_norm` beside them was NaN.  Not `critical`: it needs an
+      operator that returns a non-finite value, which is a defect upstream
+      of the solve, and the NaN norm was there to be read.
+      `context_dependent` because a caller that trusts `converged` carries
+      the zeros on.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On an affected release, read `residual_norm` as well as `converged`
+      (it is NaN there), or use `backend="loop"`, whose `converged` is
+      False for such an operator.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A solve whose residual norm overflows the dtype although its value is
+      finite (a value some 1e19 times the size of the solution in float32)
+      is answered with NaN too, where it returned that value with
+      `converged=False`.  `iters` is the backend's count, which is 0 from
+      lineax for such an operator.
+    verification:
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py::test_an_operator_that_returns_a_non_finite_value_is_answered_with_nan"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py::test_the_same_answer_when_the_call_is_not_jitted"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py::test_converged_is_not_true_beside_a_residual_norm_that_is_not_finite"
     github_issue: null

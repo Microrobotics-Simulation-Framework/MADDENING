@@ -6414,7 +6414,11 @@ anomalies:
       fields need, its floating inputs behind `stop_gradient`), and
       `"ift"` evaluates a non-floating field an internal edge carries at
       the iterate on every pass.  An all-floating group compiles to the
-      program it always did.
+      program it always did.  That evaluation was first made with the
+      group's own pass, which is the iterate's value under Jacobi and with
+      the producer swept first, and not otherwise, and it was not made
+      under `"fori"`: MADD-ANO-273 records what that left and the rule
+      both solvers follow now.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -6440,14 +6444,21 @@ anomalies:
     residual_risk: >
       A map that switches on a flag has a fixed point only where the flag
       is consistent; where none exists (the flag flips on every pass) the
-      group reaches the cap with converged=False, as before.  Under "ift"
-      an edge-carried flag is evaluated at the iterate itself rather than
-      one pass behind it as under "fori", so the two solvers can take a
-      different number of passes to the same fixed point.  The IFT
-      derivative treats a flag as locally constant (zero derivative), as
-      the unrolled fori loop does.  A group with non-floating fields pays
-      one more pass per step, and one with an edge-carried one a second
-      per iteration, less whatever XLA eliminates.
+      group reaches the cap with converged=False, as before (on every
+      route since MADD-ANO-273's resolution; until then a reader swept
+      before the flag's producer under "ift", and Jacobi under "fori",
+      could read converged=True on such a map).  Both solvers evaluate a
+      flag that a pass reads from the iterate at the iterate itself, by
+      Jacobi evaluations of the members repeated to the length of the
+      longest chain of such fields, so they take the same passes to the
+      same fixed point; a closed loop of such fields is refused at
+      compile() (MADD-ANO-273, whose residual risk says what a non-zero
+      tolerance leaves under Gauss-Seidel).  The IFT derivative treats a
+      flag as locally constant (zero derivative), as the unrolled fori
+      loop does.  A group with non-floating fields pays one more pass per
+      step, and one that carries such a field one evaluation of its
+      members per link of that chain on every pass, less whatever XLA
+      eliminates.
     verification:
       - "tests/property/test_differential_coupling_solvers.py::test_a_flag_reading_a_coupled_input_agrees_between_the_solvers"
       - "tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_an_iterate_dependent_flag_is_the_one_the_returned_state_computes"
@@ -19041,4 +19052,174 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_a_solution_that_overflows_is_returned_as_infinities_beside_a_finite_norm"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_those_infinities_read_converged_on_every_route"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-273"
+    title: "An integer or Boolean field carried by an edge inside a coupling group stopped the solve after one or two passes with converged=True, residual=0.0, far from the fixed point"
+    description: >
+      A coupling group's solvers iterate its floating fields and read
+      convergence from them.  A non-floating field that one member computes
+      from what it reads and another member reads across an edge of the
+      group is on the loop all the same.  `a: q <- 5 + 0.9 p` (float32) and
+      `b: p <- floor(q)` (int32) reach `q = 41.9`, `p = 41` by plain
+      iteration from zero, in 21 passes.  On the 0.4.0 development tree
+      (CPU, jaxlib 0.11.0) three routes stopped early with
+      `converged=True`, `residual=0.0`, no warning, and
+      `strict_convergence` silent:
+        - the default solver (`"ift"`) under the default Gauss-Seidel
+          sweep, with the reader `a` swept before the producer `b`:
+          `q = 13.1` after 2 passes.  `"ift"` evaluated such a field with
+          the group's own pass (MADD-ANO-070's resolution); a Gauss-Seidel
+          sweep hands the producer the reader's *updated* state, so the
+          field came back one pass ahead of the iterate and the floating
+          map no longer depended on the iterate;
+        - `"ift"` under Jacobi with the integer relayed through a third
+          member's integer: `q = 5.0` after 1 pass.  One evaluation settles
+          one field, and the relayed copy stayed at its first-pass value;
+        - `solver="fori"` under Jacobi: `q = 5.0` after 1 pass, where
+          `"ift"` returned 41.9.  The loop carried the integer one pass
+          behind the float, where no norm reads it, so the float changed on
+          every other pass and the pass between measured zero.
+      The same with an `int8` field.  A Boolean flag that flips on every
+      pass (`q <- 2 + 4 p`, `p <- q < 5`: no consistent state) was reported
+      converged on the same routes.  A flag held by a flux producer and
+      read by its own `compute_boundary_fluxes` (no edge carries it) was
+      kept at its first-pass value inside the `"ift"` loop: `q = 2` for 6
+      under Jacobi, `converged=True`.  With the field stored as float32
+      every route converged.  v0.3.0 and v0.3.1 (`git archive` of each tag,
+      CPU, jaxlib 0.11.0) return the fixed point on every route -- both
+      solvers, both sweeps, both schedules, relayed, `int32` and `int8` --
+      since their loop and norm carried every field as a float; a `bool`
+      field in a coupled group raised `TypeError` there.  No tagged release
+      carried the defect.
+      Resolved in 0.4.0: both solvers start every pass they measure from the
+      carried non-floating fields *evaluated at the floating iterate* --
+      the members evaluated as a Jacobi pass makes them, whatever the
+      group's sweep, repeated to the length of the longest chain of such
+      fields that feed one another.  A zero residual is then a fixed point
+      of the group's pass, non-floating fields included; every combination
+      of solver and sweep has the pass's own fixed points; and the two
+      solvers take the same passes (21 on every route above).  The rule
+      and its proof are the docstring of
+      `maddening/core/coupling/_carried_fields.py`.  The fields a pass
+      reads from the iterate include a flux producer's own.  A group whose
+      non-floating fields feed one another in a closed loop has no such
+      evaluation and is refused: `compile()` raises a `ValueError` that
+      names the fields of the loop, what the iteration would do with them
+      and three ways out.  A group that carries no such field compiles to
+      the program it did.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong: the state was far from the fixed point (0.69 to 0.88
+      of it on the reproducer) beside `converged=True` and `residual=0.0`,
+      under the default solver and sweep.  Graded `major` (a silent wrong
+      result is never `minor`).  Not `critical`: it needs an integer or
+      Boolean field that depends on the iterate and is read back into it
+      inside the group, and storing the field in floating point avoided it.
+      `context_dependent` because what a flag or a count on the loop stands
+      for is the model's.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.solver"
+      - "maddening.core.coupling.group.CouplingGroup.iteration_mode"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: store the field in floating point.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The statement is exact at a zero residual.  Under a non-zero
+      tolerance `converged=True` says the floating fields move by no more
+      than the tolerance over a pass started from the carried fields at the
+      returned iterate; a Gauss-Seidel sweep recomputes a carried field
+      from floats the sweep has already moved by up to that much, so a flag
+      whose threshold lies within the tolerance of the iterate can come
+      back different (not under Jacobi).  The refusal of a closed loop is
+      decided from the edges: a member is taken to use every field it reads
+      in every field it computes, so a loop is also refused where an
+      `update` does not use what it reads (a counter held by a flux producer
+      on a loop of flux edges, for one); store one field of it in floating
+      point.  `max_iterations=1` iterates nothing and reads a carried field
+      as stored, one step behind.  A group that carries such fields pays
+      one Jacobi evaluation of its members per link of the longest chain on
+      every pass, less what XLA eliminates.
+    verification:
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_an_integer_on_the_loop_reaches_the_fixed_point_on_every_route"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_field_relayed_through_more_non_floating_fields_is_settled_at_the_iterate"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_boolean_on_the_loop_reaches_the_fixed_point_on_every_route"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_that_flips_on_every_pass_reaches_the_cap_unconverged"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_a_flux_is_computed_from_is_evaluated_at_the_iterate"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_the_solvers_agree_under_every_acceleration"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_that_feed_one_another_in_a_loop_are_refused"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-274"
+    title: "Under acceleration=\"aitken\", \"iqn-ils\" and \"iqn-imvj\" a coupled run depends on the units ONE field is written in: its passes, its state and its verdict move"
+    description: >
+      A coupling group's norms divide each field's change by that field's
+      own magnitude, so the measurement of a change does not depend on the
+      units a field is written in.  The run that is measured does, beyond
+      one common factor.  Aitken's factor and the quasi-Newton
+      least-squares step are formed from sums over all the accelerated
+      fields together, in one power-of-two frame for the whole vector
+      (`_fixed_point_while`; `aitken_relaxation`, `iqn_ils_update`), so a
+      field written in much smaller units carries no weight in them and the
+      iteration takes another path.  Measured on the 0.4.0 tree (float32,
+      CPU, jaxlib 0.11.0; an affine pair of three entries each, spectral
+      radius 0.8, `tolerance=1e-5`, `max_iterations=25`, four steps), with
+      one field in units `2**20` smaller and the other left: under Jacobi
+      `"iqn-ils"` went from 8, 8, 8, 8 passes, all converged, to 25, 12,
+      16, 16 with `converged=False` on the first step; `"iqn-imvj"` stopped
+      unconverged at the cap on two steps, its states up to 0.49 relative
+      from the unscaled run's; `"aitken"`'s states differed by up to 6.4e-2
+      at the cap.  Under Gauss-Seidel the passes held and the states
+      differed by 5e-7 to 1e-5 relative, inside the tolerance.
+      `acceleration="none"` and `"fixed"` were bit-identical, and so was
+      every acceleration under one common factor on both fields, which is
+      what the claims inventory states (CPL-009, CPL-010).  Three sentences
+      said more: `CouplingGroup.convergence_norm` ("a group's verdict does
+      not depend on the units its quantities are written in"),
+      `_scaled_change` ("newtons or micronewtons") and the release notes'
+      "Aitken and IQN do not depend on units"; each now says what holds.
+      v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0, the
+      same pair under `convergence_norm="mixed"`, `rtol=1e-5`, their L2
+      tolerance being absolute): one common factor `2**20` is bit-identical
+      under every acceleration; with one field in units `2**20` smaller the
+      states under `"aitken"`, `"iqn-ils"` and `"iqn-imvj"` differ from the
+      unscaled run's by up to 0.96 relative under Jacobi and 1.8e-4 under
+      Gauss-Seidel, both solvers, and `"none"` and `"fixed"` are
+      bit-identical.  v0.1.0 to v0.2.1 were not measured.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Not a wrong result: each run's `converged`, `residual` and state
+      describe that run, and a solve that stops at its cap says
+      `converged=False`.  What moves with one field's units is which run is
+      taken -- more passes, or a cap reached where the same problem in
+      comparable units converges -- and the documents that said a verdict
+      did not depend on units are narrowed to what holds.  Graded `minor`
+      on that reading; were the earlier sentence taken as the specification
+      the verdict would be a documented value that differs.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.acceleration"
+      - "maddening.core.coupling.group.CouplingGroup.convergence_norm"
+    affected_versions: ">=0.3.0"
+    workaround: >
+      Write a group's quantities in units that make them comparable in
+      size, or use `acceleration="none"` or `"fixed"`, which step each
+      field by itself and repeat a run whatever units one field is in.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0; scaling each accelerated field by its own magnitude
+      inside the accelerators is deferred to 0.5.0.  Until then a group
+      whose fields differ by many orders of magnitude (a force in
+      micronewtons beside a displacement in metres) can need more passes
+      under `"aitken"` and the quasi-Newton accelerations than the same
+      group in comparable units, or stop unconverged at its cap, which
+      `converged` and `strict_convergence` report.
+    verification:
+      - "tests/core/test_coupling_units_of_one_field.py::test_under_iqn_one_field_in_other_units_is_another_run"
+      - "tests/core/test_coupling_units_of_one_field.py::test_without_a_coupled_step_one_fields_units_do_not_change_the_run"
     github_issue: null

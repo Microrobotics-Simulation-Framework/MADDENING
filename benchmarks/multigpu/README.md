@@ -662,9 +662,9 @@ A rung ends as exactly one of:
 |---|---|---|
 | `passed` | every field within 1e-5 of the tiled reference (the runner's forward limit), the mass that of the tile times the number of tiles, every value finite | goes on |
 | `check failed` | a number is wrong: the one outcome that is a defect | stops, exit **1** |
-| `out of memory` | the allocator refused (the record keeps its message), or the process was killed (137) | stops: this is the ceiling's reason |
-| `timed out` | the rung's time box ran out | stops |
-| `crashed` | anything else; the record keeps the end of its stderr | stops |
+| `out of memory` | the allocator refused (the record keeps its message), or the process was killed (137), before the rung had its verdict | stops: this is the ceiling's reason |
+| `timed out` | the rung's time box ran out before it had its verdict | stops |
+| `crashed` | anything else that left no verdict; the record keeps the end of its stderr | stops |
 | `refused by the host guard` | the rung never started: the host would have had to hold more than half its available memory | stops |
 
 and the script exits **0** when every rung that reached its checks
@@ -675,6 +675,18 @@ itself; `--summarise` re-derives every verdict from the recorded values
 and exits **3** for a record that disagrees with itself.  The last lines
 name the ceiling: the largest size that passed, its fill, and what
 stopped the next rung.
+
+**The record is read before the ending.**  A rung's verdict is what its
+record holds, read by its own values, and the way its process ended
+decides only where the record has none.  A record with a failed check
+is `check failed`, exit **1**, however the process ended: killed, at
+its time box, with any status.  A record that is complete, every check
+passed, is `passed` also when the process was then killed, ran out its
+time box or was ended by another signal on its way out: the ramp goes
+on, the ceiling counts that rung, and a `note:` line under the table
+(and the record's `outcome_detail`) says how the process ended.  A
+process that chose a status other than 0 beside a record that passed
+is still `crashed`.  `--summarise` reads the same records the same way.
 
 **The allocator, and what it does to the ceiling.**  With
 `XLA_PYTHON_CLIENT_PREALLOCATE=false` (section 2a; the script sets it

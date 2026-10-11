@@ -70,6 +70,7 @@ import jax
 # so ``jax.core.Tracer`` resolves for a type checker (as in graph_manager).
 import jax.core
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
@@ -132,7 +133,19 @@ def _validate_solver_inputs(
     mesh: Optional[Mesh],
     in_specs: Optional[PartitionSpec],
     name: str,
+    atol: Any = None,
 ) -> None:
+    # ``atol`` is an absolute floor in ``b``'s units.  A negative one was
+    # taken as it came: the loop backends' ``max(atol, rtol * ||b||)`` hid
+    # it, and lineax's entrywise ``|r_i| <= atol + rtol * |b_i|`` did not
+    # (its verdict then read True at 2e5 times the tolerance asked for).
+    # A traced value cannot be read here and is passed on.
+    if (atol is not None and not isinstance(atol, jax.core.Tracer)
+            and not bool(np.all(np.asarray(atol) >= 0))):
+        raise ValueError(
+            f"{name}: atol must be None (a purely relative test) or a number "
+            f">= 0 (an absolute floor in b's units), got {atol!r}."
+        )
     if not callable(matvec):
         raise TypeError(f"{name}: matvec must be callable, got {type(matvec)!r}")
     if not hasattr(b, "shape"):
@@ -231,10 +244,11 @@ def _framed(solve, b, x0, atol):
     res = solve(jnp.where(finite, b * p, jnp.zeros_like(b)),
                 jnp.where(finite, x0 * p, jnp.zeros_like(x0)),
                 None if atol is None else atol * p)
+    answered = jnp.logical_and(finite, jnp.isfinite(res.residual_norm))
     return SharedSolveResult(
-        value=jnp.where(finite, res.value / p, jnp.full_like(b, jnp.nan)),
-        converged=jnp.logical_and(res.converged, finite), iters=res.iters,
-        residual_norm=jnp.where(finite, res.residual_norm / p, jnp.nan),
+        value=jnp.where(answered, res.value / p, jnp.full_like(b, jnp.nan)),
+        converged=jnp.logical_and(res.converged, answered), iters=res.iters,
+        residual_norm=jnp.where(answered, res.residual_norm / p, jnp.nan),
     )
 
 
@@ -419,6 +433,7 @@ def _gmres_loop(
     restart: int,
     max_iters: int,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]],
+    a_zero_rhs_needs_no_cycle: bool = False,
 ) -> SharedSolveResult:
     """Restarted GMRES fallback.
 
@@ -478,8 +493,16 @@ def _gmres_loop(
 
         return lax.cond(converged, skip, do_cycle, operand=None)
 
+    # The first cycle always runs (an ordinary call counts it even where
+    # ``x0`` already meets the tolerance), except on request for a
+    # right-hand side that is exactly zero: ``differentiable=True`` solves
+    # one from a zero start on every call that carries an ``x0`` or an
+    # ``atol`` (``_differentiable_solve``), and a cycle on zeros is
+    # ``restart`` products that return zeros.
+    b_norm_is_zero = b_norm == 0
     init = (x0, jnp.linalg.norm(b_eff - matvec_pc(x0)),
-            jnp.array(False), jnp.int32(0))
+            b_norm_is_zero if a_zero_rhs_needs_no_cycle else jnp.array(False),
+            jnp.int32(0))
     x, res, converged, cycles_used = lax.fori_loop(
         0, n_cycles, cycle_body, init,
     )
@@ -661,16 +684,51 @@ def _lineax_cg_or_the_loop_where_it_breaks_down(
 def _differentiable_solve(
     matvec, b, *, solve_value, transpose_solve_value, symmetric, rtol,
     atol: Optional[float],
+    primal_value: Optional[Callable[[], jax.Array]] = None,
 ) -> SharedSolveResult:
-    """Route the solve through ``lax.custom_linear_solve``.
+    """The solve of ``differentiable=True``: its derivatives are linear
+    solves through ``lax.custom_linear_solve``.
 
-    Forward mode (``jax.jvp``) and reverse mode (``jax.grad``) then use
+    Forward mode (``jax.jvp``) and reverse mode (``jax.grad``) use
     ``solve_value`` / ``transpose_solve_value`` on tangents and
-    cotangents — the same backend, *with the same preconditioner* — and
+    cotangents -- the same backend, *with the same preconditioner* -- and
     the derivative with respect to anything ``matvec`` closes over
     (operator coefficients) flows through.  The Krylov loop itself is
     never differentiated, which is what makes reverse mode possible at
     all (``lax.while_loop`` has no transpose).
+
+    ``solve_value(mv, rhs)`` is the DERIVATIVE solve: it starts from zero
+    and its test is purely relative to its own right-hand side, so that a
+    derivative is linear in its direction.  ``lax.custom_linear_solve``
+    traces its ``solve`` once and uses that one program for the primal,
+    the tangent and (for a symmetric operator) the cotangent solve, so
+    nothing that belongs to the primal alone may be inside it:
+
+    * ``primal_value is None`` (the caller gave no ``x0`` and no ``atol``):
+      the primal solve is itself a zero-start, purely relative solve, and
+      the one program serves all three::
+
+          x = custom_linear_solve(A, b, solve_value)
+
+    * otherwise ``primal_value()`` is the ordinary solve, from the
+      caller's ``x0`` and with the caller's ``atol``, on inputs whose
+      gradient is stopped (a constant of the differentiation, ``x_p``).
+      The derivative is attached by a solve of a right-hand side that is
+      zero in value and carries the tangent of the residual::
+
+          r = b - A x_p                       # x_p constant
+          x = x_p + custom_linear_solve(A, r - stop_gradient(r), solve_value)
+
+      The correction is exactly zero (a zero right-hand side from a zero
+      start), so the value is the ordinary solve's.  As a function of
+      ``b`` and of the operator's coefficients ``x`` is
+      ``A^-1 (b - c)`` with the constant ``c = stop_gradient(r)``, the
+      residual the primal solve left: its derivatives of every order are
+      those of the exact solve of the system the value satisfies.  Until
+      0.4.0 the one shared program held the caller's ``x0`` and ``atol``:
+      the tangent and cotangent solves started from the primal's ``x0``
+      (MADD-ANO-267) and stopped on the primal's absolute floor
+      (MADD-ANO-268).
 
     The iteration count cannot escape ``custom_linear_solve`` (its
     ``solve`` returns the vector only), so ``iters`` is reported as -1;
@@ -678,7 +736,13 @@ def _differentiable_solve(
     """
     kw: dict[str, Any] = ({"symmetric": True} if symmetric
                           else {"transpose_solve": transpose_solve_value})
-    x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
+    if primal_value is None:
+        x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
+    else:
+        x_primal = primal_value()
+        r = b - matvec(x_primal)
+        x = x_primal + lax.custom_linear_solve(
+            matvec, r - lax.stop_gradient(r), solve_value, **kw)
     res = b - matvec(x)
     # The test is taken on ``b`` and the residual rescaled by one power of
     # two (see ``_framed``), so their norms do not flush at small units.
@@ -690,6 +754,103 @@ def _differentiable_solve(
     return SharedSolveResult(
         value=x, converged=res_norm_hat <= tol_hat, iters=jnp.int32(-1),
         residual_norm=res_norm_hat / p,
+    )
+
+
+def _constant_under_differentiation(fun, like: jax.Array):
+    """*fun* (an operator or a preconditioner applied to vectors like
+    *like*; ``None`` stays ``None``) as a constant of any differentiation:
+    the same function of its argument, with the gradient stopped on every
+    value it closes over that could carry a tangent.
+
+    ``jax.closure_convert`` finds those values (it traces *fun* once and
+    hoists the closed-over tracers that may be perturbed).  Stopping the
+    gradient of what *fun* RETURNS would not do: the closed-over values
+    would still reach ``lax.custom_linear_solve`` and ``lax.while_loop`` as
+    operands with a tangent.
+
+    A function that closes over no such value is returned as it is, not
+    wrapped.  That is not only a saving: inside a ``shard_map`` body
+    lineax can trace an operator only if it is a plain function that
+    closes over nothing (it converts any other callable on an abstract
+    vector that carries no mesh axis), and a wrapper would make every
+    operator a closure.
+    """
+    if fun is None:
+        return None
+    converted, closed_over = jax.closure_convert(fun, like)
+    if not closed_over:
+        return fun
+    constants = [lax.stop_gradient(value) for value in closed_over]
+    return lambda v: converted(v, *constants)
+
+
+# ---------------------------------------------------------------------------
+# A call without ``differentiable=True`` refuses to be differentiated
+# ---------------------------------------------------------------------------
+
+_NOT_DIFFERENTIABLE = (
+    "{name} was differentiated without differentiable=True: jax.jvp, "
+    "jax.grad, jax.jacfwd, jax.jacrev or a transformation built on them "
+    "reached the result of this call.  Differentiating the iteration itself "
+    "does not give the derivative of the solve (it was silently wrong "
+    "whenever the tangent or cotangent was not of the right-hand side's "
+    "size), so the call refuses.  Pass differentiable=True: the derivative "
+    "is then that of the linear solve, taken with the same backend and "
+    "preconditioner, and .iters reads -1.  If the solve is meant to be a "
+    "constant of the differentiation, stop the gradient on what goes INTO "
+    "the call (jax.lax.stop_gradient on b, on x0, and inside matvec and the "
+    "preconditioner on every differentiated value they close over); a "
+    "stop_gradient on the result comes too late and raises this error."
+)
+
+
+def _refusal(name: str):
+    """The identity on ``(value, residual_norm)`` whose JVP rule raises."""
+
+    @jax.custom_jvp
+    def as_solved(value, residual_norm):
+        return value, residual_norm
+
+    @as_solved.defjvp
+    def _refuse(primals, tangents):
+        del primals, tangents
+        raise ValueError(_NOT_DIFFERENTIABLE.format(name=name))
+
+    return as_solved
+
+
+_REFUSALS = {name: _refusal(name) for name in ("sharded_cg", "sharded_gmres")}
+
+
+def _refusing_a_derivative(result: SharedSolveResult, name: str) -> SharedSolveResult:
+    """*result* as it is, made to raise if a derivative is taken through it.
+
+    The two floating-point fields pass through an identity whose JVP rule
+    raises (``jax.custom_jvp``; reverse mode linearises through the same
+    rule, and ``jacfwd`` / ``jacrev`` are built on the two).  JAX calls the
+    rule only when one of the two fields carries a tangent, that is, when
+    it depends on something being differentiated: through ``b``, ``x0``,
+    or a value the operator closes over.  A call that is not
+    differentiated is not touched (the identity is inlined when the
+    program is lowered: the same bits, the same compiled program), and
+    neither is a call whose inputs do not depend on what is differentiated.
+
+    Why refuse.  Differentiating the iteration is not differentiating the
+    solve.  lineax's own tangent and transpose solves reuse the primal's
+    tolerance, which is absolute in the primal right-hand side's frame: a
+    tangent or cotangent of another size was solved to the wrong accuracy
+    or not at all (measured in float32 on 256 unknowns, unit direction:
+    off 6.4e-4 at ``|b|`` about 1e3 and 0.65 at 1e10; ``sharded_gmres``
+    returned zeros at 1e10).  A ``lax.while_loop`` has no transpose, so
+    reverse mode through the loop backends raised already.  The
+    derivative of a solve is ``differentiable=True``
+    (:func:`_differentiable_solve`).  MADD-ANO-266.
+    """
+    value, residual_norm = _REFUSALS[name](result.value, result.residual_norm)
+    return SharedSolveResult(
+        value=value, converged=result.converged, iters=result.iters,
+        residual_norm=residual_norm,
     )
 
 
@@ -938,15 +1099,16 @@ def sharded_cg(
     (sharded FVM in MIME) reads against this surface.
     """
     _validate_solver_inputs(
-        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_cg",
+        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_cg", atol=atol,
     )
     b = _materialise_b(b, mesh=mesh, in_specs=in_specs)
+    x0_given = x0 is not None
     if x0 is None:
         x0 = jnp.zeros_like(b)
     else:
         x0 = _materialise_b(x0, mesh=mesh, in_specs=in_specs)
 
-    def _dispatch(mv, rhs, x_start, atol_hat):
+    def _dispatch(mv, rhs, x_start, atol_hat, M):
         if backend == "lineax":
             if preconditioner is not None:
                 raise ValueError(
@@ -961,7 +1123,7 @@ def sharded_cg(
         if backend == "loop":
             return _cg_loop(
                 mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
-                max_iters=max_iters, preconditioner=preconditioner,
+                max_iters=max_iters, preconditioner=M,
             )
         if backend != "auto":
             raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
@@ -969,29 +1131,52 @@ def sharded_cg(
         # auto: lineax unless a preconditioner is set (lineax's CG takes
         # none), in which case the loop backend applies it.  Without one,
         # the loop also answers where lineax's value is not finite.
-        if preconditioner is None:
+        if M is None:
             return _lineax_cg_or_the_loop_where_it_breaks_down(
                 mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
                 max_iters=max_iters,
             )
         return _cg_loop(
             mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
-            max_iters=max_iters, preconditioner=preconditioner,
+            max_iters=max_iters, preconditioner=M,
         )
 
-    def _run(mv, rhs):
-        # In a power-of-two frame of the right-hand side (``_framed``); the
-        # tangent and cotangent solves of ``differentiable=True`` start at 0.
-        x_start = x0 if mv is matvec else jnp.zeros_like(rhs)
-        return _framed(lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat),
-                       rhs, x_start, atol)
+    def _run(mv, rhs, x_start, atol_given, M):
+        # One solve, in a power-of-two frame of its right-hand side (``_framed``).
+        return _framed(
+            lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat, M),
+            rhs, x_start, atol_given)
 
     if not differentiable:
-        return _run(matvec, b)
+        return _refusing_a_derivative(
+            _run(matvec, b, x0, atol, preconditioner), "sharded_cg")
+
+    # The solution does not depend on what preconditions the iteration: the
+    # preconditioner carries no derivative.  (Left as it came, a
+    # preconditioner that closes over a differentiated value made
+    # ``lax.custom_linear_solve`` raise where nothing else was
+    # differentiated.)
+    M_constant = _constant_under_differentiation(preconditioner, b)
+
+    def _derivative_solve(mv, rhs):
+        # The tangent and cotangent solves: from zero, and purely relative
+        # to their own right-hand side (``_differentiable_solve``).
+        return _run(mv, rhs, jnp.zeros_like(rhs), None, M_constant).value
+
+    primal_value = None
+    if x0_given or atol is not None:
+        def primal_value():
+            # The ordinary solve, from ``x0`` and with ``atol``, as a
+            # constant of the differentiation.
+            return _run(
+                _constant_under_differentiation(matvec, b), lax.stop_gradient(b),
+                lax.stop_gradient(x0), atol, M_constant,
+            ).value
+
     return _differentiable_solve(
-        matvec, b, solve_value=lambda mv, rhs: _run(mv, rhs).value,
+        matvec, b, solve_value=_derivative_solve,
         transpose_solve_value=None, symmetric=True,
-        rtol=rtol, atol=atol,
+        rtol=rtol, atol=atol, primal_value=primal_value,
     )
 
 
@@ -1078,15 +1263,16 @@ def sharded_gmres(
     FVM PISO pressure correction reads against this signature.
     """
     _validate_solver_inputs(
-        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_gmres",
+        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_gmres", atol=atol,
     )
     b = _materialise_b(b, mesh=mesh, in_specs=in_specs)
+    x0_given = x0 is not None
     if x0 is None:
         x0 = jnp.zeros_like(b)
     else:
         x0 = _materialise_b(x0, mesh=mesh, in_specs=in_specs)
 
-    def _dispatch(mv, rhs, x_start, atol_hat):
+    def _dispatch(mv, rhs, x_start, atol_hat, M, of_a_derivative):
         if backend == "lineax":
             if preconditioner is not None:
                 raise ValueError(
@@ -1097,18 +1283,12 @@ def sharded_gmres(
                 "gmres", mv, rhs, rtol=rtol, atol=atol_hat,
                 restart=restart, max_iters=max_iters,
             )
-        if backend == "loop":
-            return _gmres_loop(
-                mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
-                restart=restart, max_iters=max_iters,
-                preconditioner=preconditioner,
-            )
-        if backend != "auto":
+        if backend not in ("loop", "auto"):
             raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
 
         # auto: lineax unless a preconditioner is set (lineax's GMRES
         # takes none), in which case the loop backend applies it.
-        if preconditioner is None:
+        if backend == "auto" and M is None:
             return _lineax_solve(
                 "gmres", mv, rhs, rtol=rtol, atol=atol_hat,
                 restart=restart, max_iters=max_iters,
@@ -1116,22 +1296,41 @@ def sharded_gmres(
         return _gmres_loop(
             mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
             restart=restart, max_iters=max_iters,
-            preconditioner=preconditioner,
+            preconditioner=M, a_zero_rhs_needs_no_cycle=of_a_derivative,
         )
 
-    def _run(mv, rhs):
+    def _run(mv, rhs, x_start, atol_given, M, of_a_derivative=False):
         # As in :func:`sharded_cg`: in a power-of-two frame of the rhs.
-        x_start = x0 if mv is matvec else jnp.zeros_like(rhs)
-        return _framed(lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat),
-                       rhs, x_start, atol)
+        return _framed(
+            lambda b_hat, x_hat, atol_hat: _dispatch(
+                mv, b_hat, x_hat, atol_hat, M, of_a_derivative),
+            rhs, x_start, atol_given)
 
     if not differentiable:
-        return _run(matvec, b)
+        return _refusing_a_derivative(
+            _run(matvec, b, x0, atol, preconditioner), "sharded_gmres")
+
+    M_constant = _constant_under_differentiation(preconditioner, b)
+
+    def _derivative_solve(mv, rhs):
+        # As in :func:`sharded_cg`: from zero, purely relative.  ``mv`` is
+        # the operator for the tangent solve and its transpose
+        # (``jax.linear_transpose``) for the cotangent solve.
+        return _run(mv, rhs, jnp.zeros_like(rhs), None, M_constant,
+                    of_a_derivative=x0_given or atol is not None).value
+
+    primal_value = None
+    if x0_given or atol is not None:
+        def primal_value():
+            return _run(
+                _constant_under_differentiation(matvec, b), lax.stop_gradient(b),
+                lax.stop_gradient(x0), atol, M_constant,
+            ).value
+
     return _differentiable_solve(
-        matvec, b, solve_value=lambda mv, rhs: _run(mv, rhs).value,
-        transpose_solve_value=lambda vecmat, ct: _run(vecmat, ct).value,
-        symmetric=False,
-        rtol=rtol, atol=atol,
+        matvec, b, solve_value=_derivative_solve,
+        transpose_solve_value=_derivative_solve, symmetric=False,
+        rtol=rtol, atol=atol, primal_value=primal_value,
     )
 
 

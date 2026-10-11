@@ -296,13 +296,16 @@ class TestDifferentiability:
         matvec_ref = _laplacian_1d_matvec_unsharded(n)
         matvec_sh = _laplacian_1d_matvec_sharded(mesh, n_per_shard)
 
+        # ``differentiable=True``: a call without it refuses to be
+        # differentiated (MADD-ANO-266).
         def solve_unsharded(b):
-            return sharded_cg(matvec_ref, b, max_iters=500, backend="loop").value
+            return sharded_cg(matvec_ref, b, max_iters=500, backend="loop",
+                              differentiable=True).value
 
         def solve_sharded(b):
             return sharded_cg(
                 matvec_sh, b, mesh=mesh, in_specs=P("devices"),
-                max_iters=500, backend="loop",
+                max_iters=500, backend="loop", differentiable=True,
             ).value
 
         b = jnp.arange(n, dtype=jnp.float32) + 1.0

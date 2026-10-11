@@ -7352,5 +7352,5 @@ claims:
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount
-    relabelled_records: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper
+    relabelled_records: n/a
     mixed_commits: n/a

@@ -2,27 +2,32 @@
 #
 # Runs the loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py):
 # a SelkiesSession and a second GStreamer webrtcbin (the test's peer) in
-# one container, talking over the loopback interface only.  Ubuntu
-# 24.04's system Python 3.12 is used because PyGObject (python3-gi) is a
-# compiled extension built for that interpreter; the apt packages below
-# are the GStreamer set webrtcbin needs (the same list docker/Dockerfile.cloud
-# uses on a pod, plus gstreamer1.0-libav for the peer's H.264 decoder).
+# one container, with no network.  Ubuntu 24.04's system Python 3.12 is
+# used because PyGObject (python3-gi) is a compiled extension built for
+# that interpreter; the apt packages below are the GStreamer set webrtcbin
+# needs (the list docker/Dockerfile.cloud uses on a pod, plus
+# gstreamer1.0-libav for the peer's H.264 decoder).
 #
 # Build (from the repository root; the build context is cut down to
-# pyproject.toml, README.md and src/ by Dockerfile.streaming-test.dockerignore):
+# pyproject.toml, README.md, src/ and the entry point by
+# Dockerfile.streaming-test.dockerignore):
 #
 #   docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
 #
 # Run the tests against the working tree (mounted read-only over the
 # copy baked into the image, so an edit needs no rebuild):
 #
-#   docker run --rm --network none --cpuset-cpus=0-3 --memory=8g \
+#   docker run --rm --network none --cap-add NET_ADMIN \
+#     --cpuset-cpus=0-3 --memory=8g \
 #     -v "$PWD":/src:ro maddening-streaming-test \
 #     python3 -m pytest tests/cloud/test_webrtc_loopback.py -q -p no:cacheprovider
 #
-# --network none keeps the container off every network: the server and
-# the peer meet on 127.0.0.1, and no STUN or TURN server is contacted.
-# No GPU is used or needed (x264enc is a software encoder).
+# --network none keeps the container off every network; no STUN or TURN
+# server is contacted.  --cap-add NET_ADMIN lets the entry point
+# (docker/streaming-test-entrypoint.sh) add a veth pair inside that
+# network-less container, because libnice never gathers ICE candidates on
+# the loopback interface, which is all --network none leaves.  No GPU is
+# used or needed (x264enc is a software encoder).
 
 FROM ubuntu:24.04
 
@@ -53,6 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-nice \
         gstreamer1.0-libav \
         gstreamer1.0-tools \
+        iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Third-party Python dependencies first, in their own layer, so an edit
@@ -77,3 +83,8 @@ COPY src/ /src/src/
 RUN pip3 install --break-system-packages --no-deps -e /src \
     && python3 -c "import gi; gi.require_version('Gst', '1.0'); gi.require_version('GstWebRTC', '1.0'); from gi.repository import Gst; Gst.init(None); print(Gst.version_string()); assert Gst.ElementFactory.find('webrtcbin') and Gst.ElementFactory.find('x264enc') and Gst.ElementFactory.find('avdec_h264')" \
     && python3 -c "import maddening, jax; print('maddening', maddening.__file__, 'jax', jax.__version__)"
+
+# Adds the in-container test interface (see the script), then runs the
+# command given to `docker run`.
+COPY docker/streaming-test-entrypoint.sh /usr/local/bin/streaming-test-entrypoint
+ENTRYPOINT ["/usr/local/bin/streaming-test-entrypoint"]

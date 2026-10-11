@@ -2,39 +2,50 @@
 
 Every test here runs a real ``SelkiesSession`` (GStreamer ``x264enc`` and
 ``webrtcbin``, the authenticated signaling WebSocket) and connects a real
-WebRTC peer to it over the loopback interface.  The peer is a second
-GStreamer ``webrtcbin`` that behaves as the browser client
+WebRTC peer to it inside one container.  The peer is a second GStreamer
+``webrtcbin`` that behaves as the browser client
 ``maddening/api/static/webrtc_client.html`` does: it adds a receive-only
 video transceiver, creates the OFFER, sends it as
 ``{"type": "sdp", "sdp": {"type": "offer", "sdp": ...}}``, trickles its
-ICE candidates as ``{"type": "ice", "candidate": {...}}``, applies the
-answer and the server's candidates it receives in the same shapes, and
-decodes the H.264 it is sent (``rtph264depay ! avdec_h264``).  Before
-the fix this test module pins, the server never answered: a browser
-authenticated and then waited for ever, with no video.
+ICE candidates as ``{"type": "ice", "candidate": {...}}`` (the shape of
+``RTCIceCandidate.toJSON()``), applies the answer and the server's
+candidates it receives in the same shapes, and decodes the H.264 it is
+sent (``rtph264depay ! avdec_h264``).  Its H.264 payload type is 102,
+not the 96 a GStreamer payloader defaults to, as a browser's usually is.
+A GStreamer peer rather than a pure-Python one (aiortc) keeps the test's
+dependencies at what the session itself needs, and gives a peer that
+decodes with a real H.264 decoder.
+
+Before the fix these tests pin, the server never answered: a viewer
+authenticated, sent its offer, and was sent nothing (and the offer was
+handed to the input handler).
 
 What is NOT covered here: a GPU encoder (``x264enc`` is software), a
 browser (the peer is GStreamer, not Chrome or Firefox), and NAT
-traversal (both ends are on 127.0.0.1; no STUN or TURN server is
-contacted).
+traversal (both ends share one address; no STUN or TURN server is
+reached).
 
 GStreamer, its WebRTC plugins and PyGObject are not pip-installable, so
-the module skips where they are absent (the ordinary CI lanes and a
-plain virtualenv) and runs in the container built from
+this module skips where they are absent (the ordinary CI lanes, a plain
+virtualenv) and runs in the container built from
 ``docker/Dockerfile.streaming-test``, which the ``test-streaming`` job in
 ``.github/workflows/ci.yml`` runs.  The same loop on a developer machine,
 from the repository root::
 
     docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
-    docker run --rm --network none --cpuset-cpus=0-3 --memory=8g \\
+    docker run --rm --network none --cap-add NET_ADMIN \\
+      --cpuset-cpus=0-3 --memory=8g \\
       -v "$PWD":/src:ro maddening-streaming-test \\
       python3 -m pytest tests/cloud/test_webrtc_loopback.py -q -p no:cacheprovider
 
-``--network none`` leaves the container only its loopback interface, so
-nothing here can reach a network.  ``MADDENING_REQUIRE_STREAMING_TESTS=1``
-(set by the CI job) turns a missing dependency into a failure instead of
-a skip, so the one job that can run these tests cannot pass by skipping
-them.
+``--network none`` leaves the container no network at all.  libnice
+(``webrtcbin``'s ICE agent) never gathers candidates on a loopback
+interface, so the image's entry point adds a veth pair that stays inside
+the container (192.0.2.1, a never-routed documentation address) for both
+ends to meet on; that is what ``--cap-add NET_ADMIN`` is for.
+``MADDENING_REQUIRE_STREAMING_TESTS=1`` (set by the CI job) turns a
+missing dependency into a failure instead of a skip, so the one job that
+can run these tests cannot pass by skipping them.
 """
 
 from __future__ import annotations
@@ -68,73 +79,75 @@ try:
     from gi.repository import Gst, GstSdp, GstWebRTC
 except (ImportError, ValueError) as _exc:
     _require_or_skip(
-        f"needs PyGObject with the GStreamer 1.0 and GstWebRTC typelibs ({_exc}); "
-        "run it in the docker/Dockerfile.streaming-test container"
+        f"needs PyGObject with the GStreamer 1.0, GstSdp and GstWebRTC typelibs "
+        f"({_exc}); run it in the docker/Dockerfile.streaming-test container"
     )
 
 try:
+    from websockets.exceptions import ConnectionClosed
     from websockets.sync.client import connect as _ws_connect
 except ImportError as _exc:  # websockets < 11 has no threading client
     _require_or_skip(f"needs websockets >= 11 for its threading client ({_exc})")
 
 Gst.init(None)
-_MISSING = [name for name in ("appsrc", "videoconvert", "x264enc", "rtph264pay", "webrtcbin",
-                              "rtph264depay", "h264parse", "avdec_h264", "appsink")
+_MISSING = [name for name in ("appsrc", "queue", "videoconvert", "x264enc", "rtph264pay",
+                              "webrtcbin", "rtph264depay", "h264parse", "avdec_h264",
+                              "appsink")
             if Gst.ElementFactory.find(name) is None]
 if _MISSING:
     _require_or_skip(f"GStreamer elements {_MISSING} are not installed")
 
 import numpy as np  # noqa: E402
 
-from maddening.cloud.streaming import StreamConfig  # noqa: E402
+from maddening.cloud._auth import generate_session_token  # noqa: E402
 from maddening.cloud.selkies_session import SelkiesSession  # noqa: E402
+from maddening.cloud.streaming import StreamConfig  # noqa: E402
+from maddening.viz.backends.selkies_renderer import SelkiesRenderer  # noqa: E402
+from maddening.viz.renderer import GraphInfo, Renderer  # noqa: E402
+from maddening.warnings import PerformanceWarning  # noqa: E402
 
 SECRET = "loopback-test-secret"
 
-#: Small frames keep x264 and the decoder cheap on two CI cores; both
-#: sides are multiples of 16, so no macroblock is padded.
+#: Small frames keep x264 and the decoder cheap on a CI runner's cores;
+#: both sides are multiples of 16, so no macroblock is padded.
 WIDTH, HEIGHT, FPS = 320, 240, 30
+BITRATE_KBPS = 800
 
-#: Distinct solid colours, pushed in order, each for ``FRAMES_PER_COLOUR``
-#: frames.  Every pair differs by at least 128 in some channel, so a
-#: decoded frame can only be "near" the colour that was pushed.
+#: Solid colours, pushed in this order, each for ``FRAMES_PER_COLOUR``
+#: frames.  Every pair differs by 255 in at least one channel.
 PALETTE = np.array([
     (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
     (0, 255, 255), (255, 0, 255), (255, 255, 255), (0, 0, 0),
 ], dtype=np.float64)
 FRAMES_PER_COLOUR = 6
 
-#: How far a decoded frame's mean colour may sit from the colour pushed
-#: (per channel, on 0-255).  The path is RGBA -> I420 (BT.601, limited
-#: range: about one level of rounding per channel each way) -> H.264 ->
-#: I420 -> RGB; a solid frame has no detail for the encoder to lose, so
-#: what is left is the colour-space round trip and the quantiser's DC
-#: error.  The value is generous next to that and far below half the
-#: palette's spacing (64), so it cannot accept the wrong colour.
+#: How far a decoded frame's mean colour may sit from the colour pushed,
+#: in the worst channel, on 0-255.  The path is RGBA -> I420 (limited
+#: range, 4:2:0) -> H.264 at ``BITRATE_KBPS`` -> I420 -> RGB; a solid
+#: frame has no detail to lose, so what is left is the colour-space round
+#: trip and the quantiser's error on the flat block.  Measured in the
+#: container: at most 6.  The limit is four times that and far below half
+#: the palette's spacing (127.5), so no frame can match the wrong colour.
 COLOUR_TOLERANCE = 24.0
-#: A solid frame decodes solid: the spread of one decoded frame's pixels
-#: about their mean.  A frame that was not decoded from a keyframe (grey
-#: or smeared blocks) fails this.
+#: A solid frame decodes solid: the mean absolute deviation of one
+#: decoded frame's pixels from their mean (measured: 0.0).  A frame that
+#: was not decoded from its references (grey or smeared blocks) fails it.
 UNIFORMITY_TOLERANCE = 12.0
 
 #: How many decoded frames the peer must see.
 FRAMES_WANTED = 20
 
-#: Timeouts, each for one step on a loopback connection.  Measured in
-#: the container on four cores, the steps take: answer < 0.5 s, ICE
-#: connected < 1 s, twenty frames < 2 s (see the pull request for the
-#: three runs); each limit leaves several times that.
+#: Timeouts for one step each.  Measured in the container on four cores
+#: (three runs are in the pull request): the answer arrives in about
+#: 0.2 s, ICE connects about 0.1 s later, and twenty frames are decoded
+#: within 1.5 s of the offer.  Each limit is many times that, for a
+#: loaded CI runner.
 ANSWER_TIMEOUT_S = 10.0
 ICE_TIMEOUT_S = 15.0
 FRAMES_TIMEOUT_S = 30.0
-#: How long a rejected client is watched for a message it must not get.
-SILENCE_S = 3.0
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+#: How long the viewer a newer one replaces has to be closed, and a
+#: rejected client to be closed.
+CLOSE_TIMEOUT_S = 10.0
 
 
 def _solid_rgba(rgb) -> bytes:
@@ -142,6 +155,11 @@ def _solid_rgba(rgb) -> bytes:
     frame[..., :3] = np.asarray(rgb, dtype=np.uint8)
     frame[..., 3] = 255
     return frame.tobytes()
+
+
+def _palette_colour(index: int) -> np.ndarray:
+    """The colour of the ``index``-th frame pushed."""
+    return PALETTE[(index // FRAMES_PER_COLOUR) % len(PALETTE)]
 
 
 def _mid_of(sdp_text: str, mline: int) -> Optional[str]:
@@ -155,30 +173,32 @@ def _mid_of(sdp_text: str, mline: int) -> Optional[str]:
     return None
 
 
+def _candidate_address(candidate: str) -> tuple[str, int, str]:
+    """``(address, port, type)`` of an ICE candidate line (RFC 8839 §5.1)."""
+    fields = candidate.split()
+    return fields[4], int(fields[5]), fields[fields.index("typ") + 1]
+
+
 class Peer:
     """A WebRTC receiver that signals the way ``webrtc_client.html`` does.
 
-    ``webrtcbin`` with one receive-only H.264 transceiver offering payload
-    type ``payload_type`` (a browser's are dynamic and rarely the 96 a
-    GStreamer payloader defaults to, so the default here is not 96
-    either).  Decoded frames are reduced to ``(width, height, mean RGB,
-    spread)`` and kept in :attr:`frames`.
+    ``webrtcbin`` with one receive-only H.264 transceiver.  Decoded frames
+    are reduced to ``(width, height, mean RGB, spread)`` in
+    :attr:`frames`; every message the server sent is in :attr:`received`.
     """
 
-    def __init__(self, url: str, *, headers: Optional[dict] = None,
-                 payload_type: int = 102) -> None:
+    def __init__(self, url: str, *, payload_type: int = 102) -> None:
         self.url = url
-        self.headers = headers
         self.frames: list[tuple[int, int, np.ndarray, float]] = []
-        self.received: list[dict] = []          # every message from the server
-        self.sent_candidates: list[dict] = []   # the peer's own, as sent
+        self.received: list[dict] = []
+        self.sent_candidates: list[dict] = []
         self.answer = threading.Event()
         self.ice_connected = threading.Event()
         self.closed = threading.Event()
         self.close_code: Optional[int] = None
         self.errors: list[str] = []
         self._offer_text = ""
-        self._ws = None
+        self._ws: Any = None
         self._stack = contextlib.ExitStack()
         self._send_lock = threading.Lock()
         self._reader: Optional[threading.Thread] = None
@@ -200,12 +220,9 @@ class Peer:
     # -- signaling -------------------------------------------------------
 
     def connect(self) -> None:
-        """Open the signaling socket, then offer (as the browser does on open)."""
-        kwargs: dict[str, Any] = {"open_timeout": 5}
-        if self.headers:
-            kwargs["additional_headers"] = self.headers
+        """Open the signaling socket, then offer (the browser does both on open)."""
         # As a context manager: websockets >= 14 deprecates a bare connect().
-        self._ws = self._stack.enter_context(_ws_connect(self.url, **kwargs))
+        self._ws = self._stack.enter_context(_ws_connect(self.url, open_timeout=5))
         self._reader = threading.Thread(target=self._read, name="peer-reader", daemon=True)
         self._reader.start()
         self.pipe.set_state(Gst.State.PLAYING)
@@ -214,8 +231,12 @@ class Peer:
 
     def send(self, message: dict) -> None:
         with self._send_lock:
-            if self._ws is not None and not self.closed.is_set():
+            if self._ws is None or self.closed.is_set():
+                return
+            try:
                 self._ws.send(json.dumps(message))
+            except ConnectionClosed as exc:
+                self.errors.append(f"send after close: {exc!r}")
 
     def _read(self) -> None:
         try:
@@ -225,21 +246,20 @@ class Peer:
                 if message.get("type") == "sdp":
                     self._on_answer(message["sdp"])
                 elif message.get("type") == "ice":
-                    cand = message["candidate"]
-                    self.webrtc.emit("add-ice-candidate", cand["sdpMLineIndex"],
-                                     cand["candidate"])
-        except Exception as exc:  # noqa: BLE001 - recorded, the test reads it
-            if not self.closed.is_set():
-                self.errors.append(f"reader: {exc!r}")
+                    candidate = message["candidate"]
+                    self.webrtc.emit("add-ice-candidate", candidate["sdpMLineIndex"],
+                                     candidate["candidate"])
+        except Exception as exc:  # noqa: BLE001 - recorded; the tests read it
+            self.errors.append(f"reader: {exc!r}")
         finally:
-            self.close_code = getattr(self._ws, "close_code", None)
+            self.close_code = self._ws.close_code
             self.closed.set()
 
     def _on_offer_created(self, promise, _user_data) -> None:
-        reply = promise.get_reply()
+        reply = promise.get_reply()  # held: the offer belongs to it
         offer = reply.get_value("offer")
-        self.webrtc.emit("set-local-description", offer, Gst.Promise.new())
         self._offer_text = offer.sdp.as_text()
+        self.webrtc.emit("set-local-description", offer, Gst.Promise.new())
         self.send({"type": "sdp", "sdp": {"type": "offer", "sdp": self._offer_text}})
 
     def _on_answer(self, description: dict) -> None:
@@ -251,7 +271,6 @@ class Peer:
         self.answer.set()
 
     def _on_ice_candidate(self, _element, mline: int, candidate: str) -> None:
-        # The browser's RTCIceCandidate.toJSON() shape.
         payload = {"candidate": candidate, "sdpMLineIndex": mline,
                    "sdpMid": _mid_of(self._offer_text, mline)}
         self.sent_candidates.append(payload)
@@ -260,9 +279,9 @@ class Peer:
     # -- media -----------------------------------------------------------
 
     def _on_ice_state(self, element, _pspec) -> None:
-        state = element.get_property("ice-connection-state")
-        if state in (GstWebRTC.WebRTCICEConnectionState.CONNECTED,
-                     GstWebRTC.WebRTCICEConnectionState.COMPLETED):
+        if element.get_property("ice-connection-state") in (
+                GstWebRTC.WebRTCICEConnectionState.CONNECTED,
+                GstWebRTC.WebRTCICEConnectionState.COMPLETED):
             self.ice_connected.set()
 
     def _on_pad_added(self, _element, pad) -> None:
@@ -286,11 +305,10 @@ class Peer:
         ok, info = buffer.map(Gst.MapFlags.READ)
         if ok:
             try:
-                pixels = np.frombuffer(info.data, dtype=np.uint8)[: width * height * 3]
-                rgb = pixels.reshape(height, width, 3).astype(np.float64)
+                rgb = np.frombuffer(info.data, dtype=np.uint8)[: width * height * 3]
+                rgb = rgb.reshape(height, width, 3).astype(np.float64)
                 mean = rgb.reshape(-1, 3).mean(axis=0)
-                spread = float(np.abs(rgb - mean).mean())
-                self.frames.append((width, height, mean, spread))
+                self.frames.append((width, height, mean, float(np.abs(rgb - mean).mean())))
             finally:
                 buffer.unmap(info)
         return Gst.FlowReturn.OK
@@ -306,17 +324,16 @@ class Peer:
         return found
 
     def close(self) -> None:
-        self.closed.set()
-        try:
+        with contextlib.suppress(Exception):  # already closed by the server
             self._stack.close()
-        except Exception:  # noqa: BLE001 - already closed by the server
-            pass
         if self._reader is not None:
             self._reader.join(timeout=5)
+        self.closed.set()
         self.pipe.set_state(Gst.State.NULL)
 
 
 def _wait(event: threading.Event, timeout: float, what: str, peer: Peer) -> float:
+    """Wait for ``event``; on a timeout, say what the peer saw."""
     start = time.monotonic()
     if not event.wait(timeout):
         raise AssertionError(
@@ -326,63 +343,327 @@ def _wait(event: threading.Event, timeout: float, what: str, peer: Peer) -> floa
     return time.monotonic() - start
 
 
-def _url(session: SelkiesSession, token: Optional[str] = None) -> str:
-    """The signaling URL on 127.0.0.1, with ``?token=`` when given."""
-    path = urllib.parse.urlsplit(session_info(session).signaling_url).path
-    url = f"ws://127.0.0.1:{session_port(session)}{path}"
-    return url if token is None else f"{url}?token={token}"
-
-
-def session_info(session: SelkiesSession):
-    return session._info  # noqa: SLF001 - the StreamInfo start() returned
-
-
-def session_port(session: SelkiesSession) -> int:
-    return session._signaling_port  # noqa: SLF001 - the port the test chose
+def _start(config: Optional[StreamConfig] = None) -> tuple[SelkiesSession, str]:
+    """A started session on 127.0.0.1 and its signaling URL (no token)."""
+    session = SelkiesSession(secret=SECRET, signaling_port=0, bind_host="127.0.0.1")
+    info = session.start(config or StreamConfig(
+        width=WIDTH, height=HEIGHT, fps=FPS, bitrate_kbps=BITRATE_KBPS, ice_servers=[]))
+    parts = urllib.parse.urlsplit(info.signaling_url)
+    return session, f"ws://127.0.0.1:{parts.port}{parts.path}"
 
 
 @pytest.fixture
-def session():
-    """A started session on a free loopback port; stopped after the test."""
-    s = SelkiesSession(secret=SECRET, signaling_port=_free_port(), bind_host="127.0.0.1")
-    s.start(StreamConfig(width=WIDTH, height=HEIGHT, fps=FPS, bitrate_kbps=800,
-                         ice_servers=[]))
-    yield s
-    s.stop()
+def started():
+    session, url = _start()
+    yield session, url
+    session.stop()
 
 
-def _push_until(session: SelkiesSession, done, timeout: float) -> int:
-    """Push the palette, one colour per ``FRAMES_PER_COLOUR`` frames, at FPS."""
+@pytest.fixture
+def peers():
+    """Peers a test opens; closed after it, whatever happened."""
+    opened: list[Peer] = []
+    yield opened
+    for peer in opened:
+        peer.close()
+
+
+def _peer(peers: list, url: str, token: Optional[str] = None) -> Peer:
+    peer = Peer(url if token is None else f"{url}?token={token}")
+    peers.append(peer)
+    return peer
+
+
+def _push_until(push, done, timeout: float) -> int:
+    """Call ``push(i)`` for frame ``i = 0, 1, ...`` at ``FPS`` until ``done()``."""
     pushed = 0
     deadline = time.monotonic() + timeout
     while not done() and time.monotonic() < deadline:
-        colour = PALETTE[(pushed // FRAMES_PER_COLOUR) % len(PALETTE)]
-        session.update_framebuffer_cpu(_solid_rgba(colour), WIDTH, HEIGHT, "RGBA")
+        push(pushed)
         pushed += 1
         time.sleep(1.0 / FPS)
     return pushed
 
 
-def test_the_server_answers_the_offer():
-    """The browser's offer gets an SDP answer back on the same socket."""
-    s = SelkiesSession(secret=SECRET, signaling_port=_free_port(), bind_host="127.0.0.1")
-    s.start(StreamConfig(width=WIDTH, height=HEIGHT, fps=FPS, bitrate_kbps=800,
-                         ice_servers=[]))
+def _push_palette(session: SelkiesSession):
+    def push(index: int) -> None:
+        session.update_framebuffer_cpu(_solid_rgba(_palette_colour(index)),
+                                       WIDTH, HEIGHT, "RGBA")
+    return push
+
+
+def _assert_decoded_the_palette(peer: Peer) -> None:
+    """At least ``FRAMES_WANTED`` frames, of the stream's size, showing what was pushed."""
+    frames = list(peer.frames)
+    assert len(frames) >= FRAMES_WANTED, (
+        f"{len(frames)} frames decoded; errors {peer.errors + peer.pipeline_errors()}")
+    nearest = []
+    for i, (width, height, mean, spread) in enumerate(frames):
+        assert (width, height) == (WIDTH, HEIGHT), f"frame {i} is {width}x{height}"
+        assert spread <= UNIFORMITY_TOLERANCE, (
+            f"frame {i} is not solid (mean deviation {spread:.1f}): not decoded cleanly")
+        error = np.abs(PALETTE - mean).max(axis=1)
+        k = int(error.argmin())
+        assert error[k] <= COLOUR_TOLERANCE, (
+            f"frame {i}: mean colour {mean.round(1)} is {error[k]:.1f} from the nearest "
+            f"colour pushed, {PALETTE[k]}")
+        nearest.append(k)
+    # The content changes as it was pushed: runs of one colour, in palette
+    # order (a step of two allows one colour lost to a dropped frame run).
+    runs = [k for j, k in enumerate(nearest) if j == 0 or k != nearest[j - 1]]
+    assert len(runs) >= 3, f"the decoded frames show only the colours {runs}"
+    steps = [(b - a) % len(PALETTE) for a, b in zip(runs, runs[1:])]
+    assert all(1 <= step <= 2 for step in steps), (
+        f"the decoded colours {runs} are not in the order they were pushed")
+
+
+def _server_remote_candidates(session: SelkiesSession) -> set[tuple[str, int, str]]:
+    """``(address, port, type)`` of every remote candidate the server's ``webrtcbin`` holds."""
+    webrtc = session._negotiator._webrtc  # noqa: SLF001 - the viewer's webrtcbin
+    promise = Gst.Promise.new()
+    webrtc.emit("get-stats", None, promise)
+    promise.wait()
+    stats = promise.get_reply()
+    found = set()
+    for i in range(stats.n_fields()):
+        value = stats.get_value(stats.nth_field_name(i))
+        if isinstance(value, Gst.Structure) and \
+                value.get_value("type") == GstWebRTC.WebRTCStatsType.REMOTE_CANDIDATE:
+            found.add((value.get_value("address"), value.get_value("port"),
+                       value.get_value("candidate-type")))
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Negotiation
+# ---------------------------------------------------------------------------
+
+
+def test_the_server_answers_the_offer_with_the_payload_type_offered(started, peers):
+    session, url = started
     relayed: list = []
-    s.set_input_handler(relayed.append)
-    peer = Peer(_url(s, s.session_token))
+    session.set_input_handler(relayed.append)
+    peer = _peer(peers, url, session.session_token)
+    peer.connect()
+    _wait(peer.answer, ANSWER_TIMEOUT_S, "an SDP answer", peer)
+
+    (answer,) = [m["sdp"] for m in peer.received if m.get("type") == "sdp"]
+    assert answer["type"] == "answer"
+    video = [line for line in answer["sdp"].splitlines() if line.startswith("m=video")]
+    assert len(video) == 1 and video[0].split()[3:] == ["102"], video
+    assert "a=sendonly" in answer["sdp"].splitlines()
+    # The offer went to the negotiation, not to the input handler.
+    assert relayed == []
+
+
+def test_ice_candidates_go_both_ways_and_ice_connects(started, peers):
+    session, url = started
+    peer = _peer(peers, url, session.session_token)
+    peer.connect()
+    _wait(peer.ice_connected, ICE_TIMEOUT_S, "ICE connected", peer)
+
+    # Server -> viewer: trickled after the answer, in the browser's shape.
+    kinds = [m.get("type") for m in peer.received]
+    assert kinds[0] == "sdp" and "ice" in kinds, kinds
+    for message in (m for m in peer.received if m.get("type") == "ice"):
+        candidate = message["candidate"]
+        assert candidate["candidate"].startswith("candidate:"), candidate
+        assert candidate["sdpMLineIndex"] == 0
+        assert candidate["sdpMid"] == _mid_of(peer._offer_text, 0)
+
+    # Viewer -> server: the server added the viewer's candidates.  Had it
+    # dropped them, ICE could still connect (the viewer's checks would show
+    # it the viewer's address as a peer-reflexive candidate), so this reads
+    # the server's own record: a host candidate at the address and port
+    # the viewer sent.
+    sent = {_candidate_address(c["candidate"]) for c in peer.sent_candidates}
+    assert sent, "the peer gathered no candidates"
+    held = _server_remote_candidates(session)
+    assert {c for c in sent if c[2] == "host"} & {c for c in held if c[2] == "host"}, (
+        f"the server holds {held}, none of the viewer's host candidates {sent}")
+
+
+def test_the_peer_decodes_the_frames_that_were_pushed(started, peers):
+    session, url = started
+    peer = _peer(peers, url, session.session_token)
+    peer.connect()
+    _push_until(_push_palette(session), lambda: len(peer.frames) >= FRAMES_WANTED,
+                FRAMES_TIMEOUT_S)
+    _assert_decoded_the_palette(peer)
+
+
+def test_input_events_reach_the_input_handler_and_negotiation_never_does(started, peers):
+    session, url = started
+    relayed: list = []
+    session.set_input_handler(relayed.append)
+    peer = _peer(peers, url, session.session_token)
+    peer.connect()
+    _wait(peer.ice_connected, ICE_TIMEOUT_S, "ICE connected", peer)
+    events = [{"type": "mousemove", "x": 10, "y": 20, "buttons": 1},
+              {"type": "keydown", "key": "a"}]
+    for event in events:
+        peer.send(event)
+
+    deadline = time.monotonic() + ANSWER_TIMEOUT_S
+    while len(relayed) < len(events) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert peer.sent_candidates, "the peer sent no ICE candidate, so this proves nothing"
+    assert relayed == events
+
+
+# ---------------------------------------------------------------------------
+# Who may connect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("credential", ["none", "wrong", "other session", "other secret"])
+def test_an_unauthenticated_peer_is_closed_and_sent_nothing(started, peers, credential):
+    session, url = started
+    relayed: list = []
+    session.set_input_handler(relayed.append)
+    session_id = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+    token = {"none": None,
+             "wrong": "f" * 64,
+             "other session": generate_session_token("ba9876543210", SECRET),
+             "other secret": generate_session_token(session_id, "not-the-secret")}[credential]
+    peer = _peer(peers, url, token)
+    peer.connect()  # the handshake completes; the server then closes
+
+    _wait(peer.closed, CLOSE_TIMEOUT_S, "the server closing the connection", peer)
+    assert peer.close_code == 1008
+    assert peer.received == []
+    assert relayed == []
+    assert session._negotiator._pipeline is None  # noqa: SLF001 - nothing was built
+
+
+def test_a_second_viewer_replaces_the_first(started, peers):
+    session, url = started
+    first = _peer(peers, url, session.session_token)
+    first.connect()
+    _wait(first.answer, ANSWER_TIMEOUT_S, "the first viewer's answer", first)
+
+    second = _peer(peers, url, session.session_token)
+    second.connect()
+    _wait(first.closed, CLOSE_TIMEOUT_S, "the first viewer being closed", first)
+    assert first.close_code == 4000
+
+    _push_until(_push_palette(session), lambda: len(second.frames) >= FRAMES_WANTED,
+                FRAMES_TIMEOUT_S)
+    _assert_decoded_the_palette(second)
+    assert [m.get("type") for m in first.received].count("sdp") == 1
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+_SESSION_THREADS = {"selkies-signaling", "selkies-glib"}
+
+
+def test_stop_ends_the_glib_loop_the_pipeline_and_the_server(peers):
+    session, url = _start()
     try:
-        deadline = time.monotonic() + 5
-        while True:  # the base starts its server on a thread and returns at once
-            try:
-                peer.connect()
-                break
-            except OSError:
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(0.1)
-        _wait(peer.answer, ANSWER_TIMEOUT_S, "an SDP answer", peer)
+        peer = _peer(peers, url, session.session_token)
+        peer.connect()
+        _wait(peer.ice_connected, ICE_TIMEOUT_S, "ICE connected", peer)
+        pipeline = session._negotiator._pipeline  # noqa: SLF001 - checked after stop()
+        assert pipeline is not None
+        assert _SESSION_THREADS <= {t.name for t in threading.enumerate()}
     finally:
-        peer.close()
-        s.stop()
-    assert not [m for m in relayed if m.get("type") in ("sdp", "ice")], relayed
+        session.stop()
+
+    # Only the session's own Python threads are named here: GStreamer's
+    # threads register as "Dummy-N" once they call into Python, and stay
+    # listed after they end.
+    assert not _SESSION_THREADS & {t.name for t in threading.enumerate() if t.is_alive()}
+    assert pipeline.get_state(0)[1] == Gst.State.NULL
+    _wait(peer.closed, CLOSE_TIMEOUT_S, "the viewer's socket being closed", peer)
+    port = urllib.parse.urlsplit(url).port
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+    assert not session.is_alive()
+    session.stop()  # a second stop is harmless
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+def test_the_configured_ice_servers_reach_webrtcbin(peers):
+    # 192.0.2.1 is the container's own test address: nothing listens on
+    # 3478, so neither server is reached, and ICE connects on host
+    # candidates regardless.
+    session, url = _start(StreamConfig(
+        width=WIDTH, height=HEIGHT, fps=FPS, bitrate_kbps=BITRATE_KBPS, ice_servers=[
+            {"urls": "stun:192.0.2.1:3478"},
+            {"urls": ["turn:192.0.2.1:3478?transport=udp"],
+             "username": "user", "credential": "secret"},
+        ]))
+    try:
+        peer = _peer(peers, url, session.session_token)
+        peer.connect()
+        _wait(peer.answer, ANSWER_TIMEOUT_S, "an SDP answer", peer)
+        webrtc = session._negotiator._webrtc  # noqa: SLF001 - the viewer's webrtcbin
+        assert webrtc.get_property("stun-server") == "stun://192.0.2.1:3478"
+        # (How a credential that needs escaping is written into the URI is
+        # tested on the conversion itself, in test_webrtc_signaling_messages.)
+        assert webrtc.get_property("turn-server") == \
+            "turn://user:secret@192.0.2.1:3478?transport=udp"
+    finally:
+        session.stop()
+
+
+def test_a_frame_of_the_wrong_size_is_refused(started):
+    session, _url = started
+    with pytest.raises(ValueError, match="320x240"):
+        session.update_framebuffer_cpu(b"\x00" * (160 * 120 * 4), 160, 120, "RGBA")
+    with pytest.raises(ValueError, match="bytes"):
+        session.update_framebuffer_cpu(b"\x00" * 10, WIDTH, HEIGHT, "RGBA")
+
+
+# ---------------------------------------------------------------------------
+# The viz backend, end to end
+# ---------------------------------------------------------------------------
+
+
+class _PaletteRenderer(Renderer):
+    """Draws the palette: one solid colour per ``FRAMES_PER_COLOUR`` updates."""
+
+    def __init__(self) -> None:
+        self.updates = 0
+        self.torn_down = False
+
+    def setup(self, graph_info: GraphInfo) -> None:
+        pass
+
+    def update(self, sim_time: float, state: dict[str, dict]) -> None:
+        self.updates += 1
+
+    def teardown(self) -> None:
+        self.torn_down = True
+
+    def read_framebuffer_cpu(self):
+        return _solid_rgba(_palette_colour(self.updates - 1)), WIDTH, HEIGHT, "RGBA"
+
+
+def test_selkies_renderer_streams_what_its_inner_renderer_draws(peers):
+    inner = _PaletteRenderer()
+    session = SelkiesSession(secret=SECRET, signaling_port=0, bind_host="127.0.0.1")
+    renderer = SelkiesRenderer(inner, session, StreamConfig(
+        width=WIDTH, height=HEIGHT, fps=FPS, bitrate_kbps=BITRATE_KBPS, ice_servers=[]))
+    graph_info = GraphInfo(node_names=[], node_params={}, node_state_fields={},
+                           edges=[], timestep=0.01)
+    with pytest.warns(PerformanceWarning, match="CPU path"):
+        renderer.setup(graph_info)
+    try:
+        parts = urllib.parse.urlsplit(renderer.stream_info.signaling_url)
+        peer = _peer(peers, f"ws://127.0.0.1:{parts.port}{parts.path}", session.session_token)
+        peer.connect()
+        _push_until(lambda i: renderer.update(i / FPS, {}),
+                    lambda: len(peer.frames) >= FRAMES_WANTED, FRAMES_TIMEOUT_S)
+    finally:
+        renderer.teardown()
+    _assert_decoded_the_palette(peer)
+    assert inner.torn_down and not session.is_alive()
+    assert not _SESSION_THREADS & {t.name for t in threading.enumerate() if t.is_alive()}

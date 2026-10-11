@@ -19207,3 +19207,56 @@ anomalies:
       - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_the_frames_change_as_the_graph_steps_and_hold_while_it_does_not"
       - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_main_serves_the_built_in_node_types"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-275"
+    title: "The cloud entry point logged MADDENING_CLOUD_CONFIG verbatim at INFO, so a TURN username and credential in stream_config.ice_servers were written to the container's log"
+    description: >
+      From v0.1.0 to v0.3.1, and on the 0.4.0 tree before this fix,
+      `cloud/entrypoint.py` parsed `MADDENING_CLOUD_CONFIG` and logged the
+      whole dictionary at INFO ("Cloud entrypoint starting with config:
+      ..."), before reading any of it.  `StreamConfig.ice_servers` takes
+      WebRTC `RTCIceServer` dictionaries, whose TURN entries carry a
+      `username` and a `credential`, so a TURN server configured there was
+      written, credential included, to the log of every container started
+      with it (and to wherever that log is collected).  Measured at each
+      tag with `git archive` (v0.1.0, v0.2.0, v0.2.1, v0.3.0, v0.3.1 and
+      the 0.4.0 base): `main()` run with uvicorn stubbed and a TURN server
+      in the config logs both strings at INFO.  The launcher's own config
+      (`{"stream_preset": ...}`) carries no credential; the exposure needs
+      a user-written `MADDENING_CLOUD_CONFIG`.  No affected release used
+      the TURN server it logged: the session was never started there
+      (MADD-ANO-274).  Found by the pre-merge audit of the WebRTC
+      streaming work.
+      Resolved in 0.4.0: the config is logged with every value under a
+      `credential`, `username`, `password`, `passwd`, `secret`, `token`,
+      `api_key` or `apikey` key (any case) replaced by "<redacted>", and
+      the user and password of a `scheme://user:password@host` URL string
+      replaced likewise, at any depth.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A security defect (a credential written to a log, CWE-532), graded
+      by what the credential opens: a TURN relay, whose bandwidth a reader
+      of the log could use at the account holder's cost.  It gives no
+      access to the API, the stream or the simulation, and needs TURN
+      credentials put in `MADDENING_CLOUD_CONFIG` by hand.  Not safety
+      relevant: nothing the simulation computes, stores or reports
+      changes.
+    affected_components:
+      - "maddening.cloud.entrypoint.main"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Do not put TURN credentials in `MADDENING_CLOUD_CONFIG` on an
+      affected release (none of them used the TURN server: the session
+      never started).  Rotate any credential that was, and treat the
+      container logs that hold it as secrets.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A credential under a key outside that list (other than in a URL's
+      user part) is still logged.  `MADDENING_CLOUD_CONFIG` itself stays in
+      the container's environment, readable by whoever can inspect the
+      container.
+    verification:
+      - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_the_logged_config_holds_no_ice_server_credential"
+    github_issue: null

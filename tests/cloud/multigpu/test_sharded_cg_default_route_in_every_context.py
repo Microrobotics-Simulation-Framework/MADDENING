@@ -89,6 +89,15 @@ def _lowest_mode() -> np.ndarray:
     return np.ones(UNKNOWNS, np.float32)
 
 
+def _two_low_modes() -> np.ndarray:
+    """The lowest mode and half of the next one (eigenvalue
+    ``shift + 6e-4``).  lineax breaks down on its first step as on the
+    lowest mode alone (the quotient is 1.1e-3), and the loop needs two
+    iterations: where the default call falls back, its ``iters`` is the
+    loop's and not lineax's 1."""
+    return (1.0 + 0.5 * np.cos(2 * np.pi * np.arange(UNKNOWNS) / UNKNOWNS)).astype(np.float32)
+
+
 def _highest_mode() -> np.ndarray:
     """The eigenvector of the eigenvalue ``4 + shift``: alternating."""
     return np.where(np.arange(UNKNOWNS) % 2 == 0, 1.0, -1.0).astype(np.float32)
@@ -141,13 +150,14 @@ def test_lineax_answers_the_first_system_and_breaks_down_on_the_second():
 
 #: What each of the four devices solves, per case: the operator's shift (one
 #: operator for the whole ``shard_map`` call, see ``_matvec``) and each
-#: device's right-hand side.  At the shift 1e-3 the lowest mode breaks lineax down on its first
-#: step (quotient 1e-3) and the highest mode does not (quotient 4).
+#: device's right-hand side.  At the shift 1e-3 two low modes break lineax
+#: down on its first step (quotient 1.1e-3) and the highest mode does not
+#: (quotient 4).
 CASES = {
     "lineax answers on every device": (
         ANSWERS, [_rhs(ANSWERS, seed=d) for d in range(DEVICES)]),
     "lineax breaks down on devices 1 and 3": (
-        BREAKS_DOWN, [(1.0 + d) * (_highest_mode() if d % 2 == 0 else _lowest_mode())
+        BREAKS_DOWN, [(1.0 + d) * (_highest_mode() if d % 2 == 0 else _two_low_modes())
                       for d in range(DEVICES)]),
 }
 KEYWORDS = {
@@ -192,6 +202,9 @@ def _each_device_gets_its_route(case: str, keywords: str, jit: bool) -> None:
         got = _row(default, device)
         want = _row(by_loop if broke_down[device] else by_lineax, device)
         assert _bits_differ(got, want) == [], device
+        if broke_down[device] and "differentiable" not in keywords:
+            # The two routes differ in every field there, the count too.
+            assert int(by_loop[2][device]) != int(by_lineax[2][device])
         assert np.all(np.isfinite(got[0])), device
         assert bool(got[1]), (device, float(got[3]))
 

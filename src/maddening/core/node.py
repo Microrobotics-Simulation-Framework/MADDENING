@@ -798,6 +798,14 @@ class SimulationNode(ABC):
 
     meta: ClassVar[Optional["NodeMeta"]] = None  # type: ignore[name-defined]
 
+    #: Private.  For a node that wraps another and runs it under its own
+    #: name (the sharded wrappers, ``HybridNode``): the name of the
+    #: attribute holding the wrapped node.  Such a wrapper has no ``params``
+    #: of its own -- its ``params`` *is* the wrapped node's, read and
+    #: assigned through it (see :attr:`params`).  ``None`` for every other
+    #: node.
+    _params_owner_attr: ClassVar[Optional[str]] = None
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Reject legacy subclasses that override ``requires_halo``.
 
@@ -859,7 +867,27 @@ class SimulationNode(ABC):
         the node, MADD-ANO-203.)  To write a value the node already holds --
         to revert a calibration -- write the key: ``node.params[key] =
         value``.
+
+        A node that wraps another and runs it (``ShardedStencilNode``,
+        ``ShardedPointwiseNode``, ``ShardedUnstructuredNode``,
+        ``HybridNode``, and one of them around another) has no mapping of
+        its own: its ``params`` is the wrapped node's, so there is one
+        mapping however it is reached, and an assignment made on the
+        wrapper or on the node it wraps is the same assignment, counted
+        once, seen by both and by the graph.  Until 0.4.0 shipped the two
+        only *shared* a mapping from construction on, and an assignment on
+        the wrapper -- the node ``gm.get_node(name)`` returns for a sharded
+        graph -- replaced the wrapper's alone: the step went on with the
+        old value while ``node.params`` read the new one back, and every
+        later keyed write through the wrapper was lost with it.  A wrapper
+        written outside this package that shares its node's mapping
+        (``self.params = inner.params``) is followed in one direction: an
+        assignment on *it* reaches every node it holds that shared the
+        mapping replaced; one made on the node it wraps does not reach it.
         """
+        owner = self._params_owner()
+        if owner is not None:
+            return owner.params
         try:
             return self.__dict__["params"]
         except KeyError:
@@ -868,16 +896,49 @@ class SimulationNode(ABC):
 
     @params.setter
     def params(self, value) -> None:
+        attrs = cast(dict, self.__dict__)
+        owner = self._params_owner()
+        if owner is not None:
+            # A wrapper: the assignment is the wrapped node's, and the copy
+            # the base constructor stored here before the wrapped node was
+            # attached goes, so that nothing can read a second mapping.
+            owner.params = value
+            attrs.pop("params", None)
+            return
         # Kept in the instance ``__dict__`` under its own name, so pickle,
         # ``copy`` and every walk of ``vars(node)`` see what they always saw.
+        old = attrs.get("params")
         if isinstance(value, Mapping) and not isinstance(value, _ParamsDict):
             value = _ParamsDict(value)
-            old = self.__dict__.get("params")
             if isinstance(old, _ParamsDict):
                 # The replacement writes the keys it changes, not the ones
                 # it hands back (MADD-ANO-203).
                 value._succeed(old)
-        cast(dict, self.__dict__)["params"] = value
+        attrs["params"] = value
+        if old is None or value is old:
+            return
+        # A node this one holds that shared the mapping just replaced (a
+        # wrapper written as ``self.params = inner.params``) goes on sharing:
+        # left with the old one, it would run and report a value this node
+        # no longer holds.  Through its own setter, so a wrapper it is, or
+        # holds in turn, is followed; this node already holds ``value``, so
+        # a reference cycle ends here.
+        for held in list(attrs.values()):
+            if isinstance(held, SimulationNode) and held is not self \
+                    and getattr(held, "params", None) is old:
+                held.params = value
+
+    def _params_owner(self) -> Any:
+        """The wrapped node whose ``params`` are this node's
+        (:attr:`_params_owner_attr`), or ``None``: for a node that wraps
+        nothing, and for a wrapper whose constructor has not attached its
+        node yet (the base constructor runs first, and stores a copy that
+        the wrapper's first assignment drops)."""
+        attr = self._params_owner_attr
+        if attr is None:
+            return None
+        owner = self.__dict__.get(attr)
+        return None if owner is self else owner
 
     # ------------------------------------------------------------------
     # Abstract interface

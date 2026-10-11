@@ -481,7 +481,8 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
     # when every edge into the input carries a flux of a member swept at
     # or after this one (or of a node outside the group, MADD-ANO-156).
     place = {member: i for i, member in enumerate(order)}
-    fed = {r.target[0] for r in records if r.target[0] in plan.flux_members}
+    fed = list(dict.fromkeys(
+        r.target[0] for r in records if r.target[0] in plan.flux_members))
     into: dict = {member: {} for member in fed}
     for r in (*plan.internal, *(c for c in plan.crossing if c.role == INBOUND)):
         member, name = r.target

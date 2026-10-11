@@ -230,6 +230,7 @@ def test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution(order, st
     gm = built(nodes, CHAIN, ["a", "b", "c"], mode=mode, solver=solver)
     assert gm._group_sweep_order(gm._coupling_groups[0]) == list(order)
     assert off(gm, exact(nodes, CHAIN)) < CLOSE
+    assert list(gm._schedule) == list(order)        # asked before the compile, and the same
 
 
 # Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed[ift]
@@ -433,8 +434,13 @@ def test_no_hook_is_traced_for_a_group_its_edges_alone_pass(monkeypatch):
     """A flux edge to a node that produces none, a chain the seed reaches
     whose last flux no producer reads, and a graph without groups: the
     criterion returns on the edges."""
-    asked = []
-    monkeypatch.setattr(_flux_loops, "_flux_reads", lambda *args: asked.append(args[0]))
+    asked, real = [], _flux_loops._flux_reads
+
+    def counting(spec, *args):
+        asked.append(spec.node.name)
+        return real(spec, *args)
+
+    monkeypatch.setattr(_flux_loops, "_flux_reads", counting)
     plain = type("Plain", (Side,), {
         "compute_boundary_fluxes": SimulationNode.compute_boundary_fluxes})
     open_chain = [("a", "q", "b", "s", 1.0), ("b", "q", "c", "s", 1.0),
@@ -449,10 +455,12 @@ def test_no_hook_is_traced_for_a_group_its_edges_alone_pass(monkeypatch):
         assert not any(line.startswith("ERROR") for line in gm.validate())
     assert asked == []
     # The patch is read: a group its edges alone would refuse asks each
-    # member, and one that answers nothing is taken to read every input.
-    with pytest.raises(ValueError, match="that dependence is assumed"):
-        robin_pair(None)[0]._refuse_unsolved_group_fluxes()
-    assert len(asked) == 2
+    # member, once in a compile (validate() does not ask again inside it).
+    gm = robin_pair(None)[0]
+    gm.compile()
+    assert asked == ["node_a", "node_b"]
+    gm.validate()
+    assert asked == ["node_a", "node_b"] * 2
 
 
 # ---------------------------------------------------------------------------

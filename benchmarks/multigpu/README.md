@@ -255,7 +255,7 @@ above, the four of paths the goals carried without a seed (injected parameters, 
 cells wide and the seven of the `field-shares` cases -- and seven of `sharded_unstructured.py`.  Slow-marked, it
 applies each of the twenty-six to a scratch copy of the library, runs `--goal
 checklist --dry-run --keep-going`, and requires `stencil`, `hybrid` and
-`coupled` to read `FAIL` (`stencil` alone for a fault of a halo two wide or of the `field-shares` cases;
+`coupled` to read `FAIL` (`stencil` alone for a fault only its own cases reach: a halo two wide, the `field-shares` cases, the `field-mask1` case, the crossed pencil, the Dirichlet ends;
 and `halo` too for a seed of `halo.py`; the other checklist goals `PASS`),
 every item those goals decide `FAILED` once relabelled as four GPUs, the
 failed `stencil` checks to be on the meshes, the node and the ends the

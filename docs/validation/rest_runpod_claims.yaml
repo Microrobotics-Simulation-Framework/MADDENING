@@ -5394,8 +5394,8 @@ claims:
   claim: >-
     The seeded test "applies each of the twenty-six to a scratch copy of the
     library, runs --goal checklist --dry-run --keep-going, and requires
-    stencil, hybrid and coupled to read FAIL (stencil alone for a fault of
-    a halo two wide; and halo too for a seed of halo.py ...), every item
+    stencil, hybrid and coupled to read FAIL (stencil alone for a fault only
+    its own cases reach ...; and halo too for a seed of halo.py ...), every item
     those goals decide FAILED once relabelled as four GPUs, the failed
     stencil checks to be on the meshes, the node and the ends the fault can
     reach -- and on every one of them -- and the unseeded copy to pass

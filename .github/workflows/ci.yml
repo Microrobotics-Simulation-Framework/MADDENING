@@ -456,7 +456,10 @@ jobs:
   test-streaming:
     # The loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py): a
     # SelkiesSession and a GStreamer webrtcbin peer that signals as the
-    # browser client does, negotiating and decoding real H.264 on CPU.  They
+    # browser client does, negotiating and decoding real H.264 on CPU; and
+    # the cloud entry point run as the container runs it, its simulation
+    # built over REST and watched by that peer
+    # (tests/cloud/test_entrypoint_streams.py).  They
     # need GStreamer, its WebRTC plugins and PyGObject from apt, which the
     # sharded lanes do not install (the module skips there, and their
     # selection is held whole by tests/compliance/test_ci_sharding.py), so
@@ -471,7 +474,7 @@ jobs:
     # No layer cache: the image is about 2 GB, and caching it would compete
     # with the per-shard JAX compilation caches for the repository's Actions
     # cache.  Measured on a laptop: a cold build in about 100 s, the tests in
-    # under 10 s.
+    # about 30 s.
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -491,7 +494,7 @@ jobs:
           docker run --rm --network none --cap-add NET_ADMIN \
             -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
             -v "$PWD":/src:ro maddening-streaming-test:ci \
-            python3 -m pytest tests/cloud/test_webrtc_loopback.py -v -rs --tb=short -p no:cacheprovider
+            python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py -v -rs --tb=short -p no:cacheprovider
 
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the

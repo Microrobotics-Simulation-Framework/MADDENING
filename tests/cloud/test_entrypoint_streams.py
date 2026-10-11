@@ -88,8 +88,12 @@ EXIT_TIMEOUT_S = 30.0
 #: How long the viewer watches the running simulation.
 WATCH_S = 3.0
 
-#: A decoded frame "changed" where this share of its pixels moved by more
-#: than ``PIXEL_STEP`` levels (0-255, any channel) against an earlier one.
+#: A decoded frame "changed" where more than this share of its pixels
+#: moved by more than ``PIXEL_STEP`` levels (0-255, any channel) against
+#: an earlier one.  Measured in the container: while the spring swings,
+#: 2.4 % to 6.6 % of the pixels against the first frame; paused, none (no
+#: pixel moved by more than 7 levels, the encoder's noise).  The limits
+#: sit far from both.
 PIXEL_STEP = 64
 CHANGED_SHARE = 0.002
 

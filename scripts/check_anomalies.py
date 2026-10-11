@@ -1453,6 +1453,9 @@ def main(argv=None):
         repo_root=repo_root,
         resolve_references=not args.no_resolve,
         notes=notes,
+        # This gate's version-range rule reads ``maddening_version``, so the
+        # header must carry that field and no other project's.
+        version_field="maddening_version",
     )
     n_anomalies, declared, anomalies, data = _census(args.path)
     # Evidence rules run whether or not the schema passed and whether or

@@ -18,8 +18,9 @@ three are the timing goals::
                  wrapper with both numbers named (the stencil refusal
                  saying the unstructured wrapper is not a way out for a
                  stencil node), and the unstructured wrapper takes an
-                 uneven split of a node written for it and matches the
-                 unsharded node.                    -> indivisible.json
+                 uneven split of a node written for it -- its per-cell
+                 source and injected weight included -- and matches
+                 the unsharded node.                -> indivisible.json
     halo         checklist 2: ``halo_exchange`` on every mesh of
                  ``STENCIL_MESHES`` for every boundary mode and halo
                  widths 1 and 2, and ``exchange_unstructured`` under both
@@ -41,9 +42,11 @@ three are the timing goals::
                  reads the halo corners); forward rollout and the adjoint
                  (initial state and a parameter) against the unsharded
                  node.  At the smallest size, the field under periodic,
-                 ``"edge"`` (the wrapper's default) and Dirichlet ends and
-                 the lattice, each on every mesh; periodic ends on the
-                 pencil at the others.              -> stencil.json
+                 ``"edge"`` (the wrapper's default) and Dirichlet ends,
+                 the lattice, and the field with a halo of two cells
+                 under the same three ends (``field-halo2``), each on
+                 every mesh; periodic ends on the pencil at the
+                 others.                            -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
                  a graph, with a non-local correction and a grid-shaped
                  source, forward (the field and its domain integral) and
@@ -57,12 +60,16 @@ three are the timing goals::
                  ``ShardedUnstructuredNode``.       -> exchange.json
     forward      checklist 1 for ``ShardedUnstructuredNode``: 1e6-cell
                  forward run on a real unstructured mesh (``--mesh``) or a
-                 synthetic one, both transports, checked against the
-                 unsharded node; and its cross-shard sum exactly, on a
-                 field of ones (``EXACT_COUNT_CELLS``). -> forward.json
+                 synthetic one, both transports, of a node that reads a
+                 per-cell source and an injected parameter on every
+                 step, checked against the unsharded node; and its
+                 cross-shard sum exactly, on a field of ones
+                 (``EXACT_COUNT_CELLS``).           -> forward.json
     gradient     checklist 3 for ``ShardedUnstructuredNode``: ``jax.grad``
-                 through a sharded rollout (both transports) and through
-                 the Jacobi-preconditioned ``sharded_cg`` against the
+                 through a sharded rollout (both transports) with
+                 respect to its start, to the per-cell source and to
+                 the injected parameter, and through the
+                 Jacobi-preconditioned ``sharded_cg``, against the
                  unsharded references, on a system both sides' solves
                  must have converged on.            -> gradient.json
     checklist    the five checklist goals, in the order above.
@@ -95,7 +102,15 @@ grid-shaped inputs zeroed, domain integrals halved, domain integrals summed
 over the first mesh axis only, sharded axes after the first zero-filled at
 the global edges, halos taken from the wrong neighbour along spatial axis
 1, ``shard_info``'s extent divided by the first mesh axis's size or read
-off spatial axis 0):
+off spatial axis 0), and the ``stencil`` goal on three more that only a
+halo two cells wide shows (wider halos zero at the global edges, an outer
+halo cell copied from the inner one, the one-cell edge rule at width two);
+and each goal that builds the unstructured wrapper (``indivisible``,
+``forward``, ``gradient``) on that wrapper broken in any of five ways
+(per-cell inputs zeroed, their ghost rows not exchanged, their rows one
+off, injected parameters doubled or reaching one shard only), the
+``gradient`` goal on two more that leave every value right (an input's or
+a parameter's cotangent dropped):
 ``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
 scratch copy of the library and requires it.  ``--summarise DIR`` reads
 the JSON files back and prints
@@ -375,27 +390,32 @@ LIMITS = {
 }
 
 #: The ``forward`` goal checks its cross-shard reduction on a field of
-#: ones, at every size under this many cells.  ``NeighbourMeanNode`` leaves
-#: a field of ones a field of ones, bit for bit (the mean of ones is 1,
-#: ``(1 - w) + w`` is 1 at ``w = 0.5``, and a padded neighbour slot points
-#: at the cell itself), so the step's ``total`` is a float32 sum of ones:
-#: exact in ANY order of addition while the count is under 2**24, since
-#: every partial sum is an integer float32 holds, and equal to the number
-#: of cells.  One public ``update`` of the sharded node from such a field,
-#: placed as the wrapper places its own initial state (the compiled step
-#: is the one already timed: same shape, dtype and sharding), must
-#: therefore return ``total == cells`` and a field still all ones, with a
-#: limit of zero; and so must the unsharded node.  A shard left out of the
+#: ones, at every size under this many cells.  Under a zero source
+#: ``NeighbourMeanNode`` leaves a field of ones a field of ones, bit for
+#: bit (the mean of ones is 1, ``1 + w * (1 - 1)`` is 1 at any ``w``, and
+#: a padded neighbour slot points at the cell itself), so the step's
+#: ``total`` is a float32 sum of ones: exact in ANY order of addition while
+#: the count is under 2**24, since every partial sum is an integer float32
+#: holds, and equal to the number of cells.  One public ``update`` of the
+#: sharded node from such a field, placed as the wrapper places its own
+#: initial state and fed a source of zeros through the same per-cell path
+#: with the same injected weight (the compiled step is the one already
+#: timed: same shapes, dtypes and sharding), must therefore return
+#: ``total == cells`` and a field still all ones, with a limit of zero;
+#: and so must the unsharded node.  This is the one step of the goal whose
+#: source is zero: every other one carries it.  A shard left out of the
 #: reduction or counted twice reads off by that shard's cells (25,122 to
 #: 250,000 at the session's sizes), ghost rows counted off by their number
 #: (1,532, 2,646 and 4,830 there; 15,276 at 10,004,569 cells), and pad rows
-#: counted -- the node's ``own`` mask ignored -- off by half a cell each (a
-#: pad row starts at zero and takes half of its shard's first cell in the
-#: step): 1.5 cells at 100,489 and at 10,004,569 cells, which leave one
-#: pad row on each of three shards.  300,304 and 1,000,000 cells divide by
-#: four and have no pad row: the mask masks nothing there, and no check of
-#: a total can see it ignored.  At this many cells or more (the stress
-#: tail's 3e7 and 1e8) the count is recorded as a check not run.
+#: counted -- the node's ``own`` mask ignored -- off by a quarter of a cell
+#: each (a pad row starts at zero and moves towards its shard's first cell
+#: by the injected weight in the step): 0.75 cells at 100,489 and at
+#: 10,004,569 cells, which leave one pad row on each of three shards (half
+#: a cell each, 1.5, until schema 10: the weight was 0.5).  300,304 and
+#: 1,000,000 cells divide by four and have no pad row: the mask masks
+#: nothing there, and no check of a total can see it ignored.  At this
+#: many cells or more (the stress tail's 3e7 and 1e8) the count is
+#: recorded as a check not run.
 EXACT_COUNT_CELLS = 2 ** 24
 
 #: What the unstructured goals inject as ``NeighbourMeanNode``'s ``weight``
@@ -941,6 +961,24 @@ def cells_in_an_order_the_wrapper_takes(n: int, edges: np.ndarray, pa: np.ndarra
     new_id = np.empty(n, dtype=np.int32)
     new_id[order] = np.arange(n, dtype=np.int32)
     return new_id[np.asarray(edges)], pa[order], True
+
+
+def cells_were_renumbered(entry: dict) -> bool:
+    """What a goal that builds ``NeighbourMeanNode`` recorded of
+    :func:`cells_in_an_order_the_wrapper_takes`, read by each of them when
+    it derives its checks from its results.
+
+    A file from before schema 10 records no such thing, and its node read
+    neither a per-cell source nor an injected weight: with its schema
+    number edited to this one its checks would otherwise derive as they
+    were recorded.  The missing entry makes its results unreadable
+    (``KeyError``), which ``--summarise`` reports as a file that cannot
+    decide its goal.
+    """
+    renumbered = entry["renumbered"]
+    if not isinstance(renumbered, bool):
+        raise TypeError(f"renumbered is {renumbered!r}, not a bool")
+    return renumbered
 
 
 def build_pair(n: int, edges: np.ndarray, mesh, pa: np.ndarray, exchange: str):
@@ -1806,6 +1844,7 @@ def forward_checks(results: list, n_devices: int) -> list:
     exactly, on a field of ones (``EXACT_COUNT_CELLS``)."""
     checks = []
     for r in results:
+        cells_were_renumbered(r)
         for method in METHODS:
             m = r["methods"][method]
             prefix = f"{r['cells']} cells {method}"
@@ -2126,6 +2165,7 @@ def gradient_checks(results: list, n_devices: int) -> list:
     :func:`exchange_checks`)."""
     checks = []
     for r in results:
+        cells_were_renumbered(r)
         for method in METHODS:
             rollout = r["rollout"][method]
             prefix = f"{r['cells']} cells rollout {method} grad"
@@ -2259,6 +2299,7 @@ def run_indivisible(args, out: dict) -> dict:
     n = ny_bad * nx + (1 if (ny_bad * nx) % D == 0 else 0)
     edges = ring_edges(n)
     pa, how = partition_cells(n, edges, D, "contiguous")
+    edges, pa, renumbered = cells_in_an_order_the_wrapper_takes(n, edges, pa, D)
     ref, sharded, layout = build_pair(n, edges, mesh, pa, "all_to_all")
     bi_ref, bi, params = node_inputs(n, layout, mesh)
     counts = np.bincount(pa, minlength=D)
@@ -2268,8 +2309,9 @@ def run_indivisible(args, out: dict) -> dict:
         ref_state = ref.update({"x": ref_state["x"]}, bi_ref, 1.0, params=params)
     got = sharded.gather_global(state)
     parity = _diff(got["x"], np.asarray(jax.device_get(ref_state["x"])))
-    entry["unstructured"] = {"cells": n, "partition": how, "cells_per_device": counts.tolist(),
-                             "steps": args.steps, "parity_x": parity}
+    entry["unstructured"] = {"cells": n, "partition": how, "renumbered": renumbered,
+                             "cells_per_device": counts.tolist(), "steps": args.steps,
+                             "parity_x": parity}
     print(f"[indivisible] stencil {ny_bad}x{nx}: {entry['stencil']['raised']}  stencil axis 1 "
           f"{ny_ok}x{nx_bad}: {entry['stencil_axis1']['raised']}  pointwise: "
           f"{entry['pointwise']['raised']}  unstructured {n} cells {counts.tolist()}: "
@@ -2338,6 +2380,7 @@ def indivisible_checks(results: list, n_devices: int) -> list:
         checks.append(check_not_run("pencil (2-D mesh) refusal naming the axis that does "
                                     "not divide", _pencil_mesh_needs(D)))
     un = entry["unstructured"]
+    cells_were_renumbered(un)
     n, counts = un["cells"], list(un["cells_per_device"])
     checks.append(check_that(f"unstructured {n} cells on {D} devices is an uneven split",
                              len(set(counts)) > 1, str(counts)))

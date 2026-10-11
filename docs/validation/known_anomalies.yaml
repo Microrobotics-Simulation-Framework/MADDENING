@@ -19083,9 +19083,13 @@ anomalies:
       `fim`; `_resolve_rank_rtol` carries the proof that an exactly
       unidentifiable direction is not counted while `J`'s entries are right
       to about `sqrt(eps)` relative, with no factor of `m`.  In `fim_core`
-      the default cutoff is never under `(max(m, n) * eps) ** 2`, the
-      square of the conventional bound on a decomposition at that
-      precision, which is the larger term past 41,286 rows in float32.
+      the default cutoff adds the conventional bound on a decomposition at
+      that precision, `max(m, n) * eps`, to half of that allowance, which
+      makes it the larger past about 16,300 rows in float32, and every
+      direction it reads between half of `fim`'s cutoff and twice its own
+      sets `precision_limited`.  A singular value under the float64
+      decomposition's own bound is reported as `0.0` only where it is also
+      under the cutoff in force, so that never changes `rank` or `crb`.
       After the fix every draw of the three sweeps above is rank 1 with
       both bounds infinite and no warning.  `fit`, `fit_lm` and
       `fit_multiple_shooting` were not affected: their guards already read
@@ -19127,7 +19131,10 @@ anomalies:
       direction look present.  In `fim_core` the bound on a decomposition
       at `J`'s precision is the conventional `max(m, n) * eps`, not a
       theorem about the routine in use; the constant-sensitivity
-      populations measure what it leaves.  `cond` of a rank-deficient
+      populations measure what it leaves; it is loose on CPU, and the
+      directions it withholds are flagged rather than dropped.  `fim` copies
+      `J` to the host and decomposes a float64 copy (peak memory about 4.5
+      times `J`'s size).  `cond` of a rank-deficient
       float32 report is now `inf` (exactly proportional columns) or a
       very large finite number (`2e14` for the spring's scale direction)
       where the rounding of `F` used to give `inf` or a number near `1e7`

@@ -659,8 +659,8 @@ def test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff():
     """SYS-043: ``fim`` and ``fim_core`` "reached the same (rank, precision_limited) on
     every one" of the guide's population; held here as a bound, never a different pair above
     five times the rank cutoff, on matrices whose deciding eigenvalue is spread log-uniformly
-    from a hundredth to a hundred times the cutoff (to 4,096 rows: past 41,286 in float32
-    ``fim_core``'s cutoff is the larger, and the two differ by design)."""
+    from a hundredth to a hundred times the cutoff (to 4,096 rows: past about 16,300 in
+    float32 ``fim_core``'s cutoff is the larger, and the two differ by design, flagged)."""
     rng = np.random.default_rng(11)
     disagreements, limited_count = [], 0
     for n, m in ((3, 8), (3, 512), (6, 512), (6, 4096)):

@@ -2216,10 +2216,9 @@ def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float], *,
         r_dev = max(r_h, (q / (1 - q))**2),   q = t(r_h) / 2 + d
 
     and ``1.0`` -- nothing resolved -- once ``q >= 1/2`` (``t(1)``).
-    **Proof** that
-    an exactly unidentifiable direction is still never counted while
-    ``delta * sqrt(n) <= t(r_h) / 2``: where the second term is in
-    force, ``t(r_dev) = q``, and the condition
+    **Proof** that an exactly unidentifiable direction is still never
+    counted while ``delta * sqrt(n) <= t(r_h) / 2``: where the second
+    term is in force, ``t(r_dev) = q``, and the condition
     ``delta * sqrt(n) + d <= q`` is that inequality exactly; where
     ``r_h`` is in force, ``t(r_h) >= q`` gives
     ``t(r_h) - d >= t(r_h) / 2``, the same inequality again.  So the
@@ -2236,11 +2235,13 @@ def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float], *,
     exactly rank-one float32 ``J`` of a million constant rows the
     device decomposition left a ratio of ``2e-12``, against ``r_dev``
     of ``0.020``.  It is kept because a cutoff fitted to one backend's
-    summation order would not cover another's -- a decomposition whose
-    inner products round in sequence approaches ``m * eps / 2`` on
-    exactly such rows -- and because the cost of the margin is not
-    silent: :class:`FIMCore` flags every direction it reads between
-    ``r_h`` and ``r_dev`` as ``precision_limited``.
+    summation order would not cover another's -- the inner products a
+    Householder decomposition takes over constant rows are the aligned
+    sums that put ``F`` off by up to ``m * eps / 2`` (MADD-ANO-273), and
+    how much of that survives depends on the order the backend sums in
+    -- and because the cost of the margin is not silent:
+    :class:`FIMCore` flags every direction it reads from ``r_h / 2`` to
+    ``2 * r_dev`` as ``precision_limited``.
     """
     if rank_rtol is None:
         eps = float(np.finfo(dtype).eps)
@@ -2502,9 +2503,10 @@ class FIMCore:
         reads the device decomposition's rounding, a finite ``cond``
         (from ``9.9e10`` to ``1.9e17`` measured in float32 on constant
         and step inputs at 1,000 and 20,000 rows, ``inf`` in none of 160
-        draws), while ``rank`` and ``crb`` were right in every one.  Gate on ``rank``, ``crb`` and
-        ``precision_limited``; ``inf`` here only ever means a smallest
-        eigenvalue that is exactly zero, negative or ``NaN``.
+        draws), while ``rank`` and ``crb`` were right in every one.
+        Gate on ``rank``, ``crb`` and ``precision_limited``; ``inf``
+        here only ever means a smallest eigenvalue that is exactly zero,
+        negative or ``NaN``.
     crb : jnp.ndarray
         Cramér–Rao bound per parameter, ``(n,)``.
     finite : jnp.ndarray
@@ -3044,11 +3046,14 @@ def _jacobian_spectrum(J, *, cutoff: float, gram_is_zero: bool = False):
     never ``rank`` or ``crb``, and it never contradicts a caller's
     cutoff: ``rank_rtol=0.0`` resolves every positive singular value,
     including a real one at ``1e-12`` of the largest that the bound
-    alone would have zeroed.  What it reaches under the default is
-    wider than exact dependence: a float32 ``J`` whose columns differ
-    by one rounding in one entry has a ratio near ``eps32 / (2 sqrt(m))``
-    (``1.9e-10`` at 100,000 rows), under the bound's ``2.2e-10`` there
-    at ``n = 10``, and reads ``0.0`` too -- unresolved either way.
+    alone would have zeroed.  Under the default it can also reach
+    values that are real: two float32 columns that differ by one
+    rounding in one entry have a ratio of
+    ``eps32 / (2 sqrt(m))`` (measured ``1.88e-10`` at 100,000 rows, over
+    the bound's ``4.4e-11`` there, so reported as computed); the bound
+    grows as ``m * n`` and passes that ratio near 260,000 rows at
+    ``n = 2``, past which such a pair reads ``0.0`` -- unresolved either
+    way, since the snap stays under the cutoff.
 
     ``gram_is_zero`` -- ``F = J.T @ J`` came out exactly zero at the
     working precision -- returns ``F``'s own eigenvalues, all zero: a

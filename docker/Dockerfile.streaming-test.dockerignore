@@ -1,0 +1,9 @@
+# Build context for docker/Dockerfile.streaming-test (BuildKit reads
+# <Dockerfile>.dockerignore beside the Dockerfile).  The image needs only
+# the package metadata and the sources; the tests run against the
+# working tree mounted at /src.
+*
+!pyproject.toml
+!README.md
+!src/
+**/__pycache__

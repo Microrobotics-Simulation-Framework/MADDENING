@@ -229,12 +229,17 @@ def _keeps(**given):
 @pytest.mark.parametrize("given", [
     {},                                                 # built with its defaults
     {"gain": 2.0},                                      # the default, spelt out
-    {"taps": (0.0, 0.0)},                               # an equal tuple of the same floats
+    {"gain": float("2.0")},                             # an equal float that is another object
+    {"taps": (0.0, 0.0)},
+    {"taps": tuple(float(text) for text in ("0", "0"))},    # an equal tuple, another object
     {"mask": None},
-], ids=repr)
+], ids=["defaults", "the same float", "an equal float", "the same tuple", "an equal tuple",
+        "None"])
 def test_an_argument_at_exactly_its_default_is_not_reported(given):
     """The reload passes the default, and the node was built with a value
-    that cannot be told from it: nothing is lost, and nothing is said."""
+    that cannot be told from it -- the same object, or another of the same
+    type and bits (a literal repeated in one module is one object, so the
+    equal ones are built at run time): nothing is lost, nothing is said."""
     entry = _keeps(**given).to_dict()                   # warnings are errors here
     assert entry["params"] == {}
 

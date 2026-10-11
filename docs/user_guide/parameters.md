@@ -507,7 +507,12 @@ counted while the sensitivities are right to about `sqrt(eps)` relative
 (`3e-4` in float32, `1e-8` in float64), whatever the record's length,
 and a direction is counted only when it is at least `sqrt(cutoff)` of
 the strongest in the Jacobian (in float32, `5e-4` for a short record and
-`3e-3` at 4,000 rows).  A verdict
+`3e-3` at 4,000 rows).  An eigenvalue the float64 decomposition cannot
+tell from zero (a singular value at or under `max(m, n) * n * 2.2e-16`
+of the largest) is reported as exactly `0.0`, so two exactly
+proportional columns give `cond = inf`; that happens only below the
+cutoff in force, so it never changes `rank` or `crb`, and
+`rank_rtol=0.0` still counts every positive eigenvalue.  A verdict
 within a factor of two of the cutoff comes with a
 `PrecisionLimitWarning`; re-running under `jax_enable_x64` with the
 parameters and the state in float64 settles it, since the sensitivities
@@ -622,11 +627,23 @@ precision on the device and lets the compiler schedule `J.T @ J`, where
 eager.  Measured over 1,740 synthetic Jacobians (2 to 25 parameters, 20
 to 4,000 rows, the deciding eigenvalue from 0.2 to 50 times the rank
 cutoff), they reached the same `(rank, precision_limited)` on every one.
-Past 41,286 rows in float32 `fim_core`'s default cutoff is the larger of
-the two -- `(m * eps)**2`, the square of the conventional bound on a
-decomposition at that precision, 3.8 times `fim`'s at 100,000 rows --
-and a direction between the two cutoffs is unresolved and
-`precision_limited` in `fim_core` where `fim` resolves it.
+Past about 16,300 rows in float32 `fim_core`'s default cutoff is the
+larger of the two: it adds the conventional bound on a decomposition at
+that precision, `max(m, n) * eps` of the largest singular value, to the
+allowance for the sensitivities' own error, which makes it 6.1 times
+`fim`'s at 100,000 rows and 0.020 at a million (and resolves nothing
+from 4.1 million float32 rows).  The bound is loose on CPU -- a
+rank-one float32 Jacobian of a million constant rows decomposes to a
+ratio of `2e-12` -- but it is not tied to one backend's arithmetic.
+Every direction `fim_core` reads between half of `fim`'s cutoff and
+twice its own is unresolved and `precision_limited` there: the verdict
+is unavailable, never silently withdrawn, and `fim` settles it.
+
+`fim` decomposes on the host, so it copies `J` back from the device and
+holds a float64 copy of it while it works: peak memory rose by about
+4.5 times `J`'s size (690 MiB for a 4-million-row, 10-parameter float32
+`J`).  For a `J` that does not fit that comfortably, `fim_core` keeps
+the decomposition on the device.
 
 <!-- snippet: continues -->
 ```python

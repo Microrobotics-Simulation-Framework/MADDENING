@@ -134,8 +134,13 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
         J64 = np.vstack([J64, np.zeros((J64.shape[1] - J64.shape[0],
                                         J64.shape[1]))])
     _, sing, vt = np.linalg.svd(np.linalg.qr(J64, mode="r"))
-    # a singular value under the float64 decomposition's own bound is zero
+    # a singular value under the float64 decomposition's own bound is zero,
+    # but only under the cutoff in force (half its square root, so that a
+    # snapped value is one the verdict already calls zero)
     floor = max(J_host.shape) * J_host.shape[1] * np.finfo(np.float64).eps
+    in_force = _resolve_rank_rtol(J_host.dtype, J_host.shape[1], rank_rtol,
+                                  n_residual=J_host.shape[0])
+    floor = min(floor, np.sqrt(in_force) / 2.0)
     sing = np.where(sing > floor * sing[0], sing, 0.0)
     eigvals = (sing[::-1] ** 2).astype(J_host.dtype)
     eigvecs = np.ascontiguousarray(vt[::-1].T).astype(J_host.dtype)

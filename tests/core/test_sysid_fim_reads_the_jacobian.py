@@ -204,32 +204,223 @@ def test_the_jitted_core_reads_rank_one_over_the_whole_sweep(kind):
     _assert_core_rank_one_everywhere(kind, SWEEP_SIZES, SWEEP_DRAWS)
 
 
+def _t(r):
+    """The right-hand side of ``_resolve_rank_rtol``'s sufficient
+    condition, ``sqrt(r) / (1 + sqrt(r))``."""
+    return np.sqrt(r) / (1.0 + np.sqrt(r))
+
+
 def test_the_core_cutoff_covers_a_decomposition_at_the_jacobians_precision():
     """``fim_core`` computes the singular values at ``J``'s own precision,
     whose conventional bound is ``max(m, n) * eps`` of the largest
-    (``numpy.linalg.matrix_rank``'s tolerance): its default cutoff is never
-    under that bound squared.  The term is the larger only past
-    ``eps ** (-2/3)`` rows -- 41,286 in float32 -- and ``fim``'s own cutoff,
-    decomposed in float64 on the host, does not carry it."""
+    (``numpy.linalg.matrix_rank``'s tolerance).  Its default cutoff meets
+    the docstring's sufficient condition as written: what it leaves for the
+    sensitivities after that bound, ``t(r_dev) - max(m, n) * eps``, is at
+    least half of what ``fim``'s leaves, ``t(r_h) / 2``, at every size --
+    and is that exactly wherever the device term is in force.  The term is
+    in force only past about 16,300 rows in float32 at ``n = 2``; from 4.1
+    million rows no cutoff under 1 meets the condition and nothing is
+    resolved."""
+    for dtype in (np.float32, np.float64):
+        eps = float(np.finfo(dtype).eps)
+        for n in (1, 2, 5, 25, 200):
+            for m in np.unique(np.geomspace(1, 1e8, 97).astype(int)):
+                m = int(m)
+                host = _resolve_rank_rtol(dtype, n, None, n_residual=m)
+                device = _resolve_rank_rtol(dtype, n, None, n_residual=m,
+                                            decomposed_at=dtype)
+                assert host == max(n, np.sqrt(m)) * eps
+                assert device >= host, (dtype, n, m)
+                if device == 1.0:
+                    # Nothing under 1 meets it: half of fim's allowance
+                    # plus the bound reaches t(1) = 1/2.
+                    assert _t(host) / 2.0 + max(m, n) * eps >= 0.5, (dtype, n, m)
+                    continue
+                margin = _t(device) - max(m, n) * eps
+                assert margin >= _t(host) / 2.0 * (1.0 - 1e-9), (dtype, n, m)
+                if device > host:
+                    assert margin == pytest.approx(_t(host) / 2.0, rel=1e-9)
     eps = float(np.finfo(np.float32).eps)
-    for n, m in ((2, 3), (2, 4000), (5, 20000), (3, 41000)):
-        host = _resolve_rank_rtol(np.float32, n, None, n_residual=m)
-        assert host == max(n, np.sqrt(m)) * eps
+    for n, m in ((2, 3), (2, 4000), (5, 16000), (25, 16000)):
         assert _resolve_rank_rtol(np.float32, n, None, n_residual=m,
-                                  decomposed_at=np.float32) == host, (n, m)
-    for n, m in ((2, 42000), (2, 100000), (7, 1000000)):
+                                  decomposed_at=np.float32) == \
+            _resolve_rank_rtol(np.float32, n, None, n_residual=m), (n, m)
+    for n, m, times in ((2, 41286, 2.28), (2, 100000, 6.13), (7, 1000000, 170.0)):
         host = _resolve_rank_rtol(np.float32, n, None, n_residual=m)
         device = _resolve_rank_rtol(np.float32, n, None, n_residual=m,
                                     decomposed_at=np.float32)
-        assert host == np.sqrt(m) * eps
-        assert device == (m * eps) ** 2 > host, (n, m)
+        assert device / host == pytest.approx(times, rel=1e-2), (n, m)
+    assert _resolve_rank_rtol(np.float32, 2, None, n_residual=4_200_000,
+                              decomposed_at=np.float32) == 1.0
     # A stated cutoff is the caller's, on either route.
     assert _resolve_rank_rtol(np.float32, 2, 1e-9, n_residual=100000,
                               decomposed_at=np.float32) == 1e-9
     m = 100000
     core = fim_core(*_pair(3.0, 5.0, np.linspace(1.0, 2.0, m), jnp.float32))
-    assert core.rank_rtol == (m * eps) ** 2
+    assert core.rank_rtol == _resolve_rank_rtol(np.float32, 2, None, n_residual=m,
+                                                decomposed_at=np.float32)
     assert int(core.rank) == 1 and not bool(core.precision_limited)
+
+
+def _two_columns(m, ratio, dtype):
+    """``[c * 1, c * 1 + d * w]`` with ``w`` alternating ``+-1`` (exactly
+    orthogonal to the constant column), ``d`` chosen in closed form so
+    that the squared singular value ratio of the float64 matrix is
+    ``ratio``; returned at ``dtype`` with its measured float64 ratio."""
+    c = 1.3
+    # Gram matrix m * [[a, a], [a, a + x]], a = c**2, x = d**2: the
+    # eigenvalue ratio is (s - r) / (s + r), s = 2a + x, r = sqrt(x**2 +
+    # 4a**2).  With k = r / s, r**2 = k**2 s**2 is a quadratic in x whose
+    # smaller root, rationalised, is 2a (1 - k**2) / (k**2 + sqrt(2k**2 - 1)).
+    a = c * c
+    k = (1.0 - ratio) / (1.0 + ratio)
+    one_minus_k2 = 4.0 * ratio / (1.0 + ratio) ** 2
+    x = 2.0 * a * one_minus_k2 / (k * k + np.sqrt(2.0 * k * k - 1.0))
+    w = np.where(np.arange(m) % 2 == 0, 1.0, -1.0)
+    A = np.stack([np.full(m, c), c + np.sqrt(x) * w], axis=1).astype(dtype)
+    s = np.linalg.svd(A.astype(np.float64), compute_uv=False)
+    return A, float((s[-1] / s[0]) ** 2)
+
+
+def _linear_core():
+    """``fim_core`` of ``r = A @ theta`` under ``scale=None``, jitted with
+    ``A`` as its argument: one compilation per shape."""
+    return jax.jit(lambda A: fim_core(lambda p: A @ p["theta"],
+                                      {"theta": jnp.ones(A.shape[1], A.dtype)},
+                                      scale=None))
+
+
+def _linear_fim(A, **kw):
+    A = jnp.asarray(A)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = fim(lambda p: A @ p["theta"],
+                     {"theta": jnp.ones(A.shape[1], A.dtype)}, scale=None, **kw)
+    return report, [c for c in caught if issubclass(c.category, PrecisionLimitWarning)]
+
+
+#: Where a second direction is put at 100,000 float32 rows, as
+#: ``(multiple, of which cutoff)``: under, inside and above the band
+#: between half of ``fim``'s cutoff and twice ``fim_core``'s, each at
+#: least 10% from an edge.  ``fim_core``'s cutoff is 6.1 times ``fim``'s.
+BAND_PLACEMENTS = (
+    (0.4, "host"), (0.6, "host"), (1.5, "host"), (3.0, "host"),
+    (0.9, "device"), (1.2, "device"), (1.8, "device"), (2.5, "device"),
+)
+
+
+def test_every_direction_between_the_two_cutoffs_is_flagged_by_the_core():
+    """Past 16,300 float32 rows ``fim_core``'s default cutoff is the larger,
+    and a direction between the two is one ``fim`` counts (or warns about)
+    and ``fim_core`` does not.  Every such direction sets
+    ``precision_limited``, with ``deciding_ratio`` naming it; outside the
+    band the two routes agree on ``rank`` and nothing is flagged.  Before,
+    a direction at 1.5 to 3 times ``fim``'s cutoff (and at a million rows,
+    one at 7.6% of the strongest) came back unresolved and unflagged."""
+    m, dtype = 100000, np.float32
+    host = _resolve_rank_rtol(dtype, 2, None, n_residual=m)
+    device = _resolve_rank_rtol(dtype, 2, None, n_residual=m, decomposed_at=dtype)
+    assert device / host == pytest.approx(6.13, rel=1e-2)
+    run = _linear_core()
+    for multiple, which in BAND_PLACEMENTS:
+        aim = multiple * (host if which == "host" else device)
+        A, ratio = _two_columns(m, aim, dtype)
+        assert ratio == pytest.approx(aim, rel=2e-2), (multiple, which)
+        core = run(jnp.asarray(A))
+        report, warned = _linear_fim(A)
+        where = f"{multiple} x {which} cutoff (ratio {ratio:.4g})"
+        assert core.rank_rtol == device
+        assert report.rank == (2 if ratio > host else 1), where
+        assert int(core.rank) == (2 if ratio > device else 1), where
+        inside = host / 2.0 <= ratio <= 2.0 * device
+        assert bool(core.precision_limited) == inside, where
+        if inside:
+            assert float(core.deciding_ratio) == pytest.approx(ratio, rel=1e-3), where
+        else:
+            assert float(core.deciding_ratio) == 0.0, where
+            assert int(core.rank) == report.rank, where
+        # fim's own band is around its own cutoff only.
+        assert bool(warned) == (host / 2.0 <= ratio <= 2.0 * host), where
+
+
+def test_a_direction_at_eight_percent_of_the_strongest_is_flagged_at_a_million_rows():
+    """The audit's widest case: at 1e6 float32 rows ``fim_core``'s cutoff is
+    0.020, so a direction whose singular value is 7.6% of the strongest
+    (eigenvalue ratio 5.7e-3) is unresolved there -- and flagged, where
+    ``fim`` resolves it with no warning."""
+    m, dtype = 1000000, np.float32
+    A, ratio = _two_columns(m, 5.7e-3, dtype)
+    core = _linear_core()(jnp.asarray(A))
+    report, warned = _linear_fim(A)
+    assert core.rank_rtol == pytest.approx(0.0203, rel=1e-2)
+    assert report.rank == 2 and not warned
+    assert int(core.rank) == 1
+    assert bool(core.precision_limited)
+    assert float(core.deciding_ratio) == pytest.approx(ratio, rel=1e-3)
+
+
+def _orthogonal_pair(m, small, dtype):
+    """``[1, small * w]``, ``w`` alternating ``+-1``: exactly orthogonal
+    columns, so the singular values are the column norms and the squared
+    ratio is ``small**2`` as ``dtype`` stores ``small`` -- accurately
+    computed by any backward-stable decomposition."""
+    w = np.where(np.arange(m) % 2 == 0, 1.0, -1.0)
+    A = np.stack([np.ones(m), small * w], axis=1).astype(dtype)
+    return A, float(np.float64(A[0, 1]) ** 2)
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "float64"])
+def test_the_snap_never_reaches_above_the_callers_cutoff(x64):
+    """A singular value at 1e-13 of the largest (float32; 1e-14 with
+    float64 leaves) is under the float64 decomposition's bound at 1,000
+    rows (4.4e-13), so the default reports its eigenvalue as ``0.0``.
+    ``rank_rtol=0.0`` is documented to resolve every positive eigenvalue,
+    and a cutoff under that eigenvalue resolves it too: both read rank 2
+    with the exact eigenvalue, as ``fim_core`` does.  Before, the snap
+    zeroed it under any cutoff (rank 1, ``cond`` inf)."""
+    m = 1000
+    with (_x64() if x64 else contextlib.nullcontext()):
+        dtype = np.float64 if x64 else np.float32
+        A, exact = _orthogonal_pair(m, 1e-14 if x64 else 1e-13, dtype)
+        default, _ = _linear_fim(A)
+        assert default.rank == 1 and float(default.eigvals[0]) == 0.0
+        assert default.cond == float("inf")
+        for rtol in (0.0, 1e-30, exact / 10.0):
+            report, warned = _linear_fim(A, rank_rtol=rtol)
+            got = float(report.eigvals[0]) / float(report.eigvals[-1])
+            assert report.rank == 2, rtol
+            assert got == pytest.approx(exact, rel=1e-5), rtol
+            assert report.cond == pytest.approx(1.0 / exact, rel=1e-5), rtol
+            assert np.isfinite(np.asarray(report.crb)).all(), rtol
+            assert not warned
+            core = fim_core(lambda p: jnp.asarray(A) @ p["theta"],
+                            {"theta": jnp.ones(2, dtype)}, scale=None, rank_rtol=rtol)
+            assert int(core.rank) == 2, rtol
+        # A cutoff above the eigenvalue: unresolved, and now snapped too.
+        report, _ = _linear_fim(A, rank_rtol=exact * 10.0)
+        assert report.rank == 1 and float(report.eigvals[0]) == 0.0
+
+
+def test_the_snap_reaches_the_decompositions_bound_and_no_further():
+    """The snap pinned from both sides at 1,000 float32 rows, under the
+    default cutoff (bound ``max(m, n) * n * eps64 = 4.4e-13``): a real
+    singular value at a tenth of the bound reads ``0.0``; one at 22 times
+    the bound is reported as computed, ``cond`` finite at ``1e22``.  Both
+    are far under the cutoff, so ``rank`` is 1 either way: the snap moves
+    ``eigvals`` and ``cond`` only."""
+    m, dtype = 1000, np.float32
+    bound = m * 2 * float(np.finfo(np.float64).eps)
+    assert bound == pytest.approx(4.44e-13, rel=1e-2)
+    under, _ = _orthogonal_pair(m, bound / 10.0, dtype)
+    report, _ = _linear_fim(under)
+    assert float(report.eigvals[0]) == 0.0 and report.cond == float("inf")
+    assert report.rank == 1
+    over, exact = _orthogonal_pair(m, 1e-11, dtype)
+    report, _ = _linear_fim(over)
+    got = float(report.eigvals[0]) / float(report.eigvals[-1])
+    assert got == pytest.approx(exact, rel=1e-5)
+    assert report.cond == pytest.approx(1.0 / exact, rel=1e-5)
+    assert report.rank == 1 and np.isinf(np.asarray(report.crb)[1])
 
 
 # ---------------------------------------------------------------------------

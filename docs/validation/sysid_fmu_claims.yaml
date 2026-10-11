@@ -653,8 +653,14 @@ claims:
     sensitivities that leave the model wrong by more than about sqrt(eps)
     relative, nor the eigenvalues of the stored fim (MADD-ANO-273).  In
     fim_core the decomposition runs at J's precision and the default
-    cutoff is max(max(n, sqrt(m)) * eps, (max(m, n) * eps)**2), the second
-    term larger past 41,286 rows in float32.  Not claimed for 16-bit
+    cutoff adds the conventional bound max(m, n) * eps to half of fim's
+    allowance (t(r) = sqrt(r) / (1 + sqrt(r)): t(r_dev) = t(r_h) / 2 +
+    max(m, n) * eps, never under r_h, 1.0 once that reaches 1/2), larger
+    than fim's past about 16,300 rows in float32; every direction it reads
+    between half of fim's cutoff and twice its own sets precision_limited.
+    The snap of a singular value under the float64 decomposition's bound
+    is applied only under the cutoff in force, so it never changes rank or
+    crb and rank_rtol=0.0 zeroes nothing positive.  Not claimed for 16-bit
     floats.
   oracle: >-
     the cutoff recomputed; the verdict for m <= n**2 bit for bit against
@@ -673,6 +679,10 @@ claims:
     - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float64_verdict_changes_at_the_stated_cutoff
     - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_report_carries_the_gram_product_and_decides_nothing_from_it
     - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_core_cutoff_covers_a_decomposition_at_the_jacobians_precision
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_every_direction_between_the_two_cutoffs_is_flagged_by_the_core
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_direction_at_eight_percent_of_the_strongest_is_flagged_at_a_million_rows
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_snap_never_reaches_above_the_callers_cutoff
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_snap_reaches_the_decompositions_bound_and_no_further
     - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_the_core_makes_no_nan_on_a_zero_fisher_matrix
     - tests/core/test_sysid_claims_edges.py::test_a_residual_that_reads_no_parameter_is_a_real_rank_zero
   status: verified
@@ -1374,9 +1384,10 @@ claims:
   area: fim_core
   claim: >-
     fim and fim_core "agree on rank and on which crb entries are +inf over
-    the tested spread; the finite crb values differ in the last bits";
-    fim publishes the numbers it published before the core was jitted, bit
-    for bit.
+    the tested spread; the finite crb values differ in the last bits",
+    outside the band between the two default cutoffs, where every
+    direction sets precision_limited; fim publishes the numbers it
+    published before the core was jitted, bit for bit.
   sources:
     - src/maddening/sysid.py:1630 (FIMCore)
     - docs/user_guide/parameters.md (Asking the same question inside a loop)
@@ -1388,6 +1399,7 @@ claims:
     - tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
     - tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_precision_limited_flag_matches_the_warning
     - tests/core/test_sysid_fim_core.py::TestFimUnchangedByJitting::test_report_is_bit_identical_to_the_pre_jit_pipeline
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_every_direction_between_the_two_cutoffs_is_flagged_by_the_core
   status: verified
   domains:
     f32: tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
@@ -1476,8 +1488,9 @@ claims:
     Measured over 1,740 synthetic Jacobians (2 to 25 parameters, 20 to
     4,000 rows, the deciding eigenvalue from 0.2 to 50 times the rank
     cutoff), they reached the same (rank, precision_limited) on every
-    one"; past 41,286 rows in float32 fim_core's default cutoff is the
-    larger of the two.
+    one"; past about 16,300 rows in float32 fim_core's default cutoff is
+    the larger of the two, and every direction between the two is
+    precision_limited in fim_core.
   sources:
     - docs/user_guide/parameters.md (Asking the same question inside a loop)
   conditions: >-
@@ -1492,8 +1505,9 @@ claims:
     The guide's sentence used to give a rate of 0.39% over 40,000 matrices,
     measured while both read the eigenvalues of a Gram product; both read
     the singular values of J now, and over the populations measured since
-    (1,740 for the guide, 2,600 here) the two never disagreed below 41,286
-    rows.  The cited test holds the bound, not a rate.
+    (1,740 for the guide, 2,600 here) the two never disagreed below 16,300
+    rows, where the two default cutoffs coincide.  The cited test holds the
+    bound, not a rate.
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff
     f64: narrowed

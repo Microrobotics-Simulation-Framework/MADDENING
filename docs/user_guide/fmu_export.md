@@ -261,6 +261,17 @@ Until 0.4.0 shipped, a Boolean or Int32 input was written `start="0.0"` and
 `continuous`.  FMPy's `simulate_fmu`, which validates the description by
 default, refused such an FMU.
 
+A `unit` is written on a `Float32` or `Float64` variable only, which is
+where FMI 3.0's schema has the attribute.  An integer or Boolean input into
+a field whose node declares `expected_units`, or an integer or Boolean
+parameter whose `ParamSpec` names `units`, is written without it, and a
+unit that no float variable carries is not listed in `<UnitDefinitions>`.
+`FMIVariable.unit` still holds what the graph declares.  Until 0.4.0
+shipped the attribute was written on every type (in 0.3.x that needed a
+hand-built `FMIVariable`: a graph's inputs were not exported there), and
+FMPy reported `Element 'Int32', attribute 'unit': The attribute 'unit' is
+not allowed`.
+
 The `instantiationToken` covers every variable's start, bounds, unit,
 variability, value reference and clocks, besides its name, type, causality
 and shape: everything the description advertises for a variable but its
@@ -587,6 +598,16 @@ field.  A non-finite value the FMU was *instantiated* with is not a
 divergence and restores: a coupling group with `diagnostics=True` seeds
 its spectral `_meta` slots with `NaN` until a solve fills them, and until
 0.4.0's fix a snapshot taken before that was refused by both doors.
+Nor is a non-finite reading in a coupling group's report: the slots
+`coupling_diagnostics()` reads are written by every step and are not what
+the model continues from, and `inf` is an ordinary value there
+(`gradient_relative_error_bound` where the bound does not certify, at an
+iteration cap on a curved map; the experimental `geometry_plane_limit` and
+`geometry_plane_margin` on every step of a group whose positions are
+constants of the pass).  A snapshot holding one restores on both doors;
+until 0.4.0's fix the FMU refused the snapshot it had just handed out.  A
+non-finite value in a node's field, or in a group's warm starts, is still
+refused.
 ```
 
 **The C wrapper waits on the bridge for a bounded time.**  Every receive

@@ -261,6 +261,17 @@ Until 0.4.0 shipped, a Boolean or Int32 input was written `start="0.0"` and
 `continuous`.  FMPy's `simulate_fmu`, which validates the description by
 default, refused such an FMU.
 
+A `unit` is written on a `Float32` or `Float64` variable only, which is
+where FMI 3.0's schema has the attribute.  An integer or Boolean input into
+a field whose node declares `expected_units`, or an integer or Boolean
+parameter whose `ParamSpec` names `units`, is written without it, and a
+unit that no float variable carries is not listed in `<UnitDefinitions>`.
+`FMIVariable.unit` still holds what the graph declares.  Until 0.4.0
+shipped the attribute was written on every type (in 0.3.x that needed a
+hand-built `FMIVariable`: a graph's inputs were not exported there), and
+FMPy reported `Element 'Int32', attribute 'unit': The attribute 'unit' is
+not allowed`.
+
 The `instantiationToken` covers every variable's start, bounds, unit,
 variability, value reference and clocks, besides its name, type, causality
 and shape: everything the description advertises for a variable but its

@@ -227,7 +227,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 #: Exit status of a run this runner refused before a check decided anything
 #: (argparse's own status for an option it does not take).
@@ -239,7 +239,12 @@ EXIT_CRASHED = 5
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
-DRY_RUN_CELLS = (256, 1024)
+#: A dry run's sizes: the unstructured goals run the first with its cells as
+#: the partitioner scatters them (15 x 15 cells do not divide by four: a pad
+#: row on three shards) and the second renumbered into partition order
+#: (four equal shards; ``cells_in_an_order_the_wrapper_takes``).  The
+#: stencil goals' grids are what 256 and 1024 gave (``field_shape``).
+DRY_RUN_CELLS = (225, 1024)
 #: The session's question is "on 4 GPUs".  A transport ranking may decide
 #: on fewer with ``--allow-fewer-devices``; a checklist item never closes on
 #: fewer, whatever that flag says: on 2 devices a shard's left and right
@@ -260,6 +265,10 @@ MIN_DEVICES_WITH_ESCAPE = 2     # --allow-fewer-devices: still needs a real exch
 #: a boundary input beyond the grid, applied by the node after the exchange.
 STENCIL_BOUNDARIES = ("periodic", "edge", "dirichlet")
 STENCIL_WALL = 1.5              # the Dirichlet value; unlike any edge cell of the field
+#: What ``Field2D`` takes beyond its grid: those three and ``"zero"``, the
+#: wrapper's third fill, which the ``stencil`` goal runs in its
+#: ``field-shares`` cases.
+FIELD_BOUNDARIES = (*STENCIL_BOUNDARIES, "zero")
 
 #: The sharding checklist's goals, cheapest first, then the timing goals.
 CHECKLIST_GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid")
@@ -836,7 +845,19 @@ def _make_node_class(SimulationNode, StaticArray, BoundaryInputSpec, jnp):  # no
           value (0.5) is another number, so an injection that is dropped,
           or that reaches some shards only, moves the answer as a wrong
           value does.  In the ``gradient`` goal the derivative is taken
-          with respect to both as well as to the start.
+          with respect to both as well as to the start;
+        * ``per_shard`` is a domain integral the node asks the wrapper not
+          to sum (``domain_integral_axes``): one ``[offset, cells]`` pair a
+          shard, which the wrapper stacks along the mesh axis.  Both
+          numbers come from ``shard_info``: ``offset`` is the shard's tag
+          (its index times the padded block length), and ``cells`` is the
+          sum of the new field over the rows ``shard_info["n_local"]``
+          says the shard owns, as the wrapper's docstring tells a node to
+          mask its pad rows.  On the ``forward`` goal's field of ones the
+          pair is two integers, the layout's own, in the layout's order:
+          a wrong offset, a wrong count, per-shard values summed after
+          all or stacked in another order each read off exactly
+          (:func:`per_shard_entries_off`).
 
         Why it is written ``x + w * (mean - x)``: both weights are powers of
         two and every goal steps with ``dt = 1``, so the two products are
@@ -859,7 +880,10 @@ def _make_node_class(SimulationNode, StaticArray, BoundaryInputSpec, jnp):  # no
             return ["x"]
 
         def domain_integral_fields(self) -> set[str]:
-            return {"total"}
+            return {"total", "per_shard"}
+
+        def domain_integral_axes(self) -> dict:
+            return {"per_shard": ()}           # summed over no mesh axis: one a shard
 
         def boundary_input_spec(self) -> dict:
             return {"source": BoundaryInputSpec(shape=(self._n,),
@@ -905,7 +929,12 @@ def _make_node_class(SimulationNode, StaticArray, BoundaryInputSpec, jnp):  # no
             new = self._relax(state_padded["x"], static_padded["nbr"][:n_local],
                               boundary_inputs.get("source"), params, dt)
             own = static_padded["own"][:n_local]
-            return {"x": new, "total": jnp.sum(new * own)}
+            total = jnp.sum(new * own)
+            offset, block = shard_info[0]
+            mine = jnp.arange(block) < shard_info["n_local"]
+            per_shard = jnp.stack([jnp.asarray(offset, jnp.float32),
+                                   jnp.sum(jnp.where(mine, new, 0.0))])
+            return {"x": new, "total": total, "per_shard": per_shard}
 
     return NeighbourMeanNode
 
@@ -1067,18 +1096,54 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
           smallest grid): the whole of a neighbour's block is then halo.
 
         At 1 the arithmetic is what it was before the option existed.
+
+        ``boundary="zero"`` is the wrapper's third fill: zeros beyond the
+        grid for the field and for a grid-shaped input, the edge cell
+        repeated for a static (which has no boundary condition to take).
+
+        ``shares`` (the ``stencil`` goal's ``field-shares`` cases) adds two
+        domain integrals the wrapper must *not* sum over every mesh axis
+        (``domain_integral_axes``).  It names the mesh axes the wrapper
+        shards along, in mesh order, as ``(mesh axis, spatial axis,
+        devices)``; each block's part is its share of ``averages``:
+
+        * ``shares`` is summed over no mesh axis: one pair a block, which
+          the wrapper stacks along every mesh axis it uses.  It is carried
+          in the state and read back: ``SHARE_DECAY`` times the old value
+          plus the block's new share, so the slice of the stack the
+          wrapper hands each shard counts, as well as the slot each
+          shard's value lands in;
+        * ``strips`` is summed over the first of those mesh axes only and
+          stacked along the rest (on a 1-D mesh: summed over its one
+          axis, by name).
+
+        The unsharded node returns both in the stacked shape
+        (``stacked=True``), from the same field cut into the same blocks,
+        so the blocks are compared slot by slot; and the goal's loss
+        weighs every slot differently (:func:`_slot_weights`).  Without
+        ``shares`` the node declares and computes what it did.
         """
 
         #: The weight of a second neighbour against a first one (``reach=2``).
         FAR_SHARE = 0.25
+        #: How much of its old value ``shares`` keeps a step.
+        SHARE_DECAY = 0.5
+        #: The value ``shares`` and ``strips`` start from, in every slot.
+        SHARE_START = (0.25, 0.5)
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
                      exchange: float = 0.0, timestep: float = 0.1,
-                     boundary: str = "periodic", mask_axis: int = 0, reach: int = 1) -> None:
+                     boundary: str = "periodic", mask_axis: int = 0, reach: int = 1,
+                     shares: tuple | None = None, stacked: bool = False) -> None:
             super().__init__(name=name, timestep=timestep, diffusivity=diffusivity,
                              exchange=exchange)
-            if boundary not in STENCIL_BOUNDARIES:
-                raise ValueError(f"boundary {boundary!r} is not one of {STENCIL_BOUNDARIES}")
+            if boundary not in FIELD_BOUNDARIES:
+                raise ValueError(f"boundary {boundary!r} is not one of {FIELD_BOUNDARIES}")
+            self._split = tuple((str(a), int(s), int(d)) for a, s, d in (shares or ()))
+            spatial = [s for _, s, _ in self._split]
+            if spatial != sorted(set(spatial)) or set(spatial) - {0, 1}:
+                raise ValueError(f"shares {shares!r}: spatial axes 0 and 1, ascending")
+            self._stacked = bool(stacked)
             if mask_axis not in (0, 1):
                 raise ValueError(f"mask_axis {mask_axis!r} is not 0 or 1")
             if reach not in (1, 2):
@@ -1101,7 +1166,33 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             return ["f"]
 
         def domain_integral_fields(self) -> set:
-            return {"averages"}
+            return {"averages", "shares", "strips"} if self._split else {"averages"}
+
+        def domain_integral_axes(self) -> dict:
+            return {"shares": (), "strips": (self._split[0][0],)} if self._split else {}
+
+        def _block_shares(self, f):
+            """``(b0, b1, 2)``: each block's share of ``averages``, the grid cut
+            as the mesh cuts it (one block along an axis it does not shard)."""
+            per_axis = {s: d for _, s, d in self._split}
+            b0, b1 = per_axis.get(0, 1), per_axis.get(1, 1)
+            ny, nx = self._shape
+            blocks = f.reshape(b0, ny // b0, b1, nx // b1)
+            return jnp.stack([blocks.sum(axis=(1, 3)), (blocks * blocks).sum(axis=(1, 3))],
+                             axis=-1) / (ny * nx)
+
+        def _tallies(self, old_shares, new) -> dict:
+            """The two integrals of the unsharded node after a step: in the
+            shape the wrapper stacks them to (``stacked``), or as one block."""
+            if not self._split:
+                return {}
+            if not self._stacked:
+                part = self._averages(new)
+                return {"shares": self.SHARE_DECAY * old_shares + part, "strips": part}
+            lead = tuple(d for _, _, d in self._split)
+            shares = self._block_shares(new)
+            return {"shares": self.SHARE_DECAY * old_shares + shares.reshape((*lead, 2)),
+                    "strips": shares.sum(axis=self._split[0][1]).reshape((*lead[1:], 2))}
 
         @property
         def static_data(self) -> dict:
@@ -1119,7 +1210,13 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
             f = jnp.asarray((1.0 + np.sin(2 * np.pi * y) * np.cos(4 * np.pi * x)
                              + 0.25 * np.cos(6 * np.pi * (x + y))).astype(np.float32))
-            return {"f": f, "averages": self._averages(f)}
+            state = {"f": f, "averages": self._averages(f)}
+            if self._split:
+                lead = tuple(d for _, _, d in self._split) if self._stacked else ()
+                start = jnp.asarray(self.SHARE_START, jnp.float32)
+                state["shares"] = jnp.broadcast_to(start, (*lead, 2))
+                state["strips"] = jnp.broadcast_to(start, (*lead[1:], 2))
+            return state
 
         def boundary_input_spec(self) -> dict:
             spec = {"ambient": BoundaryInputSpec(shape=(), description="far-field value, "
@@ -1139,7 +1236,8 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         def _pad_mode(self) -> str:
             """How ``update`` fills the halo of the field and of a grid-shaped
             input: as the wrapper's fill does (``"edge"`` under Dirichlet)."""
-            return {"periodic": "wrap", "edge": "edge", "dirichlet": "edge"}[self.boundary]
+            return {"periodic": "wrap", "edge": "edge", "dirichlet": "edge",
+                    "zero": "constant"}[self.boundary]
 
         @property
         def _static_mode(self) -> str:
@@ -1203,7 +1301,8 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), h,
                                mode=self._static_mode)
             new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
-            return {"f": new, "averages": self._averages(new)}
+            return {"f": new, "averages": self._averages(new),
+                    **self._tallies(state.get("shares"), new)}
 
         def update_padded(self, state_padded, boundary_inputs, dt, *, static_padded=None,
                           shard_info=None, params=None):
@@ -1229,7 +1328,14 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             offset = (shard_info or {}).get(other, (0, width - 2 * h))[0]
             mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=other)
             new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
-            return {"f": f_pad.at[h:-h, h:-h].set(new), "averages": self._averages(new)}
+            part = self._averages(new)
+            out = {"f": f_pad.at[h:-h, h:-h].set(new), "averages": part}
+            if self._split:
+                # this shard's slice of the stack arrives with one leading
+                # axis a mesh axis it is stacked along; it leaves with none
+                out["shares"] = self.SHARE_DECAY * state_padded["shares"].reshape(2) + part
+                out["strips"] = part
+            return out
 
     class FarField(SimulationNode):
         """A replicated scalar solver: ``u <- u + dt * conductance * (field_mean - u)``."""
@@ -1742,6 +1848,7 @@ def run_forward(args, out: dict) -> dict:
             bi_ref, bi, params = node_inputs(n, layout, mesh)
             entry["n_local_max"] = layout.n_local_max
             entry["n_ghost_max"] = layout.n_ghost_max
+            entry["n_local"] = [int(k) for k in layout.n_local]
             entry["traffic_cells_per_shard"] = exchange_traffic(layout)
             state = sharded.initial_state()       # placed on the mesh by the wrapper
             dt = 1.0
@@ -1829,9 +1936,25 @@ def _ones_record(stepped: dict) -> dict:
     largest ``|x - 1|`` of the stepped field and how many entries are not
     exactly 1 (zero and none when the step leaves ones ones)."""
     x = np.asarray(stepped["x"], np.float64)
-    return {"total": float(np.asarray(stepped["total"]).reshape(-1)[0]),
-            "max_abs_from_one": float(np.max(np.abs(x - 1.0))) if x.size else 0.0,
-            "entries_not_one": int(np.count_nonzero(x != 1.0))}
+    record = {"total": float(np.asarray(stepped["total"]).reshape(-1)[0]),
+              "max_abs_from_one": float(np.max(np.abs(x - 1.0))) if x.size else 0.0,
+              "entries_not_one": int(np.count_nonzero(x != 1.0))}
+    if "per_shard" in stepped:                      # the sharded side only
+        record["per_shard"] = np.asarray(stepped["per_shard"], np.float64).tolist()
+    return record
+
+
+def per_shard_entries_off(per_shard, n_local_max: int, n_local: list) -> float:
+    """How many entries of the stacked ``[offset, cells]`` pairs a step from
+    a field of ones returned are not the layout's: shard ``d``'s offset is
+    ``d * n_local_max`` and it owns ``n_local[d]`` cells, both integers a
+    float32 holds exactly under ``EXACT_COUNT_CELLS``.  Anything that is
+    not one pair a shard has every entry off."""
+    want = np.asarray([[d * n_local_max, k] for d, k in enumerate(n_local)], np.float64)
+    got = np.asarray(per_shard, np.float64)
+    if got.shape != want.shape:
+        return float(want.size)
+    return float(np.count_nonzero(got != want))
 
 
 def _ones_checks(prefix: str, cells: int, record: dict) -> list:
@@ -1862,12 +1985,17 @@ def forward_checks(results: list, n_devices: int) -> list:
                                      m["parity_total"]["finite"]))
             if r["cells"] < EXACT_COUNT_CELLS:
                 checks += _ones_checks(prefix, r["cells"], m["ones"])
+                checks.append(check(
+                    f"{prefix} ones: per-shard (offset, cells) entries off the layout's",
+                    per_shard_entries_off(m["ones"]["per_shard"], r["n_local_max"],
+                                          r["n_local"]), LIMITS["exact"]))
         if r["cells"] < EXACT_COUNT_CELLS:
             checks += _ones_checks(f"{r['cells']} cells unsharded", r["cells"],
                                    r["ones_unsharded"])
         else:
             checks.append(check_not_run(
-                f"{r['cells']} cells ones: total == cells exactly, sharded and unsharded",
+                f"{r['cells']} cells ones: total == cells, sharded and unsharded, and "
+                "per-shard (offset, cells), exactly",
                 f"a float32 sum of ones is exact only under 2**24 = {EXACT_COUNT_CELLS} "
                 "cells"))
     return checks
@@ -2688,7 +2816,22 @@ STENCIL_NODES = {
     # ``Field2D(reach=2)``: every halo two cells wide (the node's docstring).
     "field-halo2": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
     "lbm": {"fields": ("f", "velocity"), "parameter": "viscosity", "loss_of": "velocity"},
+    # ``Field2D(shares=...)`` under the wrapper's zero fill: two integrals the
+    # wrapper sums over some mesh axes or none (the node's docstring).
+    "field-shares": {"fields": ("f", "averages", "shares", "strips"),
+                     "parameter": "diffusivity", "loss_of": "f"},
 }
+
+#: The one boundary the ``field-shares`` cases run under.
+SHARES_BOUNDARY = "zero"
+
+
+def _slot_weights(shape: tuple):
+    """A weight for every entry of a stacked integral, no two alike (1 to
+    1.5 in steps of an exact binary fraction of the count), so that the
+    ``stencil`` goal's loss and its adjoint tell one slot from another."""
+    size = int(np.prod(shape))
+    return jnp.asarray((1.0 + 0.5 * np.arange(size) / size).reshape(shape), jnp.float32)
 
 
 def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_inputs,
@@ -2714,6 +2857,9 @@ def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_
         value = jnp.sum(w * x * x) / x.size
         if "averages" in final:
             value = value + final["averages"][0]
+        for stacked in ("shares", "strips"):
+            if stacked in final:
+                value = value + jnp.sum(_slot_weights(final[stacked].shape) * final[stacked])
         return value
 
     return (jax.jit(lambda s, p: advance(s, p, steps)),
@@ -2738,6 +2884,7 @@ def stencil_cases(cells, n_devices: int) -> list:
                 cases += [(n, "field", b, mesh) for b in STENCIL_BOUNDARIES]
                 cases.append((n, "lbm", "periodic", mesh))
                 cases += [(n, "field-halo2", b, mesh) for b in STENCIL_BOUNDARIES]
+                cases.append((n, "field-shares", SHARES_BOUNDARY, mesh))
         else:
             cases.append((n, "field", "periodic", graph_mesh(n_devices)))
     return cases
@@ -2764,9 +2911,15 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
         return (make(), ShardedStencilNode(make(), mesh, axis_map=axis_map, boundary="periodic"),
                 {"body_force": jnp.asarray(_lbm_force(ny, nx))}, jnp.float32(LBM_VISCOSITY))
 
-    def make():
+    split = None
+    if kind == "field-shares":
+        split = tuple((a, axis_map[a], int(mesh.shape[a])) for a in mesh.axis_names
+                      if a in axis_map)
+
+    def make(stacked=False):
         return Field2D("field", ny, nx, exchange=0.3, boundary=boundary,
-                       mask_axis=mask_axis_for(axis_map), reach=2 if kind == "field-halo2" else 1)
+                       mask_axis=mask_axis_for(axis_map), reach=2 if kind == "field-halo2" else 1,
+                       shares=split, stacked=stacked)
     # "dirichlet" is the node's own condition over the wrapper's default
     # "edge" fill; the other two are the wrapper's fill of that name.
     sharded = ShardedStencilNode(make(), mesh, axis_map=axis_map,
@@ -2774,16 +2927,25 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
     bi = {"source": jnp.asarray(_source_field(ny, nx))}
     if boundary == "dirichlet":
         bi["wall"] = jnp.float32(STENCIL_WALL)
-    return make(), sharded, bi, jnp.float32(0.2)
+    return make(stacked=True), sharded, bi, jnp.float32(0.2)
 
 
 def _placed_like(sharded, state: dict) -> dict:
     """``state`` placed as the wrapper places a state it built: each grid
     field partitioned over the mesh, each domain integral replicated."""
     integrals = set(sharded.domain_integral_fields())
-    return {k: (sharded._place_integral(k, v) if k in integrals        # noqa: SLF001
-                else jax.device_put(v, sharded._sharding_for_field(v)))  # noqa: SLF001
-            for k, v in state.items()}
+
+    def placed(k, v):
+        if k not in integrals:
+            return jax.device_put(v, sharded._sharding_for_field(v))  # noqa: SLF001
+        if sharded._integral_reduction(k)[1]:                        # noqa: SLF001
+            # stacked along the mesh axes it is not summed over: already
+            # what a step returns, one slot a shard
+            return jax.device_put(v, NamedSharding(
+                sharded._mesh, sharded._integral_spec(k)))           # noqa: SLF001
+        return sharded._place_integral(k, v)                         # noqa: SLF001
+
+    return {k: placed(k, v) for k, v in state.items()}
 
 
 def _stencil_side(node, s0, p, *, dt, weight, bi, spec, args) -> tuple:
@@ -2832,7 +2994,8 @@ def run_stencil_case(case, args, unsharded_cache: dict | None = None) -> dict:
              "input_partitioned": _is_partitioned(sharded_start["f"], D),
              "forward": {}, "gradient": {}}
     side = functools.partial(_stencil_side, dt=dt, weight=weight, bi=bi, spec=spec, args=args)
-    key = (kind, boundary, ny, nx)
+    # (the unsharded ``field-shares`` node stacks its integrals as the mesh does)
+    key = (kind, boundary, ny, nx, mesh_label if kind == "field-shares" else None)
     if unsharded_cache is None or key not in unsharded_cache:
         unsharded = side(ref, start, p)
         if unsharded_cache is not None:
@@ -2844,6 +3007,10 @@ def run_stencil_case(case, args, unsharded_cache: dict | None = None) -> dict:
     got["sharded"], entry["forward"]["sharded"], entry["gradient"]["sharded"] = side(
         sharded, sharded_start, p)
     (s_s, l_s, gf_s, gp_s), (s_u, l_u, gf_u, gp_u) = got["sharded"], got["unsharded"]
+    for field in spec["fields"]:
+        if np.shape(s_s[field]) != np.shape(s_u[field]):
+            raise ValueError(f"{kind} on {mesh_label}: the sharded {field!r} has shape "
+                             f"{np.shape(s_s[field])}, the unsharded {np.shape(s_u[field])}")
     entry["forward"]["parity"] = {field: _diff(s_s[field], s_u[field])
                                   for field in spec["fields"]}
     entry["gradient"]["parity_loss"] = _rel_each(l_s, l_u)

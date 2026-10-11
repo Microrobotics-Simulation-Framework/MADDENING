@@ -1173,7 +1173,11 @@ claims:
   sources:
     - src/maddening/api/server.py:321 (MAX_REQUEST_BODY_BYTES)
     - docs/release_notes/v0.4.0.md:4669 (What a request can make the server allocate is bounded as a whole)
-  conditions: the shipped constants.
+  conditions: >-
+    the shipped constants.  What a body of that size costs to refuse is
+    not part of the claim: it was measured, not bounded by a test (a peak
+    of 2.4 to 2.6 GiB and 4 to 13 s, in the comment at the constant and in
+    MADD-ANO-274's residual).
   oracle: arithmetic on the constants.
   tests:
     - tests/api/test_request_memory_is_bounded.py::test_the_body_limit_admits_every_body_the_element_caps_admit
@@ -6622,6 +6626,62 @@ claims:
     sim_run_active: n/a
     large_payload: n/a
     hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-118
+  area: bounds
+  claim: >-
+    "A 422 echoes the value it refused (input) when that value is at most
+    1024 characters of JSON ... A larger one is left out, and the error
+    carries input_omitted in its place, with a sentence that says so; a
+    reply lists at most 64 errors and counts the rest in a last entry."
+  sources:
+    - src/maddening/api/README.md::Concurrency, limits and shutdown
+    - src/maddening/api/server.py::_validation_detail
+    - src/maddening/api/server.py::_echoed_input
+  conditions: >-
+    values at the character on either side of 1024 (text, numbers, lists,
+    objects, escaped text, a long integer); bodies of 150 kB that no model
+    takes, wrong-typed or with none of a model's fields, on every route of
+    the app that takes a body except those under /cloud and /surrogate (the
+    one typed list of the request models is a surrogate route's, and is
+    held through its model and the handler); a params body over the cap of
+    MAX_NODE_PARAM_ELEMENTS, patched to 1000; a query value too long; a
+    list of 70000 errors handed to the handler.  Says nothing of what
+    parsing and counting a refused body costs (MADD-ANO-274's residual).
+  oracle: >-
+    the reply's size against a fixed bound, input absent and input_omitted
+    present where the value is over the limit, input equal to the value
+    where it is not, and the graph unchanged.
+  tests:
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_bounds_are_the_documented_ones
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_small_value_is_echoed_as_it_was
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_value_over_the_limit_is_left_out_and_the_error_says_so
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_limit_is_of_the_json_text_to_the_character
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_value_too_long_to_echo_is_not_walked
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_reply_lists_a_bounded_number_of_errors_and_counts_the_rest
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_no_body_route_answers_a_refused_body_with_the_body
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_params_body_refused_for_its_element_count_is_not_sent_back
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_small_refused_value_is_still_echoed_by_every_kind_of_parameter
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_long_refused_query_value_is_not_echoed
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_one_typed_list_of_the_request_models_is_not_echoed_either
+    - tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_handler_cuts_a_list_of_errors_however_it_came_about
+  status: verified
+  domains:
+    loopback_bind: tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_no_body_route_answers_a_refused_body_with_the_body
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_no_body_route_answers_a_refused_body_with_the_body
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_params_body_refused_for_its_element_count_is_not_sent_back
+    hostile_input: tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_small_refused_value_is_still_echoed_by_every_kind_of_parameter
     shutdown: n/a
     wrapper_nodes: n/a
     checkpoint_restore: n/a

@@ -200,7 +200,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maddening.core.coupling._interface_plan import FLUX, INBOUND
+from maddening.core.coupling._interface_plan import FLUX
 
 #: How many sweeps a pass seeds its members' fluxes in: ``one_pass_gs``,
 #: ``one_pass_jacobi`` wherever a flux producer reads a flux, and
@@ -236,8 +236,7 @@ def _programs(closed, in_paths, out_paths, table: dict) -> dict:
     the whole expression the leaf is computed by: the primitive of each
     equation with its parameters, applied to the programs of its
     operands, down to the hook's arguments (by their place in the
-    arguments and their shape, dtype and weak type: a sweep can hand an
-    input at another shape), constants and literals (by value).  Numbers are drawn
+    arguments), constants and literals (by value).  Numbers are drawn
     from *table*, shared between the traces compared, so two leaves have
     the same number exactly when they are the same expression of the
     same arguments.  An equation whose parameters hold something
@@ -250,7 +249,7 @@ def _programs(closed, in_paths, out_paths, table: dict) -> dict:
         return table.setdefault(key, len(table))
 
     jaxpr = closed.jaxpr
-    ids = {v: number(("argument", jax.tree_util.keystr(path), _signature(v.aval)))
+    ids = {v: number(("argument", jax.tree_util.keystr(path)))
            for v, path in zip(jaxpr.invars, in_paths)}
     for v, const in zip(jaxpr.constvars, closed.consts):
         ids[v] = number(("constant", _plain(const)))

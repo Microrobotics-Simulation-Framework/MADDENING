@@ -1170,11 +1170,12 @@ def test_a_hook_that_cannot_be_evaluated_in_one_sweep_is_evaluated_in_the_next()
 class Relay(SimulationNode):
     """Fluxes ``{name: (base, the input whose shape it takes, or None)}``,
     each ``base + 0.1 u`` times a vector of ones of that input's shape;
-    ``g`` reads ``y`` where it is a vector; ``u <- c + 0.3 mean(r)``."""
+    ``g`` reads ``y`` where it has *ndim* dimensions, ``q`` reads ``p``;
+    ``u <- c + 0.3 mean(r)``."""
 
-    def __init__(self, name, c, fluxes):
+    def __init__(self, name, c, fluxes, ndim=1):
         super().__init__(name=name, timestep=1.0)
-        self.c, self.fluxes = c, fluxes
+        self.c, self.fluxes, self.ndim = c, fluxes, ndim
 
     def initial_state(self):
         return {"u": ZERO}
@@ -1188,7 +1189,7 @@ class Relay(SimulationNode):
             like = jnp.ones(3, F) if follows == "three" else boundary_inputs.get(follows, ZERO)
             out[flux] = (base + 0.1 * u) * jnp.ones_like(like)
         y = boundary_inputs.get("y")
-        if "g" in out and y is not None and jnp.ndim(y) == 1:
+        if "g" in out and y is not None and jnp.ndim(y) == self.ndim:
             out["g"] = out["g"] + 0.8 * jnp.mean(y)
         if "q" in out:
             out["q"] = out["q"] + 0.7 * jnp.mean(boundary_inputs.get("p", ZERO))
@@ -1216,6 +1217,43 @@ def test_a_flux_shape_that_settles_in_the_third_sweep_is_traced_at_that_shape(mo
     with pytest.raises(ValueError, match="flux a.q would take 4") as info:
         gm.compile()
     assert "assumed" not in str(info.value)
+
+
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+def test_a_shape_the_second_sweep_hands_before_it_settles_is_traced_too(mode):
+    """``b.g`` reads ``y`` only where it is a scalar.  ``y`` is ``b``'s own
+    flux ``s``, which takes the shape of ``a.t``, which takes the shape of
+    ``b.k`` (3,): the first sweep leaves ``y`` out, the settled shape is
+    (3,), and neither is read; the second sweep hands ``y`` as the first
+    computed ``s``, a scalar, and ``b.g`` reads it there.  So the seed of
+    ``b.g``, which ``a``'s update reads, is not its settled value after
+    the two sweeps."""
+    a = Relay("a", 1.0, {"t": (0.1, "kin")})
+    b = Relay("b", -0.5, {"k": (0.2, "three"), "s": (0.3, "tin"), "g": (0.2, None)}, ndim=0)
+    gm = GraphManager()
+    for node in (a, b):
+        gm.add_node(node)
+    for source, field, target, name in [("b", "k", "a", "kin"), ("a", "t", "b", "tin"),
+                                        ("b", "s", "b", "y"), ("b", "g", "a", "r"),
+                                        ("a", "u", "b", "r")]:
+        gm.add_edge(source=source, target=target, source_field=field, target_field=name)
+    grouped(gm, ["a", "b"], mode=mode)
+    with pytest.raises(ValueError, match="flux b.g would take 3") as info:
+        gm.compile()
+    assert "flux b.g reads input 'y', which edge 'b.s->b.y' delivers from flux b.s" in str(info.value)
+
+
+def test_an_input_taken_at_its_declared_shape_is_named_in_the_message():
+    """``b``'s input ``s`` carries the flux of ``a``'s hook, which cannot
+    be evaluated: ``b`` is traced with ``s`` at the shape it declares, and
+    the message says so beside what it establishes."""
+    nodes = [Untraceable("a", *coefficients(None, 0)), Side("b", *coefficients(0.5, 1))]
+    gm = built(nodes, [("a", "q", "b", "s", 1.0), ("b", "q", "a", "s", 1.0)], ["a", "b"])
+    with pytest.raises(ValueError, match="depend on each other in a loop") as info:
+        gm.compile()
+    assert ("'b' was traced with its input ['s'] at the shape and dtype its "
+            "boundary_input_spec() declares, as what the edges deliver there could not be "
+            "derived") in str(info.value)
 
 
 class Grows(SimulationNode):

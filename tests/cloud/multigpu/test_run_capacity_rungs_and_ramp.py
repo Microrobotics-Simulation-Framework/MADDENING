@@ -806,11 +806,20 @@ def left(tmp_path_factory, passing):
             for name, value in real_reference(tile, tile_state, steps).items()})
         assert _rung(tmp, "2x2", k, name="rung_failed.json")[0] == rc.EXIT_CHECK_FAILED
 
+        def closed_pipe(label, checks):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        # ... and the same rung raising after its last write (its stdout gone):
+        # its process then records "crashed" over the checks, and exits 5.
+        patch.setattr(rc, "_print_checks", closed_pipe)
+        assert _rung(tmp, "2x2", k, name="rung_raised.json")[0] == rc.EXIT_CRASHED
+
     def last(name, phase):
         return [doc for doc in written[name] if doc["phase"] == phase][-1]
 
     records = {
         "rung, a check failed (done)": last("rung_failed.json", "done"),
+        "rung, a check failed, then it raised": last("rung_raised.json", "done"),
         "rung, every check passed (done)": passing[k],
         "rung, still running": last("rung_failed.json", "running"),
         # Not a record a rung writes (its checks, its outcome and "done" go in
@@ -825,6 +834,9 @@ def left(tmp_path_factory, passing):
     # What each is, by what it holds: the cases are these, not their names.
     failed = records["rung, a check failed (done)"]
     assert failed["outcome"] == "check failed" and _failed(failed)
+    raised = records["rung, a check failed, then it raised"]
+    assert raised["outcome"] == "crashed" and _failed(raised) == _failed(failed)
+    assert raised["raised"]["type"] == "BrokenPipeError"
     running = records["rung, still running"]
     assert running["outcome"] is None and "checks" not in running
     assert running["memory"]["readings"]
@@ -866,6 +878,7 @@ _NO_VERDICT = {
     "exit 7": "crashed"}
 _LEFT = {
     "rung, a check failed (done)": _A_CHECK_FAILED,
+    "rung, a check failed, then it raised": _A_CHECK_FAILED,
     "rung, every check passed (done)": _COMPLETE_AND_PASSED,
     "rung, still running": _NO_VERDICT,
     "rung, checks without a verdict": _NO_VERDICT,

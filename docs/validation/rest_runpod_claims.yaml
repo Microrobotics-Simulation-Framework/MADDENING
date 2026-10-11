@@ -6878,8 +6878,9 @@ claims:
     block; a host with too little memory; a real process past a time box of
     0.05 s; a ramp ended by SIGTERM; and a passing run's records tampered
     with eleven ways before --summarise. The record before the ending:
-    eight records taken from real dry runs at each write (a rung's with a
-    failed check, complete and passed, still running, and one with checks
+    nine records taken from real dry runs at each write (a rung's with a
+    failed check, the same after its process then raised and recorded a
+    crash over it, complete and passed, still running, and one with checks
     and no verdict; a soak's with a failed block before and after its last
     write, with passed blocks before it, and complete), each with ten
     endings (the time box, SIGKILL, 137, a segfault, an abort naming an

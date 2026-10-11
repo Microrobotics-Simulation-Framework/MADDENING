@@ -248,6 +248,14 @@ def save_graph_to_usd(
         /Simulation/coupling_groups/cg0     (MaddeningCouplingGroup)
         /Simulation/external_inputs/ext0    (MaddeningExternalInput)
 
+    A node's prim carries its class, name, timestep and ``params`` (with
+    the live :attr:`GraphManager.params` values written over them), and
+    nothing else: the load rebuilds it as ``cls(name=..., timestep=...,
+    **params)``.  A node constructed with an argument it keeps outside
+    ``params`` gets a ``UserWarning`` naming it, as from
+    :meth:`GraphManager.to_dict`; here also when its class overrides
+    ``to_dict``, because a stage never writes what ``to_dict`` returns.
+
     Parameters
     ----------
     gm : GraphManager
@@ -341,9 +349,11 @@ def save_graph_to_usd(
                 gm.effective_node_params(node_name)
                 if spec.accepts_params else node_obj.params
             )
-            # ``params`` is all of the node a stage carries, as for a
-            # config: say so where the node was built with more.
-            _warn_of_unsaved_constructor_arguments(node_obj)
+            # ``params`` is all of the node a stage carries: say so where
+            # the node was built with more.  Asked of a class that
+            # overrides ``to_dict`` too, unlike a config: a stage never
+            # writes what the override returns.
+            _warn_of_unsaved_constructor_arguments(node_obj, stage=True)
             prim.GetAttribute("maddening:paramsJson").Set(
                 _params_json(node_params, node_name)
             )

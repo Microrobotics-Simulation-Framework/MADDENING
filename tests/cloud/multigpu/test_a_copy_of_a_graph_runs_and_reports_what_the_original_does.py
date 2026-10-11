@@ -10,6 +10,10 @@ calibration in ``gm.params`` after it ran the calibrated value, and its
 deep copy ran, reported and saved the node's, with nothing said
 (MADD-ANO-275; never released: no release has ``gm.params``).  A copy made
 by ``copy.deepcopy`` or ``pickle`` now carries the counts and the lineage.
+``copy.copy(gm)`` is refused: a shallow copy shared the graph's record of
+the writes it had seen but not its compiled step, so after a write to a
+node whose constants are baked into the step, whichever of the two graphs
+stepped second ran the old value while both reported the new one.
 
 Each case builds the same graph twice and makes the same statements on
 both -- node writes and calibrations in one of the orders of ``ORDERS``,
@@ -133,10 +137,6 @@ def _deep_copy_of_a_deep_copy(gm):
     return copy.deepcopy(copy.deepcopy(gm))
 
 
-def _shallow_copy_of_the_graph(gm):
-    return copy.copy(gm)
-
-
 def _the_mapping_deep_copied(gm):
     node = gm.get_node("n")
     node.params = copy.deepcopy(node.params)
@@ -158,7 +158,6 @@ def _the_mapping_shallow_copied(gm):
 COPIES = {
     "deep_copy_of_the_graph": _deep_copy_of_the_graph,
     "deep_copy_of_a_deep_copy": _deep_copy_of_a_deep_copy,
-    "shallow_copy_of_the_graph": _shallow_copy_of_the_graph,
     "the_mapping_deep_copied": _the_mapping_deep_copied,
     "the_mapping_pickled": _the_mapping_pickled,
     "the_mapping_shallow_copied": _the_mapping_shallow_copied,
@@ -277,8 +276,40 @@ def test_a_three_argument_node_write_pending_at_the_copy_is_run_by_the_copy():
 
     other, other_read = stated()
     original, read = stated()
-    for copied in (copy.deepcopy(original), copy.copy(original)):
-        twin, twin_read = stated()
-        assert np.array_equal(_run(copied, read, STEPS_AFTER), _run(twin, twin_read, STEPS_AFTER))
+    twin, twin_read = stated()
+    assert np.array_equal(_run(copy.deepcopy(original), read, STEPS_AFTER),
+                          _run(twin, twin_read, STEPS_AFTER))
     want = np.asarray(other_read(other.get_node_state("n"))) * np.float32(1.0 - 0.1 * MID) ** STEPS_AFTER
     np.testing.assert_allclose(_run(other, other_read, STEPS_AFTER), want, rtol=1e-6)
+
+
+@pytest.mark.parametrize("contract", list(CONTRACTS))
+@pytest.mark.parametrize("kind, n", WRAPPERS, ids=[f"{k}-{n}" for k, n in WRAPPERS])
+def test_a_shallow_copy_of_a_graph_is_refused_and_names_the_deep_copy(kind, n, contract):
+    """``copy.copy(gm)`` shared the nodes, the parameter tree and the
+    record of the writes seen, and not the compiled step: after a write to
+    a node whose constants are baked into the step (``three_argument``),
+    the first graph to sync took the write in for both and only it
+    recompiled, so the other ran the old value (x[0] 0.8145 against 0.4864
+    after three steps in the audit's case) beside ``node.params`` and
+    ``to_dict()`` saying the new one.  A record of its own per graph is not
+    exact either: the second sync then writes the node's value into the
+    shared tree again, over a calibration made through the first graph
+    since.  So it is refused, behind every wrapper and on both contracts,
+    whether the graph is compiled or not, and the graph it was asked of is
+    untouched."""
+    gm, _inner, read = _graph(kind, n, contract)
+    for state in ("compiled", "stepped"):
+        with pytest.raises(TypeError, match=r"copy\.copy\(\) of a GraphManager is refused.*"
+                                            r"copy\.deepcopy\(gm\)"):
+            copy.copy(gm)
+        if state == "compiled":
+            gm.step()
+    uncompiled = GraphManager()
+    uncompiled.add_node(CONTRACTS[contract]())
+    with pytest.raises(TypeError, match="copy.deepcopy"):
+        copy.copy(uncompiled)
+    # The refusal leaves the graph as it was, and a deep copy is the way.
+    gm.get_node("n").params["rate"] = MID
+    twin = copy.deepcopy(gm)
+    assert np.array_equal(_run(twin, read, STEPS_AFTER), _run(gm, read, STEPS_AFTER))

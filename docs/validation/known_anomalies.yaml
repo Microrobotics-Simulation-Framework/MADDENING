@@ -19120,16 +19120,25 @@ anomalies:
       the argument is lost all the same, for: anything a `**kwargs` of the
       constructor took in and did not hand to the base class, an argument a
       subclass's `**kwargs` hands up to a parent that keeps it as an
-      attribute included (`Child(gain=5.0)`: the state after 40 steps 1.9357
-      saved against 3.4401 reloaded, measured 2026-10-11); anything an
+      attribute included (`Child(gain=5.0)` over a parent that keeps `gain`
+      and steps `x *= 1 - dt * gain` from x = 1.5 at dt = 0.01: after 40
+      steps 0.19277 saved against 0.66855 reloaded); anything an
       `*args` took in; a node of a class, or with a mixin, whose own
       `__new__` hands no arguments on; a copy or an unpickled node; and an
       attribute written after construction.  And it names a node that
       saves an argument another way (under another key, or folded into
       another argument) although that node reloads bit for bit; such a
-      class overrides `to_dict()` to say so.  `geometry_source`, which the
-      base constructor takes out of `params`, is saved by nothing; no part
-      of the package reads it.
+      class overrides `to_dict()` to say so, which only a config honours.
+      `save_graph_to_usd` writes `params` and never calls `to_dict`, so it
+      asks such a class all the same (named although its stage reloads bit
+      for bit, or because its stage loses an argument the override adds).
+      A config does not honour an override for a node whose `update` takes
+      `params`: `GraphManager.to_dict()` writes `node.params` with the live
+      values in place of the `params` the override returns, so a key the
+      override adds is not saved, and nothing says so.  A `NaN` argument is
+      the `NaN` default only with the same sign and payload.
+      `geometry_source`, which the base constructor takes out of `params`,
+      is saved by nothing; no part of the package reads it.
     verification:
       - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_quickstart_idiom_is_named_and_reloads_as_the_default_model"
       - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_corrected_quickstart_node_round_trips_at_the_value_it_was_built_with"
@@ -19142,6 +19151,8 @@ anomalies:
       - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_a_parent_keeps_is_lost_through_the_childs_kwargs_and_nothing_says_so"
       - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_the_stage_door_gives_the_warning_the_config_door_gives"
       - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_saved_to_a_stage_is_told_of_the_node_it_wraps"
+      - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_an_override_of_to_dict_is_honoured_by_a_config_and_not_by_a_stage"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_nan_is_its_default_only_with_the_same_bits"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-274"
@@ -19269,12 +19280,21 @@ anomalies:
     resolution_version: "0.4.0"
     residual_risk: >
       A compiled graph cannot be pickled (its compiled step is a local
-      function), and says so; a graph not yet compiled can.  A shallow
-      `copy.copy(gm)` shares its nodes and its parameter tree with the
-      original, as a shallow copy does.
+      function), and says so; a graph not yet compiled can.
+      `copy.copy(gm)` is refused with a `TypeError` that names
+      `copy.deepcopy`.  A shallow copy shared the graph's nodes, its
+      parameter tree and its record of the writes it had seen, but not its
+      compiled step, so after a `node.params` write to a node whose
+      `update` takes no `params` the graph that stepped second ran the old
+      value while both reported the new one (x[0] 0.8145 against 0.4864
+      after three steps); a record of its own per copy would instead have
+      written the node's value again over a calibration made through the
+      other graph.  Never released: no release has the record.
     verification:
       - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_copy_runs_and_reports_what_the_original_does"
       - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_deep_copy_of_a_graph_of_a_wrapped_node_runs_what_the_original_does"
       - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_graph_built_around_a_copy_of_a_written_node_runs_the_written_value"
       - "tests/core/test_node_params_writes_are_observed.py::test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_copys_mapping_assigned_into_another_copys_node_is_taken_in"
+      - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_shallow_copy_of_a_graph_is_refused_and_names_the_deep_copy"
     github_issue: null

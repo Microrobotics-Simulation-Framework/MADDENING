@@ -9,6 +9,13 @@ door exactly as by a config (MADD-ANO-273).  The writer reads
 gives did not reach it, and for a time during 0.4.0 development the config
 warned and the stage did not.  Every door that saves a node's constants now
 makes the one call.
+
+A class that overrides ``to_dict()`` -- as the guide and the warning tell an
+author to do when a node saves an argument another way -- is not asked at
+the config door, which writes what the override returns.  A stage writes
+``params`` and never calls ``to_dict``, so the stage door asks such a class
+like any other: it was exempt there too, and a stage reloaded such a node
+with the default in silence.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.hybrid_node import HybridNode
 from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
 from tests.core.test_to_dict_says_which_constructor_arguments_it_does_not_save import (
-    DT, WARNING, AttributeSpring, BounceNode, ParamsSpring, _graph, _height,
+    DT, WARNING, AttributeSpring, BounceNode, ParamsSpring, _graph, _height, _reload,
 )
 
 
@@ -98,3 +105,46 @@ def test_only_this_warning_is_new_at_the_stage_door():
         warnings.simplefilter("always")
         _saved(gm)
     assert [str(w.message) for w in said] == []
+
+
+class SavesItself(AttributeSpring):
+    """The audit's class: a spring that keeps its constants as attributes
+    and saves ``stiffness`` itself, by overriding ``to_dict()`` to put it in
+    the entry's ``params``."""
+
+    def to_dict(self):
+        d = super().to_dict()
+        d["params"] = {**d["params"], "stiffness": self.stiffness}
+        return d
+
+
+def test_an_override_of_to_dict_is_honoured_by_a_config_and_not_by_a_stage():
+    """The config door writes what the override returns, says nothing and
+    reloads the spring it saved; the stage door writes ``params`` only, so
+    it names the argument, says the override does not reach a stage, and
+    the stage reloads the default spring: the loss it warns of.  The same
+    behind a ``HybridNode``, whose stage is told of the node it wraps."""
+    at_12 = _height(_graph(AttributeSpring(name="spring", timestep=DT)))
+    at_40 = _height(_graph(AttributeSpring(stiffness=40.0, name="spring", timestep=DT)))
+    gm = _graph(SavesItself(stiffness=40.0, name="spring", timestep=DT))
+    config = gm.to_dict()                                   # warnings are errors here
+    assert _height(_reload(config, SavesItself)) == at_40 != at_12
+
+    with pytest.warns(UserWarning) as from_stage:
+        stage = _saved(gm)
+    assert len(from_stage) == 1 and from_stage[0].filename == __file__
+    said = str(from_stage[0].message)
+    assert f"node 'spring' (SavesItself) {WARNING} stiffness." in said
+    assert "SavesItself overrides to_dict(), which a USD stage does not honour" in said
+    assert "override to_dict() to say so" not in said
+    reloaded = load_graph_from_usd(stage, node_registry=_registry(BounceNode, SavesItself))
+    reloaded.compile()
+    assert _height(reloaded) == at_12
+
+    hybrid = GraphManager()
+    hybrid.add_node(HybridNode(SavesItself(stiffness=40.0, name="spring", timestep=DT),
+                               lambda s, b, dt: {}))
+    hybrid.compile()
+    hybrid.to_dict()                                        # silent, as for the bare node
+    with pytest.warns(UserWarning, match=r"node 'spring' \(SavesItself\) .*does not honour"):
+        _saved(hybrid)

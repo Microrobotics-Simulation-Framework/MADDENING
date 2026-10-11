@@ -3971,8 +3971,10 @@ claims:
     inherits), at a value that is not exactly that parameter's default, and
     node.params has no key of that name ... The warning is not proof of a
     loss ... Such a class says that it answers for its own saving by
-    overriding to_dict() ... Silence is not proof that everything is
-    saved."
+    overriding to_dict() ... Only a config honours an override of
+    to_dict() ... save_graph_to_usd writes params and never calls to_dict,
+    so it asks such a class like any other ... Silence is not proof that
+    everything is saved."
   sources:
     - docs/developer_guide/node_authoring.md (Where a constant belongs, and what a saved graph carries)
     - docs/user_guide/quickstart.md (Coupled Simulation)
@@ -3990,15 +3992,22 @@ claims:
     the reload steps bit for bit); an argument at exactly its default (the
     same float or an equal one built at run time, the same tuple of floats
     or an equal one built at run time, None: not reported); an argument
-    that is not exactly its default -- another number, a NaN, an int or a
+    that is not exactly its default -- another number, a NaN, a NaN of
+    the other sign or another payload for a NaN default, an int or a
     NumPy scalar or a bool for a float, a zero of the other sign, a list or
     an array for a tuple, another length, an array where the default is
     None, a required argument (reported; for the zero of the other sign and
     the int, the reload's wrong sign and its failure to step are shown); a
     class that inherits its parent's constructor (reported); a node that
     saves an argument under another spelling or reads it through a flag
-    (reported although it reloads bit for bit; silent once its class
-    overrides to_dict); every concrete node class that maddening.nodes and
+    (reported although it reloads bit for bit; silent at the config door
+    once its class overrides to_dict); a class whose override of to_dict
+    saves the argument in the entry's params (silent at the config door,
+    which reloads it bit for bit; named at the USD door, whose warning says
+    the override does not reach a stage, and whose stage reloads the
+    default), bare and inside a HybridNode; a NaN or a complex NaN built at
+    run time with the default's bits (not reported, the complex one
+    reloading bit for bit); every concrete node class that maddening.nodes and
     maddening.nodes.adaptive export, with every named constructor
     parameter off its default (the wavelet node's included), inherited ones
     included (a test holds the table to that), and an LBMNode with no
@@ -4033,6 +4042,8 @@ claims:
     - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_the_stage_door_gives_the_warning_the_config_door_gives
     - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_node_that_hands_its_constants_on_is_saved_to_a_stage_without_a_word
     - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_saved_to_a_stage_is_told_of_the_node_it_wraps
+    - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_an_override_of_to_dict_is_honoured_by_a_config_and_not_by_a_stage
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_nan_is_its_default_only_with_the_same_bits
   status: verified
   notes: >-
     Whole-tree audit of 2026-10-10 (C, H1): the quickstart's own graph built
@@ -4074,9 +4085,8 @@ claims:
     - src/maddening/core/node.py::_ParamsDict
     - src/maddening/core/graph_manager.py::GraphManager._sync_node_param_writes
   conditions: >-
-    a deep copy of the graph, a deep copy of a deep copy, a shallow copy of
-    the graph, and the node's mapping deep-copied, pickled or shallow-copied
-    and assigned back, each after eight orders of node write and
+    a deep copy of the graph, a deep copy of a deep copy, and the node's
+    mapping deep-copied, pickled or shallow-copied and assigned back, each after eight orders of node write and
     calibration: a node write taken in then a calibration; a calibration
     then a node write taken in, or pending; a calibration then an
     assignment pending; the node's own value written back over a
@@ -4088,8 +4098,15 @@ claims:
     push, all of it slow).  A graph built around a deep copy, a shallow
     copy or an unpickled copy of a written node, on both parameter
     contracts; a graph pickled before compile(); a three-argument node's
-    write pending at the copy.  A compiled graph cannot be pickled and
-    says so.
+    write pending at the copy; one deep copy's mapping assigned into
+    another deep copy's node, and the original's into a copy's, with the
+    write counts coinciding (taken in: each copy has a lineage of its
+    own).  A compiled graph cannot be pickled and says so.  A shallow copy
+    of the graph (copy.copy) is refused with a TypeError naming
+    copy.deepcopy, behind every wrapper, on both contracts, compiled or
+    not: it shared the graph's record of the writes seen and not its
+    compiled step, and the graph that stepped second after a write to a
+    three-argument node ran the old value.
   oracle: >-
     The value each order leaves in force, stated per order; gm.params, the
     saved configuration and the state after three steps of the copy against
@@ -4102,6 +4119,8 @@ claims:
     - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_graph_not_yet_compiled_is_pickled_with_its_writes_and_a_compiled_one_refuses
     - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_three_argument_node_write_pending_at_the_copy_is_run_by_the_copy
     - tests/core/test_node_params_writes_are_observed.py::test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it
+    - tests/core/test_node_params_writes_are_observed.py::test_a_copys_mapping_assigned_into_another_copys_node_is_taken_in
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_shallow_copy_of_a_graph_is_refused_and_names_the_deep_copy
   status: verified
   notes: >-
     Audit of 2026-10-11 (Q9): copy.deepcopy(gm) after a counted node write

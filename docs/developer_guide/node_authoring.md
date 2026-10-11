@@ -390,7 +390,10 @@ name.
 
 - "Exactly the default" means the same object, or a value of the same type
   that is the same bit for bit: `-0.0` is not the default `0.0`, `2` is not
-  the default `2.0`, a list is not a tuple. A reload passes the default
+  the default `2.0`, a list is not a tuple, and a `NaN` is the default
+  `NaN` only with the same sign and payload (`-nan` is not `nan`; a
+  complex `NaN` built at run time is the complex `NaN` default when its
+  bits are). A reload passes the default
   itself, and only a value that cannot be told from it is known to build
   the same node. A node built with its defaults is not warned about.
 - **The warning is not proof of a loss.** A class that saves an argument
@@ -400,13 +403,27 @@ name.
   that says how to read another argument (`per_minute=True`), an attribute
   put back to its default before the save. Such a class says that it
   answers for its own saving by overriding `to_dict()` (calling the base
-  one is enough), and is then not asked:
+  one is enough), and a config then does not ask it:
 
 <!-- snippet: no-run, reason: fragment: one method of a class the prose describes -->
 ```python
     def to_dict(self):
         return super().to_dict()    # `period` is saved, as `frequency`
 ```
+
+- **Only a config honours an override of `to_dict()`.** `to_dict()` and
+  `GraphManager.to_dict()` write what the override returns, and `from_dict`
+  rebuilds from its `params`, with one exception: for a node whose
+  `update` takes `params`, `GraphManager.to_dict()` writes `node.params`
+  with the live values in place of the `params` the override returns, so
+  a key the override adds there is not saved, and nothing says so.
+  `save_graph_to_usd` writes `params` and never calls `to_dict`, so it asks
+  such a class like any other, and its warning says that the override does
+  not reach a stage. A class that saves an argument under another name is
+  then named at the stage door although its stage reloads bit for bit; one
+  that adds the argument in its override is named because its stage loses
+  it. Hand such an argument to `super().__init__` under its own name, and
+  every door carries it.
 
 - **Silence is not proof that everything is saved.** The rule reads the
   signature of the class's own constructor and nothing else, so these lose
@@ -440,8 +457,8 @@ What a save does not carry, whatever the class does:
 
 | Saved from | `to_dict()` then `from_dict()` | `save_graph_to_usd` then `load_graph_from_usd` |
 |---|---|---|
-| a sharded wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises `TypeError` (the wrapper is not built from `name, timestep, **params`); MADD-ANO-036 |
-| a `HybridNode` | the entry's type is `HybridNode`, and `from_dict` raises: `KeyError` when the registry has no `HybridNode`, `TypeError` when it has | the load raises `TypeError` |
+| a sharded wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises: `KeyError` ("... is not allowed by this load") by default or with a `node_registry` that names only the wrapped node's class, `TypeError` once the wrapper's class is allowed (named in `node_registry`, or `allow_import=True`), because the wrapper is not built from `name, timestep, **params`; MADD-ANO-036 |
+| a `HybridNode` | the entry's type is `HybridNode`, and `from_dict` raises: `KeyError` when the registry has no `HybridNode`, `TypeError` when it has | the load raises: `KeyError` by default or with a `node_registry` without `HybridNode`, `TypeError` once `HybridNode` is allowed |
 
 So a graph that holds a wrapper is saved from the node it wraps: save the
 unwrapped graph, and wrap the node again after loading. A correction
@@ -452,10 +469,16 @@ does not turn it into lists, so write such a config with
 `json.dumps(config, default=lambda a: numpy.asarray(a).tolist())`, or hold
 the constant as nested lists in `params` (as `HeatNode` holds
 `grid_points` and `LBMNode` its `wall_mask`). A list carries no dtype: an
-array written this way is read back at the default float type, so under
-`jax_enable_x64` a float32 array comes back as float64, a float16 or
-bfloat16 array comes back wider in either mode, and the reloaded graph is
-then no longer bit for bit the saved one.
+array written this way is read back at the default float type. Under
+`jax_enable_x64` a float32, float16 or bfloat16 array comes back as
+float64, the state it is applied to is promoted, and the reloaded graph
+drifts from the saved one (1e-7 to 3e-7 after five steps in a state of
+order one, in the cases measured). With x64 off it comes back as float32, which holds every
+float16 and bfloat16 value exactly: a node that applies such a constant to
+a float32 state reloads bit for bit. A node that computes in the
+constant's own dtype (a float16 state built from its dtype, say) does not,
+in either mode: the reloaded node computes in float32 or float64 (4e-4 off
+for float16 and 2e-3 for bfloat16 after five steps in the case measured).
 
 ## Boundary Input Specification
 

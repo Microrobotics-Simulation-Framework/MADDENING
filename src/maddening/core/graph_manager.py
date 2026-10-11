@@ -469,6 +469,31 @@ class GraphManager:
             for name, spec in self._nodes.items()
         }
 
+    def __copy__(self):
+        """``copy.copy(gm)`` is refused (``TypeError``): use
+        ``copy.deepcopy(gm)``.
+
+        A shallow copy would share this graph's nodes, its parameter tree
+        and its record of the ``node.params`` writes it has taken in
+        (``_node_writes_seen``), but not its compiled step or its dirty
+        flag.  So after a ``node.params`` write the first of the two graphs
+        to sync took the write in for both, and only that one recompiled:
+        with a node whose ``update`` takes no ``params`` (its constants
+        baked into the step), the other went on running the old value
+        while ``node.params`` and ``to_dict()`` of both said the new one,
+        with nothing said.  Giving each graph a record of its own instead
+        makes the second sync write the node's value again into the shared
+        tree, over a calibration made through the first graph after it had
+        taken the write in.  No sharing of half a graph is exact, so none
+        is made.  A deep copy (or a pickle of a graph not yet compiled) is
+        a graph of its own that runs and reports what the original does.
+        """
+        raise TypeError(
+            "copy.copy() of a GraphManager is refused: a shallow copy would share "
+            "the graph's nodes, parameter tree and record of node.params writes but "
+            "not its compiled step, so after a write one of the two graphs would run "
+            "a value neither reports.  Use copy.deepcopy(gm) for a graph of its own.")
+
     def _merge_live_params(self, fresh: dict, live: Optional[dict]) -> dict:
         """``fresh`` (the nodes' own values) with every leaf of ``live``
         (``gm.params``) that still fits written over it; leaves that no
@@ -7239,6 +7264,12 @@ class GraphManager:
         <maddening.core.node.SimulationNode.to_dict>` for the rule, which
         goes by the argument's name, and for what it cannot tell); in
         every release before 0.4.0 nothing said so (MADD-ANO-273).  A
+        class that overrides ``to_dict`` is not asked: the entry is what
+        the override returns, except that for a node whose ``update``
+        takes ``params`` the entry's ``params`` are these effective values,
+        so a key the override adds to them is not saved, and nothing says
+        so.  (:func:`~maddening.usd.serialization.save_graph_to_usd` asks
+        such a class too: a stage carries ``params`` only.)  A
         node inside a ``HybridNode`` is written with the type
         ``HybridNode``, which :meth:`from_dict` cannot rebuild (it raises);
         one inside a sharded wrapper is rebuilt unsharded, with a warning.
@@ -7282,13 +7313,17 @@ class GraphManager:
         -- which :meth:`from_dict` reads back.  A list carries no dtype:
         it comes back at the default float type.  With
         ``jax_enable_x64`` off a float32 or a float64 array reloads bit
-        for bit (JAX computes with both as float32); with it on only a
-        float64 array does, and a float32 array comes back as float64 and
-        the reloaded graph drifts from the saved one (3e-7 in a state of
-        order one after five steps, measured).  A float16 or bfloat16
-        array comes back wider in either case (1e-4 to 5e-3 off after
-        five steps in the cases measured).  :meth:`from_dict` of the
-        result as it stands is exact in every case.  A
+        for bit (JAX computes with both as float32), and so does a float16
+        or bfloat16 array applied to a float32 state (float32 holds each of
+        its values exactly); with it on only a float64 array does, and a
+        float32, float16 or bfloat16 array comes back as float64 and the
+        reloaded graph drifts from the saved one (1e-7 to 3e-7 in a state
+        of order one after five steps, in the cases measured).  A node
+        that computes in a float16 or bfloat16 constant's own dtype (a
+        state built from it) computes in the wider type after the reload,
+        in either mode (4e-4 and 2e-3 off after five steps in the case
+        measured).  :meth:`from_dict` of the result as it stands is exact
+        in every case.  A
         node that holds such a constant as nested lists (``HeatNode``'s
         ``grid_points``, ``LBMNode``'s ``wall_mask``) needs neither.
         :meth:`from_dict` turns those back into floats, and reads the

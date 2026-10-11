@@ -14,8 +14,8 @@ GraphManager.
 import copy
 import functools
 import inspect
-import math
 import os
+import struct
 import warnings
 import weakref
 from abc import ABC, abstractmethod
@@ -186,8 +186,10 @@ class _ParamsDict(dict):
 
     Copies.  ``copy.deepcopy`` and ``pickle`` carry the counts and the
     lineage with the items (:meth:`__reduce__`).  A graph copied with its
-    nodes holds, beside each node's mapping, the counts it last saw there
-    (``GraphManager._node_writes_seen``); those are copied as they are, so
+    nodes (a deep copy or a pickle: ``copy.copy(gm)`` is refused, see
+    ``GraphManager.__copy__``) holds, beside each node's mapping, the
+    counts it last saw there (``GraphManager._node_writes_seen``); those
+    are copied as they are, so
     the mapping's own counts must be too, or the copy's first sync reads
     "fewer writes than I saw" as a write and puts the node's value over a
     leaf calibrated in ``gm.params`` since.  Until 0.4.0 shipped such a copy
@@ -330,7 +332,10 @@ def _same_value(a, b) -> bool:
     """Bit-for-bit equality of two parameter values, element by element:
     a ``NaN`` equals itself and ``-0.0`` is not ``0.0``, so an unchanged
     value never reads as written and a written one never reads as
-    unchanged."""
+    unchanged.  A Python ``float`` or ``complex`` is compared by its bit
+    pattern, as an array is: a ``NaN`` equals a ``NaN`` of the same sign
+    and payload only (``-nan`` is not ``nan``), and a complex ``NaN``
+    equals itself."""
     if type(a) is not type(b):
         return False
     if isinstance(a, np.ndarray):
@@ -348,7 +353,9 @@ def _same_value(a, b) -> bool:
         return (a.shape == b.shape and a.dtype == b.dtype
                 and np.asarray(a).tobytes() == np.asarray(b).tobytes())
     if isinstance(a, float):
-        return (a == b and math.copysign(1.0, a) == math.copysign(1.0, b)) or (a != a and b != b)
+        return struct.pack("<d", a) == struct.pack("<d", b)
+    if isinstance(a, complex):
+        return struct.pack("<dd", a.real, a.imag) == struct.pack("<dd", b.real, b.imag)
     try:
         return bool(a == b)
     except Exception:   # noqa: BLE001 - an incomparable value is unchanged only if it is the same object
@@ -881,10 +888,15 @@ def _is_the_default(value: Any, default: Any) -> bool:
     ``2`` is not the default ``2.0`` (an integer state multiplied by it
     stays an integer, and by the float does not), ``np.float32(2.0)`` is
     not ``2.0`` (it carries a dtype), a list is not a tuple and an array is
-    not a tuple of the same numbers.  A ``NaN`` is the default ``NaN``.
-    Anything that cannot be compared is not the default.  Until this was
-    made exact the first two were taken for the default, and a node built
-    with them lost the argument with nothing said."""
+    not a tuple of the same numbers.  A ``NaN`` is the default ``NaN``
+    only with the same sign and payload (``-nan`` is not the default
+    ``nan``: a reload passes ``nan`` and the sign is lost), a complex
+    ``NaN`` is a complex ``NaN`` default with the same bits, and anything
+    that cannot be compared is not the default.  Until this was made exact
+    the first two were taken for the default, and a node built with them
+    lost the argument with nothing said; until the bits of a ``float`` and
+    a ``complex`` were compared, so was a ``-nan``, and an equal complex
+    ``NaN`` was warned of."""
     if value is default:
         return True
     try:
@@ -935,7 +947,7 @@ def _note_constructor_arguments(node: Any, cls: type, args: tuple, kwargs: dict)
         return
 
 
-def _unsaved_constructor_arguments(node: "SimulationNode") -> list[str]:
+def _unsaved_constructor_arguments(node: "SimulationNode", *, stage: bool = False) -> list[str]:
     """The constructor arguments of ``node`` that are not in its saved
     entry, sorted: named parameters of its class's ``__init__`` (its own,
     or the one it inherits) that it was constructed with a value other than
@@ -965,16 +977,23 @@ def _unsaved_constructor_arguments(node: "SimulationNode") -> list[str]:
     * a node whose arguments were not seen when it was created: a class,
       or a mixin before ``SimulationNode`` in its bases, whose own
       ``__new__`` hands no arguments on; a copy; an unpickled node;
-    * a node of a class that overrides ``to_dict``, which answers for its
-      own saving (the sharded wrappers and ``HybridNode`` save the node
-      they wrap, which is asked in its own right);
+    * at the config door (``stage`` false), a node of a class that
+      overrides ``to_dict``, which answers for its own saving (the sharded
+      wrappers and ``HybridNode`` save the node they wrap, which is asked
+      in its own right).  A USD stage (``stage`` true) carries ``params``
+      and never what ``to_dict`` returns, so there such a class is asked
+      like any other.  A config honours what the override returns under
+      ``params`` only for a node whose ``update`` takes no ``params``:
+      for one whose ``update`` takes them, ``GraphManager.to_dict`` writes
+      ``node.params`` with the live values in their place, so a key the
+      override adds is not saved, and is not reported either;
     * an attribute written after construction (``node.stiffness = 40.0``),
       which no save carries either;
     * ``name`` and ``timestep``, which the entry carries beside ``params``,
       and ``geometry_source``, which the base constructor takes out of
       ``params`` and nothing saves.
     """
-    if type(node).to_dict is not SimulationNode.to_dict:
+    if not stage and type(node).to_dict is not SimulationNode.to_dict:
         return []
     entry = _CONSTRUCTED_WITH.get(id(node))
     if entry is None or entry[0]() is not node:
@@ -985,15 +1004,17 @@ def _unsaved_constructor_arguments(node: "SimulationNode") -> list[str]:
     return sorted(name for name in entry[1] if name not in params)
 
 
-def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
+def _warn_of_unsaved_constructor_arguments(node: "SimulationNode", *, stage: bool = False) -> None:
     """``UserWarning`` naming the node, its class, the arguments
     :func:`_unsaved_constructor_arguments` finds, what a reload does
     instead, and the fix.  A warning and not an error: an error would stop
     every such node from being saved at all, and a node built with its
     defaults saves correctly.  Called by every door that saves a node's
     constants: ``SimulationNode.to_dict`` (a config, ``GET /graph``, the
-    reply to ``POST /graph/nodes``) and ``save_graph_to_usd``.  Given a
-    wrapper, it asks the node the wrapper's constants belong to."""
+    reply to ``POST /graph/nodes``) and, with ``stage`` true,
+    ``save_graph_to_usd``, which carries ``params`` only and so asks a
+    class that overrides ``to_dict`` too.  Given a wrapper, it asks the
+    node the wrapper's constants belong to."""
     # A wrapper's constants are its node's (``_params_owner``): a door that
     # saves a wrapper by its ``params`` (the USD writer) is told of the node.
     for _ in range(8):
@@ -1001,7 +1022,7 @@ def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
         if owner is None:
             break
         node = owner
-    names = _unsaved_constructor_arguments(node)
+    names = _unsaved_constructor_arguments(node, stage=stage)
     if not names:
         return
     cls = type(node)
@@ -1021,6 +1042,13 @@ def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
     if required:
         outcomes.append(f"cannot build the node ({', '.join(required)}: no default)")
     one = len(names) == 1
+    if stage and cls.to_dict is not SimulationNode.to_dict:
+        # The config door's way out does not reach a stage.
+        another_way = (f"{cls.__name__} overrides to_dict(), which a USD stage does not "
+                       f"honour: a stage carries params only.")
+    else:
+        another_way = (f"or, if the node saves {'it' if one else 'them'} another way, "
+                       f"override to_dict() to say so.")
     warnings.warn(
         f"node {node.name!r} ({cls.__name__}) does not save the constructor "
         f"argument{'' if one else 's'} {', '.join(names)}.  {cls.__name__}'s constructor (or one it "
@@ -1030,8 +1058,7 @@ def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
         f"**params): a graph loaded from this save {' and '.join(outcomes)}.  Hand "
         f"{'it' if one else 'them'} on -- super().__init__(name, timestep, "
         f"{', '.join(f'{name}={name}' for name in names)}) -- and read {'it' if one else 'them'} "
-        f"from self.params; or, if the node saves {'it' if one else 'them'} another way, "
-        f"override to_dict() to say so.",
+        f"from self.params; {another_way}",
         UserWarning, stacklevel=2, skip_file_prefixes=(_PACKAGE_DIR,),
     )
 
@@ -2161,7 +2188,11 @@ class SimulationNode(ABC):
         not an error, so that such a node can still be saved.  The rule
         goes by the argument's name, so a class that saves an argument
         another way is named as well: it overrides ``to_dict`` (calling
-        this one is enough), and is then not asked.
+        this one is enough), and is then not asked here.  A USD stage
+        carries ``params`` only, so ``save_graph_to_usd`` asks such a class
+        all the same; and ``GraphManager.to_dict`` writes, for a node whose
+        ``update`` takes ``params``, ``node.params`` with the live values in
+        place of the ``params`` an override returns.
         """
         _warn_of_unsaved_constructor_arguments(self)
         return {

@@ -26,6 +26,7 @@ import inspect
 import json
 import pickle
 import re
+import struct
 import warnings
 
 import jax.numpy as jnp
@@ -324,6 +325,47 @@ def test_a_zero_of_the_other_sign_and_an_int_for_a_float_are_not_the_default():
         Counter("n", DT, factor=2).to_dict()
     want, got = _reloaded_states(Counter("n", DT, factor=2))
     assert int(want[-1]) == 24 and isinstance(got, ValueError)     # the reload cannot step
+
+
+_NAN = float("nan")
+
+
+class _SignOfNaN(SimulationNode):
+    """Keeps a ``NaN`` threshold and a complex ``NaN`` as attributes; the
+    step carries the sign of the threshold into the state."""
+
+    def __init__(self, name, timestep, level=_NAN, phase=complex(_NAN, 0.0)):
+        super().__init__(name, timestep)
+        self.level, self.phase = level, phase
+
+    def initial_state(self):
+        return {"x": jnp.asarray(1.5, jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": jnp.copysign(state["x"], jnp.float32(self.level))}
+
+
+def test_a_nan_is_its_default_only_with_the_same_bits():
+    """"The same type, bit for bit" means bits: a ``-nan`` for a ``nan``
+    default is not the default (the reload passes ``nan`` and the sign is
+    lost: 1.5 against -1.5 here), nor is a ``nan`` with another payload;
+    a ``nan`` or a complex ``nan`` built at run time with the default's
+    bits is, and saves in silence.  (The ``NaN`` branch used to ignore sign
+    and payload, and a complex value was compared with ``==``, which a
+    complex ``NaN`` never passes.)"""
+    payload = struct.unpack("<d", struct.pack("<Q", 0x7FF8000000000001))[0]
+    for given in ({"level": -float("nan")}, {"level": payload}):
+        with pytest.warns(UserWarning, match=f"{WARNING} level"):
+            _SignOfNaN("n", DT, **given).to_dict()
+    defaults = dict(zip(("level", "phase"), _SignOfNaN.__init__.__defaults__))
+    for key, value in (("level", float("nan")), ("phase", complex(float("nan"), 0.0)),
+                       ("phase", complex("nan"))):
+        assert value is not defaults[key]                   # the bits are compared, not identity
+        assert _SignOfNaN("n", DT, **{key: value}).to_dict()["params"] == {}   # warnings are errors
+    want, got = _reloaded_states(_SignOfNaN("n", DT, level=-float("nan")))
+    assert float(want[-1]) == -1.5 and float(got[-1]) == 1.5          # the loss it warns of
+    want, got = _reloaded_states(_SignOfNaN("n", DT, phase=complex(float("nan"), 0.0)))
+    assert all(a.tobytes() == b.tobytes() for a, b in zip(want, got))  # nothing is lost
 
 
 class _KeepsGain(SimulationNode):

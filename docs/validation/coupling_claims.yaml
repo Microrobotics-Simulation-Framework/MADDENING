@@ -7152,7 +7152,17 @@ claims:
     member's flux, a shape that settles in the third sweep and one the
     second sweep hands before it settles are refused; shapes that never
     settle are assumed, with that reason; an edge a later edge replaces is
-    read by nothing.  Not claimed for float64, mixed dtypes, 16-bit
+    read by nothing from the second sweep on, whatever it delivered, and
+    in the first sweep where the replacing edge's flux is not computed yet
+    (every flux producer is swept as the pass seeds it): a loop through
+    such an input is refused, the guide's Robin pair with such edges
+    compiles, and a first-sweep read of the replaced value that makes a
+    chain too long is refused.  Sub-programs (a jitted helper, with a
+    custom derivative inside) are compared by structure: a ring of fluxes
+    computed from the state through one compiles; a difference in a host
+    callback is counted and said to be assumed.  A hook that cannot be
+    traced is named so, with the tracer's error, and an input that cannot
+    be derived is named with the edge that makes it so.  Not claimed for float64, mixed dtypes, 16-bit
     floats, gradients, vmap, multi-rate graphs, sub-cycled groups,
     predictors and warm starts, run_adaptive, checkpoints or sharded
     graphs.
@@ -7194,6 +7204,14 @@ claims:
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_whose_value_a_later_edge_replaces_is_read_by_nothing
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_reads_only_the_shape_of_an_input_compiles
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_raises_key_error_is_told_which_dict_it_indexed
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_right_robin_pair_whose_inputs_a_replaced_edge_reaches_first_compiles
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_difference_in_a_parameter_that_cannot_be_compared_is_reported_as_assumed
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_two_hooks_that_cannot_be_traced_are_reported_as_such_with_the_tracers_error
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_whose_rule_fails_leaves_its_input_underivable_unless_a_later_edge_replaces_it
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_group_whose_edge_rule_fails_is_refused_naming_the_edge
   status: verified
   domains:
     f32: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution

@@ -221,6 +221,11 @@ these are its edges:
   not know (a custom derivative's call among them) keeps every input,
   so a flux can be taken to read an input it does not use, and a group
   refused that would be right; never the reverse.
+* *what a flux reaches is not asked*: a flux an edge of the group
+  carries is held to the criterion whether or not its value reaches a
+  state, so a loop, or a chain too long for the seed, among fluxes that
+  no update reads (directly or through other fluxes) is refused though
+  it changes no state.
 
 (A seeding sweep hands a member its inputs without the ones a flux not
 yet computed delivers, so a hook must return its fluxes without such a

@@ -19142,7 +19142,21 @@ anomalies:
       a loop that was never asked about; 1.1e-2 off on one such pair).  Both
       are outside the node contract.  `check_conservation` refuses every
       pair whose flux edges form a loop, also where each flux is computed
-      from the state and the group compiles.
+      from the state and the group compiles.  Within the contract the
+      question is asked of one configuration: the hooks are traced at the
+      node's own `timestep` (under `run_adaptive` the step hands a `dt`
+      chosen at run time, so a hook whose structure follows `dt` is asked
+      about at one value); a geometry-anchored mapping's value is derived
+      from the shape of its geometry field in the state at compile, which
+      has not been compared edge by edge against an instrumented pass as
+      the edges without a geometry have (0 disagreements over 1,200 random
+      graphs); a flux edge from outside the group is not read by the step
+      (MADD-ANO-156) and makes its input underivable; a flux is held to
+      the criterion whether or not its value reaches a state, so a loop
+      among fluxes that no update reads is refused though it changes no
+      state; and a difference between two traces in an operation whose
+      parameter is a function or an object the comparison cannot look into
+      (a host callback) is counted as a read and said to be assumed.
     verification:
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_that_read_each_other_in_a_loop_are_refused"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_whose_seed_the_pass_reads_too_early_is_refused"
@@ -19157,4 +19171,7 @@ anomalies:
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution"
     github_issue: null

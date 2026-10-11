@@ -1721,17 +1721,22 @@ def run_gradient_cg(args, mesh, n_cg: int, rng) -> dict:
 
     ``sharded_cg(differentiable=True)``, which the derivatives are taken
     through, cannot report an iteration count (``iters`` is -1: the solve
-    is behind ``lax.custom_linear_solve``), and its ``converged`` is the
-    float32 true residual against ``rtol`` with no slack, which reads
+    is behind ``lax.custom_linear_solve``).  So the count recorded here is
+    the loop's own (the same solve without ``differentiable``), and
+    :func:`gradient_cg_checks` holds it under the cap: the loop has two
+    exits, its tolerance and ``max_iters``.
+
+    The ``converged`` recorded beside it is that same call's flag, and it
+    is information, not a check.  ``sharded_cg`` reports the float32 true
+    residual against ``rtol`` with no slack (on every route from 0.4.0; the
+    loop reported its recursively updated residual before), which reads
     ``False`` on a converged solve whenever the loop stopped within the
     float32 floor of the tolerance (measured at 1024 unknowns with a
     shift of 0.01 and a smooth right-hand side: stopped after 75 of 3000
-    iterations, true residual 1.04e-4).  So the
-    flag and the count recorded here are the loop's own (the same solve
-    without ``differentiable``: it stopped on its tolerance, after so many
-    iterations), and convergence is decided on the true residual of each
-    of the three solves (``CG_SOLVES``), measured on the host against
-    ``LIMITS["krylov_residual"]``.
+    iterations, true residual 1.04e-4).  On this goal's system it reads
+    within about 12 % of ``CG_RTOL``.  Convergence is decided on the true
+    residual of each of the three solves (``CG_SOLVES``), measured in
+    float64 on the host against ``LIMITS["krylov_residual"]``.
     """
     matvec_ref = _laplacian_matvec_unsharded()
     matvec_sh = _laplacian_matvec_sharded(mesh)
@@ -1885,15 +1890,31 @@ def gradient_checks(results: list, n_devices: int) -> list:
     return checks
 
 
+def _stopped_before_its_cap(iterations, cap) -> bool:
+    """Whether a CG loop that took *iterations* steps under a cap of *cap*
+    stopped on its tolerance.
+
+    The loop has two exits, its tolerance and the cap, so a count from 1 to
+    ``cap - 1`` is the first.  Anything else is not: the cap itself, no
+    step at all, -1 (what ``differentiable=True`` reports for "no count"),
+    or a value that is not a count.
+    """
+    return _is_count(iterations) and _is_count(cap) and 0 < iterations < cap
+
+
 def gradient_cg_checks(cg: dict) -> list:
     """The checks of one size's ``sharded_cg`` entry: the two derivatives
     against the unsharded ones, and that each side's solves converged.
 
     Parity alone passes two solves that failed alike -- it did, until
     schema 7, at every size of the session.  So each side must have stopped
-    on its tolerance and not on the iteration cap (the loop's own flag),
-    and the true residual of each of its three solves must be within
-    ``LIMITS["krylov_residual"]``.
+    on its tolerance and not on the iteration cap -- its iteration count
+    under the cap (:func:`_stopped_before_its_cap`) -- and the true
+    residual of each of its three solves must be within
+    ``LIMITS["krylov_residual"]``.  The recorded ``converged`` flag is not
+    read: it is the float32 residual against ``rtol`` with no allowance,
+    within rounding's reach of the tolerance on a converged solve (see
+    :func:`run_gradient_cg`), and the float64 residuals decide.
     """
     checks = _parity_checks(f"{cg['dof']} dof sharded_cg grad vs unsharded",
                             cg["grad_parity"], LIMITS["krylov"])
@@ -1904,7 +1925,7 @@ def gradient_cg_checks(cg: dict) -> list:
         prefix = f"{cg['dof']} dof sharded_cg {side}"
         checks.append(check_that(
             f"{prefix} solve stopped on its tolerance, not on the iteration cap",
-            solve["converged"] is True,
+            _stopped_before_its_cap(solve["iterations"], cg["max_iters"]),
             detail=f"{solve['iterations']} iterations, cap {cg['max_iters']}"))
         checks += [check(f"{prefix} {which} true residual", solve["true_residual"][which],
                          LIMITS["krylov_residual"]) for which in CG_SOLVES]

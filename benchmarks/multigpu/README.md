@@ -54,7 +54,12 @@ converge on in 55 to 58 iterations a solve at every size (condition number
 solves -- the solve, the adjoint solve behind the gradient and the tangent
 solve behind the jvp -- must have converged: the loop stopped on its
 tolerance and not on its cap, and the true residual `|rhs - A x| / |rhs|`,
-computed on the host in float64, is within 2e-4.  Until schema 7 these
+computed on the host in float64, is within 2e-4.  "Stopped on its
+tolerance" is read from the loop's iteration count, which must be under
+the cap (the loop has those two exits); the `converged` flag in the record
+is information, not a check: it is `sharded_cg`'s float32 residual against
+`rtol` with no allowance, which lands within about 12 % of `CG_RTOL` here.
+Until schema 7 these
 rows solved the unshifted operator, on which no float32 solve converges
 (true residual 6e2 to 2e4 at the session's sizes after all 3000
 iterations), and passed on parity alone, within 8 % of their limit at
@@ -279,8 +284,23 @@ mkdir -p results/multigpu
   nvidia-smi; pip freeze | grep -iE "^(jax|jaxlib|jax-cuda|lineax|equinox|numpy|scipy)"; } \
     > results/multigpu/session.txt 2>&1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_DEFAULT_MATMUL_PRECISION=highest       # float32 matrix products at float32 (below)
+env | grep -E "^(JAX|XLA)_" >> results/multigpu/session.txt
 set -o pipefail
 ```
+
+**Float32 matrix products.**  On an NVIDIA card JAX computes float32
+matrix products at reduced precision unless told otherwise
+(`jax_default_matmul_precision`; this project has seen the default move a
+float32 trajectory by 15 % on an RTX A2000, and `highest` remove the
+difference).  `LBMNode` computes its momentum and its `e . u` with matrix
+products, so the D2Q9 cases of `stencil` and the D3Q19 lattice of the
+capacity test are the goals it reaches.  The session asks whether a
+sharded run equals the unsharded one, not what that default does, so every
+goal runs with `JAX_DEFAULT_MATMUL_PRECISION=highest`, and `session.txt`
+records the variable.  What the default does to the lattice is measured
+once, in the stress tail, and gates nothing.  On CPU the setting changes
+nothing, so no dry run could have shown either number.
 
 A dirty tree is the stop condition of section 3, before anything is
 spent on goals.  Run `git status --porcelain` again after the last goal:
@@ -450,6 +470,7 @@ when they are up, stop, whatever is left.
 | (b) the pencil's ramp, five rungs | about 1 min a rung | 120 s a rung |
 | (b) the soak | 3 min, and its last block | 7 min |
 | (b) the 1-D mesh, two rungs | about 1 min a rung | 120 s a rung |
+| (c) `stencil` at 1e5 cells with the default matmul precision | 1–2 min | 10 min |
 | (a) `forward` at 1e8 cells, last and only if time is left | 7–9 min | 9 min |
 
 The expected times are estimates: (a) from the CPU dry run below, (b)
@@ -612,6 +633,23 @@ fullest by about a byte per cell.  The lattice is `LBMNode` with two methods the
 at construction answered by the script, because `ShardedStencilNode`
 otherwise builds the whole grid on the default device before placing a
 block (MADD-ANO-262).
+
+### (c) The default matmul precision, once
+
+Every goal ran with `JAX_DEFAULT_MATMUL_PRECISION=highest` (section 2a).
+This is the same `stencil` goal with the variable unset, at the smallest
+size, into a directory of its own:
+
+```sh
+env -u JAX_DEFAULT_MATMUL_PRECISION timeout 10m python benchmarks/multigpu/run_pod.py \
+    --goal stencil --cells 100000 --out results/stress/stencil-default-precision 2>&1 \
+    | tee results/stress/stencil-default-precision.log;  echo $?
+```
+
+Any exit status is a result here.  Read the `lbm` rows against the gate's
+own `stencil.json`: whether sharded still equals unsharded at the default
+precision (the two sides round the same products), and how far the
+lattice's velocities are from the ones computed at `highest`.
 
 **Copy back** `results/stress/`, `results/capacity-2x2/`,
 `results/capacity-4x1/` and the `*.log` and `*.txt` beside them, with
@@ -821,7 +859,8 @@ compile without execution.
   `max_iters`; `input_presharded`, `grad_sharded`, `grad_unsharded`,
   `compile_s.{sharded,unsharded}`, `grad_parity`, `jvp_parity`, and
   `solve.{sharded,unsharded}` = `converged` and `iterations` (the loop's
-  own flag and count), `true_residual.{solve,adjoint,tangent}`).
+  own count, which the goal holds under `max_iters`, and the same call's
+  flag, recorded as information), `true_residual.{solve,adjoint,tangent}`).
 
 Schema 8 files held the `forward` goal's float `total` to 1e-5 of
 itself and did not count the cells: they record no step from a field of

@@ -21,10 +21,12 @@
 #   docker run --rm --network none --cap-add NET_ADMIN \
 #     --cpuset-cpus=0-3 --memory=8g \
 #     -v "$PWD":/src:ro maddening-streaming-test \
-#     python3 -m pytest tests/cloud/test_webrtc_loopback.py -q -p no:cacheprovider
+#     python3 -m pytest tests/cloud/test_webrtc_loopback.py \
+#       tests/cloud/test_entrypoint_streams.py -q -p no:cacheprovider
 #
 # --network none keeps the container off every network; no STUN or TURN
-# server is contacted.  --cap-add NET_ADMIN lets the entry point
+# server is contacted, and the cloud entry point the second module runs
+# serves its API and signaling socket on loopback inside the container.  --cap-add NET_ADMIN lets the entry point
 # (docker/streaming-test-entrypoint.sh) add a veth pair inside that
 # network-less container, because libnice never gathers ICE candidates on
 # the loopback interface, which is all --network none leaves.  No GPU is

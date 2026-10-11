@@ -3988,7 +3988,8 @@ claims:
     the same from both doors; the reloaded graph is the default graph);
     the same node handing its constants to super().__init__ (no warning,
     the reload steps bit for bit); an argument at exactly its default (the
-    same float, an equal tuple of floats, None: not reported); an argument
+    same float or an equal one built at run time, the same tuple of floats
+    or an equal one built at run time, None: not reported); an argument
     that is not exactly its default -- another number, a NaN, an int or a
     NumPy scalar or a bool for a float, a zero of the other sign, a list or
     an array for a tuple, another length, an array where the default is
@@ -3997,8 +3998,9 @@ claims:
     class that inherits its parent's constructor (reported); a node that
     saves an argument under another spelling or reads it through a flag
     (reported although it reloads bit for bit; silent once its class
-    overrides to_dict); every concrete node class the package exports with
-    every named constructor parameter off its default, inherited ones
+    overrides to_dict); every concrete node class that maddening.nodes and
+    maddening.nodes.adaptive export, with every named constructor
+    parameter off its default (the wavelet node's included), inherited ones
     included (a test holds the table to that), and an LBMNode with no
     wall_mask (not reported); a HybridNode around such a node, by to_dict
     and by the USD writer, and the sharded wrappers by to_dict (the wrapped

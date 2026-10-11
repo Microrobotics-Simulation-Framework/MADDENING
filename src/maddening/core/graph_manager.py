@@ -7279,13 +7279,16 @@ class GraphManager:
         valid for every graph.  :meth:`from_dict` takes the result as it
         stands, and for JSON write the arrays as lists --
         ``json.dumps(config, default=lambda a: numpy.asarray(a).tolist())``
-        -- which :meth:`from_dict` reads back.  A list carries no dtype,
-        so the reloaded graph steps bit for bit as this one only where
-        the default float type is the array's: with ``jax_enable_x64``
-        off, any float array; with it on, a float32 array comes back as
-        float64 and the reloaded graph drifts from the saved one (3e-7 in
-        a state of order one after five steps, measured), while
-        :meth:`from_dict` of the result as it stands is exact in both.  A
+        -- which :meth:`from_dict` reads back.  A list carries no dtype:
+        it comes back at the default float type.  With
+        ``jax_enable_x64`` off a float32 or a float64 array reloads bit
+        for bit (JAX computes with both as float32); with it on only a
+        float64 array does, and a float32 array comes back as float64 and
+        the reloaded graph drifts from the saved one (3e-7 in a state of
+        order one after five steps, measured).  A float16 or bfloat16
+        array comes back wider in either case (1e-4 to 5e-3 off after
+        five steps in the cases measured).  :meth:`from_dict` of the
+        result as it stands is exact in every case.  A
         node that holds such a constant as nested lists (``HeatNode``'s
         ``grid_points``, ``LBMNode``'s ``wall_mask``) needs neither.
         :meth:`from_dict` turns those back into floats, and reads the

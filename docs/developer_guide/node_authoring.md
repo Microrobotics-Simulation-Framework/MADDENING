@@ -451,10 +451,11 @@ An array in `params` is saved as the array it is. `GraphManager.to_dict()`
 does not turn it into lists, so write such a config with
 `json.dumps(config, default=lambda a: numpy.asarray(a).tolist())`, or hold
 the constant as nested lists in `params` (as `HeatNode` holds
-`grid_points` and `LBMNode` its `wall_mask`). A list carries no dtype: a
-float32 array written this way is read back at the default float type, so
-under `jax_enable_x64` it comes back as float64 and the reloaded graph is
-no longer bit for bit the saved one.
+`grid_points` and `LBMNode` its `wall_mask`). A list carries no dtype: an
+array written this way is read back at the default float type, so under
+`jax_enable_x64` a float32 array comes back as float64, a float16 or
+bfloat16 array comes back wider in either mode, and the reloaded graph is
+then no longer bit for bit the saved one.
 
 ## Boundary Input Specification
 

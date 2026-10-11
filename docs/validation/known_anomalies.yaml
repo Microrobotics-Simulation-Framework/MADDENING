@@ -19169,8 +19169,9 @@ anomalies:
       statements on the unwrapped node ran the new one.  On the 0.4.0
       development tree: a `ShardedStencilNode` on two devices around a
       16-cell `HeatNode` (length 1, time step 2e-3, initial temperatures
-      between 300 and 340), its diffusivity assigned from 0.01 to 0.02, ran
-      four steps to a temperature 3.0e-3 (largest difference over largest
+      `300 + 40 * numpy.random.default_rng(5).random(16)` in float32), its
+      diffusivity assigned from 0.01 to 0.02 after `compile()`, ran four
+      steps to a temperature 3.0e-3 (largest difference over largest
       value) from the run constructed at 0.02 and identical to the run at
       0.01.  Found by the whole-tree audit of
       2026-10-10.

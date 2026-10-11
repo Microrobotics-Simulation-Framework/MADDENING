@@ -999,6 +999,30 @@ def test_the_ramp_goes_on_after_a_pass_whose_process_was_killed_on_its_way_out(t
     _the_summary_agrees(out, summary, status, text)
 
 
+def test_a_soak_ended_after_a_failed_block_is_check_failed_by_that_blocks_checks(left):
+    """A soak writes each block's checks as it goes and its own last.  One
+    recorded as ``check failed`` with a failed block and no checks of its
+    own agrees with itself; nothing else without checks does."""
+    def without_checks(record, **changes):
+        return rc.rederive({k: v for k, v in {**record, **changes}.items() if k != "checks"})
+
+    ended = without_checks(left["soak, a block failed (running)"], outcome="check failed")
+    assert ended["outcome"] == "check failed" and ended["problems"] == []
+    assert ended["failed"] == ["f vs the tiled reference max_rel"]
+    # ... the failure must be in a block: an outcome the blocks do not bear out
+    # is still a problem, and so is a pass, or a rung, that records no checks.
+    unsupported = without_checks(left["soak, its blocks passed (running)"],
+                                 outcome="check failed")
+    assert unsupported["problems"] == [
+        "it is recorded as a failed check, but no check fails by its own values"]
+    assert "it records no checks" in without_checks(left["soak, every block passed (done)"]
+                                                    )["problems"]
+    assert "it records no checks" in without_checks(left["rung, a check failed (done)"]
+                                                    )["problems"]
+    blockless = without_checks(left["soak, a block failed (done)"], blocks=[])
+    assert "it records no checks" in blockless["problems"]
+
+
 # --- --summarise re-derives; the runner's summary reads none of it --------------
 
 

@@ -6841,16 +6841,26 @@ claims:
   claim: >-
     The exit statuses of the header: "0 every rung that ran to its checks
     passed them (an out-of-memory or a time-out above a passing rung is a
-    result, and is recorded); 1 a check failed, in a rung or in the soak; 2
+    result, and is recorded); 1 a check failed, in a rung or in the soak,
+    however the process that recorded it then ended; 2
     an option was refused; 3 --summarise only: a record cannot be read, or
     its recorded verdict disagrees with its own values; 5 this script itself
     raised; 6 no ceiling: the first rung did not pass". "The ramp stops at
     the first rung that did not pass; the summary names the ceiling -- the
     largest size that passed, its fill, and what stopped the next one." A
     rung ends as exactly one of passed, check failed, out of memory, timed
-    out, crashed, or never starts (refused by the host guard).
+    out, crashed, or never starts (refused by the host guard). "The record
+    a rung left decides before the way its process ended does. A record
+    that holds a failed check is check failed however the process ended:
+    with any status, killed, or at its time box. A record that is complete,
+    every check passed, is passed also when the process was then killed,
+    ran out its time box or was ended by another signal on its way out",
+    and the ramp and --summarise give every such record the same outcome
+    and the same status.
   sources:
     - benchmarks/multigpu/run_capacity.py::classify
+    - benchmarks/multigpu/run_capacity.py::_ended_from_outside
+    - benchmarks/multigpu/run_capacity.py::passes_not_ended_cleanly
     - benchmarks/multigpu/run_capacity.py::ramp_status
     - benchmarks/multigpu/run_capacity.py::run_ramp
     - benchmarks/multigpu/run_capacity.py::summarise
@@ -6867,18 +6877,34 @@ claims:
     same as a first rung; a failed check above a passing rung and in a soak
     block; a host with too little memory; a real process past a time box of
     0.05 s; a ramp ended by SIGTERM; and a passing run's records tampered
-    with eleven ways before --summarise. A real allocator refusal on an
-    accelerator is not exercised.
+    with eleven ways before --summarise. The record before the ending:
+    eight records taken from real dry runs at each write (a rung's with a
+    failed check, complete and passed, still running, and one with checks
+    and no verdict; a soak's with a failed block before and after its last
+    write, with passed blocks before it, and complete), each with ten
+    endings (the time box, SIGKILL, 137, a segfault, an abort naming an
+    allocation, statuses 0, 1, 5 and 7, status 1 at the time box) above a
+    passing rung, and seven of them as a first rung. A real allocator
+    refusal on an accelerator is not exercised, and no real process is
+    killed between its record's last write and its exit: the launcher is
+    scripted.
   oracle: >-
     The outcome each ending is given, the ramp's status, the ceiling and the
     stopping rung in the summary, the header's own table, and for
-    --summarise the verdict the changed value and limit give.
+    --summarise the verdict the changed value and limit give. For a record
+    and an ending: a table written by what the record holds (a failed check
+    is check failed, always), and --summarise run on the directory the ramp
+    left, held to the ramp's status, outcomes and last lines.
   tests:
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_that_dies_above_a_passing_one_is_the_ceilings_reason_and_exit_0
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_whose_runtime_reports_resource_exhaustion_is_out_of_memory
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_rung_that_raises_anything_else_is_crashed_with_its_traceback_kept
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_first_rung_that_cannot_run_is_its_own_exit_status
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_failed_check_stops_the_ramp_with_the_check_failed_status
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_record_a_rung_left_decides_before_the_way_its_process_ended
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_first_rung_is_read_by_its_record_before_its_ending
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_failed_check_under_a_kill_stops_the_ramp_and_no_soak_follows
+    - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_ramp_goes_on_after_a_pass_whose_process_was_killed_on_its_way_out
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_a_soak_block_that_fails_its_checks_is_the_check_failed_status
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_exit_statuses_are_the_ones_the_header_documents
     - tests/cloud/multigpu/test_run_capacity_rungs_and_ramp.py::test_the_host_guard_refuses_a_rung_before_anything_is_built

@@ -7504,7 +7504,9 @@ anomalies:
       bound the peak within a small factor (measured 3 to 4 times the
       state for the lattices, 48 to 76 bytes per operator entry for the
       wavelet basis), not exactly.  A body up to the limit is still parsed
-      whole (about 1.3 GB at the limit); bodies are parsed one at a time,
+      whole (a refused one at the limit measured a peak of 2.4 to 2.6 GiB,
+      not the 1.3 GB estimated here at first: MADD-ANO-274's residual);
+      bodies are parsed one at a time,
       but a node build and a surrogate training job (MADD-ANO-092) can run
       at once.  `from_dict` and `load_graph_from_usd` refuse only what
       exceeds the machine's physical memory, so a config can still ask for
@@ -19043,6 +19045,112 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-273"
+    title: "ModelDescription.to_xml wrote the unit attribute on integer and Boolean variables: a modelDescription.xml that FMI 3.0's schema refuses, with nothing said at export"
+    description: >
+      `ModelDescription.to_xml` set `unit` on every variable element that
+      carried one, and listed it in `<UnitDefinitions>`.  FMI 3.0's schema
+      has the attribute on `<Float32>` and `<Float64>` only, so a
+      description with a unit on an `Int8` to `UInt64` or a `Boolean`
+      variable is invalid: FMPy's `validate_fmu` reports `Element 'Int32',
+      attribute 'unit': The attribute 'unit' is not allowed`, and
+      `simulate_fmu`, which validates by default, refuses the FMU.  Measured
+      on `git archive` of v0.3.0 and v0.3.1 (CPU, jaxlib 0.11.0): a
+      hand-built `FMIVariable(dtype="int32", unit="m")` (and `"bool"`,
+      `"uint8"`) was written with the attribute, and so was the input of a
+      manager that exposes `_external_input_specs` with `expected_units`.
+      `build_model_description` of a real graph did not reach it there: it
+      exported no inputs (MADD-ANO-078) and its outputs carry no unit.
+      During 0.4.0's development the export of a real graph came to write
+      it too, once inputs and parameters were exported with their units: an
+      `int32` external input into a field whose node declares
+      `expected_units` (the built-in spring's `anchor_position`, the ball's
+      `table_position`), and an integer or Boolean parameter whose
+      `ParamSpec` names `units`.  Resolved in 0.4.0: one rule decides the
+      attribute and the unit's definition together, so `unit` is written on
+      the two float types only and a unit that no element carries is not
+      defined (a clock's included).  `FMIVariable.unit` still holds what
+      the graph declares, and the instantiation token still covers it.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No wrong number: the file is invalid and an importer that validates
+      refuses it.  Silent only at export.
+    affected_components:
+      - "maddening.fmi.model_description.ModelDescription.to_xml"
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.0 and v0.3.1 leave `unit` empty on a hand-built `FMIVariable`
+      whose dtype is not a float.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: null
+    verification:
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_unit_is_written_on_a_float_variable_and_on_no_other"
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_units_definition_is_left_out_with_its_last_float_variable"
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_fmpy_validates_a_unit_bearing_variable_of_every_type"
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_fmi3_schema_validates_a_unit_bearing_variable_of_every_type"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-274"
+    title: "A 422 sent the refused value back whole: a request body the server refused was encoded and returned at its full size"
+    description: >
+      A validation error carries the value it refused (`input`), and for a
+      request body that is the body, or a field of it as large as the body:
+      a missing field carries the whole object, a field of the wrong type
+      its value.  The reply was the errors encoded whole, so a refused
+      request was answered with a body of about its own size, encoded on
+      the event loop.  Measured on `git archive` of v0.1.0, v0.2.0, v0.3.0
+      and v0.3.1 (CPU, jaxlib 0.11.0): `POST /graph/nodes` with 1.2 MB of
+      `[[],[],...]` answered 422 with 900 kB, on every route that takes a
+      body, and nothing bounded the body there (MADD-ANO-086).  0.4.0's
+      development bounded the body at 32 MiB and kept the echo in its own
+      handler: a `PUT /graph/params` 16 bytes under the limit (11.2 million
+      `[],`) was answered after 22.5 s with a 422 of 32.00 MiB, and
+      `GET /healthz` sent meanwhile waited for it.  Resolved in 0.4.0: a
+      422 echoes a refused value of at most 1024 characters of JSON (a
+      number, a name, the text `NaN`, a short body), and leaves a larger
+      one out with `input_omitted` in its place saying so; whether a value
+      is that small is decided in about 1024 steps whatever its size, so a
+      large one is never encoded.  A reply lists at most 64 errors and
+      counts the rest.  The handler is the app's one handler of validation
+      errors, for the body, query and path of every route.  The same
+      request is now answered after 13.3 s with under 1 kB.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No wrong result: a cost a caller can impose, graded `major` as the
+      other unbounded costs of a request were (MADD-ANO-086, MADD-ANO-092).
+      The reply grew with the request, and encoding it held the event loop,
+      so every other request waited, the health check among them.  Up to
+      v0.3.1 the API was unauthenticated; since 0.4.0 it takes a local user
+      on a loopback bind, or a token holder.  `context_dependent`: what the
+      server shares its host and its callers with is the deployment's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep the API on loopback and let only trusted callers
+      reach it (MADD-ANO-051's workaround).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The reply is bounded; what refusing a large body costs is not much
+      smaller.  A body at the 32 MiB limit that `PUT /graph/params` refuses
+      still takes a peak of 2.4 to 2.6 GiB and 4 to 13 s (measured: 16.8
+      million zeros, 11.2 million empty lists), on the event loop, so other
+      requests still wait for it.  Most of that is the element count, which
+      is taken on the parsed tree by a walk that queues every element of a
+      list before it counts one; counting while parsing, and refusing off
+      the event loop, are not done.  A long name is still quoted in an
+      error's `loc` or `msg` where a route's own check quotes it.
+    verification:
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_no_body_route_answers_a_refused_body_with_the_body"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_params_body_refused_for_its_element_count_is_not_sent_back"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_value_too_long_to_echo_is_not_walked"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_small_refused_value_is_still_echoed_by_every_kind_of_parameter"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_handler_cuts_a_list_of_errors_however_it_came_about"
   - anomaly_id: "MADD-ANO-275"
     title: "IQN acceleration under the Jacobi schedule can stall, unconverged, on a coupling group the plain Jacobi loop solves"
     description: >

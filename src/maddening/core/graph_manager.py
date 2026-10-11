@@ -154,6 +154,70 @@ class ExternalInputSpec:
         )
 
 
+def _as_declared(spec: ExternalInputSpec) -> tuple[Any, str]:
+    """``(shape, dtype name)`` of a declaration, in the form two
+    declarations of one field are compared in and an error quotes.
+
+    ``jnp.float32``, ``"float32"`` and ``np.dtype("float32")`` are one dtype,
+    and ``[3]`` and ``(3,)`` one shape.  The dtype is the one written down,
+    not the one the process canonicalises it to: ``float64`` and ``float32``
+    are two declarations without ``jax_enable_x64`` too (``to_dict`` saves
+    the name and the FMU export types the input by it).  A shape or dtype
+    that is neither is quoted as it was given.
+    """
+    try:
+        shape: Any = tuple(spec.shape)
+    except TypeError:
+        shape = spec.shape
+    try:
+        dtype = jnp.dtype(spec.dtype).name
+    except TypeError:
+        dtype = repr(spec.dtype)
+    return shape, dtype
+
+
+def _second_declaration_refusal(
+    held: ExternalInputSpec, spec: ExternalInputSpec, *, first: str, second: str, resolve: str,
+) -> Optional[str]:
+    """Why ``spec`` cannot be declared beside ``held``, a declaration of the
+    same field, or ``None`` when the two are one declaration.
+
+    An external input's shape and dtype are read in several places: the
+    step casts a supplied value to the dtype, the zeros of an omitted input
+    are made in both, the FMU export types the input by them and
+    ``to_dict`` saves them.  The graph kept every declaration of a field in
+    a list, and those readers did not take the same one: declared ``int32``
+    and then ``float32``, the step and the FMU ran ``float32``, the cast
+    warning said the value ran as ``int32``, and the saved configuration
+    held both.  So a field has one declaration, and a second that differs
+    is refused where it is made instead of one of the two being chosen.
+
+    A second that says the same again changes nothing a reader could
+    disagree about, and is accepted without being kept twice: a builder
+    that declares its inputs and is run a second time keeps working, as it
+    did before 0.4.0 (measured on v0.3.0 and v0.3.1: both were kept, the
+    last decided the zeros of an omitted input, and nothing else read
+    them).
+
+    ``first`` and ``second`` name the two for the message (a call, an entry
+    of a config), and ``resolve`` says what to do about them at that door.
+    """
+    was, now = _as_declared(held), _as_declared(spec)
+    if was == now:
+        return None
+    return (
+        f"external input '{spec.target_node}.{spec.target_field}' is already declared, "
+        f"with shape {was[0]!r} and dtype {was[1]} ({first}), and {second} declares it "
+        f"again with shape {now[0]!r} and dtype {now[1]}. A field has one declaration: "
+        "its shape and dtype are what the step casts a supplied value to, what the "
+        "zeros of an omitted input are made in, what the FMU export types the input as "
+        "and what to_dict() saves, and two declarations were not read alike (the step "
+        "and the FMU took the last, the cast warning spoke of the first, and the saved "
+        f"configuration held both). {resolve} Declaring it again with the same shape "
+        "and dtype is accepted and changes nothing."
+    )
+
+
 # ------------------------------------------------------------------
 # Observer event names
 # ------------------------------------------------------------------
@@ -2047,6 +2111,22 @@ class GraphManager:
             the same number.  A value the cast changes (a float64 ``0.1``
             into a float32 input, a fraction into an integer one) is
             reported with a ``UserWarning``, once per input.
+
+        Raises
+        ------
+        ValueError
+            If *target_field* is not a valid field name, or if the field of
+            that node is already declared with another shape or dtype.  A
+            field has one declaration, since the step, the zeros of an
+            omitted input, the FMU export and :meth:`to_dict` all read it:
+            declare the input once (there is no ``remove_external_input``;
+            :meth:`remove_node` drops a node's declarations with it).
+            Declaring it again with the same shape and dtype is accepted
+            and changes nothing: the graph keeps the one declaration and is
+            not marked for a recompile.  Until 0.4.0 a second declaration
+            was appended to the first and the graph ran the last one (in
+            0.3.x that decided the zeros of an omitted input and nothing
+            else: a supplied value ran in the dtype it arrived in).
         """
         refusal = _graph_specs._field_name_refusal(target_field)
         if refusal is not None:
@@ -2057,6 +2137,26 @@ class GraphManager:
                 f"{target_field!r} is invalid: {refusal}."
             )
         spec = ExternalInputSpec(target_node, target_field, shape, dtype)
+        for held in self._external_inputs:
+            if (held.target_node, held.target_field) != (target_node, target_field):
+                continue
+            refusal = _second_declaration_refusal(
+                held, spec,
+                first="an earlier add_external_input call, or the file this graph was "
+                      "loaded from",
+                second=f"add_external_input({target_node!r}, {target_field!r}, ...)",
+                resolve="Declare the input once, with the shape and dtype it is to run "
+                        "in: there is no remove_external_input, so leave the other "
+                        "declaration out where the graph is built (or out of the file "
+                        "it is loaded from), or take the node out with remove_node, "
+                        "which drops its external inputs, and add it again. Until "
+                        "0.4.0 the second declaration was taken and the graph ran the "
+                        "last one, so keeping the last keeps what it did.")
+            if refusal is not None:
+                raise ValueError(refusal)
+            # The same declaration again: one is kept, and nothing the
+            # compiled step reads has changed.
+            return
         self._external_inputs.append(spec)
         self._dirty = True
 
@@ -7466,8 +7566,26 @@ class GraphManager:
                         f"config ({owner!r} is neither one of its nodes nor one of its "
                         f"mapped edge keys): {exc}"
                     ) from exc
-        for ei in config.get("external_inputs", []):
+        # A field has one declaration (see ``add_external_input``).  A
+        # config that holds two that differ -- ``to_dict`` of a graph built
+        # before the second was refused saved both -- is refused here by its
+        # entries, which is what its author can edit; two that say the same
+        # load as the one declaration they are.
+        loaded: dict[tuple[str, str], tuple[int, ExternalInputSpec]] = {}
+        for i, ei in enumerate(config.get("external_inputs", [])):
             spec = ExternalInputSpec.from_dict(ei)
+            at, held = loaded.setdefault((spec.target_node, spec.target_field), (i, spec))
+            if at != i:
+                refusal = _second_declaration_refusal(
+                    held, spec,
+                    first=f"external_inputs[{at}] of this config",
+                    second=f"external_inputs[{i}]",
+                    resolve="Delete from the config's \"external_inputs\" the entry the "
+                            "graph is not to run with, and load it again. A graph saved "
+                            "before the second declaration was refused (0.4.0) could hold "
+                            "both, and ran the later one.")
+                if refusal is not None:
+                    raise ValueError(refusal)
             gm.add_external_input(
                 target_node=spec.target_node,
                 target_field=spec.target_field,

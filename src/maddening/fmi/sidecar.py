@@ -70,7 +70,9 @@ import numpy as np
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core._exact_integers import lost_as_integer
+from maddening.core._graph_specs import _META_KEY
 from maddening.core._param_probes import _state_layout_drift
+from maddening.core.coupling._reports import _REPORT_SLOT_SUFFIXES
 from maddening.core.params import check_bounds
 from maddening.fmi.directional_derivatives import (
     DirectionalDerivativeKind,
@@ -232,13 +234,47 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
     return cast
 
 
+#: How the name of a coupling group's report slot ends in ``_meta``
+#: (``coupling_{group key}_{suffix}``).  No other slot of a group ends so:
+#: its warm starts are ``_V``, ``_W``, ``_pred_count`` and ``_pred_{i}``.
+_REPORT_SLOT_ENDINGS = tuple(f"_{suffix}" for suffix in _REPORT_SLOT_SUFFIXES)
+
+
+def _is_report_slot(node: str, field: str) -> bool:
+    """Whether the state leaf ``node.field`` is a coupling group's report
+    slot: what its last solve measured, which
+    ``GraphManager.coupling_diagnostics`` reads.
+
+    A step writes every one of them and reads none (it asks two for their
+    dtype), so they describe a step and are not what the model continues
+    from, unlike the group's warm starts beside them.  And a non-finite
+    value is an ordinary reading there, on a model whose fields are all
+    finite: ``gradient_relative_error_bound`` is ``inf`` where the bound
+    does not certify (a group stopped at its iteration cap on a curved
+    map), the experimental ``geometry_plane_limit`` and
+    ``geometry_plane_margin`` are ``inf`` where no position the pass reads
+    can reach a lattice plane, and each spectral slot is ``NaN`` until a
+    solve fills it.  A restore therefore takes one as it is
+    (:func:`_restored_leaf`): an FMU refused the snapshot it had just
+    handed out, so an importer could not roll such a model back.
+    """
+    return (node == _META_KEY and field.startswith("coupling_")
+            and field.endswith(_REPORT_SLOT_ENDINGS))
+
+
 def _restored_leaf(value: Any, live: Any, *, what: str,
-                   initial: Any = None) -> np.ndarray:
+                   initial: Any = None, report: bool = False) -> np.ndarray:
     """A snapshot leaf, checked against the live leaf it would replace.
 
     The shape must match and the value must pass :func:`_checked_value` in
     the live leaf's dtype.  A leaf with no live counterpart is checked in
     its own dtype (finite only).
+
+    ``report`` says the leaf is a coupling group's report slot
+    (:func:`_is_report_slot`).  A floating one restores with the
+    non-finite values it holds: every other check stands (the shape, a
+    number and not text, and a finite value must fit the slot's type), and
+    an integer report slot still takes no ``NaN``.
 
     ``initial`` is the leaf as the FMU was instantiated, when the caller
     has it: a value equal to it (``NaN`` equal to ``NaN``) is one the FMU
@@ -263,6 +299,16 @@ def _restored_leaf(value: Any, live: Any, *, what: str,
             cast = arr.astype(live_arr.dtype)
         if start.shape == cast.shape and bool(np.array_equal(cast, start, equal_nan=True)):
             return cast
+    if report and np.issubdtype(arr.dtype, np.inexact) \
+            and np.issubdtype(live_arr.dtype, np.floating):
+        finite = np.isfinite(arr)
+        if not bool(np.all(finite)):
+            # The finite entries by the rule of every leaf; the others as
+            # they are, in the slot's type.
+            checked = _checked_value(np.where(finite, arr, 0), live_arr.dtype, what=what)
+            with np.errstate(over="ignore", invalid="ignore"):
+                cast = arr.astype(live_arr.dtype)
+            return np.where(finite, checked, cast)
     return _checked_value(arr, live_arr.dtype, what=what)
 
 
@@ -848,7 +894,10 @@ class FmuSidecar:
         FMU did not start with -- therefore does not restore; the error
         names the field.  A non-finite value the FMU was instantiated with
         restores (a ``diagnostics=True`` coupling group's spectral ``_meta``
-        slots are seeded ``NaN``).  A sidecar without a parameter tree
+        slots are seeded ``NaN``), and so does one in a coupling group's
+        report slot, where it is a reading and not a divergence (a
+        ``gradient_relative_error_bound`` of ``inf`` says the bound does
+        not certify; :func:`_is_report_slot`).  A sidecar without a parameter tree
         refuses a snapshot that carries parameters, as the bridge's
         ``set_state`` does (it used to ignore them).
 
@@ -880,7 +929,8 @@ class FmuSidecar:
         for (node, field), live in live_state.items():
             new_state[node][field] = _restored_leaf(
                 got_state[(node, field)], live, what=f"FMU state {node}.{field}",
-                initial=self._initial_state_leaf(node, field))
+                initial=self._initial_state_leaf(node, field),
+                report=_is_report_slot(node, field))
         new_params = None
         got_params = ({} if params is None
                       else _param_leaves(params, what="FMU state params"))

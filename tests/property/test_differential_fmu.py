@@ -83,7 +83,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.params import check_bounds
 from maddening.fmi import MODEL_IDENTIFIER, build_model_description
 from maddening.fmi.fmu_state import deserialize_fmu_state, serialize_fmu_state
-from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
+from maddening.fmi.sidecar import FmuSidecar, SidecarConfig, _is_report_slot
 from maddening.fmi.tcp_bridge import (
     FmuTcpBridge,
     recv_message,
@@ -717,9 +717,14 @@ def op_set_bad_state(paths: Paths, kind: str, pick: int) -> None:
                if specs.get(k.split("/")[2], {}).get(k.split("/")[3]) is not None
                and any(b is not None for b in specs[k.split("/")[2]][k.split("/")[3]].bounds)]
 
+    # A NaN in a coupling group's report slot is a reading, and restores on
+    # both paths (tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py);
+    # the refusal this op holds the two paths to is of every other leaf.
+    refusable = [k for k in state_keys if not _is_report_slot(*k.split("/", 2)[1:])]
+
     def edit(members, _fmt):
         if kind == "nan_state":
-            key = state_keys[pick % len(state_keys)]
+            key = refusable[pick % len(refusable)]
             members[key] = np.full_like(members[key], np.nan) \
                 if np.issubdtype(members[key].dtype, np.floating) else members[key]
         elif kind == "inf_param" and param_keys:

@@ -54,6 +54,21 @@ Design:
   ``value``, a NaN ``residual_norm``, ``converged=False``
   (MADD-ANO-269; ``_framed``).  On no route is ``converged`` True beside
   a ``residual_norm`` that is not finite.
+* The same answer for a solution too large for the dtype (the answer is
+  tested after it is scaled back, MADD-ANO-272) and for a tolerance that
+  is negative or NaN and arrives as a traced value (MADD-ANO-271); given
+  as a concrete number such a tolerance is refused.  A result is every
+  entry of ``value`` finite beside a finite ``residual_norm``, or NaN in
+  both (one exception under ``differentiable=True`` at the top of the
+  dtype's range: MADD-ANO-282, ``Returns`` of :func:`sharded_cg`).
+* lineax's verdict is ``converged`` only where the floor of its entrywise
+  test, as lineax is handed it, is at least the dtype's smallest normal
+  number ``tiny``.  Under it (``rtol=0``, an explicit ``atol=0.0``, a
+  tolerance that underflows, and a positive ``atol`` under ``tiny / p``,
+  ``p`` the power of two the solve rescales ``b`` by) lineax's quotient
+  is ``0 / 0`` at every entry that is exactly zero and it reports
+  success; ``converged`` is then the loop backends' statement on the
+  value lineax returned (``_lineax_solve``, MADD-ANO-281).
 
 Differentiability: pass ``differentiable=True``.  The solve then goes
 through ``lax.custom_linear_solve``: forward and reverse mode are linear
@@ -71,6 +86,17 @@ side's size (MADD-ANO-266).
 Preconditioning: Jacobi only.  The interface
 accepts an optional ``preconditioner`` callable for forward compat
 with AMG / block-Jacobi in v0.4.0+.
+
+Limits that stay documented rather than fixed: at the bottom of the
+dtype's range the value cannot hold the solution (``Returns`` of
+:func:`sharded_cg`); under ``differentiable=True`` inside a ``shard_map``
+body a tolerance that is traced (an argument of the body, or closed over
+from an enclosing ``jit``) raises JAX's ``pvary`` error, measured on the
+default and loop backends of :func:`sharded_cg` (a concrete one answers;
+for a preconditioner see its ``matvec``); and complex, float16 and
+bfloat16 right-hand sides
+are not tested (every measurement in these docstrings is float32 or
+float64).
 """
 
 from __future__ import annotations
@@ -107,44 +133,56 @@ class SharedSolveResult:
     ----------
     value : jax.Array
         The approximate solution ``x`` to ``A x = b``.  NaN in every
-        entry where there is no answer: see ``residual_norm``.  One
-        case is not caught: a solution too large for the dtype comes
-        back as infinities (MADD-ANO-272).
+        entry where there is no answer (see ``residual_norm``), and
+        every entry finite otherwise.
     converged : jax.Array
         Boolean scalar.  On the loop backends, on :func:`sharded_cg`'s
         default route where it falls back to the loop, and under
         ``differentiable=True``: ``residual_norm <= max(atol, rtol * ||b||)``
         for the returned ``value``, in the working dtype, with no
         allowance for rounding.  On the lineax backend: lineax's own
-        verdict (``Returns`` of :func:`sharded_cg`).  False where
-        ``value`` is NaN, and never True beside a ``residual_norm`` that
-        is not finite.  It is a statement about ``value``: under
-        ``differentiable=True`` it does not cover the tangent and
-        cotangent solves (MADD-ANO-270).  Registered cases in which it
-        is True beside a value that is not the solution: a tolerance
-        that is not a number >= 0 and was not refused (MADD-ANO-271),
-        and a solution that overflows the dtype (MADD-ANO-272).  Until
-        0.4.0 the CG loop answered from the
+        verdict (``Returns`` of :func:`sharded_cg`), except where the
+        floor lineax's entrywise test is handed is under the dtype's
+        smallest normal number (``rtol=0``, an explicit ``atol=0.0``, a
+        tolerance that underflows, a positive ``atol`` small beside
+        ``max|b|``: where exactly is in ``Returns`` of
+        :func:`sharded_cg`): there it is the statement above too, which
+        for a tolerance of zero is ``residual_norm == 0``.  False where ``value`` is NaN, and never
+        True beside a ``residual_norm`` that is not finite.  It is a
+        statement about ``value``: under ``differentiable=True`` it
+        does not cover the tangent and cotangent solves (MADD-ANO-270).
+        Until 0.4.0 the CG loop answered from the
         residual it updates by recurrence, and the GMRES loop behind a
         preconditioner from the preconditioned residual: ``True`` on
         float32 solves whose ``||b - A x||`` was far above the tolerance
         (MADD-ANO-263).
     iters : jax.Array
         Integer scalar — number of iterations used (-1 under
-        ``differentiable=True``).
+        ``differentiable=True``).  The unit depends on the route.
+        :func:`sharded_cg`: steps, one operator product each.
+        :func:`sharded_gmres` on the loop backend: steps, in whole
+        restart cycles (a multiple of ``restart``).
+        :func:`sharded_gmres` on the lineax backend, which is its
+        default: restart CYCLES, of up to ``restart`` products each
+        (lineax's ``num_steps``; MADD-ANO-280, see ``max_iters``
+        there).
     residual_norm : jax.Array
         ``||b - A x||_2`` of the returned ``value``: one product in the
         working dtype, with the operator and the right-hand side the
         caller gave, on every route.  (The product is taken on the
         right-hand side rescaled into ``[0.5, 1)`` and the norm scaled
-        back; where the value overflows on being scaled back the norm
-        beside it is finite and is not that of the infinities returned:
-        MADD-ANO-272.)  NaN, with NaN in every entry of
-        ``value`` and ``converged=False``, where that norm is not
-        finite: a ``b`` with a NaN or infinite entry (MADD-ANO-155); an
+        back.)  NaN, with NaN in every entry of
+        ``value`` and ``converged=False``, where there is no answer: a
+        ``b`` with a NaN or infinite entry (MADD-ANO-155); an
         operator that returned a NaN or an infinity, or a value so far
         off that the norm overflows (MADD-ANO-269); ``backend="lineax"``
-        CG in float32 at scale (MADD-ANO-264).
+        CG in float32 at scale (MADD-ANO-264); a solution too large
+        for the dtype, or a residual whose norm is (both are tested as
+        they are returned, after the scaling back; MADD-ANO-272); an
+        ``rtol`` or ``atol`` that is negative or NaN and arrived as a
+        traced value (MADD-ANO-271).  Finite otherwise, with one
+        exception under ``differentiable=True`` (MADD-ANO-282,
+        ``Returns`` of :func:`sharded_cg`).
     """
     value: jax.Array
     converged: jax.Array
@@ -164,18 +202,30 @@ def _validate_solver_inputs(
     mesh: Optional[Mesh],
     in_specs: Optional[PartitionSpec],
     name: str,
+    rtol: Any,
     atol: Any = None,
 ) -> None:
     # ``atol`` is an absolute floor in ``b``'s units.  A negative one was
     # taken as it came: the loop backends' ``max(atol, rtol * ||b||)`` hid
     # it, and lineax's entrywise ``|r_i| <= atol + rtol * |b_i|`` did not
     # (its verdict then read True at 2e5 times the tolerance asked for).
-    # A traced value cannot be read here and is passed on.
+    # A traced value cannot be read here: ``_tolerances_are_numbers``
+    # tests it in the program, and ``_framed`` answers it.
     if (atol is not None and not isinstance(atol, jax.core.Tracer)
             and not bool(np.all(np.asarray(atol) >= 0))):
         raise ValueError(
             f"{name}: atol must be None (a purely relative test) or a number "
             f">= 0 (an absolute floor in b's units), got {atol!r}."
+        )
+    # ``rtol`` was not read at all until 0.4.0: a NaN stopped lineax on its
+    # zero start with a verdict of success (zeros, ``converged=True``), and
+    # a negative one was refused by lineax on its own routes only.  ``not
+    # (rtol >= 0)`` is True for a NaN.
+    if (not isinstance(rtol, jax.core.Tracer)
+            and not bool(np.all(np.asarray(rtol) >= 0))):
+        raise ValueError(
+            f"{name}: rtol must be a number >= 0 (a fraction of ||b||), "
+            f"got {rtol!r}."
         )
     if not callable(matvec):
         raise TypeError(f"{name}: matvec must be callable, got {type(matvec)!r}")
@@ -216,6 +266,28 @@ def _validate_solver_inputs(
                         )
 
 
+def _tolerances_are_numbers(rtol: Any, atol: Any) -> Any:
+    """Whether ``rtol`` and ``atol`` are numbers >= 0, for the tolerances
+    :func:`_validate_solver_inputs` could not read: ``True`` (the Python
+    value) where both came as concrete values, which were refused or are
+    valid, and otherwise a traced boolean, False for a traced tolerance
+    that is negative or NaN (``not (t >= 0)``).
+
+    A traced tolerance is one that is an argument of a jitted or vmapped
+    function.  It cannot raise, so :func:`_framed` answers it as it
+    answers a right-hand side that is not finite: NaN in every entry,
+    a NaN ``residual_norm``, ``converged=False``.  Until 0.4.0's fix it was
+    passed on, and the lineax routes read ``converged=True`` on a value
+    72 % off (a traced ``atol=-1``) or on zeros (a traced NaN)
+    (MADD-ANO-271).  Infinity is a number >= 0 and passes.
+    """
+    valid: Any = True
+    for tolerance in (rtol, atol):
+        if isinstance(tolerance, jax.core.Tracer):
+            valid = jnp.logical_and(valid, jnp.all(tolerance >= 0))
+    return valid
+
+
 def _materialise_b(
     b: jax.Array,
     *,
@@ -234,7 +306,7 @@ def _materialise_b(
 
 
 
-def _framed(solve, b, x0, atol):
+def _framed(solve, b, x0, atol, tolerances_are_numbers: Any = True):
     """Run ``solve(b_hat, x0_hat, atol_hat)`` on ``b`` rescaled by an exact
     power of two and scale its result back.
 
@@ -280,17 +352,44 @@ def _framed(solve, b, x0, atol):
     reports success at once), on ``backend="lineax"`` and on the default
     call; the CG loop returned zeros with ``converged=False``
     (MADD-ANO-269).
+
+    **The answer is tested after it is scaled back.**  The two fields are
+    tested as they are returned, ``value / p`` and ``residual_norm / p``,
+    not as the backend left them in the frame: a solution too large for
+    the dtype is finite in the frame and overflows on being scaled back,
+    and until 0.4.0's fix the result then held infinities beside a finite
+    ``residual_norm`` and the frame's ``converged`` (MADD-ANO-272).  The
+    same for a norm that is finite in the frame and overflows on being
+    scaled back (a ``b`` whose own norm overflows, left unsolved): it was
+    returned as ``inf``, beside ``converged=True`` where the tolerance was
+    infinite too.  So a result is one of two things on every route: every
+    entry of ``value`` finite beside a finite ``residual_norm``, or NaN in
+    both with ``converged=False``.
+
+    **A traced tolerance that is not a number >= 0** gets that second
+    answer too: ``tolerances_are_numbers`` is the verdict of
+    :func:`_tolerances_are_numbers` on the ``rtol`` and ``atol`` of the
+    CALL (not of this solve: the tangent and cotangent solves of
+    ``differentiable=True`` are purely relative, and are refused with the
+    call they belong to).  ``True``, the Python value, where both were
+    concrete: nothing is added to the program then.
     """
     p = jax.lax.stop_gradient(pow2_frame(b))
     finite = jnp.all(jnp.isfinite(b))
     res = solve(jnp.where(finite, b * p, jnp.zeros_like(b)),
                 jnp.where(finite, x0 * p, jnp.zeros_like(x0)),
                 None if atol is None else atol * p)
-    answered = jnp.logical_and(finite, jnp.isfinite(res.residual_norm))
+    value = res.value / p
+    residual_norm = res.residual_norm / p
+    answered = jnp.logical_and(
+        finite,
+        jnp.logical_and(jnp.all(jnp.isfinite(value)), jnp.isfinite(residual_norm)))
+    if tolerances_are_numbers is not True:
+        answered = jnp.logical_and(answered, tolerances_are_numbers)
     return SharedSolveResult(
-        value=jnp.where(answered, res.value / p, jnp.full_like(b, jnp.nan)),
+        value=jnp.where(answered, value, jnp.full_like(b, jnp.nan)),
         converged=jnp.logical_and(res.converged, answered), iters=res.iters,
-        residual_norm=jnp.where(answered, res.residual_norm / p, jnp.nan),
+        residual_norm=jnp.where(answered, residual_norm, jnp.nan),
     )
 
 
@@ -582,9 +681,59 @@ def _lineax_solve(
     has an "unavailable" outcome; the import stays lazy purely to keep
     equinox + jaxtyping off ``import maddening``'s critical path.
     Errors propagate — the caller sees the real failure.
+
+    **Where lineax's verdict is not used.**  lineax tests the quotients
+    ``|r_i| / (floor + rtol |b_i|)`` and ``|dx_i| / (floor + rtol |x_i|)``
+    against one, entry by entry, and takes their maximum.  With a floor of
+    zero the quotient is ``0 / 0 = NaN`` at every entry where the residual
+    and the right-hand side (or the update and the iterate) are both
+    exactly zero; the maximum is then NaN, ``NaN > 1`` is False, and lineax
+    stops and reports success, whatever the other entries hold.  Two calls
+    get there: ``rtol=0`` (the floor of a call without ``atol`` is
+    ``rtol * max|b|``), measured as ``converged=True`` at a residual of
+    1e-6 to 7e-5 of ``||b||`` on GMRES with ``restart=1`` (white noise from
+    ``numpy.random.default_rng(0)``, 96 to 1024 unknowns behind
+    ``2.5 x[i] - x[i-1] - x[i+1]``, float32, lineax 0.0.7 and 0.1.1; with
+    ``restart=50`` lineax's verdict was False) and of 0.4 on CG for a ``b``
+    that is one unit vector; and an explicit ``atol=0.0`` beside any ``rtol``, for
+    a ``b`` with entries that are exactly zero (a local source behind a
+    stencil: every entry the Krylov space has not reached yet), measured
+    as ``converged=True`` after ONE step at a residual of 0.4 ``||b||``.
+    A floor that underflows does the same (XLA's CPU backend flushes a
+    subnormal to zero): ``rtol=1e-44`` in float32.  MADD-ANO-281; the
+    ``atol=0.0`` form was in 0.3.0 and 0.3.1.
+
+    So lineax's verdict is ``converged`` only where the floor it was
+    handed is at least the smallest normal number of the dtype, ``tiny``:
+    every quotient then has a positive denominator.  That floor is the
+    caller's ``atol`` times ``p`` (:func:`_framed`: the power of two that
+    brings ``max|b|`` into ``[0.5, 1)``), or ``rtol * max|b| * p`` without
+    an ``atol``.  So for a positive ``atol`` the rule switches at
+    ``atol = tiny / p``, which lies between ``tiny * max|b|`` and
+    ``2 * tiny * max|b|`` (float32: about 1.2e-8 beside ``max|b| = 1e30``),
+    and an ``rtol`` without an ``atol`` switches it under about ``tiny``.
+    Across the switch ``converged`` changes from lineax's verdict to the
+    statement below, and for one ``b`` it is not monotone in ``atol``:
+    measured in float32 (32 and 64 unknowns behind
+    ``2.5 x[i] - x[i-1] - x[i+1]``, white noise from
+    ``numpy.random.default_rng(0)`` times ``2**100``; GMRES with
+    ``restart=10`` and ``rtol=1e-6``, CG with ``rtol=1e-3`` and
+    ``max_iters=16``; lineax 0.0.7 and 0.1.1) True at 0.99 of
+    ``tiny / p``, ``residual_norm`` at 0.02 to 0.15 of the tolerance, and
+    False at 1.01, lineax's verdict, with the same value and residual.  Every
+    True of the statement is true of ``residual_norm``.  Under that, ``converged``
+    is the statement of the loop backends on the value lineax returned,
+    ``residual_norm <= max(atol, rtol * ||b||)``
+    (:func:`_residual_of_the_system`, from the product the report takes
+    anyway), which for a tolerance of exactly zero is
+    ``residual_norm == 0``.  ``value`` and ``iters`` are lineax's on
+    both sides: when it stops is not changed.  (An ``rtol`` of infinity
+    on a zero ``b`` makes the floor NaN, which is not "under": lineax's
+    verdict, as before.)
     """
     import lineax as lx  # noqa: PLC0415  (lazy: import-time cost only)
 
+    atol_given = atol
     if atol is None:
         # Relative to the largest entry of ``b``: lineax's test is entrywise
         # (``|r_i| <= atol + rtol |b_i|``), so an entry of ``b`` at zero needs
@@ -620,14 +769,17 @@ def _lineax_solve(
     # ``SharedSolveResult.converged`` to decide what to do — the same
     # contract the loop fallback follows.
     result = lx.linear_solve(op, b, solver=solver, throw=False)
-    res_norm = jnp.linalg.norm(b - matvec(result.value))
+    res_norm, within_the_norm = _residual_of_the_system(
+        matvec, b, result.value, rtol=rtol, atol=atol_given,
+    )
     # lineax's RESULTS object doesn't always populate iters; treat as -1.
     stats = result.stats or {}
     n_iters = jnp.int32(stats.get("num_steps", -1))
-    converged = result.result == lx.RESULTS.successful
+    verdict = jnp.asarray(result.result == lx.RESULTS.successful)
+    the_floor_is_zero = atol < jnp.finfo(b.dtype).tiny
     return SharedSolveResult(
         value=result.value,
-        converged=jnp.asarray(converged),
+        converged=jnp.where(the_floor_is_zero, within_the_norm, verdict),
         iters=n_iters,
         residual_norm=res_norm,
     )
@@ -793,9 +945,51 @@ def _differentiable_solve(
     tol_hat = rtol * jnp.linalg.norm(b * p)
     if atol is not None:
         tol_hat = jnp.maximum(atol * p, tol_hat)
+    residual_norm = res_norm_hat / p
+    # ``x`` is all finite, or NaN in every entry where a solve inside had
+    # no answer (``_framed``: a right-hand side that is not finite, an
+    # operator that returned a NaN, a solution or a residual norm that
+    # overflows, a traced tolerance that is not a number >= 0).  Where
+    # there is no answer there is no derivative either.  The tangent and
+    # cotangent solves have right-hand sides of their own, which can be
+    # solved where the primal was not: left alone they returned a finite
+    # derivative beside a NaN value.  A FACTOR of NaN carries to both modes
+    # (a ``jnp.where`` on the value would give a derivative of zero).  The
+    # factor is exactly one where there is an answer, so the product changes
+    # no number it multiplies; but it and the reductions below are in the
+    # compiled program, and XLA fuses the program around them differently.
+    # Measured against the build before them (float32, 16 and 32 unknowns,
+    # jax 0.10.2, 0.11.0 and 0.11.2, lineax 0.0.7 and 0.1.1, the same on
+    # each): the value, ``jvp``, ``jacfwd`` and ``jacrev`` under ``jit``,
+    # the eager ``grad`` and every GMRES route keep their bits;
+    # ``jax.jit(jax.grad)`` with respect to ``b`` on the four CG routes
+    # (default, lineax, loop, loop with Jacobi) moves by up to 17 ulp per
+    # entry (1.2e-7 of its largest entry), deterministically.
+    answered = jnp.all(jnp.isfinite(x))
+    real = jnp.finfo(x.dtype).dtype
+    no_answer_is_nan = jnp.where(
+        answered, jnp.ones((), real), jnp.full((), jnp.nan, real))
+    # The flag is not True beside a norm that is not finite.  ``res`` above
+    # is a product on the bare vectors, as it always was.  Its norm keeps
+    # the bits of 0.4.0's earlier builds outside loop bodies (eager, ``jit``,
+    # ``vmap``, a mesh, a ``shard_map`` body); inside a ``lax.scan`` or
+    # ``fori_loop`` body XLA fuses it with the reductions above and
+    # ``residual_norm`` moves by 1 or 2 ulp (19 of 120 calls of one
+    # measurement, float32; ``value``, ``converged`` and ``iters`` keep
+    # their bits).  For a solution within a factor of
+    # the operator's diagonal of the dtype's largest number that product
+    # overflows in an intermediate although ``x`` and ``A x`` are
+    # representable, and the report is then ``converged=False`` beside an
+    # infinite ``residual_norm`` where the ordinary call answers
+    # (MADD-ANO-282, open; with an ``x0`` or an ``atol`` the residual ``r``
+    # above overflows the same way and the value is NaN).
     return SharedSolveResult(
-        value=x, converged=res_norm_hat <= tol_hat, iters=jnp.int32(-1),
-        residual_norm=res_norm_hat / p,
+        value=x * no_answer_is_nan,
+        converged=jnp.logical_and(
+            res_norm_hat <= tol_hat,
+            jnp.logical_and(answered, jnp.isfinite(residual_norm))),
+        iters=jnp.int32(-1),
+        residual_norm=residual_norm,
     )
 
 
@@ -1068,9 +1262,16 @@ def sharded_cg(
         tolerance.  The result then says so: ``converged=False`` and the
         residual it has (``Returns``).  In float32 the default ``1e-6``
         is met up to a ``kappa`` of about 17; ask for an ``rtol`` a few
-        times above ``eps * kappa``, or solve in float64.  ``rtol`` is
-        not validated: a NaN is passed on, and the lineax routes then
-        return zeros with ``converged=True`` (MADD-ANO-271, open).
+        times above ``eps * kappa``, or solve in float64.  A number
+        >= 0.  A NaN or negative ``rtol`` given as a concrete number is
+        refused with a ``ValueError``; one that is traced (an argument
+        of a jitted or vmapped function) cannot raise and is answered
+        with NaN (``Returns``).  Until 0.4.0 ``rtol`` was not read: a
+        NaN gave zeros with ``converged=True`` on the lineax routes
+        (MADD-ANO-271).  ``rtol=0`` without a positive ``atol`` asks
+        for a residual of exactly zero, and ``converged`` is then
+        ``residual_norm == 0`` on every route; infinity passes
+        everything.
     atol : float or None
         Absolute floor of that test, in ``b``'s units: give a number only to
         assert a noise floor in ``b``'s own units.  ``None`` (the default)
@@ -1086,10 +1287,16 @@ def sharded_cg(
         backend a ``b`` with ``||b|| >= 1e-8 / rtol`` stops exactly where it
         did.  A negative (or NaN) ``atol`` given as a concrete number
         is refused with a ``ValueError``; one that is traced (an
-        argument of a jitted function) cannot be read when the call is
-        traced and is passed on, and the lineax routes can then read
-        ``converged=True`` on a value that is not the solution
-        (MADD-ANO-271, open).  Under ``differentiable=True`` an ``atol`` bounds
+        argument of a jitted or vmapped function) cannot be read when
+        the call is traced and is answered with NaN (``Returns``).
+        Until 0.4.0 it was passed on, and the lineax routes read
+        ``converged=True`` on a value 72 % off (MADD-ANO-271).
+        ``atol=0.0`` is the relative test, as ``None`` is, with one
+        difference on the lineax routes: lineax is handed the floor
+        zero instead of ``rtol * max|b|``, stops where it stops with
+        that (``Returns``), and ``converged`` is
+        ``residual_norm <= rtol * ||b||``.  Prefer ``None``.
+        Under ``differentiable=True`` an ``atol`` bounds
         the primal solve only: the tangent and cotangent solves are
         purely relative (``||r|| <= rtol * ||rhs||`` of their own
         right-hand side), so that a derivative is linear in its
@@ -1190,7 +1397,35 @@ def sharded_cg(
           entrywise test ``|r_i| <= atol + rtol * |b_i|`` on a residual
           it recomputes every tenth step, and the same test on its last
           step.  By name, in float32, this route returns NaN above about
-          1e5 unknowns (MADD-ANO-264, see ``backend``).
+          1e5 unknowns (MADD-ANO-264, see ``backend``).  One exception:
+          where the floor lineax is handed is under the dtype's
+          smallest normal number ``tiny`` (float32: 1.2e-38).  That
+          floor is ``atol * p`` for an ``atol`` given and
+          ``rtol * max|b| * p`` without one, ``p`` the power of two that
+          brings ``max|b|`` into ``[0.5, 1)``.  So: ``rtol=0`` without
+          an ``atol``; an explicit ``atol=0.0``; a tolerance that
+          underflows (in float32 ``rtol=1e-44``); and a positive
+          ``atol`` under ``tiny / p``, which lies between
+          ``tiny * max|b|`` and twice that (float32: about 1.2e-8
+          beside ``max|b| = 1e30``).  There lineax's test is a quotient
+          that is ``0 / 0`` at every entry where the residual and ``b``
+          are both exactly zero (a subnormal floor is flushed to zero),
+          and it stops there and reports success.  ``.converged`` is
+          then not its verdict but the loop backend's statement on the
+          value lineax returned,
+          ``.residual_norm <= max(atol, rtol * ||b||)``, which for a
+          tolerance of zero is ``.residual_norm == 0``.  Across
+          ``tiny / p`` the flag of one ``b`` changes from lineax's
+          verdict to that statement, so it is not monotone in ``atol``
+          (measured: True at 0.99 of ``tiny / p``, False at 1.01, with
+          the same value and residual; ``_lineax_solve``); every True
+          the statement gives is true of ``.residual_norm``.  Until 0.4.0's
+          fix: ``converged=True`` after one step at a residual of 0.4
+          ``||b||``, for a ``b`` that is one unit vector, with
+          ``atol=0.0`` or with ``rtol=0`` (MADD-ANO-281; ``atol=0.0``
+          in 0.3.0 and 0.3.1).  ``.value`` and ``.iters``
+          are lineax's as they were: such a call still stops early,
+          and now says so.
         * ``differentiable=True``, on either backend: ``.converged`` is
           the loop backend's statement,
           ``||b - A x|| <= max(atol, rtol * ||b||)`` on the returned
@@ -1225,14 +1460,39 @@ def sharded_cg(
         2e-2 and 9e-2 at ten times that number, 1e-3 and 4e-3 at a
         hundred times, none (5e-7) at 1e4 times.  Rescale such a system.
 
-        At the top of the range a solution too large for the dtype is
-        not caught: scaling the value back overflows, the result holds
-        infinities beside a finite ``.residual_norm``, and
-        ``.converged`` is the scaled solve's (MADD-ANO-272, open).
-        Rescale such a system too, or test the value with
-        ``jnp.isfinite``.  A right-hand side whose norm alone overflows
-        is solved (until 0.4.0 the loop answered it with zeros and
-        ``converged=True``).
+        At the top of the range the answer is tested after it is
+        scaled back.  A solution too large for the dtype gets NaN in
+        every entry, a NaN ``.residual_norm`` and ``converged=False``
+        on every route, and under ``differentiable=True`` a derivative
+        of NaN (until 0.4.0's fix: infinities beside a finite
+        ``.residual_norm``, and ``converged=True`` where the scaled
+        solve met its tolerance; MADD-ANO-272).  So does a solve whose
+        residual has a norm too large for the dtype: a right-hand side
+        whose own norm overflows, left far from solved.  A right-hand
+        side whose norm overflows is solved where its solution fits
+        (until 0.4.0 the loop answered it with zeros and
+        ``converged=True``).  Rescale a system whose solution does not
+        fit, or solve it in float64.
+
+        A traced ``rtol`` or ``atol`` that is negative or NaN gets the
+        same answer on every route (MADD-ANO-271), and under
+        ``differentiable=True`` a derivative of NaN.  A result is so
+        one of two things: every entry of ``.value`` finite beside a
+        finite ``.residual_norm``, or NaN in both with
+        ``converged=False``.
+
+        One exception, under ``differentiable=True`` only (MADD-ANO-282,
+        open): the report of that route, and the residual it attaches
+        the derivative to, are products on the vectors as they are, not
+        in the frame of ``b``.  For a solution within a factor of the
+        operator's diagonal of the dtype's largest number such a
+        product overflows in an intermediate although the solution
+        fits.  The call then returns the right value with
+        ``converged=False`` and an infinite ``.residual_norm``, and
+        with an ``x0`` or an ``atol`` NaN in every entry, where the
+        ordinary call answers (measured in float32 at a solution of 0.5
+        and 0.7 of the largest number behind a diagonal of 2.05).
+        Rescale such a system, or solve it in float64.
 
     Raises
     ------
@@ -1257,8 +1517,9 @@ def sharded_cg(
         with respect to one of them is zero or an error of JAX or of
         lineax, by route.
     ValueError
-        For a negative or NaN ``atol`` given as a concrete number, an
-        unknown ``backend``, a
+        For a negative or NaN ``rtol`` or ``atol`` given as a concrete
+        number (a Python or NumPy number, or a JAX array that is not
+        traced), an unknown ``backend``, a
         ``preconditioner`` with ``backend="lineax"``, or a ``mesh``
         without ``in_specs``.
 
@@ -1269,8 +1530,10 @@ def sharded_cg(
     (sharded FVM in MIME) reads against this surface.
     """
     _validate_solver_inputs(
-        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_cg", atol=atol,
+        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_cg",
+        rtol=rtol, atol=atol,
     )
+    tolerances_are_numbers = _tolerances_are_numbers(rtol, atol)
     b = _materialise_b(b, mesh=mesh, in_specs=in_specs)
     x0_given = x0 is not None
     if x0 is None:
@@ -1315,7 +1578,7 @@ def sharded_cg(
         # One solve, in a power-of-two frame of its right-hand side (``_framed``).
         return _framed(
             lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat, M),
-            rhs, x_start, atol_given)
+            rhs, x_start, atol_given, tolerances_are_numbers)
 
     if not differentiable:
         return _refusing_a_derivative(
@@ -1386,22 +1649,60 @@ def sharded_gmres(
     ``TypeError`` on the carry of its ``while_loop``), as before 0.4.0.
 
     See :func:`sharded_cg` for the matvec / mesh / in_specs contract, and
-    for the answer to a ``b`` with a NaN or infinite entry and to an
-    operator that returns one: NaN, with ``converged=False``
-    (MADD-ANO-155, MADD-ANO-269).
+    for the answer to a ``b`` with a NaN or infinite entry, to an
+    operator that returns one, to a solution too large for the dtype and
+    to a traced tolerance that is negative or NaN: NaN, with
+    ``converged=False`` (MADD-ANO-155, MADD-ANO-269, MADD-ANO-272,
+    MADD-ANO-271).
 
     Parameters
     ----------
+    x0 : jax.Array, optional
+        Initial guess, as for :func:`sharded_cg`.  Read by the loop
+        backend only: the default route is lineax's GMRES, which is not
+        given it, so that where the default route answers the initial
+        guess is not used.
     rtol, atol : float, float or None
         As for :func:`sharded_cg`: ``atol=None`` (the default) is
-        relative, and a negative or NaN ``atol`` given as a concrete
-        number is refused (a traced one and a NaN ``rtol`` are not:
-        MADD-ANO-271).
+        relative; a negative or NaN ``rtol`` or ``atol`` given as a
+        concrete number is refused with a ``ValueError``, and one that
+        is traced is answered with NaN (MADD-ANO-271).  Where the floor
+        lineax is handed is under the dtype's smallest normal number
+        (``rtol=0``, an explicit ``atol=0.0``, a tolerance that
+        underflows, a positive ``atol`` under ``tiny / p``: exactly as
+        in ``Returns`` of :func:`sharded_cg`) ``converged`` on the
+        default route is not lineax's verdict but
+        ``residual_norm <= max(atol, rtol * ||b||)`` (``Returns``).
     max_iters : int
-        Iteration budget.  On the loop backend it is counted in whole
-        restart cycles, rounded up, and at least one cycle runs: a
-        budget of 0 or 1 is ``restart`` steps.  On the lineax backend
-        the budget is at least ``4 * restart`` steps.
+        Iteration budget.  Its unit depends on the backend.
+
+        On the loop backend it is a number of steps, of one operator
+        product each, counted in whole restart cycles, rounded up, and
+        at least one cycle runs: a budget of 0 or 1 is ``restart``
+        steps.  The call executes ``restart + 2`` products per cycle
+        and one more (measured: 53 for one cycle of 50, 209 for four).
+
+        **On the lineax backend, which is the default, it is not a
+        bound on the work (MADD-ANO-280, open).**  lineax is handed
+        ``max_steps = max(4 * restart, max_iters)``, and lineax counts
+        one step per restart CYCLE of up to ``restart`` operator
+        products.  So the budget is in cycles, ``restart`` times what
+        the argument names, and never under ``4 * restart`` cycles;
+        ``.iters`` counts the same cycles.  Measured in float32 on 1000
+        unknowns at a condition number of 4001 (the default
+        ``restart=50`` and ``rtol``) with ``max_iters=10``, on white
+        noise from ``numpy.random.default_rng(0)``: 1,889 operator
+        products and ``iters=38`` on lineax 0.0.7, and 3,317 products
+        and ``iters=66`` on lineax 0.1.1 (jax 0.11.0 and 0.11.2 alike).
+        lineax stops before its 200 cycles at a cycle that depends on
+        the right-hand side: over the seeds 0 to 23 of that generator,
+        1,583 to 3,419 products (``iters`` 32 to 68) on lineax 0.0.7 and
+        1,583 to 4,490 (32 to 89) on 0.1.1.  The loop backend executed
+        53 products and reported ``iters=50``.
+        A caller who needs a bound on the work passes
+        ``backend="loop"``.  The unit of this route is left as it is in
+        0.4.0: a budget in steps would change what every default call
+        with a binding budget returns.
     restart : int
         Krylov subspace dimension before restart.  Capped to ``b.shape[0]``
         inside the solver, on both backends (the loop backend returned NaN
@@ -1409,7 +1710,9 @@ def sharded_gmres(
         produces low-rank approximations on problems larger than 20
         unknowns — we default to 50 here.  See the regression test in
         ``tests/core/test_coupling_ift_lineax.py`` for the historical
-        gotcha.
+        gotcha.  On the lineax backend ``restart`` is also the number
+        of operator products behind each unit of ``max_iters`` and of
+        ``.iters`` (``max_iters``).
 
     Returns
     -------
@@ -1445,7 +1748,22 @@ def sharded_gmres(
           are what they were before 0.4.0.
         * lineax backend (the default without a preconditioner):
           ``.residual_norm`` is ``||b - A x||`` of the returned value;
-          ``.converged`` is lineax's own verdict.  The NaN of
+          ``.converged`` is lineax's own verdict, except where the
+          floor its entrywise test is handed is under the dtype's
+          smallest normal number (``rtol=0``, an explicit ``atol=0.0``,
+          a tolerance that underflows, a positive ``atol`` under
+          ``tiny / p``: exactly as in ``Returns`` of
+          :func:`sharded_cg`): there lineax
+          stops on a quotient of ``0 / 0`` and reports success, and
+          ``.converged`` is ``.residual_norm <= max(atol, rtol * ||b||)``
+          instead, which for a tolerance of zero is
+          ``.residual_norm == 0`` (until 0.4.0's fix, with ``rtol=0``:
+          ``True`` at a residual of 1e-6 to 7e-5 of ``||b||`` on white
+          noise with ``restart=1``, and of 0.17 for a ``b`` that is one
+          unit vector with ``restart=2``; ``_lineax_solve``).  ``.iters`` counts
+          restart CYCLES (lineax's ``num_steps``), not steps: about
+          ``.iters * restart`` operator products were executed
+          (``max_iters``; MADD-ANO-280).  The NaN of
           MADD-ANO-264 is lineax CG's alone: this route was measured to
           converge in float32 up to 1e6 unknowns on the systems where
           :func:`sharded_cg`'s default route returns NaN.
@@ -1458,8 +1776,10 @@ def sharded_gmres(
     FVM PISO pressure correction reads against this signature.
     """
     _validate_solver_inputs(
-        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_gmres", atol=atol,
+        matvec, b, mesh=mesh, in_specs=in_specs, name="sharded_gmres",
+        rtol=rtol, atol=atol,
     )
+    tolerances_are_numbers = _tolerances_are_numbers(rtol, atol)
     b = _materialise_b(b, mesh=mesh, in_specs=in_specs)
     x0_given = x0 is not None
     if x0 is None:
@@ -1499,7 +1819,7 @@ def sharded_gmres(
         return _framed(
             lambda b_hat, x_hat, atol_hat: _dispatch(
                 mv, b_hat, x_hat, atol_hat, M, of_a_derivative),
-            rhs, x_start, atol_given)
+            rhs, x_start, atol_given, tolerances_are_numbers)
 
     if not differentiable:
         return _refusing_a_derivative(

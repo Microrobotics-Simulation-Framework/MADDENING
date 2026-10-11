@@ -70,7 +70,11 @@ from __future__ import annotations
 from typing import Any, Callable, Literal, Optional
 
 import jax
+# ``jax.core`` is not re-exported by ``jax/__init__.py``; imported by name
+# so ``jax.core.Tracer`` resolves for a type checker.
+import jax.core
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core._pow2_frame import pow2_frame
 from maddening.core.compliance.metadata import StabilityLevel
@@ -141,6 +145,22 @@ def ift_linear_solve(
         ``rhs`` near zero made GMRES raise "iterative breakdown".  Ignored
         when ``solver="dense"``.
 
+        **A floor that is not a normal positive number** (``atol=0.0``;
+        ``rtol=0`` without an ``atol``; a tolerance that underflows, such
+        as ``rtol=1e-44`` in float32 or an ``atol`` far below the scale of
+        ``rhs``, whose rescaled value is subnormal; a negative or NaN one):
+        lineax's entrywise test is then ``0 / 0`` wherever the residual and
+        ``rhs`` are both exactly zero, and lineax stops there and reports
+        success.  The solve is judged instead by
+        ``||rhs - A x|| <= max(atol, rtol * ||rhs||)`` (one more product)
+        and raises where it is not met (``Raises``); ``rtol=0`` without a
+        positive ``atol`` asks for a residual of exactly zero.  The tangent
+        and adjoint solves are judged the same.  Until 0.4.0's fix such a
+        call returned a value that was not the solution with no error
+        (measured in float32 on 64 unknowns, ``rhs`` one unit vector: CG
+        0.53 off; GMRES on 128 unknowns 0.36 off), and the derivative the
+        same.  Prefer ``atol=None`` with a positive ``rtol``.
+
     Returns
     -------
     jax.Array
@@ -189,7 +209,10 @@ def ift_linear_solve(
         a grid-coupled problem, where N runs to 10^5-10^6 and the
         allocation is refused before the solve starts.  There the
         remedy is to condition the problem better, not to change
-        backend.
+        backend.  The same channel, with a message that names the
+        floor, where the floor of the stopping test is not a normal
+        positive number and the value lineax stopped on does not meet
+        the norm test (``atol``).
 
     Examples
     --------
@@ -293,7 +316,12 @@ def ift_linear_solve(
                 rtol=rtol, atol=atol_hat, restart=restart,
                 max_steps=max(4 * restart, 100),
             )
-        x = lx.linear_solve(op, b_hat, solver=solver_obj, options=options).value / p
+        x_hat = lx.linear_solve(op, b_hat, solver=solver_obj, options=options).value
+        if not _floor_is_normal_for_every_rhs(rtol, atol, b_hat.dtype):
+            x_hat = _judged_by_the_norm_test_where_the_floor_is_not_normal(
+                mv, b_hat, x_hat, floor=atol_hat, rtol=rtol,
+                atol_hat=None if atol is None else atol * p)
+        x = x_hat / p
         return jnp.where(finite, x, jnp.full_like(x, jnp.nan))
 
     # ``custom_linear_solve`` rather than lineax's own autodiff: the tangent
@@ -310,6 +338,89 @@ def ift_linear_solve(
         return jax.lax.custom_linear_solve(operator_fn, rhs, _framed_solve, symmetric=True)
     return jax.lax.custom_linear_solve(operator_fn, rhs, _framed_solve,
                                        transpose_solve=_framed_solve)
+
+
+#: What a Krylov solve of :func:`ift_linear_solve` raises where the floor of
+#: lineax's stopping test is not a normal positive number and the value
+#: lineax stopped on does not meet the norm test.
+_FLOOR_NOT_NORMAL_MESSAGE = (
+    "ift_linear_solve: the floor of lineax's stopping test (atol, or "
+    "rtol * max|rhs| when atol is None, in the frame of rhs) is zero, under "
+    "the dtype's smallest normal number, negative or NaN, and the value the "
+    "solve stopped on does not meet ||rhs - A x|| <= max(atol, rtol * ||rhs||). "
+    "With such a floor lineax's entrywise test is 0 / 0 wherever the residual "
+    "and rhs are both exactly zero, and it stops there and reports success. "
+    "Pass atol=None with a positive rtol, or a positive atol of rhs's scale."
+)
+
+
+def _floor_is_normal_for_every_rhs(rtol: Any, atol: Any, dtype: Any) -> bool:
+    """Whether the floor lineax is handed is a normal positive number for
+    every right-hand side that needs a solve, known when the call is traced.
+
+    With ``atol=None`` the floor is ``rtol * max|b_hat|`` and ``max|b_hat|``
+    lies in ``[0.5, 1)`` for every finite non-zero ``rhs``, so a concrete
+    ``rtol`` of at least twice the smallest normal number gives a floor of at
+    least that number (a zero ``b_hat`` is solved by the zero start, exactly).
+    An explicit ``atol`` is rescaled with ``rhs`` (``atol * p``) and can
+    underflow for a large one, and a traced ``rtol`` is not known: those
+    calls keep the run-time test.  ``True`` leaves the program as it was.
+    """
+    if atol is not None or isinstance(rtol, jax.core.Tracer) or jnp.ndim(rtol) != 0:
+        return False
+    # NumPy, not ``jnp``: under a trace a ``jnp`` operation on a constant is
+    # staged out and cannot be read.
+    finfo = np.finfo(np.dtype(jnp.finfo(dtype).dtype))
+    return bool(np.asarray(rtol, dtype=finfo.dtype) >= 2 * finfo.tiny)
+
+
+def _judged_by_the_norm_test_where_the_floor_is_not_normal(
+    mv: Callable[[jax.Array], jax.Array],
+    b_hat: jax.Array,
+    x_hat: jax.Array,
+    *,
+    floor: Any,
+    rtol: Any,
+    atol_hat: Any,
+) -> jax.Array:
+    """``x_hat``, or lineax's channel for a failed solve where it is not
+    the solution.
+
+    lineax stops where ``max_i |r_i| / (floor + rtol |b_i|)`` (and the same
+    quotient of the update) is not above one.  With a floor of zero the
+    quotient is ``0 / 0 = NaN`` at every entry where the residual and the
+    right-hand side are both exactly zero (every entry a Krylov space of a
+    local right-hand side behind a stencil has not reached yet); the maximum
+    is then NaN, ``NaN > 1`` is False, and lineax stops and reports success
+    on a value that is not the solution, so ``throw=True`` does not fire.
+    lineax 0.0.7 and 0.1.1, CG and GMRES alike.  A floor under the smallest
+    normal number is flushed to zero by XLA's CPU arithmetic and does the
+    same; a negative or NaN floor stops lineax at once.
+
+    So where the floor is not a normal positive number, lineax's verdict is
+    replaced by the norm rule of
+    :func:`maddening.cloud.multigpu.iterative_solver.sharded_cg`,
+    ``||b_hat - A x_hat|| <= max(atol_hat, rtol * ||b_hat||)`` (one more
+    product), and a value that does not meet it raises through
+    :func:`equinox.error_if`, the channel lineax raises a failed solve on.
+    A residual of exactly zero meets every tolerance.  Where the floor is
+    normal the product is not taken (``lax.cond``) and ``x_hat`` passes
+    through with its bits.
+    """
+    import equinox as eqx  # noqa: PLC0415 — lineax transitive dep
+
+    tiny = jnp.finfo(b_hat.dtype).tiny
+
+    def norm_test() -> jax.Array:
+        tol = rtol * jnp.linalg.norm(b_hat)
+        if atol_hat is not None:
+            tol = jnp.maximum(atol_hat, tol)
+        residual = jnp.linalg.norm(b_hat - mv(x_hat))
+        return jnp.logical_or(residual <= tol, residual == 0)
+
+    met = jax.lax.cond(jnp.logical_not(floor >= tiny), norm_test,
+                       lambda: jnp.asarray(True))
+    return eqx.error_if(x_hat, jnp.logical_not(met), _FLOOR_NOT_NORMAL_MESSAGE)
 
 
 def _dense_solve(

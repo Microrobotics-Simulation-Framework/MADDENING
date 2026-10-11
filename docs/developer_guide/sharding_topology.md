@@ -162,9 +162,33 @@ which wrapper a node is written for:
   body, one solve per device; the lineax route (the default) then takes
   only an operator that closes over nothing, and `backend="loop"` any
   callable.  `sharded_gmres` cannot: every route of it raises there.
-  Three inputs are not caught and are registered open: a NaN `rtol` or a
-  traced negative or NaN `atol` (MADD-ANO-271), and a solution too large
-  for the dtype, which comes back as infinities (MADD-ANO-272).
+  The same NaN answer is given to a solution too large for the dtype (the
+  answer is tested after it is scaled back: MADD-ANO-272) and to an
+  `rtol` or `atol` that is negative or NaN and arrives as a traced value;
+  given as a concrete number such a tolerance raises a `ValueError`
+  (MADD-ANO-271).  A result is so every entry of `value` finite beside a
+  finite `residual_norm`, or NaN in both (one exception, open: under
+  `differentiable=True` a solution within a factor of the operator's
+  diagonal of the dtype's largest number reads `converged=False` beside an
+  infinite `residual_norm`, or NaN with an `x0` or an `atol`, where the
+  ordinary call answers: MADD-ANO-282).  Where the floor lineax is
+  handed is under the dtype's smallest normal number `tiny` -- `rtol=0`,
+  an explicit `atol=0.0`, a tolerance that underflows, and a positive
+  `atol` under `tiny / p`, `p` the power of two that brings `max|b|`
+  into `[0.5, 1)` (between `tiny * max|b|` and twice that; float32:
+  about 1.2e-8 beside `max|b| = 1e30`) -- lineax's entrywise test is
+  `0 / 0` at an exactly zero entry and lineax stops there reporting
+  success: `converged` on the lineax backend is then not its verdict but
+  `residual_norm <= max(atol, rtol * ||b||)` (MADD-ANO-281).  Across
+  `tiny / p` the flag of one `b` changes from one rule to the other, so
+  it is not monotone in `atol`; every `True` is true of
+  `residual_norm`.  Prefer `atol=None`.  One thing is registered open:
+  on its default (lineax) route `sharded_gmres` counts `max_iters` and
+  `.iters` in restart CYCLES of up to `restart` operator products, not
+  in steps (MADD-ANO-280: on 1000 unknowns `max_iters=10` executed 1,583
+  to 4,490 products over 24 white-noise right-hand sides); for a bound
+  on the work pass `backend="loop"`.  That route does not read `x0`
+  either.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
 * Boundary inputs are classified by shape.  A **grid-shaped** input (on

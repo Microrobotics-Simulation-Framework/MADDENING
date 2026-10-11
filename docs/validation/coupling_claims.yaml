@@ -7141,7 +7141,18 @@ claims:
     does not pass through the hook's arguments, and a hook changed after
     compile(), are not seen.  A flux hook that indexes an input is an
     ERROR line of validate() naming the node, the hook and the input, and
-    is asked once.  Not claimed for float64, mixed dtypes, 16-bit
+    is asked once; one that indexes a field its state does not hold names
+    that field.  What a hook is traced on is composed as the pass composes
+    it (the edges in add_edge order, additive or replacing, edges from
+    outside the group and external inputs) at the shapes the sweeps settle
+    at, and each seeding sweep's inputs are traced too: an input two edges
+    compose at another shape, in either edge order and either flux name, is
+    refused where the hook reads the shape the pass hands and right, to the
+    bit of the pass, where it does not; a flux whose shape follows a later
+    member's flux, a shape that settles in the third sweep and one the
+    second sweep hands before it settles are refused; shapes that never
+    settle are assumed, with that reason; an edge a later edge replaces is
+    read by nothing.  Not claimed for float64, mixed dtypes, 16-bit
     floats, gradients, vmap, multi-rate graphs, sub-cycled groups,
     predictors and warm starts, run_adaptive, checkpoints or sharded
     graphs.
@@ -7169,6 +7180,20 @@ claims:
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_the_shape_the_pass_hands_is_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_shape_the_hook_does_not_read_compiles_with_the_numbers_of_the_pass
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_whose_shape_follows_a_later_flux_is_judged_at_the_shape_the_sweeps_settle_at
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_what_the_refused_shape_cases_compute_without_the_refusal
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_additive_edge_adds_its_value_to_what_an_earlier_edge_delivered
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_cannot_be_evaluated_in_one_sweep_is_evaluated_in_the_next
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_shape_that_settles_in_the_third_sweep_is_traced_at_that_shape
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_shape_the_second_sweep_hands_before_it_settles_is_traced_too
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_input_taken_at_its_declared_shape_is_named_in_the_message
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_input_one_of_whose_edges_cannot_be_evaluated_is_not_derived_from_the_others
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_flux_shapes_that_never_settle_are_assumed_and_the_message_says_why
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_whose_value_a_later_edge_replaces_is_read_by_nothing
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_reads_only_the_shape_of_an_input_compiles
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_raises_key_error_is_told_which_dict_it_indexed
   status: verified
   domains:
     f32: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution

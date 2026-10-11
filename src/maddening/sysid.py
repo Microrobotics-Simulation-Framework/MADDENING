@@ -3004,7 +3004,10 @@ def _device_jacobian_spectrum(J):
     m, n = J.shape
     if m < n:
         J = jnp.concatenate([J, jnp.zeros((n - m, n), dtype=J.dtype)], axis=0)
-    _, s, vt = jnp.linalg.svd(jnp.linalg.qr(J, mode="r"), full_matrices=False)
+    # ``lax.linalg.qr`` for its return type, always ``(q, r)``; under
+    # ``jit`` the unused ``q`` is never formed.
+    _, r = jax.lax.linalg.qr(J, full_matrices=False)
+    _, s, vt = jnp.linalg.svd(r, full_matrices=False)
     return (s * s)[::-1], vt[::-1].T
 
 

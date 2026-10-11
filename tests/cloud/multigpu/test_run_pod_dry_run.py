@@ -90,7 +90,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 10
+    assert doc["schema_version"] == 11
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -438,15 +438,19 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
         smallest.append((256, "lbm", "periodic", mesh))
         # the field again with a halo of two cells, under each boundary
         smallest += [(256, "field-halo2", b, mesh) for b in rp.STENCIL_BOUNDARIES]
+        # and once under the zero fill, with integrals the wrapper stacks a shard
+        smallest.append((256, "field-shares", "zero", mesh))
     assert rp.stencil_cases([1024, 256], 4) == [(1024, "field", "periodic", "2d"), *smallest]
-    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2"}
+    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2", "field-shares"}
+    assert rp.FIELD_BOUNDARIES == (*rp.STENCIL_BOUNDARIES, "zero")
     # no pencil mesh on 2 or 3 devices: the other three carry every case,
     # and the larger sizes run on the 1-D mesh
     assert rp.stencil_cases([256, 1024], 2) == [
         (256, kind, b, mesh) for mesh in ("1d", "1d-axis1", "2d-flat")
         for kind, b in (("field", "periodic"), ("field", "edge"), ("field", "dirichlet"),
                         ("lbm", "periodic"), ("field-halo2", "periodic"),
-                        ("field-halo2", "edge"), ("field-halo2", "dirichlet"))
+                        ("field-halo2", "edge"), ("field-halo2", "dirichlet"),
+                        ("field-shares", "zero"))
     ] + [(1024, "field", "periodic", "1d")]
     gpu = rp.stencil_cases(list(rp.GPU_CELLS), 4)
     assert gpu[:4] == [(100_000, "field", b, "1d") for b in rp.STENCIL_BOUNDARIES] + [

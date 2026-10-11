@@ -6,7 +6,7 @@
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-11T10:44:35Z",
+    "timestamp_utc": "2026-10-11T10:50:58Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "0c486897d952bc27214b13cb2f8b6f9c3c568bd3"
+    "git_commit": "762943eff6923ef3c605b6b35d59f4bd2ad8a5f6"
   },
   "config": {
     "goal": "all",
@@ -33,8 +33,8 @@
     "keep_going": false,
     "dry_run": true,
     "cells": [
-      225,
-      1024
+      256,
+      961
     ],
     "n_devices": 4,
     "allow_fewer_devices": false,
@@ -50,18 +50,18 @@
   },
   "results": [
     {
-      "cells": 225,
-      "requested_cells": 225,
+      "cells": 256,
+      "requested_cells": 256,
       "mesh": "grid",
       "partition": "rcm",
       "n_devices": 4,
       "fields_per_cell": 1,
-      "n_local_max": 57,
-      "n_ghost_max": 26,
-      "layout_build_s": 0.0008756360039114952,
+      "n_local_max": 64,
+      "n_ghost_max": 27,
+      "layout_build_s": 0.0009882360027404502,
       "traffic_cells_per_shard": {
-        "all_to_all": 104,
-        "ppermute": 30,
+        "all_to_all": 108,
+        "ppermute": 32,
         "useful": 19,
         "ppermute_messages": 2
       },
@@ -72,55 +72,55 @@
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.26131499907933176,
-            0.36044100124854594,
-            0.12708599388133734
+            0.34744999720714986,
+            0.3371799975866452,
+            0.17508900782559067
           ],
-          "min_ms": 0.12708599388133734,
-          "median_ms": 0.26131499907933176,
-          "mean_ms": 0.24961399806973836,
-          "compile_s": 0.2157484279887285,
-          "bytes_per_shard": 416,
-          "bytes_total": 1664,
+          "min_ms": 0.17508900782559067,
+          "median_ms": 0.3371799975866452,
+          "mean_ms": 0.2865730008731286,
+          "compile_s": 0.23114526399876922,
+          "bytes_per_shard": 432,
+          "bytes_total": 1728,
           "messages": 1,
-          "bandwidth_GBps": 0.013093496373437572
+          "bandwidth_GBps": 0.009869266046223141
         },
         "ppermute": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.46166899846866727,
-            0.2570289943832904,
-            0.24140399182215333
+            0.5337689945008606,
+            0.20355399465188384,
+            0.12335099745541811
           ],
-          "min_ms": 0.24140399182215333,
-          "median_ms": 0.2570289943832904,
-          "mean_ms": 0.32003399489137035,
-          "compile_s": 0.16182549299264792,
-          "bytes_per_shard": 120,
-          "bytes_total": 480,
+          "min_ms": 0.12335099745541811,
+          "median_ms": 0.20355399465188384,
+          "mean_ms": 0.2868913288693875,
+          "compile_s": 0.14864833699539304,
+          "bytes_per_shard": 128,
+          "bytes_total": 512,
           "messages": 2,
-          "bandwidth_GBps": 0.001988368114283813
+          "bandwidth_GBps": 0.0041507568691128635
         }
       },
       "bit_identical": true,
-      "ppermute_speedup_median": 1.0166751798034501,
-      "ppermute_speedup_min": 0.5264452875119144
+      "ppermute_speedup_median": 1.656464655303313,
+      "ppermute_speedup_min": 1.4194373084730982
     },
     {
-      "cells": 1024,
-      "requested_cells": 1024,
+      "cells": 961,
+      "requested_cells": 961,
       "mesh": "grid",
       "partition": "rcm",
       "n_devices": 4,
       "fields_per_cell": 1,
-      "n_local_max": 256,
-      "n_ghost_max": 55,
-      "layout_build_s": 0.0031929099932312965,
+      "n_local_max": 241,
+      "n_ghost_max": 53,
+      "layout_build_s": 0.0030517689883708954,
       "traffic_cells_per_shard": {
-        "all_to_all": 220,
-        "ppermute": 64,
-        "useful": 39,
+        "all_to_all": 212,
+        "ppermute": 62,
+        "useful": 38,
         "ppermute_messages": 2
       },
       "input_sharding": "NamedSharding(mesh=Mesh('devices': 4, axis_types=(Auto,)), spec=P('devices',), memory_kind=device)",
@@ -130,45 +130,45 @@
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.38507299905177206,
-            0.2890530013246462,
-            0.26644500030670315
+            0.28096899040974677,
+            0.4264559975126758,
+            0.25491201085969806
           ],
-          "min_ms": 0.26644500030670315,
-          "median_ms": 0.2890530013246462,
-          "mean_ms": 0.3135236668943738,
-          "compile_s": 0.22464511600264814,
-          "bytes_per_shard": 880,
-          "bytes_total": 3520,
+          "min_ms": 0.25491201085969806,
+          "median_ms": 0.28096899040974677,
+          "mean_ms": 0.3207789995940402,
+          "compile_s": 0.1884077260037884,
+          "bytes_per_shard": 848,
+          "bytes_total": 3392,
           "messages": 1,
-          "bandwidth_GBps": 0.013210981613271597
+          "bandwidth_GBps": 0.013306552282728392
         },
         "ppermute": {
           "warmup": 1,
           "repeats": 3,
           "ms": [
-            0.30833198979962617,
-            0.25333400117233396,
-            0.1699860004009679
+            0.38820500776637346,
+            0.21778899827040732,
+            0.15997000446077436
           ],
-          "min_ms": 0.1699860004009679,
-          "median_ms": 0.25333400117233396,
-          "mean_ms": 0.24388399712430933,
-          "compile_s": 0.14942639200307894,
-          "bytes_per_shard": 256,
-          "bytes_total": 1024,
+          "min_ms": 0.15997000446077436,
+          "median_ms": 0.21778899827040732,
+          "mean_ms": 0.2553213368325184,
+          "compile_s": 0.13224613798956852,
+          "bytes_per_shard": 248,
+          "bytes_total": 992,
           "messages": 2,
-          "bandwidth_GBps": 0.006024025493773365
+          "bandwidth_GBps": 0.006201162545089786
         }
       },
       "bit_identical": true,
-      "ppermute_speedup_median": 1.1409956815390678,
-      "ppermute_speedup_min": 1.5674526118515935
+      "ppermute_speedup_median": 1.2900972622175113,
+      "ppermute_speedup_min": 1.59349880447246
     }
   ],
   "checks": [
     {
-      "name": "225 cells: all_to_all == ppermute bit for bit",
+      "name": "256 cells: all_to_all == ppermute bit for bit",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -176,7 +176,7 @@
       "passed": true
     },
     {
-      "name": "225 cells: timed input pre-placed on the mesh",
+      "name": "256 cells: timed input pre-placed on the mesh",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -184,7 +184,7 @@
       "passed": true
     },
     {
-      "name": "1024 cells: all_to_all == ppermute bit for bit",
+      "name": "961 cells: all_to_all == ppermute bit for bit",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -192,7 +192,7 @@
       "passed": true
     },
     {
-      "name": "1024 cells: timed input pre-placed on the mesh",
+      "name": "961 cells: timed input pre-placed on the mesh",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -201,5 +201,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 0.8706570009962888
+  "wall_s": 0.8248799610009883
 }

@@ -18,7 +18,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 RUNBOOK = REPO / "benchmarks" / "multigpu" / "README.md"
 SEEDED = REPO / "tests" / "cloud" / "multigpu" / "test_run_pod_seeded_faults.py"
-WORDS = {"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+WORDS = {"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+         "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16}
 
 
 def test_the_runbook_counts_every_seed_and_names_the_eighth():

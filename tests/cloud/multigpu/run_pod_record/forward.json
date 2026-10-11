@@ -6,7 +6,7 @@
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-11T10:44:35Z",
+    "timestamp_utc": "2026-10-11T10:50:58Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "0c486897d952bc27214b13cb2f8b6f9c3c568bd3"
+    "git_commit": "762943eff6923ef3c605b6b35d59f4bd2ad8a5f6"
   },
   "config": {
     "goal": "all",
@@ -33,8 +33,8 @@
     "keep_going": false,
     "dry_run": true,
     "cells": [
-      225,
-      1024
+      256,
+      961
     ],
     "n_devices": 4,
     "allow_fewer_devices": false,
@@ -50,168 +50,7 @@
   },
   "results": [
     {
-      "cells": 225,
-      "mesh": "grid",
-      "partition": "rcm",
-      "renumbered": false,
-      "n_devices": 4,
-      "steps": 3,
-      "methods": {
-        "all_to_all": {
-          "compile_s": 0.41018119400541764,
-          "wrapper_first_call_s": 0.14499329500540625,
-          "input_presharded": true,
-          "wrapper_step": {
-            "warmup": 1,
-            "repeats": 3,
-            "ms": [
-              4.9427880003349856,
-              4.722797995782457,
-              5.650603008689359
-            ],
-            "min_ms": 4.722797995782457,
-            "median_ms": 4.9427880003349856,
-            "mean_ms": 5.105396334935601,
-            "ms_per_step": 1.6475960001116619
-          },
-          "device_step": {
-            "warmup": 1,
-            "repeats": 3,
-            "ms": [
-              1.0321759909857064,
-              1.0796389979077503,
-              0.9539360034978017
-            ],
-            "min_ms": 0.9539360034978017,
-            "median_ms": 1.0321759909857064,
-            "mean_ms": 1.0219169974637528,
-            "ms_per_step": 0.34405866366190213
-          },
-          "parity_x": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 1.0119682550430298,
-            "finite": true
-          },
-          "parity_total": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 157.00387573242188,
-            "finite": true
-          },
-          "ones": {
-            "total": 225.0,
-            "max_abs_from_one": 0.0,
-            "entries_not_one": 0,
-            "per_shard": [
-              [
-                0.0,
-                57.0
-              ],
-              [
-                57.0,
-                56.0
-              ],
-              [
-                114.0,
-                56.0
-              ],
-              [
-                171.0,
-                56.0
-              ]
-            ]
-          }
-        },
-        "ppermute": {
-          "compile_s": 0.2544262129958952,
-          "wrapper_first_call_s": 0.002240340007119812,
-          "input_presharded": true,
-          "wrapper_step": {
-            "warmup": 1,
-            "repeats": 3,
-            "ms": [
-              5.529431000468321,
-              5.213084994466044,
-              5.43517000915017
-            ],
-            "min_ms": 5.213084994466044,
-            "median_ms": 5.43517000915017,
-            "mean_ms": 5.392562001361512,
-            "ms_per_step": 1.81172333638339
-          },
-          "device_step": {
-            "warmup": 1,
-            "repeats": 3,
-            "ms": [
-              0.9961850009858608,
-              1.1455030034994707,
-              1.1654580011963844
-            ],
-            "min_ms": 0.9961850009858608,
-            "median_ms": 1.1455030034994707,
-            "mean_ms": 1.1023820018939052,
-            "ms_per_step": 0.38183433449982357
-          },
-          "parity_x": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 1.0119682550430298,
-            "finite": true
-          },
-          "parity_total": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 157.00387573242188,
-            "finite": true
-          },
-          "ones": {
-            "total": 225.0,
-            "max_abs_from_one": 0.0,
-            "entries_not_one": 0,
-            "per_shard": [
-              [
-                0.0,
-                57.0
-              ],
-              [
-                57.0,
-                56.0
-              ],
-              [
-                114.0,
-                56.0
-              ],
-              [
-                171.0,
-                56.0
-              ]
-            ]
-          }
-        }
-      },
-      "n_local_max": 57,
-      "n_ghost_max": 26,
-      "n_local": [
-        57,
-        56,
-        56,
-        56
-      ],
-      "traffic_cells_per_shard": {
-        "all_to_all": 104,
-        "ppermute": 30,
-        "useful": 19,
-        "ppermute_messages": 2
-      },
-      "ones_unsharded": {
-        "total": 225.0,
-        "max_abs_from_one": 0.0,
-        "entries_not_one": 0
-      }
-    },
-    {
-      "cells": 1024,
+      "cells": 256,
       "mesh": "grid",
       "partition": "rcm",
       "renumbered": true,
@@ -219,154 +58,315 @@
       "steps": 3,
       "methods": {
         "all_to_all": {
-          "compile_s": 0.3687904549879022,
-          "wrapper_first_call_s": 0.1661507879907731,
+          "compile_s": 0.34000257299339864,
+          "wrapper_first_call_s": 0.16194716800237074,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              5.351840998628177,
-              5.6761750020086765,
-              5.155297010787763
+              4.7785269998712465,
+              5.03709600889124,
+              5.540881989873014
             ],
-            "min_ms": 5.155297010787763,
-            "median_ms": 5.351840998628177,
-            "mean_ms": 5.394437670474872,
-            "ms_per_step": 1.7839469995427255
+            "min_ms": 4.7785269998712465,
+            "median_ms": 5.03709600889124,
+            "mean_ms": 5.118834999545167,
+            "ms_per_step": 1.6790320029637467
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              1.0382389882579446,
-              0.9429979982087389,
-              1.0506630060262978
+              1.1811809963546693,
+              1.0609400051180273,
+              1.0036799940280616
             ],
-            "min_ms": 0.9429979982087389,
-            "median_ms": 1.0382389882579446,
-            "mean_ms": 1.0106333308309938,
-            "ms_per_step": 0.3460796627526482
+            "min_ms": 1.0036799940280616,
+            "median_ms": 1.0609400051180273,
+            "mean_ms": 1.0819336651669194,
+            "ms_per_step": 0.3536466683726758
           },
           "parity_x": {
-            "max_abs": 2.384185791015625e-07,
-            "max_rel": 1.9208341644942834e-07,
-            "reference_scale": 1.2412241697311401,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.007796287536621,
             "finite": true
           },
           "parity_total": {
             "max_abs": 1.52587890625e-05,
-            "max_rel": 9.355946906498257e-08,
-            "reference_scale": 163.0918731689453,
+            "max_rel": 8.432493839220001e-08,
+            "reference_scale": 180.9522705078125,
             "finite": true
           },
           "ones": {
-            "total": 1024.0,
+            "total": 256.0,
             "max_abs_from_one": 0.0,
             "entries_not_one": 0,
             "per_shard": [
               [
                 0.0,
-                256.0
+                64.0
               ],
               [
-                256.0,
-                256.0
+                64.0,
+                64.0
               ],
               [
-                512.0,
-                256.0
+                128.0,
+                64.0
               ],
               [
-                768.0,
-                256.0
+                192.0,
+                64.0
               ]
             ]
           }
         },
         "ppermute": {
-          "compile_s": 0.29035884099721443,
-          "wrapper_first_call_s": 0.0022629820014117286,
+          "compile_s": 0.25580715999240056,
+          "wrapper_first_call_s": 0.002401755002210848,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              5.795543998829089,
-              5.29739900957793,
-              6.0561509890249
+              5.294806003803387,
+              4.742438002722338,
+              5.01642600283958
             ],
-            "min_ms": 5.29739900957793,
-            "median_ms": 5.795543998829089,
-            "mean_ms": 5.71636466581064,
-            "ms_per_step": 1.9318479996096964
+            "min_ms": 4.742438002722338,
+            "median_ms": 5.01642600283958,
+            "mean_ms": 5.017890003121768,
+            "ms_per_step": 1.6721420009465267
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.9581949998391792,
-              0.8932740020100027,
-              0.9949990053428337
+              1.140038002631627,
+              0.8915029902709648,
+              1.0422699997434393
             ],
-            "min_ms": 0.8932740020100027,
-            "median_ms": 0.9581949998391792,
-            "mean_ms": 0.9488226690640053,
-            "ms_per_step": 0.3193983332797264
+            "min_ms": 0.8915029902709648,
+            "median_ms": 1.0422699997434393,
+            "mean_ms": 1.0246036642153438,
+            "ms_per_step": 0.3474233332478131
           },
           "parity_x": {
-            "max_abs": 2.384185791015625e-07,
-            "max_rel": 1.9208341644942834e-07,
-            "reference_scale": 1.2412241697311401,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.007796287536621,
             "finite": true
           },
           "parity_total": {
             "max_abs": 1.52587890625e-05,
-            "max_rel": 9.355946906498257e-08,
-            "reference_scale": 163.0918731689453,
+            "max_rel": 8.432493839220001e-08,
+            "reference_scale": 180.9522705078125,
             "finite": true
           },
           "ones": {
-            "total": 1024.0,
+            "total": 256.0,
             "max_abs_from_one": 0.0,
             "entries_not_one": 0,
             "per_shard": [
               [
                 0.0,
-                256.0
+                64.0
               ],
               [
-                256.0,
-                256.0
+                64.0,
+                64.0
               ],
               [
-                512.0,
-                256.0
+                128.0,
+                64.0
               ],
               [
-                768.0,
-                256.0
+                192.0,
+                64.0
               ]
             ]
           }
         }
       },
-      "n_local_max": 256,
-      "n_ghost_max": 55,
+      "n_local_max": 64,
+      "n_ghost_max": 27,
       "n_local": [
-        256,
-        256,
-        256,
-        256
+        64,
+        64,
+        64,
+        64
       ],
       "traffic_cells_per_shard": {
-        "all_to_all": 220,
-        "ppermute": 64,
-        "useful": 39,
+        "all_to_all": 108,
+        "ppermute": 32,
+        "useful": 19,
         "ppermute_messages": 2
       },
       "ones_unsharded": {
-        "total": 1024.0,
+        "total": 256.0,
+        "max_abs_from_one": 0.0,
+        "entries_not_one": 0
+      }
+    },
+    {
+      "cells": 961,
+      "mesh": "grid",
+      "partition": "rcm",
+      "renumbered": false,
+      "n_devices": 4,
+      "steps": 3,
+      "methods": {
+        "all_to_all": {
+          "compile_s": 0.40166312499786727,
+          "wrapper_first_call_s": 0.17485480899631511,
+          "input_presharded": true,
+          "wrapper_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              5.6522630038671196,
+              5.304808000801131,
+              5.015652001020499
+            ],
+            "min_ms": 5.015652001020499,
+            "median_ms": 5.304808000801131,
+            "mean_ms": 5.32424100189625,
+            "ms_per_step": 1.768269333600377
+          },
+          "device_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.6142139938892797,
+              1.2001019931631163,
+              1.2008180056000128
+            ],
+            "min_ms": 1.2001019931631163,
+            "median_ms": 1.2008180056000128,
+            "mean_ms": 1.338377997550803,
+            "ms_per_step": 0.4002726685333376
+          },
+          "parity_x": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.2316534519195557,
+            "finite": true
+          },
+          "parity_total": {
+            "max_abs": 3.0517578125e-05,
+            "max_rel": 1.5416282801224917e-07,
+            "reference_scale": 197.956787109375,
+            "finite": true
+          },
+          "ones": {
+            "total": 961.0,
+            "max_abs_from_one": 0.0,
+            "entries_not_one": 0,
+            "per_shard": [
+              [
+                0.0,
+                241.0
+              ],
+              [
+                241.0,
+                240.0
+              ],
+              [
+                482.0,
+                240.0
+              ],
+              [
+                723.0,
+                240.0
+              ]
+            ]
+          }
+        },
+        "ppermute": {
+          "compile_s": 0.2500363150029443,
+          "wrapper_first_call_s": 0.002332531992578879,
+          "input_presharded": true,
+          "wrapper_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              5.5322789994534105,
+              4.952421004418284,
+              4.77863299602177
+            ],
+            "min_ms": 4.77863299602177,
+            "median_ms": 4.952421004418284,
+            "mean_ms": 5.087777666631155,
+            "ms_per_step": 1.6508070014727612
+          },
+          "device_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.2860690039815381,
+              1.1709109967341647,
+              1.1146210017614067
+            ],
+            "min_ms": 1.1146210017614067,
+            "median_ms": 1.1709109967341647,
+            "mean_ms": 1.1905336674923699,
+            "ms_per_step": 0.3903036655780549
+          },
+          "parity_x": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.2316534519195557,
+            "finite": true
+          },
+          "parity_total": {
+            "max_abs": 3.0517578125e-05,
+            "max_rel": 1.5416282801224917e-07,
+            "reference_scale": 197.956787109375,
+            "finite": true
+          },
+          "ones": {
+            "total": 961.0,
+            "max_abs_from_one": 0.0,
+            "entries_not_one": 0,
+            "per_shard": [
+              [
+                0.0,
+                241.0
+              ],
+              [
+                241.0,
+                240.0
+              ],
+              [
+                482.0,
+                240.0
+              ],
+              [
+                723.0,
+                240.0
+              ]
+            ]
+          }
+        }
+      },
+      "n_local_max": 241,
+      "n_ghost_max": 53,
+      "n_local": [
+        241,
+        240,
+        240,
+        240
+      ],
+      "traffic_cells_per_shard": {
+        "all_to_all": 212,
+        "ppermute": 62,
+        "useful": 38,
+        "ppermute_messages": 2
+      },
+      "ones_unsharded": {
+        "total": 961.0,
         "max_abs_from_one": 0.0,
         "entries_not_one": 0
       }
@@ -374,14 +374,14 @@
   ],
   "checks": [
     {
-      "name": "225 cells all_to_all x vs unsharded max_rel",
+      "name": "256 cells all_to_all x vs unsharded max_rel",
       "value": 0.0,
       "limit": 1e-05,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells all_to_all x vs unsharded finite",
+      "name": "256 cells all_to_all x vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -389,7 +389,7 @@
       "passed": true
     },
     {
-      "name": "225 cells all_to_all total vs unsharded finite",
+      "name": "256 cells all_to_all total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -397,35 +397,35 @@
       "passed": true
     },
     {
-      "name": "225 cells all_to_all ones: |total - cells|",
+      "name": "256 cells all_to_all ones: |total - cells|",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells all_to_all ones: max |x - 1| after the step",
+      "name": "256 cells all_to_all ones: max |x - 1| after the step",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells all_to_all ones: per-shard (offset, cells) entries off the layout's",
+      "name": "256 cells all_to_all ones: per-shard (offset, cells) entries off the layout's",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells ppermute x vs unsharded max_rel",
+      "name": "256 cells ppermute x vs unsharded max_rel",
       "value": 0.0,
       "limit": 1e-05,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells ppermute x vs unsharded finite",
+      "name": "256 cells ppermute x vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -433,7 +433,7 @@
       "passed": true
     },
     {
-      "name": "225 cells ppermute total vs unsharded finite",
+      "name": "256 cells ppermute total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -441,49 +441,49 @@
       "passed": true
     },
     {
-      "name": "225 cells ppermute ones: |total - cells|",
+      "name": "256 cells ppermute ones: |total - cells|",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells ppermute ones: max |x - 1| after the step",
+      "name": "256 cells ppermute ones: max |x - 1| after the step",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells ppermute ones: per-shard (offset, cells) entries off the layout's",
+      "name": "256 cells ppermute ones: per-shard (offset, cells) entries off the layout's",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells unsharded ones: |total - cells|",
+      "name": "256 cells unsharded ones: |total - cells|",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "225 cells unsharded ones: max |x - 1| after the step",
+      "name": "256 cells unsharded ones: max |x - 1| after the step",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all x vs unsharded max_rel",
-      "value": 1.9208341644942834e-07,
+      "name": "961 cells all_to_all x vs unsharded max_rel",
+      "value": 0.0,
       "limit": 1e-05,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all x vs unsharded finite",
+      "name": "961 cells all_to_all x vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -491,7 +491,7 @@
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all total vs unsharded finite",
+      "name": "961 cells all_to_all total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -499,35 +499,35 @@
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all ones: |total - cells|",
+      "name": "961 cells all_to_all ones: |total - cells|",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all ones: max |x - 1| after the step",
+      "name": "961 cells all_to_all ones: max |x - 1| after the step",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells all_to_all ones: per-shard (offset, cells) entries off the layout's",
+      "name": "961 cells all_to_all ones: per-shard (offset, cells) entries off the layout's",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells ppermute x vs unsharded max_rel",
-      "value": 1.9208341644942834e-07,
+      "name": "961 cells ppermute x vs unsharded max_rel",
+      "value": 0.0,
       "limit": 1e-05,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells ppermute x vs unsharded finite",
+      "name": "961 cells ppermute x vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -535,7 +535,7 @@
       "passed": true
     },
     {
-      "name": "1024 cells ppermute total vs unsharded finite",
+      "name": "961 cells ppermute total vs unsharded finite",
       "value": true,
       "limit": true,
       "sense": "==",
@@ -543,35 +543,35 @@
       "passed": true
     },
     {
-      "name": "1024 cells ppermute ones: |total - cells|",
+      "name": "961 cells ppermute ones: |total - cells|",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells ppermute ones: max |x - 1| after the step",
+      "name": "961 cells ppermute ones: max |x - 1| after the step",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells ppermute ones: per-shard (offset, cells) entries off the layout's",
+      "name": "961 cells ppermute ones: per-shard (offset, cells) entries off the layout's",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells unsharded ones: |total - cells|",
+      "name": "961 cells unsharded ones: |total - cells|",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1024 cells unsharded ones: max |x - 1| after the step",
+      "name": "961 cells unsharded ones: max |x - 1| after the step",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
@@ -579,5 +579,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 2.8439031719899504
+  "wall_s": 2.7734135900100227
 }

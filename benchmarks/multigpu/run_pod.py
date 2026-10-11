@@ -97,7 +97,7 @@ goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
 those cases that way on such a count.  The goals must fail on a stencil
-wrapper or a halo exchange broken in any of eleven ways: eight that every
+wrapper or a halo exchange broken in any of sixteen ways: eight that every
 wrapper goal must catch (a static's halos NaN, grid-shaped inputs zeroed,
 domain integrals halved, domain integrals summed over the first mesh axis
 only, sharded axes after the first zero-filled at the global edges, halos
@@ -105,7 +105,11 @@ taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
 extent divided by the first mesh axis's size or read off spatial axis 0),
 and three that only a halo two cells wide shows, which are the ``stencil``
 goal's (wider halos zero at the global edges, an outer halo cell copied
-from the innermost one, the one-cell edge rule at width two).  And the
+from the innermost one, the one-cell edge rule at width two), and five
+that only its ``field-shares`` cases show (the zero fill replaced by the
+edge fill or by ones; an integral the node asks to keep one a shard
+summed over the mesh, stacked a slot off, or zeroed on its way back into
+the step).  And the
 goals that build the unstructured wrapper (``indivisible``, ``forward``,
 ``gradient``) must fail on that wrapper broken in any of seven ways: five
 that each of them must catch (per-cell inputs zeroed, their ghost rows not

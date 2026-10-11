@@ -82,13 +82,17 @@ so an edit needs no rebuild; rebuild after a dependency changes.
 * `--cpuset-cpus` and `--memory` are optional limits.
 
 **Import order.**  In this image a process that imports numpy, then
-initialises GStreamer (`Gst.init`), then imports jax aborts (SIGSEGV or
-SIGABRT, three tries of three); jax first, then GStreamer, runs.
-`SelkiesSession.start()` therefore imports jax before it calls
-`Gst.init` when jax is installed and GStreamer is not initialised yet;
-the cloud entry point and the test modules import jax first anyway.  A
-program that calls `Gst.init` itself must import jax (or
-`maddening.core`) before it.
+loads GStreamer's library (PyGObject loads it at the first call into
+`Gst`, such as `Gst.init` or `Gst.is_initialized`), then imports jax
+aborts inside jaxlib's MLIR import (SIGSEGV or SIGABRT, three tries of
+three); jax first, then GStreamer, runs, pipelines included.
+`SelkiesSession` therefore imports jax, when it is installed and not
+imported yet, before its first contact with GStreamer (in its
+constructor and at the top of `start()`), and
+`test_a_session_started_after_numpy_and_before_jax_does_not_abort_the_process`
+runs that order; the cloud entry point and the test modules import jax
+first anyway.  A program that calls into `Gst` itself must import jax
+(or `maddening.core`) before it.
 
 Set `MADDENING_REQUIRE_STREAMING_TESTS=1` (`-e ...`) to make a missing
 dependency fail the run instead of skipping it, as the `test-streaming`

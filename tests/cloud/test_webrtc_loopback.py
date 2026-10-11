@@ -145,9 +145,9 @@ FRAMES_WANTED = 20
 #: Timeouts for one step each.  Measured in the container on four cores
 #: (GStreamer 1.24.2): the answer arrives about 0.2 s after the offer,
 #: ICE connects about 0.1 s later, and twenty frames are decoded within
-#: 1.5 s.  The whole module (31 tests) takes 10.4-10.6 s; its slowest
+#: 1.5 s.  The whole module (32 tests) takes 10.4-10.9 s; its slowest
 #: test, 2.8 s, is the SSDP listener's (a fixed 2 s watch after the
-#: frames), the next 1.6-1.9 s (the session in a child process).  Each
+#: frames), the next 1.5-1.9 s (the session in a child process).  Each
 #: limit is many times its step, for a loaded CI runner.
 ANSWER_TIMEOUT_S = 10.0
 ICE_TIMEOUT_S = 15.0
@@ -1117,3 +1117,35 @@ def test_the_tests_hold_no_capability_and_cannot_change_a_link():
                             capture_output=True, text=True, timeout=30)
     assert change.returncode != 0 and "Operation not permitted" in change.stderr, (
         change.returncode, change.stderr)
+
+
+#: numpy first, then a session started, then jax: the order that aborted.
+_NUMPY_SESSION_JAX = """
+import numpy
+from maddening.cloud.selkies_session import SelkiesSession
+from maddening.cloud.streaming import StreamConfig
+session = SelkiesSession(secret="import-order", signaling_port=0, bind_host="127.0.0.1")
+session.start(StreamConfig(width=64, height=64, fps=5, ice_servers=[]))
+import maddening.core
+import jax.numpy as jnp
+assert float(jnp.ones(3).sum()) == 3.0
+session.stop()
+print("survived")
+"""
+
+
+def test_a_session_started_after_numpy_and_before_jax_does_not_abort_the_process():
+    """In this image, numpy, then GStreamer's library, then jax aborts the process.
+
+    PyGObject loads GStreamer's library at the first call into ``Gst``;
+    a process that had imported numpy and then imported jax after that
+    died inside jaxlib's MLIR import (SIGSEGV or SIGABRT, three of three).
+    The session imports jax before it first touches GStreamer, so a
+    program that starts a session before it imports :mod:`maddening.core`
+    runs.  In a fresh process, since this one imported jax long ago.
+    """
+    child = subprocess.run([sys.executable, "-c", _NUMPY_SESSION_JAX],
+                           cwd=Path(__file__).resolve().parents[2],
+                           capture_output=True, text=True, timeout=120)
+    assert child.returncode == 0 and child.stdout.strip().endswith("survived"), (
+        child.returncode, child.stdout[-500:], child.stderr[-2000:])

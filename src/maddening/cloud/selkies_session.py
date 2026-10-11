@@ -43,8 +43,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import logging
+import sys
 import threading
 import urllib.parse
 import uuid
@@ -66,9 +68,29 @@ logger = logging.getLogger(__name__)
 _HAS_GST = None
 
 
+def _import_jax_before_gstreamer() -> None:
+    """Import jax, when it is installed and not imported yet, before GStreamer is touched.
+
+    In the streaming test image (Ubuntu 24.04's GStreamer 1.24, pip numpy
+    and jaxlib), a process that imported numpy, then loaded GStreamer's
+    library (PyGObject loads it at the first call into ``Gst``, such as
+    ``Gst.is_initialized()``), and only then imported jax aborted inside
+    jaxlib's MLIR import (SIGSEGV or SIGABRT, three tries of three).  jax
+    first, then GStreamer, runs, plugins and pipelines included.  So the
+    session imports jax before its first contact with GStreamer: in the
+    constructor (:func:`_check_gstreamer`) and at the top of
+    :meth:`SelkiesSession.start`.  A program that calls into ``Gst`` itself
+    before importing jax is outside this: import jax (or
+    :mod:`maddening.core`) first.
+    """
+    if "jax" not in sys.modules and importlib.util.find_spec("jax") is not None:
+        import jax  # noqa: F401 - only for its import order, see above
+
+
 def _check_gstreamer() -> bool:
     global _HAS_GST
     if _HAS_GST is None:
+        _import_jax_before_gstreamer()
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -1059,28 +1081,28 @@ class SelkiesSession(StreamingSession):
 
         Notes
         -----
-        **Import order.**  When GStreamer is not initialised yet and jax is
-        installed, jax is imported before ``Gst.init``.  In the streaming
-        test image (Ubuntu 24.04, its Mesa/LLVM, pip numpy and jaxlib), a
-        process that imported numpy, then initialised GStreamer, then
-        imported jax aborted (SIGSEGV or SIGABRT, three tries of three);
-        jax first, then GStreamer, runs.  A program that calls ``Gst.init``
-        itself before importing jax is outside this guard: import jax (or
+        **Import order.**  When jax is installed and not imported yet, it
+        is imported before the session first calls into GStreamer (here and
+        in the constructor).  In the streaming test image (Ubuntu 24.04's
+        GStreamer 1.24, pip numpy and jaxlib), a process that imported
+        numpy, then loaded GStreamer's library (the first call into
+        ``Gst``), then imported jax aborted inside jaxlib's MLIR import
+        (SIGSEGV or SIGABRT, three tries of three); jax first, then
+        GStreamer, runs.  A program that calls into ``Gst`` itself before
+        importing jax is outside this guard: import jax (or
         :mod:`maddening.core`) first.
         """
         if self._negotiator is not None or self._signaling_thread is not None:
             raise RuntimeError(
                 "this SelkiesSession is already started; stop() it before "
                 "starting it again")
-        import importlib.util
+        _import_jax_before_gstreamer()
 
         import gi
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
 
         if not Gst.is_initialized():
-            if importlib.util.find_spec("jax") is not None:
-                import jax  # noqa: F401 - before Gst.init: see the Notes
             Gst.init(None)
 
         self._config = config

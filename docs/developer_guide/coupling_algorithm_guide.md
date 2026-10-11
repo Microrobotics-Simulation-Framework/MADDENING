@@ -1517,7 +1517,24 @@ chain and ring families (`chain-5` 5.3 vs 7.0, `chain-20` 13.5 vs 15.4,
 the stars (`star-8` 4.3 vs 4.0, `star-16` 4.6 vs 4.0).  The hypothesis — a residual history from a single
 iterate spans a cleaner space — is weakly supported on the chains and
 rings only, and the effect is smaller than the noise in step time.  Worth knowing, not
-worth defaulting to.
+worth defaulting to.  **And it can stall where the plain Jacobi loop
+converges** (MADD-ANO-275).  Measured on a float32 pair of `tanh` nodes
+with 2 and 4 entries, each reading the other through a matrix mapping
+(default norm and solver): plain Jacobi is 5e-8 from the fixed point
+after 12 passes, while `iqn-ils` under Jacobi takes the error from 0.82
+at a cap of 3 passes to 4.0 at a cap of 5 and is still 0.18 away at a
+cap of 40.  At tolerances of 1e-4 and 1e-6 with `max_iterations=50`,
+both IQN accelerations stop at the cap with a residual of 0.18, 0.14
+from the fixed point.  The same pair converges under Gauss-Seidel with
+either IQN (6 to 10 passes), and under Jacobi with no acceleration (9 to
+12) or with Aitken (33 to 35).  The stall is occasional — 2 of 7 pairs
+drawn with those sizes, none of 36 pairs of equal sizes — and it is
+reported: `converged=False` with `iterations == max_iterations`, and
+`strict_convergence=True` raises.  So read `converged` after choosing
+this combination; where it is `False` on a group the plain Jacobi loop
+solves, use Gauss-Seidel with IQN, or stay on Jacobi with
+`acceleration="none"` or `"aitken"`.  The accelerator does not go back
+to a plain pass when its own step makes the residual grow.
 
 **Gauss-Seidel + fixed under-relaxation.** Never won.  See contradiction
 4 above.

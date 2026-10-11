@@ -319,12 +319,19 @@ def test_the_solvers_agree_under_every_acceleration(mode, reader_first, accel):
 
 @pytest.mark.parametrize("accel", [(), *_ACCELERATED], ids=lambda a: str(a[0][1]) if a else "none")
 def test_fori_without_diagnostics_iterates_the_same_map(accel):
-    """Each acceleration has a second loop body, taken with ``diagnostics=False``."""
-    with_report = _floor_result("fori", "jacobi", False, **dict(accel))
+    """Each acceleration has a second loop body, taken with ``diagnostics=False``.
+
+    Held to eight passes, one more than the plain iteration needs: a body
+    that carried the integer a pass behind would need about twice as many,
+    so it is told apart by the state it has reached, converged or not
+    (Aitken's two-pass exit does not stop on the lagged zero residual, and
+    would arrive at the same fixed point later).
+    """
+    with_report = _floor_result("fori", "jacobi", False, max_iterations=8, **dict(accel))
     gm = _floor_loop(reader_first=False, solver="fori", iteration_mode="jacobi",
-                     diagnostics=False, **dict(accel))
+                     diagnostics=False, max_iterations=8, **dict(accel))
     gm.step()
-    assert float(gm.get_node_state("a")["q"]) == pytest.approx(with_report[0], abs=1e-6)
+    assert float(gm.get_node_state("a")["q"]) == with_report[0]
     assert int(gm.get_node_state("b")["p"]) == with_report[1]
     if not accel:
         assert float(gm.get_node_state("a")["q"]) == Q_STAR

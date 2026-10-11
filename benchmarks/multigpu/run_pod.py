@@ -45,8 +45,9 @@ three are the timing goals::
                  ``"edge"`` (the wrapper's default) and Dirichlet ends,
                  the lattice, and the field with a halo of two cells
                  under the same three ends (``field-halo2``), each on
-                 every mesh; periodic ends on the pencil at the
-                 others.                            -> stencil.json
+                 every mesh, and the field with periodic ends on the
+                 crossed pencil (``CROSSED_MESH``); periodic ends on
+                 the pencil at the others.          -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
                  a graph, with a non-local correction and a grid-shaped
                  source, forward (the field and its domain integral) and
@@ -79,7 +80,9 @@ The meshes (``STENCIL_MESHES``, as devices along spatial axes 0 and 1 over
 ``D``): ``"1d"`` (D x 1) and ``"1d-axis1"`` (1 x D), a 1-D mesh sharding
 one spatial axis each; ``"2d-flat"`` (1 x D), a 2-D mesh whose two axes
 have different sizes; and ``"2d"`` (2 x D/2), the pencil, which exchanges
-two axes.  On four devices the pencil is 2 x 2, and on a mesh axis of two
+two axes.  The ``stencil`` goal also runs one case on ``"2d-crossed"``
+(``CROSSED_MESH``, D/2 x 2), the pencil with its mesh axes mapped to the
+spatial axes in the other order.  On four devices the pencil is 2 x 2, and on a mesh axis of two
 devices a shard's left and right neighbour are one device: the 1-D meshes
 give each spatial axis all four.  Every grid is non-square
 (``field_shape``: ``nx = ny + D``), and every grid-shaped input differs on
@@ -97,7 +100,7 @@ goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
 those cases that way on such a count.  The goals must fail on a stencil
-wrapper or a halo exchange broken in any of twenty ways: ten that every
+wrapper or a halo exchange broken in any of twenty-two ways: ten that every
 wrapper goal must catch (a static's halos NaN, a static split along the
 second sharded axis of a 2-D mesh exchanged along the first mesh axis
 ``axis_map`` lists or along spatial axis 0's, grid-shaped inputs zeroed,
@@ -105,7 +108,9 @@ domain integrals halved, domain integrals summed over the first mesh axis
 only, sharded axes after the first zero-filled at the global edges, halos
 taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
 extent divided by the first mesh axis's size or read off spatial axis 0),
-and three that only a halo two cells wide shows, which are the ``stencil``
+two that only the ``stencil`` goal's crossed pencil shows (the fields
+split, or ``shard_info``'s offsets taken, as if the mesh's axes were in
+the spatial axes' order), and three that only a halo two cells wide shows, which are the ``stencil``
 goal's (wider halos zero at the global edges, an outer halo cell copied
 from the innermost one, the one-cell edge rule at width two), and seven
 that only its ``field-shares`` cases show (the zero fill replaced by the
@@ -1680,6 +1685,17 @@ def field_shape(cells: int, n_devices: int) -> tuple:
 #: :func:`_neighbour_direction_not_run`).
 STENCIL_MESHES = ("1d", "1d-axis1", "2d-flat", "2d")
 
+#: The pencil with its mesh axes crossed: the same ``2 x D/2`` mesh, its
+#: first mesh axis (two devices) splitting spatial axis 1 and its second
+#: splitting spatial axis 0 -- an ``axis_map`` whose order is not the
+#: order of the mesh's axes, which no mesh above has.  The ``stencil`` goal
+#: runs one case on it, ``Field2D`` with periodic ends at its smallest size
+#: (:func:`stencil_cases`); no other goal does.  Until schema 12 every
+#: 2-D mesh mapped its mesh axes to the spatial axes in order, and a
+#: wrapper that split the fields as if every mesh did passed all eight
+#: goals.  As devices along spatial axes 0 and 1: ``D/2 x 2``.
+CROSSED_MESH = "2d-crossed"
+
 
 def stencil_mesh(label: str, n_devices: int) -> tuple:
     """``(mesh, axis_map, mesh_shape)`` of mesh ``label`` over ``n_devices``."""
@@ -1689,8 +1705,11 @@ def stencil_mesh(label: str, n_devices: int) -> tuple:
         return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 0}, shape
     if label == "1d-axis1":
         return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 1}, shape
-    if label == "2d" and not _pencil_mesh_fits(n_devices):
+    if label in ("2d", CROSSED_MESH) and not _pencil_mesh_fits(n_devices):
         raise ValueError(_pencil_mesh_needs(n_devices))
+    if label == CROSSED_MESH:
+        return (create_device_mesh(shape=(2, n_devices // 2)),
+                {"spatial_y": 1, "spatial_z": 0}, shape)
     return create_device_mesh(shape=shape), {"spatial_y": 0, "spatial_z": 1}, shape
 
 
@@ -1698,6 +1717,14 @@ def meshes_that_fit(n_devices: int) -> tuple:
     """The ``STENCIL_MESHES`` this device count can build: every one but the
     pencil, which needs an even count of at least 4."""
     return STENCIL_MESHES if _pencil_mesh_fits(n_devices) else STENCIL_MESHES[:-1]
+
+
+def stencil_goal_meshes(n_devices: int) -> tuple:
+    """Every mesh the ``stencil`` goal runs a case on with this device
+    count: :func:`meshes_that_fit`, and :data:`CROSSED_MESH` where the
+    pencil fits."""
+    crossed = (CROSSED_MESH,) if _pencil_mesh_fits(n_devices) else ()
+    return meshes_that_fit(n_devices) + crossed
 
 
 def graph_mesh(n_devices: int) -> str:
@@ -1722,9 +1749,9 @@ def graph_cases(cells, n_devices: int) -> list:
 def _mesh_shape_of(label: str, n_devices: int) -> tuple:
     """Devices along (spatial axis 0, spatial axis 1) on mesh ``label``."""
     shapes = {"1d": (n_devices, 1), "1d-axis1": (1, n_devices), "2d-flat": (1, n_devices),
-              "2d": (2, n_devices // 2)}
+              "2d": (2, n_devices // 2), CROSSED_MESH: (n_devices // 2, 2)}
     if label not in shapes:
-        raise ValueError(f"unknown mesh {label!r} (one of {STENCIL_MESHES})")
+        raise ValueError(f"unknown mesh {label!r} (one of {(*STENCIL_MESHES, CROSSED_MESH)})")
     return shapes[label]
 
 
@@ -2898,9 +2925,11 @@ def stencil_cases(cells, n_devices: int) -> list:
     At the smallest size: ``Field2D`` under every ``STENCIL_BOUNDARIES``
     entry, the D2Q9 lattice, and ``Field2D`` with a halo of two under every
     ``STENCIL_BOUNDARIES`` entry again (``field-halo2``), on every mesh this
-    device count can build (:func:`meshes_that_fit`).  At the other sizes:
-    ``Field2D`` with periodic ends on the goal's own mesh
-    (:func:`graph_mesh`, the pencil where it fits).
+    device count can build (:func:`meshes_that_fit`), and ``Field2D`` with
+    periodic ends once more on the crossed pencil (:data:`CROSSED_MESH`)
+    where the pencil fits.  At the other sizes: ``Field2D`` with periodic
+    ends on the goal's own mesh (:func:`graph_mesh`, the pencil where it
+    fits).
     """
     smallest = min(cells)
     cases = []
@@ -2911,6 +2940,8 @@ def stencil_cases(cells, n_devices: int) -> list:
                 cases.append((n, "lbm", "periodic", mesh))
                 cases += [(n, "field-halo2", b, mesh) for b in STENCIL_BOUNDARIES]
                 cases.append((n, "field-shares", SHARES_BOUNDARY, mesh))
+            if _pencil_mesh_fits(n_devices):
+                cases.append((n, "field", "periodic", CROSSED_MESH))
         else:
             cases.append((n, "field", "periodic", graph_mesh(n_devices)))
     return cases

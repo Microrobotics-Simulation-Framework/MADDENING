@@ -92,14 +92,17 @@ _HALO = "cloud/multigpu/halo.py"
 #: leave both passing, and a seed of ``halo_exchange`` fails ``halo`` too.
 _WRAPPER_GOALS = ("stencil", "hybrid", "coupled")
 _OTHER_GOALS = ("indivisible", "halo")
+#: ``run_pod.CROSSED_MESH``: the pencil whose mesh axes map to the spatial
+#: axes in the other order, on which the ``stencil`` goal alone runs a case.
+_CROSSED = "2d-crossed"
 
 
 class Seed(NamedTuple):
     old: str
     new: str
-    #: The mesh labels (``run_pod.STENCIL_MESHES``) the fault is confined to
-    #: on four devices: every failed check of the ``stencil`` goal must name
-    #: one of them.  Empty: any mesh.
+    #: The mesh labels (``run_pod.STENCIL_MESHES``, or ``_CROSSED``) the
+    #: fault is confined to on four devices: every failed check of the
+    #: ``stencil`` goal must name one of them.  Empty: any mesh.
     only_in: tuple = ()
     #: The library file the seed is applied to, under ``maddening/``.
     file: str = _WRAPPER
@@ -161,7 +164,7 @@ _SEEDS = {
         "                    boundary={**{a[0]: 'zero' for a in exchange_axes[1:]},\n"
         "                              exchange_axes[0][0]: boundary},\n"
         "                )\n",
-        only_in=("2d", "2d-flat"), mesh="2d"),
+        only_in=("2d", "2d-flat", _CROSSED), mesh="2d"),
     # A domain integral summed over the first mesh axis only: on a 2-D mesh
     # the result is not replicated over the second, so shard_map refuses
     # the step and each wrapper goal raises -- which ended a --keep-going
@@ -275,7 +278,29 @@ _SEEDS = {
         "                        descriptors.append((ma, sa.shard_axis, h))\n",
         "                        descriptors.append((min(axis_map, key=axis_map.get), sa.shard_axis,"
         " h))  # SEEDED FAULT\n",
-        only_in=("2d-flat",), mesh="2d-flat"),
+        only_in=("2d-flat", _CROSSED), mesh="2d-flat"),
+    # The crossed pencil (``_CROSSED``, schema 12): an ``axis_map`` whose
+    # order is not the mesh's, which the ``stencil`` goal alone runs.  The
+    # first passed all eight goals until then, when every 2-D mesh mapped
+    # its mesh axes to the spatial axes in order: the fields split as if
+    # the mesh order were the spatial order.
+    "fields_split_as_if_the_mesh_order_were_the_spatial_order": Seed(
+        "        for mesh_axis, spatial_axis in self._axis_map.items():\n"
+        "            if spatial_axis < arr.ndim:\n"
+        "                spec[spatial_axis] = mesh_axis\n"
+        "        return P(*spec)\n",
+        "        for mesh_axis, spatial_axis in zip(self._mesh.axis_names,  # SEEDED FAULT\n"
+        "                                           sorted(self._axis_map.values())):\n"
+        "            if spatial_axis < arr.ndim:\n"
+        "                spec[spatial_axis] = mesh_axis\n"
+        "        return P(*spec)\n",
+        only_in=(_CROSSED,), mesh=_CROSSED, fails=("stencil",)),
+    # ... and ``shard_info``'s offsets taken along the mesh axes in that order.
+    "shard_info_offsets_from_the_mesh_axes_in_spatial_order": Seed(
+        "                offset = lax.axis_index(ma) * extent\n",
+        "                offset = lax.axis_index(  # SEEDED FAULT: mesh axes in spatial order\n"
+        "                    mesh_axis_tup[sorted(axis_map.values()).index(sax)]) * extent\n",
+        only_in=(_CROSSED,), mesh=_CROSSED, fails=("stencil",)),
     # A REDUCED integral carried in the state, which the ``field-shares``
     # node reads back into its field since schema 12 (``Field2D.MEAN_PULL``,
     # its ``averages``).  The first passed all eight goals until then: the
@@ -300,6 +325,16 @@ def _boundaries_of(rp, kind: str) -> tuple:
     """The boundaries the ``stencil`` goal runs node ``kind`` under."""
     return tuple(dict.fromkeys(b for _n, k, b, _m in rp.stencil_cases([64], _N_DEV)
                                if k == kind))
+
+
+def _stencil_goal_only(rp, seed: Seed) -> bool:
+    """The seed's fault is confined to cases the ``stencil`` goal alone
+    runs: a node of its own (``Seed.kind``), the crossed pencil, or ends
+    other than periodic (``hybrid`` and ``coupled`` run ``Field2D`` with
+    periodic ends on :func:`run_pod.meshes_that_fit`)."""
+    return (seed.kind != "field"
+            or (bool(seed.only_in) and not set(seed.only_in) & set(rp.meshes_that_fit(_N_DEV)))
+            or (bool(seed.only_under) and "periodic" not in seed.only_under))
 
 
 def _runner():
@@ -336,7 +371,9 @@ def test_every_seed_names_goals_meshes_and_a_mesh_the_runner_has():
     are checklist goals, it fails every wrapper goal, and its meshes are
     meshes the runner builds on four devices."""
     rp = _runner()
-    meshes = set(rp.meshes_that_fit(_N_DEV))
+    assert rp.CROSSED_MESH == _CROSSED
+    meshes = set(rp.stencil_goal_meshes(_N_DEV))
+    assert meshes == {*rp.meshes_that_fit(_N_DEV), _CROSSED}
     text = _RUNNER.read_text(encoding="utf-8")
     for name, seed in _SEEDS.items():
         assert set(seed.fails) <= set(rp.CHECKLIST_GOALS), name
@@ -346,10 +383,10 @@ def test_every_seed_names_goals_meshes_and_a_mesh_the_runner_has():
         assert set(seed.only_under) <= set(_boundaries_of(rp, seed.kind)), name
         assert seed.boundary in (seed.only_under or _boundaries_of(rp, seed.kind)), name
         assert seed.confined_to_kind or seed.kind != "field", name
-        if seed.kind == "field":
-            assert set(_WRAPPER_GOALS) <= set(seed.fails), name
-        else:
+        if _stencil_goal_only(rp, seed):
             assert set(seed.fails) - {"halo"} == {"stencil"}, name
+        else:
+            assert set(_WRAPPER_GOALS) <= set(seed.fails), name
     # ... and a halo of two is the stencil goal's alone: one call builds
     # Field2D with a reach, for the stencil goal's cases
     builds = [line for line in text.splitlines() if "reach=" in line and "``" not in line]
@@ -484,7 +521,7 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
     rp = rp_backend
     limit = rp.LIMITS["forward"]
     if name is None:
-        for mesh_label in rp.meshes_that_fit(_N_DEV):
+        for mesh_label in rp.stencil_goal_meshes(_N_DEV):
             rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label)
             assert all(v <= limit for v in rel.values()), (mesh_label, rel)
         return
@@ -501,10 +538,9 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
             assert all(v <= limit for v in rel.values()), rel
         else:                              # the boundary's fault, whatever the node
             assert any(not v <= limit for v in rel.values()), rel
-        for boundary in set(rp.STENCIL_BOUNDARIES) - set(seed.only_under or
-                                                         rp.STENCIL_BOUNDARIES):
-            rel = _one_step_forward(rp, wrapper, seed.mesh, seed.kind, boundary)
-            assert all(v <= limit for v in rel.values()), (boundary, rel)
+    for boundary in set(rp.STENCIL_BOUNDARIES) - set(seed.only_under or rp.STENCIL_BOUNDARIES):
+        rel = _one_step_forward(rp, wrapper, seed.mesh, seed.kind, boundary)
+        assert all(v <= limit for v in rel.values()), (boundary, rel)
 
 
 @pytest.mark.parametrize("boundary", ["periodic", "edge", "dirichlet"])
@@ -611,6 +647,7 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
         # node's, under a boundary the fault can reach -- and every such
         # case on every mesh has one, so each of them guards the path.
         assert failed and all(c.startswith(f"{seed.kind} ") for c in failed), failed
+    if seed.kind != "field" or seed.only_under:
         under = seed.only_under or _boundaries_of(rp, seed.kind)
         assert all(c.split(":")[0].split(" vs ")[0].split()[4] in under for c in failed), failed
         for mesh in seed.only_in or rp.meshes_that_fit(_N_DEV):
@@ -621,7 +658,7 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
     # four GPUs: every item a failing goal decides has FAILED, the rest closed.
     status = {i: s for i, (s, _) in rp.checklist_status(_as_four_gpus(docs)).items()}
     failing = {i for i, (_c, goals) in rp.CHECKLIST.items() if set(goals) & set(seed.fails)}
-    assert ({1, 3, 4, 6} if seed.kind == "field" else {1, 3}) <= failing
+    assert ({1, 3} if _stencil_goal_only(rp, seed) else {1, 3, 4, 6}) <= failing
     assert status == {i: "FAILED" if i in failing else "CLOSED" for i in rp.CHECKLIST}, status
     json.dumps(status)                                # (the verdicts are plain data)
 

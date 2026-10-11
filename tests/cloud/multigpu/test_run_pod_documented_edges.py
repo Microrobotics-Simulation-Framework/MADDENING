@@ -261,12 +261,14 @@ def test_every_seeded_fault_the_runbook_names_is_a_seed():
     assert unstructured == word[len(faults._PATH_SEEDS)]
     halo_two = [s for s in faults._SEEDS.values() if s.kind == "field-halo2"]
     shares = [s for s in faults._SEEDS.values() if s.kind == "field-shares"]
+    crossed = [s for s in faults._SEEDS.values() if s.only_in == (faults._CROSSED,)]
     only_gradient = [s for s in faults._PATH_SEEDS.values() if s.fails == ("gradient",)]
     said = " ".join(runner.split())
     for count, what in (
-            (len(faults._SEEDS) - len(halo_two) - len(shares),
+            (len(faults._SEEDS) - len(halo_two) - len(shares) - len(crossed),
              "that every wrapper goal must catch"),
             (len(shares), "that only its ``field-shares`` cases show"),
+            (len(crossed), "that only the ``stencil`` goal's crossed pencil shows"),
             (len(halo_two), "that only a halo two cells wide shows"),
             (len(faults._PATH_SEEDS) - len(only_gradient), "that each of them must catch"),
             (len(only_gradient), "that leave every value right")):

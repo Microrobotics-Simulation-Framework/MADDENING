@@ -199,6 +199,8 @@ four, and the scattered order ran only in the seeded-fault tests.)
 |---|---|---|---|
 | a sharded static halo-exchanged along the first mesh axis `axis_map` lists, whatever axis it is split along | `sharded_node.py` | `stencil`, `hybrid`, `coupled`: the `2d-flat` cases | 1, 3, 4, 6 |
 | a sharded static halo-exchanged along the mesh axis of spatial axis 0 | `sharded_node.py` | `stencil`, `hybrid`, `coupled`: the `2d-flat` cases | 1, 3, 4, 6 |
+| the fields split as if the mesh's axes were in the spatial axes' order | `sharded_node.py` | `stencil`: the `2d-crossed` case | 1, 3 |
+| `shard_info`'s offsets taken along the mesh axes in the spatial axes' order | `sharded_node.py` | `stencil`: the `2d-crossed` case | 1, 3 |
 | halos two wide zero at the global edges | `sharded_node.py` | `stencil`: every `field-halo2` case | 1, 3 |
 | each outer halo cell a copy of the innermost one | `halo.py` | `halo`; `stencil`: every `field-halo2` case | 1, 2, 3 |
 | the one-cell `"edge"` rule at width two (the block's two cells, not its edge cell twice) | `halo.py` | `halo`; `stencil`: the `field-halo2` cases under edge and Dirichlet ends | 1, 2, 3 |
@@ -221,11 +223,11 @@ four, and the scattered order ran only in the seeded-fault tests.)
 | an integral declared one a shard summed over the mesh axis | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 | each shard's integral stacked into the next shard's slot | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds twenty faults
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds twenty-two faults
 as seeds of `sharded_node.py` and `halo.py` -- the four and the three
-above, the two of a static split along the second sharded axis, domain integrals summed over the first mesh axis only, the three of a halo two
+above, the two of a static split along the second sharded axis, the two of the crossed pencil, domain integrals summed over the first mesh axis only, the three of a halo two
 cells wide and the seven of the `field-shares` cases -- and seven of `sharded_unstructured.py`.  Slow-marked, it
-applies each of the twenty to a scratch copy of the library, runs `--goal
+applies each of the twenty-two to a scratch copy of the library, runs `--goal
 checklist --dry-run --keep-going`, and requires `stencil`, `hybrid` and
 `coupled` to read `FAIL` (`stencil` alone for a fault of a halo two wide or of the `field-shares` cases;
 and `halo` too for a seed of `halo.py`; the other checklist goals `PASS`),
@@ -262,6 +264,7 @@ is not **run**.
 | path | status | goals | seeds, or the CPU test |
 |---|---|---|---|
 | `axis_map`: a spatial axis split over a mesh axis, each halo from the neighbouring shard (a 1-D mesh along either axis, the 2 × 2 pencil, a mesh axis of one device) | run | `halo`, `stencil`, `hybrid`, `coupled` | `wrong_neighbour_along_spatial_axis_1`, `later_axes_are_zero_at_the_global_edges` |
+| `axis_map` in another order than the mesh's axes (the crossed pencil, `2d-crossed`: its first mesh axis splits spatial axis 1) | run | `stencil` | `fields_split_as_if_the_mesh_order_were_the_spatial_order`, `shard_info_offsets_from_the_mesh_axes_in_spatial_order` |
 | a halo axis `axis_map` leaves unsharded, which the wrapper fills itself | unproved | | `tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py` |
 | `boundary="periodic"` at the global edges | run | `stencil`, `hybrid`, `coupled` | `later_axes_are_zero_at_the_global_edges` |
 | `boundary="edge"`, the default (also under the goals' Dirichlet ends, which the node holds over it) | run | `halo`, `stencil` | `wide_edge_halos_repeat_the_block_not_its_edge_cell`, `halos_two_wide_are_zero_at_the_global_edges` |

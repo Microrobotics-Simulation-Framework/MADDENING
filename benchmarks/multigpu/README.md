@@ -478,7 +478,7 @@ launcher's default, `JobConfig.container_image =
 "ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest"`, is
 the only tag published, and it was built on 2026-03-25 from an older
 Dockerfile: Ubuntu 22.04 (system Python 3.10), CUDA 12.2,
-`jax[cuda12]>=0.4,<0.6`.  This tree needs Python >= 3.12 and jax >= 0.10,
+`jax[cuda12]` below 0.6.  This tree needs Python >= 3.12 and jax >= 0.10,
 so a pod on that image stops at section 2a's interpreter check, on metered
 time.  Before the session the maintainer builds the image from
 `docker/Dockerfile.cloud` at the session's commit (`git rev-parse HEAD`)

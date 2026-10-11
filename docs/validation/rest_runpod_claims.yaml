@@ -7373,7 +7373,7 @@ claims:
     the four files as text (the runbook, the Dockerfile, pyproject.toml,
     .github/workflows/ci.yml); nothing is built, pushed or launched.  The
     published :latest image (built 2026-03-25: Python 3.10, CUDA 12.2,
-    jax[cuda12]>=0.4,<0.6) was read from its registry config by the
+    jax[cuda12] below 0.6) was read from its registry config by the
     maintainer's session, not by a test.
   oracle: >-
     one version in section 2a's install and section 1's build argument, a

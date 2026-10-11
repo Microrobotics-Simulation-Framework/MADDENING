@@ -325,10 +325,16 @@ CG_SOLVES = ("solve", "adjoint", "tangent")
 #: them.  Measured for every goal at the dry run's 256 and 1024 cells (the
 #: record under tests/cloud/multigpu/run_pod_record/): the closest is the
 #: D2Q9 lattice's forward velocity at 0.11 of the forward limit, then the
-#: coupled and hybrid gradients at 0.03 of theirs, the rollouts at 0.01,
-#: and ``sharded_cg`` at 0.001.  And for the ``gradient`` goal at the
-#: session's 1e5, 3e5 and 1e6 cells: rollouts 1e-7 against 1e-5,
-#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4 (8e-7 at 1e7 unknowns).  The
+#: coupled and hybrid gradients and the field with a halo of two at 0.03
+#: of theirs, the rollouts at 0.02 (with respect to the start, the per-cell
+#: source and the injected weight alike), and ``sharded_cg`` at 0.001.  And
+#: at the session's 1e5, 3e5 and 1e6 cells (CPU, jax 0.11.0): the
+#: ``gradient`` goal's rollouts 1.2e-7 to 2.5e-7 against 1e-5 with respect
+#: to the start and the source (of size 3 to 6 and 18 to 31), the weight's
+#: derivative (8e4 to 9e5) the unsharded one's to the last bit, and
+#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4 (8e-7 at 1e7 unknowns); the
+#: ``stencil`` goal's cases with a halo of two 2.8e-7 at most (the
+#: derivative with respect to the initial field).  The
 #: residual limit is of another kind: a converged solve reads just under
 #: its tolerance, half the limit.  The few-ulp CPU numbers are pinned by
 #: the unit tests under tests/cloud/multigpu/.

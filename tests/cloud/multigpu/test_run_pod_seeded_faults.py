@@ -1261,7 +1261,7 @@ def test_a_seeded_fault_of_an_input_or_a_parameter_fails_every_goal_on_its_path(
         name, tmp_path):
     """The goals as a dry run starts them, on a scratch copy of the library
     with one seed: each goal the seed names exits 1 with a record
-    ``--summarise`` accepts, every other one exits 0, and read as a
+    ``--summarise`` accepts, every other one exits 0, and relabelled as a
     four-GPU run every checklist item a failing goal decides has FAILED
     (1, 3 and 5; a dropped cotangent, 3).  Unseeded, all three pass."""
     rp = _runner()

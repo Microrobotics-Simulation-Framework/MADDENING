@@ -32,7 +32,7 @@ def test_the_runbook_counts_every_seed_and_names_the_eighth():
 
 def test_the_runbook_counts_the_seeds_of_the_unstructured_wrappers_two_paths():
     """And the seeds of ``ShardedUnstructuredNode``'s per-cell inputs and
-    injected parameters (RPD-045), which no goal ran until schema 10."""
+    injected parameters (RPD-063), which no goal ran until schema 10."""
     seeds = re.findall(r'^    "([a-z_0-9]+)": PathSeed\(', SEEDED.read_text(encoding="utf-8"),
                        re.M)
     text = " ".join(RUNBOOK.read_text(encoding="utf-8").split())

@@ -598,6 +598,16 @@ field.  A non-finite value the FMU was *instantiated* with is not a
 divergence and restores: a coupling group with `diagnostics=True` seeds
 its spectral `_meta` slots with `NaN` until a solve fills them, and until
 0.4.0's fix a snapshot taken before that was refused by both doors.
+Nor is a non-finite reading in a coupling group's report: the slots
+`coupling_diagnostics()` reads are written by every step and are not what
+the model continues from, and `inf` is an ordinary value there
+(`gradient_relative_error_bound` where the bound does not certify, at an
+iteration cap on a curved map; the experimental `geometry_plane_limit` and
+`geometry_plane_margin` on every step of a group whose positions are
+constants of the pass).  A snapshot holding one restores on both doors;
+until 0.4.0's fix the FMU refused the snapshot it had just handed out.  A
+non-finite value in a node's field, or in a group's warm starts, is still
+refused.
 ```
 
 **The C wrapper waits on the bridge for a bounded time.**  Every receive

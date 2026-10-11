@@ -46,8 +46,10 @@ three are the timing goals::
                  the lattice, and the field with a halo of two cells
                  under the same three ends (``field-halo2``), each on
                  every mesh, and the field with periodic ends on the
-                 crossed pencil (``CROSSED_MESH``); periodic ends on
-                 the pencil at the others.          -> stencil.json
+                 pencil with its static split along the second axis
+                 (``field-mask1``) and on the crossed pencil
+                 (``CROSSED_MESH``); periodic ends on the pencil at
+                 the others.                        -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
                  a graph, with a non-local correction and a grid-shaped
                  source, forward (the field and its domain integral) and
@@ -100,24 +102,25 @@ goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
 those cases that way on such a count.  The goals must fail on a stencil
-wrapper or a halo exchange broken in any of twenty-two ways: ten that every
-wrapper goal must catch (a static's halos NaN, a static split along the
-second sharded axis of a 2-D mesh exchanged along the first mesh axis
-``axis_map`` lists or along spatial axis 0's, grid-shaped inputs zeroed,
+wrapper or a halo exchange broken in any of twenty-two ways: eight that every
+wrapper goal must catch (a static's halos NaN, grid-shaped inputs zeroed,
 domain integrals halved, domain integrals summed over the first mesh axis
 only, sharded axes after the first zero-filled at the global edges, halos
 taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
 extent divided by the first mesh axis's size or read off spatial axis 0),
-two that only the ``stencil`` goal's crossed pencil shows (the fields
-split, or ``shard_info``'s offsets taken, as if the mesh's axes were in
-the spatial axes' order), and three that only a halo two cells wide shows, which are the ``stencil``
-goal's (wider halos zero at the global edges, an outer halo cell copied
-from the innermost one, the one-cell edge rule at width two), and seven
-that only its ``field-shares`` cases show (the zero fill replaced by the
-edge fill or by ones; an integral the node asks to keep one a shard
-summed over the mesh, stacked a slot off, or zeroed on its way back into
-the step; a reduced integral handed back to the step as zeros, or summed
-over the mesh again).  And the
+and fourteen that only the ``stencil`` goal can catch, each in cases of
+its own: two that only its ``field-mask1`` case shows (a static split
+along the second axis ``axis_map`` lists, halo-exchanged along the first
+mesh axis it lists or placed along it), two that only its crossed pencil
+shows (the fields split, or ``shard_info``'s offsets taken, as if the
+mesh's axes were in the spatial axes' order), three that only a halo two
+cells wide shows (wider halos zero at the global edges, an outer halo
+cell copied from the innermost one, the one-cell edge rule at width two),
+and seven that only its ``field-shares`` cases show (the zero fill
+replaced by the edge fill or by ones; an integral the node asks to keep
+one a shard summed over the mesh, stacked a slot off, or zeroed on its
+way back into the step; a reduced integral handed back to the step as
+zeros, or summed over the mesh again).  And the
 goals that build the unstructured wrapper (``indivisible``, ``forward``,
 ``gradient``) must fail on that wrapper broken in any of seven ways: five
 that each of them must catch (per-cell inputs zeroed, their ghost rows not
@@ -1060,9 +1063,9 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         * the conductance ``k`` of a face is the mean of the ``mask`` of
           the two cells it joins, so every step reads ``mask`` one cell
           into its halo.  ``mask`` is a ``StaticArray(replication="shard")``
-          along ``mask_axis`` (:func:`mask_axis_for`: 0 on ``"1d"`` and
-          the pencil, 1 on ``"1d-axis1"`` and ``"2d-flat"``): the wrapper
-          halo-exchanges it along that axis
+          along ``mask_axis`` (:func:`mask_axis_for`: the spatial axis the
+          first mesh axis of ``axis_map`` splits, or the second): the
+          wrapper halo-exchanges it along that axis
           (periodically under ``"periodic"``, the edge cell repeated
           otherwise), and the node fills the other axis itself by the same
           rule, taking its own slice out of the whole static by
@@ -2868,6 +2871,9 @@ STENCIL_NODES = {
     "field": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
     # ``Field2D(reach=2)``: every halo two cells wide (the node's docstring).
     "field-halo2": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
+    # ``Field2D`` whose static is split along the SECOND axis ``axis_map``
+    # lists (:func:`mask_axis_for`), on the pencil: its one case.
+    "field-mask1": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
     "lbm": {"fields": ("f", "velocity"), "parameter": "viscosity", "loss_of": "velocity"},
     # ``Field2D(shares=...)`` under the wrapper's zero fill: two integrals the
     # wrapper sums over some mesh axes or none (the node's docstring).
@@ -2925,9 +2931,10 @@ def stencil_cases(cells, n_devices: int) -> list:
     At the smallest size: ``Field2D`` under every ``STENCIL_BOUNDARIES``
     entry, the D2Q9 lattice, and ``Field2D`` with a halo of two under every
     ``STENCIL_BOUNDARIES`` entry again (``field-halo2``), on every mesh this
-    device count can build (:func:`meshes_that_fit`), and ``Field2D`` with
-    periodic ends once more on the crossed pencil (:data:`CROSSED_MESH`)
-    where the pencil fits.  At the other sizes: ``Field2D`` with periodic
+    device count can build (:func:`meshes_that_fit`); and where the pencil
+    fits, ``Field2D`` with periodic ends twice more: on the pencil with its
+    static split along the second sharded axis (``field-mask1``), and on
+    the crossed pencil (:data:`CROSSED_MESH`).  At the other sizes: ``Field2D`` with periodic
     ends on the goal's own mesh (:func:`graph_mesh`, the pencil where it
     fits).
     """
@@ -2941,7 +2948,8 @@ def stencil_cases(cells, n_devices: int) -> list:
                 cases += [(n, "field-halo2", b, mesh) for b in STENCIL_BOUNDARIES]
                 cases.append((n, "field-shares", SHARES_BOUNDARY, mesh))
             if _pencil_mesh_fits(n_devices):
-                cases.append((n, "field", "periodic", CROSSED_MESH))
+                cases += [(n, "field-mask1", "periodic", "2d"),
+                          (n, "field", "periodic", CROSSED_MESH)]
         else:
             cases.append((n, "field", "periodic", graph_mesh(n_devices)))
     return cases
@@ -2952,26 +2960,20 @@ def _stencil_prefix(entry: dict) -> str:
     return f"{entry['node']} {entry['mesh']} {py}x{pz} {ny}x{nx} {entry['boundary']}"
 
 
-def mask_axis_for(axis_map: dict, mesh=None) -> int:
+def mask_axis_for(axis_map: dict, second: bool = False) -> int:
     """The spatial axis ``Field2D`` shards its static ``mask`` along under
-    ``axis_map`` on ``mesh``: one the wrapper shards (it refuses any
-    other), the one whose mesh axis has the most devices, the first
-    ``axis_map`` lists on a tie (without a mesh: the smallest axis).
+    ``axis_map``: one the wrapper shards (it refuses any other) -- the one
+    the first mesh axis ``axis_map`` lists splits, or with ``second`` the
+    one the second splits (the ``stencil`` goal's ``field-mask1`` case).
 
-    On four devices: axis 0 on ``"1d"`` and on the pencil (the first
-    axis ``axis_map`` lists), axis 1 on ``"1d-axis1"`` and on
-    ``"2d-flat"`` -- the *second* axis its ``axis_map`` lists, split
-    over all four devices -- so on the two 2-D meshes the static is
-    halo-exchanged along each of the two sharded axes in turn.  Until
-    schema 12 it was axis 0 wherever the wrapper shards axis 0, the first
-    mesh axis every 2-D ``axis_map`` lists, and a wrapper that exchanged
-    every sharded static along that first mesh axis, whatever axis the
-    static is split along, passed all eight goals.
+    The first listed is axis 0 on ``"1d"``, ``"2d-flat"`` and the pencil,
+    and axis 1 on ``"1d-axis1"`` and the crossed pencil.  Until schema 12
+    every case split its static along it, and a wrapper that halo-exchanged
+    every sharded static along the first mesh axis ``axis_map`` lists,
+    whatever axis the static is split along, passed all eight goals.
     """
-    if mesh is None:
-        return min(axis_map.values())
-    most = max(int(mesh.shape[a]) for a in axis_map)
-    return next(s for a, s in axis_map.items() if int(mesh.shape[a]) == most)
+    axes = list(axis_map.values())
+    return axes[1] if second else axes[0]
 
 
 def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
@@ -2990,7 +2992,7 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
 
     def make(stacked=False):
         return Field2D("field", ny, nx, exchange=0.3, boundary=boundary,
-                       mask_axis=mask_axis_for(axis_map, mesh),
+                       mask_axis=mask_axis_for(axis_map, second=kind == "field-mask1"),
                        reach=2 if kind == "field-halo2" else 1,
                        shares=split, stacked=stacked)
     # "dirichlet" is the node's own condition over the wrapper's default
@@ -3226,7 +3228,7 @@ def run_hybrid(args, out: dict) -> dict:
         def graph(sharded: bool, _ny=ny, _nx=nx, _correction=correction, _mesh=mesh,
                   _axis_map=axis_map):
             inner = Field2D("field", _ny, _nx, exchange=0.3,
-                            mask_axis=mask_axis_for(_axis_map, _mesh))
+                            mask_axis=mask_axis_for(_axis_map))
             physics = (ShardedStencilNode(inner, _mesh, axis_map=_axis_map,
                                           boundary="periodic") if sharded else inner)
             gm = GraphManager()
@@ -3331,7 +3333,7 @@ def coupled_graph(ny: int, nx: int, mesh, solver: str, axis_map=None):
     group's fixed point and its adjoint.
     """
     axis_map = axis_map or {MESH_AXIS: 0}
-    field = Field2D("field", ny, nx, exchange=0.8, mask_axis=mask_axis_for(axis_map, mesh))
+    field = Field2D("field", ny, nx, exchange=0.8, mask_axis=mask_axis_for(axis_map))
     gm = GraphManager()
     gm.add_node(field if mesh is None else ShardedStencilNode(
         field, mesh, axis_map=axis_map, boundary="periodic"))

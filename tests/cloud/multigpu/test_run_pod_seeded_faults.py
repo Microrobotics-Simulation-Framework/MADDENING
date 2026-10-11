@@ -262,23 +262,24 @@ _SEEDS = {
         "                f: (arr if f in integrals else _pad_like_state(arr))\n",
         "                f: (arr * 0 if f in integrals else _pad_like_state(arr))  # SEEDED FAULT\n",
         fails=("stencil",), kind="field-shares", boundary="zero"),
-    # A sharded static split along the SECOND sharded axis of a 2-D mesh:
-    # the ``2d-flat`` cases of every wrapper goal since schema 12
+    # A sharded static split along the SECOND axis ``axis_map`` lists: the
+    # ``stencil`` goal's ``field-mask1`` case on the pencil since schema 12
     # (``run_pod.mask_axis_for``).  The first passed all eight goals until
-    # then, when every 2-D case split its static along the first mesh axis
-    # ``axis_map`` lists: each sharded static halo-exchanged along that mesh
-    # axis, whatever axis it is split along.
+    # then, when every case split its static along the first listed axis:
+    # each sharded static halo-exchanged along the first mesh axis
+    # ``axis_map`` lists, whatever axis it is split along.
     "statics_exchanged_along_the_first_mesh_axis_axis_map_lists": Seed(
         "                        descriptors.append((ma, sa.shard_axis, h))\n",
         "                        descriptors.append((next(iter(axis_map)), sa.shard_axis, h))"
         "  # SEEDED FAULT\n",
-        only_in=("2d-flat",), mesh="2d-flat"),
-    # ... and along the mesh axis of spatial axis 0.
-    "statics_exchanged_along_the_mesh_axis_of_spatial_axis_0": Seed(
-        "                        descriptors.append((ma, sa.shard_axis, h))\n",
-        "                        descriptors.append((min(axis_map, key=axis_map.get), sa.shard_axis,"
-        " h))  # SEEDED FAULT\n",
-        only_in=("2d-flat", _CROSSED), mesh="2d-flat"),
+        only_in=("2d",), fails=("stencil",), mesh="2d", kind="field-mask1"),
+    # ... and placed on the mesh along that first mesh axis.
+    "statics_placed_along_the_first_mesh_axis_axis_map_lists": Seed(
+        "            if spatial_axis == sa.shard_axis and spatial_axis < arr.ndim:\n"
+        "                spec[spatial_axis] = mesh_axis\n",
+        "            if spatial_axis == sa.shard_axis and spatial_axis < arr.ndim:\n"
+        "                spec[spatial_axis] = next(iter(self._axis_map))  # SEEDED FAULT\n",
+        only_in=("2d",), fails=("stencil",), mesh="2d", kind="field-mask1"),
     # The crossed pencil (``_CROSSED``, schema 12): an ``axis_map`` whose
     # order is not the mesh's, which the ``stencil`` goal alone runs.  The
     # first passed all eight goals until then, when every 2-D mesh mapped

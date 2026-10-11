@@ -915,8 +915,9 @@ def cannot_fail(nodeid: str, slow_items: list[str], collection: Collection, *,
         return ("its definition is not in its file, so nothing shows its body runs to an "
                 "assertion; name a test written where it is collected")
     if "skip" in reached:
-        return ("its body skips on every run: a pytest.skip() in the test, a helper it calls "
-                "or a fixture it requests")
+        return ("its body skips on every run: a pytest.skip() in the test, a helper it calls, "
+                "a fixture it requests or an xunit setup; or unittest.skip, or a raise of "
+                "unittest.SkipTest")
     if "xfail" in reached:
         return ("its body calls pytest.xfail(), or it is marked unittest.expectedFailure: it "
                 "reports success when its assertions fail")

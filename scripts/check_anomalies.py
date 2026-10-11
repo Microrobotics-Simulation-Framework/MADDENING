@@ -888,9 +888,12 @@ _TEST_FUNCTION_PREFIX = "test"
 #: * a directory every pytest run over ``tests/`` in ``.github/workflows``
 #:   passes ``--ignore=`` for, which no job targets itself (``tests/viz``);
 #: * a test file that skips itself whole when it is imported -- a
-#:   module-level ``pytest.importorskip`` -- waiting for a package that no
-#:   job which runs the file installs (:data:`IMPORTS_NO_CI_JOB_INSTALLS`
-#:   says which).  Every lane collects such a file and reports it skipped.
+#:   ``pytest.importorskip`` in its top-level code, a class body, a
+#:   decorator or a default value -- waiting for a package that no job
+#:   which runs the file installs (:data:`IMPORTS_NO_CI_JOB_INSTALLS` says
+#:   which; a package that only a workflow step under an ``if:`` installs
+#:   counts as not installed).  Every lane collects such a file and reports
+#:   it skipped.
 #:
 #: A test there runs on nobody's machine but the author's, so it evidences
 #: nothing the release can point to (audit_040_p4_1, A23).

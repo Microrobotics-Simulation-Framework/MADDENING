@@ -2894,7 +2894,14 @@ def _ci_jobs(root):
     ``[(job id, extras, [(targets, ignores), ...])]``.
 
     ``extras`` are those of the project a ``pip install`` of it names
-    (``pip install -e ".[ci,usd]"``).  An invocation is a pytest (or
+    (``pip install -e ".[ci,usd]"``), in steps without an ``if:``.  A step
+    under an ``if:`` may not run in a given cell or at all (``if:
+    matrix.python-version == '3.99'`` never holds), and nothing here
+    evaluates the condition, so its extras are NOT counted as installed:
+    a package that arrives only there leaves the file recorded as never
+    run, which errs towards citing nothing it cannot show.  Extras written
+    with a ``${{ }}`` expression cannot be read without evaluating it and
+    are refused with the step named.  An invocation is a pytest (or
     pytest-wrapping) command with a positional argument under ``tests``;
     a target that is a node id stands for its file, which is what is
     imported."""
@@ -2912,10 +2919,17 @@ def _ci_jobs(root):
                 run = (step or {}).get("run")
                 if not isinstance(run, str):
                     continue
+                conditional = "if" in step
                 for command in run.replace("\\\n", " ").splitlines():
                     command = command.split(" #", 1)[0].strip()
                     for named in re.findall(r"pip install[^\n]*?\.\[([^\]]+)\]", command):
-                        extras |= {e.strip() for e in named.split(",")}
+                        assert "${{" not in named, (
+                            f"{wf.name} job {job_id} step {step.get('name')!r}: the extras of "
+                            f"`{command}` are written with a ${{{{ }}}} expression, which this "
+                            "derivation does not evaluate; write each set of extras out in a "
+                            "step of its own (one under an `if:` counts as not installed)")
+                        if not conditional:
+                            extras |= {e.strip() for e in named.split(",")}
                     if "pytest" not in command and "audit_property" not in command:
                         continue
                     try:
@@ -2966,8 +2980,10 @@ def _awaited_at_import(path, gate):
     """The modules a file's own top-level code hands to
     ``pytest.importorskip``: where one is missing, the whole file is
     skipped.  Calls inside a function, a class or a lambda run later and
-    are not read; a name that is not a literal reads as ``"?"``, which no
-    job installs."""
+    are not read; a class body, a decorator and a default value run at
+    import and are read; a name that is not a literal reads as ``"?"``,
+    which no job installs.  A ``minversion`` is not read: the module is
+    counted as present when it is installed, whatever its version."""
     import ast
 
     text = Path(path).read_text(encoding="utf-8")
@@ -2978,7 +2994,13 @@ def _awaited_at_import(path, gate):
     awaited = []
 
     def walk(node):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        if isinstance(node, ast.Lambda):
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # The body runs later; what the def line evaluates runs now.
+            for child in [*node.decorator_list, *node.args.defaults,
+                          *(d for d in node.args.kw_defaults if d is not None)]:
+                walk(child)
             return
         if isinstance(node, ast.Call) and gate._dotted(node.func, aliases) == "pytest.importorskip":
             first = node.args[0] if node.args else next(
@@ -3005,9 +3027,12 @@ def _paths_no_ci_lane_runs(root, gate):
       the file installs: every lane collects it and skips it whole.
 
     Not seen: a file skipped through a module it imports (a helper whose
-    own top-level code waits for a package), and one skipped at import in
+    own top-level code waits for a package), one skipped at import in
     another way (a ``pytest.skip(allow_module_level=True)`` behind a failed
-    ``import``).
+    ``import``), and one whose ``importorskip`` names a ``minversion`` no
+    job's install meets (the version is not decided from the source).  A
+    package installed only by a step under an ``if:`` counts as not
+    installed (:func:`_ci_jobs`).
     """
     import tomllib
 
@@ -3222,6 +3247,50 @@ class TestAnomalyGateRefusesEvidenceCINeverRuns:
         workflow.write_text(_SEEDED_WORKFLOW.replace('".[ci,usd]"', '".[ci]"'))
         never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
         assert waits["tests/usd/test_stage.py"] == ("pxr",)
+
+    def test_a_class_body_a_conditional_install_and_inline_extras(self, tmp_path):
+        """What runs at import beyond the module's own statements; a step that
+        may never run; extras the derivation cannot read without evaluating."""
+        gate = _load("check_anomalies")
+        _seeded_tree(tmp_path)
+        seeded = {
+            # A class body, a default value and a decorator run at import.
+            "tests/core/test_class_body.py":
+                'import pytest\n\nclass TestA:\n    pv = pytest.importorskip("pyvista")\n'
+                '    def test_a(self):\n        pass\n',
+            "tests/core/test_default.py":
+                'import pytest\n\ndef test_a(pv=pytest.importorskip("pyvista")):\n    pass\n',
+            "tests/core/test_decorator.py":
+                'import pytest\n\n@pytest.mark.skipif(not pytest.importorskip("pyvista"), reason="x")\n'
+                'def test_a():\n    pass\n',
+        }
+        for rel, text in seeded.items():
+            (tmp_path / rel).write_text(text, encoding="utf-8")
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert {rel: waits.get(rel) for rel in seeded} == dict.fromkeys(seeded, ("pyvista",)), waits
+        assert "tests/api/test_in_a_body.py" not in never      # a test's own body still runs later
+        workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+        step = '      - {}run: pip install -e ".[ci,viz3d]"\n'
+        # A step under an `if:` that may never hold installs nothing here ...
+        conditional = _SEEDED_WORKFLOW.replace(
+            "  test:\n    steps:\n",
+            "  test:\n    steps:\n" + step.format("if: matrix.python-version == '3.99'\n        "))
+        workflow.write_text(conditional, encoding="utf-8")
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert {job: extras for job, extras, _ in _ci_jobs(tmp_path)}["ci.yml:test"] == {"ci"}
+        assert waits["tests/api/test_renderer.py"] == ("pyvista",)
+        # ... where the same step without it does.
+        workflow.write_text(_SEEDED_WORKFLOW.replace("  test:\n    steps:\n",
+                                                     "  test:\n    steps:\n" + step.format("")),
+                            encoding="utf-8")
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert "tests/api/test_renderer.py" not in never
+        # Extras written with an expression are refused with the step named, not read as a name.
+        workflow.write_text(_SEEDED_WORKFLOW.replace(
+            '".[ci]"', "\".[ci${{ matrix.python-version == '3.12' && ',viz3d' || '' }}]\""),
+            encoding="utf-8")
+        with pytest.raises(AssertionError, match=r"job test step None: the extras .* expression"):
+            _paths_no_ci_lane_runs(tmp_path, gate)
 
     def test_what_a_job_installs_is_read_from_the_extras_it_names(self, tmp_path):
         import tomllib

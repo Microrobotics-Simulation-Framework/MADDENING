@@ -85,6 +85,9 @@ SLOW_RULE = (_SLOW_RULE,)
 SR_MARKS = (f"{_SLOW_RULE}::test_the_collection_holds_the_marks_as_pytest_decides_them",)
 SR_PIN = (f"{_SLOW_RULE}::test_an_xfail_pin_is_a_witness_only_of_a_slow_pin_of_the_same_open_anomaly",)
 SR_BODY = (f"{_SLOW_RULE}::test_a_witness_whose_own_body_skips_or_expects_to_fail_is_refused",)
+SR_LANE = (f"{_SLOW_RULE}::test_a_witness_in_a_file_the_per_push_lane_never_collects_is_refused",)
+SR_READER = (f"{_SLOW_RULE}::test_the_comment_reader_finds_what_it_is_for",)
+SR_BODIES = (f"{_SLOW_RULE}::test_the_body_reader_finds_what_it_is_for",)
 _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
 _PLAN_SCAN = "tests/core/test_interface_plan_is_the_only_enumeration.py"
@@ -603,6 +606,36 @@ MUTANTS: tuple[Mutant, ...] = (
        "the exception given to a pin of a resolved entry, or of an id the registry does not hold"),
     _M("W21", SR, '    if "skipif" in reached and function not in excused:', "    if False:", SR_BODY,
        "a witness whose body skips under a condition accepted without a reason in the table"),
+    # What the per-push lane never collects, and the readers widened after the pre-merge audit.
+    _M("W22", _XF, f"# Per push: {_XF}::{_LM}\n@pytest.mark.slow",
+       "# Per push: tests/viz/test_serialization.py::TestSerialization::test_to_dict_structure\n"
+       "@pytest.mark.slow", SLOW_RULE,
+       "a witness in tests/viz, which the lane passes --ignore for: the collection names the file "
+       "and pytest collects it, while no push ever runs it"),
+    _M("W23", SR, '    return next((why for key, why in collection.not_collected.items() if _covers(key, '
+                  'nodeid)), "")', '    return ""', SR_LANE,
+       "the lane's exclusions computed and never consulted: a witness in an ignored path accepted"),
+    _M("W24", SR, "        elif not named and not any(fnmatch_ex(p, root / rel) for p in python_files):",
+       "        elif False:", SR_LANE,
+       "a witness in a file pytest's python_files does not match accepted: `pytest tests/` never "
+       "collects it"),
+    _M("W25", SR, r'                      r"(?:\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\])?")',
+       r'                      r"(?:\[[^\]\s]*\])?")', SR_READER,
+       "a parameter id holding a space cut at the space: the comment then names the test's other "
+       "parameters, an xfail case or one that does not exist accepted"),
+    _M("W26", SR, "    if not mark.run:", "    if False:", SR_PIN,
+       "a strict xfail pin with run=False accepted as a witness: pytest never runs it, so it cannot "
+       "turn red on the push that fixes the defect"),
+    _M("W27", SR, '_UNITTEST_OUTCOMES = {"unittest.skip": "skip",', '_UNITTEST_OUTCOMES = {',
+       SR_BODIES, "a witness under unittest.skip accepted: it is collected and never runs"),
+    _M("W28", SR, "            last = stmt", "            last = last or stmt", SR_BODIES,
+       "the first of two definitions of a test read: pytest collects the last, which may skip"),
+    _M("W29", SR, "    return sorted({v for v in _UNSET_FOR_COLLECTION for t in texts if v in t})",
+       "    return []", SR_BODIES,
+       "a witness whose skipif reads MADDENING_TEST_SHARD accepted: the collection unsets it, every "
+       "sharded lane sets it and skips the witness"),
+    _M("W30", SR, "        kinds += gate._imperative_kinds(setup.body, aliases, helpers)  # noqa: SLF001",
+       "        pass", SR_BODIES, "a witness whose xunit setup_function skips accepted"),
     # --- L: the layout of the coupling searches' cells, tests/property/test_coupling_*_search.py
     _M("L1", _NL, "                knob = ROTATED_KNOBS[(s + 3 * t + 2 * q) % len(ROTATED_KNOBS)]\n",
        "                knob = (s + 3 * t + 2 * q) % len(linear.KNOBS)\n", CELLS_PINNED,

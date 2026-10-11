@@ -920,10 +920,17 @@ def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded_per_p
     same digits on jaxlib 0.10.2, 0.11.0 and 0.11.2.
 
     What it is not.  This cell's tolerance is 1e-4, and the loop stops on
-    it after four passes at ``residual=6.6e-6``; the slow cells, at 1e-7,
-    stall at ``residual=0.0``, where the bound stands on the counted floor
-    alone (a Gauss-Seidel bound at the stall is held per push in
-    ``tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py``).
+    it after four passes at ``residual=6.6e-6``, where the residual carries
+    the bound: a fault in the floor term alone passes here.  The slow
+    cells, at 1e-7, stall at ``residual=0.0``, where the bound is the
+    counted floor term alone.  Per push, that term's arithmetic,
+    ``(residual + floor) * amplification``, is held exactly by
+    ``tests/core/test_coupling_precision_floor.py::test_the_floor_is_added_to_the_residual_before_it_is_amplified``,
+    which fails with the floor term alone shrunk 2.3 times (just past the
+    slow set's least margin, 2.16 at amplitude 300); the Gauss-Seidel
+    bound at a float32 stall in
+    ``tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py`` holds
+    with a margin of 55.8, so it fails only on a larger fault in that term.
     And on this cell the bound is 1.30 of the distance at 70 and under it
     from 100 on (0.98 at 100, still stopped on the tolerance; 0.84 at 300,
     stalled): measured, the cause not established here.  That is why the
@@ -952,7 +959,11 @@ def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded_per_p
 #     (the same field at the least amplitude on the per-push Gauss-Seidel cell, which stops
 #     on its tolerance)
 # Per push: tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_the_spectral_bound_holds_on_a_stalled_squaring_chain
-#     (a Gauss-Seidel bound at the float32 stall, where it stands on the counted floor)
+#     (a Gauss-Seidel bound at the float32 stall, where it stands on the counted floor; it
+#     holds with a margin of 55.8)
+# Per push: tests/core/test_coupling_precision_floor.py::test_the_floor_is_added_to_the_residual_before_it_is_amplified
+#     (the floor term these cells' bound is made of at the stall, held exactly: a fault in that
+#     term alone, from 2.3 times, fails there and passes the two above)
 @pytest.mark.slow
 @pytest.mark.parametrize("amplitude", SIGN_CHANGING_BOUNDED)
 def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded(amplitude):

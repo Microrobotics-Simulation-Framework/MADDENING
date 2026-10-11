@@ -34,6 +34,8 @@ pip install maddening[cuda12,runpod]      # GPU + RunPod cloud deploy
 
 > **Note**: The `cuda12` extra upgrades the base JAX installation to the CUDA 12 variant. You must have CUDA 12 drivers installed on your system. Check with `nvidia-smi`.
 
+> **Float32 matrix products on NVIDIA GPUs**: JAX computes float32 matrix products (`@`, `jnp.matmul`, `jnp.dot`, `jnp.einsum`) at reduced precision by default on these cards. Nodes that use them are affected: the lattice Boltzmann nodes (`LBMNode`, `LBMPipeNode`) compute momentum and velocity with matrix products, and so does any MLP surrogate. Set the environment variable `JAX_DEFAULT_MATMUL_PRECISION=highest` before the first JAX call, or call `jax.config.update("jax_default_matmul_precision", "highest")`, to compute them in float32. On CPU the setting changes nothing, so a result checked on CPU says nothing about it.
+
 ## Feature Extras
 
 Install only what you need. Each extra adds one capability:

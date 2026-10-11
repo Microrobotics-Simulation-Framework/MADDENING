@@ -536,8 +536,8 @@ another's time. Judge a test on more than one run.
 
 ### Sharded lanes
 
-Each JAX lane runs as four jobs on four runners, each running its share of
-the suite one test at a time (`MADDENING_TEST_SHARD=i/4`,
+Each JAX lane runs as six jobs on six runners, each running its share of
+the suite one test at a time (`MADDENING_TEST_SHARD=i/6`,
 `tests/_sharding.py`). The split is by test file, and it is stable. A file's
 shard is a hash of its path, or an explicit pin in `PINS` for the heaviest
 files, never a function of the test list. So:
@@ -547,8 +547,8 @@ files, never a function of the test list. So:
 - shard *i* of a pull request holds the same files as shard *i* of the base
   branch, which is what lets a shard reuse that shard's compilation cache.
 
-`slow-tests.yml` is split by file too, but on eight runners per lane and by
-measured time, not by hash (`MADDENING_TEST_SHARD=i/8:weighted`). It
+`slow-tests.yml` is split by file too, but on ten runners per lane and by
+measured time, not by hash (`MADDENING_TEST_SHARD=i/10:weighted`). It
 restores no compilation cache, so nothing there needs a file to stay on its
 shard, and its files are far from equal: the heaviest takes 48 minutes, and
 by hash one shard of four held nearly half of the lane (166 to 172 minutes
@@ -557,13 +557,22 @@ split deals the files listed in `tests/slow_lane_weights.json` (seconds per
 file on its slower JAX lane, from a slow-lane run's JUnit artifacts),
 longest first, each onto the shard with the least time so far. A file the
 table does not list (a new one, or one under ten seconds) goes by the hash
-of its path. That predicts 60 minutes of test time on every shard (six
-shards held 80 each; the heaviest file alone is 42).
+of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 64
+minutes of test time on every shard (eight shards held 79 each); the
+heaviest file alone is 49.
 
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The
 per-shard `Test time budget` step gates. The `Test durations` job writes
-one summary per lane from all four shards' reports.
+one summary per lane from all six shards' reports.
+
+The lane ran four shards until 2026-10-11. On three cold push runs the
+slowest of the four jobs took 43 to 48 minutes. Six shards are predicted
+at 28 to 30 with six files pinned (33 to 37 by hash alone), and at
+33.7 at most if every compiled program that files on one shard shared in
+a cold run had to be compiled again. That prediction is for the runners
+those runs drew: the same files take up to 1.6 times as long on one hosted
+runner as on another.
 
 To rebalance, edit `PINS`, which moves only the files you pin, and take the
 per-file totals from the lane summary. Changing the job count re-deals
@@ -571,23 +580,25 @@ every file, and the count is written in several places that must move
 together:
 
 - in `ci.yml`: `shard:` and `MADDENING_TEST_SHARD` in the `test` job, the
-  `of4` in the compilation cache's key and in the durations artifact's
-  name, and the `-ne 4` and "of 4" in the `Test durations` job's
+  `of6` in the compilation cache's key and in the durations artifact's
+  name, and the `-ne 6`, `-eq 6` and "of 6" in the `Test durations` job's
   "Summarise the lane" step;
 - `PINS_FOR` in `tests/_sharding.py`, and the pins themselves.
 
 The slow lane's count is separate (`SLOW_LANE_SHARDS` in
 `tests/_sharding.py`) and is written in `slow-tests.yml` as `shard:`,
-`MADDENING_TEST_SHARD`, the artifact name's `of8`, the "of 8" in the step
-title and the `/8` in the three issue titles. No pin depends on it: the
-table is dealt for whatever count the spec names.
+`MADDENING_TEST_SHARD`, the artifact name's `of10`, the "of 10" in the step
+title and the `/10` in the three issue titles. No pin depends on it: the
+table is dealt for whatever count the spec names. Twelve shards are
+predicted at 56 minutes for the slowest and fit what the organisation's plan
+runs at once (60 jobs; the lane would be 24): the next step after ten.
 
 The compliance tests pin these counts, so a change to one fails them until
 each place is updated: `test_ci_sharding.py` (`shard:`,
 `MADDENING_TEST_SHARD` and every other mention of the count, in both
 workflows, against `PINS_FOR` and `SLOW_LANE_SHARDS`), `test_ci_workflows.py`
 and `test_report_test_durations.py` (the cache key, and the lane summary
-run on four shards' reports and on three).
+run on six shards' reports and on five).
 
 To rebalance the slow lane, regenerate the table from a run's artifacts.
 The script prints the heaviest files and the minutes it predicts per shard,
@@ -603,6 +614,14 @@ that run: give an earlier run first (`--run` repeats, and the later
 measurement of a file wins). `test_ci_sharding.py` fails if the table lists
 a file that no longer exists, or predicts more than 100 minutes on the
 heaviest shard; then raise `SLOW_LANE_SHARDS`, or split the heaviest file.
+
+A run's times carry the speed of each runner it drew. Between two runs of
+one deal on 2026-10-10 the same files on the same shard took from 0.57 to
+1.59 times as long, in compile time as in the rest: the hosted runners are
+of several CPU models (on the per-push lane one shard's files took 1.6
+times as long on an EPYC 7763 as on an EPYC 9V45). So the table balances
+the shards to within the runners' spread, not to the minute, and a shard
+dealt the mean can still run half as long again.
 
 Every allowlist entry is `<node id> # kept: <why it must run on every
 push>`. The tests that were already over 5 s when the budget arrived

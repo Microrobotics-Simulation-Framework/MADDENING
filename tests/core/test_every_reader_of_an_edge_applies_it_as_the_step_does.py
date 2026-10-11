@@ -105,7 +105,6 @@ EDGES = {
                    "transform": _double_reversed})],
     "a transform that indexes its field": [("two", {"transform": _double_reversed})],
     "additive edges": [("two", {}), ("two", {"additive": True, "transform": _double_reversed})],
-    "an external input on the same field": [("two", {})],
     "a later edge that is not additive": [
         ("three", {"mapping": lambda: matrix_mapping(H)}), ("two", {"transform": _double_reversed})],
 }
@@ -122,8 +121,6 @@ def _graph(variant, rate=0.0, compile_it=True):
     for source, kwargs in EDGES[variant]:
         kwargs = {k: (v() if k == "mapping" else v) for k, v in kwargs.items()}
         gm.add_edge(source, "tgt", "x", "u", **kwargs)
-    if variant == "an external input on the same field":
-        gm.add_external_input("tgt", "u", shape=(2,))
     if compile_it:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=f".*{DISCONNECTED}", category=UserWarning)
@@ -143,7 +140,6 @@ def _expected(variant, three, two):
         "two additive mapped edges": h @ three + 2.0 * (2.0 * h @ three)[::-1],
         "a transform that indexes its field": 2.0 * two[::-1],
         "additive edges": two + 2.0 * two[::-1],
-        "an external input on the same field": np.zeros(2),
         "a later edge that is not additive": 2.0 * two[::-1],      # it replaces the first
     }[variant]
 
@@ -181,6 +177,56 @@ def test_resolve_boundary_inputs_still_raises_key_error_on_a_flux_edge():
         gm.resolve_boundary_inputs("b")
     with pytest.raises(KeyError, match="unknown node"):
         gm.resolve_boundary_inputs("nobody")
+
+
+# ---------------------------------------------------------------------------
+# An edge onto a declared external input
+# ---------------------------------------------------------------------------
+
+REFUSED = "an edge and a declared external input target the same field"
+
+
+def _an_edge_onto_an_external_input():
+    """``two.x -> tgt.u`` and a declared external input ``tgt.u``, not compiled."""
+    gm = GraphManager()
+    gm.add_node(_Source("two", [10.0, 20.0]))
+    tgt = _Recorder("tgt")
+    gm.add_node(tgt)
+    gm.add_edge("two", "tgt", "x", "u")
+    gm.add_external_input("tgt", "u", shape=(2,))
+    return gm, tgt
+
+
+def test_an_edge_onto_an_external_input_is_refused_by_the_step_and_the_dataset():
+    """This module used to hold every reader to the step on such a graph:
+    the step let the input replace the edge (zeros when it is not fed) and
+    the readers had to do the same.  The step now refuses the graph
+    (MADD-ANO-265), and so does every reader, compiled or not (the next
+    test holds the two that do not compile)."""
+    gm, _ = _an_edge_onto_an_external_input()
+    with pytest.raises(ValueError, match=REFUSED):
+        gm.compile()
+    with pytest.raises(ValueError, match=REFUSED):
+        gm.step()
+    with pytest.raises(ValueError, match=REFUSED):
+        DatasetGenerator.from_graph(gm, "tgt", 4)
+
+
+def test_the_readers_of_a_graph_never_compiled_refuse_it_as_the_step_does():
+    """``resolve_boundary_inputs`` and ``check_conservation`` read a graph
+    without compiling it (``_boundary_inputs_from``).  They used to apply
+    the rule the step had (the external input's zero default replaced what
+    the edge delivered: zeros where the edge carried ``[10, 20]``).  They
+    refuse the graph with the error ``compile()`` gives, and feed the node
+    nothing."""
+    gm, tgt = _an_edge_onto_an_external_input()
+    with pytest.raises(ValueError, match=REFUSED):
+        gm.resolve_boundary_inputs("tgt")
+    state = {"two": {"x": jnp.asarray([10.0, 20.0], F32)}, "tgt": {"seen": jnp.zeros(2, F32)}}
+    tgt.fed.clear()
+    with pytest.raises(ValueError, match=REFUSED):
+        check_conservation(gm, state, [("tgt", "q", "tgt", "q")])
+    assert tgt.fed == []
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@
 # count) fails the gate.
 
 # --- sharded Krylov solvers -------------------------------------------------
-src/maddening/cloud/multigpu/iterative_solver.py _cg_loop.body finfo.tiny*2  # dtype range: a division guard; b is framed into [0.5, 1) (_framed), so a denominator below the smallest normal is a breakdown's exact or flushed zero, not a small unit
+src/maddening/cloud/multigpu/iterative_solver.py _cg_iterations.body finfo.tiny*2  # dtype range: a division guard; b is framed into [0.5, 1) (_framed), so a denominator below the smallest normal is a breakdown's exact or flushed zero, not a small unit
 src/maddening/cloud/multigpu/iterative_solver.py _gmres_inner_cycle finfo.tiny  # dtype range: guards normalising a zero residual; b is framed into [0.5, 1) first, so only an exact (or flushed) zero reaches it
 src/maddening/cloud/multigpu/iterative_solver.py _gmres_inner_cycle.arnoldi_step finfo.tiny  # dtype range: guards normalising a zero Arnoldi vector (a breakdown) in the framed solve
 src/maddening/cloud/multigpu/iterative_solver.py sharded_cg 1e-6  # dimensionless: rtol, a fraction of ||b||

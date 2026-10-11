@@ -176,15 +176,19 @@ def _held():
 
 def _geometry():
     """Two edges with a geometry-dependent mapping (experimental), one
-    anchor each, and an exported array input: the geometry is node state
-    that moves every step, so an FMU path that froze it, or restored a
-    snapshot without it, steps to other values."""
+    anchor each: the geometry is node state that moves every step, so an
+    FMU path that froze it, or restored a snapshot without it, steps to
+    other values.
+
+    No external input.  This graph used to declare one on ``grid.deposit``,
+    the field its source-anchored edge delivers to: the input replaced the
+    edge on every step, and since the nodes are not exported it was held
+    at zero, so that edge never delivered on any of the three paths
+    (MADD-ANO-265).  Such a graph is now refused; with the declaration
+    gone both edges deliver."""
     from tests.core import geometry_surface_graphs as surfaces  # noqa: PLC0415
 
-    gm = surfaces.graph(compile=False)
-    gm.add_external_input("grid", "deposit", shape=(surfaces.N_GRID,))
-    gm.compile()
-    return gm
+    return surfaces.graph()
 
 
 GRAPHS = {"plant": _plant, "multirate": _multirate, "coupled": _coupled, "held": _held,

@@ -124,6 +124,13 @@ print(f"Final ball height: {float(final_state['ball']['position']):.2f}")
 
 Both messages are designed to surface unintentional graph mistakes
 without breaking deliberate constructions.
+
+One construction is an error.  A field takes an edge or a declared
+external input (`gm.add_external_input`), not both: the input would
+replace whatever the edge delivers on every step, with zeros when it is
+not fed, so `gm.compile()` raises a `ValueError` naming the pair and
+`gm.validate()` lists it.  Keep one of the two: leave the declaration
+out where the graph is built, or `gm.remove_edge(...)`.
 ```
 
 ### An edge from a node to itself

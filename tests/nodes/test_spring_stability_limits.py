@@ -384,10 +384,15 @@ def test_no_warning_for_an_additive_anchor():
 
 
 def test_no_warning_when_something_else_also_writes_an_anchor():
+    """The second writer is an external input on the wired field: a graph
+    ``compile()`` refuses (MADD-ANO-265).  The advisory has nothing to say
+    of it, and ``validate()`` lists the refusal."""
     gm = _anchor_each_other(_springs(GraphManager(), stiffness=1000.0, damping=2.0,
                                      mass=0.5))
     gm.add_external_input("a", "anchor_position")
     assert _anomaly_issues(_group(gm)) == []
+    assert any("an edge and a declared external input target the same field" in i
+               for i in gm.validate())
 
 
 def test_no_warning_when_only_one_of_the_pair_is_in_the_group():

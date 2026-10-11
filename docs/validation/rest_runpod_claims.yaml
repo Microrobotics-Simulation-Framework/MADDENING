@@ -5803,14 +5803,18 @@ claims:
     run_pod.py with each of four seeds; the goal itself in a dry run at 256
     and 1024 unknowns on the same seeds (slow); the committed record's
     results degraded one solve at a time (a residual of 0.26, one a
-    thousandth over what is accepted, NaN, inf; a flag that is not true).
+    thousandth over what is accepted, NaN, inf; an iteration count at
+    the most the loop is allowed or beyond it, zero, negative or not a
+    count; a flag that is not true, which must change nothing).
     Measured once at 1e5, 3e5, 1e6 and 1e7 unknowns with the session's 3000
-    iterations at most on the three jax versions: not a test.  The loop's
-    own flag is taken on its recursively updated residual, not on the
-    system's (MADD-ANO-263, open, pinned in
-    tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py):
-    the claim does not rest on it, the float64 residual is checked beside
-    it and is what holds each solve to the limit.
+    iterations at most on the three jax versions: not a test.  "Stopped
+    on its tolerance and not on its cap" is read from the loop's iteration
+    count (under the cap: the loop has those two exits).  The flag recorded
+    beside it is not read: from 0.4.0 it is the float32 residual of the
+    system against rtol with no allowance (MADD-ANO-263, resolved, pinned in
+    tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py),
+    within about 12 % of the tolerance on this system; the float64
+    residual is what holds each solve to the limit.
   oracle: >-
     the checks' statuses re-derived from value, limit and sense; a float64
     residual on the host by an operator written apart from the two JAX
@@ -5821,6 +5825,7 @@ claims:
     - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_fails_a_cg_solve_that_stopped_on_its_iteration_cap
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_gradient_goal_does_not_read_the_recorded_flag
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_gradient_json_reports_parity_for_rollout_and_sharded_cg
     - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_limits_are_the_runbooks
   status: verified
@@ -5894,9 +5899,10 @@ claims:
     gate (the CPU-virtual half is tests/cloud/multigpu/test_iterative_solver.py::TestGradientParityAtScale)":
     the CPU half solves the same system (CG_SHIFT and CG_RTOL read from the
     runner) with operators of its own at 1e5 unknowns over four shards, and
-    asserts in this order that each side's solves converged (the loop's
-    flag; the float64 true residual of the solve, the adjoint solve and the
-    tangent solve within the runner's residual limit), that each side's
+    asserts in this order that each side's solves converged (the loop
+    stopped well under its iteration cap; the float64 true residual of the
+    solve, the adjoint solve and the tangent solve within the runner's
+    residual limit), that each side's
     derivatives are within half the parity limit of a float64 direct solve,
     and that the sharded and the unsharded derivatives agree within the
     runner's parity limit and, on CPU, within 1e-5.
@@ -5906,10 +5912,11 @@ claims:
   conditions: >-
     CPU, four virtual devices, float32; 1024 unknowns with a cap of 300
     iterations per push and 1e5 unknowns with the cap of 3000 in the slow
-    lane; both run on jax 0.10.2, 0.11.0 and 0.11.2.  "The loop's flag"
-    is taken on its recursively updated residual (MADD-ANO-263, open);
-    the float64 true residual asserted beside it is what holds each
-    solve to the limit.
+    lane; both run on jax 0.10.2, 0.11.0 and 0.11.2.  The loop's
+    ``converged`` flag is not read: from 0.4.0 it is the float32 residual
+    against rtol with no allowance (MADD-ANO-263, resolved), which on this
+    system lands within a few percent of rtol; the float64 true residual
+    is what holds each solve to the limit.
   oracle: >-
     a float64 direct solve of the system (the Thomas algorithm) and a
     float64 residual, both by an operator written apart from the two JAX

@@ -6,9 +6,9 @@ on:
   pull_request:
     branches: [main, "release/**"]
 
-# One run per branch or PR at a time.  GitHub runs about twenty jobs at
-# once across the whole repository and every run of this workflow costs
-# about fifteen, so a run nobody will read holds up everyone's CI.
+# One run per branch or PR at a time.  The organisation's plan runs sixty
+# jobs at once across its repositories and every run of this workflow
+# costs about nineteen, so a run nobody will read holds up everyone's CI.
 #
 # * Pull requests: a new push cancels the run in progress.  Only the head's
 #   result decides a merge.
@@ -158,18 +158,20 @@ jobs:
         # other.  **Dropping the 0.10.2 lane silently deletes the only
         # coverage that term has.**  Replace the test first.
         jax-version: ["0.10.2", "0.11.2"]
-        # Each lane runs as four jobs, each on its own runner and each
+        # Each lane runs as six jobs, each on its own runner and each
         # running its share one test at a time.  The split is by test file
         # and stable (tests/_sharding.py): a file's shard is a hash of its
         # path, or an explicit pin for the heaviest files, never a function
         # of the test list -- so shard i of a pull request holds the same
         # files as shard i of the base branch.  One process per runner
         # keeps per-test times comparable to the budget and memory at a
-        # quarter of the suite's; xdist on one runner did neither (four
+        # sixth of the suite's; xdist on one runner did neither (four
         # workers stretched every test's wall time, and memory grew to
         # 14 GB of 16 before a runner died, PR #133).  Changing the count
-        # means changing MADDENING_TEST_SHARD below and PINS_FOR.
-        shard: [1, 2, 3, 4]
+        # means changing MADDENING_TEST_SHARD, the cache key and the
+        # artifact name below, the three counts in the test-durations
+        # job, and PINS_FOR with its pins in tests/_sharding.py.
+        shard: [1, 2, 3, 4, 5, 6]
 
     steps:
       - uses: actions/checkout@v4
@@ -252,7 +254,7 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           # One cache per shard: shard i holds the same test files on every
           # branch (tests/_sharding.py), so it compiles the same programs.
-          echo "key=jaxcc-v1-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of4" >> "$GITHUB_OUTPUT"
+          echo "key=jaxcc-v1-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"
           echo "compilation cache: $mode on '$model'"
 
       - name: Restore compilation cache
@@ -301,7 +303,7 @@ jobs:
           # proof stopped running -- fail instead.
           MADDENING_REQUIRE_PACKAGING_TESTS: "1"
           # This job's share of the suite (tests/_sharding.py).
-          MADDENING_TEST_SHARD: "${{ matrix.shard }}/4"
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"
         run: |
           # -rs prints every skip's reason.  A skip whose reason nobody
           # reads is indistinguishable from a test that never existed,
@@ -319,7 +321,7 @@ jobs:
         # Runs after a red test step too.  The gate half only: warns on any
         # test over 5 s that is not on tests/duration_allowlist.txt and
         # fails on one over 20 s.  The summary is written once per lane,
-        # from all four shards, by the "Test durations" job below.  The
+        # from all six shards, by the "Test durations" job below.  The
         # budget is in docs/developer_guide/testing_standards.md.
         if: ${{ !cancelled() }}
         run: |
@@ -359,7 +361,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of4
+          name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6
           path: |
             test-results-shard${{ matrix.shard }}.xml
             cache-mode-shard${{ matrix.shard }}.txt
@@ -367,7 +369,7 @@ jobs:
           if-no-files-found: warn
 
   test-durations:
-    # One summary per lane from all four shards' JUnit XML: band counts,
+    # One summary per lane from all six shards' JUnit XML: band counts,
     # slowest tests and files, and allowlist entries that may be
     # removable -- which only a view of the whole lane can say, since an
     # entry absent from one shard is simply on another.  Report only; the
@@ -398,8 +400,8 @@ jobs:
             exit 1
           fi
           extra=""
-          if [ "$n" -ne 4 ]; then
-            echo "::warning title=Test durations::only $n of 4 shard reports for JAX ${{ matrix.jax-version }}; the summary covers those shards and lists no removable allowlist entries"
+          if [ "$n" -ne 6 ]; then
+            echo "::warning title=Test durations::only $n of 6 shard reports for JAX ${{ matrix.jax-version }}; the summary covers those shards and lists no removable allowlist entries"
             extra="--no-removable"
           fi
           # warm, cold, or mixed when the shards differ (a shard whose CPU
@@ -408,10 +410,10 @@ jobs:
           modes=$(cat results/cache-mode-shard*.txt 2>/dev/null | sort -u)
           case "$modes" in warm|cold) mode=$modes ;; *) mode=mixed ;; esac
           nmodes=$(ls results/cache-mode-shard*.txt 2>/dev/null | wc -l)
-          [ "$nmodes" -eq 4 ] || mode=mixed
+          [ "$nmodes" -eq 6 ] || mode=mixed
           python3 scripts/report_test_durations.py results/test-results-shard*.xml \
             --allowlist tests/duration_allowlist.txt --fail-over 0 $extra --cache-mode "$mode" \
-            --title "Test durations (Python 3.12, JAX ${{ matrix.jax-version }}, $n of 4 shards)"
+            --title "Test durations (Python 3.12, JAX ${{ matrix.jax-version }}, $n of 6 shards)"
 
   test-usd:
     needs: changes

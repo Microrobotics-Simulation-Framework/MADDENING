@@ -19043,7 +19043,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-273"
+  - anomaly_id: "MADD-ANO-275"
     title: "IQN acceleration under the Jacobi schedule can stall, unconverged, on a coupling group the plain Jacobi loop solves"
     description: >
       With `iteration_mode="jacobi"`, `acceleration="iqn-ils"` or

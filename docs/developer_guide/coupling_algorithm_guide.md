@@ -1518,7 +1518,7 @@ the stars (`star-8` 4.3 vs 4.0, `star-16` 4.6 vs 4.0).  The hypothesis — a res
 iterate spans a cleaner space — is weakly supported on the chains and
 rings only, and the effect is smaller than the noise in step time.  Worth knowing, not
 worth defaulting to.  **And it can stall where the plain Jacobi loop
-converges** (MADD-ANO-273).  Measured on a float32 pair of `tanh` nodes
+converges** (MADD-ANO-275).  Measured on a float32 pair of `tanh` nodes
 with 2 and 4 entries, each reading the other through a matrix mapping
 (default norm and solver): plain Jacobi is 5e-8 from the fixed point
 after 12 passes, while `iqn-ils` under Jacobi takes the error from 0.82

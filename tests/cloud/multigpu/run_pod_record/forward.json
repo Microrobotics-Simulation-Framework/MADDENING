@@ -1,12 +1,12 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "goal": "forward",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-10T20:45:36Z",
+    "timestamp_utc": "2026-10-11T08:54:53Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "0b061d1c9ef52c4dda932ba0c1207d3e0c0c4d3a"
+    "git_commit": "f4d4e7a49ea1ce5e43da7852af82d7799f2fc950"
   },
   "config": {
     "goal": "all",
@@ -53,49 +53,50 @@
       "cells": 256,
       "mesh": "grid",
       "partition": "rcm",
+      "renumbered": true,
       "n_devices": 4,
       "steps": 3,
       "methods": {
         "all_to_all": {
-          "compile_s": 0.12048036699707154,
-          "wrapper_first_call_s": 0.0675116870115744,
+          "compile_s": 0.8116540119954152,
+          "wrapper_first_call_s": 0.13144707400351763,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              1.8640119960764423,
-              1.800212005036883,
-              1.713661986286752
+              4.715515999123454,
+              6.826871001976542,
+              6.276679006987251
             ],
-            "min_ms": 1.713661986286752,
-            "median_ms": 1.800212005036883,
-            "mean_ms": 1.7926286624666925,
-            "ms_per_step": 0.6000706683456277
+            "min_ms": 4.715515999123454,
+            "median_ms": 6.276679006987251,
+            "mean_ms": 5.939688669362416,
+            "ms_per_step": 2.092226335662417
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.836271996377036,
-              0.2806940028676763,
-              0.1907639962155372
+              0.6541759939864278,
+              0.7484800007659942,
+              0.6737980002071708
             ],
-            "min_ms": 0.1907639962155372,
-            "median_ms": 0.2806940028676763,
-            "mean_ms": 0.43590999848674983,
-            "ms_per_step": 0.09356466762255877
+            "min_ms": 0.6541759939864278,
+            "median_ms": 0.6737980002071708,
+            "mean_ms": 0.6921513316531976,
+            "ms_per_step": 0.22459933340239027
           },
           "parity_x": {
             "max_abs": 0.0,
             "max_rel": 0.0,
-            "reference_scale": 1.0797796249389648,
+            "reference_scale": 1.007796287536621,
             "finite": true
           },
           "parity_total": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 183.40968322753906,
+            "max_abs": 1.52587890625e-05,
+            "max_rel": 8.432493839220001e-08,
+            "reference_scale": 180.9522705078125,
             "finite": true
           },
           "ones": {
@@ -105,45 +106,45 @@
           }
         },
         "ppermute": {
-          "compile_s": 0.08456149899575394,
-          "wrapper_first_call_s": 0.0011553279910003766,
+          "compile_s": 0.15942680899752304,
+          "wrapper_first_call_s": 0.00288235601328779,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              1.8036239926004782,
-              1.907710000523366,
-              1.7562059947522357
+              5.124268995132297,
+              4.835697007365525,
+              4.09100299293641
             ],
-            "min_ms": 1.7562059947522357,
-            "median_ms": 1.8036239926004782,
-            "mean_ms": 1.8225133292920266,
-            "ms_per_step": 0.6012079975334927
+            "min_ms": 4.09100299293641,
+            "median_ms": 4.835697007365525,
+            "mean_ms": 4.68365633181141,
+            "ms_per_step": 1.611899002455175
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.3499000013107434,
-              0.27566999779082835,
-              0.16348899225704372
+              0.9696490014903247,
+              0.6570910045411438,
+              0.6521770119434223
             ],
-            "min_ms": 0.16348899225704372,
-            "median_ms": 0.27566999779082835,
-            "mean_ms": 0.26301966378620517,
-            "ms_per_step": 0.09188999926360945
+            "min_ms": 0.6521770119434223,
+            "median_ms": 0.6570910045411438,
+            "mean_ms": 0.7596390059916303,
+            "ms_per_step": 0.21903033484704792
           },
           "parity_x": {
             "max_abs": 0.0,
             "max_rel": 0.0,
-            "reference_scale": 1.0797796249389648,
+            "reference_scale": 1.007796287536621,
             "finite": true
           },
           "parity_total": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 183.40968322753906,
+            "max_abs": 1.52587890625e-05,
+            "max_rel": 8.432493839220001e-08,
+            "reference_scale": 180.9522705078125,
             "finite": true
           },
           "ones": {
@@ -171,49 +172,50 @@
       "cells": 1024,
       "mesh": "grid",
       "partition": "rcm",
+      "renumbered": true,
       "n_devices": 4,
       "steps": 3,
       "methods": {
         "all_to_all": {
-          "compile_s": 0.12341243600531016,
-          "wrapper_first_call_s": 0.06603868199454155,
+          "compile_s": 0.2963650270103244,
+          "wrapper_first_call_s": 0.1304781580111012,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              1.9189500017091632,
-              1.9390289962757379,
-              1.8177700112573802
+              4.8362939996877685,
+              3.319748997455463,
+              3.0394100031116977
             ],
-            "min_ms": 1.8177700112573802,
-            "median_ms": 1.9189500017091632,
-            "mean_ms": 1.8919163364140938,
-            "ms_per_step": 0.6396500005697211
+            "min_ms": 3.0394100031116977,
+            "median_ms": 3.319748997455463,
+            "mean_ms": 3.731817666751643,
+            "ms_per_step": 1.106582999151821
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.35679800203070045,
-              0.3573809954104945,
-              0.16075999883469194
+              0.869870011229068,
+              0.7589829911012203,
+              0.547739997273311
             ],
-            "min_ms": 0.16075999883469194,
-            "median_ms": 0.35679800203070045,
-            "mean_ms": 0.2916463320919623,
-            "ms_per_step": 0.11893266734356682
+            "min_ms": 0.547739997273311,
+            "median_ms": 0.7589829911012203,
+            "mean_ms": 0.7255309998678664,
+            "ms_per_step": 0.2529943303670734
           },
           "parity_x": {
-            "max_abs": 1.1920928955078125e-07,
-            "max_rel": 1.1469378823030697e-07,
-            "reference_scale": 1.039370059967041,
+            "max_abs": 2.384185791015625e-07,
+            "max_rel": 1.9208341644942834e-07,
+            "reference_scale": 1.2412241697311401,
             "finite": true
           },
           "parity_total": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 169.25265502929688,
+            "max_abs": 1.52587890625e-05,
+            "max_rel": 9.355946906498257e-08,
+            "reference_scale": 163.0918731689453,
             "finite": true
           },
           "ones": {
@@ -223,45 +225,45 @@
           }
         },
         "ppermute": {
-          "compile_s": 0.08858514000894502,
-          "wrapper_first_call_s": 0.001232609007274732,
+          "compile_s": 0.1707984899985604,
+          "wrapper_first_call_s": 0.0026900999946519732,
           "input_presharded": true,
           "wrapper_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              1.7852900055004284,
-              1.812925998819992,
-              1.8439790001139045
+              5.845544001203962,
+              3.682390000903979,
+              3.3678089966997504
             ],
-            "min_ms": 1.7852900055004284,
-            "median_ms": 1.812925998819992,
-            "mean_ms": 1.8140650014781083,
-            "ms_per_step": 0.6043086662733307
+            "min_ms": 3.3678089966997504,
+            "median_ms": 3.682390000903979,
+            "mean_ms": 4.298580999602564,
+            "ms_per_step": 1.2274633336346596
           },
           "device_step": {
             "warmup": 1,
             "repeats": 3,
             "ms": [
-              0.28512599237728864,
-              0.28614701295737177,
-              0.1733859971864149
+              0.9979850001400337,
+              0.8314430015161633,
+              0.7628040038980544
             ],
-            "min_ms": 0.1733859971864149,
-            "median_ms": 0.28512599237728864,
-            "mean_ms": 0.2482196675070251,
-            "ms_per_step": 0.09504199745909621
+            "min_ms": 0.7628040038980544,
+            "median_ms": 0.8314430015161633,
+            "mean_ms": 0.8640773351847505,
+            "ms_per_step": 0.27714766717205447
           },
           "parity_x": {
-            "max_abs": 1.1920928955078125e-07,
-            "max_rel": 1.1469378823030697e-07,
-            "reference_scale": 1.039370059967041,
+            "max_abs": 2.384185791015625e-07,
+            "max_rel": 1.9208341644942834e-07,
+            "reference_scale": 1.2412241697311401,
             "finite": true
           },
           "parity_total": {
-            "max_abs": 0.0,
-            "max_rel": 0.0,
-            "reference_scale": 169.25265502929688,
+            "max_abs": 1.52587890625e-05,
+            "max_rel": 9.355946906498257e-08,
+            "reference_scale": 163.0918731689453,
             "finite": true
           },
           "ones": {
@@ -377,7 +379,7 @@
     },
     {
       "name": "1024 cells all_to_all x vs unsharded max_rel",
-      "value": 1.1469378823030697e-07,
+      "value": 1.9208341644942834e-07,
       "limit": 1e-05,
       "sense": "<=",
       "passed": true
@@ -414,7 +416,7 @@
     },
     {
       "name": "1024 cells ppermute x vs unsharded max_rel",
-      "value": 1.1469378823030697e-07,
+      "value": 1.9208341644942834e-07,
       "limit": 1e-05,
       "sense": "<=",
       "passed": true
@@ -465,5 +467,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 0.9786806430056458
+  "wall_s": 2.656237722010701
 }

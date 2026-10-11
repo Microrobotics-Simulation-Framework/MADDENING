@@ -406,9 +406,9 @@ def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
     assert "Checks not run" not in out and "Failed checks" not in out     # 4 devices
     assert "Records that cannot decide" not in out and "MIXED COMMITS" not in out
     for mesh, (py, pz) in _MESHES.items():
-        for case in ("field", "lbm"):
-            for boundary in (("periodic", "edge", "dirichlet") if case == "field"
-                             else ("periodic",)):
+        for case in ("field", "lbm", "field-halo2"):
+            for boundary in (("periodic",) if case == "lbm"
+                             else ("periodic", "edge", "dirichlet")):
                 assert f"{case} {mesh} {py}x{pz} 16x20 {boundary}" in out, out
     # every item names the one commit its files record
     assert all(line.endswith(lines[0].split()[-1]) and " commit " in line for line in lines)
@@ -422,19 +422,25 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
     for mesh in _MESHES:
         smallest += [(256, "field", b, mesh) for b in rp.STENCIL_BOUNDARIES]
         smallest.append((256, "lbm", "periodic", mesh))
+        # the field again with a halo of two cells, under each boundary
+        smallest += [(256, "field-halo2", b, mesh) for b in rp.STENCIL_BOUNDARIES]
     assert rp.stencil_cases([1024, 256], 4) == [(1024, "field", "periodic", "2d"), *smallest]
+    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2"}
     # no pencil mesh on 2 or 3 devices: the other three carry every case,
     # and the larger sizes run on the 1-D mesh
     assert rp.stencil_cases([256, 1024], 2) == [
         (256, kind, b, mesh) for mesh in ("1d", "1d-axis1", "2d-flat")
         for kind, b in (("field", "periodic"), ("field", "edge"), ("field", "dirichlet"),
-                        ("lbm", "periodic"))] + [(1024, "field", "periodic", "1d")]
+                        ("lbm", "periodic"), ("field-halo2", "periodic"),
+                        ("field-halo2", "edge"), ("field-halo2", "dirichlet"))
+    ] + [(1024, "field", "periodic", "1d")]
     gpu = rp.stencil_cases(list(rp.GPU_CELLS), 4)
     assert gpu[:4] == [(100_000, "field", b, "1d") for b in rp.STENCIL_BOUNDARIES] + [
         (100_000, "lbm", "periodic", "1d")]
+    assert gpu[4:7] == [(100_000, "field-halo2", b, "1d") for b in rp.STENCIL_BOUNDARIES]
     assert gpu[-2:] == [(300_000, "field", "periodic", "2d"),
                         (1_000_000, "field", "periodic", "2d")]
-    assert len(gpu) == 18
+    assert len(gpu) == 4 * 7 + 2 == 30
     # the graph goals: every mesh at the smallest size, the pencil after
     assert rp.graph_cases([256, 1024], 4) == [(256, m) for m in _MESHES] + [(1024, "2d")]
     assert rp.graph_cases([256], 3) == [(256, m) for m in ("1d", "1d-axis1", "2d-flat")]

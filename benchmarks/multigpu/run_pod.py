@@ -96,21 +96,22 @@ another check of the goal ran and passed (the run exits 0 for it and the
 goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
-those cases that way on such a count.  Each of the wrapper goals must fail
-on a stencil wrapper broken in any of eight ways (a static's halos NaN,
-grid-shaped inputs zeroed, domain integrals halved, domain integrals summed
-over the first mesh axis only, sharded axes after the first zero-filled at
-the global edges, halos taken from the wrong neighbour along spatial axis
-1, ``shard_info``'s extent divided by the first mesh axis's size or read
-off spatial axis 0), and the ``stencil`` goal on three more that only a
-halo two cells wide shows (wider halos zero at the global edges, an outer
-halo cell copied from the inner one, the one-cell edge rule at width two);
-and each goal that builds the unstructured wrapper (``indivisible``,
-``forward``, ``gradient``) on that wrapper broken in any of five ways
-(per-cell inputs zeroed, their ghost rows not exchanged, their rows one
-off, injected parameters doubled or reaching one shard only), the
-``gradient`` goal on two more that leave every value right (an input's or
-a parameter's cotangent dropped):
+those cases that way on such a count.  The goals must fail on a stencil
+wrapper or a halo exchange broken in any of eleven ways: eight that every
+wrapper goal must catch (a static's halos NaN, grid-shaped inputs zeroed,
+domain integrals halved, domain integrals summed over the first mesh axis
+only, sharded axes after the first zero-filled at the global edges, halos
+taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
+extent divided by the first mesh axis's size or read off spatial axis 0),
+and three that only a halo two cells wide shows, which are the ``stencil``
+goal's (wider halos zero at the global edges, an outer halo cell copied
+from the innermost one, the one-cell edge rule at width two).  And the
+goals that build the unstructured wrapper (``indivisible``, ``forward``,
+``gradient``) must fail on that wrapper broken in any of seven ways: five
+that each of them must catch (per-cell inputs zeroed, their ghost rows not
+exchanged, their rows one off, injected parameters doubled or reaching one
+shard only), and two that leave every value right, which are the
+``gradient`` goal's (an input's or a parameter's cotangent dropped):
 ``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
 scratch copy of the library and requires it.  ``--summarise DIR`` reads
 the JSON files back and prints

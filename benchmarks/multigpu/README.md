@@ -20,9 +20,9 @@ pod except whether to stop.
 
 | # | claim | goal(s) | compared against | limit |
 |---|---|---|---|---|
-| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on every mesh below), `forward` | the unsharded node, same pod; `forward` also the number of cells | rel 1e-5 on every field; `forward`'s count of its cells **0** (exact) |
+| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends, a D2Q9 lattice, and the field again with a halo of two cells under the same three ends, on every mesh below), `forward` (a node that reads a per-cell input and an injected parameter on every step) | the unsharded node, same pod; `forward` also the number of cells | rel 1e-5 on every field; `forward`'s count of its cells **0** (exact) |
 | 2 | halo exchange at the shard and global boundaries | `halo` | NumPy, every slot, forward and adjoint | **0** (bit for bit) |
-| 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 4e-4 (`sharded_cg`, each of whose solves must have converged: true residual within 2e-4) |
+| 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient` (the rollout with respect to its start, to the per-cell input and to the injected parameter), `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 4e-4 (`sharded_cg`, each of whose solves must have converged: true residual within 2e-4) |
 | 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` (every mesh) | `HybridNode(inner)` in the same graph | rel 1e-5 |
 | 5 | an indivisible grid is refused | `indivisible` | the documented `ValueError`, naming both numbers | exact |
 | 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` (every mesh) | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
@@ -30,14 +30,16 @@ pod except whether to stop.
 The limits live in `LIMITS` in `run_pod.py`, each with its reason; a dry
 run is held to the same ones.  The `forward` goal checks its cross-shard
 sum exactly: one more public step from a field of ones, which the node
-leaves a field of ones bit for bit, must return `total` equal to the
-number of cells and a field still all ones, with a limit of zero, sharded
-under both transports and unsharded.  A float32 sum of ones is exact in
+leaves a field of ones bit for bit under a source of zeros (the one step
+of the goal whose source is zero, fed through the same per-cell path), must
+return `total` equal to the number of cells and a field still all ones,
+with a limit of zero, sharded under both transports and unsharded.  A float32 sum of ones is exact in
 any order of addition under 2**24 = 16,777,216 cells, so a shard left out
 or counted twice reads off by its 25,122 to 250,000 cells at the gate's
 sizes, ghost rows counted by their 1,532 to 4,830, and pad rows counted by
-half a cell each (1.5 cells at 100,489; 300,304 and 1,000,000 cells divide
-by four, have no pad row, and nothing can be miscounted there).  The float
+a quarter of a cell each, the injected weight (0.75 cells at 100,489;
+300,304 and 1,000,000 cells divide by four, have no pad row, and nothing
+can be miscounted there).  The float
 `total` of the goal's own field is recorded (`parity_total`) and must be
 finite, and is held to no limit: that field's sum cancels (`sum|x| / |sum
 x|` of 22 to 69,000), so eight float32 orders of addition of the same
@@ -126,17 +128,75 @@ every axis (which passed on eight devices too, the grids being square).
 They now fail on `1d-axis1` and `2d-flat`, on `2d-flat`, and on every mesh
 that shards axis 1, respectively.
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds eight faults
+Three paths of the wrappers were on no goal's path at all until schema
+10, and a fault on each passed all eight goals and closed all six items
+once relabelled as a GPU run:
+
+* **A halo two cells wide.**  `Field2D` and the lattice read one cell, so
+  `ShardedStencilNode` zero-filling every wider halo at the global edges
+  moved nothing.  The `stencil` goal now runs `Field2D(reach=2)` -- its
+  `field-halo2` cases: the diffusion (through the mask) and the smoothing
+  of the source read a second cell along each axis -- under periodic, edge
+  and Dirichlet ends on every mesh at its smallest size.  Under Dirichlet
+  ends the node overwrites the field's global-edge halo, two cells deep,
+  and the source's is the wrapper's own fill.  (The `halo` goal already
+  compared widths 1 and 2 with NumPy on every mesh and mode; what was
+  missing was a node that carried the second cell into an answer.)
+* **A per-cell boundary input** and **an injected parameter** of
+  `ShardedUnstructuredNode`.  The unstructured goals' node read no input
+  and took no `params`.  `NeighbourMeanNode` now reads a `source` with one
+  value per cell -- in partition layout, so the wrapper splits it over the
+  mesh and ghost-exchanges it; read at the cell and at its neighbours, so
+  its ghost rows count -- and takes its relaxation `weight` from the
+  `params` the wrapper replicates to every shard (0.25, where the node's
+  own value is 0.5), on every step of `forward`, `gradient` and
+  `indivisible`.  The `gradient` goal's rollout is differentiated with
+  respect to its start, the source and the weight in one reverse pass.
+
+The wrapper takes a per-cell input only when it can tell partition layout
+from global cell order: with a pad row the two have different lengths, and
+without one (every shard the same number of cells) it refuses the input
+unless each device owns a contiguous, ascending block of cell ids.  So on
+a partition with no pad row -- 256, 1024, 300,304 and 1,000,000 cells cut
+into four by reverse Cuthill-McKee, or a mesh file with a balanced
+partition -- these three goals renumber the cells into partition order
+before they build anything (`renumbered: true` in the record): the same
+graph and partition, each shard's cells in the order they had, the node's
+start, source and loss weights laid over the new numbering.  A partition
+with a pad row (100,489 cells) runs with its cells as the partitioner left
+them.
+
+| fault (seed) | where | goals that must fail | items |
+|---|---|---|---|
+| halos two wide zero at the global edges | `sharded_node.py` | `stencil`: every `field-halo2` case | 1, 3 |
+| each outer halo cell a copy of the innermost one | `halo.py` | `halo`; `stencil`: every `field-halo2` case | 1, 2, 3 |
+| the one-cell `"edge"` rule at width two (the block's two cells, not its edge cell twice) | `halo.py` | `halo`; `stencil`: the `field-halo2` cases under edge and Dirichlet ends | 1, 2, 3 |
+| per-cell inputs zeroed | `sharded_unstructured.py` | `indivisible`, `forward`, `gradient` | 1, 3, 5 |
+| a per-cell input's ghost rows not exchanged (zeros) | `sharded_unstructured.py` | `indivisible`, `forward`, `gradient` | 1, 3, 5 |
+| a per-cell input one row off within each shard | `sharded_unstructured.py` | `indivisible`, `forward`, `gradient` | 1, 3, 5 |
+| injected parameters doubled | `sharded_unstructured.py` | `indivisible`, `forward`, `gradient` | 1, 3, 5 |
+| injected parameters reaching shard 0 only | `sharded_unstructured.py` | `indivisible`, `forward`, `gradient` | 1, 3, 5 |
+| a per-cell input's cotangent dropped (every value right) | `sharded_unstructured.py` | `gradient`: the derivative with respect to the source | 3 |
+| an injected parameter's cotangent dropped (every value right) | `sharded_unstructured.py` | `gradient`: the derivative with respect to the weight | 3 |
+
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds eleven faults
 as seeds of `sharded_node.py` and `halo.py` -- the four and the three
-above, and domain integrals summed over the first mesh axis only: slow-marked, it
-applies each to a scratch copy of the library, runs `--goal checklist
---dry-run --keep-going`, and requires `stencil`, `hybrid` and `coupled`
-to read `FAIL` (and `halo` too for the `halo_exchange` seed; the other
-checklist goals `PASS`), every item those goals decide `FAILED` once
-relabelled as four GPUs, the failed `stencil` checks to be on the meshes
-the fault can reach, and the unseeded copy to pass everything.  Its
-per-push tests fail when a seed no longer matches the library, and check
-one step of the goals' own node against each seeded wrapper in-process.
+above, domain integrals summed over the first mesh axis only, and the three of a halo two
+cells wide -- and seven of `sharded_unstructured.py`.  Slow-marked, it
+applies each of the eleven to a scratch copy of the library, runs `--goal
+checklist --dry-run --keep-going`, and requires `stencil`, `hybrid` and
+`coupled` to read `FAIL` (`stencil` alone for a fault of a halo two wide;
+and `halo` too for a seed of `halo.py`; the other checklist goals `PASS`),
+every item those goals decide `FAILED` once relabelled as four GPUs, the
+failed `stencil` checks to be on the meshes, the node and the ends the
+fault can reach -- and on every one of them -- and the unseeded copy to
+pass everything.  Each of the seven it applies the same way and runs
+`indivisible`, `forward` and `gradient` on, at a size with pad rows and at
+one the runner renumbers: the goals in the table read `FAIL` with the
+parity checks named, the others `PASS`.  Its per-push tests fail when a
+seed no longer matches the library, and check one step of the stencil
+goals' own node, and the `forward` goal and the `gradient` goal's rollout
+themselves, against each seeded wrapper in-process.
 
 ### The transport question
 
@@ -683,7 +743,7 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (9);
+* be on the current `schema_version` (10);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
@@ -773,7 +833,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 9)
+## Schema of the JSON (schema_version 10)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -798,8 +858,8 @@ compile without execution.
   raised, message}` (otherwise a check not run) (`stencil` and
   `stencil_axis1` also `divisible_shape`, `divisible_raised`,
   `divisible_message`: one row, or column, fewer is accepted);
-  `unstructured` = `{cells, partition, cells_per_device, steps,
-  parity_x}`.
+  `unstructured` = `{cells, partition, renumbered, cells_per_device,
+  steps, parity_x}`.
 * `halo.json` results (one entry): `stencil_cases` = `[{mesh,
   mesh_shape, shape, halo, boundary, forward_max_abs, adjoint_max_abs}]`
   (`mesh` one of `1d`, `1d-axis1`, `2d-flat`, `2d`; `mesh_shape` the
@@ -816,7 +876,8 @@ compile without execution.
   `device0_pinned_ops`), `parity_f`, `parity_averages`, `parity_u`,
   `parity_loss`, `parity_grad`, `model.<side>.{f, averages, u, loss,
   grad}`.
-* `stencil.json` results, one per case: `node` (`field` or `lbm`), `mesh`
+* `stencil.json` results, one per case: `node` (`field`, `lbm` or
+  `field-halo2`, the field with a halo of two cells), `mesh`
   (`1d`, `1d-axis1`, `2d-flat` or `2d`), `mesh_shape`, `cells`, `shape`,
   `boundary`
   (`periodic`, `edge` or `dirichlet`), `steps`, `grad_steps`,
@@ -841,7 +902,9 @@ compile without execution.
   `bytes_per_shard`, `bytes_total`, `messages`, `bandwidth_GBps`;
   `bit_identical`, `ppermute_speedup_median` (`null` when the ppermute
   median is 0), `ppermute_speedup_min`.
-* `forward.json` results: `cells`, `mesh`, `partition`, `n_devices`,
+* `forward.json` results: `cells`, `mesh`, `partition`, `renumbered`
+  (whether the cells were renumbered into partition order, which a
+  per-cell input needs on a partition with no pad row), `n_devices`,
   `steps`, `n_local_max`, `n_ghost_max`, `traffic_cells_per_shard`,
   `methods.<m>` = `compile_s`, `wrapper_first_call_s` (host
   partitioning of the statics by the public `update()`),
@@ -852,17 +915,24 @@ compile without execution.
   `ones_unsharded`, the same three for the unsharded node.  At 2**24
   cells or more neither `ones` is recorded and the count is one check not
   run.
-* `gradient.json` results: `cells`, `mesh`, `partition`, `n_devices`,
-  `grad_steps`, `rollout.{unsharded,all_to_all,ppermute}` (`grad`
-  timing and `compile_s`; `input_presharded` and `parity` for the
-  sharded ones), `sharded_cg` (`dof`, the system solved: `shift`, `rtol`,
+* `gradient.json` results: `cells`, `mesh`, `partition`, `renumbered`,
+  `n_devices`, `grad_steps`, `rollout.{unsharded,all_to_all,ppermute}`
+  (`grad` timing and `compile_s`, of the one reverse pass that gives all
+  three derivatives; `input_presharded` and `parity`, `parity_source`,
+  `parity_weight` -- the derivative with respect to the start, to the
+  per-cell source and to the injected weight -- for the sharded ones),
+  `sharded_cg` (`dof`, the system solved: `shift`, `rtol`,
   `max_iters`; `input_presharded`, `grad_sharded`, `grad_unsharded`,
   `compile_s.{sharded,unsharded}`, `grad_parity`, `jvp_parity`, and
   `solve.{sharded,unsharded}` = `converged` and `iterations` (the loop's
   own count, which the goal holds under `max_iters`, and the same call's
   flag, recorded as information), `true_residual.{solve,adjoint,tangent}`).
 
-Schema 8 files held the `forward` goal's float `total` to 1e-5 of
+Schema 9 files ran the `forward`, `gradient` and `indivisible` goals on
+a node that read no boundary input and took no `params`, and the `stencil`
+goal with halos one cell wide only: they record no `renumbered`, no
+derivative with respect to the source or the weight, and no `field-halo2`
+case.  Schema 8 files held the `forward` goal's float `total` to 1e-5 of
 itself and did not count the cells: they record no step from a field of
 ones.  Schema 7 files ran the `gradient` goal's `sharded_cg` part on the
 unshifted operator with a smooth right-hand side and `rtol=1e-6`, recorded

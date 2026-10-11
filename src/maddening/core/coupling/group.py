@@ -57,6 +57,20 @@ class CouplingGroup:
         A member's edge to itself is iterated with the group, which makes
         the term it carries implicit; a group of one node is allowed for
         this.
+
+        The group iterates its floating-point fields and reads
+        convergence from them.  An integer, Boolean or key field that
+        one member computes and another reads across an edge of the
+        group is evaluated at every iterate from the fields that feed
+        it (as a Jacobi pass computes it, whatever ``iteration_mode``;
+        once per link where such fields are handed on in a chain), so a
+        solve that reports a zero residual has returned a state the
+        pass leaves unchanged, such fields included, under either
+        ``solver``.  Where such fields feed one another in a closed loop
+        of the group's edges they have no value at an iterate, and
+        ``GraphManager.compile()`` refuses the group (``ValueError``):
+        store one of them in floating point, or compute it in a node
+        outside the group.
     max_iterations : int
         Upper bound on coupling passes per timestep.
 

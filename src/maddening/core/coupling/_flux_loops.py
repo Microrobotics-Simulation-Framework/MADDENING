@@ -521,8 +521,8 @@ def _source_of(r, state, fluxes: dict, first: bool) -> Any:
 
 def _underived_causes(into, names, state, fluxes: dict, members, mappings) -> list:
     """Why no value could be derived for the inputs *names* of a member
-    (:func:`_handed` composing them on the settled *fluxes*): one clause
-    per edge into them whose value could not be derived and is not
+    (:func:`_handed` composing them on *fluxes*): ``(edge key, clause)``
+    for each edge into them whose value could not be derived and is not
     replaced by a later edge that is not additive."""
     causes: list = []
     live: list = []
@@ -535,24 +535,25 @@ def _underived_causes(into, names, state, fluxes: dict, members, mappings) -> li
         producer, field = r.source
         if source is None:
             if producer not in members:
-                causes.append(f"edge {r.key!r} carries a flux from outside the group, which "
-                              f"the step does not read (MADD-ANO-156)")
+                causes.append((r.key, f"edge {r.key!r} carries a flux from outside the group, "
+                                      f"which the step does not read (MADD-ANO-156)"))
             elif fluxes.get(producer) is None:
-                causes.append(f"edge {r.key!r} carries a flux of {producer!r}, whose fluxes "
-                              f"could not be evaluated on the inputs the pass hands it")
+                causes.append((r.key, f"edge {r.key!r} carries a flux of {producer!r}, whose "
+                                      f"fluxes could not be derived on the inputs the pass "
+                                      f"hands it"))
             else:
-                causes.append(f"edge {r.key!r} carries {producer}.{field}, which "
-                              f"{producer!r}'s compute_boundary_fluxes does not return")
+                causes.append((r.key, f"edge {r.key!r} carries {producer}.{field}, which "
+                                      f"{producer!r}'s compute_boundary_fluxes does not return"))
             continue
         try:
             failed = r.delivered_abstract(source, state, mappings) is None
         except Exception:  # noqa: BLE001 - the edge's rule fails on these shapes
             failed = True
         if failed:
-            causes.append(f"the mapping or transform of edge {r.key!r} fails on the shape "
-                          f"and dtype it is handed")
-    return causes or ["an additive edge's value does not add to what the edges before it "
-                      "deliver"]
+            causes.append((r.key, f"the mapping or transform of edge {r.key!r} fails on the "
+                                  f"shape and dtype it is handed"))
+    return causes or [(None, "an additive edge's value does not add to what the edges "
+                             "before it deliver")]
 
 
 def _called_as_handed(spec, names) -> Callable:
@@ -1048,9 +1049,18 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         except Exception:  # noqa: BLE001 - a spec that gives no shape declares nothing here
             declared[member] = {}
 
+    # Why a member's input first became underivable, with the fluxes as
+    # they stood then: round a loop the members it starves become
+    # underivable in turn, and the settled fluxes no longer show the cause.
+    first_causes: dict = {}
+
     def handed_to(member, fluxes, first=False):
-        return _handed(into[member], given[member], state, fluxes,
-                       declared[member], mappings, first)
+        handed = _handed(into[member], given[member], state, fluxes,
+                         declared[member], mappings, first)
+        if handed[1] and member not in first_causes:
+            first_causes[member] = _underived_causes(
+                into[member], handed[1], state, fluxes, plan.members, mappings)
+        return handed
 
     fluxes, sweeps, moving = _abstract_fluxes(involved, handed_to, nodes, state,
                                               params.__getitem__)
@@ -1097,12 +1107,14 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
                 f"hands it ({why[0] if why else 'no reason recorded'})")
         elif unknown:
             traced[member] = None
+            causes = dict(first_causes.get(member, ()))
+            for key, clause in _underived_causes(into[member], unknown, state, fluxes,
+                                                 plan.members, mappings):
+                causes.setdefault(key, clause)
             reason[member] = (
                 "underived",
                 f"no shape could be derived for its input {sorted(unknown)}: "
-                + "; ".join(_underived_causes(into[member], unknown, state, fluxes,
-                                              plan.members, mappings))
-                + "; and boundary_input_spec() does not declare it")
+                + "; ".join(causes.values()) + "; and boundary_input_spec() does not declare it")
 
     def depends(member, flux, name):
         reads = traced.get(member)

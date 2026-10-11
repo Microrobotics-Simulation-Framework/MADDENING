@@ -1278,7 +1278,7 @@ def test_an_input_one_of_whose_edges_cannot_be_evaluated_is_not_derived_from_the
         gm.compile()
     text = str(info.value)
     assert ("for 'b', no shape could be derived for its input ['r']: edge 'a.q->b.r' carries "
-            "a flux of 'a', whose fluxes could not be evaluated on the inputs the pass hands "
+            "a flux of 'a', whose fluxes could not be derived on the inputs the pass hands "
             "it; and boundary_input_spec() does not declare it") in text
     assert ("for 'a', its compute_boundary_fluxes could not be traced on the inputs the pass "
             "hands it (ConcretizationTypeError") in text
@@ -1434,3 +1434,358 @@ def test_a_flux_hook_that_raises_key_error_is_told_which_dict_it_indexed(cls, sa
     assert ("boundary_inputs[" in errors[0]) == (cls in (Counting, JitInputKey))
     assert (GET_ADVICE in errors[0]) == (cls in (Counting, JitInputKey, TableKey, CopyKey))
     assert ("not from indexing" in errors[0]) is False
+
+
+# ---------------------------------------------------------------------------
+# Edges a later edge replaces, every producer swept as the pass seeds it,
+# sub-programs compared by structure, and what the message says of each.
+# ---------------------------------------------------------------------------
+
+
+class ArrayReader(SimulationNode):
+    """``u <- 1 + 0.3 mean(x)``; its flux ``a = 0.3 + 0.5 u``, plus
+    ``0.4 mean(x)`` where ``x`` is handed as an array: a hook that
+    branches on the shape it is handed."""
+
+    def initial_state(self):
+        return {"u": ZERO}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        x = boundary_inputs.get("x")
+        return {"u": 1.0 + 0.3 * (jnp.mean(x) if x is not None else ZERO)}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        x = boundary_inputs.get("x")
+        a = 0.3 + 0.5 * state["u"]
+        if x is not None and x.ndim > 0:
+            a = a + 0.4 * jnp.mean(x)
+        return {"a": a}
+
+
+class ShapeFollower(SimulationNode):
+    """``v <- -0.5 + 0.2 y`` (held as a (3,) vector); its flux
+    ``b = 0.2 - 0.4 mean(v) + 0.5 y`` at the shape of the input ``z``."""
+
+    def initial_state(self):
+        return {"u": jnp.zeros((3,), F)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"u": (-0.5 + 0.2 * boundary_inputs.get("y", ZERO)) * jnp.ones((3,), F)}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        z = boundary_inputs.get("z", ZERO)
+        return {"b": jnp.zeros_like(z) + 0.2 - 0.4 * jnp.mean(state["u"])
+                + 0.5 * boundary_inputs.get("y", ZERO)}
+
+
+class Emits(SimulationNode):
+    """A member that starts at ``u = 1`` and emits the flux *field*:
+    ``2 u`` as a scalar, or ``u`` as a (3,) vector.  It keeps its state,
+    or with *drive* ``(c, k)`` updates ``u <- c + k w``."""
+
+    def __init__(self, name, field, vector=False, drive=None):
+        super().__init__(name=name, timestep=1.0)
+        self.field, self.vector, self.drive = field, vector, drive
+
+    def initial_state(self):
+        return {"u": jnp.ones((), F)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        if self.drive is None:
+            return {"u": state["u"]}
+        return {"u": self.drive[0] + self.drive[1] * boundary_inputs.get("w", ZERO)}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        u = state["u"]
+        return {self.field: jnp.zeros((3,), F) + u if self.vector else 2.0 * u}
+
+
+def replaced_loop(mode, solver):
+    """Members added B, A, D, C, one coupling loop (``B.u`` reaches D and
+    C), so the sweep is B, A, D, C.  ``C.c -> B.z`` is replaced by
+    ``D.d -> B.z`` (not additive), so from the second sweep on the pass
+    hands ``z = D.d``, a (3,) vector: ``B.b`` is a vector, ``A.a`` reads
+    it, and ``B.b`` reads ``A.a``, a loop.  No edge the criterion follows
+    reads ``C.c``."""
+    gm = GraphManager()
+    for node in (ShapeFollower(name="B", timestep=1.0), ArrayReader(name="A", timestep=1.0),
+                 Emits("D", "d", vector=True), Emits("C", "c")):
+        gm.add_node(node)
+    for source, field, target, name in [("C", "c", "B", "z"), ("D", "d", "B", "z"),
+                                        ("B", "b", "A", "x"), ("A", "a", "B", "y"),
+                                        ("B", "u", "D", "w"), ("B", "u", "C", "w")]:
+        gm.add_edge(source=source, target=target, source_field=field, target_field=name)
+    return grouped(gm, ["A", "B", "C", "D"], mode=mode, solver=solver)
+
+
+def replaced_loop_exact():
+    """The coupled solution of :func:`replaced_loop`, in float64:
+    ``u_A = 1 + 0.3 b``, ``v = -0.5 + 0.2 a``, ``a = 0.3 + 0.5 u_A + 0.4 b``,
+    ``b = 0.2 - 0.4 v + 0.5 a``."""
+    M = np.array([[1, 0, 0, -0.3], [0, 1, -0.2, 0], [-0.5, 0, 1, -0.4], [0, 0.4, -0.5, 1]], float)
+    u_a, v, _a, _b = np.linalg.solve(M, np.array([1.0, -0.5, 0.3, 0.2]))
+    return {"A": u_a, "B": v}
+
+
+def replaced_loop_off(gm, reference):
+    """How far *gm*'s stepped states are off *reference*, as a fraction."""
+    got = {"A": float(gm.get_node_state("A")["u"]), "B": float(jnp.mean(gm.get_node_state("B")["u"]))}
+    return max(abs(got[name] - value) / abs(value) for name, value in reference.items())
+
+
+@pytest.mark.parametrize("mode, solver", SCHEDULES)
+def test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused(
+        mode, solver, monkeypatch):
+    """The input ``z`` an edge from ``C`` reaches first, and one from ``D``
+    replaces, is the one the pass hands, ``D.d``: the loop of ``A.a`` and
+    ``B.b`` through it is established (``C`` is swept like every
+    producer, and the replaced edge does not leave ``z`` underivable).
+    Without the refusal the pass stops off the coupled solution."""
+    with pytest.raises(ValueError, match="depend on each other in a loop") as info:
+        replaced_loop(mode, solver).compile()     # stepped by without_the_refusal below
+    text = str(info.value)
+    assert ("flux B.b reads input 'y', which edge 'A.a->B.y' delivers from flux A.a; flux A.a "
+            "reads input 'x', which edge 'B.b->A.x' delivers from flux B.b") in text
+    assert "assumed" not in text
+    gm = without_the_refusal(monkeypatch, lambda: replaced_loop(mode, solver))
+    assert replaced_loop_off(gm, replaced_loop_exact()) > 1e-2
+
+
+def robin_after_a_third(cls, mode, solver):
+    """The developer guide's Robin pair, fluxes from the state alone, and
+    a third member ``C`` whose flux an edge delivers into each ``r``
+    BEFORE the Robin edges, which replace it (``node_b.u -> C.w`` puts C
+    in the loop)."""
+    nodes = [cls("node_a", *coefficients(None, 0), reads="r"),
+             cls("node_b", *coefficients(None, 1), reads="r")]
+    gm = GraphManager()
+    for node in (*nodes, Emits("C", "c")):
+        gm.add_node(node)
+    gm.add_edge(source="C", target="node_a", source_field="c", target_field="r")
+    gm.add_edge(source="C", target="node_b", source_field="c", target_field="r")
+    add_robin_coupling(gm, "node_a", "node_b", value_field_a="u", flux_field_a="q",
+                       value_field_b="u", flux_field_b="q", input_a="r", input_b="r", alpha=ALPHA)
+    gm.add_edge(source="node_b", target="C", source_field="u", target_field="w")
+    return grouped(gm, ["node_a", "node_b", "C"], mode=mode, solver=solver), nodes
+
+
+@pytest.mark.parametrize("mode, solver", SCHEDULES)
+@pytest.mark.parametrize("cls", [Bare, Side], ids=["undeclared", "declared"])
+def test_a_right_robin_pair_whose_inputs_a_replaced_edge_reaches_first_compiles(cls, mode, solver):
+    """Each edge from ``C`` is replaced by the first Robin edge, which
+    reads a state field and so is left out by no sweep: the pass never
+    hands ``C.c``, the fluxes read no flux, and the group compiles at the
+    coupled solution of the pair, declared input or not (it was refused,
+    the input taken as underivable, while ``C`` was not swept)."""
+    gm, nodes = robin_after_a_third(cls, mode, solver)
+    assert off(gm, exact(nodes, ROBIN)) < CLOSE
+
+
+class Mean(SimulationNode):
+    """``u <- c + k r``, keeping its state otherwise; its flux
+    ``q = base + gain * (mean(x) where x is an array, else 0)
+    + own * u``.  *reads*: the input ``x``'s name."""
+
+    def __init__(self, name, c=1.0, k=0.0, base=0.0, gain=0.0, own=1.0, reads="x"):
+        super().__init__(name=name, timestep=1.0)
+        self.c, self.k, self.base, self.gain, self.own, self.reads = c, k, base, gain, own, reads
+
+    def initial_state(self):
+        return {"u": jnp.ones((), F)}
+
+    def boundary_input_spec(self):
+        return {"y": BoundaryInputSpec(shape=(), dtype=F, default=ZERO)} if self.reads == "y" else {}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        if self.k == 0.0:
+            return {"u": state["u"]}
+        return {"u": self.c + self.k * boundary_inputs.get("r", ZERO)}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        x = boundary_inputs.get(self.reads)
+        q = self.base + self.own * state["u"]
+        if self.gain:
+            if self.reads == "y":
+                q = q + (self.gain * jnp.mean(x) if x is not None and x.ndim > 0 else 0.0)
+            else:
+                q = q + self.gain * jnp.mean(x if x is not None else ZERO)
+        return {self.field: q}
+
+    @property
+    def field(self):
+        return self.name.lower()
+
+
+def first_sweep_graph(mode, solver, replaced=True):
+    """Members added P, H, M, G, Q (sweep P, H, M, G, Q):
+    ``P.p -> M.y`` (a (3,) vector) is replaced by ``Q.q -> M.y`` (a
+    scalar); ``M.m`` reads ``y`` only as an array, so it reads ``P.p`` in
+    the first sweep alone, where ``Q.q`` is not computed yet; ``G.g``
+    reads ``M.m``, ``H.h`` reads ``G.g`` one step against the sweep, and
+    ``H`` and ``P`` update from it.  *replaced*: False puts a value edge
+    ``P.u -> M.v`` in place of ``P.p -> M.y`` (the control)."""
+    nodes = [Emits("P", "p", vector=True, drive=(2.0, 0.1)),
+             Mean("H", c=1.0, k=0.5, base=0.1, gain=0.6, own=0.0),
+             Mean("M", gain=0.5, reads="y"), Mean("G", base=0.2, gain=0.7, own=0.0),
+             Mean("Q", base=0.5, own=0.0)]
+    gm = GraphManager()
+    for node in nodes:
+        gm.add_node(node)
+    edges = [("P", "p", "M", "y") if replaced else ("P", "u", "M", "v"), ("Q", "q", "M", "y"),
+             ("M", "m", "G", "x"), ("G", "g", "H", "x"), ("H", "h", "H", "r"),
+             ("H", "u", "P", "w"), ("M", "u", "Q", "w")]
+    for source, field, target, name in edges:
+        gm.add_edge(source=source, target=target, source_field=field, target_field=name)
+    return grouped(gm, ["P", "H", "M", "G", "Q"], mode=mode, solver=solver)
+
+
+def first_sweep_exact():
+    """The coupled solution of :func:`first_sweep_graph`, in float64: ``y``
+    is the scalar ``q``, so ``m = u_M = 1``, ``g = 0.2 + 0.7 m``,
+    ``h = 0.1 + 0.6 g``, ``u_H = 1 + 0.5 h``, ``u_P = 2 + 0.1 u_H``."""
+    h = 0.1 + 0.6 * (0.2 + 0.7 * 1.0)
+    u_h = 1.0 + 0.5 * h
+    return {"H": u_h, "P": 2.0 + 0.1 * u_h}
+
+
+@pytest.mark.parametrize("mode, solver", SCHEDULES)
+def test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep(mode, solver, monkeypatch):
+    """The first sweep leaves out ``Q.q -> M.y`` (``Q`` is swept after
+    ``M``) and hands ``y = P.p``; ``M.m`` reads it there, so its seed is
+    right only after the second sweep, ``G.g``'s too, and ``H.h``, one
+    step against the sweep, after a third: refused, saying ``M.m``'s read
+    is the first sweep's.  Without the refusal the pass is off; the
+    control without the replaced edge compiles at the coupled solution."""
+    with pytest.raises(ValueError, match="flux H.h would take 3") as info:
+        first_sweep_graph(mode, solver).compile()
+    assert ("flux M.m reads input 'y' in seeding sweep 1, which hands it otherwise than once "
+            "the fluxes settle (edge 'Q.q->M.y' delivers it from flux Q.q)") in str(info.value)
+    reference = first_sweep_exact()
+    gm = without_the_refusal(monkeypatch, lambda: first_sweep_graph(mode, solver))
+    wrong = max(abs(float(gm.get_node_state(n)["u"]) - v) / abs(v) for n, v in reference.items())
+    assert wrong > 1e-2
+    assert off(first_sweep_graph(mode, solver, replaced=False), reference) < CLOSE
+
+
+class JitSide(Bare):
+    """A :class:`Bare` whose flux, from the state alone, is computed by a
+    ``jax.jit`` helper made in each call, with a custom derivative inside
+    (``relu(v) - relu(-v)`` is ``v``): a sub-program and a custom
+    derivative's call in its program."""
+
+    def flux(self, u, boundary_inputs):
+        _cu, _ku, cq, _kq, mq = self.k
+        return jax.jit(lambda v: jax.nn.relu(cq + mq * v) - jax.nn.relu(-(cq + mq * v)))(u)
+
+
+RING = [("b", "q", "a", "s", 1.0), ("c", "q", "b", "s", 1.0), ("a", "q", "c", "s", 1.0),
+        ("b", "u", "a", "r", 1.0), ("c", "u", "b", "r", 1.0), ("a", "u", "c", "r", 1.0)]
+
+
+@pytest.mark.parametrize("mode, solver", SCHEDULES)
+def test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution(mode, solver):
+    """A ring of three flux edges, each against the sweep, whose fluxes
+    are computed from the state alone through a jitted helper: its
+    programs as the first sweep and as the settled inputs call it are
+    the same (compared by structure, not by the objects jax makes for
+    each trace), so no flux reads another and the group compiles, at the
+    coupled solution."""
+    nodes = [JitSide(name, *coefficients(None, i)) for i, name in enumerate("abc")]
+    assert off(built(nodes, RING, ["a", "b", "c"], mode=mode, solver=solver),
+               exact(nodes, RING)) < CLOSE
+
+
+class CallbackSide(Bare):
+    """A :class:`Bare` whose flux, from the state alone, is computed by a
+    host callback made in each call: a parameter the comparison cannot
+    look into."""
+
+    def flux(self, u, boundary_inputs):
+        _cu, _ku, cq, _kq, mq = self.k
+        return jax.pure_callback(lambda v: np.asarray(cq + mq * v, np.float32),
+                                 jax.ShapeDtypeStruct((), F), u)
+
+
+def test_a_difference_in_a_parameter_that_cannot_be_compared_is_reported_as_assumed():
+    """The same ring through a host callback: the callback is a new
+    function in each trace, so the programs differ there and the reads
+    are counted, and the message says they are assumed, not established,
+    with the remedy, and does not say such a group is never refused."""
+    nodes = [CallbackSide(name, *coefficients(None, i)) for i, name in enumerate("abc")]
+    with pytest.raises(ValueError, match="for more than one step") as info:
+        built(nodes, RING, ["a", "b", "c"], mode="jacobi").compile()
+    text = str(info.value)
+    assert "reads input 's' are assumed, not established" in text
+    assert "a host callback, for example" in text
+    assert "without operations that take a function or an object as a parameter" in text
+    assert "is never refused" not in text
+
+
+def test_two_hooks_that_cannot_be_traced_are_reported_as_such_with_the_tracers_error():
+    """Both hooks of a Robin pair compute on values: the input each is
+    handed carries the other's flux, which cannot be derived either, but
+    each is reported as a hook that cannot be traced, with the error, and
+    the remedy that applies (declaring an input does not help)."""
+    nodes = [UntraceableBare("a", *coefficients(None, 0), reads="r"),
+             UntraceableBare("b", *coefficients(None, 1), reads="r")]
+    with pytest.raises(ValueError, match="depend on each other in a loop") as info:
+        built(nodes, ROBIN_AB, ["a", "b"]).compile()
+    text = str(info.value)
+    for name in "ab":
+        assert (f"for {name!r}, its compute_boundary_fluxes could not be traced on the inputs "
+                f"the pass hands it (ConcretizationTypeError") in text
+    assert "write compute_boundary_fluxes as JAX operations" in text
+    assert "declare an input" not in text and "no shape could be derived" not in text
+
+
+def test_an_edge_whose_rule_fails_leaves_its_input_underivable_unless_a_later_edge_replaces_it():
+    """``_handed``: an edge whose transform fails on the shape it is
+    handed gives its input no value (unknown, or the declared shape); an
+    additive edge after it does not make one; a later edge that is not
+    additive replaces it, and the input keeps the place its first edge
+    gave it in the dict."""
+    from maddening.core.coupling import _interface_plan
+
+    def fails(v):
+        return v.reshape((2,))          # (3,) does not reshape to (2,)
+
+    def handed(edges, declared=None, first=False):
+        gm = GraphManager()
+        gm.add_node(Half(name="b", timestep=1.0))
+        gm.add_node(Half(name="a", timestep=1.0))
+        for field, name, additive, transform in edges:
+            gm.add_edge(source="b", target="a", source_field=field, target_field=name,
+                        additive=additive, transform=transform)
+        plan = _interface_plan.interface_plan(["a", "b"], gm._edges, ["a", "b"], gm._state, gm._nodes)
+        return _flux_loops._handed(plan.edges_into("a"), {}, gm._state,
+                                   {"b": {"q": jax.ShapeDtypeStruct((3,), F)}},
+                                   declared or {}, None, first)
+
+    for first in (False, True):
+        assert handed([("q", "x", False, fails)], first=first)[:2] == ({}, {"x"})
+        values, unknown, fallback = handed([("q", "x", False, fails)], {"x": ZERO}, first)
+        assert (values["x"].shape, unknown, fallback) == ((), set(), ["x"])
+        assert handed([("q", "x", False, fails), ("h", "x", True, None)], first=first)[1] == {"x"}
+        values, unknown, _ = handed([("q", "x", False, fails), ("h", "y", False, None),
+                                     ("h", "x", False, None)], first=first)
+        assert (list(values), values["x"].dtype, unknown) == (["x", "y"], jnp.float16, set())
+
+
+def test_a_group_whose_edge_rule_fails_is_refused_naming_the_edge():
+    """In a Robin pair whose fluxes read no flux, an edge into ``b`` whose
+    transform fails on the flux it carries makes ``b``'s input
+    underivable, ``b``'s fluxes then too, and ``a``'s input with them: the
+    group is refused with what is assumed and why, the edge named."""
+    nodes = [Bare("a", *coefficients(None, 0), reads="r"), Bare("b", *coefficients(None, 1), reads="r")]
+    gm = built(nodes, ROBIN_AB, None)
+    gm.add_edge(source="a", target="b", source_field="q", target_field="z",
+                transform=lambda v: v.reshape((2,)))
+    grouped(gm, ["a", "b"])
+    with pytest.raises(ValueError, match="depend on each other in a loop") as info:
+        gm.compile()
+    text = str(info.value)
+    assert ("for 'b', no shape could be derived for its input ['r', 'z']: the mapping or "
+            "transform of edge 'a.q->b.z' fails on the shape and dtype it is handed; edge "
+            "'a.q->b.r' carries a flux of 'a', whose fluxes could not be derived") in text
+    assert ("for 'a', no shape could be derived for its input ['r']: edge 'b.q->a.r' carries "
+            "a flux of 'b', whose fluxes could not be derived") in text

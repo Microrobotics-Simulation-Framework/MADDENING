@@ -1937,9 +1937,11 @@ class GraphManager:
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*
         state: every incoming edge (mapping, transform, additive) plus the
-        zero defaults of its external inputs, which replace an edge into
-        the same field as they do in the step.  A debugging / inspection
-        helper; the compiled step resolves edges itself."""
+        zero defaults of its external inputs.  A graph in which an edge
+        delivers to a field that is also a declared external input is
+        refused here as :meth:`compile` refuses it (``ValueError``,
+        MADD-ANO-265).  A debugging / inspection helper; the compiled step
+        resolves edges itself."""
         self._recover_from_escaped_tracers()
         return self._boundary_inputs_from(self._state, node_name, params)
 
@@ -1952,8 +1954,11 @@ class GraphManager:
         node's boundary inputs: each incoming edge through
         :func:`_apply_edge` (the mapping, then the transform, with the
         weights in ``params["mappings"]``), additive edges summed, and
-        then the zero default of each external input -- which, as in the
-        step, *replaces* whatever edges delivered to the same field.
+        then the zero default of each external input.  An external input
+        and an edge on one field never meet here: the step would let the
+        input replace whatever the edges delivered, so ``compile()``
+        refuses such a graph, and so does this reader, with the same
+        ``ValueError`` (MADD-ANO-265), compiled or not.
         Every reader of the edges that is not the step --
         :meth:`resolve_boundary_inputs`, the conservation diagnostic, the
         surrogate dataset generator -- goes through it, so none of them
@@ -1967,6 +1972,10 @@ class GraphManager:
         """
         if node_name not in self._nodes:
             raise KeyError(f"unknown node {node_name!r}")
+        # What compile() refuses, a reader of a graph never compiled
+        # refuses too: an edge onto a declared external input.
+        _graph_specs._refuse_edges_onto_external_inputs(
+            self._edges, self._external_inputs)
         p = self._params_or_default(params)
         resolved = _graph_specs._ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
         # The shape compile() holds each of these edges' sources to, asked
@@ -1995,9 +2004,8 @@ class GraphManager:
             else:
                 out[edge.target_field] = value
         for ei in self._external_inputs:
-            # No ``not in out`` guard: the step writes an external input
-            # over the edges into its field (``_resolve_and_update_node``),
-            # and an omitted external input is zeros.
+            # An omitted external input is zeros.  No edge delivers to
+            # its field (refused above), so nothing is overwritten.
             if ei.target_node == node_name:
                 out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
         return out

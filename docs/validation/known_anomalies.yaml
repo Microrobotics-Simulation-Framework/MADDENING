@@ -18406,8 +18406,12 @@ anomalies:
       `from_dict` raises it at its compile, the REST server answers 400 with
       it from `POST /graph/compile`, `/sim/step` and `/sim/run`, and no FMU
       is described from such a graph (the export takes a compiled graph and
-      compiles nothing).  What an external input does to a field without an
-      edge is unchanged.
+      compiles nothing).  The readers that turn edges into a node's inputs
+      without compiling (`resolve_boundary_inputs`, `check_conservation`,
+      through `GraphManager._boundary_inputs_from`) raise it too: until this
+      entry they applied the step's old rule and answered zeros for a graph
+      that had never been compiled.  What an external input does to a field
+      without an edge is unchanged.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

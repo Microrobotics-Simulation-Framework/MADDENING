@@ -20,7 +20,9 @@ The routes:
 * two additive edges into one input, each with its own mapping and its
   own transform;
 * a coupling group under both schedules: an edge into it, two inside it
-  (one of them additive) and one out of it;
+  (one of them additive) and one out of it -- and the same group with one
+  member sub-cycled, whose edges are resolved at each of its sub-steps by
+  a function of their own (the time-interpolated one);
 * a legacy closure of ``interface_mapping`` as the transform of a mapped
   edge: two matrices, applied in the order mapping, closure.
 
@@ -63,8 +65,8 @@ class Holds(SimulationNode):
 class Takes(SimulationNode):
     """``x <- u``: after a step its state is what its input delivered."""
 
-    def __init__(self, name, n, x0=None):
-        super().__init__(name, DT)
+    def __init__(self, name, n, x0=None, timestep=DT):
+        super().__init__(name, timestep)
         self._x0 = np.zeros(n, np.float32) if x0 is None else np.asarray(x0, np.float32)
 
     def initial_state(self):
@@ -138,7 +140,9 @@ LOOP = np.array([[0, 2], [1, 1]], np.float32)
 #: ``r = OUT @ b + 1 = [17.5 + 13 + 1, 17.5 + 1] = [31.5, 18.5]``.
 #: ``a1`` depends on nothing in the group, ``b1`` on ``a1``, ``a0`` on
 #: ``b1`` and ``b0`` on ``a``: the loop ends, so plain passes reach the
-#: fixed point exactly (every number above is a float32).
+#: fixed point exactly (every number above is a float32).  A member taken
+#: in two sub-steps ends on the same values: its last sub-step reads the
+#: other member at the end of the step, and it keeps nothing but its input.
 #:
 #: The other order, by hand.  ``a = H @ (S + 1) + BACK @ b = [5 + b1 / 2, 7]``
 #: and ``b = FORTH @ (a + 1) = [a0 + a1 + 2, 2 a1 + 2]``.  So ``a1 = 7``,
@@ -241,15 +245,19 @@ def test_additive_edges_each_apply_their_own_mapping_then_their_own_transform():
     np.testing.assert_array_equal(_x(gm, "t"), [7.0, 8.0])
 
 
+@pytest.mark.parametrize("sub_cycled", [None, "a", "b"])
 @pytest.mark.parametrize("schedule", ["gauss-seidel", "jacobi"])
-def test_edges_into_inside_and_out_of_a_coupling_group_map_then_transform(schedule):
+def test_edges_into_inside_and_out_of_a_coupling_group_map_then_transform(schedule, sub_cycled):
     """The group's fixed point and the reader behind it are the ones worked
     by hand above for the order mapping, transform -- under both schedules,
-    whose passes resolve the group's edges in different places."""
+    and with either member taken in two sub-steps (``subcycling=True``),
+    whose inputs the group resolves with its time-interpolating function
+    and not with the one a plain pass uses."""
+    half = {sub_cycled: DT / 2}
     gm = GraphManager()
     gm.add_node(Holds("s", S))
-    gm.add_node(Takes("a", 2))
-    gm.add_node(Takes("b", 2))
+    gm.add_node(Takes("a", 2, timestep=half.get("a", DT)))
+    gm.add_node(Takes("b", 2, timestep=half.get("b", DT)))
     gm.add_node(Takes("r", 2))
     gm.add_edge("s", "a", "x", "u", mapping=matrix_mapping(H), transform=_plus_one,
                 additive=True)
@@ -257,7 +265,8 @@ def test_edges_into_inside_and_out_of_a_coupling_group_map_then_transform(schedu
     gm.add_edge("a", "b", "x", "u", mapping=matrix_mapping(FORTH), transform=_plus_one)
     gm.add_edge("b", "r", "x", "u", mapping=matrix_mapping(OUT), transform=_plus_one)
     gm.add_coupling_group(["a", "b"], max_iterations=12, tolerance=1e-6,
-                          iteration_mode=schedule, acceleration="none")
+                          iteration_mode=schedule, acceleration="none",
+                          subcycling=sub_cycled is not None)
     gm.compile()
     gm.step()
     for name, want in GROUP.items():

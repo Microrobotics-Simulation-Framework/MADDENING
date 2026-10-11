@@ -19042,3 +19042,89 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_those_infinities_read_converged_on_every_route"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-273"
+    title: "WebRTC streaming never negotiated: SelkiesSession sent a viewer no answer and no ICE, so no video ever reached a viewer"
+    description: >
+      From v0.1.0 to v0.3.1 `SelkiesSession` built `appsrc ! videoconvert !
+      x264enc ! rtph264pay ! webrtcbin` and served the signaling WebSocket,
+      but nothing negotiated a WebRTC connection: no handler on any of
+      `webrtcbin`'s signals, no answer to an offer, no ICE exchange.  The
+      signaling handler never sent the viewer anything and handed every
+      message it received -- the browser's SDP offer and ICE candidates
+      among them -- to the input handler meant for mouse and keyboard
+      events; its comment "Relay SDP/ICE messages" described code that did
+      not exist at any tag (`git show <tag>:src/maddening/cloud/selkies_session.py`
+      has no `create-answer`, `set-remote-description` or
+      `on-ice-candidate` at v0.1.0, v0.2.0, v0.2.1, v0.3.0 or v0.3.1).
+      The shipped browser client (`api/static/webrtc_client.html`) offers
+      and waits for `{"type": "sdp"}` and `{"type": "ice"}` replies, so a
+      viewer authenticated (from 0.4.0's signaling fix on) and then waited
+      for ever, with no video; `is_alive()` still reported the session as
+      streaming.  Two further faults sat behind the first, measured on the
+      0.4.0 tree before this fix with GStreamer 1.24.2: the encoder could
+      not have run either (`videoconvert` negotiated a 4:4:4 format for
+      RGBA input, which x264enc refused: "baseline profile doesn't support
+      4:4:4"), and every frame pushed was kept, because `webrtcbin` holds
+      back data until a negotiation that never came (18.1 MB queued in
+      `appsrc` after sixty 320x240 frames; at 1280x720 and 30 frames per
+      second about 110 MB a second, without bound).  `SelkiesRenderer`,
+      which streams through the session, delivered nothing either.  No
+      test built the pipeline: CI installed neither GStreamer nor
+      PyGObject, and the two streaming examples stopped at "the pipeline is
+      PLAYING and the port answers".
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Graded `major`: a failure the viewer sees (no picture) whose only
+      workaround was not to use the feature, with `is_alive()` vouching for
+      a stream nobody could receive.  Not safety relevant: the defect is in
+      the delivery of rendered frames to a remote viewer; no simulated
+      state, output, saved file or reported result of the simulation is
+      affected, and a program that relied on the view had no picture to
+      rely on.  The unbounded frame queue could exhaust a long-running
+      process's memory, which ends the run loudly.
+    affected_components:
+      - "maddening.cloud.selkies_session.SelkiesSession"
+      - "maddening.cloud.selkies_session._make_signaling_handler"
+      - "maddening.viz.backends.selkies_renderer.SelkiesRenderer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      None within an affected release: the session offers no way to answer
+      the viewer's offer.  Stream through another route (the REST frame
+      endpoints, or a separate WebRTC server fed from
+      `update_framebuffer_cpu`'s frames).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0.4.0.  A GLib main loop on a thread of its own owns all
+      GStreamer work; a viewer's offer builds a fresh pipeline whose
+      payloader carries the H.264 payload type the offer named (constrained
+      baseline, packetization-mode=1), and the answer goes back on the same
+      authenticated socket; ICE candidates go both ways (the server's held
+      until the answer is out); SDP and ICE never reach the input handler.
+      One viewer at a time: a newer authenticated viewer replaces the
+      current one (closed with 4000).  Frames pushed while nobody watches
+      are dropped, and a frame of another size than the stream's is
+      refused.  `stop()` ends the signaling server, the GLib loop and the
+      pipeline.  `StreamConfig.ice_servers` now reaches `webrtcbin` (the
+      first STUN URL, every TURN URL with credentials).  Verified by a
+      GStreamer WebRTC peer that signals as the browser client does and
+      decodes the frames, on CPU in a network-less container (CI job
+      `test-streaming`).  What remains untested: a GPU encoder (the encoder
+      is x264enc), a real browser, and NAT traversal -- on a cloud host the
+      media travels over UDP, which a provider may not expose, so a viewer
+      outside its network needs a reachable TURN server.  And the cloud
+      container's entry point (`cloud/entrypoint.py`) constructs a
+      `SelkiesSession` but never starts it or feeds it frames, at every tag
+      and on the 0.4.0 tree, so the shipped container still streams
+      nothing; that is a separate defect.
+    verification:
+      - "tests/cloud/test_webrtc_loopback.py::test_the_server_answers_the_offer_with_the_payload_type_offered"
+      - "tests/cloud/test_webrtc_loopback.py::test_ice_candidates_go_both_ways_and_ice_connects"
+      - "tests/cloud/test_webrtc_loopback.py::test_the_peer_decodes_the_frames_that_were_pushed"
+      - "tests/cloud/test_webrtc_loopback.py::test_input_events_reach_the_input_handler_and_negotiation_never_does"
+      - "tests/cloud/test_webrtc_loopback.py::test_an_unauthenticated_peer_is_closed_and_sent_nothing"
+      - "tests/cloud/test_webrtc_loopback.py::test_selkies_renderer_streams_what_its_inner_renderer_draws"
+      - "tests/cloud/test_webrtc_signaling_messages.py::TestRouting::test_sdp_and_ice_go_to_the_negotiation_and_never_to_the_input_handler"
+    github_issue: null

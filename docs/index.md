@@ -72,7 +72,7 @@ nodes:
   Swap:     Hot-swap registry — at runtime a physics node can be replaced by a trained surrogate without restarting the graph.
   Sky:      SkyPilot orchestration provisions GPU VMs (RunPod, Lambda, AWS, GCP) and tears them down when the job ends.
   ZMQ:      ZeroMQ rendezvous wires distributed graph fragments and streams state to clients.
-  WRTC:     WebRTC streams rendered viewport frames from the remote VM to the local browser or IDE.
+  WRTC:     WebRTC streams rendered viewport frames from the remote VM to the local browser or IDE. Tested end to end on CPU (a GStreamer WebRTC peer decodes the frames over a container-internal link, x264enc encoding); not tested: a GPU encoder, a real browser, NAT traversal.
   API:      FastAPI + WebSocket server — remote control of the graph and live state subscriptions.
   USD:      Codeless USD schemas + a serialiser turn the graph and its trajectory into a USD stage MICROROBOTICA can render.
   MIM:      MIME extends SimulationNode with biocompatibility, anatomical regime, and SOUP classification — same coupling, same autodiff.

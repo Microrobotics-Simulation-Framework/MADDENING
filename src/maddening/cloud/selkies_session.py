@@ -590,7 +590,7 @@ class _WebRTCNegotiator:
             self._client = None
 
     def _offer(self, client: _SignalingClient, description: Any) -> None:
-        from gi.repository import Gst, GstSdp, GstWebRTC
+        from gi.repository import GLib, Gst, GstSdp, GstWebRTC
 
         if client is not self._client:
             return
@@ -630,10 +630,8 @@ class _WebRTCNegotiator:
                 webrtc.emit("add-turn-server", uri)
         webrtc.connect("on-ice-candidate", self._on_local_candidate)
         webrtc.connect("notify::ice-connection-state", self._on_ice_state)
-        pipeline.get_bus().add_watch(0, self._on_bus_message, pipeline)
+        pipeline.get_bus().add_watch(GLib.PRIORITY_DEFAULT, self._on_bus_message, pipeline)
         self._pipeline, self._webrtc = pipeline, webrtc
-        self._answer_sent = self._remote_set = False
-        self._pending_local = []
         if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             logger.error("The streaming pipeline would not start")
             self._fail(client)
@@ -760,14 +758,14 @@ class _WebRTCNegotiator:
             client.close(_CLOSE_INTERNAL_ERROR, "streaming pipeline error")
 
     def _teardown(self) -> None:
+        self._remote_set = self._answer_sent = False
+        self._pending_local, self._pending_remote = [], []
         if self._pipeline is None:
             return
         from gi.repository import Gst
 
         pipeline = self._pipeline
         self._pipeline = self._webrtc = None
-        self._remote_set = self._answer_sent = False
-        self._pending_local, self._pending_remote = [], []
         self._on_pipeline(None, None)
         pipeline.get_bus().remove_watch()
         pipeline.set_state(Gst.State.NULL)

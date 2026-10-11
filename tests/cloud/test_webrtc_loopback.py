@@ -597,6 +597,20 @@ def test_stop_ends_the_glib_loop_the_pipeline_and_the_server(peers):
     session.stop()  # a second stop is harmless
 
 
+def test_a_stopped_session_starts_again_and_answers(peers):
+    session, url = _start()
+    session.stop()
+    info = session.start(StreamConfig(width=WIDTH, height=HEIGHT, fps=FPS,
+                                      bitrate_kbps=BITRATE_KBPS, ice_servers=[]))
+    try:
+        parts = urllib.parse.urlsplit(info.signaling_url)
+        peer = _peer(peers, f"ws://127.0.0.1:{parts.port}{parts.path}", session.session_token)
+        peer.connect()
+        _wait(peer.answer, ANSWER_TIMEOUT_S, "an SDP answer after a restart", peer)
+    finally:
+        session.stop()
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------

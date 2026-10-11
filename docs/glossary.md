@@ -126,7 +126,15 @@ ZMQ
 WebRTC
    The browser-native real-time streaming protocol. MADDENING uses it
    to push rendered viewport frames from a remote GPU VM to a local
-   browser or to the MICROROBOTICA IDE.
+   browser or to the MICROROBOTICA IDE (`SelkiesSession`, with the
+   browser client `api/static/webrtc_client.html`). What is tested: a
+   GStreamer WebRTC peer that signals as the browser client does gets
+   the answer, completes ICE, and decodes the frames pushed, on CPU in
+   a network-less container (`tests/cloud/test_webrtc_loopback.py`, CI
+   job `test-streaming`). Not tested: a GPU encoder (the encoder is
+   `x264enc`), a real browser, and NAT traversal: on a cloud host the
+   media travels over UDP, which a provider may not expose, and
+   `StreamConfig.ice_servers` is where a STUN or TURN server is set.
 
 pybind11
    Header-only C++ ↔ Python binding generator. MICROROBOTICA ships

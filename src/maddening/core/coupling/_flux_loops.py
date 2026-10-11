@@ -564,8 +564,7 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         f"{producer[0]}'s state[{producer[1]!r}]), and name that state field as the "
         "edge's source_field in place of the flux; the group then iterates it and "
         f"measures its convergence. {ways}"
-        "A flux that is computed from the node's state alone is never refused. "
-        "Before 0.4.0 such a group compiled."
+        "A flux that is computed from the node's state alone is never refused."
     )
 
 

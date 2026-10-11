@@ -917,8 +917,9 @@ its state).  If `compute_boundary_fluxes` reads the Robin datum the node is
 handed (`q = h * (u - robin_in)`, say), the two fluxes depend on each other
 in a loop that the passes do not solve, and `compile()` refuses the group
 with a `ValueError` that names the loop; `validate()` lists it as an `ERROR`.
-Before 0.4.0 such a group compiled and reported `converged=True` at a state
-that was not the coupled solution (MADD-ANO-273).  For such nodes carry the
+(Releases to 0.3.1 failed on such a pair with a `KeyError` at the first step;
+during 0.4.0's development it ran and reported `converged=True` at a state
+that was not the coupled solution: MADD-ANO-273.)  For such nodes carry the
 flux in the state: compute `q` in `update()`, return it as a state field, and
 pass that field as `flux_field_a` / `flux_field_b`.  The group then iterates
 `q` together with `u` and measures its convergence; on two affine nodes whose

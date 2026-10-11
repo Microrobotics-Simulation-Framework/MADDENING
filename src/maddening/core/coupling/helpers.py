@@ -212,9 +212,11 @@ def add_robin_coupling(
     If each node's ``compute_boundary_fluxes`` reads its Robin input,
     the two fluxes depend on each other in a loop no pass solves, and
     ``GraphManager.compile()`` refuses the group (``ValueError``; an
-    ``ERROR`` line of ``validate()``).  Before 0.4.0 such a group
-    compiled and reported ``converged=True`` at a state that was not the
-    coupled solution (MADD-ANO-273).  Carry such a flux in the state.
+    ``ERROR`` line of ``validate()``).  Releases to 0.3.1 failed on such
+    a pair with a ``KeyError`` at the first step, and during 0.4.0's
+    development it ran and reported ``converged=True`` at a state that
+    was not the coupled solution (MADD-ANO-273).  Carry such a flux in
+    the state.
     ``alpha=1`` does not lift the refusal: the flux edges are still
     there, delivering the flux times zero.
 

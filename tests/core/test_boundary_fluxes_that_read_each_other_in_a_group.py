@@ -1533,6 +1533,8 @@ def replaced_loop_off(gm, reference):
     return max(abs(got[name] - value) / abs(value) for name, value in reference.items())
 
 
+# Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused[gauss-seidel-ift]
+# and its [jacobi-fori]: each schedule and each solver once.
 @pytest.mark.parametrize("mode, solver", SCHEDULES)
 def test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused(
         mode, solver, monkeypatch):
@@ -1569,6 +1571,8 @@ def robin_after_a_third(cls, mode, solver):
     return grouped(gm, ["node_a", "node_b", "C"], mode=mode, solver=solver), nodes
 
 
+# Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_right_robin_pair_whose_inputs_a_replaced_edge_reaches_first_compiles[undeclared-gauss-seidel-ift]
+# and its [declared-jacobi-fori] and the other two per-push cells: each schedule and each solver once.
 @pytest.mark.parametrize("mode, solver", SCHEDULES)
 @pytest.mark.parametrize("cls", [Bare, Side], ids=["undeclared", "declared"])
 def test_a_right_robin_pair_whose_inputs_a_replaced_edge_reaches_first_compiles(cls, mode, solver):
@@ -1648,6 +1652,8 @@ def first_sweep_exact():
     return {"H": u_h, "P": 2.0 + 0.1 * u_h}
 
 
+# Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep[gauss-seidel-ift]
+# and its [jacobi-fori]: each schedule and each solver once.
 @pytest.mark.parametrize("mode, solver", SCHEDULES)
 def test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep(mode, solver, monkeypatch):
     """The first sweep leaves out ``Q.q -> M.y`` (``Q`` is swept after
@@ -1682,6 +1688,8 @@ RING = [("b", "q", "a", "s", 1.0), ("c", "q", "b", "s", 1.0), ("a", "q", "c", "s
         ("b", "u", "a", "r", 1.0), ("c", "u", "b", "r", 1.0), ("a", "u", "c", "r", 1.0)]
 
 
+# Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution[jacobi-fori]
+# and its [gauss-seidel-ift]: each schedule and each solver once.
 @pytest.mark.parametrize("mode, solver", SCHEDULES)
 def test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution(mode, solver):
     """A ring of three flux edges, each against the sweep, whose fluxes

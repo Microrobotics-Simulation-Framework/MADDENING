@@ -337,6 +337,26 @@ def test_fori_without_diagnostics_iterates_the_same_map(accel):
         assert float(gm.get_node_state("a")["q"]) == Q_STAR
 
 
+@pytest.mark.parametrize("options", [
+    {"predictor": "linear"}, {"predictor": "quadratic"},
+    {"convergence_norm": "mixed"}, {"convergence_norm": "interface"}],
+    ids=lambda o: "-".join(map(str, o.values())))
+@pytest.mark.parametrize("solver, mode, reader_first", [
+    ("ift", "gauss-seidel", True), ("fori", "jacobi", False)])
+def test_the_fixed_point_is_reached_under_the_groups_other_options(
+        solver, mode, reader_first, options):
+    """A predictor's start and each norm, over a scan of steps.
+
+    The pass does not depend on the pre-step state, so every step has the
+    same fixed point; a predictor only moves the guess, and the interface
+    norm reads the one floating edge.
+    """
+    gm = _floor_loop(reader_first=reader_first, solver=solver, iteration_mode=mode, **options)
+    out = gm.run_scan(4)
+    assert float(out["a"]["q"]) == Q_STAR and int(out["b"]["p"]) == P_STAR
+    assert _report(gm)["converged"]
+
+
 def _boolean_loop(solver, mode, reader_first, *, below, relays=0):
     """``q <- 2 + 4 p`` with ``p <- (q > 1)``: one fixed point, ``q = 6`` with ``p`` set.
 

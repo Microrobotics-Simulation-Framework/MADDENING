@@ -335,4 +335,9 @@ def test_every_mode_is_accepted_by_a_node_that_declares_none():
     for boundary in ("periodic", "edge", "zero"):
         wrapped = ShardedStencilNode(_WideStencil2D("w", 1), create_device_mesh(shape=(1,)),
                                      axis_map={"devices": 0}, boundary=boundary)
-        assert wrapped.to_dict()["boundary"] == boundary
+        # The stencil keeps its width outside ``params``: the wrapper saves
+        # the node it wraps, and passes on what that node's ``to_dict()``
+        # says of an argument its saved entry cannot rebuild.
+        with pytest.warns(UserWarning, match="does not save the constructor argument h"):
+            saved = wrapped.to_dict()
+        assert saved["boundary"] == boundary

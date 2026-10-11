@@ -15,11 +15,13 @@ import copy
 import functools
 import inspect
 import math
+import os
 import warnings
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Optional, cast
+from typing import Any, Callable, ClassVar, Optional, Self, cast
 
 import jax
 import jax.core
@@ -782,6 +784,204 @@ def static_data_dep_violations(
     return [(owner_of[k], k[0], k[1]) for k in order]
 
 
+# ---------------------------------------------------------------------------
+# What a saved node cannot rebuild
+# ---------------------------------------------------------------------------
+#
+# A saved node is its ``params`` and nothing else: every reload calls
+# ``cls(name=..., timestep=..., **params)``.  A constructor argument the
+# class keeps anywhere but ``params`` (``self.stiffness = stiffness``) is
+# therefore dropped by the save, and the reloaded graph runs the default,
+# with nothing said.  ``SimulationNode.to_dict`` says so, for the arguments
+# it can tell were lost: the ones the node was constructed with.
+
+#: The package directory, with a trailing separator: frames inside it are
+#: skipped when a warning is attributed to the caller's line.
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+
+#: What :meth:`SimulationNode.__init__` itself takes: ``name`` and
+#: ``timestep``, which a saved entry carries beside its ``params``, and
+#: ``geometry_source``, which the base constructor takes out of ``params``
+#: (nothing in this package reads it, and no save carries it).
+_BASE_CONSTRUCTOR_NAMES = frozenset({"name", "timestep", "geometry_source"})
+
+#: ``id(node) -> (weak reference to the node, names)``.  For a node built by
+#: calling its class: the named parameters of its constructor that were
+#: given a value other than their default.  Names only (a value may be a
+#: large array), and kept off the node, so that ``vars(node)``, a pickle and
+#: a copy are what they were; a copy therefore has no record, and is not
+#: warned about.
+_CONSTRUCTED_WITH: dict = {}
+
+#: ``__init__ function -> its signature`` (``None`` when it has none to
+#: read), dropped with the function.
+_INIT_SIGNATURES: "weakref.WeakKeyDictionary[Any, Optional[inspect.Signature]]" = \
+    weakref.WeakKeyDictionary()
+
+
+def _init_signature(cls: type) -> Optional[inspect.Signature]:
+    init = cls.__init__
+    try:
+        return _INIT_SIGNATURES[init]
+    except KeyError:
+        pass
+    except TypeError:       # not a Python function: nothing to read
+        return None
+    try:
+        signature: Optional[inspect.Signature] = inspect.signature(init)
+    except (TypeError, ValueError):
+        signature = None
+    _INIT_SIGNATURES[init] = signature
+    return signature
+
+
+def _is_the_default(value: Any, default: Any) -> bool:
+    """Whether a constructor given ``value`` was given what it would have
+    had anyway: the same object, or the same number, or the same numbers in
+    a sequence, a mapping or an array.  ``12`` for a default of ``12.0`` is
+    the default, and so is ``np.zeros(3)`` for ``(0.0, 0.0, 0.0)``: a reload
+    that passes the default instead builds the same node.  Anything that
+    cannot be compared is not the default."""
+    if value is default:
+        return True
+    numbers = (bool, int, float, complex, np.number, np.bool_)
+    try:
+        if isinstance(value, numbers) and isinstance(default, numbers):
+            return bool(value == default) or bool(value != value and default != default)
+        if isinstance(value, jax.core.Tracer) or isinstance(default, jax.core.Tracer):
+            return False
+        arrays = (np.ndarray, jax.Array)
+        if isinstance(value, arrays) or isinstance(default, arrays):
+            if default is None or value is None or isinstance(default, (str, bytes, Mapping)) \
+                    or isinstance(value, (str, bytes, Mapping)):
+                return False
+            a, b = np.asarray(value), np.asarray(default)
+            if a.dtype == object or b.dtype == object or a.shape != b.shape:
+                return False
+            return bool(np.array_equal(a, b, equal_nan=a.dtype.kind in "fc" and b.dtype.kind in "fc"))
+        if isinstance(value, (list, tuple)) and isinstance(default, (list, tuple)):
+            return len(value) == len(default) and all(
+                _is_the_default(x, y) for x, y in zip(value, default))
+        if isinstance(value, Mapping) and isinstance(default, Mapping):
+            return value.keys() == default.keys() and all(
+                _is_the_default(value[k], default[k]) for k in value)
+        return type(value) is type(default) and bool(value == default)
+    except Exception:   # noqa: BLE001 - what cannot be compared is not the default
+        return False
+
+
+def _note_constructor_arguments(node: Any, cls: type, args: tuple, kwargs: dict) -> None:
+    """Record, for :func:`_unsaved_constructor_arguments`, which named
+    parameters of ``cls.__init__`` this call gives a value other than their
+    default.  Records nothing when it cannot tell: a signature that cannot
+    be read, a call the constructor is about to refuse, a node that takes no
+    weak reference.  Never raises."""
+    try:
+        signature = _init_signature(cls)
+        if signature is None:
+            return
+        try:
+            bound = signature.bind(node, *args, **kwargs)
+        except TypeError:
+            return                              # the constructor raises it itself
+        parameters = signature.parameters
+        first = next(iter(parameters), None)
+        names = set()
+        for name, value in bound.arguments.items():
+            parameter = parameters[name]
+            if name == first or name in _BASE_CONSTRUCTOR_NAMES \
+                    or parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                continue
+            if parameter.default is not parameter.empty \
+                    and _is_the_default(value, parameter.default):
+                continue
+            names.add(name)
+        if not names:
+            return
+        key = id(node)
+
+        def forget(reference, key=key, records=_CONSTRUCTED_WITH):
+            entry = records.get(key)
+            if entry is not None and entry[0] is reference:
+                del records[key]
+
+        _CONSTRUCTED_WITH[key] = (weakref.ref(node, forget), frozenset(names))
+    except Exception:   # noqa: BLE001 - a record that cannot be made is not made
+        return
+
+
+def _unsaved_constructor_arguments(node: "SimulationNode") -> list[str]:
+    """The constructor arguments of ``node`` that its saved entry cannot
+    rebuild, sorted: named parameters of its class's ``__init__`` that it
+    was constructed with a value other than their default for, and that are
+    no key of ``node.params``.
+
+    Exactly that, so that nothing harmless is reported.  Not reported,
+    because it cannot be told from here:
+
+    * an argument a ``**kwargs`` (or ``*args``) of the constructor took in:
+      there is no default to hold it against;
+    * a node of a class that overrides ``to_dict``, which saves itself its
+      own way (the sharded wrappers and ``HybridNode`` save the node they
+      wrap, which is asked in its own right);
+    * a node not built by calling its class -- a copy, an unpickled node --
+      which has no record;
+    * an attribute written after construction (``node.stiffness = 40.0``),
+      which no save carries either;
+    * ``name`` and ``timestep``, which the entry carries beside ``params``,
+      and ``geometry_source``, which the base constructor takes out of
+      ``params`` and nothing saves.
+    """
+    if type(node).to_dict is not SimulationNode.to_dict:
+        return []
+    entry = _CONSTRUCTED_WITH.get(id(node))
+    if entry is None or entry[0]() is not node:
+        return []
+    params = node.params
+    if not isinstance(params, Mapping):
+        return []
+    return sorted(name for name in entry[1] if name not in params)
+
+
+def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
+    """``UserWarning`` naming the node, its class, the arguments
+    :func:`_unsaved_constructor_arguments` finds, what a reload does
+    instead, and the fix.  A warning and not an error: an error would stop
+    every such node from being saved at all, and a node built with its
+    defaults saves correctly."""
+    names = _unsaved_constructor_arguments(node)
+    if not names:
+        return
+    cls = type(node)
+    signature = _init_signature(cls)
+    parameters = signature.parameters if signature is not None else {}
+    defaulted, required = [], []
+    for name in names:
+        parameter = parameters.get(name)
+        if parameter is None or parameter.default is parameter.empty:
+            required.append(name)
+        else:
+            shown = repr(parameter.default)
+            defaulted.append(f"{name}={shown if len(shown) <= 40 else shown[:37] + '...'}")
+    outcomes = []
+    if defaulted:
+        outcomes.append(f"runs with the default {', '.join(defaulted)}")
+    if required:
+        outcomes.append(f"cannot build the node ({', '.join(required)}: no default)")
+    one = len(names) == 1
+    warnings.warn(
+        f"node {node.name!r} ({cls.__name__}): to_dict() does not save the constructor "
+        f"argument{'' if one else 's'} {', '.join(names)}.  {cls.__name__}.__init__ does not "
+        f"pass {'it' if one else 'them'} to super().__init__(), so {'it is' if one else 'they are'} "
+        f"not in node.params, and a saved node is rebuilt as {cls.__name__}(name=..., "
+        f"timestep=..., **params): a graph loaded from this config {' and '.join(outcomes)}.  "
+        f"Pass {'it' if one else 'them'} on -- super().__init__(name, timestep, "
+        f"{', '.join(f'{name}={name}' for name in names)}) -- and read {'it' if one else 'them'} "
+        f"from self.params; or override to_dict() if the node saves itself another way.",
+        UserWarning, stacklevel=2, skip_file_prefixes=(_PACKAGE_DIR,),
+    )
+
+
 @stability(StabilityLevel.STABLE)
 class SimulationNode(ABC):
     """Abstract base class for all simulation nodes.
@@ -834,7 +1034,33 @@ class SimulationNode(ABC):
                 ),
             )
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        """Create the node, and note which constructor arguments it is
+        being given (:func:`_note_constructor_arguments`), so that
+        :meth:`to_dict` can say which of them it does not save.  The
+        arguments are ``__init__``'s; nothing else changes."""
+        make = super().__new__
+        node = make(cls) if make is object.__new__ else make(cls, *args, **kwargs)
+        if args or kwargs:
+            _note_constructor_arguments(node, cls, args, kwargs)
+        return node
+
     def __init__(self, name: str, timestep: float, **params):
+        """
+        Parameters
+        ----------
+        name : str
+            The node's name in a graph.
+        timestep : float
+            The node's time step.
+        **params
+            The node's constants.  They are stored in :attr:`params`, and
+            they are all a save carries: ``to_dict()`` writes ``params``,
+            and a reload calls ``cls(name=..., timestep=..., **params)``.
+            A subclass passes every constructor argument it wants a saved
+            graph to rebuild -- ``super().__init__(name, timestep,
+            stiffness=stiffness)`` -- and reads it from ``self.params``.
+        """
         self.name = name
         self.delta_t = float(timestep)
         self.geometry_source: Optional[str] = params.pop("geometry_source", None)
@@ -1868,10 +2094,42 @@ class SimulationNode(ABC):
         (:func:`_detached_config`), not the node's own ``params``.  It
         used to be that mapping itself, so writing into a config wrote
         into the node (MADD-ANO-205).
+
+        ``params`` is all of the node that is saved: a reload calls
+        ``type(node)(name=..., timestep=..., **params)``.  A constructor
+        argument the class keeps anywhere else (``self.stiffness =
+        stiffness``) is not in the entry, and the reloaded node has the
+        default.  When the node was constructed with such an argument, at
+        a value other than its default, this method says so with a
+        ``UserWarning`` naming the node, its class, the arguments and the
+        fix (:func:`_unsaved_constructor_arguments` states the rule and
+        what it cannot tell).  Until 0.4.0 nothing said so.  A warning and
+        not an error, so that such a node can still be saved.
         """
+        _warn_of_unsaved_constructor_arguments(self)
         return {
             "type": type(self).__name__,
             "name": self.name,
             "timestep": self.delta_t,
             "params": _detached_config(self.params),
         }
+
+
+def _constructor_signature_for_new() -> inspect.Signature:
+    """``__init__``'s signature, with ``cls`` for ``self``: what
+    ``SimulationNode.__new__`` presents to ``inspect.signature``.
+
+    ``inspect.signature(cls)`` reads whichever of ``__new__`` and
+    ``__init__`` comes first along the MRO.  A node class that defines its
+    own ``__init__`` is unaffected; one that inherits the base constructor
+    would otherwise show ``(*args, **kwargs)`` in ``help()`` and in the
+    generated documentation where it showed ``(name, timestep, **params)``.
+    """
+    init = _init_signature(SimulationNode)
+    assert init is not None
+    parameters = list(init.parameters.values())
+    cls = inspect.Parameter("cls", inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    return init.replace(parameters=[cls, *parameters[1:]])
+
+
+setattr(SimulationNode.__new__, "__signature__", _constructor_signature_for_new())

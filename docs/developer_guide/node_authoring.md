@@ -128,13 +128,14 @@ class YourNode(SimulationNode):
         ),
     )
 
-    def __init__(self, name, timestep, **kwargs):
-        params = {"key": value, ...}
-        state_spec = {"field": shape_tuple, ...}
-        super().__init__(name, timestep, params, state_spec)
+    def __init__(self, name, timestep, key=value, shape=shape_tuple):
+        # Hand every constructor argument to the base class.  It keeps
+        # them in self.params, and params is all a saved graph carries
+        # (see "Where a constant belongs" below).
+        super().__init__(name, timestep, key=key, shape=shape)
 
     def initial_state(self):
-        return {"field": jnp.zeros(self.state_spec["field"])}
+        return {"field": jnp.zeros(self.params["shape"])}
 
     def param_specs(self):
         # Bounds / transforms / trainable flags for the constants below;
@@ -347,6 +348,72 @@ python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
 ```
+
+## Where a constant belongs, and what a saved graph carries
+
+**A constant belongs in `params`.** Hand every constructor argument to
+`super().__init__(name, timestep, key=value, ...)` and read it back from
+`self.params` (a float through the injected `params`, as in the template
+above).
+
+A saved graph holds, for each node, its class name, `name`, `timestep` and
+`params`, and nothing else. Every reload (`GraphManager.from_dict` on a
+`to_dict()` config, `load_graph_from_usd` on a saved stage) rebuilds the
+node as `cls(name=..., timestep=..., **params)`. A constructor argument the
+class keeps anywhere else is therefore dropped by the save:
+
+<!-- snippet: no-run, reason: fragment: two constructors side by side, without the rest of their classes -->
+```python
+class Spring(SimulationNode):
+    def __init__(self, name, timestep, stiffness=12.0):
+        super().__init__(name, timestep)
+        self.stiffness = stiffness          # NOT saved: a reload runs 12.0
+
+
+class Spring(SimulationNode):
+    def __init__(self, name, timestep, stiffness=12.0):
+        super().__init__(name, timestep, stiffness=stiffness)   # saved
+```
+
+With the first class, `Spring("s", 0.01, stiffness=40.0)` saved and
+reloaded is a spring of stiffness 12, and the reloaded graph runs. Since
+0.4.0 `to_dict()` says so (in every release before, nothing did,
+MADD-ANO-273): it gives a `UserWarning` naming the node, its class, the
+arguments and the fix. The rule is exact, so that it never warns of a node
+that saves correctly:
+
+- it warns when the node **was constructed with** an argument for a named
+  parameter of its class's `__init__`, at a value other than that
+  parameter's default, and `node.params` has no key of that name. A node
+  built with its defaults reloads as the node it was, and is not warned
+  about;
+- it says nothing where it cannot tell: an argument a `**kwargs` of the
+  constructor took in (there is no default to hold it against); a class
+  that overrides `to_dict()`, which answers for its own saving (the sharded
+  wrappers and `HybridNode` save the node they wrap, and that node is asked
+  in its own right); a node that was not built by calling its class (a
+  copy, an unpickled node); and an attribute written after construction.
+- only `to_dict()` warns (a config, `GET /graph`, the reply to
+  `POST /graph/nodes`). `save_graph_to_usd` drops the same arguments and
+  does not warn.
+
+What a save does not carry, whatever the class does:
+
+- `geometry_source`, which the base constructor takes out of `params`;
+- an attribute written after construction (`node.stiffness = 40.0`). It is
+  also not a counted write: see
+  [Live values, recompiles and partial pytrees](../user_guide/parameters.md#live-values-recompiles-and-partial-pytrees);
+- anything that is not in `params` because it cannot be: a callable, a
+  device mesh, a partition layout. A sharded node is reloaded unsharded,
+  with a warning that names the call that wraps it again;
+- state. A config and a stage carry structure; a checkpoint
+  (`gm.save_state`) carries the state and the live `gm.params`.
+
+An array in `params` is saved as the array it is. `GraphManager.to_dict()`
+does not turn it into lists, so write such a config with
+`json.dumps(config, default=lambda a: numpy.asarray(a).tolist())`, or hold
+the constant as nested lists in `params` (as `HeatNode` holds
+`grid_points` and `LBMNode` its `wall_mask`).
 
 ## Boundary Input Specification
 

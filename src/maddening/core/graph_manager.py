@@ -7222,10 +7222,23 @@ class GraphManager:
     def to_dict(self, *, strict_mappings: bool = True) -> dict:
         """Serialise the graph structure (not runtime state).
 
-        Node ``params`` are the *effective* values — the constructor
-        arguments with the live :attr:`params` written over them (see
+        Node ``params`` are the *effective* values — each node's own
+        ``params`` with the live :attr:`params` written over them (see
         :meth:`effective_node_params`) — and ``param_specs`` carries the
-        graph's :meth:`set_param_spec` overrides.  An edge's interface
+        graph's :meth:`set_param_spec` overrides.  A node's ``params`` are
+        the constructor arguments its class handed to
+        ``SimulationNode.__init__``, and they are all of the node that is
+        saved: :meth:`from_dict` rebuilds it as ``cls(name=...,
+        timestep=..., **params)``.  A constructor argument a class keeps
+        anywhere else (``self.stiffness = stiffness``) is **not** in the
+        config, and the reloaded node has the constructor's default.  For
+        a node that was constructed with such an argument, at a value
+        other than its default, this method gives a ``UserWarning`` naming
+        the node, its class, the arguments and the fix (see
+        :meth:`SimulationNode.to_dict
+        <maddening.core.node.SimulationNode.to_dict>` for the rule and for
+        what it cannot tell); in every release before 0.4.0 nothing said
+        so (MADD-ANO-273).  An edge's interface
         mapping is written as its
         :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (kind,
         hyper-parameters, point references — never the weights, which
@@ -7249,11 +7262,23 @@ class GraphManager:
         its iteration cap would still be a group, and would quietly
         solve the same graph a different way.
 
-        The result is JSON-*valid*, not merely JSON-shaped: a non-finite
-        float anywhere in it -- a diverged param, an infinite ParamSpec
-        bound -- is the quoted token ``"NaN"`` / ``"Infinity"`` /
-        ``"-Infinity"``, not the bare token ``json.dumps`` writes by
-        default and no conforming reader accepts (``MADD-ANO-006``).
+        Where the result is numbers, text and containers it is
+        JSON-*valid*, not merely JSON-shaped: a non-finite float anywhere
+        in it -- a diverged param, an infinite ParamSpec bound -- is the
+        quoted token ``"NaN"`` / ``"Infinity"`` / ``"-Infinity"``, not the
+        bare token ``json.dumps`` writes by default and no conforming
+        reader accepts (``MADD-ANO-006``).  **An array is not converted.**
+        A node whose ``params`` hold a NumPy or JAX array (a gain matrix, a
+        field-valued constant) has that array in the result as it is (a
+        NumPy array as a copy), so plain ``json.dumps`` of such a config
+        raises ``TypeError``, where this docstring used to say it was
+        valid for every graph.  :meth:`from_dict` takes the result as it
+        stands, and for JSON write the arrays as lists --
+        ``json.dumps(config, default=lambda a: numpy.asarray(a).tolist())``
+        -- which :meth:`from_dict` reads back into a graph that steps bit
+        for bit as this one.  A node that holds such a constant as nested
+        lists (``HeatNode``'s ``grid_points``, ``LBMNode``'s
+        ``wall_mask``) needs neither.
         :meth:`from_dict` turns those back into floats, and reads the
         bare tokens an older config carries as well.  The encoding is
         applied once, to the assembled tree, so each part's own
@@ -7263,8 +7288,9 @@ class GraphManager:
         :mod:`maddening.serialization.json_codec`.
 
         Because the encoding is applied here rather than at the write
-        boundary -- so that plain ``json.dumps`` of this result is valid,
-        which is what every caller in the tree does -- the result is
+        boundary -- so that plain ``json.dumps`` of this result is valid
+        (for a graph whose params hold no array, see above), which is what
+        every caller in the tree does -- the result is
         *already encoded*.  Write it with ``json.dumps`` or
         :func:`~maddening.serialization.json_codec.dumps_encoded`, and
         **not** with :func:`~maddening.serialization.json_codec.dumps`:

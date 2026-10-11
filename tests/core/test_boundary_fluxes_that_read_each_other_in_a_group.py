@@ -6,9 +6,13 @@ argument).  That is the flux of the iterate for a flux computed from the
 state, and for fluxes that read each other along a chain the two sweeps
 reach; it is not a solution of fluxes that read each other in a loop.  A
 group with such a loop used to stop with ``converged=True`` at a state
-that does not solve the coupled equations (4e-4 to 0.8 off on the affine
-pair below), and ``validate()`` said the loop was "handled by iterative
-coupling".  It is refused at ``compile()``.
+that does not solve the coupled equations, and ``validate()`` said the
+loop was "handled by iterative coupling".  It is refused at ``compile()``.
+
+One measure of error throughout (:func:`off`): the largest distance of a
+member's state from its value in the coupled solution, as a fraction of
+that value.  On the affine pair below the refused loop was 4.3e-4 to 0.77
+off in it.
 
 Every case here is affine, so the coupled equations are one linear
 system, solved in float64 (:func:`exact`): each structure the passes are
@@ -22,6 +26,7 @@ import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -33,9 +38,10 @@ from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationN
 
 F = jnp.float32
 ZERO = jnp.zeros((), F)
-# The states agree with the float64 solution to 4e-7 of themselves where a
-# pass is right (measured, tolerance 1e-6); the wrong ones were 4e-4 off
-# or more.
+# Where a pass is right the states are within 1.0e-6 of their coupled
+# values, as a fraction of those values (measured at tolerance 1e-6; the
+# largest is the carried flux at loop gain 0.56 under Jacobi); the wrong
+# ones were 4.3e-4 off or more.
 CLOSE = 5e-6
 # Each schedule with each solver: one pair on every push, the other slow.
 PER_PUSH = [("gauss-seidel", "ift"), ("jacobi", "fori")]
@@ -51,6 +57,8 @@ class Side(SimulationNode):
     hook does not touch its inputs.  *strict* indexes the input, the
     ordinary way to read one; otherwise the hook tolerates its absence.
     """
+
+    drives = "r"
 
     def __init__(self, name, cu, ku, cq, kq, mq, *, reads="s", strict=False):
         super().__init__(name=name, timestep=1.0)
@@ -68,7 +76,7 @@ class Side(SimulationNode):
         return {"q": BoundaryFluxSpec(shape=(), dtype=F)}
 
     def update(self, state, boundary_inputs, dt, *, params=None):
-        return {"u": self.k[0] + self.k[1] * boundary_inputs.get("r", ZERO)}
+        return {"u": self.k[0] + self.k[1] * boundary_inputs.get(self.drives, ZERO)}
 
     def flux(self, u, boundary_inputs):
         _cu, _ku, cq, kq, mq = self.k
@@ -117,7 +125,7 @@ def exact(nodes, edges):
         for source, field, target, name, gain in edges:
             if target != node.name:
                 continue
-            if name == "r":
+            if name == node.drives:
                 A[i, col[(source, field)]] -= ku * gain
             if name == node.reads:
                 A[n + i, col[(source, field)]] -= kq * gain
@@ -149,10 +157,11 @@ def grouped(gm, group, mode="gauss-seidel", solver="ift"):
 
 
 def off(gm, reference):
-    """The largest distance of a stepped state from *reference*, relative."""
+    """The largest distance of a stepped state from its value in
+    *reference*, as a fraction of that value."""
     gm.compile()
     gm.step()
-    return max(abs(float(gm.get_node_state(name)["u"]) - value) / max(1.0, abs(value))
+    return max(abs(float(gm.get_node_state(name)["u"]) - value) / abs(value)
                for name, value in reference.items())
 
 
@@ -190,7 +199,7 @@ def test_a_flux_computed_from_the_state_alone_reaches_the_coupled_solution(mode,
     """(a): one evaluation of such a flux is the flux of the iterate.
 
     The Robin recipe with fluxes that do not read their datum.  Before
-    and after the refusal: 1.5e-8 (Gauss-Seidel) and 3.7e-7 (Jacobi).
+    and after the refusal: 1.7e-8 (Gauss-Seidel) and 3.8e-7 (Jacobi).
     """
     gm, nodes = robin_pair(None, mode=mode, solver=solver)
     assert off(gm, exact(nodes, ROBIN)) < CLOSE
@@ -216,17 +225,17 @@ def chain_nodes(order, strict=False, cls=Side):
     return [make[name]() for name in order]
 
 
-# Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution[abc-True-gauss-seidel-ift]
-# and its [bac-False-jacobi-fori]: a chain along the sweep and one a step against it,
+# Per push: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution[abc-gauss-seidel-ift]
+# and its [bac-jacobi-fori]: a chain along the sweep and one a step against it,
 # under each schedule and each solver once.
 @pytest.mark.parametrize("mode, solver", SCHEDULES)
-@pytest.mark.parametrize("order, strict", [("abc", True), ("bac", False)])
-def test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution(order, strict, mode, solver):
-    """(b), ``S <= 2``: along the sweep order (one sweep, and a hook may
-    index its input), and one step against it (two; the hook tolerates
-    the first).  Measured 4.7e-8 to 5.8e-8 before and after.
+@pytest.mark.parametrize("order", ["abc", "bac"])
+def test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution(order, mode, solver):
+    """(b), ``S <= 2``: along the sweep order (one sweep), and one step
+    against it (two; the hook is handed its inputs without the flux in
+    the first).  Measured 1.8e-7 to 3.2e-7 before and after.
     """
-    nodes = chain_nodes(order, strict)
+    nodes = chain_nodes(order)
     gm = built(nodes, CHAIN, ["a", "b", "c"], mode=mode, solver=solver)
     assert gm._group_sweep_order(gm._coupling_groups[0]) == list(order)
     assert off(gm, exact(nodes, CHAIN)) < CLOSE
@@ -239,8 +248,8 @@ def test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed(solver):
     """Two steps against the sweep order, and the one reader of the last
     flux is swept after its producer: it reads the flux Gauss-Seidel
     recomputed after the producer's update, whose inputs are seeds two
-    sweeps reach.  Right before the refusal (1.5e-7), and compiled still;
-    the Jacobi pass reads the seed there, and was 6.3e-2 off.
+    sweeps reach.  Right before the refusal (3.8e-7), and compiled still;
+    the Jacobi pass reads the seed there, and was 0.15 off.
     """
     nodes = chain_nodes("cba")
     gm = built(nodes, CHAIN, ["a", "b", "c"], mode="gauss-seidel", solver=solver)
@@ -250,7 +259,7 @@ def test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed(solver):
 @pytest.mark.parametrize("edges, mode", [(CHAIN, "jacobi"), (SEED_CHAIN, "jacobi"),
                                          (SEED_CHAIN, "gauss-seidel")])
 def test_a_chain_whose_seed_the_pass_reads_too_early_is_refused(edges, mode):
-    """(b), ``S = 3`` where the seed is read: 6.3e-2 and 4.0e-2 off with
+    """(b), ``S = 3`` where the seed is read: 0.15 and 6.3e-2 off with
     ``converged=True`` before.  The message gives the chain, the order
     and both ways out, and each way out compiles.
     """
@@ -261,7 +270,8 @@ def test_a_chain_whose_seed_the_pass_reads_too_early_is_refused(edges, mode):
     assert "(['c', 'b', 'a'])" in text and "flux c.q would take 3" in text
     assert ("flux c.q reads input 's', which edge 'b.q->c.s' delivers from flux b.q; "
             "flux b.q reads input 's', which edge 'a.q->b.s' delivers from flux a.q") in text
-    assert "write it to a state field" in text and "add_node order" in text
+    assert "write it to a state field" in text
+    assert "in the order of the reads, ['a', 'b', 'c']: a group sweeps" in text
     assert [line for line in gm.validate() if line.startswith("ERROR")] == [f"ERROR: {text}"]
     for way_out in (chain_nodes("abc"), chain_nodes("cba", cls=Carried)):
         built(way_out, edges, ["a", "b", "c"], mode=mode)._refuse_unsolved_group_fluxes()
@@ -272,8 +282,8 @@ def test_a_chain_whose_seed_the_pass_reads_too_early_is_refused(edges, mode):
     ("jacobi", "fori"), pytest.param("gauss-seidel", "ift", marks=pytest.mark.slow)])
 @pytest.mark.parametrize("way", ["carried", pytest.param("added in order", marks=pytest.mark.slow)])
 def test_each_way_out_of_a_refused_chain_reaches_the_coupled_solution(way, mode, solver):
-    """The flux in a state field (5.8e-8), and the nodes added so the
-    chain runs along the sweep (7.3e-8 to 1.2e-7)."""
+    """The flux in a state field, and the nodes added so the chain runs
+    along the sweep (2.3e-7 to 3.7e-7)."""
     nodes = chain_nodes("cba", cls=Carried) if way == "carried" else chain_nodes("abc")
     gm = built(nodes, SEED_CHAIN, ["a", "b", "c"], mode=mode, solver=solver)
     assert off(gm, exact(nodes, SEED_CHAIN)) < CLOSE
@@ -336,7 +346,10 @@ def test_fluxes_that_read_each_other_in_a_loop_are_refused(loop, mode):
         assert said in text
     assert "assumed" not in text                    # every hook here was traced
     lines = gm.validate()
-    assert [line for line in lines if line.startswith("ERROR")] == [f"ERROR: {text}"]
+    errors = [line for line in lines if line.startswith("ERROR")]
+    # A hook that indexes its input has a line of its own (see below).
+    assert [line for line in errors if "raised KeyError" not in line] == [f"ERROR: {text}"]
+    assert len(errors) == (1 + len(members) if "indexed" in loop else 1)
     assert not any("handled by iterative coupling" in line or "iterated with the group" in line
                    for line in lines)
     with pytest.raises(ValueError) as read:
@@ -369,8 +382,10 @@ def test_a_hook_that_cannot_be_traced_is_taken_to_read_every_input_and_the_messa
     gm = built(nodes, [("a", "q", "b", "s", 1.0), ("b", "q", "a", "s", 1.0)], ["a", "b"])
     with pytest.raises(ValueError, match="depend on each other in a loop") as info:
         gm.compile()
-    assert "what ['a.q'] read could not be established" in str(info.value)
-    assert "that dependence is assumed" in str(info.value)
+    text = str(info.value)
+    assert "What the fluxes of 'a' read is assumed, not established: for 'a', its " \
+        "compute_boundary_fluxes could not be traced on the inputs the pass hands it (" in text
+    assert "is never refused" not in text and "once that can be established" in text
 
 
 class TwoFluxes(Side):
@@ -404,10 +419,20 @@ class Fallback(Side):
         return {"q": state["u"] + boundary_inputs.get("s", ZERO)}
 
 
+class Switched(Branching):
+    """A :class:`Branching` flux computed inside ``lax.cond``: the two
+    traces differ only within the branch."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        gain = 3.0 if "x" in boundary_inputs else 5.0
+        return {"q": jax.lax.cond(state["u"] > 0, lambda u: gain * u, lambda u: u, state["u"])}
+
+
 def _reads(node, handed, absent=()):
     gm = GraphManager()
     gm.add_node(node)
-    return _flux_loops._flux_reads(gm._nodes[node.name], gm._state[node.name], {}, handed, absent)
+    return _flux_loops._flux_reads(gm._nodes[node.name], gm._state[node.name], {},
+                                   {name: ZERO for name in handed}, absent)
 
 
 def test_each_flux_of_a_node_is_asked_what_it_reads():
@@ -423,8 +448,10 @@ def test_each_flux_of_a_node_is_asked_what_it_reads():
     # Traced on the inputs the graph hands it, not on every input it declares.
     assert _reads(Fallback("n", *coefficients(None, 0)), ["r", "s"]) == {"q": {"s"}}
     assert _reads(Fallback("n", *coefficients(None, 0)), ["r", "s", "x"]) == {"q": set()}
-    # An input the node does not declare cannot be traced: nothing is established.
-    assert _reads(branching, ["r", "undeclared"]) is None
+    # Declared or not: the hook is traced on what it is handed.
+    assert _reads(branching, ["r", "undeclared"]) == {"q": set(), "steady": set()}
+    # An equation that holds a sub-program (control flow) is the same as no other.
+    assert _reads(Switched("n", *coefficients(None, 0)), ["r", "x"], ["x"]) == {"q": {"x"}}
 
 
 def test_a_flux_that_changes_with_the_inputs_it_is_handed_is_not_a_seed_of_one_sweep():
@@ -489,7 +516,8 @@ def test_no_hook_is_traced_for_a_group_its_edges_alone_pass(monkeypatch):
                                 pytest.param(1.0, marks=pytest.mark.slow)])
 def test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution(kq, mode, solver):
     """The same pair with ``q`` written by ``update`` and read as a state
-    field: the group iterates it.  8.7e-8 to 3.4e-7 off the 6x6 solution
+    field: the group iterates it.  8.7e-8 (kq 0.5 and 1.0), 7.0e-7 (kq
+    1.5, Gauss-Seidel) and 1.0e-6 (kq 1.5, Jacobi) off the 6x6 solution,
     where the flux edges were 4.3e-4 (kq 0.5) to 0.77 (kq 1.5) off.
     """
     gm, nodes = robin_pair(kq, cls=Carried, mode=mode, solver=solver)
@@ -509,29 +537,271 @@ def test_outside_a_group_the_loop_cannot_be_read():
 
 
 # ---------------------------------------------------------------------------
-# A hook that indexes its inputs.
+# A hook that indexes an input.
 # ---------------------------------------------------------------------------
 
-def test_a_hook_that_indexes_its_input_is_asked_for_its_fluxes_with_the_declared_inputs():
-    """``validate()`` asks each flux hook for its keys with no inputs; one
-    that indexes an input raised a bare ``KeyError`` there, for every
-    edge from its flux.  Outside a group the edge is read forward."""
-    nodes = [Side("a", *coefficients(None, 0)), Side("b", *coefficients(0.8, 1), strict=True),
+class Counting(Side):
+    """A :class:`Side` whose flux hook indexes ``s`` and counts its calls."""
+
+    calls = 0
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        type(self).calls += 1
+        return {"q": state["u"] + boundary_inputs["s"]}
+
+
+@pytest.mark.parametrize("group", [None, ["b", "c"]])
+@pytest.mark.parametrize("edges", [
+    [("b", "q", "c", "r", 1.0), ("c", "u", "b", "r", 1.0)],
+    [("a", "u", "b", "s", 1.0), ("b", "q", "c", "r", 1.0), ("b", "q", "c", "s", 1.0),
+     ("c", "u", "b", "r", 1.0)]], ids=["input not delivered", "input delivered"])
+def test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once(edges, group):
+    """``validate()`` asks each flux hook for its flux names with no
+    inputs, once, however many edges read its fluxes.  A hook that
+    indexes an input raised a bare ``KeyError`` there; it is an ``ERROR``
+    line that names the node, the hook and the input, and ``compile()``
+    raises it.  (Asked a second time with the declared inputs, such a
+    hook passed and failed at the first step instead.)
+    """
+    Counting.calls = 0
+    nodes = [Side("a", *coefficients(None, 0)), Counting("b", *coefficients(0.8, 1)),
              Side("c", *coefficients(None, 2))]
-    edges = [("a", "u", "b", "s", 1.0), ("b", "q", "c", "r", 1.0)]
-    gm = built(nodes, edges, None)
+    gm = built(nodes, edges, group)
+    errors = [line for line in gm.validate() if line.startswith("ERROR")]
+    assert Counting.calls == 1
+    assert len(errors) == 1 and errors[0].startswith(
+        "ERROR: compute_boundary_fluxes of node 'b' raised KeyError('s') when it was asked "
+        "for its flux names with no boundary inputs: it indexes boundary_inputs['s'].")
+    assert "boundary_inputs.get('s'," in errors[0]
+    with pytest.raises(RuntimeError, match="compute_boundary_fluxes of node 'b' raised KeyError"):
+        gm.compile()
+
+
+# ---------------------------------------------------------------------------
+# Inputs the node does not declare.  ``boundary_input_spec()`` is empty by
+# default and a node may read an input it does not declare, so the hook is
+# traced on what the edges deliver, declared or not.
+# ---------------------------------------------------------------------------
+
+class Bare(Side):
+    """A :class:`Side` that declares no input (the default)."""
+
+    boundary_input_spec = SimulationNode.boundary_input_spec
+
+
+class Guide(Bare):
+    """The node of the developer guide's Robin recipe: it is handed ``robin_in``."""
+
+    drives = "robin_in"
+
+
+class GuideDeclared(Guide):
+    def boundary_input_spec(self):
+        return {"robin_in": BoundaryInputSpec(shape=(), dtype=F, default=ZERO)}
+
+
+GUIDE = [(source, field, target, "robin_in", gain) for source, field, target, _r, gain in ROBIN]
+
+
+def guide_pair(cls_a, cls_b, kq=None, bias=False):
+    """The guide's recipe, verbatim, on two nodes named as it names them."""
+    nodes = [cls_a("node_a", *coefficients(kq, 0), reads="robin_in"),
+             cls_b("node_b", *coefficients(kq, 1), reads="robin_in")]
+    gm = GraphManager()
+    for node in nodes:
+        gm.add_node(node)
+    add_robin_coupling(
+        gm, "node_a", "node_b",
+        value_field_a="u", flux_field_a="q",
+        value_field_b="u", flux_field_b="q",
+        input_a="robin_in", input_b="robin_in",
+        alpha=0.5,  # mixing: 0=pure Neumann, 1=pure Dirichlet
+    )
+    edges = list(GUIDE)
+    if bias:    # a state edge into an input nobody declares, and a third member
+        nodes.append(Carried("src", 0.8, 0.0, 0.0, None, 0.0))
+        gm.add_node(nodes[-1])
+        gm.add_edge(source="src", target="node_a", source_field="u", target_field="bias")
+        gm.add_edge(source="node_a", target="src", source_field="u", target_field="r")
+        edges += [("src", "u", "node_a", "bias", 1.0), ("node_a", "u", "src", "r", 1.0)]
+    return gm, nodes, edges
+
+
+VARIANTS = {"V1 neither declares": (Guide, Guide, False),
+            "V2 both declare": (GuideDeclared, GuideDeclared, False),
+            "V3 one declares": (Guide, GuideDeclared, False),
+            "V4 a state edge into an undeclared input": (GuideDeclared, GuideDeclared, True)}
+
+
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+@pytest.mark.parametrize("variant", sorted(VARIANTS))
+def test_a_flux_from_the_state_is_right_whether_or_not_its_node_declares_the_input(variant, mode):
+    """The Robin recipe with fluxes computed from the state: 1.7e-8
+    (Gauss-Seidel) and 3.8e-7 (Jacobi) off, the same with the input
+    declared, undeclared, or beside an undeclared input a state edge
+    feeds.  (While dependence on an undeclared input was assumed, V1, V3
+    and V4 were refused.)
+    """
+    cls_a, cls_b, bias = VARIANTS[variant]
+    gm, nodes, edges = guide_pair(cls_a, cls_b, bias=bias)
+    grouped(gm, [node.name for node in nodes], mode=mode)
+    assert off(gm, {k: v for k, v in exact(nodes, edges).items() if k != "src"}) < CLOSE
+
+
+def test_the_guides_robin_recipe_compiles_as_written():
+    """Verbatim, group and all, on nodes that override nothing but what
+    the recipe names: the default ``boundary_input_spec()``."""
+    gm, nodes, edges = guide_pair(Guide, Guide)
+    gm.add_coupling_group(["node_a", "node_b"])
     assert not any(line.startswith(("ERROR", "WARNING")) for line in gm.validate())
-    assert off(gm, exact(nodes, edges)) < CLOSE
+    assert off(gm, exact(nodes, edges)) < 1e-4      # the group's default tolerance
 
 
-@pytest.mark.parametrize("mode, solver", PER_PUSH)
-def test_a_hook_that_indexes_an_input_the_first_sweep_leaves_out_is_told_so(mode, solver):
-    """One step against the sweep order is right for a hook that
-    tolerates the first sweep; one that indexes the input used to raise a
-    bare ``KeyError`` naming it."""
-    gm = built(chain_nodes("bac", strict=True), CHAIN, ["a", "b", "c"], mode=mode, solver=solver)
-    gm.compile()
-    with pytest.raises(ValueError, match=r"compute_boundary_fluxes of 'b' indexes "
-                                         r"boundary_inputs\['s'\]") as info:
-        gm.step()
-    assert "edge 'a.q->b.s'" in str(info.value) and "boundary_inputs.get('s'" in str(info.value)
+def test_an_undeclared_input_a_flux_does_read_in_a_loop_is_refused_as_established():
+    gm, _nodes, _edges = guide_pair(Guide, Guide, kq=0.5)
+    grouped(gm, ["node_a", "node_b"])
+    with pytest.raises(ValueError, match="depend on each other in a loop") as info:
+        gm.compile()
+    assert "flux node_a.q reads input 'robin_in'" in str(info.value)
+    assert "assumed" not in str(info.value) and "is never refused" in str(info.value)
+
+
+class Wide(GuideDeclared):
+    """V5, a control: ``profile`` is declared at the default shape ``()``
+    and handed three values; the flux reads ``profile[0]``, which only
+    traces at the shape that is handed."""
+
+    def boundary_input_spec(self):
+        return {"robin_in": BoundaryInputSpec(shape=(), dtype=F, default=ZERO),
+                "profile": BoundaryInputSpec()}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        profile = boundary_inputs.get("profile", jnp.zeros(3, F))
+        return {"q": self.flux(state["u"], boundary_inputs) + 0.0 * profile[0]}
+
+
+class Three(SimulationNode):
+    def initial_state(self):
+        return {"v": jnp.asarray([0.1, 0.2, 0.3], F)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"v": state["v"]}
+
+
+def test_a_hook_is_traced_at_the_shape_it_is_handed_not_the_declared_one():
+    """The flux refusal has nothing to say (the fluxes read a state
+    field's value); what stops the graph is what always stopped it, the
+    declared shape against the delivered one."""
+    gm, _nodes, _edges = guide_pair(Wide, Wide)
+    gm.add_node(Three("vec", 1.0))
+    for target in ("node_a", "node_b"):
+        gm.add_edge(source="vec", target=target, source_field="v", target_field="profile")
+    grouped(gm, ["node_a", "node_b"])
+    gm._refuse_unsolved_group_fluxes()
+    assert not any("is not compiled" in line for line in gm.validate())
+    with pytest.raises(Exception, match="edge validation failed"):
+        gm.compile()
+
+
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+@pytest.mark.parametrize("order", ["abc", "acb", "bac", "bca", "cab", "cba"])
+def test_a_chain_with_undeclared_inputs_is_judged_as_one_with_declared_inputs(order, mode):
+    """Every sweep order of the chain, nothing declared.  Only two steps
+    against the sweep under Jacobi reads a seed the two sweeps do not
+    reach (0.15 off before); every other order is right (1.8e-7 to
+    3.8e-7) and compiles."""
+    nodes = chain_nodes(order, cls=Bare)
+    gm = built(nodes, CHAIN, ["a", "b", "c"], mode=mode)
+    if (order, mode) == ("cba", "jacobi"):
+        with pytest.raises(ValueError, match="flux c.q would take 3") as info:
+            gm.compile()
+        assert "assumed" not in str(info.value)
+    else:
+        assert off(gm, exact(nodes, CHAIN)) < CLOSE
+
+
+# ---------------------------------------------------------------------------
+# What the message offers, and what the trace is handed.
+# ---------------------------------------------------------------------------
+
+class Several(SimulationNode):
+    """Fluxes ``{name: the input it reads, or None}``, each the state plus
+    half that input.  Nothing declared."""
+
+    def __init__(self, name, fluxes):
+        super().__init__(name=name, timestep=1.0)
+        self.fluxes = fluxes
+
+    def initial_state(self):
+        return {"u": ZERO}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"u": 0.5 + 0.25 * boundary_inputs.get("r", ZERO)}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        return {flux: state["u"] + (0.5 * boundary_inputs.get(reads, ZERO) if reads else 0.0)
+                for flux, reads in self.fluxes.items()}
+
+
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+@pytest.mark.parametrize("order", ["AB", "BA"])
+def test_a_chain_that_bounces_between_two_members_is_not_offered_an_order(order, mode):
+    """``A.f1 <- B.g1 <- A.f2 <- B.g2 <- A.f3``, and ``f1`` read by ``A``'s
+    update: refused whichever node is added first, so the message offers
+    the state field and no order of the nodes."""
+    make = {"A": lambda: Several("A", {"f3": None, "f2": "x2", "f1": "x1"}),
+            "B": lambda: Several("B", {"g2": "y2", "g1": "y1"})}
+    edges = [("A", "f3", "B", "y2", 1.0), ("B", "g2", "A", "x2", 1.0), ("A", "f2", "B", "y1", 1.0),
+             ("B", "g1", "A", "x1", 1.0), ("A", "f1", "A", "r", 1.0)]
+    gm = built([make[name]() for name in order], edges, ["A", "B"], mode=mode)
+    with pytest.raises(ValueError, match="along a chain that runs against the order") as info:
+        gm.compile()
+    assert "write it to a state field" in str(info.value)
+    assert "add the nodes" not in str(info.value)
+
+
+class Gated(Side):
+    """Its flux reads ``s`` only when it is also handed ``x``."""
+
+    def boundary_input_spec(self):
+        return {name: BoundaryInputSpec(shape=(), dtype=F, default=ZERO) for name in "rsx"}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        q = self.k[2] + self.k[4] * state["u"]
+        if "x" in boundary_inputs:
+            q = q + self.k[3] * boundary_inputs.get("s", ZERO)
+        return {"q": q}
+
+
+@pytest.mark.parametrize("handed", ["nothing", "an external input", "an edge from outside the group"])
+def test_the_hook_is_traced_with_every_input_the_pass_hands_it(handed):
+    """An external input and an edge from a node outside the group are
+    inputs of the hook like any other: with ``x`` handed the two fluxes
+    read each other, and the group is refused; without it they do not."""
+    nodes = [Gated("a", *coefficients(0.5, 0)), Side("b", *coefficients(0.5, 1))]
+    edges = [("a", "q", "b", "s", 1.0), ("b", "q", "a", "s", 1.0),
+             ("a", "u", "b", "r", 1.0), ("b", "u", "a", "r", 1.0)]
+    if handed == "an edge from outside the group":
+        nodes.append(Carried("o", 0.8, 0.0, 0.0, None, 0.0))
+        edges.append(("o", "u", "a", "x", 1.0))
+    gm = built(nodes, edges, ["a", "b"])
+    if handed == "an external input":
+        gm.add_external_input("a", "x", shape=(), dtype=F)
+    if handed == "nothing":
+        gm._refuse_unsolved_group_fluxes()
+    else:
+        with pytest.raises(ValueError, match="depend on each other in a loop"):
+            gm.compile()
+
+
+def test_every_group_of_the_graph_is_asked():
+    """A loop in the second group added is refused like one in the first."""
+    nodes = [Side(name, *coefficients(None if name in "ab" else 0.5, i % 3))
+             for i, name in enumerate("abcd")]
+    edges = [("a", "u", "b", "r", 1.0), ("b", "u", "a", "r", 1.0),
+             ("c", "q", "d", "s", 1.0), ("d", "q", "c", "s", 1.0)]
+    gm = built(nodes, edges, ["a", "b"])
+    grouped(gm, ["c", "d"])
+    with pytest.raises(ValueError, match=r"coupling group \['c', 'd'\] is not compiled"):
+        gm.compile()
+    assert sum(line.startswith("ERROR: coupling group ['c', 'd']") for line in gm.validate()) == 1

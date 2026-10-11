@@ -39,7 +39,6 @@ from maddening.core._graph_specs import (
     _node_fluxes,
     _node_update,
 )
-from maddening.core.coupling import _flux_loops
 from maddening.core.coupling._interface_plan import KERNEL_LENGTH, interface_plan
 from maddening.core.coupling._group_layout import (
     _group_accel_fields,
@@ -482,23 +481,6 @@ def _run_coupled_block_impl(
                     boundary_inputs[ei.target_field] = node_ext[ei.target_field]
         return boundary_inputs
 
-    def _seed_fluxes(nn, state_nn, bi, strict):
-        """``nn``'s fluxes in a sweep that seeds them (``_flux_loops``).
-
-        A sweep that is not strict hands a member its inputs without the
-        ones a flux not yet computed delivers.  A hook that indexes such
-        an input raised a bare ``KeyError`` naming it; it is told which
-        edge, why, and what to do.  Nothing is traced differently.
-        """
-        try:
-            return _node_fluxes(nodes[nn], state_nn, bi, _get_dt(nn), _np(nn))
-        except KeyError as exc:
-            explained = None if strict else _flux_loops._unseeded_input_error(
-                group, plan, nn, bi, exc)
-            if explained is None:
-                raise
-            raise explained from exc
-
     use_linear_interp = group.boundary_interpolation == "linear"
     use_quadratic_interp = group.boundary_interpolation == "quadratic"
     # How many evaluations one pass rounds like, for the float floor the
@@ -542,11 +524,11 @@ def _run_coupled_block_impl(
                 for strict in (False, True):
                     for nn in group_node_names:
                         if nn in flux_producing_nodes:
-                            flux_s[nn] = _seed_fluxes(
-                                nn, s[nn],
+                            flux_s[nn] = _node_fluxes(
+                                nodes[nn], s[nn],
                                 _resolve_boundary(nn, s, flux_s, strict=strict,
                                                   consumer=s[nn]),
-                                strict)
+                                _get_dt(nn), _np(nn))
             out = _node_update(nodes[dst], dst_pre,
                                _resolve_boundary(dst, s, flux_s, consumer=dst_pre),
                                _get_dt(dst), _np(dst))
@@ -686,7 +668,9 @@ def _run_coupled_block_impl(
                     if nn in flux_producing_nodes:
                         bi0 = _resolve_boundary(nn, latest_results, flux_s, strict=strict,
                                                 consumer=latest_results[nn])
-                        flux_s[nn] = _seed_fluxes(nn, latest_results[nn], bi0, strict)
+                        flux_s[nn] = _node_fluxes(
+                            nodes[nn], latest_results[nn], bi0, _get_dt(nn), _np(nn),
+                        )
         for nn in group_node_names:
             if use_subcycling and group_dividers[nn] > 1:
                 n_sub = group_dividers[nn]
@@ -731,7 +715,9 @@ def _run_coupled_block_impl(
                     if nn in flux_producing_nodes:
                         bi = _resolve_boundary(nn, latest_results, flux_s, strict=strict,
                                                consumer=latest_results[nn])
-                        flux_s[nn] = _seed_fluxes(nn, latest_results[nn], bi, strict)
+                        flux_s[nn] = _node_fluxes(
+                            nodes[nn], latest_results[nn], bi, _get_dt(nn), _np(nn),
+                        )
 
         results = {}
         for nn in group_node_names:

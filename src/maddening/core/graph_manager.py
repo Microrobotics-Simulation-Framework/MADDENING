@@ -1990,7 +1990,8 @@ class GraphManager:
             _flux_loops._refuse_unsolved_fluxes(
                 g, g_plan, self._nodes, self._state, params_of,
                 lambda g=g: self._group_sweep_order(g),
-                g_plan.external_inputs(self._external_inputs))
+                g_plan.external_inputs(self._external_inputs),
+                (self._params or {}).get("mappings"))
 
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*
@@ -2452,6 +2453,7 @@ class GraphManager:
         # lines about edges from a node to itself at the end.
         flux_sourced: set[int] = set()
         unknown_source: set[int] = set()
+        flux_names: dict[str, Any] = {}
 
         # A node's ``delta_t`` written after ``add_node`` read it.
         issues.extend(_graph_specs._timestep_drift_issues(self._nodes))
@@ -2472,9 +2474,19 @@ class GraphManager:
                         node_obj = self._nodes[e.source_node].node
                         from maddening.core.node import SimulationNode as _SimBase
                         if type(node_obj).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
-                            flux_keys = _graph_specs._flux_field_names(
-                                node_obj, self._state[e.source_node])
-                            if e.source_field in flux_keys:
+                            # Each hook is asked once, however many edges
+                            # read its fluxes.  One that cannot answer
+                            # without inputs has its own ERROR line, and
+                            # its edges are taken to read a flux.
+                            if e.source_node not in flux_names:
+                                try:
+                                    flux_names[e.source_node] = _graph_specs._flux_field_names(
+                                        node_obj, self._state[e.source_node])
+                                except _graph_specs._FluxHookNeedsItsInputs as exc:
+                                    flux_names[e.source_node] = None
+                                    issues.append(f"ERROR: {exc}")
+                            flux_keys = flux_names[e.source_node]
+                            if flux_keys is None or e.source_field in flux_keys:
                                 is_flux_field = True
                                 flux_sourced.add(id(e))
                     if not is_flux_field:

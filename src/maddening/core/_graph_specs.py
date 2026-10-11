@@ -500,25 +500,37 @@ def _refuse_edge_sources(rules: Sequence[_EdgeSourceRule], state, *,
 
 
 
+class _FluxHookNeedsItsInputs(ValueError):
+    """A flux hook raised ``KeyError`` when asked for its flux names with
+    no boundary inputs (:func:`_flux_field_names`)."""
+
+
 def _flux_field_names(node, fields) -> Any:
     """The names of the boundary fluxes *node* returns, asked of the hook.
 
     ``compute_boundary_fluxes(fields, {}, 0.0)``, as ``validate()`` has
-    always asked.  A hook that indexes an input it declares
-    (``boundary_inputs["u"]``, the ordinary way to read one) raises
-    ``KeyError`` on the empty dict, which used to leave ``validate()`` and
-    ``compile()`` with that bare error for every edge from one of the
-    node's fluxes.  Such a hook is asked again with a zero for every input
-    ``boundary_input_spec()`` declares.  A hook that answers the first
-    call is not called twice.
+    always asked, once.  A hook that indexes an input
+    (``boundary_inputs["u"]``) raises ``KeyError`` on the empty dict,
+    which left ``validate()`` and ``compile()`` with that bare error for
+    every edge from one of the node's fluxes.  It is raised as
+    :class:`_FluxHookNeedsItsInputs`, which names the node, the hook and
+    the input and says what the hook must do; ``validate()`` lists it as
+    an ``ERROR`` line.
     """
     try:
         return node.compute_boundary_fluxes(fields, {}, 0.0).keys()
-    except KeyError:
-        from maddening.core._param_probes import _declared_boundary_zeros  # noqa: PLC0415
-
-        return node.compute_boundary_fluxes(
-            fields, _declared_boundary_zeros(node), 0.0).keys()
+    except KeyError as exc:
+        missing = exc.args[0] if exc.args else "?"
+        raise _FluxHookNeedsItsInputs(
+            f"compute_boundary_fluxes of node {getattr(node, 'name', '?')!r} raised "
+            f"KeyError({missing!r}) when it was asked for its flux names with no "
+            f"boundary inputs: it indexes boundary_inputs[{missing!r}]. A flux hook is "
+            "called without the inputs that are not available yet (validate() asks it "
+            "with none, and the first of the two sweeps that compute a coupling "
+            "group's fluxes leaves out an input whose flux does not exist yet), so it "
+            f"must return its fluxes without them: read the input with "
+            f"boundary_inputs.get({missing!r}, <a default of its shape and dtype>)."
+        ) from exc
 
 
 def _geometry_edge_issues(edges, nodes, state) -> list[str]:
@@ -559,9 +571,13 @@ def _geometry_edge_issues(edges, nodes, state) -> list[str]:
         fields = state[holder]
         if field not in fields:
             node = nodes[holder].node
-            is_flux = (
-                type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes
-                and field in _flux_field_names(node, fields))
+            try:
+                is_flux = (
+                    type(node).compute_boundary_fluxes
+                    is not SimulationNode.compute_boundary_fluxes
+                    and field in _flux_field_names(node, fields))
+            except _FluxHookNeedsItsInputs:
+                is_flux = False     # validate() has the hook's own error
             if is_flux:
                 issues.append(
                     f"ERROR: edge {e.key}: geometry field {field!r} of {holder!r} is a "

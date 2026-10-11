@@ -537,6 +537,31 @@ class GraphManager:
             for name, spec in self._nodes.items()
         }
 
+    def __copy__(self):
+        """``copy.copy(gm)`` is refused (``TypeError``): use
+        ``copy.deepcopy(gm)``.
+
+        A shallow copy would share this graph's nodes, its parameter tree
+        and its record of the ``node.params`` writes it has taken in
+        (``_node_writes_seen``), but not its compiled step or its dirty
+        flag.  So after a ``node.params`` write the first of the two graphs
+        to sync took the write in for both, and only that one recompiled:
+        with a node whose ``update`` takes no ``params`` (its constants
+        baked into the step), the other went on running the old value
+        while ``node.params`` and ``to_dict()`` of both said the new one,
+        with nothing said.  Giving each graph a record of its own instead
+        makes the second sync write the node's value again into the shared
+        tree, over a calibration made through the first graph after it had
+        taken the write in.  No sharing of half a graph is exact, so none
+        is made.  A deep copy (or a pickle of a graph not yet compiled) is
+        a graph of its own that runs and reports what the original does.
+        """
+        raise TypeError(
+            "copy.copy() of a GraphManager is refused: a shallow copy would share "
+            "the graph's nodes, parameter tree and record of node.params writes but "
+            "not its compiled step, so after a write one of the two graphs would run "
+            "a value neither reports.  Use copy.deepcopy(gm) for a graph of its own.")
+
     def _merge_live_params(self, fresh: dict, live: Optional[dict]) -> dict:
         """``fresh`` (the nodes' own values) with every leaf of ``live``
         (``gm.params``) that still fits written over it; leaves that no
@@ -7419,10 +7444,34 @@ class GraphManager:
     def to_dict(self, *, strict_mappings: bool = True) -> dict:
         """Serialise the graph structure (not runtime state).
 
-        Node ``params`` are the *effective* values — the constructor
-        arguments with the live :attr:`params` written over them (see
+        Node ``params`` are the *effective* values — each node's own
+        ``params`` with the live :attr:`params` written over them (see
         :meth:`effective_node_params`) — and ``param_specs`` carries the
-        graph's :meth:`set_param_spec` overrides.  An edge's interface
+        graph's :meth:`set_param_spec` overrides.  A node's ``params`` are
+        the constructor arguments its class handed to
+        ``SimulationNode.__init__``, and they are all of the node that is
+        saved: :meth:`from_dict` rebuilds it as ``cls(name=...,
+        timestep=..., **params)``.  A constructor argument a class keeps
+        anywhere else (``self.stiffness = stiffness``) is **not** in the
+        config, and the reloaded node has the constructor's default.  For
+        a node that was constructed with such an argument, at a value
+        other than its default, this method gives a ``UserWarning`` naming
+        the node, its class, the arguments and the fix (see
+        :meth:`SimulationNode.to_dict
+        <maddening.core.node.SimulationNode.to_dict>` for the rule, which
+        goes by the argument's name, and for what it cannot tell); in
+        every release before 0.4.0 nothing said so (MADD-ANO-277).  A
+        class that overrides ``to_dict`` is not asked: the entry is what
+        the override returns, except that for a node whose ``update``
+        takes ``params`` the keys of ``node.params`` in the entry's
+        ``params`` are these effective values (a key the override leaves
+        out is written all the same), and a key the override adds to them
+        is kept after them.  (:func:`~maddening.usd.serialization.save_graph_to_usd` asks
+        such a class too: a stage carries ``params`` only.)  A
+        node inside a ``HybridNode`` is written with the type
+        ``HybridNode``, which :meth:`from_dict` cannot rebuild (it raises);
+        one inside a sharded wrapper is rebuilt unsharded, with a warning.
+        An edge's interface
         mapping is written as its
         :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (kind,
         hyper-parameters, point references — never the weights, which
@@ -7446,11 +7495,35 @@ class GraphManager:
         its iteration cap would still be a group, and would quietly
         solve the same graph a different way.
 
-        The result is JSON-*valid*, not merely JSON-shaped: a non-finite
-        float anywhere in it -- a diverged param, an infinite ParamSpec
-        bound -- is the quoted token ``"NaN"`` / ``"Infinity"`` /
-        ``"-Infinity"``, not the bare token ``json.dumps`` writes by
-        default and no conforming reader accepts (``MADD-ANO-006``).
+        Where the result is numbers, text and containers it is
+        JSON-*valid*, not merely JSON-shaped: a non-finite float anywhere
+        in it -- a diverged param, an infinite ParamSpec bound -- is the
+        quoted token ``"NaN"`` / ``"Infinity"`` / ``"-Infinity"``, not the
+        bare token ``json.dumps`` writes by default and no conforming
+        reader accepts (``MADD-ANO-006``).  **An array is not converted.**
+        A node whose ``params`` hold a NumPy or JAX array (a gain matrix, a
+        field-valued constant) has that array in the result as it is (a
+        NumPy array as a copy), so plain ``json.dumps`` of such a config
+        raises ``TypeError``, where this docstring used to say it was
+        valid for every graph.  :meth:`from_dict` takes the result as it
+        stands, and for JSON write the arrays as lists --
+        ``json.dumps(config, default=lambda a: numpy.asarray(a).tolist())``
+        -- which :meth:`from_dict` reads back.  A list carries no dtype:
+        it comes back at the default float type.  With
+        ``jax_enable_x64`` off a float32 or a float64 array reloads bit
+        for bit (JAX computes with both as float32), and so does a float16
+        or bfloat16 array applied to a float32 state (float32 holds each of
+        its values exactly); with it on only a float64 array does, and a
+        float32, float16 or bfloat16 array comes back as float64 and the
+        reloaded graph drifts from the saved one (1e-7 to 3e-7 in a state
+        of order one after five steps, in the cases measured).  A node
+        that computes in a float16 or bfloat16 constant's own dtype (a
+        state built from it) computes in the wider type after the reload,
+        in either mode (4e-4 and 2e-3 off after five steps in the case
+        measured).  :meth:`from_dict` of the result as it stands is exact
+        in every case.  A
+        node that holds such a constant as nested lists (``HeatNode``'s
+        ``grid_points``, ``LBMNode``'s ``wall_mask``) needs neither.
         :meth:`from_dict` turns those back into floats, and reads the
         bare tokens an older config carries as well.  The encoding is
         applied once, to the assembled tree, so each part's own
@@ -7460,8 +7533,9 @@ class GraphManager:
         :mod:`maddening.serialization.json_codec`.
 
         Because the encoding is applied here rather than at the write
-        boundary -- so that plain ``json.dumps`` of this result is valid,
-        which is what every caller in the tree does -- the result is
+        boundary -- so that plain ``json.dumps`` of this result is valid
+        (for a graph whose params hold no array, see above), which is what
+        every caller in the tree does -- the result is
         *already encoded*.  Write it with ``json.dumps`` or
         :func:`~maddening.serialization.json_codec.dumps_encoded`, and
         **not** with :func:`~maddening.serialization.json_codec.dumps`:
@@ -7498,7 +7572,21 @@ class GraphManager:
                 # load.
                 d["timestep"] = spec.timestep
             if spec.accepts_params:
-                d["params"] = self.effective_node_params(name)
+                # The keys of the node's ``params`` at their live values,
+                # and after them whatever else the node's own ``to_dict``
+                # put under ``params``: an argument a class keeps outside
+                # ``params`` and saves by overriding ``to_dict``.  Writing
+                # the live values in place of the override's ``params``
+                # lost such an argument without a word.  A key of
+                # ``node.params`` that the override leaves out is written
+                # all the same, as it always was; an entry that is not a
+                # dict is replaced, as it always was.
+                live = self.effective_node_params(name)
+                own = d.get("params")
+                d["params"] = (
+                    {**live, **{k: v for k, v in own.items() if k not in live}}
+                    if isinstance(own, dict) else live
+                )
             nodes.append(d)
         overrides = {
             n: {k: s.to_dict() for k, s in o.items()}

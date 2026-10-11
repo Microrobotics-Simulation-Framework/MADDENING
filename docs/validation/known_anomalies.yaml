@@ -3881,7 +3881,9 @@ anomalies:
       and writes nothing, because the step reads the mask the constructor
       built.  The same sweep over every built-in node's constructor
       arguments found one more loss, `AdaptiveNode(dtype=...)`, which no
-      release carried and which is fixed in the same change.
+      release carried and which is fixed in the same change.  The general
+      case -- a node class written outside the package that keeps a
+      constructor argument outside `params` -- is MADD-ANO-277.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -8759,7 +8761,16 @@ anomalies:
       A value mutated inside an object `node.params` holds is not a counted
       write, and changes no trace on its own; replace the value to write
       it.  An FMU sidecar built before a write keeps the compiled step it
-      was given.
+      was given.  A constant a node keeps as an attribute instead of in
+      `node.params` (`self.stiffness = stiffness`) is not counted either:
+      written after `compile()` with no recompile, `gm.step` and a
+      `run_scan` length already traced go on with the old value while a
+      `run_scan` at a length not traced before runs the new one, with
+      nothing said, until the next `compile()` (the quickstart's spring
+      written from 12 to 40: ball height after 1000 steps 1.5782 by
+      `step()`, the k = 12 height, and 3.2044 by a newly traced
+      `run_scan(990)`, the k = 40 one; measured 2026-10-10).  Keep
+      constants in `params`; the parameters guide says so.
     verification:
       - "tests/property/test_differential_entry_points_after_a_node_write.py::test_every_entry_point_runs_the_written_model"
       - "tests/core/test_node_params_writes_are_observed.py::test_a_structural_write_reaches_gm_step_without_a_compile"
@@ -19350,4 +19361,248 @@ anomalies:
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution"
+  - anomaly_id: "MADD-ANO-277"
+    title: "A constructor argument a node keeps outside params was dropped by every save: the reloaded graph ran the constructor's default"
+    description: >
+      A saved node is its `params` and nothing else: `SimulationNode.to_dict`
+      writes `self.params`, and every path that rebuilds a node from a saved
+      graph calls `cls(name=, timestep=, **params)` -- `GraphManager.from_dict`
+      on a `to_dict()` config, `load_graph_from_usd` on a saved stage.  A
+      constructor argument a class keeps anywhere else (`self.stiffness =
+      stiffness`) was therefore not saved, and the rebuilt node had the
+      constructor's default, with no error or warning from `to_dict`,
+      `from_dict`, `validate` or `compile`.  The quickstart taught that
+      spelling: its own coupled graph built with `SpringNode(stiffness=40.0)`
+      saved the entry `'params': {}` and reloaded as the default k = 12 graph
+      -- ball height after 1000 steps 3.5564 for the saved graph, 1.5782 for
+      the reloaded one, which is the height of a graph built with k = 12.
+      `GraphManager.to_dict`'s docstring said a config holds "the constructor
+      arguments".  MADD-ANO-034 is this mechanism in one built-in node, and
+      its fix held the built-in nodes to a round-trip test; a node class
+      written outside the package was not covered.  Measured at v0.1.0,
+      v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (a `git archive` of each tag, one
+      script, CPU, jaxlib 0.11.0: the same entry and the same two heights at
+      every tag) and on the 0.4.0 development tree.  Found by the whole-tree
+      audit of 2026-10-10.
+      From 0.4.0 every door that saves a node's constants -- `to_dict()` and
+      `save_graph_to_usd` -- gives a `UserWarning` naming the node, its
+      class, the arguments and the fix, for a node that was constructed with
+      an argument for a named parameter of its class's `__init__`, at a value
+      that is not exactly the parameter's default (type and sign included),
+      that is no key of `node.params`.
+      The quickstart's node and the node authoring guide's template hand
+      their constants to `super().__init__`, and the guide says where a
+      constant belongs and what a save does not carry.  The save is not
+      refused: an error would stop every such node from being saved at all.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent in every release before 0.4.0, and as wrong as the dropped
+      argument matters: the reloaded graph looks identical and runs another
+      model.  It reaches every workflow that saves a graph and runs it again.
+      Graded `major` (a silent wrong result is never `minor`).  Not
+      `critical`: it needs a node class that keeps a constructor argument
+      outside `params`, a node of it built with a value other than the
+      default, and a save and reload between construction and use; the
+      built-in nodes save every argument.  `context_dependent` because what
+      the default model does instead depends on the model.
+    affected_components:
+      - "maddening.core.node.SimulationNode"
+      - "maddening.core.graph_manager.GraphManager"
+      - "maddening.usd.serialization.save_graph_to_usd"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      In the node class, pass every constructor argument to
+      `super().__init__(name, timestep, key=value, ...)` and read it from
+      `self.params`.  For a class that cannot be changed: after loading the
+      graph, rebuild the node with its arguments and replace the loaded one
+      before compiling.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: the argument is still not saved, and `to_dict()` now
+      says so, as `save_graph_to_usd` does.  The rule goes by the argument's
+      name and reads the class's own constructor only.  So it is silent, and
+      the argument is lost all the same, for: anything a `**kwargs` of the
+      constructor took in and did not hand to the base class, an argument a
+      subclass's `**kwargs` hands up to a parent that keeps it as an
+      attribute included (`Child(gain=5.0)` over a parent that keeps `gain`
+      and steps `x *= 1 - dt * gain` from x = 1.5 at dt = 0.01: after 40
+      steps 0.19277 saved against 0.66855 reloaded); anything an
+      `*args` took in; a node of a class, or with a mixin, whose own
+      `__new__` hands no arguments on; a copy or an unpickled node; and an
+      attribute written after construction.  And it names a node that
+      saves an argument another way (under another key, or folded into
+      another argument) although that node reloads bit for bit; such a
+      class overrides `to_dict()` to say so, which only a config honours.
+      `save_graph_to_usd` writes `params` and never calls `to_dict`, so it
+      asks such a class all the same (named although its stage reloads bit
+      for bit, or because its stage loses an argument the override adds).
+      For a node whose `update` takes `params` a config writes the live
+      values of the keys of `node.params` into the `params` the override
+      returns and keeps the keys the override adds.  A `NaN` argument is
+      the `NaN` default only with the same sign and payload.
+      `geometry_source`, which the base constructor takes out of `params`,
+      is saved by nothing; no part of the package reads it.
+    verification:
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_quickstart_idiom_is_named_and_reloads_as_the_default_model"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_corrected_quickstart_node_round_trips_at_the_value_it_was_built_with"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_that_is_not_exactly_its_default_and_outside_params_is_reported"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_at_exactly_its_default_is_not_reported"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_what_the_rule_cannot_tell_is_not_reported"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_no_built_in_node_is_reported"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_zero_of_the_other_sign_and_an_int_for_a_float_are_not_the_default"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_node_that_saves_an_argument_another_way_says_so_by_overriding_to_dict"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_a_parent_keeps_is_lost_through_the_childs_kwargs_and_nothing_says_so"
+      - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_the_stage_door_gives_the_warning_the_config_door_gives"
+      - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_saved_to_a_stage_is_told_of_the_node_it_wraps"
+      - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_an_override_of_to_dict_is_honoured_by_a_config_and_not_by_a_stage"
+      - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_nan_is_its_default_only_with_the_same_bits"
+      - "tests/core/test_a_config_keeps_what_a_to_dict_override_adds_to_params.py::test_a_reloaded_config_has_the_added_argument_and_the_calibrated_value"
+      - "tests/core/test_a_config_keeps_what_a_to_dict_override_adds_to_params.py::test_behind_each_wrapper_the_entry_has_both"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-278"
+    title: "An assignment to node.params on a sharded wrapper or a HybridNode replaced the wrapper's mapping alone: the step ran the old value while node.params read the new one back"
+    description: >
+      The guide documents two spellings of a write to a node's constants:
+      `node.params["k"] = v` and `node.params = {**node.params, "k": v}`.  In
+      a sharded graph the node `gm.get_node(name)` returns is the wrapper.
+      In every release the wrappers held a copy of the wrapped node's params,
+      so a write of either spelling made through the wrapper was lost
+      (MADD-ANO-004; MADD-ANO-164 for `HybridNode`).  The fix for those made
+      the wrapper share the wrapped node's mapping, which made the keyed
+      write work and left the assignment: it replaced the wrapper's mapping
+      alone.  After it the step ran the old value, bit for bit the unwritten
+      graph; `node.params` read the new value back; `gm.params` kept the old
+      one; `params_table()` showed the value in force and `to_dict()` saved
+      the one that never ran; every later keyed write through the wrapper
+      went into the orphaned mapping and was lost too; and nothing warned.
+      The same assignment made on the wrapped node was lost the other way
+      round.  Measured after `node.params = {**node.params, key: v}` and
+      `compile()` at v0.1.0 (`HybridNode` and the pointwise wrapper), and at
+      v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (also `ShardedStencilNode`): the
+      graph ran the constructor's value at every tag (a `git archive` of
+      each, CPU, jaxlib 0.11.0, two virtual devices), where the same
+      statements on the unwrapped node ran the new one.  On the 0.4.0
+      development tree: a `ShardedStencilNode` on two devices around a
+      16-cell `HeatNode` (length 1, time step 2e-3, initial temperatures
+      `300 + 40 * numpy.random.default_rng(5).random(16)` in float32), its
+      diffusivity assigned from 0.01 to 0.02 after `compile()`, ran four
+      steps to a temperature 3.0e-3 (largest difference over largest
+      value) from the run constructed at 0.02 and identical to the run at
+      0.01.  Found by the whole-tree audit of
+      2026-10-10.
+      Resolved in 0.4.0: a wrapper has no mapping of its own.
+      `ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`
+      and `HybridNode` name the node they wrap, and `SimulationNode.params`
+      reads and assigns through it, so there is one mapping however it is
+      reached, with the write counter and the staleness rule of an unwrapped
+      node.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a documented way of changing a constant did nothing to the
+      run, while everything a user would read to check it -- `node.params`,
+      the saved config -- showed the new value.  Graded `major` (a silent
+      wrong result is never `minor`).  Not `critical`: it needs a sharded or
+      hybrid node and the assignment spelling of a write after the wrapper
+      is built; a constant set at construction, and a keyed write on the
+      0.4.0 tree, are unaffected.  `context_dependent` because what the old
+      value does instead depends on the model.
+    affected_components:
+      - "maddening.core.node.SimulationNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.core.simulation.hybrid_node.HybridNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On an affected release: set the value on the node before wrapping it,
+      or build a new wrapper around a node constructed with the new value
+      and replace the old one before compiling.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A wrapper written outside the package that shares its node's mapping
+      (`self.params = inner.params`) is followed in one direction: an
+      assignment on the wrapper reaches every node it holds that shared the
+      mapping replaced; one made on the node it wraps does not reach the
+      wrapper.  A reference to a mapping taken before an assignment is no
+      longer `node.params`, on a wrapper as on a node: write through
+      `node.params`.
+    verification:
+      - "tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs"
+      - "tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_every_entry_point_runs_the_value_assigned_on_a_wrapper"
+      - "tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_checkpoint_carries_the_value_assigned_on_a_wrapper"
+      - "tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_wrapper_has_no_mapping_of_its_own"
+      - "tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_that_shares_its_nodes_mapping_reaches_the_node"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-279"
+    title: "A deep copy of a graph put a node's value back over a constant calibrated in gm.params: the copy ran and saved another value than the original"
+    description: >
+      A node's `params` counts its writes, and a graph keeps, beside each
+      node, the counts it last saw there.  `copy.deepcopy` (and `pickle`) of
+      the mapping started its counts again at zero, while the graph's record
+      was copied with the counts it held.  So in `copy.deepcopy(gm)` of a
+      graph whose node had a counted write in its past, the copy's first
+      sync read "fewer writes than I saw" as a write of that key and put the
+      node's value over the live leaf.  A graph with a node write taken in
+      (rate 2.0) and a calibration in `gm.params` after it (rate 5.0) ran
+      5.0, and its deep copy ran, reported in `gm.params` and saved in
+      `to_dict()` 2.0, with no warning: the state after three steps 0.11875
+      for the original and 0.4864 for the copy, on a node on its own, inside
+      a `HybridNode` and inside `ShardedPointwiseNode` alike.  Found by the
+      audit of the wrapper-assignment fix (2026-10-11), on the 0.4.0
+      development tree, where it had stood since `node.params` began to
+      count its writes.  No release is affected: measured on a `git archive`
+      of v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1, none has `gm.params`, a
+      counting `node.params` or the graph's record of counts, so the
+      statements cannot be written there.
+      Resolved in 0.4.0: a mapping copied by `copy.deepcopy` or `pickle`
+      carries its counts and its lineage (copied once per copy operation, so
+      mappings that shared one still do), and a graph copied with its nodes
+      is consistent with them.  `copy.copy` of the mapping stays a second
+      mapping with zero counts and a lineage of its own.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a copy of a calibrated graph ran, reported and saved the
+      uncalibrated value.  Graded `major` (a silent wrong result is never
+      `minor`).  Not `critical`: it needs a deep copy of a compiled graph, a
+      counted `node.params` write before the copy and a `gm.params`
+      calibration of the same key after that write; a copy of a graph that
+      was only calibrated, or only written through its nodes, was right.
+      `context_dependent` because what the node's value does instead depends
+      on the model.
+    affected_components:
+      - "maddening.core.node.SimulationNode"
+      - "maddening.core.graph_manager.GraphManager"
+    affected_versions: "none"
+    workaround: >
+      None needed on a release.  On an affected development tree: build the
+      second graph from `to_dict()` and a checkpoint instead of copying it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A compiled graph cannot be pickled (its compiled step is a local
+      function), and says so; a graph not yet compiled can.
+      `copy.copy(gm)` is refused with a `TypeError` that names
+      `copy.deepcopy`.  A shallow copy shared the graph's nodes, its
+      parameter tree and its record of the writes it had seen, but not its
+      compiled step, so after a `node.params` write to a node whose
+      `update` takes no `params` the graph that stepped second ran the old
+      value while both reported the new one (x[0] 0.8145 against 0.4864
+      after three steps); a record of its own per copy would instead have
+      written the node's value again over a calibration made through the
+      other graph.  Never released: no release has the record.
+    verification:
+      - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_copy_runs_and_reports_what_the_original_does"
+      - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_deep_copy_of_a_graph_of_a_wrapped_node_runs_what_the_original_does"
+      - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_graph_built_around_a_copy_of_a_written_node_runs_the_written_value"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_copys_mapping_assigned_into_another_copys_node_is_taken_in"
+      - "tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_shallow_copy_of_a_graph_is_refused_and_names_the_deep_copy"
     github_issue: null

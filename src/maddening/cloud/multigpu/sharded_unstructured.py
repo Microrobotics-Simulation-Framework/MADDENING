@@ -234,6 +234,10 @@ class ShardedUnstructuredNode(SimulationNode):
     facing description.
     """
 
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "_inner"
+
     def __init__(
         self,
         node: SimulationNode,
@@ -283,15 +287,18 @@ class ShardedUnstructuredNode(SimulationNode):
         _validate_partition_statics(sharded_static, layout)
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
-        # Share the inner node's params dict rather than copying it, so a
-        # write through any surface reaches the code that reads it.
+        self._inner = node
+        # The wrapper's ``params`` IS the inner node's
+        # (``_params_owner_attr``), not a copy of it, so a write or an
+        # assignment through either reaches the code that reads it.  This
+        # statement drops the copy the base constructor stored a line above
+        # (and must follow the line that attaches the node).
         self.params = node.params
         if exchange not in ("all_to_all", "ppermute"):
             raise ValueError(
                 f"ShardedUnstructuredNode: exchange must be 'all_to_all' or "
                 f"'ppermute', got {exchange!r}"
             )
-        self._inner = node
         # Graph parameter contract: the wrapper is a params node exactly
         # when the inner ``update_padded`` -- what the shard_map calls --
         # would receive ``params``.  The one rule (explicit keyword or

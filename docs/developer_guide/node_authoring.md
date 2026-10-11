@@ -128,13 +128,14 @@ class YourNode(SimulationNode):
         ),
     )
 
-    def __init__(self, name, timestep, **kwargs):
-        params = {"key": value, ...}
-        state_spec = {"field": shape_tuple, ...}
-        super().__init__(name, timestep, params, state_spec)
+    def __init__(self, name, timestep, key=value, shape=shape_tuple):
+        # Hand every constructor argument to the base class.  It keeps
+        # them in self.params, and params is all a saved graph carries
+        # (see "Where a constant belongs" below).
+        super().__init__(name, timestep, key=key, shape=shape)
 
     def initial_state(self):
-        return {"field": jnp.zeros(self.state_spec["field"])}
+        return {"field": jnp.zeros(self.params["shape"])}
 
     def param_specs(self):
         # Bounds / transforms / trainable flags for the constants below;
@@ -347,6 +348,137 @@ python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
 ```
+
+## Where a constant belongs, and what a saved graph carries
+
+**A constant belongs in `params`.** Hand every constructor argument to
+`super().__init__(name, timestep, key=value, ...)` and read it back from
+`self.params` (a float through the injected `params`, as in the template
+above).
+
+A saved graph holds, for each node, its class name, `name`, `timestep` and
+`params`, and nothing else. `GraphManager.from_dict` on a `to_dict()`
+config and `load_graph_from_usd` on a saved stage both rebuild a node as
+`cls(name=..., timestep=..., **params)`. A constructor argument the class
+keeps anywhere else is therefore dropped by the save:
+
+<!-- snippet: no-run, reason: fragment: two constructors side by side, without the rest of their classes -->
+```python
+class Spring(SimulationNode):
+    def __init__(self, name, timestep, stiffness=12.0):
+        super().__init__(name, timestep)
+        self.stiffness = stiffness          # NOT saved: a reload runs 12.0
+
+
+class Spring(SimulationNode):
+    def __init__(self, name, timestep, stiffness=12.0):
+        super().__init__(name, timestep, stiffness=stiffness)   # saved
+```
+
+With the first class, `Spring("s", 0.01, stiffness=40.0)` saved and
+reloaded is a spring of stiffness 12, and the reloaded graph runs. Since
+0.4.0 every door that saves a node's constants says so (in every release
+before, nothing did, MADD-ANO-277): `to_dict()` (a config, `GET /graph`,
+the reply to `POST /graph/nodes`) and `save_graph_to_usd` give a
+`UserWarning` naming the node, its class, the arguments and the fix.
+
+**The rule goes by the name.** The warning is given when the node *was
+constructed with* an argument for a named parameter of its class's
+`__init__` (its own, or the one it inherits), at a value that is not
+exactly that parameter's default, and `node.params` has no key of that
+name.
+
+- "Exactly the default" means the same object, or a value of the same type
+  that is the same bit for bit: `-0.0` is not the default `0.0`, `2` is not
+  the default `2.0`, a list is not a tuple, and a `NaN` is the default
+  `NaN` only with the same sign and payload (`-nan` is not `nan`; a
+  complex `NaN` built at run time is the complex `NaN` default when its
+  bits are). A reload passes the default
+  itself, and only a value that cannot be told from it is known to build
+  the same node. A node built with its defaults is not warned about.
+- **The warning is not proof of a loss.** A class that saves an argument
+  another way is named too, although it reloads bit for bit: an argument
+  accepted under two spellings and saved under one (`period=` saved as
+  `frequency`), one handed to `super().__init__` under another name, a flag
+  that says how to read another argument (`per_minute=True`), an attribute
+  put back to its default before the save. Such a class says that it
+  answers for its own saving by overriding `to_dict()` (calling the base
+  one is enough), and a config then does not ask it:
+
+<!-- snippet: no-run, reason: fragment: one method of a class the prose describes -->
+```python
+    def to_dict(self):
+        return super().to_dict()    # `period` is saved, as `frequency`
+```
+
+- **Only a config honours an override of `to_dict()`.** `to_dict()` and
+  `GraphManager.to_dict()` write what the override returns, and `from_dict`
+  rebuilds from its `params`. For a node whose `update` takes `params`,
+  `GraphManager.to_dict()` writes the live (calibrated) values of the keys
+  of `node.params` into the `params` the override returns and keeps the
+  keys the override adds there, so the reloaded node has both.
+  `save_graph_to_usd` writes `params` and never calls `to_dict`, so it asks
+  such a class like any other, and its warning says that the override does
+  not reach a stage. A class that saves an argument under another name is
+  then named at the stage door although its stage reloads bit for bit; one
+  that adds the argument in its override is named because its stage loses
+  it. Hand such an argument to `super().__init__` under its own name, and
+  every door carries it.
+
+- **Silence is not proof that everything is saved.** The rule reads the
+  signature of the class's own constructor and nothing else, so these lose
+  an argument without a word:
+  - anything a `**kwargs` of the constructor took in. Most of it reaches
+    the base class's `**params` and is saved. An argument the class takes
+    out on the way is not, and neither is one that a subclass's `**kwargs`
+    hands up to a parent that keeps it as an attribute (`Child(gain=5.0)`
+    where `Parent.__init__` does `self.gain = gain`). The parents'
+    signatures are not read, because a parent may save such an argument
+    under another name (the built-in adaptive node takes
+    `blindness_threshold` and saves it as `gradient_capture_threshold`);
+  - anything an `*args` of the constructor took in;
+  - a node whose arguments were not seen when it was created: a class (or
+    a mixin placed before `SimulationNode`) whose own `__new__` hands no
+    arguments on, a copy (`copy.deepcopy`), an unpickled node;
+  - an attribute written after construction (`node.stiffness = 40.0`).
+
+What a save does not carry, whatever the class does:
+
+- `geometry_source`, which the base constructor takes out of `params`;
+- an attribute written after construction. It is also not a counted write:
+  see
+  [Live values, recompiles and partial pytrees](../user_guide/parameters.md#live-values-recompiles-and-partial-pytrees);
+- anything that is not in `params` because it cannot be: a callable, a
+  device mesh, a partition layout;
+- state. A config and a stage carry structure; a checkpoint
+  (`gm.save_state`) carries the state and the live `gm.params`.
+
+**A node inside a wrapper, door by door.** The two doors differ here:
+
+| Saved from | `to_dict()` then `from_dict()` | `save_graph_to_usd` then `load_graph_from_usd` |
+|---|---|---|
+| a sharded wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises: `KeyError` ("... is not allowed by this load") by default or with a `node_registry` that names only the wrapped node's class, `TypeError` once the wrapper's class is allowed (named in `node_registry`, or `allow_import=True`), because the wrapper is not built from `name, timestep, **params`; MADD-ANO-036 |
+| a `HybridNode` | the entry's type is `HybridNode`, and `from_dict` raises: `KeyError` when the registry has no `HybridNode`, `TypeError` when it has | the load raises: `KeyError` by default or with a `node_registry` without `HybridNode`, `TypeError` once `HybridNode` is allowed |
+
+So a graph that holds a wrapper is saved from the node it wraps: save the
+unwrapped graph, and wrap the node again after loading. A correction
+function and a device mesh are not in any save.
+
+An array in `params` is saved as the array it is. `GraphManager.to_dict()`
+does not turn it into lists, so write such a config with
+`json.dumps(config, default=lambda a: numpy.asarray(a).tolist())`, or hold
+the constant as nested lists in `params` (as `HeatNode` holds
+`grid_points` and `LBMNode` its `wall_mask`). A list carries no dtype: an
+array written this way is read back at the default float type. Under
+`jax_enable_x64` a float32, float16 or bfloat16 array comes back as
+float64, the state it is applied to is promoted, and the reloaded graph
+drifts from the saved one (1e-7 to 3e-7 after five steps in a state of
+order one, in the cases measured). With x64 off it comes back as float32, which holds every
+float16 and bfloat16 value exactly: a node that applies such a constant to
+a float32 state reloads bit for bit. A node that computes in the
+constant's own dtype (a float16 state built from its dtype, say) does not,
+in either mode: the reloaded node computes in float32 or float64 (4e-4 off
+for float16 and 2e-3 for bfloat16 after five steps in the case measured).
 
 ## Boundary Input Specification
 

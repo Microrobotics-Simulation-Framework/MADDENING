@@ -41,14 +41,18 @@ DT = 0.01
 
 
 class GridNode(SimulationNode):
-    """A node whose state size is the product of two caller-chosen ints."""
+    """A node whose state size is the product of two caller-chosen ints.
+
+    The two are handed to the base constructor, so they are in ``params``
+    and a saved graph rebuilds the grid it had: a node added over REST is
+    described back by ``to_dict()``, which warns of a constructor argument
+    kept anywhere else."""
 
     def __init__(self, name, timestep, nx: int = 2, ny: int = 2):
-        super().__init__(name, timestep)
-        self.nx, self.ny = int(nx), int(ny)
+        super().__init__(name, timestep, nx=int(nx), ny=int(ny))
 
     def initial_state(self):
-        return {"grid": jnp.zeros((self.nx, self.ny), jnp.float32)}
+        return {"grid": jnp.zeros((self.params["nx"], self.params["ny"]), jnp.float32)}
 
     def update(self, state, boundary_inputs, dt, *, params=None):
         return {"grid": state["grid"] + dt}

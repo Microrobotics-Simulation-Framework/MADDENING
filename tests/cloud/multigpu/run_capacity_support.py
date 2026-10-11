@@ -98,9 +98,17 @@ def scripted(steps):
     it here (:func:`in_process`); a ``dict`` is written as its record
     (re-labelled with the rung's own number) and the rung "exits 0"; a
     ``Launched`` is returned as it is, its ``stderr_tail`` written to the
-    rung's log, with no record.  ``launch.calls`` lists the argument lists."""
+    rung's log, with no record; a pair ``(dict, Launched)`` is both -- the
+    record the process left, and how it then ended.  ``launch.calls``
+    lists the argument lists."""
     rc = module()
     calls: list = []
+
+    def leave(argv, record: dict) -> None:
+        record = dict(record, rung=int(argv[argv.index("--rung-index") + 1]))
+        assert [str(k) for k in record["k"]] == argv[argv.index("--k") + 1:
+                                                     argv.index("--k") + 4], (record["k"], argv)
+        Path(argv[argv.index("--record") + 1]).write_text(json.dumps(record), encoding="utf-8")
 
     def launch(argv, timeout_s, stderr_path):
         step = steps[len(calls)]
@@ -108,13 +116,13 @@ def scripted(steps):
         if step == "run":
             return in_process(argv, timeout_s, stderr_path)
         if isinstance(step, dict):
-            record = dict(step, rung=int(argv[argv.index("--rung-index") + 1]))
-            assert [str(k) for k in record["k"]] == argv[argv.index("--k") + 1:
-                                                         argv.index("--k") + 4], (record["k"], argv)
-            Path(argv[argv.index("--record") + 1]).write_text(json.dumps(record),
-                                                              encoding="utf-8")
+            leave(argv, step)
             Path(stderr_path).write_text("", encoding="utf-8")
             return rc.Launched(0, False, "", 0.0)
+        if not isinstance(step, rc.Launched):       # (the record left, how the process ended)
+            record, step = step
+            assert isinstance(record, dict) and isinstance(step, rc.Launched)
+            leave(argv, record)
         Path(stderr_path).write_text(step.stderr_tail, encoding="utf-8")
         return step
 

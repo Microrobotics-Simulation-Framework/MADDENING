@@ -1287,6 +1287,27 @@ class InterfacePlan:
         return any(rec.source_kind == FLUX and rec.target[0] in self.flux_members
                    for rec in self._declared(INTERNAL, INBOUND))
 
+    def edges_into(self, member) -> tuple:
+        """The records of the edges into *member*, in the order a pass
+        applies them.
+
+        Every edge whose target is *member*, from another member or from
+        outside the group, in the order of the ``add_edge`` calls: the
+        order in which a pass composes a member's boundary inputs
+        (``_coupled_block._run_coupled_block_impl._resolve_boundary``
+        walks ``edges_by_target[member]``, which
+        ``GraphManager._build_step_fn`` fills from every edge of the
+        graph in that order; an additive edge adds to what an earlier
+        edge into the same input delivered, any other edge replaces it).
+
+        Read by ``_flux_loops._refuse_unsolved_fluxes``: what a pass
+        hands a member's ``compute_boundary_fluxes``.  **Differs from**
+        :attr:`internal`, the canonical order the interface norm sums
+        in, which sorts by the source's place in the sweep and by the
+        source field.
+        """
+        return tuple(r for r in self._declared(INTERNAL, INBOUND) if r.target[0] == member)
+
     def external_inputs(self, external_inputs) -> tuple:
         """``(member, field, value)`` of each declared external input into
         a member, *value* being the shape and dtype the step hands.

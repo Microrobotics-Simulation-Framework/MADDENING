@@ -505,6 +505,28 @@ class _FluxHookNeedsItsInputs(ValueError):
     no boundary inputs (:func:`_flux_field_names`)."""
 
 
+class _Asked(dict):
+    """A dict that records each key looked up in it and not found
+    (``d[key]``; ``d.get(key)`` and ``key in d`` look nothing up that
+    raises): which dict a hook's ``KeyError`` came from."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.missed: list = []
+
+    def __missing__(self, key):
+        self.missed.append(key)
+        raise KeyError(key)
+
+
+# Flattened as a dict is (its values in the order of its sorted keys), so a
+# hook that maps over its state or its inputs sees what it sees in the step.
+jax.tree_util.register_pytree_node(
+    _Asked,
+    lambda d: (tuple(d[k] for k in sorted(d)), tuple(sorted(d))),
+    lambda keys, values: dict(zip(keys, values)))
+
+
 def _flux_field_names(node, fields) -> Any:
     """The names of the boundary fluxes *node* returns, asked of the hook.
 
@@ -514,22 +536,41 @@ def _flux_field_names(node, fields) -> Any:
     which left ``validate()`` and ``compile()`` with that bare error for
     every edge from one of the node's fluxes.  It is raised as
     :class:`_FluxHookNeedsItsInputs`, which names the node, the hook and
-    the input and says what the hook must do; ``validate()`` lists it as
-    an ``ERROR`` line.
+    what it indexed, and says what the hook must do; ``validate()`` lists
+    it as an ``ERROR`` line.  The hook is handed both dicts as
+    :class:`_Asked`, so the message names the dict the missing key was
+    looked up in: ``boundary_inputs[...]``, ``state[...]`` (a field the
+    node's state does not hold), or neither.
     """
+    state, inputs = _Asked(fields), _Asked()
     try:
-        return node.compute_boundary_fluxes(fields, {}, 0.0).keys()
+        return node.compute_boundary_fluxes(state, inputs, 0.0).keys()
     except KeyError as exc:
         missing = exc.args[0] if exc.args else "?"
+        asked = (f"KeyError({missing!r}) when it was asked for its flux names with no "
+                 f"boundary inputs")
+        name = getattr(node, "name", "?")
+        if missing in inputs.missed:
+            raise _FluxHookNeedsItsInputs(
+                f"compute_boundary_fluxes of node {name!r} raised {asked}: it indexes "
+                f"boundary_inputs[{missing!r}]. A flux hook is "
+                "called without the inputs that are not available yet (validate() asks it "
+                "with none, and the first of the two sweeps that compute a coupling "
+                "group's fluxes leaves out an input whose flux does not exist yet), so it "
+                f"must return its fluxes without them: read the input with "
+                f"boundary_inputs.get({missing!r}, <a default of its shape and dtype>)."
+            ) from exc
+        if missing in state.missed:
+            raise _FluxHookNeedsItsInputs(
+                f"compute_boundary_fluxes of node {name!r} raised {asked}: it indexes "
+                f"state[{missing!r}], which is not a field of the node's state (its fields: "
+                f"{list(fields)}). A flux hook is handed the state that initial_state() "
+                "and update() give the node: return that field from both, or read one "
+                "they return."
+            ) from exc
         raise _FluxHookNeedsItsInputs(
-            f"compute_boundary_fluxes of node {getattr(node, 'name', '?')!r} raised "
-            f"KeyError({missing!r}) when it was asked for its flux names with no "
-            f"boundary inputs: it indexes boundary_inputs[{missing!r}]. A flux hook is "
-            "called without the inputs that are not available yet (validate() asks it "
-            "with none, and the first of the two sweeps that compute a coupling "
-            "group's fluxes leaves out an input whose flux does not exist yet), so it "
-            f"must return its fluxes without them: read the input with "
-            f"boundary_inputs.get({missing!r}, <a default of its shape and dtype>)."
+            f"compute_boundary_fluxes of node {name!r} raised {asked}, and not from "
+            f"indexing boundary_inputs or the state it is handed: {exc!r}."
         ) from exc
 
 

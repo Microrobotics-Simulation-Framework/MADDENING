@@ -1093,8 +1093,9 @@ class InterfacePlan:
 
         Read by the spectrum's weights under the interface norm
         (``_read_fields`` in ``_run_coupled_block_impl``, which keeps
-        the floating state fields among them) and by the non-floating
-        fields the IFT solve evaluates at the iterate (``live_nonfloat``).
+        the floating state fields among them).  The non-floating fields a
+        solve evaluates at the iterate are not read from here: they
+        include a flux producer's (``_carried_fields``).
 
         **Differs from** :meth:`iqn_fields`: no geometry field is here,
         and a flux edge contributes its flux's name, which is no state

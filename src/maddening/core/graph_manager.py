@@ -84,7 +84,7 @@ from maddening.core.schedule import (
 # nothing reads.
 from maddening.core import _adaptive_scan, _graph_specs, _param_probes
 from maddening.core.coupling import (
-    _bounds, _coupled_block, _group_layout, _interface_plan, _reports,
+    _bounds, _carried_fields, _coupled_block, _group_layout, _interface_plan, _reports,
 )
 from maddening.core.coupling import reason_codes as _reason_codes
 # Public names defined with the machinery that uses them stay importable from here.
@@ -2779,6 +2779,13 @@ class GraphManager:
                 self._state, self._nodes)
             for g in self._coupling_groups
         }
+        # A group whose integer, Boolean or key fields feed one another in
+        # a closed loop of its own edges is refused: such fields have no
+        # value at a floating iterate, so no solve can be made to read
+        # them (``coupling/_carried_fields.py``).  One ValueError naming
+        # every such group.
+        _carried_fields._refuse_nonfloat_loops(
+            self._coupling_groups, interface_plans, self._state)
         # Positions an interface reading rests on (read in grid spacings,
         # or what a delivered value is computed at), held in a dtype that
         # cannot resolve the group's tolerance where they are

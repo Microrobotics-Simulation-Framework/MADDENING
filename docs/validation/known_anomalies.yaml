@@ -19132,10 +19132,9 @@ anomalies:
       `save_graph_to_usd` writes `params` and never calls `to_dict`, so it
       asks such a class all the same (named although its stage reloads bit
       for bit, or because its stage loses an argument the override adds).
-      A config does not honour an override for a node whose `update` takes
-      `params`: `GraphManager.to_dict()` writes `node.params` with the live
-      values in place of the `params` the override returns, so a key the
-      override adds is not saved, and nothing says so.  A `NaN` argument is
+      For a node whose `update` takes `params` a config writes the live
+      values of the keys of `node.params` into the `params` the override
+      returns and keeps the keys the override adds.  A `NaN` argument is
       the `NaN` default only with the same sign and payload.
       `geometry_source`, which the base constructor takes out of `params`,
       is saved by nothing; no part of the package reads it.
@@ -19153,6 +19152,8 @@ anomalies:
       - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_saved_to_a_stage_is_told_of_the_node_it_wraps"
       - "tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_an_override_of_to_dict_is_honoured_by_a_config_and_not_by_a_stage"
       - "tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_nan_is_its_default_only_with_the_same_bits"
+      - "tests/core/test_a_config_keeps_what_a_to_dict_override_adds_to_params.py::test_a_reloaded_config_has_the_added_argument_and_the_calibrated_value"
+      - "tests/core/test_a_config_keeps_what_a_to_dict_override_adds_to_params.py::test_behind_each_wrapper_the_entry_has_both"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-274"

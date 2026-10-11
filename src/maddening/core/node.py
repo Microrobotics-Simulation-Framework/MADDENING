@@ -983,11 +983,10 @@ def _unsaved_constructor_arguments(node: "SimulationNode", *, stage: bool = Fals
       wrappers and ``HybridNode`` save the node they wrap, which is asked
       in its own right).  A USD stage (``stage`` true) carries ``params``
       and never what ``to_dict`` returns, so there such a class is asked
-      like any other.  A config honours what the override returns under
-      ``params`` only for a node whose ``update`` takes no ``params``:
-      for one whose ``update`` takes them, ``GraphManager.to_dict`` writes
-      ``node.params`` with the live values in their place, so a key the
-      override adds is not saved, and is not reported either;
+      like any other.  A config keeps what the override returns under
+      ``params``: for a node whose ``update`` takes ``params``,
+      ``GraphManager.to_dict`` writes the live values of the keys of
+      ``node.params`` there and keeps the keys the override adds;
     * an attribute written after construction (``node.stiffness = 40.0``),
       which no save carries either;
     * ``name`` and ``timestep``, which the entry carries beside ``params``,
@@ -2192,8 +2191,9 @@ class SimulationNode(ABC):
         this one is enough), and is then not asked here.  A USD stage
         carries ``params`` only, so ``save_graph_to_usd`` asks such a class
         all the same; and ``GraphManager.to_dict`` writes, for a node whose
-        ``update`` takes ``params``, ``node.params`` with the live values in
-        place of the ``params`` an override returns.
+        ``update`` takes ``params``, the live values of the keys of
+        ``node.params`` into the ``params`` an override returns, keeping
+        the keys the override adds there.
         """
         _warn_of_unsaved_constructor_arguments(self)
         return {

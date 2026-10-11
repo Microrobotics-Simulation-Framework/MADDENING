@@ -413,10 +413,10 @@ name.
 
 - **Only a config honours an override of `to_dict()`.** `to_dict()` and
   `GraphManager.to_dict()` write what the override returns, and `from_dict`
-  rebuilds from its `params`, with one exception: for a node whose
-  `update` takes `params`, `GraphManager.to_dict()` writes `node.params`
-  with the live values in place of the `params` the override returns, so
-  a key the override adds there is not saved, and nothing says so.
+  rebuilds from its `params`. For a node whose `update` takes `params`,
+  `GraphManager.to_dict()` writes the live (calibrated) values of the keys
+  of `node.params` into the `params` the override returns and keeps the
+  keys the override adds there, so the reloaded node has both.
   `save_graph_to_usd` writes `params` and never calls `to_dict`, so it asks
   such a class like any other, and its warning says that the override does
   not reach a stage. A class that saves an argument under another name is

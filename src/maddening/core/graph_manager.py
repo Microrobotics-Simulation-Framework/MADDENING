@@ -7266,9 +7266,10 @@ class GraphManager:
         every release before 0.4.0 nothing said so (MADD-ANO-273).  A
         class that overrides ``to_dict`` is not asked: the entry is what
         the override returns, except that for a node whose ``update``
-        takes ``params`` the entry's ``params`` are these effective values,
-        so a key the override adds to them is not saved, and nothing says
-        so.  (:func:`~maddening.usd.serialization.save_graph_to_usd` asks
+        takes ``params`` the keys of ``node.params`` in the entry's
+        ``params`` are these effective values (a key the override leaves
+        out is written all the same), and a key the override adds to them
+        is kept after them.  (:func:`~maddening.usd.serialization.save_graph_to_usd` asks
         such a class too: a stage carries ``params`` only.)  A
         node inside a ``HybridNode`` is written with the type
         ``HybridNode``, which :meth:`from_dict` cannot rebuild (it raises);
@@ -7374,7 +7375,21 @@ class GraphManager:
                 # load.
                 d["timestep"] = spec.timestep
             if spec.accepts_params:
-                d["params"] = self.effective_node_params(name)
+                # The keys of the node's ``params`` at their live values,
+                # and after them whatever else the node's own ``to_dict``
+                # put under ``params``: an argument a class keeps outside
+                # ``params`` and saves by overriding ``to_dict``.  Writing
+                # the live values in place of the override's ``params``
+                # lost such an argument without a word.  A key of
+                # ``node.params`` that the override leaves out is written
+                # all the same, as it always was; an entry that is not a
+                # dict is replaced, as it always was.
+                live = self.effective_node_params(name)
+                own = d.get("params")
+                d["params"] = (
+                    {**live, **{k: v for k, v in own.items() if k not in live}}
+                    if isinstance(own, dict) else live
+                )
             nodes.append(d)
         overrides = {
             n: {k: s.to_dict() for k, s in o.items()}

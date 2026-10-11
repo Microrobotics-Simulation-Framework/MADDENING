@@ -852,3 +852,332 @@ def test_a_group_whose_edges_allow_no_carried_field_is_not_traced(monkeypatch):
     # ... and the patch does take effect where a field may be carried.
     _flags_both_ways(latched=False).step()
     assert calls
+
+
+# ---------------------------------------------------------------------------
+# Side effects in member code, reads the trace can only assume, and where
+# compile() and the step decide
+# ---------------------------------------------------------------------------
+
+def _side_effect(value, how):
+    """``jax.debug.print`` or ``jax.debug.callback`` of *value*: an effect with no result."""
+    if how == "print":
+        jax.debug.print("printed {v}", v=value)
+    else:
+        jax.debug.callback(lambda v: None, value)
+
+
+def _side_effect_in(where, how, value):
+    """:func:`_side_effect` at top level, in a ``lax.cond`` branch, a jitted helper or a loop body."""
+    if where == "top":
+        _side_effect(value, how)
+    elif where == "cond":
+        jax.lax.cond(value > 0, lambda v: _side_effect(v, how), lambda v: None, value)
+    elif where == "jit":
+        jax.jit(lambda v: _side_effect(v, how))(value)
+    elif where == "while":
+        def body(i):
+            _side_effect(value, how)
+            return i + 1
+        jax.lax.while_loop(lambda i: i < 2, body, 0)
+    else:
+        def step(carry, _):
+            _side_effect(value, how)
+            return carry, None
+        jax.lax.scan(step, 0, None, length=2)
+
+
+_PAIR_IN = {"a": {"q": _zero(_F32), "n": _zero(jnp.int32)}, "b": {"p": _zero(jnp.int32)}}
+
+
+@pytest.mark.parametrize("how", ["print", "callback"])
+@pytest.mark.parametrize("where", ["top", "cond", "jit", "while", "scan"])
+def test_a_side_effect_in_the_pass_makes_nothing_a_read(where, how):
+    """Printing ``b.p`` while ``a.q`` is computed from it makes ``b.p`` read nothing new.
+
+    The carried-fields walk follows an equation only through its results,
+    in every sub-program, so ``b.p`` reads ``a.q`` alone, as without the
+    print, and every read is established.  The parameter probes' walk is
+    the one it was: called without the keywords it still keeps an
+    effect's inputs live for every output.
+    """
+    from maddening.core._param_probes import _live_jaxpr_inputs
+
+    def evaluate(members):
+        p = members["b"]["p"]
+        _side_effect_in(where, how, p)
+        return {"a": {"q": (C + K * p.astype(_F32)).astype(_F32), "n": members["a"]["n"] * 0},
+                "b": {"p": jnp.floor(members["a"]["q"]).astype(jnp.int32)}}
+
+    assumed: dict = {}
+    reads = _carried_fields.traced_reads(evaluate, _PAIR_IN, assumed=assumed)
+    assert reads == {("a", "q"): {("b", "p")}, ("a", "n"): {("a", "n")},
+                     ("b", "p"): {("a", "q")}}
+    assert assumed == {}
+    jaxpr = jax.make_jaxpr(evaluate)(_PAIR_IN).jaxpr
+    # Inputs flatten as a.n, a.q, b.p; outputs likewise.  Only b.p's output live.
+    assert _live_jaxpr_inputs(jaxpr, [False, False, True]) == [False, True, True]
+
+
+class PrintingReader(Reader):
+    """:class:`Reader` whose ``update`` also prints the field it reads (*where*, *how*)."""
+
+    def __init__(self, name, where, how):
+        super().__init__(name, jnp.int32)
+        self._where, self._how = where, how
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        _side_effect_in(self._where, self._how, boundary_inputs["p"])
+        return super().update(state, boundary_inputs, dt, params=params)
+
+
+@pytest.mark.parametrize("solver, mode, where", [
+    *[(solver, mode, "top") for solver in ("ift", "fori") for mode in ("gauss-seidel", "jacobi")],
+    ("ift", "gauss-seidel", "cond"), ("fori", "jacobi", "cond"),
+    ("ift", "gauss-seidel", "jit"), ("fori", "jacobi", "jit")])
+def test_a_printed_field_steps_as_the_same_pair_unprinted(solver, mode, where):
+    """``a: q <- 20 - p/2`` prints the ``p`` that ``b: p <- floor(q)`` hands it.
+
+    The print changes no arithmetic: ``p`` is carried at depth one as
+    without it, ``validate()`` and ``compile()`` pass, and the step ends at
+    the one fixed point with the same passes, residual and verdict as the
+    unprinted pair, on both solvers and both sweeps, with the print at
+    top level, in a ``lax.cond`` branch or in a jitted helper.  (It used to
+    pass ``compile()`` and then be refused by the step as a loop of ``b.p``
+    onto itself.)
+    """
+    gm = GraphManager()
+    gm.add_node(PrintingReader("a", where, "print"))
+    gm.add_node(Floor("b", jnp.int32))
+    gm.add_edge("a", "b", "q", "q")
+    gm.add_edge("b", "a", "p", "p")
+    _group(gm, ["a", "b"], solver=solver, iteration_mode=mode)
+    assert _chains(gm)[1] == _carried_fields.CarriedChain((("b", "p"),), 1, None)
+    assert not [issue for issue in gm.validate() if issue.startswith("ERROR")]
+    gm.step()
+    r = _report(gm)
+    got = (float(gm.get_node_state("a")["q"]), int(gm.get_node_state("b")["p"]),
+           int(r["iterations"]), float(r["residual"]), bool(r["converged"]))
+    assert got == _floor_result(solver, mode, True)
+    assert got[:2] == (Q_STAR, P_STAR)
+
+
+class PrintingFluxPair(FluxPair):
+    """:class:`FluxPair` whose flux hook also prints the counter (the flux is unchanged)."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        jax.debug.print("n={n}", n=state["n"])
+        return super().compute_boundary_fluxes(state, boundary_inputs, dt, params=params)
+
+
+@pytest.mark.parametrize("solver, mode", [
+    ("ift", "gauss-seidel"), ("ift", "jacobi"), ("fori", "gauss-seidel"), ("fori", "jacobi")])
+def test_a_printed_counter_beside_fluxes_both_ways_steps_as_without_the_print(solver, mode):
+    """The counter of :func:`test_a_counter_and_a_key_beside_fluxes_both_ways_are_not_carried`, printed.
+
+    The edges' bound has a loop (a flux is a function of its producer's
+    whole state), so ``compile()`` traces the pass; the print in the flux
+    hook makes the counter feed nothing, nothing is carried, and the three
+    steps are those of the pair with neither leaf: the floats bit for bit,
+    the passes and the verdict, and the residual to rounding (the print is
+    an effect XLA keeps in order, which can change how the norm is summed).
+    (It used to be refused at ``compile()`` as a loop of ``a.n`` onto
+    itself.)
+    """
+    gm = _flux_pair(PrintingFluxPair("a", "count"), FluxPair("b", "key"),
+                    solver=solver, mode=mode)
+    bound, traced = _chains(gm)
+    assert bound.loop == (("a", "n"),)
+    assert traced == _carried_fields.CarriedChain((), 0, None)
+    assert not [issue for issue in gm.validate() if issue.startswith("ERROR")]
+    bare = _flux_pair(FluxPair("a"), FluxPair("b"), solver=solver, mode=mode)
+    printed, unprinted = _trajectory(gm), _trajectory(bare)
+    assert [row[:4] for row in printed] == [row[:4] for row in unprinted]
+    assert [row[4] for row in printed] == pytest.approx([row[4] for row in unprinted], rel=1e-5)
+    assert int(gm.get_node_state("a")["n"]) == 3
+
+
+@jax.custom_jvp
+def _floor_and_pass(q, n):
+    """``(floor(q), q)``, as one ``custom_jvp`` function also handed ``n`` (unused)."""
+    return jnp.floor(q).astype(jnp.int32), q * 1.0
+
+
+@_floor_and_pass.defjvp
+def _floor_and_pass_jvp(primals, tangents):
+    q, n = primals
+    return _floor_and_pass(q, n), (jnp.zeros((), jnp.int32), tangents[0])
+
+
+def test_reads_through_an_operation_the_walk_does_not_look_inside_are_assumed():
+    """Established through operands, or assumed through a named primitive.
+
+    ``b.p`` reads ``a.q`` through ``floor`` (established) and through a
+    two-result ``custom_jvp`` function also handed ``a.n``, which it does
+    not use: the walk cannot tell, so ``a.n`` is read, assumed through
+    ``custom_jvp_call``.  A ``pure_callback``'s operands are assumed
+    likewise; a value an ``io_callback`` returns may be anything the
+    program handed out, so the output it reaches reads every field.
+    """
+    from jax.experimental import io_callback
+
+    def through(kind):
+        def evaluate(members):
+            q, n = members["a"]["q"], members["a"]["n"]
+            if kind == "custom_jvp":
+                p = jnp.floor(q).astype(jnp.int32) + _floor_and_pass(q, n)[0]
+            elif kind == "pure_callback":
+                p = jax.pure_callback(lambda v: np.asarray(v, np.int32),
+                                      jax.ShapeDtypeStruct((), jnp.int32), n)
+            else:
+                p = io_callback(lambda: np.int32(0), jax.ShapeDtypeStruct((), jnp.int32))
+            return {"a": {"q": q, "n": n}, "b": {"p": p}}
+        assumed: dict = {}
+        reads = _carried_fields.traced_reads(evaluate, _PAIR_IN, assumed=assumed)
+        return reads[("b", "p")], {k: v for k, v in assumed.items() if k[0] == ("b", "p")}
+
+    reads, assumed = through("custom_jvp")
+    assert reads == {("a", "q"), ("a", "n")}
+    assert assumed == {(("b", "p"), ("a", "n")): ("custom_jvp_call",)}
+    reads, assumed = through("pure_callback")
+    assert reads == {("a", "n")}
+    assert assumed == {(("b", "p"), ("a", "n")): ("pure_callback",)}
+    reads, assumed = through("io_callback")
+    assert reads == {("a", "q"), ("a", "n"), ("b", "p")}
+    assert set(assumed) == {(("b", "p"), f) for f in reads}
+    assert set(assumed.values()) == {("io_callback",)}
+
+
+@pytest.mark.parametrize("solver, mode", [("ift", "gauss-seidel"), ("fori", "jacobi")])
+def test_a_loop_through_a_custom_jvp_is_refused_as_assumed_and_says_through_what(solver, mode):
+    """``b.p`` from a two-result ``custom_jvp`` handed ``a.n``; ``a.n <- (p > 3)``.
+
+    ``a.n`` is not in fact used for ``p``, but the trace cannot see inside
+    the function: the loop is refused, and the message says which link is
+    established through operands and which is assumed, through which
+    primitive, and that the loop may not be one.
+    """
+    class FloorThrough(SimulationNode):
+        def __init__(self, name):
+            super().__init__(name, 1.0)
+
+        def initial_state(self):
+            return {"p": _zero(jnp.int32)}
+
+        def boundary_input_spec(self):
+            return {"q": BoundaryInputSpec(shape=(), dtype=_F32, default=_zero(_F32)),
+                    "n": BoundaryInputSpec(shape=(), dtype=jnp.bool_, default=_zero(jnp.bool_))}
+
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            return {"p": _floor_and_pass(boundary_inputs["q"], boundary_inputs["n"])[0]}
+
+    class FlagReader(Reader):
+        def initial_state(self):
+            return {"q": _zero(_F32), "n": _zero(jnp.bool_)}
+
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            return {**super().update(state, boundary_inputs, dt, params=params),
+                    "n": boundary_inputs["p"] > 3}
+
+    gm = GraphManager()
+    gm.add_node(FlagReader("a", jnp.int32))
+    gm.add_node(FloorThrough("b"))
+    gm.add_edge("a", "b", "q", "q")
+    gm.add_edge("a", "b", "n", "n")
+    gm.add_edge("b", "a", "p", "p")
+    _group(gm, ["a", "b"], solver=solver, iteration_mode=mode)
+    with pytest.raises(ValueError) as refused:
+        gm.compile()
+    text = str(refused.value)
+    assert "a.n (bool) -> b.p (int32) -> a.n (bool)" in text
+    assert "a.n -> b.p is ASSUMED, through custom_jvp_call" in text
+    assert "b.p -> a.n is established through operands" in text
+    assert "the loop may not be one" in text
+    assert "read from one trace" not in text
+
+
+def test_compile_and_the_step_decide_alike_where_the_walk_overstates(monkeypatch):
+    """A read the trace reports and the edges do not allow is not one.
+
+    Here the walk is made to overstate (``b.p`` reported to read itself,
+    which no edge hands it).  ``compile()`` traces a group only where the
+    edges' bound has a loop, and this pair's has none; the step traces
+    wherever the bound has a field.  The step counts a read only where the
+    bound allows it too, so it carries ``b.p`` at depth one and reaches the
+    fixed point, as ``validate()`` and ``compile()`` said it could.
+    """
+    calls = []
+    real = _carried_fields.traced_reads
+
+    def overstating(evaluate, members, **kw):
+        reads = real(evaluate, members, **kw)
+        calls.append(1)
+        if ("b", "p") in reads:
+            reads[("b", "p")] = reads[("b", "p")] | {("b", "p")}
+        return reads
+
+    monkeypatch.setattr(_carried_fields, "traced_reads", overstating)
+    gm = _floor_loop(reader_first=True, solver="ift", iteration_mode="gauss-seidel")
+    assert not [issue for issue in gm.validate() if issue.startswith("ERROR")]
+    gm.compile()
+    assert calls == []                      # compile() did not trace: the bound has no loop
+    gm.step()
+    assert calls                            # the step did, through the patched walk
+    assert (float(gm.get_node_state("a")["q"]), int(gm.get_node_state("b")["p"])) == (
+        Q_STAR, P_STAR)
+
+
+class Latch(SimulationNode):
+    """``x <- u/2 + 0.2 + signal/4``; ``flag <- (u > 0.3) | signal``, in the dtype it is stored in.
+
+    ``signal`` is the other member's flag, on an input the node does not
+    declare.  Stored as float32 the flags are iterated with the floats;
+    written as Booleans they stay Booleans, and each is computed from the
+    other's.
+    """
+
+    def __init__(self, name):
+        super().__init__(name, 1.0)
+
+    def initial_state(self):
+        return {"x": _zero(_F32), "flag": _zero(_F32)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=_F32, default=_zero(_F32))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        u = boundary_inputs["u"]
+        handed = boundary_inputs.get("signal", _zero(_F32)) > 0
+        x = 0.5 * u + 0.2 + jnp.where(handed, 0.25, 0.0)
+        return {"x": x.astype(_F32), "flag": ((u > 0.3) | handed).astype(state["flag"].dtype)}
+
+
+@pytest.mark.parametrize("solver, mode", [("ift", "gauss-seidel"), ("fori", "jacobi")])
+def test_a_write_that_makes_a_loop_of_non_floating_fields_is_refused_at_the_step(solver, mode):
+    """The step's own refusal: a state ``compile()`` did not see.
+
+    The flags are float32 when the graph compiles, and the group steps.  A
+    write then stores them as Booleans (``set_node_state`` allows another
+    dtype, and says to call ``validate()`` after such a write).  The step's
+    program is traced again for the new layout, and refuses the group with
+    the text ``validate()`` now lists: the flags are computed from one
+    another in a closed loop.
+    """
+    gm = GraphManager()
+    gm.add_node(Latch("a"))
+    gm.add_node(Latch("b"))
+    for src, dst in (("a", "b"), ("b", "a")):
+        gm.add_edge(src, dst, "x", "u")
+        gm.add_edge(src, dst, "flag", "signal")
+    _group(gm, ["a", "b"], solver=solver, iteration_mode=mode)
+    gm.compile()
+    gm.step()
+    assert _report(gm)["converged"]
+    for name in ("a", "b"):
+        state = gm.get_node_state(name)
+        gm.set_node_state(name, {**state, "flag": state["flag"] > 0})
+    (error,) = [issue for issue in gm.validate() if issue.startswith("ERROR")]
+    assert "a.flag (bool) -> b.flag (bool) -> a.flag (bool)" in error
+    with pytest.raises(ValueError, match="closed loop") as refused:
+        gm.step()
+    assert error == f"ERROR: {refused.value}"

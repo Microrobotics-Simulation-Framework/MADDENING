@@ -19083,7 +19083,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-273"
-    title: "sharded_gmres on its default (lineax) route counts max_iters and .iters in restart cycles, not steps: a budget of 10 executed 3,164 operator products and reported iters=63"
+    title: "sharded_gmres on its default (lineax) route counts max_iters and .iters in restart cycles, not steps: a budget of 10 executed 1,583 to 4,490 operator products over 24 right-hand sides and reported iters of 32 to 89"
     description: >
       `sharded_gmres` documents `max_iters` as an iteration budget and
       `.iters` as the number of iterations used.  On the lineax backend,
@@ -19099,14 +19099,17 @@ anomalies:
       every route.
       Measured on 2026-10-11 (CPU, float32, the operator
       `d x[i] - x[i-1] - x[i+1]` with `d = 2.001`, condition number about
-      4001, 1000 unknowns, white noise, the default `restart=50` and
-      `rtol`; products counted by a host callback in the operator).  With
-      `max_iters=10`: 3,164 operator products and `iters=63` on jax 0.11.0
-      with lineax 0.0.7, and 1,685 products and `iters=34` on jax 0.11.2
-      with lineax 0.1.1 (lineax stopped before its 200 cycles on both, at a
-      different cycle on each version); `max_iters=200` gave the same
-      numbers, since 200 cycles were allowed either way.  The loop backend
-      given the same call executed 53 products and reported `iters=50`.
+      4001, 1000 unknowns, the default `restart=50` and `rtol`; products
+      counted by a host callback in the operator).  With `max_iters=10`,
+      on white noise from `numpy.random.default_rng(0)` as float32: 1,889
+      operator products and `iters=38` on lineax 0.0.7, and 3,317 products
+      and `iters=66` on lineax 0.1.1, on jax 0.11.0 and 0.11.2 alike.
+      lineax stops before its 200 cycles at a cycle that depends on the
+      right-hand side: over the seeds 0 to 23 of that generator, 1,583 to
+      3,419 products (`iters` 32 to 68) on lineax 0.0.7 and 1,583 to 4,490
+      (32 to 89) on 0.1.1.  `max_iters=200` gives the same numbers, since
+      200 cycles are allowed either way.  The loop backend given the same
+      call executed 53 products and reported `iters=50`.
       With `restart=5`, `max_iters=1` on 256 unknowns: 116 products and
       `iters=20` on both lineax versions, and on `git archive` of v0.3.0
       and of v0.3.1 (lineax 0.0.7); the loop: 8 products, `iters=5`.
@@ -19122,7 +19125,7 @@ anomalies:
     safety_relevance_rationale: >
       Graded `major` by the rule for a silent wrong report: `.iters` is the
       reported status of the solve, documented as its number of iterations,
-      and read 63 where 3,164 operator products had run; and the documented
+      and read 38 where 1,889 operator products had run; and the documented
       budget was exceeded by the same factor with nothing said.  Not
       `critical`: the value, `converged` and `residual_norm` are right (the
       solve ran longer than asked, not shorter), and the loop backend
@@ -19144,8 +19147,9 @@ anomalies:
     residual_risk: >
       Open in 0.4.0, documented: on the default route of `sharded_gmres`
       `max_iters` is not a bound on the work and `.iters` is not a number
-      of operator products.  The numbers a call stops at differ between
-      lineax versions (measured: 63 cycles on 0.0.7, 34 on 0.1.1).  A
+      of operator products.  The cycle a call stops at depends on the
+      right-hand side and on the lineax version (measured on one
+      right-hand side: 38 cycles on 0.0.7, 66 on 0.1.1).  A
       budget and a count in steps on this route are left to 0.5.0.
     verification:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_the_budget_and_the_count_of_gmres_on_lineax_are_in_restart_cycles"
@@ -19328,4 +19332,86 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_with_the_flag_a_solution_just_under_the_top_reads_not_converged_beside_an_infinite_norm"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_with_the_flag_and_an_atol_the_same_solution_is_nan"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-276"
+    title: "ift_linear_solve with solver=\"cg\" or \"gmres\" returned a value that was not the solution, with no error, where the floor of lineax's stopping test was zero, underflowed, or was negative or NaN"
+    description: >
+      `ift_linear_solve` hands lineax's CG and GMRES the floor `atol` (in the
+      frame of `rhs` from 0.4.0), or `rtol * max|rhs|` without one, and runs
+      `lineax.linear_solve` with `throw=True`, so a solve lineax reports as
+      failed raises.  lineax stops where `max_i |r_i| / (floor + rtol |b_i|)`
+      (and the same quotient of the update) is not above one.  With a floor
+      of zero the quotient is `0 / 0 = NaN` at every entry where the residual
+      and the right-hand side are both exactly zero (every entry the Krylov
+      space of a local right-hand side behind a stencil has not reached yet);
+      the maximum is then NaN, `NaN > 1` is False, and lineax stops and
+      reports success, so nothing was raised.  The same in lineax 0.0.7 and
+      0.1.1, in CG and in GMRES.  A floor under the dtype's smallest normal
+      number does the same (XLA's CPU arithmetic flushes it to zero), and a
+      NaN floor stops lineax at once with the zero start.
+      Measured on 2026-10-11 (CPU, float32, the operator
+      `d x[i] - x[i-1] - x[i+1]`, a right-hand side that is one unit
+      vector): CG (`d = 2.5`, 64 unknowns) with `atol=0.0` returned a value
+      0.53 off (relative error) at a residual of 0.40 `||rhs||`; GMRES
+      (`d = 2.001`, 128 unknowns, restart 50) 0.36 off; a NaN `atol` or
+      `rtol` returned zeros; eagerly and under `jit`.  The tangent and
+      adjoint solves take the same floor: with `atol=0.0` a cotangent or
+      tangent that is one unit vector gave a derivative 0.53 off.  On `git
+      archive` of v0.3.1 (jax 0.11.0, lineax 0.0.7) the same for
+      `atol=0.0`, a NaN `atol` and a NaN `rtol`; there a negative `atol`
+      was refused by lineax and `rtol=0` had the absolute default floor
+      `1e-8`.  In 0.4.0's development builds, where the floor is relative
+      and rescaled with `rhs`, also `rtol=0`, an `rtol` that underflows
+      (`1e-44` in float32), a negative `atol`, and a positive `atol` whose
+      rescaled value is subnormal (`atol=1e-12` beside a right-hand side of
+      `2**100`).  Found on 2026-10-11 by the pre-merge audit of the fix of
+      MADD-ANO-274, which has the same cause in `sharded_cg` and
+      `sharded_gmres`.
+      Fixed in 0.4.0: where the floor is not a normal positive number the
+      solve is judged by `||rhs - A x|| <= max(atol, rtol * ||rhs||)` (the
+      norm rule of `sharded_cg`, one more operator product), and a value
+      that does not meet it raises on the channel lineax raises a failed
+      solve on, with a message that names the floor; a residual of exactly
+      zero meets every tolerance.  The tangent and adjoint solves are judged
+      the same.  Where the floor is normal for every right-hand side
+      (`atol=None` with a concrete `rtol` of at least twice the smallest
+      normal number, the default) the program is unchanged; where it is in
+      the program and the floor is normal (an explicit positive `atol`) the
+      value passes through with its bits.  `coupling._ift._ift_linear_solve`
+      (the coupling adjoint) has the fixed positive floor
+      `rtol * max|b_hat|` and does not call this function; it is unchanged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a value 0.36 to 1.0 off returned
+      as the solution, and a derivative 0.53 off, with no error, by a
+      function whose failures otherwise raise.  Not `critical`: it needs an
+      explicit `atol=0.0` or a NaN tolerance in the released 0.3.1 (the
+      default floor is not affected), together with a right-hand side with
+      exactly zero entries for `atol=0.0`.  `context_dependent` because the
+      caller carries the value on.
+    affected_components:
+      - "maddening.core.solver_utils.ift_linear_solve"
+    affected_versions: ">=0.3.1, <0.4.0"
+    workaround: >
+      On 0.3.1 do not pass `atol=0.0` to `ift_linear_solve` with
+      `solver="cg"` or `"gmres"`: pass a small positive floor of the
+      right-hand side's scale, or keep the default; check a computed
+      tolerance for NaN before passing it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      lineax still stops on its `0 / 0`: such a call now raises instead of
+      returning, including `rtol=0` without a positive `atol` on a solve
+      that is not exact (GMRES on a unit vector with a residual of 1.3e-7
+      `||rhs||` raised where it returned before), which asks for a residual
+      of exactly zero.  Pass `atol=None` with a positive `rtol`.
+    verification:
+      - "tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py::test_a_floor_that_is_not_normal_raises_where_lineax_stopped_short"
+      - "tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py::test_the_same_when_the_call_is_not_jitted"
+      - "tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py::test_a_floor_of_zero_that_is_traced_raises_too_and_a_solvable_one_is_solved"
+      - "tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py::test_the_derivative_solves_are_held_to_the_same_rule"
+      - "tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py::test_a_floor_that_is_normal_keeps_the_bits_of_the_solve_and_its_derivatives"
+      - "tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py::test_the_rule_is_not_in_the_program_where_the_floor_is_normal_for_every_rhs"
     github_issue: null

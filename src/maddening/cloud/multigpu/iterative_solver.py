@@ -1678,12 +1678,16 @@ def sharded_gmres(
         products.  So the budget is in cycles, ``restart`` times what
         the argument names, and never under ``4 * restart`` cycles;
         ``.iters`` counts the same cycles.  Measured in float32 on 1000
-        unknowns at a condition number of 4001 (white noise, the
-        default ``restart=50`` and ``rtol``) with ``max_iters=10``:
-        3,164 operator products and ``iters=63`` on lineax 0.0.7, and
-        1,685 products and ``iters=34`` on lineax 0.1.1 (lineax stopped
-        before its 200 cycles, at a different one on each version); the
-        loop backend executed 53 products and reported ``iters=50``.
+        unknowns at a condition number of 4001 (the default
+        ``restart=50`` and ``rtol``) with ``max_iters=10``, on white
+        noise from ``numpy.random.default_rng(0)``: 1,889 operator
+        products and ``iters=38`` on lineax 0.0.7, and 3,317 products
+        and ``iters=66`` on lineax 0.1.1 (jax 0.11.0 and 0.11.2 alike).
+        lineax stops before its 200 cycles at a cycle that depends on
+        the right-hand side: over the seeds 0 to 23 of that generator,
+        1,583 to 3,419 products (``iters`` 32 to 68) on lineax 0.0.7 and
+        1,583 to 4,490 (32 to 89) on 0.1.1.  The loop backend executed
+        53 products and reported ``iters=50``.
         A caller who needs a bound on the work passes
         ``backend="loop"``.  The unit of this route is left as it is in
         0.4.0: a budget in steps would change what every default call

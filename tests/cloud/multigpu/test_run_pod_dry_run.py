@@ -205,27 +205,32 @@ def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
     assert set(cases) == {(node, mesh, b) for mesh in _MESHES
                           for node, b in (*(("field", b) for b in ends), ("lbm", "periodic"),
                                           # the field with a halo of two cells
-                                          *(("field-halo2", b) for b in ends))}
-    assert len(doc["results"]) == 28
+                                          *(("field-halo2", b) for b in ends),
+                                          # and under the zero fill, with two integrals
+                                          # the wrapper stacks over the mesh
+                                          ("field-shares", "zero"))}
+    assert len(doc["results"]) == 32
     for (node, mesh, boundary), s in cases.items():
         assert tuple(s["shape"]) == _SHAPE and s["cells"] == 16 * 20
         assert s["mesh_shape"] == _MESHES[mesh]
         assert s["input_partitioned"] is True
         fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"},
-                  "field-halo2": {"f", "averages"}}[node]
+                  "field-halo2": {"f", "averages"},
+                  "field-shares": {"f", "averages", "shares", "strips"}}[node]
         assert set(s["forward"]["parity"]) == fields
         assert all(p["max_rel"] < 1e-5 for p in s["forward"]["parity"].values())
         assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
         assert s["gradient"]["parity_grad_parameter"] < 1e-5
         assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity",
-                                  "field-halo2": "diffusivity"}[node]
+                                  "field-halo2": "diffusivity",
+                                  "field-shares": "diffusivity"}[node]
         for side in ("sharded", "unsharded"):
             _check_timing(s["forward"][side]["rollout"])
             _check_timing(s["gradient"][side]["grad"])
         py, pz = s["mesh_shape"]
         prefix = f"{node} {mesh} {py}x{pz} 16x20 {boundary}"
         assert sum(c["name"].startswith(prefix + " ") or c["name"].startswith(prefix + ":")
-                   for c in doc["checks"]) == 10
+                   for c in doc["checks"]) == 10 + 2 * (len(fields) - 2)
     # the three conditions are different models: nothing here compares a
     # mode with itself under another name; and one model on every mesh
     for mesh in _MESHES:
@@ -321,8 +326,12 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
         # the float total: information, held to no limit (its sum cancels)
         assert m["parity_total"]["finite"] and "max_rel" in m["parity_total"]
         # the reduction, exactly: a field of ones sums to the number of cells
+        # and each shard's [offset, cells] pair, from shard_info, is the layout's
         assert m["ones"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
-                             "entries_not_one": 0}
+                             "entries_not_one": 0, "per_shard": [
+                                 [float(d * r["n_local_max"]), float(k)]
+                                 for d, k in enumerate(r["n_local"])]}
+        assert sum(r["n_local"]) == _CELLS and len(r["n_local"]) == 4
     assert r["ones_unsharded"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
                                    "entries_not_one": 0}
 

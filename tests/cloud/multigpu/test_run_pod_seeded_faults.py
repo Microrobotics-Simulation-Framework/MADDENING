@@ -793,7 +793,10 @@ def test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault(nam
         return
     assert rc == 1, log
     assert failed and all(" dof sharded_cg " in n for n in failed), failed
-    assert any(n.startswith(f"{_CG_DOF} dof") for n in failed), failed
+    # at the larger of the dry run's two sizes too (961 cells: 960 unknowns)
+    largest = max(r["sharded_cg"]["dof"] for r in doc["results"])
+    assert largest == rp.DRY_RUN_CELLS[-1] // _N_DEV * _N_DEV > 256
+    assert any(n.startswith(f"{largest} dof") for n in failed), failed
     if _CG_SEEDS[name].sharded_only:
         assert not [n for n in failed if " sharded_cg unsharded " in n], failed
     else:

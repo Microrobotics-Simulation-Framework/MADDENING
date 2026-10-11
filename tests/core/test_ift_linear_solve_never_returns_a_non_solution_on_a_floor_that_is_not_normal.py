@@ -138,14 +138,19 @@ def test_the_derivative_solves_are_held_to_the_same_rule(mode):
 
 @pytest.mark.parametrize("solver", list(SYSTEMS))
 def test_an_exact_solve_meets_every_tolerance(solver):
-    """A zero right-hand side is solved by the zero start, exactly: with
-    ``rtol=0`` the floor is zero, and with ``rtol=inf`` it is ``inf * 0``,
-    NaN; both are judged, and a residual of exactly zero meets them."""
+    """A zero right-hand side is solved by the zero start, exactly.  With
+    ``rtol=0`` or ``atol=0.0`` the floor is zero and the tolerance zero;
+    with a TRACED ``rtol=inf`` (nothing is known of it when the call is
+    traced, so the rule is in the program) the floor is ``inf * 0``, NaN,
+    and so is the tolerance.  All are judged, and a residual of exactly
+    zero meets them: infinity passes everything, as in ``sharded_cg``."""
     diagonal, n = SYSTEMS[solver]
-    for kw in ({"rtol": 0.0}, {"rtol": float("inf")}, {"atol": 0.0}):
-        got = jax.jit(lambda b: ift_linear_solve(_operator(diagonal), b, solver=solver, **kw))(
-            jnp.zeros(n, jnp.float32))
+    zeros = jnp.zeros(n, jnp.float32)
+    for kw in ({"rtol": 0.0}, {"atol": 0.0}):
+        got = jax.jit(lambda b: ift_linear_solve(_operator(diagonal), b, solver=solver, **kw))(zeros)
         assert np.array_equal(np.asarray(got), np.zeros(n, np.float32)), kw
+    traced = jax.jit(lambda b, rtol: ift_linear_solve(_operator(diagonal), b, solver=solver, rtol=rtol))
+    assert np.array_equal(np.asarray(traced(zeros, jnp.float32(np.inf))), np.zeros(n, np.float32))
 
 
 def _solve_as_before_the_rule(operator_fn, rhs, *, solver, rtol, atol):

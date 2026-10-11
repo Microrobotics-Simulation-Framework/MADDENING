@@ -313,7 +313,13 @@ And `node.params` takes any key: a misspelt one
 (`node.params["stifness"] = 40.0`) is accepted, changes nothing the step
 reads, and after the recompile it causes is a new leaf of `gm.params` and
 an entry of every config saved from then on, where the same key written
-into `gm.params` or passed to `step(params=)` is a `ValueError`.
+into `gm.params` or passed to `step(params=)` is a `ValueError`.  Such a
+config no longer loads: `from_dict` hands the key to the node's
+constructor, which raises `TypeError` naming it (`SpringDamperNode.__init__()
+got an unexpected keyword argument 'stifness'`) unless the class takes
+`**kwargs`.  Delete the key (`del node.params["stifness"]`) before saving;
+the recompile that follows says, with a `RuntimeWarning`, that it drops the
+leaf.
 `gm.params_table()` lists the keys there are.
 
 <!-- snippet: continues -->

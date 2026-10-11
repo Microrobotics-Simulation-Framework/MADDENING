@@ -106,11 +106,30 @@ def test_every_mutation_through_the_mapping_counts():
     assert p._writes == 8 and p == {}
 
 
-def test_a_copy_is_a_fresh_mapping_and_the_rest_sees_a_dict():
+def test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it():
+    """``copy.deepcopy`` and ``pickle`` carry the counts and a lineage of
+    the copy's own: a graph copied with its nodes copies the counts it last
+    saw beside them, and a mapping that started again at zero read as
+    written (MADD-ANO-275).  ``copy.copy`` is a second mapping beside the
+    first, with nothing of a graph copied along: zero counts, its own
+    lineage.  The rest sees a ``dict``."""
     p = _ParamsDict(a=1.0, b=[1, 2])
     p["a"] = 2.0
+    successor = _ParamsDict({**p, "b": [3]})
+    successor._succeed(p)
     for twin in (copy.deepcopy(p), pickle.loads(pickle.dumps(p))):
-        assert type(twin) is _ParamsDict and twin == p and twin._writes == 0
+        assert type(twin) is _ParamsDict and twin == p
+        assert twin._write_counts() == p._write_counts() == {"a": 1}
+        assert twin._writes == 1 and twin._lineage is not p._lineage
+        twin["a"] = 3.0                                   # ... and counts on from there
+        assert twin._write_counts() == {"a": 2} and p._write_counts() == {"a": 1}
+    # Mappings that shared a lineage still share one, the copy's own.
+    for a, b in (copy.deepcopy((p, successor)), pickle.loads(pickle.dumps((p, successor)))):
+        assert a._lineage is b._lineage is not p._lineage
+        assert b._write_counts() == successor._write_counts() == {"a": 1, "b": 1}
+    beside = copy.copy(p)
+    assert type(beside) is _ParamsDict and beside == p and beside["b"] is p["b"]
+    assert beside._write_counts() == {} and beside._lineage is not p._lineage
     assert type(dict(p)) is dict and type(p.copy()) is dict
     assert isinstance(p, dict) and json.loads(json.dumps(p)) == {"a": 2.0, "b": [1, 2]}
     mapped = jax.tree.map(lambda x: x * 2, _ParamsDict(a=1.0, b=2.0))

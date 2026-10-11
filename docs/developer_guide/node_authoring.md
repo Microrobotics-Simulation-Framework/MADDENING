@@ -357,10 +357,10 @@ python scripts/check_citations.py
 above).
 
 A saved graph holds, for each node, its class name, `name`, `timestep` and
-`params`, and nothing else. Every reload (`GraphManager.from_dict` on a
-`to_dict()` config, `load_graph_from_usd` on a saved stage) rebuilds the
-node as `cls(name=..., timestep=..., **params)`. A constructor argument the
-class keeps anywhere else is therefore dropped by the save:
+`params`, and nothing else. `GraphManager.from_dict` on a `to_dict()`
+config and `load_graph_from_usd` on a saved stage both rebuild a node as
+`cls(name=..., timestep=..., **params)`. A constructor argument the class
+keeps anywhere else is therefore dropped by the save:
 
 <!-- snippet: no-run, reason: fragment: two constructors side by side, without the rest of their classes -->
 ```python
@@ -377,43 +377,84 @@ class Spring(SimulationNode):
 
 With the first class, `Spring("s", 0.01, stiffness=40.0)` saved and
 reloaded is a spring of stiffness 12, and the reloaded graph runs. Since
-0.4.0 `to_dict()` says so (in every release before, nothing did,
-MADD-ANO-273): it gives a `UserWarning` naming the node, its class, the
-arguments and the fix. The rule is exact, so that it never warns of a node
-that saves correctly:
+0.4.0 every door that saves a node's constants says so (in every release
+before, nothing did, MADD-ANO-273): `to_dict()` (a config, `GET /graph`,
+the reply to `POST /graph/nodes`) and `save_graph_to_usd` give a
+`UserWarning` naming the node, its class, the arguments and the fix.
 
-- it warns when the node **was constructed with** an argument for a named
-  parameter of its class's `__init__`, at a value other than that
-  parameter's default, and `node.params` has no key of that name. A node
-  built with its defaults reloads as the node it was, and is not warned
-  about;
-- it says nothing where it cannot tell: an argument a `**kwargs` of the
-  constructor took in (there is no default to hold it against); a class
-  that overrides `to_dict()`, which answers for its own saving (the sharded
-  wrappers and `HybridNode` save the node they wrap, and that node is asked
-  in its own right); a node that was not built by calling its class (a
-  copy, an unpickled node); and an attribute written after construction.
-- only `to_dict()` warns (a config, `GET /graph`, the reply to
-  `POST /graph/nodes`). `save_graph_to_usd` drops the same arguments and
-  does not warn.
+**The rule goes by the name.** The warning is given when the node *was
+constructed with* an argument for a named parameter of its class's
+`__init__` (its own, or the one it inherits), at a value that is not
+exactly that parameter's default, and `node.params` has no key of that
+name.
+
+- "Exactly the default" means the same object, or a value of the same type
+  that is the same bit for bit: `-0.0` is not the default `0.0`, `2` is not
+  the default `2.0`, a list is not a tuple. A reload passes the default
+  itself, and only a value that cannot be told from it is known to build
+  the same node. A node built with its defaults is not warned about.
+- **The warning is not proof of a loss.** A class that saves an argument
+  another way is named too, although it reloads bit for bit: an argument
+  accepted under two spellings and saved under one (`period=` saved as
+  `frequency`), one handed to `super().__init__` under another name, a flag
+  that says how to read another argument (`per_minute=True`), an attribute
+  put back to its default before the save. Such a class says that it
+  answers for its own saving by overriding `to_dict()` (calling the base
+  one is enough), and is then not asked:
+
+<!-- snippet: no-run, reason: fragment: one method of a class the prose describes -->
+```python
+    def to_dict(self):
+        return super().to_dict()    # `period` is saved, as `frequency`
+```
+
+- **Silence is not proof that everything is saved.** The rule reads the
+  signature of the class's own constructor and nothing else, so these lose
+  an argument without a word:
+  - anything a `**kwargs` of the constructor took in. Most of it reaches
+    the base class's `**params` and is saved. An argument the class takes
+    out on the way is not, and neither is one that a subclass's `**kwargs`
+    hands up to a parent that keeps it as an attribute (`Child(gain=5.0)`
+    where `Parent.__init__` does `self.gain = gain`). The parents'
+    signatures are not read, because a parent may save such an argument
+    under another name (the built-in adaptive node takes
+    `blindness_threshold` and saves it as `gradient_capture_threshold`);
+  - anything an `*args` of the constructor took in;
+  - a node whose arguments were not seen when it was created: a class (or
+    a mixin placed before `SimulationNode`) whose own `__new__` hands no
+    arguments on, a copy (`copy.deepcopy`), an unpickled node;
+  - an attribute written after construction (`node.stiffness = 40.0`).
 
 What a save does not carry, whatever the class does:
 
 - `geometry_source`, which the base constructor takes out of `params`;
-- an attribute written after construction (`node.stiffness = 40.0`). It is
-  also not a counted write: see
+- an attribute written after construction. It is also not a counted write:
+  see
   [Live values, recompiles and partial pytrees](../user_guide/parameters.md#live-values-recompiles-and-partial-pytrees);
 - anything that is not in `params` because it cannot be: a callable, a
-  device mesh, a partition layout. A sharded node is reloaded unsharded,
-  with a warning that names the call that wraps it again;
+  device mesh, a partition layout;
 - state. A config and a stage carry structure; a checkpoint
   (`gm.save_state`) carries the state and the live `gm.params`.
+
+**A node inside a wrapper, door by door.** The two doors differ here:
+
+| Saved from | `to_dict()` then `from_dict()` | `save_graph_to_usd` then `load_graph_from_usd` |
+|---|---|---|
+| a sharded wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises `TypeError` (the wrapper is not built from `name, timestep, **params`); MADD-ANO-036 |
+| a `HybridNode` | the entry's type is `HybridNode`, and `from_dict` raises: `KeyError` when the registry has no `HybridNode`, `TypeError` when it has | the load raises `TypeError` |
+
+So a graph that holds a wrapper is saved from the node it wraps: save the
+unwrapped graph, and wrap the node again after loading. A correction
+function and a device mesh are not in any save.
 
 An array in `params` is saved as the array it is. `GraphManager.to_dict()`
 does not turn it into lists, so write such a config with
 `json.dumps(config, default=lambda a: numpy.asarray(a).tolist())`, or hold
 the constant as nested lists in `params` (as `HeatNode` holds
-`grid_points` and `LBMNode` its `wall_mask`).
+`grid_points` and `LBMNode` its `wall_mask`). A list carries no dtype: a
+float32 array written this way is read back at the default float type, so
+under `jax_enable_x64` it comes back as float64 and the reloaded graph is
+no longer bit for bit the saved one.
 
 ## Boundary Input Specification
 

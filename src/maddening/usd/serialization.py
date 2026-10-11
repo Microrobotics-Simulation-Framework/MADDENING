@@ -60,6 +60,7 @@ from pxr import Sdf, Usd, Vt
 
 from maddening.core._size_estimate import refuse_beyond_memory
 from maddening.core.coupling.group import coupling_group_kwargs
+from maddening.core.node import _warn_of_unsaved_constructor_arguments
 from maddening.core.transforms import (
     UnregisteredTransformError,
     get_transform_name,
@@ -340,6 +341,9 @@ def save_graph_to_usd(
                 gm.effective_node_params(node_name)
                 if spec.accepts_params else node_obj.params
             )
+            # ``params`` is all of the node a stage carries, as for a
+            # config: say so where the node was built with more.
+            _warn_of_unsaved_constructor_arguments(node_obj)
             prim.GetAttribute("maddening:paramsJson").Set(
                 _params_json(node_params, node_name)
             )

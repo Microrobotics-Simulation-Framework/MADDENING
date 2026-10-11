@@ -181,9 +181,25 @@ class _ParamsDict(dict):
     the node's own value over every other constant of that node a fit had
     calibrated in ``gm.params`` (MADD-ANO-203).
 
-    Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
-    JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
-    pickle, ``copy.deepcopy``) that starts its counts at zero.
+    Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON,
+    and a JAX pytree with the dict's own flattening.
+
+    Copies.  ``copy.deepcopy`` and ``pickle`` carry the counts and the
+    lineage with the items (:meth:`__reduce__`).  A graph copied with its
+    nodes holds, beside each node's mapping, the counts it last saw there
+    (``GraphManager._node_writes_seen``); those are copied as they are, so
+    the mapping's own counts must be too, or the copy's first sync reads
+    "fewer writes than I saw" as a write and puts the node's value over a
+    leaf calibrated in ``gm.params`` since.  Until 0.4.0 shipped such a copy
+    started at zero, and ``copy.deepcopy(gm)`` of a graph with a node write
+    in its past and a calibration after it ran the node's value where the
+    original ran the calibrated one, with nothing said (MADD-ANO-275).  The
+    lineage is copied once per copy operation, so mappings that shared one
+    still do and share none with the originals.  ``copy.copy(p)`` and
+    ``dict(p)`` are another matter: a second mapping beside this one, with
+    no graph record copied along, so it starts at zero with a lineage of
+    its own (two mappings that counted alike and then diverged must not
+    pass for one another).
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -262,7 +278,25 @@ class _ParamsDict(dict):
         return self
 
     def __reduce__(self):
-        return (_ParamsDict, (dict(self),))
+        # pickle and copy.deepcopy: the items with the counts and the lineage
+        # (see "Copies" in the class docstring).
+        return (_restored_params_dict,
+                (dict(self), self._writes, self._key_writes, self._carried, self._lineage))
+
+    def __copy__(self):
+        # A second mapping beside this one: zero counts, its own lineage.
+        return _ParamsDict(self)
+
+
+def _restored_params_dict(items, writes, key_writes, carried, lineage) -> "_ParamsDict":
+    """A :class:`_ParamsDict` with the counts and the lineage of the one it
+    was copied or pickled from (:meth:`_ParamsDict.__reduce__`)."""
+    restored = _ParamsDict(items)
+    restored._writes = writes
+    restored._key_writes = dict(key_writes)
+    restored._carried = dict(carried)
+    restored._lineage = lineage
+    return restored
 
 
 def _holds_mutable(value) -> bool:
@@ -836,46 +870,37 @@ def _init_signature(cls: type) -> Optional[inspect.Signature]:
 
 
 def _is_the_default(value: Any, default: Any) -> bool:
-    """Whether a constructor given ``value`` was given what it would have
-    had anyway: the same object, or the same number, or the same numbers in
-    a sequence, a mapping or an array.  ``12`` for a default of ``12.0`` is
-    the default, and so is ``np.zeros(3)`` for ``(0.0, 0.0, 0.0)``: a reload
-    that passes the default instead builds the same node.  Anything that
-    cannot be compared is not the default."""
+    """Whether a constructor given ``value`` for a parameter was given that
+    parameter's default: the same object, or a value of the same type that
+    is the same bit for bit, element by element in a list, a tuple, a dict
+    or an array (:func:`_same_value`).
+
+    Exactly that, because a reload passes the default itself, and only a
+    value that cannot be told from it is known to build the same node.  So
+    ``-0.0`` is not the default ``0.0`` (a constructor may read the sign),
+    ``2`` is not the default ``2.0`` (an integer state multiplied by it
+    stays an integer, and by the float does not), ``np.float32(2.0)`` is
+    not ``2.0`` (it carries a dtype), a list is not a tuple and an array is
+    not a tuple of the same numbers.  A ``NaN`` is the default ``NaN``.
+    Anything that cannot be compared is not the default.  Until this was
+    made exact the first two were taken for the default, and a node built
+    with them lost the argument with nothing said."""
     if value is default:
         return True
-    numbers = (bool, int, float, complex, np.number, np.bool_)
     try:
-        if isinstance(value, numbers) and isinstance(default, numbers):
-            return bool(value == default) or bool(value != value and default != default)
-        if isinstance(value, jax.core.Tracer) or isinstance(default, jax.core.Tracer):
-            return False
-        arrays = (np.ndarray, jax.Array)
-        if isinstance(value, arrays) or isinstance(default, arrays):
-            if default is None or value is None or isinstance(default, (str, bytes, Mapping)) \
-                    or isinstance(value, (str, bytes, Mapping)):
-                return False
-            a, b = np.asarray(value), np.asarray(default)
-            if a.dtype == object or b.dtype == object or a.shape != b.shape:
-                return False
-            return bool(np.array_equal(a, b, equal_nan=a.dtype.kind in "fc" and b.dtype.kind in "fc"))
-        if isinstance(value, (list, tuple)) and isinstance(default, (list, tuple)):
-            return len(value) == len(default) and all(
-                _is_the_default(x, y) for x, y in zip(value, default))
-        if isinstance(value, Mapping) and isinstance(default, Mapping):
-            return value.keys() == default.keys() and all(
-                _is_the_default(value[k], default[k]) for k in value)
-        return type(value) is type(default) and bool(value == default)
+        return _same_value(value, default)
     except Exception:   # noqa: BLE001 - what cannot be compared is not the default
         return False
 
 
 def _note_constructor_arguments(node: Any, cls: type, args: tuple, kwargs: dict) -> None:
     """Record, for :func:`_unsaved_constructor_arguments`, which named
-    parameters of ``cls.__init__`` this call gives a value other than their
-    default.  Records nothing when it cannot tell: a signature that cannot
-    be read, a call the constructor is about to refuse, a node that takes no
-    weak reference.  Never raises."""
+    parameters of ``cls.__init__`` (the class's own constructor, or the one
+    it inherits) this call gives a value that is not exactly their default
+    (:func:`_is_the_default`).  What a ``**kwargs`` or an ``*args`` of that
+    constructor takes in is not looked at.  Records nothing when it cannot
+    tell: a signature that cannot be read, a call the constructor is about
+    to refuse, a node that takes no weak reference.  Never raises."""
     try:
         signature = _init_signature(cls)
         if signature is None:
@@ -911,21 +936,38 @@ def _note_constructor_arguments(node: Any, cls: type, args: tuple, kwargs: dict)
 
 
 def _unsaved_constructor_arguments(node: "SimulationNode") -> list[str]:
-    """The constructor arguments of ``node`` that its saved entry cannot
-    rebuild, sorted: named parameters of its class's ``__init__`` that it
-    was constructed with a value other than their default for, and that are
-    no key of ``node.params``.
+    """The constructor arguments of ``node`` that are not in its saved
+    entry, sorted: named parameters of its class's ``__init__`` (its own,
+    or the one it inherits) that it was constructed with a value other than
+    their default for (:func:`_is_the_default`: exactly the default, type
+    and sign included), and that are no key of ``node.params``.
 
-    Exactly that, so that nothing harmless is reported.  Not reported,
-    because it cannot be told from here:
+    The rule goes by the name: "given, and not in ``params`` under that
+    name".  It is silent for a node built with its defaults, which reloads
+    as the node it was.  It is **not** proof of a loss: a class that saves
+    an argument another way -- under another key, or folded into another
+    argument -- is named too, and says so by overriding ``to_dict`` (below).
 
-    * an argument a ``**kwargs`` (or ``*args``) of the constructor took in:
-      there is no default to hold it against;
-    * a node of a class that overrides ``to_dict``, which saves itself its
-      own way (the sharded wrappers and ``HybridNode`` save the node they
-      wrap, which is asked in its own right);
-    * a node not built by calling its class -- a copy, an unpickled node --
-      which has no record;
+    Not reported, though the argument may be lost all the same:
+
+    * anything a ``**kwargs`` of the constructor took in.  Most of it
+      reaches the base's ``**params`` and is saved; an argument the class
+      takes out on the way is not, and neither is one a subclass's
+      ``**kwargs`` hands up to a parent that keeps it as an attribute
+      (``Child(gain=5.0)`` where ``Parent.__init__`` does ``self.gain =
+      gain``).  The parents' signatures are not read, because a parent may
+      save such an argument under another name (the built-in adaptive
+      node takes ``blindness_threshold`` and saves it as
+      ``gradient_capture_threshold``), and going by a parent's names would
+      then warn of a built-in node that reloads bit for bit;
+    * anything an ``*args`` of the constructor took in: it has no name to
+      look for in ``params``;
+    * a node whose arguments were not seen when it was created: a class,
+      or a mixin before ``SimulationNode`` in its bases, whose own
+      ``__new__`` hands no arguments on; a copy; an unpickled node;
+    * a node of a class that overrides ``to_dict``, which answers for its
+      own saving (the sharded wrappers and ``HybridNode`` save the node
+      they wrap, which is asked in its own right);
     * an attribute written after construction (``node.stiffness = 40.0``),
       which no save carries either;
     * ``name`` and ``timestep``, which the entry carries beside ``params``,
@@ -948,7 +990,17 @@ def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
     :func:`_unsaved_constructor_arguments` finds, what a reload does
     instead, and the fix.  A warning and not an error: an error would stop
     every such node from being saved at all, and a node built with its
-    defaults saves correctly."""
+    defaults saves correctly.  Called by every door that saves a node's
+    constants: ``SimulationNode.to_dict`` (a config, ``GET /graph``, the
+    reply to ``POST /graph/nodes``) and ``save_graph_to_usd``.  Given a
+    wrapper, it asks the node the wrapper's constants belong to."""
+    # A wrapper's constants are its node's (``_params_owner``): a door that
+    # saves a wrapper by its ``params`` (the USD writer) is told of the node.
+    for _ in range(8):
+        owner = node._params_owner() if isinstance(node, SimulationNode) else None
+        if owner is None:
+            break
+        node = owner
     names = _unsaved_constructor_arguments(node)
     if not names:
         return
@@ -970,14 +1022,16 @@ def _warn_of_unsaved_constructor_arguments(node: "SimulationNode") -> None:
         outcomes.append(f"cannot build the node ({', '.join(required)}: no default)")
     one = len(names) == 1
     warnings.warn(
-        f"node {node.name!r} ({cls.__name__}): to_dict() does not save the constructor "
-        f"argument{'' if one else 's'} {', '.join(names)}.  {cls.__name__}.__init__ does not "
-        f"pass {'it' if one else 'them'} to super().__init__(), so {'it is' if one else 'they are'} "
-        f"not in node.params, and a saved node is rebuilt as {cls.__name__}(name=..., "
-        f"timestep=..., **params): a graph loaded from this config {' and '.join(outcomes)}.  "
-        f"Pass {'it' if one else 'them'} on -- super().__init__(name, timestep, "
+        f"node {node.name!r} ({cls.__name__}) does not save the constructor "
+        f"argument{'' if one else 's'} {', '.join(names)}.  {cls.__name__}'s constructor (or one it "
+        f"inherits) does not hand {'it' if one else 'them'} to SimulationNode.__init__ under "
+        f"{'that name' if one else 'those names'}, so {'it is' if one else 'they are'} not in "
+        f"node.params, and a saved node is rebuilt as {cls.__name__}(name=..., timestep=..., "
+        f"**params): a graph loaded from this save {' and '.join(outcomes)}.  Hand "
+        f"{'it' if one else 'them'} on -- super().__init__(name, timestep, "
         f"{', '.join(f'{name}={name}' for name in names)}) -- and read {'it' if one else 'them'} "
-        f"from self.params; or override to_dict() if the node saves itself another way.",
+        f"from self.params; or, if the node saves {'it' if one else 'them'} another way, "
+        f"override to_dict() to say so.",
         UserWarning, stacklevel=2, skip_file_prefixes=(_PACKAGE_DIR,),
     )
 
@@ -2104,7 +2158,10 @@ class SimulationNode(ABC):
         ``UserWarning`` naming the node, its class, the arguments and the
         fix (:func:`_unsaved_constructor_arguments` states the rule and
         what it cannot tell).  Until 0.4.0 nothing said so.  A warning and
-        not an error, so that such a node can still be saved.
+        not an error, so that such a node can still be saved.  The rule
+        goes by the argument's name, so a class that saves an argument
+        another way is named as well: it overrides ``to_dict`` (calling
+        this one is enough), and is then not asked.
         """
         _warn_of_unsaved_constructor_arguments(self)
         return {

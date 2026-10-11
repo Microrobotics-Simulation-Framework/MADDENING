@@ -7236,9 +7236,13 @@ class GraphManager:
         other than its default, this method gives a ``UserWarning`` naming
         the node, its class, the arguments and the fix (see
         :meth:`SimulationNode.to_dict
-        <maddening.core.node.SimulationNode.to_dict>` for the rule and for
-        what it cannot tell); in every release before 0.4.0 nothing said
-        so (MADD-ANO-273).  An edge's interface
+        <maddening.core.node.SimulationNode.to_dict>` for the rule, which
+        goes by the argument's name, and for what it cannot tell); in
+        every release before 0.4.0 nothing said so (MADD-ANO-273).  A
+        node inside a ``HybridNode`` is written with the type
+        ``HybridNode``, which :meth:`from_dict` cannot rebuild (it raises);
+        one inside a sharded wrapper is rebuilt unsharded, with a warning.
+        An edge's interface
         mapping is written as its
         :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (kind,
         hyper-parameters, point references — never the weights, which
@@ -7275,10 +7279,15 @@ class GraphManager:
         valid for every graph.  :meth:`from_dict` takes the result as it
         stands, and for JSON write the arrays as lists --
         ``json.dumps(config, default=lambda a: numpy.asarray(a).tolist())``
-        -- which :meth:`from_dict` reads back into a graph that steps bit
-        for bit as this one.  A node that holds such a constant as nested
-        lists (``HeatNode``'s ``grid_points``, ``LBMNode``'s
-        ``wall_mask``) needs neither.
+        -- which :meth:`from_dict` reads back.  A list carries no dtype,
+        so the reloaded graph steps bit for bit as this one only where
+        the default float type is the array's: with ``jax_enable_x64``
+        off, any float array; with it on, a float32 array comes back as
+        float64 and the reloaded graph drifts from the saved one (3e-7 in
+        a state of order one after five steps, measured), while
+        :meth:`from_dict` of the result as it stands is exact in both.  A
+        node that holds such a constant as nested lists (``HeatNode``'s
+        ``grid_points``, ``LBMNode``'s ``wall_mask``) needs neither.
         :meth:`from_dict` turns those back into floats, and reads the
         bare tokens an older config carries as well.  The encoding is
         applied once, to the assembled tree, so each part's own

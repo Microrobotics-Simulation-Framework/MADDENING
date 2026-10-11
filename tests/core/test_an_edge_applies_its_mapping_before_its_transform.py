@@ -27,9 +27,12 @@ The routes:
   edge: two matrices, applied in the order mapping, closure.
 
 Not here: a transform that changes the shape (a selection) after a
-mapping.  ``add_edge`` holds the mapping's ``n_target`` to the shape the
-target input declares, whatever the transform does next, so such an edge
-is refused before either order could be taken.
+mapping.  Where the target input declares a shape, ``add_edge`` holds the
+mapping's ``n_target`` to it whatever the transform does next, so such an
+edge is refused.  Where it declares none the edge is accepted, and the
+other order cannot be evaluated at all (the mapping is handed the wrong
+number of entries): ``test_coupling_interface_reading_is_what_the_edge_delivers.py``
+has that case, "a mapping then a selection of what it delivered".
 """
 
 import os

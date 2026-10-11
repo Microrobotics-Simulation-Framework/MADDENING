@@ -295,10 +295,11 @@ def possible_chain(plan, state, assumed=None) -> CarriedChain:
     nodes compute; ``loop`` ``None`` means it carries none in a closed
     loop.  Anything else is a question for :func:`carried_nonfloat_chain`.
     """
-    return _chain(*_edge_relation(plan, state), assumed)
+    fields, fed_by = _edge_relation(plan, state)
+    return _chain(fields, fed_by, assumed)
 
 
-def _edge_relation(plan, state) -> tuple:
+def _edge_relation(plan, state) -> tuple[set, dict]:
     """``(fields, fed_by)`` of :func:`possible_chain`: the edges' bound, before chaining."""
     reads = plan.iterate_reads()
     carried = {

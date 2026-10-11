@@ -197,6 +197,8 @@ four, and the scattered order ran only in the seeded-fault tests.)
 
 | fault (seed) | where | goals that must fail | items |
 |---|---|---|---|
+| a sharded static halo-exchanged along the first mesh axis `axis_map` lists, whatever axis it is split along | `sharded_node.py` | `stencil`, `hybrid`, `coupled`: the `2d-flat` cases | 1, 3, 4, 6 |
+| a sharded static halo-exchanged along the mesh axis of spatial axis 0 | `sharded_node.py` | `stencil`, `hybrid`, `coupled`: the `2d-flat` cases | 1, 3, 4, 6 |
 | halos two wide zero at the global edges | `sharded_node.py` | `stencil`: every `field-halo2` case | 1, 3 |
 | each outer halo cell a copy of the innermost one | `halo.py` | `halo`; `stencil`: every `field-halo2` case | 1, 2, 3 |
 | the one-cell `"edge"` rule at width two (the block's two cells, not its edge cell twice) | `halo.py` | `halo`; `stencil`: the `field-halo2` cases under edge and Dirichlet ends | 1, 2, 3 |
@@ -219,11 +221,11 @@ four, and the scattered order ran only in the seeded-fault tests.)
 | an integral declared one a shard summed over the mesh axis | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 | each shard's integral stacked into the next shard's slot | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds eighteen faults
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds twenty faults
 as seeds of `sharded_node.py` and `halo.py` -- the four and the three
-above, domain integrals summed over the first mesh axis only, the three of a halo two
+above, the two of a static split along the second sharded axis, domain integrals summed over the first mesh axis only, the three of a halo two
 cells wide and the seven of the `field-shares` cases -- and seven of `sharded_unstructured.py`.  Slow-marked, it
-applies each of the eighteen to a scratch copy of the library, runs `--goal
+applies each of the twenty to a scratch copy of the library, runs `--goal
 checklist --dry-run --keep-going`, and requires `stencil`, `hybrid` and
 `coupled` to read `FAIL` (`stencil` alone for a fault of a halo two wide or of the `field-shares` cases;
 and `halo` too for a seed of `halo.py`; the other checklist goals `PASS`),
@@ -267,7 +269,7 @@ is not **run**.
 | `halo_width()`: one cell, and two | run | `halo`, `stencil` | `outer_halo_cells_copy_the_innermost_one`, `halos_two_wide_are_zero_at_the_global_edges` |
 | a `halo_width()` that follows a parameter, read again at each `compile()` | not run | | `tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py` |
 | `halo_boundary()`: a fill the node declares, and the refusal of another | not run | | `tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py` |
-| `static_data`: a `StaticArray(replication="shard")`, halo-exchanged along its `shard_axis` and handed over as `static_padded` | run | `stencil`, `hybrid`, `coupled` | `static_halos_are_nan` |
+| `static_data`: a `StaticArray(replication="shard")`, halo-exchanged along its `shard_axis` and handed over as `static_padded` (on a 2-D mesh split along the first sharded axis, on the pencil, and the second, on `2d-flat`) | run | `stencil`, `hybrid`, `coupled` | `static_halos_are_nan`, `statics_exchanged_along_the_first_mesh_axis_axis_map_lists`, `statics_exchanged_along_the_mesh_axis_of_spatial_axis_0` |
 | `shard_info`: the block's offset and extent along each sharded axis | run | `stencil`, `hybrid`, `coupled` | `shard_info_extent_from_the_first_mesh_axis`, `shard_info_extent_from_spatial_axis_0` |
 | a grid-shaped boundary input, split and halo-padded like the state | run | `stencil`, `hybrid`, `coupled` | `grid_inputs_are_zeroed` |
 | a scalar boundary input, replicated to every shard | unproved | | `tests/cloud/multigpu/test_sharded_boundary_inputs.py` |

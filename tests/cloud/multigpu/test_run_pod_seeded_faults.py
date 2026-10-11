@@ -259,6 +259,23 @@ _SEEDS = {
         "                f: (arr if f in integrals else _pad_like_state(arr))\n",
         "                f: (arr * 0 if f in integrals else _pad_like_state(arr))  # SEEDED FAULT\n",
         fails=("stencil",), kind="field-shares", boundary="zero"),
+    # A sharded static split along the SECOND sharded axis of a 2-D mesh:
+    # the ``2d-flat`` cases of every wrapper goal since schema 12
+    # (``run_pod.mask_axis_for``).  The first passed all eight goals until
+    # then, when every 2-D case split its static along the first mesh axis
+    # ``axis_map`` lists: each sharded static halo-exchanged along that mesh
+    # axis, whatever axis it is split along.
+    "statics_exchanged_along_the_first_mesh_axis_axis_map_lists": Seed(
+        "                        descriptors.append((ma, sa.shard_axis, h))\n",
+        "                        descriptors.append((next(iter(axis_map)), sa.shard_axis, h))"
+        "  # SEEDED FAULT\n",
+        only_in=("2d-flat",), mesh="2d-flat"),
+    # ... and along the mesh axis of spatial axis 0.
+    "statics_exchanged_along_the_mesh_axis_of_spatial_axis_0": Seed(
+        "                        descriptors.append((ma, sa.shard_axis, h))\n",
+        "                        descriptors.append((min(axis_map, key=axis_map.get), sa.shard_axis,"
+        " h))  # SEEDED FAULT\n",
+        only_in=("2d-flat",), mesh="2d-flat"),
     # A REDUCED integral carried in the state, which the ``field-shares``
     # node reads back into its field since schema 12 (``Field2D.MEAN_PULL``,
     # its ``averages``).  The first passed all eight goals until then: the

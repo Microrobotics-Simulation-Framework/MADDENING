@@ -506,8 +506,10 @@ newest JAX in the range of the `cuda12` extra.
   a ranking on that interconnect.
 * The duration estimates of section 2 were made for A100s and have not
   been made again; the time boxes are those of the A100 estimates (two of
-  them raised with schema 10, `stencil` to 45 minutes and `forward` to 20:
-  "Expected durations" says why).
+  them raised with schema 10, `stencil` to 45 minutes and `forward` to 20,
+  and one added, 25 minutes for the second `forward` run, on the real mesh:
+  "Expected durations" says why, and what is cut first when the 2-hour cap
+  binds).
 * No goal needs more than one card: each compares a sharded run with the
   unsharded node on one device of the same pod, at 1e5 to 1e6 cells.
   Whether a run *larger* than one card works is not a checklist question;
@@ -619,7 +621,7 @@ timeout 10m $R --goal exchange    2>&1 | tee $L/exchange.log         # the trans
 timeout 20m $R --goal forward     2>&1 | tee $L/forward.log          # checklist 1: the three synthetic sizes
 timeout 20m $R --goal gradient    2>&1 | tee $L/gradient.log         # checklist 1 and 3, unstructured
 M=results/multigpu-mesh; mkdir -p $M                                  # the real mesh: a directory of its own
-timeout 15m python3 benchmarks/multigpu/run_pod.py --out $M --goal forward \
+timeout 25m python3 benchmarks/multigpu/run_pod.py --out $M --goal forward \
     --mesh /path/to/mesh.npz 2>&1 | tee $M/forward.log               # one size, the file's
 python3 benchmarks/multigpu/run_pod.py --summarise results/multigpu | tee $L/summary.txt
 python3 benchmarks/multigpu/run_pod.py --summarise $M | tee $M/summary.txt
@@ -694,29 +696,53 @@ dominates; a GPU compile of the coupled group's adjoint is assumed to take
 | `indivisible` | 4 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 10 min |
 | `halo` | 5 programs at 1e6 cells (the four meshes, unstructured) and the NumPy reference | 1–2 min | 10 min |
 | `coupled` | 2 solvers × (the unsharded group once, and the sharded group on each of the four meshes) at 1e5 cells, and on the pencil at 3e5 and 1e6 -- 18 programs -- and the float64 model on the host | 7–15 min | 25 min |
-| `stencil` | rollout and gradient per side: at 1e5 cells the field under each of the three ends, the D2Q9 lattice, and the field with a halo of two under each of the three ends, on each of the four meshes and the field once under the zero fill with its two stacked integrals (32 cases, the unsharded side run once per node and ends, and once per mesh for the stacked integrals: 86 programs), and periodic ends on the pencil mesh at 3e5 and 1e6 (34 cases, 94 programs) | 20–35 min | 45 min |
+| `stencil` | rollout and gradient per side: at 1e5 cells the field under each of the three ends, the D2Q9 lattice, and the field with a halo of two under each of the three ends, on each of the four meshes, the field once under the zero fill with its two stacked integrals on each, and the field with periodic ends twice more, its static split along the second axis on the pencil and on the crossed pencil (34 cases, the unsharded side run once per node and ends, and once per mesh for the stacked integrals: 92 programs), and periodic ends on the pencil mesh at 3e5 and 1e6 (36 cases, 100 programs) | 21–37 min | 45 min |
 | `hybrid` | `run_scan` and the gradient of the unsharded graph once per size, and of the sharded one on each of the four meshes at 1e5 cells and on the pencil at the others (9 graphs) | 4–8 min | 20 min |
 | `exchange` | per size, 2 transports | ~5 min | 10 min |
 | `forward` | per size, 2 transports, public and compiled step; every step ghost-exchanges the field and the per-cell source | ~13 min | 20 min |
 | `gradient` | per size, 3 rollout gradients (each one reverse pass for the start, the per-cell source and the injected weight) and `sharded_cg` (55 to 58 iterations a solve; the 3000-iteration cap is never reached) | ~8 min | 20 min |
+| `forward --mesh` | the real mesh, its one size (1,001,664 cells), 2 transports, public and compiled step | 10–20 min | 25 min |
 
-About 68–95 minutes of goals, 1.7–2.2 h with setup and copy-back: **at the
-top of the estimate the session's 2-hour cap binds**.  The whole session
-is capped at **2 hours**.  Schema 10 added about ten to sixteen minutes
-to the estimate, scaled from the CPU dry run at the session's sizes and
-not measured on a GPU: the `stencil` goal's twelve cases with a halo of
-two (30 of its 78 programs; its dry run went from 28 s to 52 s, and its
-time box from 30 to 45 minutes) and the `forward` goal's second exchanged
-array (its compiled step from 5.4–7.2 ms to 12–19 ms at 1e6 cells on CPU,
-its public step from 40 ms to 48–56 ms; its time box from 15 to 20
-minutes).  Schema 11 added three to five minutes more, scaled the same
-way: the `stencil` goal's four `field-shares` cases (16 of its 94
+About 70–109 minutes of goals; with setup and copy-back (about 35
+minutes) 1.75–2.4 hours.  **The session is capped at 2 hours, and above
+about 85 minutes of goals the cap binds**: the top of the estimate does
+not fit.  The time boxes add up to 185 minutes, more than the cap: a box
+is one goal's own ceiling, so that a goal that hangs ends there, not a
+share of the session.  The cap bounds the session (section 3).  So,
+before each goal, compare the time left before the cap, less 15 minutes
+to copy back and tear down, with the top of the estimates of the goals
+still to run, and cut in this order until they fit:
+
+1. `stencil`, `hybrid` and `coupled` at 1e6 cells: run them with
+   `--cells 100000 300000`.  The items they decide still close: every
+   file is read against the sizes it records.
+2. The second `forward` run (`--mesh`), which decides no checklist item:
+   the real-mesh question then waits for another session.
+
+Nothing else is cut: every other goal decides an item or the transport
+question, and a session that runs out of time stops by section 3, copies
+back what exists, and decides only what its files decide.  Never cut the
+meshes, the cases with a halo of two, the `field-shares` cases, the
+`field-mask1` case or the crossed pencil (the smallest size's cases).
+
+How the estimate was scaled (from CPU dry runs, not measured on a GPU).
+Schema 10 added about ten to sixteen minutes: the `stencil` goal's twelve
+cases with a halo of two (30 of its 78 programs; its dry run went from
+28 s to 52 s, and its time box from 30 to 45 minutes) and the `forward`
+goal's second exchanged array (its compiled step from 5.4–7.2 ms to
+12–19 ms at 1e6 cells on CPU, its public step from 40 ms to 48–56 ms; its
+time box from 15 to 20 minutes).  Schema 11 added three to five minutes
+more: the `stencil` goal's four `field-shares` cases (16 of its 94
 programs; its dry run went from 53 s to 62 s, inside its 45-minute box),
 and one masked sum a step in `forward`, which its timings do not show.
-The extra meshes (schema 6) cost about ten minutes; if the cap
-binds, the larger sizes of `stencil`, `hybrid` and `coupled` run on the
-pencil only and are the place to cut (`--cells 100000 300000`), not the
-meshes, not the cases with a halo of two and not the `field-shares` cases.
+Schema 12 added one to two minutes: the `stencil` goal's two cases on the
+pencil (6 of its 100 programs; its dry run went from 80 s to 84 s on
+shared cores, the mean of two runs of each), inside its box.  The second
+`forward` run is new: on CPU it took 1.5 times the first run's wall time
+(27 s against 19 s), its steps 4 to 7 times those of the synthetic 1e6
+cells (a tetrahedral mesh's shards have more ghost rows), so it is
+estimated at 10–20 minutes against the first run's 13.  The extra meshes
+(schema 6) cost about ten minutes.
 
 ## 3. Stop condition
 

@@ -5353,10 +5353,10 @@ claims:
   area: run_pod-goals
   claim: >-
     "The goals must fail on a stencil wrapper or a halo exchange broken in
-    any of sixteen ways: eight that every wrapper goal must catch (...
-    domain integrals summed over the first mesh axis only ...), and three
-    that only a halo two cells wide shows, which are the stencil goal's";
-    the runbook: test_run_pod_seeded_faults.py "holds sixteen faults as
+    any of twenty-six ways: ten that every wrapper goal must catch (...
+    domain integrals summed over the first mesh axis only ...), and sixteen
+    that only the stencil goal can catch, each in cases of its own";
+    the runbook: test_run_pod_seeded_faults.py "holds twenty-six faults as
     seeds of sharded_node.py and halo.py".  (The seeds of the unstructured
     wrapper are RPD-063's.)
   sources:
@@ -5392,7 +5392,7 @@ claims:
 - id: RPD-025
   area: run_pod-goals
   claim: >-
-    The seeded test "applies each of the sixteen to a scratch copy of the
+    The seeded test "applies each of the twenty-six to a scratch copy of the
     library, runs --goal checklist --dry-run --keep-going, and requires
     stencil, hybrid and coupled to read FAIL (stencil alone for a fault of
     a halo two wide; and halo too for a seed of halo.py ...), every item
@@ -7352,5 +7352,101 @@ claims:
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-069
+  area: run_pod-runbook
+  claim: >-
+    Section 1 launches the session on an image built from docker/Dockerfile.cloud
+    at the session's commit with --build-arg JAX_SPEC='jax[cuda12]==0.11.2',
+    passed as container_image (or --image-id docker:<tag>), "never :latest";
+    section 2a checks that python3 is at least 3.12 before anything else,
+    installs "jax[cuda12]==0.11.2" -- the JAX of CI's newer lane, exactly --
+    with the system python3's pip, and records python3 --version in
+    session.txt.  The Dockerfile's JAX_SPEC defaults to the range of
+    pyproject's cuda12 extra.
+  sources:
+    - benchmarks/multigpu/README.md (1. Launch; 2a. Sanity, and what to record before the first goal)
+    - pyproject.toml (the cuda12 extra, which docker/Dockerfile.cloud's JAX_SPEC defaults to)
+  conditions: >-
+    the four files as text (the runbook, the Dockerfile, pyproject.toml,
+    .github/workflows/ci.yml); nothing is built, pushed or launched.  The
+    published :latest image (built 2026-03-25: Python 3.10, CUDA 12.2,
+    jax[cuda12]>=0.4,<0.6) was read from its registry config by the
+    maintainer's session, not by a test.
+  oracle: >-
+    one version in section 2a's install and section 1's build argument, a
+    version CI's matrix runs, inside the Dockerfile's default range, which
+    is the cuda12 extra's; the interpreter check first; each of nine edits
+    of the four files reported.
+  tests:
+    - tests/compliance/test_run_pod_runbook_installs_the_jax_ci_tests.py::test_the_runbook_the_image_and_ci_name_one_jax
+    - tests/compliance/test_run_pod_runbook_installs_the_jax_ci_tests.py::test_the_check_fails_on_each_way_the_four_files_can_part
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-070
+  area: run_pod-goals
+  claim: >-
+    "Three faults passed every goal on four devices until schema 12": a
+    sharded static halo-exchanged along the first mesh axis axis_map lists
+    whatever axis it is split along, the fields split as if every mesh's
+    axes were in the spatial axes' order, and a reduced domain integral
+    carried in the state handed back as zeros.  The stencil goal now runs a
+    field-mask1 case (its static split along the second axis, on the
+    pencil) and a case on the crossed pencil (2d-crossed), and its
+    field-shares node reads its reduced integral back; each fault, and a
+    second seed on the same path, fails the stencil goal and leaves items 1
+    and 3 not closed.
+  sources:
+    - benchmarks/multigpu/README.md (What a broken wrapper does to the goals)
+    - benchmarks/multigpu/run_pod.py::stencil_cases
+    - benchmarks/multigpu/run_pod.py::mask_axis_for
+    - benchmarks/multigpu/run_pod.py::stencil_mesh
+  conditions: >-
+    four CPU virtual devices (the two new cases need the pencil: an even
+    count of at least 4), jax 0.10.2, 0.11.0 and 0.11.2; the smallest size
+    only; six seeds of sharded_node.py, in-process on every push and as a
+    dry run of the checklist goals on a scratch copy of the library in the
+    slow lane.
+  oracle: >-
+    the goals a seed names read FAIL and the others PASS; every failed
+    stencil check is the field-mask1 case's, the crossed pencil's or a
+    field-shares case's, as the seed says; unseeded, every check passes.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_every_seed_names_goals_meshes_and_a_mesh_the_runner_has
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper
     relabelled_records: n/a
     mixed_commits: n/a

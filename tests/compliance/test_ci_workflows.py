@@ -576,7 +576,7 @@ def test_pushes_start_cold_and_a_pull_request_restores_the_base_cache_unless_tol
     assert outputs["mode"] == mode, f"{event} {message!r} cold={cold_diff}: {outputs}\n{log}"
     assert "::warning" not in log, log
     # One cache per shard and lane (whatever else the key holds).
-    assert re.fullmatch(r"jaxcc-v1-Linux-.*py3\.12-jax0\.10\.2-shard3of4", outputs["key"]), outputs["key"]
+    assert re.fullmatch(r"jaxcc-v1-Linux-.*py3\.12-jax0\.10\.2-shard3of6", outputs["key"]), outputs["key"]
 
 
 def test_a_cold_ci_request_that_cannot_be_read_runs_cold_and_says_so(tmp_path):

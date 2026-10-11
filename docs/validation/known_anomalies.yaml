@@ -18822,3 +18822,223 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py::test_the_same_answer_when_the_call_is_not_jitted"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py::test_converged_is_not_true_beside_a_residual_norm_that_is_not_finite"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-270"
+    title: "With differentiable=True the converged flag of sharded_cg and sharded_gmres says nothing of the tangent and cotangent solves: a primal that needs fewer steps than a solve from zero reads converged=True beside a derivative that is far off"
+    description: >
+      Under `differentiable=True` each derivative of the result is one more
+      solve of the same system: the tangent solve of `jax.jvp`, the
+      cotangent solve of `jax.grad`.  Those solves start from zero, run
+      under the caller's `rtol` and `max_iters`, and nothing reports whether
+      they met the tolerance: `converged` and `residual_norm` are the
+      primal solve's.  So where the primal needs fewer steps than a solve
+      from zero does, and `max_iters` covers the first but not the second,
+      the result reads `converged=True` beside a derivative taken from a
+      solve that stopped on its budget.  Three ways to get there: an `x0`
+      close to the solution (a time-stepping caller that starts each solve
+      from the last step's), an `atol` above `||b||`, and a right-hand side
+      that the Krylov method solves in a step or two (one eigenvector).  A
+      call without `x0` whose primal runs out of budget reads
+      `converged=False`, which is the warning; the three above do not.
+      Measured on 2026-10-11 (CPU, jax 0.11.0, lineax 0.0.7; the same on
+      jax 0.10.2 and 0.11.2).  Float64, 4096 unknowns, the 1-D Laplacian
+      shifted by 1e-3 (condition number about 4001), the DEFAULT `rtol=1e-6`
+      and `max_iters=200`, `x0` the solution of the previous right-hand
+      side: `sharded_cg` on the loop backend, and on the default backend
+      behind a Jacobi preconditioner, read `converged=True` with
+      `||b - A x|| = 1.0e-7 ||b||`, and the JVP is off 2.58e-3 and the
+      gradient 2.38e-3 (the tangent solve's own residual is 2.6e-3 of its
+      right-hand side); `sharded_gmres` on the loop backend 1.13e-2 and
+      1.29e-2.  Float32, 256 unknowns, condition number about 81, `rtol=1e-5`,
+      `max_iters=5`, the right-hand side one eigenvector: `converged=True`
+      with the JVP 46 % and the gradient 49 % off on `sharded_cg` (default
+      and loop), 67 % and 64 % on `sharded_gmres` (loop, `restart=5`); with
+      `max_iters=500` the same derivatives are within 3e-5.  A derivative
+      from a solve that stopped on its budget is also not linear in its
+      direction, and the forward and the reverse mode disagree (the audit
+      measured, on that float32 system with another direction, additivity
+      off 2.0e-2 and `<c, jvp(v)>` against `<grad(c), v>` off 5.2e-2).
+      `differentiable=` is new in 0.4.0, so no released version has this.  Found by the second audit of the solver change before it
+      merged.  Not fixed in 0.4.0 because both fixes change what a caller
+      gets: a derivative of NaN where its solve missed the tolerance would
+      also turn every float32 derivative at a tolerance under the float
+      floor of its system into NaN (the primal of such a call returns its
+      value with `converged=False`, and the derivative has no flag to
+      return), and a report needs a place in the result that the reverse
+      mode can write to.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a derivative off by parts in a
+      thousand at the default tolerance and budget, beside `converged=True`,
+      from a function whose flag callers are told to read.  Not `critical`:
+      the value itself is right and its flag true, the call needs
+      `differentiable=True` together with a warm start (or an `atol`, or a
+      special right-hand side) and a budget under a cold solve's need, and
+      the workaround is one argument.  `context_dependent` because what the
+      derivative feeds (an optimiser, a sensitivity, the adjoint of a
+      coupling group) decides the consequence.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      With `differentiable=True`, give `max_iters` what a solve FROM ZERO
+      needs at your `rtol`, not what the warm-started primal needs.  To
+      check a budget, solve once with no `x0` and no `atol` for a
+      right-hand side of the kind the derivative has (for a derivative with
+      respect to `b`, the direction itself:
+      `sharded_cg(matvec, v, rtol=..., max_iters=...).converged`); that is a
+      check of one right-hand side, not a certificate.  Or compare one
+      derivative with a finite difference.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0; no release is named for the fix.  Until the derivative
+      solves can report (or refuse) a solve that missed its tolerance, read
+      `converged` under `differentiable=True` as a statement about the value
+      only.  The same holds for the adjoint of a coupling group whose node
+      calls these solvers with the flag.
+    verification:
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_converged_is_true_beside_a_derivative_whose_own_solve_ran_out_of_steps"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_derivatives_are_right_when_the_budget_covers_a_cold_solve"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-271"
+    title: "sharded_cg and sharded_gmres do not refuse a NaN rtol, nor a negative or NaN atol that is traced: the lineax routes then read converged=True on a value that is not the solution"
+    description: >
+      A tolerance has to be a number >= 0.  From 0.4.0 an `atol` given as a
+      concrete value (a Python or NumPy number) that is negative or NaN is
+      refused with a `ValueError` on every route.  Two cases are still
+      passed on as they come.  (1) An `atol` that is traced, as when it is
+      an argument of a jitted function: its value cannot be read when the
+      call is traced.  (2) `rtol`, which is not validated at all.  On the
+      lineax routes (`sharded_cg`'s default call and `backend="lineax"`,
+      `sharded_gmres`'s default call) the result then reads
+      `converged=True` beside a value that is not the solution: lineax's
+      entrywise test `|r_i| <= atol + rtol * |b_i|` passes early for a
+      negative `atol` whose size exceeds the residual, and a NaN tolerance
+      stops lineax on its zero start with a verdict of success.
+      Measured on 2026-10-11 (CPU, float32, 64 unknowns, the operator
+      `2.5 x[i] - x[i-1] - x[i+1]`, white noise; jax 0.11.0 with lineax
+      0.0.7, and jax 0.11.2 with lineax 0.1.1).  Traced `atol=-1.0`:
+      `sharded_cg` default and `backend="lineax"` return after one step,
+      `converged=True`, the value 72 % off, `||b - A x||` at 5.7e5 times
+      `rtol * ||b||`; traced `atol=-1e-3`: 304 times.  Traced `atol=NaN`,
+      or `rtol=NaN` as a plain Python float in a call that is not jitted:
+      all zeros with `converged=True` on `sharded_cg` default, `sharded_cg`
+      lineax and `sharded_gmres` default.  The loop backends do not vouch:
+      their flag compares with `max(atol, rtol * ||b||)`, which a negative
+      `atol` drops out of (the solve is the relative one, and right) and
+      which a NaN makes False (the CG loop then returns zeros and the
+      GMRES loop its solution, both with `converged=False`).
+      The same numbers on `git archive` of v0.3.0 and of v0.3.1 (lineax
+      0.0.7); there a concrete negative `atol` was refused by lineax
+      itself on `sharded_cg`'s default route ("Tolerances must be
+      non-negative") and a concrete NaN `atol` was not refused.  Found by the second audit of
+      the solver change before it merged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a value 72 % off, or zeros,
+      reported as a converged solution by the default backend of a STABLE
+      function.  Not `critical`: it needs a tolerance that is not a
+      tolerance (negative, or NaN), which is a defect in the caller, and
+      for `atol` it needs that value to arrive as a traced one.
+      `context_dependent` because a caller that trusts `converged` carries
+      the value on.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.3.0"
+    workaround: >
+      Check a tolerance that is computed before it is passed (`rtol > 0`,
+      `atol >= 0`, both finite), and pass `atol` as a concrete number where
+      that is possible, so that the module can refuse it.  `backend="loop"`
+      does not vouch for such a tolerance.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0; no release is named for the fix.  A fix would refuse a
+      concrete `rtol` that is NaN or negative as `atol` is refused, and
+      answer a traced tolerance that is not a number >= 0 as a non-finite
+      right-hand side is answered: NaN in every entry, `converged=False`.
+    verification:
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_a_negative_atol_that_is_traced_is_not_refused_and_lineax_vouches_for_the_value"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_a_nan_atol_that_is_traced_gives_zeros_that_read_converged"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_a_nan_rtol_is_not_refused_and_gives_zeros_that_read_converged"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_cg_loop_does_not_vouch_for_those_tolerances"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-272"
+    title: "At the top of the dtype's range sharded_cg and sharded_gmres vouch for a value that is not the solution: zeros from the CG loop until 0.4.0 for a right-hand side whose norm overflows, and in 0.4.0 infinities on every route where the solution itself overflows"
+    description: >
+      Two forms, of which 0.4.0 resolved the first.
+      (1) In 0.3.0 and 0.3.1 a right-hand side whose 2-norm overflows the
+      dtype had no right answer on any route, also where its solution is
+      representable.  The CG loop (`backend="loop"`) returned all zeros with
+      `converged=True`, `iters=0` and an infinite `residual_norm`: its
+      tolerance `rtol * ||b||` was infinite, and the zero start passed
+      `inf <= inf`.  lineax's CG and both `sharded_gmres` routes returned
+      NaN with `converged=False`.  Measured on `git archive` of v0.3.0 and
+      of v0.3.1 (CPU, float32, lineax 0.0.7): 64 entries of a quarter of
+      the largest float32 (norm twice that number) behind the operator
+      `10 x[i] - x[i-1] - x[i+1]`, whose solution is about an eighth of the
+      right-hand side.  From 0.4.0 the solve runs on the right-hand side
+      rescaled by the power of two that brings `max|b|` into `[0.5, 1)`
+      (MADD-ANO-123), nothing overflows, and every route solves that system
+      (within 2e-5).
+      (2) Still in 0.4.0: where the SOLUTION is too large for the dtype,
+      the rescaled solve succeeds and scaling its value back overflows.  The
+      result holds infinities; `residual_norm` is the norm found in the
+      rescaled frame, multiplied back, and is finite; and `converged` is
+      the rescaled solve's.  Measured on the head of 0.4.0 (float32, 64
+      unknowns, the same right-hand side behind `2.05 x[i] - x[i-1] -
+      x[i+1]`, whose solution is about twenty times the right-hand side;
+      jax 0.11.0 with lineax 0.0.7, and the same flags on jax 0.11.2
+      with lineax 0.1.1): 62 to 64 of the 64 entries infinite on all five
+      routes, a `residual_norm` of 1.5e33 to 4.7e35, and at `rtol=1e-3`
+      `converged=True` on all five.  At the default `rtol=1e-6`, which
+      float32 does not meet on that system, the lineax routes
+      (`sharded_cg` default and lineax, `sharded_gmres` default) read True
+      and the two loop routes False.  This contradicts what the result
+      documents ("NaN in every entry where there is no answer";
+      `residual_norm` "of the returned value"): the test added for
+      MADD-ANO-269 reads the norm in the rescaled frame, before the value
+      is scaled back.  The same system a thousand times smaller is solved.
+      Found by the second audit of the solver change before it merged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` for the released form: zeros reported as a converged
+      solution by the CG loop (the infinite `residual_norm` beside them was
+      there to be read).  The form that remains in 0.4.0 is not silent in
+      the value, which is visibly infinite, but the flag vouches for it.
+      Not `critical`: it needs a right-hand side within a few orders of the
+      largest number of the dtype.  `context_dependent` because a caller
+      that trusts `converged` carries the value on.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.3.0"
+    workaround: >
+      Rescale a system whose right-hand side is within a few orders of the
+      dtype's largest number, or solve it in float64.  In 0.4.0, test the
+      returned value with `jnp.isfinite` beside `converged`.  On 0.3.0 and
+      0.3.1 use the default backend for such a right-hand side: it answers
+      NaN, where the loop answered zeros.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Still reachable in 0.4.0: a solution that overflows the dtype is
+      returned as infinities beside a finite `residual_norm`, with
+      `converged=True` where the rescaled solve met its tolerance; no
+      release is named for the fix.  A fix would test the value after it
+      is scaled back and give NaN, `converged=False`, where it is not
+      finite.  At the other end of the range the docstring's caveat stands
+      (entries of the solution under the smallest normal number are flushed
+      to zero).
+    verification:
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_a_right_hand_side_whose_norm_overflows_is_solved_where_its_solution_fits"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_a_solution_that_overflows_is_returned_as_infinities_beside_a_finite_norm"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_those_infinities_read_converged_on_every_route"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
+    github_issue: null

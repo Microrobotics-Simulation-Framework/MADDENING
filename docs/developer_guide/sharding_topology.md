@@ -136,7 +136,10 @@ which wrapper a node is written for:
   tangent was not of `b`'s size: MADD-ANO-266).  With the flag, the
   tangent and cotangent solves start from zero and are purely relative
   to their own right-hand side, whatever `x0` and `atol` the call was
-  given.  `residual_norm` is `||b - A x||` of the returned value on every
+  given.  Nothing reports whether those solves converged: `converged` is
+  the value's, so with the flag give `max_iters` what a solve from zero
+  needs, not what a warm-started one does (MADD-ANO-270, open).
+  `residual_norm` is `||b - A x||` of the returned value on every
   route, from one product.  On the loop backend (`backend="loop"`, or the
   default with a preconditioner) and under `differentiable=True`,
   `converged` is that norm against `max(atol, rtol * ||b||)`, with no
@@ -155,10 +158,13 @@ which wrapper a node is written for:
   (MADD-ANO-264): pass `backend="loop"`, or solve in float64.
   An operator that returns a NaN or an infinity is answered, on every
   route, as a non-finite right-hand side is: NaN in every entry,
-  `converged=False`.  The solvers can also be called INSIDE a `shard_map`
+  `converged=False`.  `sharded_cg` can also be called INSIDE a `shard_map`
   body, one solve per device; the lineax route (the default) then takes
   only an operator that closes over nothing, and `backend="loop"` any
-  callable.
+  callable.  `sharded_gmres` cannot: every route of it raises there.
+  Three inputs are not caught and are registered open: a NaN `rtol` or a
+  traced negative or NaN `atol` (MADD-ANO-271), and a solution too large
+  for the dtype, which comes back as infinities (MADD-ANO-272).
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
 * Boundary inputs are classified by shape.  A **grid-shaped** input (on

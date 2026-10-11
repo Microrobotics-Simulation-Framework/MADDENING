@@ -500,6 +500,27 @@ def _refuse_edge_sources(rules: Sequence[_EdgeSourceRule], state, *,
 
 
 
+def _flux_field_names(node, fields) -> Any:
+    """The names of the boundary fluxes *node* returns, asked of the hook.
+
+    ``compute_boundary_fluxes(fields, {}, 0.0)``, as ``validate()`` has
+    always asked.  A hook that indexes an input it declares
+    (``boundary_inputs["u"]``, the ordinary way to read one) raises
+    ``KeyError`` on the empty dict, which used to leave ``validate()`` and
+    ``compile()`` with that bare error for every edge from one of the
+    node's fluxes.  Such a hook is asked again with a zero for every input
+    ``boundary_input_spec()`` declares.  A hook that answers the first
+    call is not called twice.
+    """
+    try:
+        return node.compute_boundary_fluxes(fields, {}, 0.0).keys()
+    except KeyError:
+        from maddening.core._param_probes import _declared_boundary_zeros  # noqa: PLC0415
+
+        return node.compute_boundary_fluxes(
+            fields, _declared_boundary_zeros(node), 0.0).keys()
+
+
 def _geometry_edge_issues(edges, nodes, state) -> list[str]:
     """``validate()``'s issues about the geometry each edge names.
 
@@ -540,7 +561,7 @@ def _geometry_edge_issues(edges, nodes, state) -> list[str]:
             node = nodes[holder].node
             is_flux = (
                 type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes
-                and field in node.compute_boundary_fluxes(fields, {}, 0.0))
+                and field in _flux_field_names(node, fields))
             if is_flux:
                 issues.append(
                     f"ERROR: edge {e.key}: geometry field {field!r} of {holder!r} is a "

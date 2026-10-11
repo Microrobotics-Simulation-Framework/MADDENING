@@ -15,7 +15,6 @@ import copy
 import functools
 import inspect
 import os
-import struct
 import warnings
 import weakref
 from abc import ABC, abstractmethod
@@ -353,9 +352,11 @@ def _same_value(a, b) -> bool:
         return (a.shape == b.shape and a.dtype == b.dtype
                 and np.asarray(a).tobytes() == np.asarray(b).tobytes())
     if isinstance(a, float):
-        return struct.pack("<d", a) == struct.pack("<d", b)
+        # NumPy's float64 / complex128 hold the same IEEE bits as a Python
+        # float / complex, the sign and payload of a NaN included.
+        return np.float64(a).tobytes() == np.float64(b).tobytes()
     if isinstance(a, complex):
-        return struct.pack("<dd", a.real, a.imag) == struct.pack("<dd", b.real, b.imag)
+        return np.complex128(a).tobytes() == np.complex128(b).tobytes()
     try:
         return bool(a == b)
     except Exception:   # noqa: BLE001 - an incomparable value is unchanged only if it is the same object

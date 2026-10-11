@@ -19043,7 +19043,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-273"
+  - anomaly_id: "MADD-ANO-286"
     title: "WebRTC streaming never negotiated: SelkiesSession sent a viewer no answer and no ICE, so no video ever reached a viewer"
     description: >
       From v0.1.0 to v0.3.1 `SelkiesSession` built `appsrc ! videoconvert !
@@ -19121,7 +19121,7 @@ anomalies:
       video), which a viewer in another process than the session met
       whenever frames were already flowing -- found when the cloud entry
       point was wired, before any release.  The cloud container's entry
-      point never started the session at any tag: MADD-ANO-274, resolved
+      point never started the session at any tag: MADD-ANO-287, resolved
       in 0.4.0.
     verification:
       - "tests/cloud/test_webrtc_loopback.py::test_the_server_answers_the_offer_with_the_payload_type_offered"
@@ -19135,7 +19135,7 @@ anomalies:
       - "tests/cloud/test_webrtc_signaling_messages.py::TestRouting::test_sdp_and_ice_go_to_the_negotiation_and_never_to_the_input_handler"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-274"
+  - anomaly_id: "MADD-ANO-287"
     title: "The cloud container streamed nothing: its entry point never started the WebRTC session, and its API could add no node to build a graph"
     description: >
       From v0.1.0 to v0.3.1, and on the 0.4.0 tree before this fix,
@@ -19158,7 +19158,7 @@ anomalies:
     severity: "major"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
-      Graded `major` as MADD-ANO-273 is: a failure the user sees (no
+      Graded `major` as MADD-ANO-286 is: a failure the user sees (no
       stream, a refused connection, a 400 for every node) whose only
       workaround was another entry point.  Not safety relevant: nothing
       was simulated, so no state, output, saved file or reported result
@@ -19171,7 +19171,7 @@ anomalies:
       Run the container with another entry point that builds its
       `SimulationServer` with a node registry.  No WebRTC video was
       possible within an affected release in any case: the session itself
-      never negotiated (MADD-ANO-273).
+      never negotiated (MADD-ANO-286).
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
@@ -19195,7 +19195,7 @@ anomalies:
       that change while the simulation runs and hold while it is paused, a
       peer without a valid token closed and sent nothing, and a clean exit
       on SIGTERM.  Not covered: a provider's network (a viewer outside it
-      needs a reachable TURN server, see MADD-ANO-273), a browser, and a
+      needs a reachable TURN server, see MADD-ANO-286), a browser, and a
       GPU encoder.  `MADDENING_GRAPH_USD` is still not loaded.  The picture
       is drawn with matplotlib on the CPU while the simulation runs,
       whether or not a viewer is connected.
@@ -19208,7 +19208,7 @@ anomalies:
       - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_main_serves_the_built_in_node_types"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-275"
+  - anomaly_id: "MADD-ANO-288"
     title: "The cloud entry point logged MADDENING_CLOUD_CONFIG verbatim at INFO, so a TURN username and credential in stream_config.ice_servers were written to the container's log"
     description: >
       From v0.1.0 to v0.3.1, and on the 0.4.0 tree before this fix,
@@ -19225,7 +19225,7 @@ anomalies:
       (`{"stream_preset": ...}`) carries no credential; the exposure needs
       a user-written `MADDENING_CLOUD_CONFIG`.  No affected release used
       the TURN server it logged: the session was never started there
-      (MADD-ANO-274).  Found by the pre-merge audit of the WebRTC
+      (MADD-ANO-287).  Found by the pre-merge audit of the WebRTC
       streaming work.
       Resolved in 0.4.0: the config is logged with every value under a
       `credential`, `username`, `password`, `passwd`, `secret`, `token`,

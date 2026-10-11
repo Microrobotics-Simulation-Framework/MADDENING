@@ -19,13 +19,16 @@ REPO = Path(__file__).resolve().parents[2]
 RUNBOOK = REPO / "benchmarks" / "multigpu" / "README.md"
 SEEDED = REPO / "tests" / "cloud" / "multigpu" / "test_run_pod_seeded_faults.py"
 WORDS = {"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-         "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16}
+         "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+         "eighteen": 18, "nineteen": 19, "twenty": 20, "twenty-one": 21, "twenty-two": 22,
+         "twenty-three": 23, "twenty-four": 24, "twenty-five": 25, "twenty-six": 26,
+         "twenty-seven": 27, "twenty-eight": 28}
 
 
 def test_the_runbook_counts_every_seed_and_names_the_eighth():
     seeds = re.findall(r'^    "([a-z_0-9]+)": Seed\(', SEEDED.read_text(encoding="utf-8"), re.M)
     text = RUNBOOK.read_text(encoding="utf-8")
-    said = re.search(r"test_run_pod_seeded_faults\.py` holds (\w+) faults", text)
+    said = re.search(r"test_run_pod_seeded_faults\.py` holds ([\w-]+) faults", text)
     assert said, "the runbook no longer says how many faults the seeded test holds"
     assert WORDS[said.group(1)] == len(seeds) == len(set(seeds)), (said.group(1), seeds)
     assert "domain integrals summed over the first mesh axis only" in text.replace("\n", " ")

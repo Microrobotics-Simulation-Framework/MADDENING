@@ -97,7 +97,7 @@ goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
 those cases that way on such a count.  The goals must fail on a stencil
-wrapper or a halo exchange broken in any of sixteen ways: eight that every
+wrapper or a halo exchange broken in any of eighteen ways: eight that every
 wrapper goal must catch (a static's halos NaN, grid-shaped inputs zeroed,
 domain integrals halved, domain integrals summed over the first mesh axis
 only, sharded axes after the first zero-filled at the global edges, halos
@@ -105,11 +105,12 @@ taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
 extent divided by the first mesh axis's size or read off spatial axis 0),
 and three that only a halo two cells wide shows, which are the ``stencil``
 goal's (wider halos zero at the global edges, an outer halo cell copied
-from the innermost one, the one-cell edge rule at width two), and five
+from the innermost one, the one-cell edge rule at width two), and seven
 that only its ``field-shares`` cases show (the zero fill replaced by the
 edge fill or by ones; an integral the node asks to keep one a shard
 summed over the mesh, stacked a slot off, or zeroed on its way back into
-the step).  And the
+the step; a reduced integral handed back to the step as zeros, or summed
+over the mesh again).  And the
 goals that build the unstructured wrapper (``indivisible``, ``forward``,
 ``gradient``) must fail on that wrapper broken in any of seven ways: five
 that each of them must catch (per-cell inputs zeroed, their ghost rows not
@@ -1126,8 +1127,17 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         The unsharded node returns both in the stacked shape
         (``stacked=True``), from the same field cut into the same blocks,
         so the blocks are compared slot by slot; and the goal's loss
-        weighs every slot differently (:func:`_slot_weights`).  Without
-        ``shares`` the node declares and computes what it did.
+        weighs every slot differently (:func:`_slot_weights`).
+
+        With ``shares`` the field also relaxes towards the mean it had a
+        step before, read out of its own ``averages`` in the state
+        (``MEAN_PULL``): a *reduced* integral, which the wrapper hands
+        every shard whole, carried back into the answer -- the same term
+        in ``update`` and ``update_padded``.  ``shares`` reads back the
+        per-shard kind; until schema 12 nothing read back the reduced
+        kind, and a wrapper that handed it to ``update_padded`` as zeros
+        passed all eight goals.  Without ``shares`` the node declares and
+        computes what it did.
         """
 
         #: The weight of a second neighbour against a first one (``reach=2``).
@@ -1136,6 +1146,9 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         SHARE_DECAY = 0.5
         #: The value ``shares`` and ``strips`` start from, in every slot.
         SHARE_START = (0.25, 0.5)
+        #: With ``shares``: the rate the field relaxes at towards the mean
+        #: in its old ``averages`` (a reduced integral read back).
+        MEAN_PULL = 0.5
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
                      exchange: float = 0.0, timestep: float = 0.1,
@@ -1250,7 +1263,7 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             """How a sharded static's halo is filled: the wrapper's rule."""
             return "wrap" if self.boundary == "periodic" else "edge"
 
-        def _new(self, f_pad, mask_pad, ambient, source_pad, p, dt):
+        def _new(self, f_pad, mask_pad, ambient, source_pad, p, dt, old_averages=None):
             h = self._reach
 
             def at(a, dy, dx):
@@ -1266,6 +1279,8 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
                 div = div + self.FAR_SHARE * sum(
                     0.5 * (m + at(mask_pad, *to)) * (at(f_pad, *to) - f) for to in ring(2))
             out = f + dt * (p["diffusivity"] * div + p["exchange"] * (ambient - f))
+            if self._split:
+                out = out + dt * self.MEAN_PULL * (old_averages[0] - f)
             if source_pad is not None:
                 (up, down, left, right) = (at(source_pad, *to) for to in ring(1))
                 s = 0.5 * at(source_pad, 0, 0) + 0.125 * (up + down + left + right)
@@ -1306,7 +1321,7 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
                 f_pad = self._hold_walls(f_pad, wall, None)
             mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), h,
                                mode=self._static_mode)
-            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
+            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt, state.get("averages"))
             return {"f": new, "averages": self._averages(new),
                     **self._tallies(state.get("shares"), new)}
 
@@ -1333,7 +1348,9 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             width = f_pad.shape[other]
             offset = (shard_info or {}).get(other, (0, width - 2 * h))[0]
             mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=other)
-            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
+            # ``averages`` arrives whole: the wrapper reduced it over the mesh
+            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt,
+                            state_padded.get("averages"))
             part = self._averages(new)
             out = {"f": f_pad.at[h:-h, h:-h].set(new), "averages": part}
             if self._split:

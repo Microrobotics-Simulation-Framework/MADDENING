@@ -259,6 +259,23 @@ _SEEDS = {
         "                f: (arr if f in integrals else _pad_like_state(arr))\n",
         "                f: (arr * 0 if f in integrals else _pad_like_state(arr))  # SEEDED FAULT\n",
         fails=("stencil",), kind="field-shares", boundary="zero"),
+    # A REDUCED integral carried in the state, which the ``field-shares``
+    # node reads back into its field since schema 12 (``Field2D.MEAN_PULL``,
+    # its ``averages``).  The first passed all eight goals until then: the
+    # reduced integral handed to ``update_padded`` as zeros while every
+    # per-shard one arrives right.
+    "reduced_integrals_in_the_state_arrive_as_zeros": Seed(
+        "                f: (arr if f in integrals else _pad_like_state(arr))\n",
+        "                f: ((arr if integral_reduction[f][1] else arr * 0) if f in integrals"
+        " else _pad_like_state(arr))  # SEEDED FAULT\n",
+        fails=("stencil",), kind="field-shares", boundary="zero"),
+    # ... and summed over the mesh a second time on its way in.
+    "reduced_integrals_in_the_state_are_summed_again_on_the_way_in": Seed(
+        "                f: (arr if f in integrals else _pad_like_state(arr))\n",
+        "                f: ((lax.psum(arr, integral_reduction[f][0]) if integral_reduction[f][0]"
+        " and not integral_reduction[f][1] else arr) if f in integrals"
+        " else _pad_like_state(arr))  # SEEDED FAULT\n",
+        fails=("stencil",), kind="field-shares", boundary="zero"),
 }
 
 

@@ -251,9 +251,12 @@ def test_every_seeded_fault_the_runbook_names_is_a_seed():
                    "run_pod_seeded_faults_for_their_names")
     word = dict(enumerate(("zero", "one", "two", "three", "four", "five", "six", "seven",
                            "eight", "nine", "ten", "eleven", "twelve", "thirteen",
-                           "fourteen", "fifteen", "sixteen")))
+                           "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+                           "nineteen", "twenty", "twenty-one", "twenty-two", "twenty-three",
+                           "twenty-four", "twenty-five", "twenty-six", "twenty-seven",
+                           "twenty-eight")))
     runner = _RUNNER.read_text(encoding="utf-8")
-    stencil, unstructured = re.findall(r"broken in any of (\w+)\s+ways", runner)
+    stencil, unstructured = re.findall(r"broken in any of ([\w-]+)\s+ways", runner)
     assert stencil == word[len(faults._SEEDS)]
     assert unstructured == word[len(faults._PATH_SEEDS)]
     halo_two = [s for s in faults._SEEDS.values() if s.kind == "field-halo2"]

@@ -212,16 +212,18 @@ four, and the scattered order ran only in the seeded-fault tests.)
 | an integral declared one a shard summed over every mesh axis | `sharded_node.py` | `stencil`: every `field-shares` case | 1, 3 |
 | each shard's integral stacked into the next shard's slot | `sharded_node.py` | `stencil`: every `field-shares` case | 1, 3 |
 | an integral carried in the state zeroed on its way into the step | `sharded_node.py` | `stencil`: every `field-shares` case | 1, 3 |
+| a reduced integral carried in the state handed to the step as zeros (every per-shard one right) | `sharded_node.py` | `stencil`: every `field-shares` case | 1, 3 |
+| a reduced integral carried in the state summed over the mesh again on its way in | `sharded_node.py` | `stencil`: every `field-shares` case | 1, 3 |
 | `shard_info`'s offset zero on every shard | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 | `shard_info["n_local"]` the padded block length | `sharded_unstructured.py` | `forward`: the per-shard check, at a size with a pad row | 1 |
 | an integral declared one a shard summed over the mesh axis | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 | each shard's integral stacked into the next shard's slot | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds sixteen faults
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds eighteen faults
 as seeds of `sharded_node.py` and `halo.py` -- the four and the three
 above, domain integrals summed over the first mesh axis only, the three of a halo two
-cells wide and the five of the `field-shares` cases -- and seven of `sharded_unstructured.py`.  Slow-marked, it
-applies each of the sixteen to a scratch copy of the library, runs `--goal
+cells wide and the seven of the `field-shares` cases -- and seven of `sharded_unstructured.py`.  Slow-marked, it
+applies each of the eighteen to a scratch copy of the library, runs `--goal
 checklist --dry-run --keep-going`, and requires `stencil`, `hybrid` and
 `coupled` to read `FAIL` (`stencil` alone for a fault of a halo two wide or of the `field-shares` cases;
 and `halo` too for a seed of `halo.py`; the other checklist goals `PASS`),
@@ -270,7 +272,7 @@ is not **run**.
 | a grid-shaped boundary input, split and halo-padded like the state | run | `stencil`, `hybrid`, `coupled` | `grid_inputs_are_zeroed` |
 | a scalar boundary input, replicated to every shard | unproved | | `tests/cloud/multigpu/test_sharded_boundary_inputs.py` |
 | `domain_integral_fields()`: the shards' partial sums summed over the mesh | run | `stencil`, `hybrid`, `coupled` | `domain_integrals_are_halved`, `domain_integrals_summed_over_the_first_mesh_axis_only` |
-| a domain integral carried in the state, handed back to `update_padded` (a per-shard one as that shard's slice) | run | `stencil` | `integrals_in_the_state_are_zeroed_on_the_way_in` |
+| a domain integral carried in the state, handed back to `update_padded` (a per-shard one as that shard's slice, a reduced one whole) | run | `stencil` | `integrals_in_the_state_are_zeroed_on_the_way_in`, `reduced_integrals_in_the_state_arrive_as_zeros`, `reduced_integrals_in_the_state_are_summed_again_on_the_way_in` |
 | `domain_integral_axes()`: an integral summed over some mesh axes only, or over none | run | `stencil` | `per_shard_integrals_are_summed_over_every_axis`, `per_shard_integrals_land_in_the_next_shards_slot` |
 | a mesh axis `axis_map` does not use | not run | | `tests/cloud/multigpu/test_unused_mesh_axis_integrals.py` |
 | `params`: injected parameters replicated to every shard, and their derivative | unproved | | `tests/cloud/multigpu/test_property_injected_params_gradient.py` |

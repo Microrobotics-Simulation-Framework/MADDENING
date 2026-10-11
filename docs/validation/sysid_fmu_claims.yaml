@@ -3893,7 +3893,8 @@ claims:
     value."
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-    - src/maddening/core/node.py:148 (_ParamsDict, _succeed)
+    - src/maddening/core/node.py::_ParamsDict
+    - src/maddening/core/node.py::SimulationNode
     - src/maddening/core/graph_manager.py::GraphManager._sync_node_param_writes
   conditions: >-
     a calibrated constant beside the key assigned; a key handed back with
@@ -3903,12 +3904,24 @@ claims:
     after it, replaced by an equal one and by a different one; a counting
     mapping from elsewhere stored as it is; 400 generated sequences of
     keyed writes, replacements, gm.params writes and reads against "the
-    later write wins".  Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, multi-rate graphs, sub-cycled groups or sharded graphs.
+    later write wins".  On a node inside a wrapper -- ShardedStencilNode,
+    ShardedPointwiseNode and ShardedUnstructuredNode on 1, 2 and 4 devices,
+    HybridNode, and a HybridNode around each sharded wrapper -- the
+    assignment (and the keyed write, an element written in place, a
+    counting mapping assigned) made on the wrapper or on the wrapped node,
+    before the first step and after steps, on both parameter contracts;
+    a calibrated constant beside the key assigned on a wrapper.  Not
+    claimed for float64 (x64), mixed dtypes, 16-bit floats, multi-rate
+    graphs or sub-cycled groups, nor for a wrapper written outside the
+    package when the assignment is made on the node it wraps.
   oracle: >-
     gm.params, the value the next step integrates with and the saved
     configuration; a reference model of the two stores and the keys
-    written since the last sync.
+    written since the last sync.  For a wrapped node: the same wrapper
+    around a node constructed with the value, started from the state the
+    written graph was in (bit for bit), an unsharded twin given the same
+    statements (the sharded-equivalence tolerance), gm.params,
+    params_table(), the saved configuration and a checkpoint.
   tests:
     - tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_that_hands_a_key_back_unchanged_is_not_a_write_of_it
@@ -3916,11 +3929,21 @@ claims:
     - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_and_an_in_place_write_do_not_hide_each_other
     - tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes
     - tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_every_spelling_of_a_write_on_every_wrapper_is_the_write_the_step_runs
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_every_entry_point_runs_the_value_assigned_on_a_wrapper
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_checkpoint_carries_the_value_assigned_on_a_wrapper
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_leaves_the_other_calibrated_constants_alone
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_wrapper_has_no_mapping_of_its_own
   status: verified
   notes: >-
     Round 9 (B1, on e301c41): node.params = {**node.params, "damping": 5.0}
     after a stiffness calibrated to 45 put the stiffness back to the node's
-    30, with no warning (MADD-ANO-203).
+    30, with no warning (MADD-ANO-203).  Whole-tree audit of 2026-10-10
+    (B1): the assignment on a sharded wrapper replaced the wrapper's
+    mapping alone, so the step ran the old value while node.params read
+    the new one (MADD-ANO-274); this row said "not claimed for sharded
+    graphs" and nothing a user reads did.
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     f64: narrowed
@@ -3933,9 +3956,81 @@ claims:
     sub_cycled: narrowed
     predictors_warm_starts: n/a
     adaptive: n/a
-    checkpoint_restart: n/a
-    sharded: narrowed
+    checkpoint_restart: tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_checkpoint_carries_the_value_assigned_on_a_wrapper
+    sharded: tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs
 
+- id: SYS-148
+  area: params persistence
+  claim: >-
+    "A saved graph holds, for each node, its class name, name, timestep and
+    params, and nothing else ... A constructor argument the class keeps
+    anywhere else is therefore dropped by the save ... to_dict() ... gives a
+    UserWarning naming the node, its class, the arguments and the fix ...
+    it warns when the node was constructed with an argument for a named
+    parameter of its class's __init__, at a value other than that
+    parameter's default, and node.params has no key of that name.  A node
+    built with its defaults reloads as the node it was, and is not warned
+    about; it says nothing where it cannot tell."
+  sources:
+    - docs/developer_guide/node_authoring.md (Where a constant belongs, and what a saved graph carries)
+    - docs/user_guide/quickstart.md (Coupled Simulation)
+    - src/maddening/core/node.py::SimulationNode
+    - src/maddening/core/node.py::_unsaved_constructor_arguments
+    - src/maddening/core/graph_manager.py::GraphManager.to_dict
+  conditions: >-
+    the quickstart's spring as it was taught, built with a stiffness off
+    its default, saved through GraphManager.to_dict and reloaded through
+    JSON (the warning's whole text; the reloaded graph is the default
+    graph); the same node handing its constants to super().__init__ (no
+    warning, the reload steps bit for bit); an argument at its default
+    spelt as the default, as an int, a NumPy scalar, a list and an array
+    (not reported); off its default as a number, a NaN, a tuple of another
+    length and an array where the default is None (reported); a required
+    argument; an argument a **kwargs took in, a class that overrides
+    to_dict, a deep copy, an unpickled node and an attribute written after
+    construction (not reported, as the guide says); every built-in node
+    with every argument off its default, and an LBMNode with no wall_mask
+    (not reported); a HybridNode and the sharded wrappers around such a
+    node (the wrapped node is named).  Outside this row: save_graph_to_usd,
+    which drops the same arguments and does not warn (MADD-ANO-273), and
+    geometry_source, which nothing saves.
+  oracle: >-
+    The warnings raised (every test runs with warnings as errors, so an
+    unexpected one fails it), the saved entry, and the trajectory of the
+    reloaded graph against the saved graph and the default graph.
+  tests:
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_quickstart_idiom_is_named_and_reloads_as_the_default_model
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_warning_reads_as_written
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_corrected_quickstart_node_round_trips_at_the_value_it_was_built_with
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_at_its_default_is_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_off_its_default_and_outside_params_is_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_what_the_rule_cannot_tell_is_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_base_constructors_own_arguments_are_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_no_built_in_node_is_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_built_in_argument_saved_only_when_given_is_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_passes_on_what_its_node_cannot_save
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_noting_the_arguments_changes_nothing_else_about_a_node
+  status: verified
+  notes: >-
+    Whole-tree audit of 2026-10-10 (C, H1): the quickstart's own graph built
+    with SpringNode(stiffness=40.0) saved 'params': {} and reloaded as the
+    k = 12 graph with no warning, at every tag from v0.1.0 (MADD-ANO-273).
+    The rule is by instance and not by parameter names, because LBMNode
+    writes no wall_mask key for a node built without one.
+  domains:
+    f32: tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_quickstart_idiom_is_named_and_reloads_as_the_default_model
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: tests/cloud/multigpu/test_exchange_ppermute.py::test_wrapper_matches_unsharded_under_both_transports
 - id: SYS-117
   area: params pytree
   claim: >-

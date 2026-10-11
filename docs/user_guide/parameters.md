@@ -297,7 +297,8 @@ place are the same write whether you make them on the wrapper or on the
 node you wrapped.  (Until 0.4.0's fix the two only shared a mapping from
 construction on, and an assignment on the wrapper replaced the wrapper's
 alone: the step went on with the old value, `node.params` read the new
-one back, and every later keyed write through the wrapper was lost.)
+one back, and every later keyed write through the wrapper was lost:
+MADD-ANO-274.)
 
 **A constant belongs in `params`.**  One a node keeps as an attribute
 (`self.stiffness = stiffness`) is outside everything above.  Writing it

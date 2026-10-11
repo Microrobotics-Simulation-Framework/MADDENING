@@ -331,7 +331,7 @@ def test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs(
     _check(kind, n, contract, spelling, when)
 
 
-# Per push: test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs
+# Per push: tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs
 @pytest.mark.slow
 @pytest.mark.parametrize("contract", list(CONTRACTS))
 @pytest.mark.parametrize("kind, n", WRAPPERS, ids=[f"{k}-{n}" for k, n in WRAPPERS])

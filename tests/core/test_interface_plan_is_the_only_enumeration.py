@@ -76,6 +76,10 @@ ALLOWED = {
         "an external input's own fields",
     "core/graph_manager.py::GraphManager._warn_of_input_casts":
         "an external input's own fields",
+    "core/graph_manager.py::GraphManager.add_external_input":
+        "an external input's own fields: finds the declaration a field already has",
+    "core/graph_manager.py::_second_declaration_refusal":
+        "an external input's own fields: names the field two declarations share",
 }
 
 

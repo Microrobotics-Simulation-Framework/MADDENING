@@ -85,7 +85,9 @@ SPRING = {"type": "SpringDamperNode", "name": "spring", "timestep": 0.01,
 #: ICE and the first frames then take as long as in test_webrtc_loopback.
 STARTUP_TIMEOUT_S = 90.0
 EXIT_TIMEOUT_S = 30.0
-#: How long the viewer watches the running simulation.
+#: How long the viewer watches the running simulation.  The frames it
+#: decodes in that time must arrive at between half and one and a half
+#: times ``FPS`` (measured: 46 frames in 3.0 s at 15 fps).
 WATCH_S = 3.0
 
 #: A decoded frame "changed" where more than this share of its pixels
@@ -259,10 +261,14 @@ def test_a_viewer_with_the_secret_watches_the_simulation_run(entrypoint, peers):
     loopback._wait(peer.answer, loopback.ANSWER_TIMEOUT_S, "an SDP answer", peer)
     loopback._wait(peer.ice_connected, loopback.ICE_TIMEOUT_S, "ICE connected", peer)
 
-    # Frames of the configured size, which change as the simulation runs.
+    # Frames of the configured size, at the configured rate, which change
+    # as the simulation runs.
     first = _frames_after(peer, 0, 1, loopback.FRAMES_TIMEOUT_S)[0]
+    seen = len(peer.pixels)
     time.sleep(WATCH_S)
-    running = _frames_after(peer, 1, int(FPS * WATCH_S / 2), loopback.FRAMES_TIMEOUT_S)
+    rate = (len(peer.pixels) - seen) / WATCH_S
+    assert FPS / 2 <= rate <= FPS * 1.5, f"{rate:.1f} frames a second; the stream asked for {FPS}"
+    running = list(peer.pixels)[1:]
     assert {frame.shape for frame in running} == {(HEIGHT, WIDTH, 3)}, (
         {frame.shape for frame in running})
     # A white figure: the picture was drawn, not an empty buffer.

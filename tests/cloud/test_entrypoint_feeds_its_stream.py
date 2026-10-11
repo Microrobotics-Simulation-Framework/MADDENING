@@ -111,13 +111,21 @@ def test_the_frames_change_as_the_graph_steps_and_hold_while_it_does_not():
         stream.stop()
 
 
-def test_frames_keep_coming_while_the_simulation_is_paused():
-    """A viewer who connects during a pause still needs frames (a keyframe)."""
+def test_frames_keep_coming_at_the_stream_rate_while_the_simulation_is_paused():
+    """A viewer who connects during a pause still needs frames (a keyframe).
+
+    The frame rate is the stream's: over two seconds, between a quarter and
+    one and a half times ``FPS`` (an unchanged picture is pushed again, not
+    redrawn, so a loaded runner does not slow it much).
+    """
     server, session = _server_with_a_spring(), MockStreamSession(max_frames=500)
     stream = _stream(server, session)
     try:
-        count = session.frame_count
-        _wait_for(lambda: session.frame_count >= count + 5, "frames with no snapshot")
+        _wait_for(lambda: session.frame_count >= 1, "a first frame")
+        count, start = session.frame_count, time.monotonic()
+        time.sleep(2.0)
+        rate = (session.frame_count - count) / (time.monotonic() - start)
+        assert FPS / 4 <= rate <= FPS * 1.5, f"{rate:.1f} frames a second for {FPS}"
     finally:
         stream.stop()
 

@@ -258,3 +258,20 @@ def test_the_budget_of_the_gmres_loop_is_in_whole_cycles_and_at_least_one():
         result = sharded_gmres(_laplacian, b, backend="loop", restart=8, max_iters=budget,
                                rtol=1e-12)
         assert int(result.iters) == steps, budget
+
+
+@pytest.mark.parametrize("differentiable", [False, True], ids=["ordinary", "differentiable"])
+def test_a_zero_right_hand_side_is_answered_with_zeros_and_an_ordinary_call_counts_its_cycle(
+        differentiable):
+    """A zero ``b`` from a zero start is solved by zeros, ``converged=True``
+    with a zero norm.  An ordinary GMRES-loop call still runs (and counts)
+    its one cycle there, as it always did: only the zero right-hand side
+    that ``differentiable=True`` itself solves, to attach the derivative
+    to a call with an ``x0`` or an ``atol``, skips the cycle."""
+    zeros = jnp.zeros((UNKNOWNS,), jnp.float32)
+    result = sharded_gmres(_laplacian, zeros, backend="loop", restart=8,
+                           differentiable=differentiable)
+    assert not np.any(np.asarray(result.value))
+    assert bool(result.converged) and float(result.residual_norm) == 0.0
+    if not differentiable:
+        assert int(result.iters) == 8

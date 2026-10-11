@@ -261,6 +261,29 @@ def test_with_an_x0_the_tangent_and_cotangent_solves_start_from_zero(route):
     assert not np.any(gradient)
 
 
+def _cosine(u, w) -> float:
+    u, w = np.asarray(u, np.float64), np.asarray(w, np.float64)
+    return float(abs(u @ w) / (np.linalg.norm(u) * np.linalg.norm(w)))
+
+
+@pytest.mark.parametrize("preconditioned", [False, True], ids=["plain", "Jacobi"])
+def test_with_an_x0_the_gmres_tangent_and_cotangent_solves_start_from_zero(preconditioned):
+    """MADD-ANO-267 on the GMRES loop, which always runs a cycle: with
+    ``restart=1`` a cycle is one step along its start's residual.  From a
+    zero start that residual is the right-hand side, so the tangent is a
+    multiple of the direction and the gradient a multiple of the loss
+    weight (the Jacobi preconditioner here is a multiple of the identity).
+    From the primal's ``x0`` the tangent was not."""
+    b, v, c = (jnp.asarray(_vector(k)) for k in range(3))
+    x0 = jnp.asarray(_vector(3))
+    route = "gmres auto with Jacobi" if preconditioned else "gmres loop"
+    _, tangent, gradient = _derivatives(route, b, v, c, x0=x0, restart=1, max_iters=1)
+    assert np.any(tangent) and np.any(gradient)
+    assert _cosine(tangent, v) > 1 - 1e-6
+    assert _cosine(gradient, c) > 1 - 1e-6
+    assert _cosine(x0, v) < 0.5     # the start is not along the direction
+
+
 @pytest.mark.parametrize("start", ["the solution", "noise of the size of b"])
 @_routes
 def test_with_an_x0_a_derivative_is_as_accurate_as_without(route, start):

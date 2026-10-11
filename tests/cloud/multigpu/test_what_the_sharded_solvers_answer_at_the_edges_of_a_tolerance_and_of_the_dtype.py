@@ -590,10 +590,10 @@ def test_the_budget_and_the_count_of_gmres_on_lineax_are_in_restart_cycles(backe
 
 def test_the_loop_backend_bounds_the_work_of_gmres_by_its_budget():
     """What a caller who needs a bound on the work does: ``backend="loop"``
-    runs ``max_iters`` steps rounded up to whole cycles (at least one),
-    plus three products (the first residual and each cycle's own), and
-    reports the steps."""
-    restart, max_iters = 5, 1
-    products, iters = _products_and_iters("loop", restart, max_iters)
-    assert iters == restart
-    assert products == restart + 3
+    runs ``max_iters`` steps rounded up to whole cycles (at least one)
+    and reports the steps.  Each cycle is ``restart`` products and two for
+    its residuals, after one product for the first residual."""
+    for restart, max_iters, cycles in ((5, 1, 1), (5, 12, 3)):
+        products, iters = _products_and_iters("loop", restart, max_iters)
+        assert iters == cycles * restart
+        assert products == cycles * (restart + 2) + 1

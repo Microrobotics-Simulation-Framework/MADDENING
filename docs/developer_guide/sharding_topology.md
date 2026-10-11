@@ -162,9 +162,21 @@ which wrapper a node is written for:
   body, one solve per device; the lineax route (the default) then takes
   only an operator that closes over nothing, and `backend="loop"` any
   callable.  `sharded_gmres` cannot: every route of it raises there.
-  Three inputs are not caught and are registered open: a NaN `rtol` or a
-  traced negative or NaN `atol` (MADD-ANO-271), and a solution too large
-  for the dtype, which comes back as infinities (MADD-ANO-272).
+  The same NaN answer is given to a solution too large for the dtype (the
+  answer is tested after it is scaled back: MADD-ANO-272) and to an
+  `rtol` or `atol` that is negative or NaN and arrives as a traced value;
+  given as a concrete number such a tolerance raises a `ValueError`
+  (MADD-ANO-271).  A result is so every entry of `value` finite beside a
+  finite `residual_norm`, or NaN in both.  With a floor of zero
+  (`rtol=0`, an explicit `atol=0.0`) lineax's entrywise test is `0 / 0`
+  at an exactly zero entry and lineax stops there reporting success:
+  `converged` on the lineax backend is then not its verdict but
+  `residual_norm <= max(atol, rtol * ||b||)` (MADD-ANO-274); prefer
+  `atol=None`.  One thing is registered open: on its default (lineax)
+  route `sharded_gmres` counts `max_iters` and `.iters` in restart
+  CYCLES of up to `restart` operator products, not in steps
+  (MADD-ANO-273: `max_iters=10` executed 3,164 products); for a bound on
+  the work pass `backend="loop"`.  That route does not read `x0` either.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
 * Boundary inputs are classified by shape.  A **grid-shaped** input (on

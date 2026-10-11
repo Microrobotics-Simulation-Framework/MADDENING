@@ -890,7 +890,11 @@ def _sign_changing(mode: str, amplitude: float) -> dict:
 
 
 # Slow: a compile of a group with its diagnostics and of its twin.
-# Per push: tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded
+# Per push: tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_jacobi_group_reading_a_difference_within_one_field_is_bounded
+#     (the bound of a Jacobi group stalled behind a read that cancels three digits of one
+#     field: a mapping row there, a gather here)
+# Per push: tests/property/test_coupling_geometry_search.py::test_the_self_check_passes_on_every_per_push_draw_with_a_margin
+#     (the gap of an honest Jacobi pass behind a gather)
 @pytest.mark.slow
 @pytest.mark.parametrize("amplitude", SIGN_CHANGING_TOO_LOW[:2])
 def test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded(amplitude):
@@ -905,8 +909,49 @@ def test_a_jacobi_group_whose_gather_samples_a_sign_changing_field_is_bounded(am
     assert 0.0 < report["geometry_gap"] <= HONEST_GAP, report
 
 
+def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded_per_push():
+    """The field of the slow cases below at the least of their amplitudes,
+    on the module's per-push Gauss-Seidel cell (:data:`PINNED_CELL`, which
+    the lattice-plane case above has compiled): one marker in the middle
+    of a cell of a grid alternating ``+A, -A``.  The update the marker
+    reads cancels a factor of 7.3 by the search's own measure (3.2, 23 and
+    67 on the slow cells), the number is the one the search holds, the
+    self-check passes and the bound holds: 1.37 times the distance, the
+    same digits on jaxlib 0.10.2, 0.11.0 and 0.11.2.
+
+    What it is not.  This cell's tolerance is 1e-4, and the loop stops on
+    it after four passes at ``residual=6.6e-6``; the slow cells, at 1e-7,
+    stall at ``residual=0.0``, where the bound stands on the counted floor
+    alone (a Gauss-Seidel bound at the stall is held per push in
+    ``tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py``).
+    And on this cell MADD-ANO-212's first band starts lower: the bound is
+    1.30 of the distance at 70, 0.98 at 100 and 0.84 at 300, which is why
+    the other two amplitudes are the slow lane's.
+    """
+    assert gc.KNOBS[PINNED_CELL.knob]["iteration_mode"] == "gauss-seidel" and PINNED_CELL.m == 1
+    grid = SIGN_CHANGING_BOUNDED[0] * np.asarray([1.0, -1.0, 1.0, -1.0])
+    marker = np.asarray([0.5])
+    values = {"F": {"x": grid, "g": 0.3,
+                    "c": (0.5 - gc.ALPHA) * grid + np.asarray([0.2, 0.1, 0.4, 0.3])},
+              "P": {"x": marker, "g": 0.4, "c": (0.5 - gc.ALPHA) * marker,
+                    "pos": np.asarray([[0.25]]), "drift": np.zeros((1, 1)),
+                    "Q": 0.0002 * np.eye(1)}}
+    seen = gc.observe(PINNED_CELL, Case(0, 0, 0.0, 0.0), PINNED_SEARCH._built(0),  # noqa: SLF001
+                      values=values, across=True)
+    report = seen["report"]
+    assert seen["referenced"] and not seen["crossed"] and seen["scored"], seen
+    assert report["converged"] and report["cancellation"] > 5.0, report
+    assert seen["spectral_usable"] and not gc.withheld(seen["reason"]) and not seen["rule"], seen
+    assert report["spectral_error_bound"] >= report["distance"] > 0.0, report
+    assert 0.0 < report["geometry_gap"] <= _bounds.GEOMETRY_GAP_TOLERANCE, report
+
+
 # Slow: a compile of a group with its diagnostics and of its twin.
-# Per push: tests/core/test_coupling_floor_gain_of_a_difference_within_one_field.py::test_a_gauss_seidel_group_reading_a_difference_within_one_field_is_bounded
+# Per push: tests/property/test_coupling_geometry_search.py::test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded_per_push
+#     (the same field at the least amplitude on the per-push Gauss-Seidel cell, which stops
+#     on its tolerance)
+# Per push: tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_the_spectral_bound_holds_on_a_stalled_squaring_chain
+#     (a Gauss-Seidel bound at the float32 stall, where it stands on the counted floor)
 @pytest.mark.slow
 @pytest.mark.parametrize("amplitude", SIGN_CHANGING_BOUNDED)
 def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded(amplitude):

@@ -797,6 +797,42 @@ sharding, checkpoints, the CI gates), say one of two things there as well:
 - **or that it is slow-only on purpose**, in which case the property
   belongs in the table below with the reason.
 
+**What a witness must be.** A witness is a test that runs on every push and
+can fail there, so that a fault in the property turns a push red. It is
+therefore:
+
+- not slow-marked, and collected under the id you wrote;
+- not skipped: no `skip` mark, no `skipif` whose condition is true in the
+  default lane, no `pytest.skip()` that its body (or a helper it calls, or
+  a fixture it requests) reaches on every run. A `skipif` whose condition
+  is false in the default lane is fine: the multi-device tests under
+  `tests/cloud/multigpu` are skipped only where there are too few devices,
+  and that directory's conftest provides them. The guard takes the
+  condition's value from pytest, not from the decorator's text; write the
+  condition as an expression, not as a string. A witness whose body skips
+  under a condition (a `pytest.skip()` under an `if`, a
+  `pytest.importorskip()`) must be listed in the guard's
+  `CONDITIONAL_BODY_SKIPS` with the reason the condition is false on a
+  push;
+- not expected to fail: no `xfail` mark in any form (strict or not, with
+  `raises=`, on one parameter, on the class or the module) and no
+  `pytest.xfail()` call. An xfail test reports success when its assertions
+  fail, so it stays green on exactly the fault the slow test would catch.
+  Name a test that passes and checks the property; if there is none, write
+  the cheapest case of the slow test as one, and say in its docstring what
+  it leaves to the slow lane.
+
+There is one exception. A slow test that is itself the strict xfail pin of
+an open anomaly has nothing that passes to point at, and may name a
+per-push strict xfail pin of the same anomaly: that one turns red on the
+push that fixes the defect. "The same anomaly" is decided from the marks
+pytest collects and from the registry, never from prose: one registry id
+(`MADD-ANO-<n>`) is written in the `reason=` of the witness's mark and of
+the mark of every slow-marked parametrisation of the slow test, all of
+those marks are `strict=True`, and the registry holds that entry as `open`
+or `partially_resolved`. A slow test that is expected to pass never takes
+the exception.
+
 `tests/compliance/test_slow_only_rule.py` checks this rule on every push
 for every slow-marked test under `tests/core`, `tests/property`,
 `tests/verification`, `tests/cloud/multigpu`, `tests/compliance`,
@@ -804,7 +840,8 @@ for every slow-marked test under `tests/core`, `tests/property`,
 applied through a parameter list or a class counts). It fails when a
 slow test has neither, when a named witness is not a test the default
 lane runs (it is slow-marked itself, misspelt, or named without its
-class), and when a table row or an exemption names no slow test. Files
+class) or cannot fail there (it is skipped or expected to fail, as
+above), and when a table row or an exemption names no slow test. Files
 under those paths that check a node rather than the framework (the LBM
 and wavelet convergence studies, the `run_pod` session harness, two
 timing benchmarks) are listed in its `NOT_FRAMEWORK`, each with the

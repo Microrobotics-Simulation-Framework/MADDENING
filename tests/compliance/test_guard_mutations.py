@@ -81,6 +81,13 @@ WF = (_WORKFLOWS,)
 PRUNE = (_PRUNE,)
 CC = (_COMPILE_CACHE,)
 SLOW_RULE = (_SLOW_RULE,)
+#: The slow-only rule's own readers, each held by one test that needs no collection of the tree.
+SR_MARKS = (f"{_SLOW_RULE}::test_the_collection_holds_the_marks_as_pytest_decides_them",)
+SR_PIN = (f"{_SLOW_RULE}::test_an_xfail_pin_is_a_witness_only_of_a_slow_pin_of_the_same_open_anomaly",)
+SR_BODY = (f"{_SLOW_RULE}::test_a_witness_whose_own_body_skips_or_expects_to_fail_is_refused",)
+SR_LANE = (f"{_SLOW_RULE}::test_a_witness_in_a_file_the_per_push_lane_never_collects_is_refused",)
+SR_READER = (f"{_SLOW_RULE}::test_the_comment_reader_finds_what_it_is_for",)
+SR_BODIES = (f"{_SLOW_RULE}::test_the_body_reader_finds_what_it_is_for",)
 _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
 _PLAN_SCAN = "tests/core/test_interface_plan_is_the_only_enumeration.py"
@@ -554,8 +561,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("W6", SR, 'SIBLING_REQUIRED = ("tests/verification/hypothesis/",)', "SIBLING_REQUIRED = ()",
        SLOW_RULE, "a slow hypothesis property listed only in the table: verify-hypothesis runs it on "
        "jax 0.10.2 only, so jax 0.11.2 sees it in the slow lane alone"),
-    _M("W7", SR, "default_lane=frozenset(n for n, slow, skip in items if not slow and not skip),",
-       "default_lane=frozenset(n for n, slow, skip in items if not skip),", SLOW_RULE,
+    _M("W7", SR, "                               if not slow and not skip and not skipif),",
+       "                               if not skip and not skipif),", SLOW_RULE,
        "a slow-marked test accepted as a per-push witness"),
     _M("W8", SR, '    "tests/core/",\n', "", SLOW_RULE,
        "tests/core dropped from the covered directories: its slow marks go unchecked"),
@@ -571,6 +578,64 @@ MUTANTS: tuple[Mutant, ...] = (
        "exempt the next slow test written there"),
     _M("W12", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_LM}():", SLOW_RULE,
        "the named witness skip-marked: it is collected and never runs"),
+    # A witness that cannot fail, or does not run, with no slow or skip mark on it.
+    _M("W13", _XF, f"\n\ndef {_LM}():",
+       f"\n\n@pytest.mark.xfail(strict=True, raises=AssertionError, reason='x')\ndef {_LM}():", SLOW_RULE,
+       "the named witness xfail-marked, of a slow test that is expected to pass: it reports success "
+       "when its assertions fail, so the fault the slow test would catch stays green on every push"),
+    _M("W14", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.skipif(True, reason='x')\ndef {_LM}():",
+       SLOW_RULE, "the named witness behind a skipif whose condition is true: collected, never run"),
+    _M("W15", _XF, f"\n\ndef {_LM}():", f"\n\ndef {_LM}():\n    pytest.skip('x')", SLOW_RULE,
+       "the named witness skipping in its own body, with no mark for a collection to show"),
+    _M("W16", SR, "                       xfail(i, strict_default)] for i in items]",
+       "                       None] for i in items]", SR_MARKS,
+       "the collection no longer reading xfail marks: every xfail-marked witness accepted"),
+    _M("W17", SR, '        elif condition:\n            return "true"',
+       '        elif False:\n            return "true"', SR_MARKS,
+       "a skipif's or an xfail's condition no longer decided: a witness skipped on a true condition "
+       "accepted as one that runs"),
+    _M("W18", SR, "    marks = [witness] + [collection.xfail.get(item) for item in slow_items]",
+       "    marks = [witness]", SR_PIN,
+       "the exception given without asking the slow test: an xfail pin accepted as the witness of a "
+       "slow test that is expected to pass, which is the audited case"),
+    _M("W19", SR, "    shared = set.intersection(*(set(_ANOMALY_ID.findall(m.reason)) for m in marks))",
+       "    shared = set(_ANOMALY_ID.findall(witness.reason))", SR_PIN,
+       "the exception given to a pin of another anomaly than the slow test's"),
+    _M("W20", SR, '    return min((i for i in shared if status(i) in OPEN_STATUSES), default="")',
+       '    return min(shared, default="")', SR_PIN,
+       "the exception given to a pin of a resolved entry, or of an id the registry does not hold"),
+    _M("W21", SR, '    if "skipif" in reached and function not in excused:', "    if False:", SR_BODY,
+       "a witness whose body skips under a condition accepted without a reason in the table"),
+    # What the per-push lane never collects, and the readers widened after the pre-merge audit.
+    _M("W22", _XF, f"# Per push: {_XF}::{_LM}\n@pytest.mark.slow",
+       "# Per push: tests/viz/test_serialization.py::TestSerialization::test_to_dict_structure\n"
+       "@pytest.mark.slow", SLOW_RULE,
+       "a witness in tests/viz, which the lane passes --ignore for: the collection names the file "
+       "and pytest collects it, while no push ever runs it"),
+    _M("W23", SR, '    return next((why for key, why in collection.not_collected.items() if _covers(key, '
+                  'nodeid)), "")', '    return ""', SR_LANE,
+       "the lane's exclusions computed and never consulted: a witness in an ignored path accepted"),
+    _M("W24", SR, "        elif not named and not any(fnmatch_ex(p, root / rel) for p in python_files):",
+       "        elif False:", SR_LANE,
+       "a witness in a file pytest's python_files does not match accepted: `pytest tests/` never "
+       "collects it"),
+    _M("W25", SR, r'                      r"(?:\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\])?")',
+       r'                      r"(?:\[[^\]\s]*\])?")', SR_READER,
+       "a parameter id holding a space cut at the space: the comment then names the test's other "
+       "parameters, an xfail case or one that does not exist accepted"),
+    _M("W26", SR, "    if not mark.run:", "    if False:", SR_PIN,
+       "a strict xfail pin with run=False accepted as a witness: pytest never runs it, so it cannot "
+       "turn red on the push that fixes the defect"),
+    _M("W27", SR, '_UNITTEST_OUTCOMES = {"unittest.skip": "skip",', '_UNITTEST_OUTCOMES = {',
+       SR_BODIES, "a witness under unittest.skip accepted: it is collected and never runs"),
+    _M("W28", SR, "            last = stmt", "            last = last or stmt", SR_BODIES,
+       "the first of two definitions of a test read: pytest collects the last, which may skip"),
+    _M("W29", SR, "    return sorted({v for v in _UNSET_FOR_COLLECTION for t in texts if v in t})",
+       "    return []", SR_BODIES,
+       "a witness whose skipif reads MADDENING_TEST_SHARD accepted: the collection unsets it, every "
+       "sharded lane sets it and skips the witness"),
+    _M("W30", SR, "        kinds += gate._imperative_kinds(setup.body, aliases, helpers)  # noqa: SLF001",
+       "        pass", SR_BODIES, "a witness whose xunit setup_function skips accepted"),
     # --- L: the layout of the coupling searches' cells, tests/property/test_coupling_*_search.py
     _M("L1", _NL, "                knob = ROTATED_KNOBS[(s + 3 * t + 2 * q) % len(ROTATED_KNOBS)]\n",
        "                knob = (s + 3 * t + 2 * q) % len(linear.KNOBS)\n", CELLS_PINNED,

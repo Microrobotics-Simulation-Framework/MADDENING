@@ -859,6 +859,15 @@ class TestPrecisionLimitedRank:
     overall under the old cutoff.  The cap coming off is the property getting
     its teeth back, and a regression in the cutoff shows up here as a
     failure rather than as a region nobody asserts anything about.
+
+    Those figures are of the route the verdict took then, the
+    eigenvalues of a float32 ``F``.  It is read from the singular values
+    of ``J`` in float64 now: the two precisions' verdicts differ only
+    within the one rounding ``J`` took when it was stored, a part in a
+    thousand of the cutoff, and the properties below hold with that
+    much less to forgive.  (A *constant* sensitivity, which none of
+    these random Jacobians has, is
+    ``tests/core/test_sysid_fim_reads_the_jacobian.py``'s.)
     """
 
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -986,43 +995,56 @@ class TestPrecisionLimitedRank:
         to catch one more case and it starts firing on ordinary work, or
         narrows it and it stops catching anything.  Neither shows up in
         a test that only asks whether a particular matrix warns.  So
-        this one measures both rates over a fixed population and holds
-        them to floors well inside the measured values.
+        this one counts over a fixed population.
 
-        The population spans short and long residuals, which it could
-        not before: ``m = 400`` puts the cutoff at ``sqrt(m) * eps``
-        rather than ``n * eps`` for every ``n`` here, so a cutoff that
-        stopped seeing the residual length would show up as a collapse
-        in recall on the ``m = 400`` cells rather than as nothing at
-        all.
+        The population spans short and long residuals: ``m = 400`` puts
+        the cutoff at ``sqrt(m) * eps`` rather than ``n * eps`` for
+        every ``n`` here, so a band anchored to a cutoff that stopped
+        seeing the residual length fails on the ``m = 400`` cells.
+
+        What is held changed with the route the verdict takes.  Read
+        from the eigenvalues of ``F``, the two precisions disagreed on a
+        scatter of reports around the cutoff (3 to 12 of these, by
+        jaxlib) and the gate held the warning's recall over them to
+        0.90.  Read from the singular values of ``J`` they do not
+        disagree anywhere away from the cutoff itself, so the gate is
+        exact: no disagreement, a warning on every report inside the
+        band, and none outside it.
         """
         self._assert_separates(*self._separation(20260919, per_cell=150),
-                               min_disagreements=5)
+                               min_inside=60)
 
     def test_the_threshold_still_separates_a_smaller_population(self):
         """The gate above over a third of the population (50 reports per
         cell instead of 150, same cells, its own fixed seed), on every
-        push and both JAX lanes.  The verdicts are float32 decompositions,
-        so this is the one check here whose outcome moves with jaxlib,
-        and it must see both lanes' jaxlib, not only verify-hypothesis's.
+        push and both JAX lanes.
 
-        The recall and fire-rate floors are the gate's.  Only the floor
-        on the number of disagreements scales with the population: this
-        seed gives (disagreements, caught, far, fired, long-residual)
-        = (3, 3, 180, 0, 2) on jaxlib 0.10.2 and 0.11.0 and
-        (4, 4, 180, 0, 3) on 0.11.2.  Measured against a seeded warning
-        factor on 0.11.0 (it is 2): 1.01 (catching nothing) and 8 (firing
-        on 40 of 180 ordinary reports) fail it; 1.3, 3 and 4 pass it, and
-        pass the full gate above too."""
+        Every count is exact, on every jaxlib: the verdicts are float64
+        decompositions of a float32 ``J`` on the host, and nothing in
+        them depends on how the backend reduces a sum.  A seeded warning
+        factor other than 2 fails it from either side (1.01 warns on no
+        report inside the band; 1.3 misses those between 1.3 and 2; 3, 4
+        and 8 warn outside it)."""
         self._assert_separates(*self._separation(20261002, per_cell=50),
-                               min_disagreements=2)
+                               min_inside=20)
 
-    @staticmethod
-    def _separation(seed, per_cell):
-        """``(dis, caught, far, fired, long_dis)`` over ``per_cell`` reports
-        in each of the nine ``(n, m)`` cells."""
+    #: How near the cutoff a report may sit and still be left out of the
+    #: exact counts.  The float32 storage of ``J`` moves the ratio by at
+    #: most ``sqrt(n) * eps / sqrt(ratio)`` relative -- one rounding per
+    #: entry, :func:`maddening.sysid._resolve_rank_rtol` -- which is under
+    #: ``4e-4`` for every cell here; twice that with room.
+    _GUARD = 2e-3
+
+    @classmethod
+    def _separation(cls, seed, per_cell):
+        """Counts over ``per_cell`` reports in each of the nine ``(n, m)``
+        cells: disagreements between the float32 report and the float64
+        reference away from the cutoff, and -- inside and outside the
+        warning's band -- how many reports there were and how many
+        warned, with the long-residual share of the inside ones."""
         rng = np.random.default_rng(seed)
-        dis = caught = far = fired = long_dis = 0
+        factor, guard = _PRECISION_WARN_FACTOR, cls._GUARD
+        dis = inside = inside_warned = outside = outside_warned = long_inside = 0
         for n in (2, 3, 5):
             for m in (12, 40, 400):
                 cutoff = max(n, np.sqrt(m)) * _EPS32
@@ -1032,28 +1054,27 @@ class TestPrecisionLimitedRank:
                         n, m, rc, int(rng.integers(0, 2**31 - 1)))
                     report, warned = _fim_of(J64)
                     rank64 = _rank_at(np.linalg.eigh(J64.T @ J64)[0], cutoff)
-                    if report.rank != rank64:
-                        dis += 1
-                        caught += warned
-                        long_dis += m > n * n
-                    elif rc >= 5.0:
-                        far += 1
-                        fired += warned
-        return dis, caught, far, fired, long_dis
+                    if abs(rc - 1.0) > guard:
+                        dis += report.rank != rank64
+                    if (1.0 + guard) / factor <= rc <= factor * (1.0 - guard):
+                        inside += 1
+                        inside_warned += warned
+                        long_inside += m > n * n
+                    elif rc < (1.0 - guard) / factor or rc > factor * (1.0 + guard):
+                        outside += 1
+                        outside_warned += warned
+        return dis, inside, inside_warned, outside, outside_warned, long_inside
 
     @staticmethod
-    def _assert_separates(dis, caught, far, fired, long_dis, *, min_disagreements):
-        where = (f"disagreements={dis} caught={caught} "
-                 f"far={far} fired={fired} long_residual={long_dis}")
-        assert dis >= min_disagreements, f"population produced too few disagreements; {where}"
-        # Measured 1.000 / 0.0000 over six seeds; the floors sit inside
-        # that.  0.90 was 0.75 before the cutoff saw ``m``, when the
-        # long-residual misses made a tighter floor unmeetable.
-        assert caught / dis >= 0.90, where
-        assert fired / max(far, 1) <= 0.02, where
-        # Non-vacuity for the regime this gate was widened to cover: the
-        # ``m > n**2`` cells must actually be producing close calls, or
-        # the recall figure above is a statement about short residuals
-        # wearing a longer population's name.  Three to six over six
-        # seeds at calibration.
-        assert long_dis >= 1, where
+    def _assert_separates(dis, inside, inside_warned, outside, outside_warned,
+                          long_inside, *, min_inside):
+        where = (f"disagreements={dis} inside={inside} warned={inside_warned} "
+                 f"outside={outside} warned={outside_warned} "
+                 f"long_residual_inside={long_inside}")
+        # Non-vacuity: reports on both sides of the band's edges, and the
+        # ``m > n**2`` cells among those inside it.
+        assert inside >= min_inside and outside >= 2 * min_inside, where
+        assert long_inside >= min_inside // 4, where
+        assert dis == 0, f"the two precisions reached different ranks away from the cutoff; {where}"
+        assert inside_warned == inside, f"a report inside the band did not warn; {where}"
+        assert outside_warned == 0, f"a report outside the band warned; {where}"

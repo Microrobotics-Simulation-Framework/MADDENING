@@ -3,12 +3,13 @@
 The three properties this file exists to pin, in the order they are
 most likely to rot:
 
-1. **``fim`` still answers exactly what it answered before it was
-   jitted.**  Not "to a tolerance" -- bit for bit, including on the
-   degenerate problems whose verdicts are decided at the rounding
-   floor, which is where a change of arithmetic shows up first.
-   :func:`_reference_fim` is the pre-jit pipeline written out, and
-   :class:`TestFimUnchangedByJitting` compares against it.
+1. **``fim`` answers exactly what its pipeline, written out eagerly,
+   answers.**  Not "to a tolerance" -- bit for bit, including on the
+   degenerate problems whose verdicts are decided at the cutoff.
+   :func:`_reference_fim` is that pipeline written out (the Gram
+   product for the matrix, the singular values of ``J`` in float64 for
+   every verdict), and :class:`TestFimUnchangedByJitting` compares
+   against it.
 2. **Nobody reads the device.**  ``fim_core`` performs zero
    device-to-host transfers and ``fim`` performs four.  Counted, and
    asserted as an exact number: a stray ``float(x)`` on a device array
@@ -62,16 +63,18 @@ _EPS32 = float(np.finfo(np.float32).eps)
 
 def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
                    noise_std=None, rank_rtol=None, specs=None):
-    """``fim``'s pipeline as it stood before the jitted core, eager
-    throughout.
+    """``fim``'s pipeline, eager throughout.
 
     Deliberately a transcription and not a call into the module: a
     reference that shares the code under test cannot detect a change to
     it.  The host-side verdict helpers *are* shared, because they are
-    the part that did not change and are covered in their own right --
-    what this pins is the wiring around them, which is what moved: when
-    the Jacobian is built, in what order the Gram product and ``eigh``
-    run, and at what precision each stage lands.
+    covered in their own right -- what this pins is the wiring around
+    them: when the Jacobian is built, that the published matrix is the
+    eager Gram product, that every verdict is read from the singular
+    values of ``J`` decomposed in float64 on the host (never from an
+    ``eigh`` of that matrix: its entries carry the rounding of a sum
+    over the rows, which constant sensitivities align), and at what
+    precision each stage lands.
     """
     if scale not in ("relative", "nominal", None):
         raise ValueError(f"scale must be 'relative', 'nominal' or None, got {scale!r}")
@@ -125,7 +128,19 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
     F = J.T @ J
     if not bool(jnp.all(jnp.isfinite(F))):
         raise FloatingPointError("non-finite Fisher matrix")
-    eigvals, eigvecs = jnp.linalg.eigh(F)
+    J_host = np.asarray(J)
+    J64 = J_host.astype(np.float64)
+    if J64.shape[0] < J64.shape[1]:
+        J64 = np.vstack([J64, np.zeros((J64.shape[1] - J64.shape[0],
+                                        J64.shape[1]))])
+    _, sing, vt = np.linalg.svd(np.linalg.qr(J64, mode="r"))
+    # a singular value under the float64 decomposition's own bound is zero
+    sing = np.where(sing > max(J_host.shape) * np.finfo(np.float64).eps * sing[0],
+                    sing, 0.0)
+    eigvals = (sing[::-1] ** 2).astype(J_host.dtype)
+    eigvecs = np.ascontiguousarray(vt[::-1].T).astype(J_host.dtype)
+    if not np.any(np.asarray(F)):
+        eigvals = np.zeros_like(eigvals)
     lo, hi = float(eigvals[0]), float(eigvals[-1])
     cond = float("inf") if lo <= 0.0 else hi / lo
     m = int(J.shape[0])
@@ -454,18 +469,17 @@ ALL_PROBLEMS = [
 
 
 class TestFimUnchangedByJitting:
-    """``fim`` publishes the same numbers it published before the core
-    was jitted -- bit for bit.
+    """``fim`` publishes the numbers of its eager pipeline -- bit for bit.
 
-    Not a tolerance.  ``rank`` and ``cond`` are decided by comparing two
-    numbers at the ``max(n, sqrt(m)) * eps`` floor, so a change of one
-    float32 ulp in ``F`` is enough to move a published verdict: letting
-    ``jax.jit`` fold the transpose into ``J.T @ J`` moved ``cond`` on
-    the spring's scale direction from ``inf`` to ``3.45e+07`` and
-    ``rank`` on an on-cutoff matrix from 3 to 2.  That is why ``fim``
-    jits only the Jacobian -- which *is* bit-identical jitted -- and
-    leaves the Gram product, ``eigh`` and the float64 host verdict layer
-    eager.  These assertions are how that stays true.
+    Not a tolerance.  The published matrix is the eager Gram product:
+    letting ``jax.jit`` fold the transpose into ``J.T @ J`` moves it by a
+    float32 ulp, which moved ``cond`` on the spring's scale direction
+    from ``inf`` to ``3.45e+07`` and ``rank`` on an on-cutoff matrix from
+    3 to 2 while the verdicts were read from that matrix's eigenvalues.
+    They are read from the singular values of ``J`` now, which *is*
+    bit-identical jitted, so ``fim`` jits only the Jacobian and leaves
+    the Gram product and the float64 host verdict layer eager.  These
+    assertions are how that stays true.
     """
 
     @pytest.mark.parametrize("name", ALL_PROBLEMS)
@@ -660,9 +674,10 @@ class TestNoHostSyncs:
         assert counter.count == 0, counter.by_kind
 
     def test_fim_performs_exactly_four_transfers(self, problems):
-        """``eigvals``, ``eigvecs``, the finiteness flag and the
-        zero-scaled mask, in one ``jax.device_get``.  Everything the
-        host verdict layer does afterwards is numpy on numpy.
+        """``J``, the Gram product's finiteness and all-zero flags and
+        the zero-scaled mask, in one ``jax.device_get``.  Everything the
+        host verdict layer does afterwards -- the decomposition of ``J``
+        included -- is numpy on numpy.
 
         This is the default call, which builds ``J`` eagerly every time
         (it keeps no trace between calls); the eager ``jacfwd`` reads

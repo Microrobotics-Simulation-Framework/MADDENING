@@ -137,26 +137,19 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
-        # 0.10.2 IS NOT REDUNDANT, AND IS NOT KEPT FOR COMPATIBILITY
-        # ALONE.  It is the only lane that exercises the `sqrt(m)` term
-        # in `rank_rtol`'s default cutoff
-        # (`maddening.sysid._resolve_rank_rtol`).  That term exists
-        # because the float32 error of accumulating `F = J.T @ J` over
-        # `m` residual rows grows with `m`; demonstrating it needs a
-        # backend whose reduction is loose enough to push a null
-        # direction above the older `n * eps` cutoff.  Measured, 64
-        # seeds at n=2, m=4000, CPU:
-        #
-        #   jaxlib 0.10.2 / 0.11.0   floor 10.1 eps   9/64 seeds over
-        #   jaxlib 0.11.2            floor  1.4 eps   0/64 seeds over
-        #
-        # and under 0.11.2 the floor stays flat at ~1 eps out to
-        # m=256000, so no fixture size brings it back -- that backend's
-        # reduction no longer follows the sqrt(m) error model.  So
-        # `test_the_sqrt_m_term_earns_its_place_where_the_backend_rounds_loosely`
-        # asserts on this lane and reports "not applicable" on the
-        # other.  **Dropping the 0.10.2 lane silently deletes the only
-        # coverage that term has.**  Replace the test first.
+        # 0.10.2 is the oldest jax the package supports, and the lane
+        # that holds that floor.  It used to carry one more thing: it
+        # was the only lane on which the `sqrt(m)` term of `rank_rtol`'s
+        # default cutoff (`maddening.sysid._resolve_rank_rtol`) could be
+        # shown to be load-bearing, because `fim` read the eigenvalues
+        # of `F = J.T @ J` and only this backend's float32 reduction was
+        # loose enough to push a null direction over the older `n * eps`
+        # cutoff (10.1 eps here against 1.4 eps on 0.11.2, 64 seeds at
+        # n=2, m=4000).  `fim` reads the singular values of `J` now, the
+        # reduction is not on that route, and the test that depended on
+        # the lane was replaced by one that asserts on every backend
+        # (`test_a_missing_direction_reads_at_the_square_of_one_rounding_on_every_backend`
+        # in tests/core/test_sysid_degenerate_inputs.py).
         jax-version: ["0.10.2", "0.11.2"]
         # Each lane runs as six jobs, each on its own runner and each
         # running its share one test at a time.  The split is by test file

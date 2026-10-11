@@ -286,7 +286,12 @@ prefer the tunnel, or a TLS-terminating reverse proxy, to a public port.
 `/docs` is not served when the token is enforced (Swagger UI cannot send
 a bearer header when it fetches its own schema).  WebRTC signaling on
 8443 authenticates separately, once you set `MADDENING_STREAM_SECRET` and
-share it with the viewer.
+share it with the viewer.  The container streams its simulation there (a
+time series of its scalar state fields, at `StreamConfig.fps`): it logs
+the session id at startup, and the viewer's token is
+`maddening.cloud.generate_session_token(<session id>, <secret>)`.  Build
+the graph through the REST graph routes, which take the built-in node
+types; `MADDENING_GRAPH_USD` is not loaded.
 
 **The ZeroMQ transports follow the same rule.**
 `NetworkRelay` (state, 5555), `CommandPublisher` (commands, 5556) and the

@@ -19114,11 +19114,15 @@ anomalies:
       `test-streaming`).  What remains untested: a GPU encoder (the encoder
       is x264enc), a real browser, and NAT traversal -- on a cloud host the
       media travels over UDP, which a provider may not expose, so a viewer
-      outside its network needs a reachable TURN server.  And the cloud
-      container's entry point (`cloud/entrypoint.py`) constructs a
-      `SelkiesSession` but never starts it or feeds it frames, at every tag
-      and on the 0.4.0 tree, so the shipped container still streams
-      nothing; that is a separate defect.
+      outside its network needs a reachable TURN server.  Frames are let
+      into a viewer's pipeline only once its answer has been applied: a
+      frame that reached `webrtcbin` before the offer was applied made it
+      answer with an inactive m-line (ICE connected, DTLS never did, no
+      video), which a viewer in another process than the session met
+      whenever frames were already flowing -- found when the cloud entry
+      point was wired, before any release.  The cloud container's entry
+      point never started the session at any tag: MADD-ANO-274, resolved
+      in 0.4.0.
     verification:
       - "tests/cloud/test_webrtc_loopback.py::test_the_server_answers_the_offer_with_the_payload_type_offered"
       - "tests/cloud/test_webrtc_loopback.py::test_ice_candidates_go_both_ways_and_ice_connects"
@@ -19126,5 +19130,80 @@ anomalies:
       - "tests/cloud/test_webrtc_loopback.py::test_input_events_reach_the_input_handler_and_negotiation_never_does"
       - "tests/cloud/test_webrtc_loopback.py::test_an_unauthenticated_peer_is_closed_and_sent_nothing"
       - "tests/cloud/test_webrtc_loopback.py::test_selkies_renderer_streams_what_its_inner_renderer_draws"
+      - "tests/cloud/test_webrtc_loopback.py::test_a_viewer_in_another_process_decodes_a_session_that_was_already_fed"
+      - "tests/cloud/test_webrtc_loopback.py::test_frames_are_let_into_the_pipeline_only_once_the_answer_is_applied"
       - "tests/cloud/test_webrtc_signaling_messages.py::TestRouting::test_sdp_and_ice_go_to_the_negotiation_and_never_to_the_input_handler"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-274"
+    title: "The cloud container streamed nothing: its entry point never started the WebRTC session, and its API could add no node to build a graph"
+    description: >
+      From v0.1.0 to v0.3.1, and on the 0.4.0 tree before this fix,
+      `cloud/entrypoint.py` constructed a `SelkiesSession` and never
+      started it: `CloudConfig.stream_config` was read and dropped, no
+      renderer pushed a frame into the session, and the only call on it was
+      `stop()`, at SIGTERM (`git show <tag>:src/maddening/cloud/entrypoint.py`
+      at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 has one
+      `SelkiesSession(`, no `.start(`, no `SelkiesRenderer` and no
+      `update_framebuffer`).  Nothing listened on the signaling port 8443
+      that `docker/Dockerfile.cloud` exposes, so a viewer of the container
+      had its connection refused.  The same entry point built its
+      `SimulationServer` with `node_registry={}`, so every
+      `POST /graph/nodes` was refused with "Unknown node type ...
+      Available: []": the container's API could not build a graph, and
+      there was no simulation to run or stream (`MADDENING_GRAPH_USD` is
+      not loaded either, which the entry point has said in its log since
+      0.4.0).  No test ran the entry point; the streaming examples built
+      their own server and session.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Graded `major` as MADD-ANO-273 is: a failure the user sees (no
+      stream, a refused connection, a 400 for every node) whose only
+      workaround was another entry point.  Not safety relevant: nothing
+      was simulated, so no state, output, saved file or reported result
+      could be wrong; the API answered every refused request with an
+      error.
+    affected_components:
+      - "maddening.cloud.entrypoint.main"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Run the container with another entry point that builds its
+      `SimulationServer` with a node registry.  No WebRTC video was
+      possible within an affected release in any case: the session itself
+      never negotiated (MADD-ANO-273).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0.4.0.  The entry point registers the built-in node
+      types (`maddening.nodes`), so a client builds its graph through the
+      REST graph routes, and starts a `SelkiesSession` with
+      `CloudConfig.stream_config`: its signaling socket listens on port
+      8443 of the API's bind address (`MADDENING_HOST`) and authenticates
+      every viewer against `MADDENING_STREAM_SECRET` (unset, it refuses
+      every viewer, as before).  The session id is logged at start-up; a
+      viewer holding the secret derives its token from it.  The frames are
+      the latest state the simulation published to the server's relay,
+      drawn by a `ServerFrameRenderer` as a time series of up to eight
+      scalar state fields and pushed through `SelkiesRenderer` at the
+      stream's frame rate (a new snapshot is drawn, an unchanged one
+      pushed again); SIGTERM stops the feeding thread, the renderer and
+      the session after uvicorn has shut down.  Verified by running the
+      entry point as the container does, in the network-less streaming
+      container: a graph built and run over REST, a GStreamer WebRTC peer
+      with a token from the secret decoding frames of the configured size
+      that change while the simulation runs and hold while it is paused, a
+      peer without a valid token closed and sent nothing, and a clean exit
+      on SIGTERM.  Not covered: a provider's network (a viewer outside it
+      needs a reachable TURN server, see MADD-ANO-273), a browser, and a
+      GPU encoder.  `MADDENING_GRAPH_USD` is still not loaded.  The picture
+      is drawn with matplotlib on the CPU while the simulation runs,
+      whether or not a viewer is connected.
+    verification:
+      - "tests/cloud/test_entrypoint_streams.py::test_a_viewer_with_the_secret_watches_the_simulation_run"
+      - "tests/cloud/test_entrypoint_streams.py::test_a_viewer_without_a_valid_token_is_closed_and_sent_nothing"
+      - "tests/cloud/test_entrypoint_streams.py::test_sigterm_stops_the_stream_and_the_process_exits_cleanly"
+      - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_main_starts_the_session_from_the_environment_and_stops_it_at_shutdown"
+      - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_the_frames_change_as_the_graph_steps_and_hold_while_it_does_not"
+      - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_main_serves_the_built_in_node_types"
     github_issue: null

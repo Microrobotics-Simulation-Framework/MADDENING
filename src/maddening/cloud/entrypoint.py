@@ -14,8 +14,8 @@ bind address, ``MADDENING_HOST``, and authenticates every viewer against
 ``MADDENING_STREAM_SECRET``: unset, the session holds a random secret
 nobody knows and refuses every viewer.  The session id is logged at
 start-up (the token is not); a viewer that holds the secret derives its
-token as ``maddening.cloud._auth.generate_session_token(session_id,
-secret)`` and presents it as ``Authorization: Bearer <token>`` or
+token as ``maddening.cloud.generate_session_token(session_id, secret)``
+and presents it as ``Authorization: Bearer <token>`` or
 ``?token=<token>`` on ``ws://<host>:8443/signaling/<session_id>``.
 
 The picture is the latest state the simulation published to the server's

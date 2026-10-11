@@ -4,20 +4,39 @@
 
 The cloud container: MADDENING's simulation server with GStreamer, on a
 CUDA base image.  The build and run commands are in the file's header.
+Its entry point (`python3 -m maddening.cloud.entrypoint`) serves the API
+on `MADDENING_PORT` (8000) and streams the simulation over WebRTC: the
+signaling socket listens on 8443 of `MADDENING_HOST`, authenticates every
+viewer against `MADDENING_STREAM_SECRET` (unset, it refuses everyone), and
+the session id it logs at startup is what a viewer derives its token from
+(`maddening.cloud.generate_session_token(session_id, secret)`).  A client
+builds the graph through the REST graph routes, which take the built-in
+node types.
 
 ## `Dockerfile.streaming-test`
 
 A CPU-only image for the WebRTC streaming tests,
-`tests/cloud/test_webrtc_loopback.py`.  It holds Ubuntu 24.04's system
+`tests/cloud/test_webrtc_loopback.py` and
+`tests/cloud/test_entrypoint_streams.py`.  It holds Ubuntu 24.04's system
 Python 3.12 with PyGObject, GStreamer with the plugins `webrtcbin` needs
 (base, good, bad, ugly, `gstreamer1.0-nice`) plus `gstreamer1.0-libav`
-for the test peer's H.264 decoder, JAX for CPU, and MADDENING installed
-editable from the tree.  No GPU is used.
+for the test peer's H.264 decoder, JAX for CPU, the packages of the
+`server` extra (what the cloud image installs for the entry point), and
+MADDENING installed editable from the tree.  No GPU is used.
 
 The tests start a `SelkiesSession` and connect a second GStreamer
 `webrtcbin` to it, a peer that signals the way the browser client
 `src/maddening/api/static/webrtc_client.html` does; it must receive the
-answer, complete ICE and decode the frames that were pushed.
+answer, complete ICE and decode the frames that were pushed; one test
+runs the session in a child process, fed from before the viewer connects.
+`test_entrypoint_streams.py` runs the cloud entry point as the container
+does (a child process, with the config JSON, the stream secret and the
+bind host in its environment), builds and runs a graph through the API's
+`/graph/` and `/sim/` routes on loopback, and connects the same peer to
+port 8443 with a token from the secret: the frames must have the
+configured size, change while the simulation runs and hold while it is
+paused; a peer without a valid token gets nothing; SIGTERM ends the
+process cleanly.
 
 From the repository root:
 
@@ -27,7 +46,8 @@ docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
 docker run --rm --network none --cap-add NET_ADMIN \
   --cpuset-cpus=0-3 --memory=8g \
   -v "$PWD":/src:ro maddening-streaming-test \
-  python3 -m pytest tests/cloud/test_webrtc_loopback.py -q -p no:cacheprovider
+  python3 -m pytest tests/cloud/test_webrtc_loopback.py \
+    tests/cloud/test_entrypoint_streams.py -q -p no:cacheprovider
 ```
 
 The working tree is mounted read-only over the copy baked into the image,
@@ -49,5 +69,6 @@ dependency fail the run instead of skipping it, as the `test-streaming`
 job in `.github/workflows/ci.yml` does.  Outside the container the
 module skips, since GStreamer and PyGObject are not pip-installable.
 
-What these tests do not cover: a GPU encoder (the encoder is `x264enc`),
-a real browser, and NAT traversal.
+What these tests do not cover: a provider's network and NAT traversal
+(both ends are in one container), a GPU encoder (the encoder is
+`x264enc`), and a real browser.

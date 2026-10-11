@@ -1051,10 +1051,74 @@ def _streaming_job() -> tuple[str, list[str], list[str]]:
     return tag, run[2:run.index(tag)], run[run.index(tag) + 1:]
 
 
-def _needs_gstreamer(literals: tuple[list[tuple[int, str]], set[str]]) -> bool:
-    """Imports PyGObject (``gi``), the GStreamer bindings' package."""
-    _strings, imports = literals
-    return any(m == "gi" or m.startswith("gi.") for m in imports)
+#: The variable that turns a streaming module's skip into a failure.
+STREAMING_REQUIRE_ENV = "MADDENING_REQUIRE_STREAMING_TESTS"
+
+
+def _tests_imported(rel: str) -> set[str]:
+    """The files under tests/ that module *rel* imports, relative imports included."""
+    tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+    package = rel.rsplit("/", 1)[0].split("/")
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = package[:len(package) - node.level + 1] if node.level else []
+            module = base + (node.module.split(".") if node.module else [])
+            names.add(".".join(module))
+            names.update(".".join(module + [a.name]) for a in node.names)
+    found = set()
+    for name in names:
+        for candidate in (name.replace(".", "/") + ".py", name.replace(".", "/") + "/__init__.py"):
+            if candidate.startswith("tests/") and (REPO_ROOT / candidate).is_file():
+                found.add(candidate)
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def _gstreamer_modules() -> frozenset[str]:
+    """Every file under tests/ that needs GStreamer: imports ``gi``, or imports one that does.
+
+    A module that reaches PyGObject through another test module or a
+    helper (the entry point's test imports the loopback module's peer)
+    needs GStreamer as much as one that imports ``gi`` itself.
+    """
+    modules = _test_modules()
+    needing = {rel for rel, (_s, imports) in modules.items()
+               if any(m == "gi" or m.startswith("gi.") for m in imports)}
+    imported = {rel: _tests_imported(rel) for rel in modules}
+    while True:
+        more = {rel for rel, deps in imported.items() if rel not in needing and deps & needing}
+        if not more:
+            return frozenset(needing)
+        needing |= more
+
+
+def _is_test_module(rel: str) -> bool:
+    name = rel.rsplit("/", 1)[-1]
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def _unguarded_skips(rel: str) -> list[int]:
+    """Lines of *rel* that skip or xfail outside a function reading STREAMING_REQUIRE_ENV.
+
+    In the streaming job a skip would pass the job without running the
+    test; ``MADDENING_REQUIRE_STREAMING_TESTS`` turns the module's skip into
+    a failure only where the skip goes through a function that reads it.
+    """
+    tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+    guarded = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                (isinstance(n, ast.Constant) and n.value == STREAMING_REQUIRE_ENV)
+                or (isinstance(n, ast.Name) and n.id == "_REQUIRED_ENV")
+                for n in ast.walk(fn)):
+            guarded.update(id(n) for n in ast.walk(fn))
+    return sorted(n.lineno for n in ast.walk(tree)
+                  if isinstance(n, ast.Attribute)
+                  and n.attr in ("skip", "skipif", "importorskip", "xfail")
+                  and id(n) not in guarded)
 
 
 def test_the_streaming_job_runs_its_container_with_no_network_and_no_device():
@@ -1090,11 +1154,39 @@ def test_every_test_that_needs_gstreamer_runs_in_the_streaming_job():
     assert not any(a in ("-m", "-k") or a.startswith(("-m=", "-k=", "--deselect", "--ignore"))
                    for a in args), f"test-streaming narrows its selection: {args}"
     targets = [a for a in args if not a.startswith("-") and a != "no:cacheprovider"]
-    needing = [rel for rel, literals in _test_modules().items() if _needs_gstreamer(literals)]
+    needing = sorted(rel for rel in _gstreamer_modules() if _is_test_module(rel))
     assert needing, "no test module imports gi: the scan is broken, or the tests are gone"
+    assert "tests/cloud/test_entrypoint_streams.py" in needing, (
+        f"the scan misses a module that needs GStreamer through another one: {needing}")
     missing = [rel for rel in needing if not _selected(rel, targets)]
     assert not missing, f"these need GStreamer but test-streaming does not run them: {missing}"
     assert all((REPO_ROOT / t.split("::")[0]).exists() for t in targets), targets
+    skipping = {rel: lines for rel in needing if (lines := _unguarded_skips(rel))}
+    assert not skipping, (
+        f"these skip without reading {STREAMING_REQUIRE_ENV}, so the streaming job could pass "
+        f"without running them: {skipping}")
+
+
+def test_the_streaming_job_cannot_pass_without_running_its_tests():
+    """No ``if:`` on a step, and the run step is the ``docker run`` and nothing else.
+
+    A step skipped by ``if:`` reports success, so ``if: false`` on the run
+    step would leave the job green with no test run; a second command or
+    ``|| true`` after the run could hide its exit status.  pytest itself
+    exits 5 when the selection collects no test, and the require variable
+    (pinned above) turns a module's skip into a failure.
+    """
+    job = _workflow("ci.yml")["jobs"]["test-streaming"]
+    conditional = [s.get("name") for s in job["steps"] if "if" in s]
+    assert not conditional, f"test-streaming has steps that can be skipped: {conditional}"
+    assert job.get("if") == GATED_ON_CODE["test-streaming"][1], job.get("if")
+    runs = [s for s in job["steps"] if "docker run" in s.get("run", "")]
+    assert len(runs) == 1, runs
+    assert "shell" not in runs[0], f"the run step overrides its shell: {runs[0]['shell']!r}"
+    lines = _logical_lines(runs[0]["run"])
+    assert len(lines) == 1 and lines[0].startswith("docker run"), (
+        f"the run step must be one docker run command: {lines}")
+    assert not re.search(r"\|\||;|&&|\||\bset\s+\+e\b|\bexit\b", lines[0]), lines[0]
 
 
 

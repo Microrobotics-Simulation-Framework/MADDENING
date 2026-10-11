@@ -103,7 +103,7 @@ if _MISSING:
 import numpy as np  # noqa: E402
 
 from maddening.cloud._auth import generate_session_token  # noqa: E402
-from maddening.cloud.selkies_session import SelkiesSession  # noqa: E402
+from maddening.cloud.selkies_session import SelkiesSession, _disable_upnp  # noqa: E402
 from maddening.cloud.streaming import StreamConfig  # noqa: E402
 from maddening.viz.backends.selkies_renderer import SelkiesRenderer  # noqa: E402
 from maddening.viz.renderer import GraphInfo, Renderer  # noqa: E402
@@ -193,6 +193,7 @@ class Peer:
     """
 
     def __init__(self, url: str, *, payload_type: int = 102,
+                 extra_payload_types: tuple[int, ...] = (),
                  keep_pixels: bool = False) -> None:
         self.url = url
         self.frames: list[tuple[int, int, np.ndarray, float]] = []
@@ -216,12 +217,17 @@ class Peer:
         self.webrtc = Gst.ElementFactory.make("webrtcbin", "peer-webrtc")
         self.webrtc.set_property("bundle-policy", GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
         self.pipe.add(self.webrtc)
-        caps = Gst.Caps.from_string(
+        # One H.264 format per payload type, in this order, in one m-line.
+        caps = Gst.Caps.from_string("; ".join(
             "application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,"
-            f"payload={payload_type},packetization-mode=(string)1,"
-            "profile-level-id=(string)42e01f")
+            f"payload={pt},packetization-mode=(string)1,"
+            "profile-level-id=(string)42e01f"
+            for pt in (payload_type, *extra_payload_types)))
         self.webrtc.emit("add-transceiver",
                          GstWebRTC.WebRTCRTPTransceiverDirection.RECVONLY, caps)
+        # A browser maps no router port; nor does this peer, so an SSDP
+        # search seen in the container can only be the session's.
+        _disable_upnp(self.webrtc)
         self.webrtc.connect("on-ice-candidate", self._on_ice_candidate)
         self.webrtc.connect("pad-added", self._on_pad_added)
         self.webrtc.connect("notify::ice-connection-state", self._on_ice_state)
@@ -405,10 +411,13 @@ def _push_until(push, done, timeout: float) -> int:
     return pushed
 
 
-def _push_palette(session: SelkiesSession):
+def _push_palette(session: SelkiesSession, *, as_array: bool = False):
+    """Push palette frames as bytes, or as ``(HEIGHT, WIDTH, 4)`` uint8 arrays."""
     def push(index: int) -> None:
-        session.update_framebuffer_cpu(_solid_rgba(_palette_colour(index)),
-                                       WIDTH, HEIGHT, "RGBA")
+        frame = _solid_rgba(_palette_colour(index))
+        if as_array:
+            frame = np.frombuffer(frame, dtype=np.uint8).reshape(HEIGHT, WIDTH, 4)
+        session.update_framebuffer_cpu(frame, WIDTH, HEIGHT, "RGBA")
     return push
 
 
@@ -488,9 +497,12 @@ def test_ice_candidates_go_both_ways_and_ice_connects(started, peers):
     # Server -> viewer: trickled after the answer, in the browser's shape.
     kinds = [m.get("type") for m in peer.received]
     assert kinds[0] == "sdp" and "ice" in kinds, kinds
-    for message in (m for m in peer.received if m.get("type") == "ice"):
-        candidate = message["candidate"]
-        assert candidate["candidate"].startswith("candidate:"), candidate
+    ice = [m["candidate"] for m in peer.received if m.get("type") == "ice"]
+    for i, candidate in enumerate(ice):
+        # An empty candidate is the end-of-candidates marker (the browser's
+        # shape for it too); it can only come last.
+        assert candidate["candidate"].startswith("candidate:") or (
+            candidate["candidate"] == "" and i == len(ice) - 1), candidate
         assert candidate["sdpMLineIndex"] == 0
         assert candidate["sdpMid"] == _mid_of(peer._offer_text, 0)
 
@@ -499,7 +511,8 @@ def test_ice_candidates_go_both_ways_and_ice_connects(started, peers):
     # it the viewer's address as a peer-reflexive candidate), so this reads
     # the server's own record: a host candidate at the address and port
     # the viewer sent.
-    sent = {_candidate_address(c["candidate"]) for c in peer.sent_candidates}
+    sent = {_candidate_address(c["candidate"]) for c in peer.sent_candidates
+            if c["candidate"]}  # not the end-of-candidates marker
     assert sent, "the peer gathered no candidates"
     held = _server_remote_candidates(session)
     assert {c for c in sent if c[2] == "host"} & {c for c in held if c[2] == "host"}, (
@@ -510,7 +523,7 @@ def test_the_peer_decodes_the_frames_that_were_pushed(started, peers):
     session, url = started
     peer = _peer(peers, url, session.session_token)
     peer.connect()
-    _push_until(_push_palette(session), lambda: len(peer.frames) >= FRAMES_WANTED,
+    _push_until(_push_palette(session, as_array=True), lambda: len(peer.frames) >= FRAMES_WANTED,
                 FRAMES_TIMEOUT_S)
     _assert_decoded_the_palette(peer)
 
@@ -706,6 +719,209 @@ def test_a_frame_of_the_wrong_size_is_refused(started):
         session.update_framebuffer_cpu(b"\x00" * (160 * 120 * 4), 160, 120, "RGBA")
     with pytest.raises(ValueError, match="bytes"):
         session.update_framebuffer_cpu(b"\x00" * 10, WIDTH, HEIGHT, "RGBA")
+
+
+def test_a_frame_is_measured_in_bytes_and_must_hold_unsigned_bytes(started):
+    """``memoryview(pixels).nbytes`` against ``W*H*4``, and format ``B`` only.
+
+    Before: ``len(pixels)`` was compared, so a ``float32`` array of
+    ``W*H*4`` elements (four times the bytes) streamed garbage, and a
+    correct ``(H, W, 4)`` ``uint8`` frame (``len`` = ``H``) was refused.
+    """
+    session, _url = started
+    n = WIDTH * HEIGHT * 4
+    # Accepted: every C-contiguous unsigned-byte buffer of exactly n bytes.
+    for good in (bytes(n), bytearray(n), memoryview(bytes(n)),
+                 np.zeros((HEIGHT, WIDTH, 4), dtype=np.uint8),
+                 np.zeros(n, dtype=np.uint8)):
+        session.update_framebuffer_cpu(good, WIDTH, HEIGHT, "RGBA")
+    # Refused, naming what was given: wider items with the element count of a frame.
+    with pytest.raises(ValueError, match=r"format 'f' with 4-byte items"):
+        session.update_framebuffer_cpu(np.zeros(n, dtype=np.float32), WIDTH, HEIGHT, "RGBA")
+    with pytest.raises(ValueError, match=r"format 'I' with 4-byte items"):
+        session.update_framebuffer_cpu(memoryview(np.zeros(n, dtype=np.uint32)),
+                                       WIDTH, HEIGHT, "RGBA")
+    with pytest.raises(ValueError, match="holds 4 bytes"):
+        session.update_framebuffer_cpu(np.zeros(1, dtype=np.uint32).view(np.uint8),
+                                       WIDTH, HEIGHT, "RGBA")
+    with pytest.raises(ValueError, match="C-contiguous"):
+        session.update_framebuffer_cpu(np.zeros((HEIGHT, 2 * WIDTH, 4), dtype=np.uint8)[:, ::2],
+                                       WIDTH, HEIGHT, "RGBA")
+    with pytest.raises(ValueError, match="bytes-like"):
+        session.update_framebuffer_cpu([0] * n, WIDTH, HEIGHT, "RGBA")
+
+
+def test_start_on_a_started_session_raises_and_leaves_it_running(started, peers):
+    session, url = started
+    with pytest.raises(RuntimeError, match="already started"):
+        session.start(StreamConfig(width=WIDTH, height=HEIGHT, fps=FPS,
+                                   bitrate_kbps=BITRATE_KBPS, ice_servers=[]))
+    assert session.is_alive()
+    peer = _peer(peers, url, session.session_token)
+    peer.connect()
+    _wait(peer.answer, ANSWER_TIMEOUT_S, "the answer after a refused second start", peer)
+
+
+def test_the_pipeline_caps_carry_the_configured_frame_rate():
+    session = SelkiesSession(secret=SECRET, signaling_port=0, bind_host="127.0.0.1")
+    session._config = StreamConfig(width=WIDTH, height=HEIGHT, fps=12,  # noqa: SLF001
+                                   bitrate_kbps=BITRATE_KBPS, ice_servers=[])
+    description = session._pipeline_description(102)  # noqa: SLF001
+    assert "framerate=12/1" in description and "key-int-max=12 " in description, description
+
+
+# ---------------------------------------------------------------------------
+# Offers the server cannot answer, and messages it cannot read
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("payload_type", [35, 63, 95])
+def test_an_offer_with_h264_only_below_96_is_refused_with_a_message(started, peers, caplog,
+                                                                     payload_type):
+    """The payloader sends only 96-127; the viewer is told why and closed, never left waiting."""
+    session, url = started
+    peer = Peer(f"{url}?token={session.session_token}", payload_type=payload_type)
+    peers.append(peer)
+    with caplog.at_level("WARNING", logger="maddening.cloud.selkies_session"):
+        peer.connect()
+        _wait(peer.closed, CLOSE_TIMEOUT_S, "the close after a refusal", peer)
+    assert f"a=rtpmap:{payload_type} H264" in peer._offer_text  # noqa: SLF001
+    assert [m["type"] for m in peer.received] == ["error"], peer.received
+    assert "96-127" in peer.received[0]["message"], peer.received
+    assert peer.close_code == 4001, peer.close_code
+    refusals = [r for r in caplog.records if "Refusing the viewer's offer" in r.getMessage()]
+    assert len(refusals) == 1 and refusals[0].levelname == "WARNING", caplog.text
+    assert not any(r.exc_info for r in caplog.records), "a refusal must not log a traceback"
+
+
+@pytest.mark.parametrize("low", [35, 63, 95])
+def test_an_offer_with_h264_below_96_beside_a_usable_one_is_answered_with_the_usable_one(
+        started, peers, low):
+    session, url = started
+    peer = Peer(f"{url}?token={session.session_token}", payload_type=low,
+                extra_payload_types=(102,))
+    peers.append(peer)
+    peer.connect()
+    _wait(peer.answer, ANSWER_TIMEOUT_S, "the answer", peer)
+    answer = next(m["sdp"]["sdp"] for m in peer.received if m["type"] == "sdp")
+    video = next(line for line in answer.splitlines() if line.startswith("m=video"))
+    assert video.split()[3:] == ["102"], video
+    _push_until(_push_palette(session), lambda: len(peer.frames) >= FRAMES_WANTED,
+                FRAMES_TIMEOUT_S)
+    _assert_decoded_the_palette(peer)
+
+
+def test_malformed_messages_and_a_raising_input_handler_do_not_end_the_stream(started, peers,
+                                                                              caplog):
+    session, url = started
+
+    def handler(_message: dict) -> None:
+        raise KeyError("the handler's own fault")
+
+    session.set_input_handler(handler)
+    peer = _peer(peers, url, session.session_token)
+    peer.connect()
+    push = _push_palette(session)
+    _push_until(push, lambda: len(peer.frames) >= 5, FRAMES_TIMEOUT_S)
+    with caplog.at_level("WARNING", logger="maddening.cloud.selkies_session"):
+        peer.send({"type": ["sdp"]})
+        peer._ws.send("[" * 200_000)  # noqa: SLF001 - deeper than json.loads goes
+        peer.send({"type": "mouse", "x": 1})
+        seen = len(peer.frames)
+        _push_until(push, lambda: len(peer.frames) >= seen + FRAMES_WANTED, FRAMES_TIMEOUT_S)
+    assert not peer.closed.is_set(), (peer.close_code, peer.errors)
+    assert len(peer.frames) >= seen + FRAMES_WANTED, len(peer.frames)
+    errors = [m for m in peer.received if m.get("type") == "error"]
+    assert len(errors) == 2, peer.received
+    assert "malformed signaling message" in caplog.text
+    raised = [r for r in caplog.records if "input handler raised" in r.getMessage()]
+    assert raised and raised[0].exc_info and raised[0].exc_info[0] is KeyError, caplog.text
+
+
+# ---------------------------------------------------------------------------
+# What the session sends on the network: no UPnP
+# ---------------------------------------------------------------------------
+
+_SSDP_GROUP, _SSDP_PORT = "239.255.255.250", 1900
+
+
+def test_with_no_ice_servers_the_session_sends_no_ssdp_search(peers):
+    """libnice's UPnP (on by default) multicasts SSDP M-SEARCH for a router; it is off.
+
+    A listener joined to the SSDP group on both interfaces records every
+    M-SEARCH while a viewer (its UPnP off, as every ``Peer``'s is)
+    negotiates and watches.  The listener is shown to work by one M-SEARCH
+    the test sends itself; only searches after the session starts count.
+    Before the fix the session sent 12 within 4 s (WANIPConnection,
+    WANPPPConnection).
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((_SSDP_GROUP, _SSDP_PORT))
+    for interface in ("192.0.2.1", "127.0.0.1"):
+        listener.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                            socket.inet_aton(_SSDP_GROUP) + socket.inet_aton(interface))
+    listener.settimeout(0.2)
+    got: list[tuple[float, tuple[str, int], bytes]] = []
+    stop = threading.Event()
+
+    def listen() -> None:
+        while not stop.is_set():
+            with contextlib.suppress(socket.timeout):
+                data, address = listener.recvfrom(4096)
+                got.append((time.monotonic(), address, data.split(b"\r\n")[0]))
+
+    thread = threading.Thread(target=listen, daemon=True)
+    thread.start()
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    session = None
+    try:
+        probe.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("192.0.2.1"))
+        probe.sendto(b"M-SEARCH * HTTP/1.1\r\nST: test-probe\r\n\r\n", (_SSDP_GROUP, _SSDP_PORT))
+        probe_port = probe.getsockname()[1]
+        deadline = time.monotonic() + 5.0
+        while probe_port not in [a[1] for _t, a, _l in got] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert probe_port in [a[1] for _t, a, _l in got], f"the listener does not work: {got}"
+        started_at = time.monotonic()
+        session, url = _start()
+        peer = _peer(peers, url, session.session_token)
+        _disable_upnp(peer.webrtc)
+        peer.connect()
+        _wait(peer.ice_connected, ICE_TIMEOUT_S, "ICE connected", peer)
+        _push_until(_push_palette(session), lambda: len(peer.frames) >= FRAMES_WANTED,
+                    FRAMES_TIMEOUT_S)
+        time.sleep(2.0)  # libnice searched at once, then every few hundred ms
+    finally:
+        stop.set()
+        thread.join(5)
+        listener.close()
+        probe.close()
+        if session is not None:
+            session.stop()
+    searches = [(a, line) for t, a, line in got
+                if t >= started_at and a[1] != probe_port and b"M-SEARCH" in line]
+    assert searches == [], f"SSDP searches sent with ice_servers=[]: {searches}"
+
+
+def test_viewer_candidates_sent_before_the_offer_survive_the_offers_teardown(started):
+    """``_offer`` tears down the previous pipeline; the viewer's early candidates are kept."""
+    from maddening.cloud.selkies_session import _WebRTCNegotiator
+
+    session, _url = started
+    negotiator = _WebRTCNegotiator(session._pipeline_description,  # noqa: SLF001
+                                   lambda appsrc, encoder: None)
+    client = _RecordingClient()
+    negotiator._connect(client)  # noqa: SLF001
+    early = {"type": "ice", "candidate": {"candidate": "candidate:1 1 UDP 1 192.0.2.1 5000 typ host",
+                                          "sdpMid": "video0"}}
+    negotiator._remote_ice(client, early)  # noqa: SLF001
+    try:
+        negotiator._offer(client, {"type": "offer", "sdp": _OFFER})  # noqa: SLF001
+        assert negotiator._webrtc is not None, client.closed  # noqa: SLF001
+        assert negotiator._pending_remote == [early]  # noqa: SLF001
+    finally:
+        negotiator._teardown()  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

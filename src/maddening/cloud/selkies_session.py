@@ -90,6 +90,17 @@ _CLOSE_INTERNAL_ERROR = 1011
 #: Close code sent to a viewer when a newer authenticated viewer takes
 #: its place (4000-4999 are left to applications by RFC 6455 §7.4.2).
 _CLOSE_REPLACED = 4000
+#: Close code sent, after an ``error`` message, to a viewer whose offer has
+#: no video format this server can send (see :func:`_h264_payload_type`).
+_CLOSE_UNSUPPORTED_OFFER = 4001
+
+#: The payload types ``rtph264pay`` can send.  Its ``pt`` property takes
+#: 0-127, but its source pad's template caps hold ``payload=[96, 127]``:
+#: given ``pt=35`` it still writes 96 into every RTP header (measured,
+#: GStreamer 1.24.2), and a ``capssetter`` that relabels the caps leaves
+#: the headers at 96.  A browser offers H.264 below 96 (Chrome uses 35-63
+#: once the dynamic range runs out); such a format is not chosen.
+_PAYLOADER_PAYLOAD_TYPES = range(96, 128)
 
 #: Message types the negotiation consumes.  These never reach the input
 #: handler, whether or not a negotiator is attached.
@@ -185,9 +196,10 @@ def _h264_payload_type(sdp_text: str) -> Optional[tuple[int, int]]:
 
     The session sends constrained-baseline H.264 packetised by
     ``rtph264pay``, which fragments large NAL units (FU-A) and therefore
-    needs ``packetization-mode=1``.  A browser offers several H.264
-    formats under dynamic payload types; the answer must use one of the
-    offer's payload types, and the RTP packets must carry it.
+    needs ``packetization-mode=1``, and which can send only the payload
+    types 96-127 (``_PAYLOADER_PAYLOAD_TYPES``).  A browser offers several
+    H.264 formats under dynamic payload types; the answer must use one of
+    the offer's payload types, and the RTP packets must carry it.
 
     Parameters
     ----------
@@ -198,10 +210,11 @@ def _h264_payload_type(sdp_text: str) -> Optional[tuple[int, int]]:
     -------
     tuple or None
         ``(m-line index, payload type)``: the first video m-line that
-        offers H.264 with ``packetization-mode=1``, and in it a
-        constrained-baseline ``profile-level-id`` before any other
-        baseline one before any other profile, ties going to the
-        offer's own order.  ``None`` when the offer has no such format.
+        offers H.264 with ``packetization-mode=1`` at a payload type of
+        96-127, and in it a constrained-baseline ``profile-level-id``
+        before any other baseline one before any other profile, ties
+        going to the offer's own order.  ``None`` when the offer has no
+        such format (H.264 offered only below 96 included).
     """
     sections: list[dict[str, Any]] = []
     for raw in sdp_text.splitlines():
@@ -228,7 +241,7 @@ def _h264_payload_type(sdp_text: str) -> Optional[tuple[int, int]]:
             if str(pt) not in section["formats"]:
                 continue
             params = section["fmtp"].get(pt, {})
-            if params.get("packetization-mode") != "1":
+            if params.get("packetization-mode") != "1" or pt not in _PAYLOADER_PAYLOAD_TYPES:
                 continue
             ranked.append((_h264_profile_rank(params.get("profile-level-id", "")),
                            section["formats"].index(str(pt)), pt))
@@ -330,6 +343,61 @@ def _ice_server_settings(
     return stun, turn
 
 
+def _disable_upnp(webrtc: Any) -> None:
+    """Turn off UPnP in ``webrtcbin``'s ICE agent, so it maps no router port.
+
+    libnice's ``NiceAgent`` (the agent inside ``webrtcbin``'s
+    ``GstWebRTCNice``) has a ``upnp`` property that is on by default when
+    libnice is built with UPnP-IGD, as Ubuntu's is: gathering candidates
+    then multicasts SSDP ``M-SEARCH`` requests for a router and asks any
+    that answers to map a port.  This sets it off before the pipeline
+    gathers.
+
+    The two objects are reached with ``g_object_get`` through ``ctypes``
+    rather than PyGObject: ``webrtcbin`` hands out its ICE object with a
+    floating reference, which PyGObject sinks as its own, so a Python read
+    of ``ice-agent`` drops ``webrtcbin``'s reference and the object is freed
+    under it (seen as GObject criticals and a crash, GStreamer 1.24.2).
+    ``g_object_get`` returns an ordinary reference, released here.
+
+    Raises
+    ------
+    RuntimeError
+        When the agent cannot be reached or ``upnp`` does not read back
+        off: the caller then refuses to stream rather than contact a
+        router it promised not to.
+    """
+    import ctypes
+    import ctypes.util
+
+    name = ctypes.util.find_library("gobject-2.0") or "libgobject-2.0.so.0"
+    gobject = ctypes.CDLL(name)
+    gobject.g_object_get.restype = None
+    gobject.g_object_set.restype = None
+    gobject.g_object_unref.argtypes = [ctypes.c_void_p]
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.restype = ctypes.c_void_p
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    element = ctypes.c_void_p(get_pointer(webrtc.__gpointer__, None))
+    ice, agent = ctypes.c_void_p(), ctypes.c_void_p()
+    upnp = ctypes.c_int(1)
+    try:
+        gobject.g_object_get(element, b"ice-agent", ctypes.byref(ice), None)
+        if not ice.value:
+            raise RuntimeError("webrtcbin has no ICE agent")
+        gobject.g_object_get(ice, b"agent", ctypes.byref(agent), None)
+        if not agent.value:
+            raise RuntimeError("webrtcbin's ICE object has no NiceAgent")
+        gobject.g_object_set(agent, b"upnp", ctypes.c_int(0), None)
+        gobject.g_object_get(agent, b"upnp", ctypes.byref(upnp), None)
+    finally:
+        for obj in (agent, ice):
+            if obj.value:
+                gobject.g_object_unref(obj)
+    if upnp.value:
+        raise RuntimeError("the ICE agent's upnp property did not turn off")
+
+
 # ---------------------------------------------------------------------------
 # Signaling
 # ---------------------------------------------------------------------------
@@ -354,19 +422,31 @@ class _SignalingClient:
             self.loop.call_soon_threadsafe(self.outbox.put_nowait, text)
 
     def close(self, code: int, reason: str) -> None:
-        def _close() -> None:
-            asyncio.ensure_future(self.ws.close(code, reason))
+        """Close the socket once every message sent before this has gone out.
+
+        The close goes through the same queue as the messages, so an
+        ``error`` message sent just before it reaches the viewer first.
+        """
         with contextlib.suppress(RuntimeError):
-            self.loop.call_soon_threadsafe(_close)
+            self.loop.call_soon_threadsafe(self.outbox.put_nowait, (code, reason))
 
     async def pump(self) -> None:
         try:
             while True:
-                await self.ws.send(await self.outbox.get())
+                item = await self.outbox.get()
+                if isinstance(item, tuple):
+                    await self.ws.close(*item)
+                    return
+                await self.ws.send(item)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the viewer went away
             logger.debug("Signaling send failed; the viewer disconnected", exc_info=True)
+
+
+def _malformed(why: str) -> None:
+    """Log a viewer's message the session cannot use (it is dropped)."""
+    logger.warning("Ignoring a malformed signaling message: %s", why)
 
 
 def _make_signaling_handler(
@@ -389,7 +469,11 @@ def _make_signaling_handler(
 
     An authenticated client's ``sdp`` and ``ice`` messages go to the
     *negotiator* (and are dropped without one); every other JSON message
-    goes to the input handler.
+    goes to the input handler.  A message that is not JSON, is nested
+    deeper than the parser goes, or has a ``type`` that is not a string is
+    logged and answered with ``{"type": "error", ...}``; an input handler
+    that raises is logged with its exception.  Neither ends the viewer's
+    stream.
 
     Parameters
     ----------
@@ -433,9 +517,23 @@ def _make_signaling_handler(
                     continue
                 try:
                     message = json.loads(msg)
-                except ValueError:
+                except (ValueError, RecursionError) as exc:
+                    # Not JSON, or nested deeper than the parser goes: the
+                    # viewer is told and its stream carries on.
+                    _malformed(f"the message is not JSON the server can read "
+                               f"({type(exc).__name__})")
+                    if client is not None:
+                        client.send({"type": "error", "message": "unreadable message "
+                                     f"ignored: {type(exc).__name__}"})
                     continue
-                if isinstance(message, dict) and message.get("type") in _NEGOTIATION_TYPES:
+                kind = message.get("type") if isinstance(message, dict) else None
+                if kind is not None and not isinstance(kind, str):
+                    _malformed(f"its type is a {type(kind).__name__}, not a string")
+                    if client is not None:
+                        client.send({"type": "error", "message": "message ignored: "
+                                     "its 'type' must be a string"})
+                    continue
+                if kind in _NEGOTIATION_TYPES:
                     if negotiator is not None and client is not None:
                         negotiator.client_message(client, message)
                     continue
@@ -443,8 +541,9 @@ def _make_signaling_handler(
                 if input_handler:
                     try:
                         input_handler(message)
-                    except (ValueError, TypeError):
-                        pass
+                    except Exception:  # noqa: BLE001 - the handler's fault, not the viewer's
+                        logger.exception("The input handler raised on a viewer's "
+                                         "message; the stream carries on")
         except Exception:  # noqa: BLE001 - a dropped client is not an error
             logger.debug("Signaling connection closed", exc_info=True)
         finally:
@@ -610,25 +709,37 @@ class _WebRTCNegotiator:
         text = description["sdp"]
         chosen = _h264_payload_type(text)
         if chosen is None:
-            logger.warning("The viewer's offer has no H.264 video format with "
-                           "packetization-mode=1; no answer is sent")
+            self._refuse(client, "the offer has no H.264 video format with "
+                         "packetization-mode=1 at a payload type of 96-127, "
+                         "which is all this server can send")
             return
         ok, sdp = GstSdp.SDPMessage.new_from_text(text)
         if ok != GstSdp.SDPResult.OK:
-            logger.warning("Ignoring an offer that does not parse as SDP")
+            self._refuse(client, "the offer does not parse as SDP")
             return
         mline, payload_type = chosen
 
-        # A second offer on one connection starts over with a fresh pipeline.
+        # A second offer on one connection starts over with a fresh
+        # pipeline; candidates the viewer sent before this offer are kept
+        # and applied once it is.
+        pending = self._pending_remote
         self._teardown()
+        self._pending_remote = pending
         self._mids = {}
         for index in range(sdp.medias_len()):
             mid = sdp.get_media(index).get_attribute_val("mid")
             if mid is not None:
                 self._mids[mid] = index
 
-        pipeline = Gst.parse_launch(self._describe_pipeline(payload_type))
-        webrtc = pipeline.get_by_name("webrtc")
+        try:
+            pipeline = Gst.parse_launch(self._describe_pipeline(payload_type))
+            webrtc = pipeline.get_by_name("webrtc")
+            _disable_upnp(webrtc)
+        except Exception as exc:  # noqa: BLE001 - the viewer is told, not left waiting
+            logger.error("The streaming pipeline for the viewer's offer could not be "
+                         "built: %s", exc)
+            self._fail(client)
+            return
         if self._stun_server:
             webrtc.set_property("stun-server", self._stun_server)
         if self._turn_servers:
@@ -762,6 +873,20 @@ class _WebRTCNegotiator:
             self._fail(self._client)
         return True
 
+    def _refuse(self, client: _SignalingClient, reason: str) -> None:
+        """Tell the viewer why its offer gets no answer, then close (4001).
+
+        The viewer is sent ``{"type": "error", "message": ...}`` (the
+        client page shows it) and its socket is closed with
+        ``_CLOSE_UNSUPPORTED_OFFER`` after that message has gone out, so it
+        is never left waiting for an answer that will not come.
+        """
+        logger.warning("Refusing the viewer's offer: %s", reason)
+        self._teardown()
+        client.send({"type": "error", "message": f"The server cannot stream to this "
+                     f"viewer: {reason}."})
+        client.close(_CLOSE_UNSUPPORTED_OFFER, "no usable video format in the offer")
+
     def _fail(self, client: Optional[_SignalingClient]) -> None:
         """End this viewer's stream and tell the viewer (1011)."""
         self._teardown()
@@ -789,6 +914,32 @@ class _WebRTCNegotiator:
 #: Bytes per pixel of the raw formats a frame may be pushed in.
 _BYTES_PER_PIXEL = {"RGBA": 4, "BGRA": 4, "RGBx": 4, "BGRx": 4, "ARGB": 4,
                     "ABGR": 4, "xRGB": 4, "xBGR": 4, "RGB": 3, "BGR": 3}
+
+
+def _frame_bytes(pixels: Any) -> memoryview:
+    """*pixels* as a C-contiguous memoryview of unsigned bytes, or ``ValueError``.
+
+    The byte count of a frame is ``memoryview(pixels).nbytes``, not
+    ``len(pixels)``: a ``uint8`` array of shape ``(H, W, 4)`` has ``len``
+    ``H``, and a ``float32`` array of ``W*H*4`` elements has four times the
+    bytes.  Only format ``B`` (unsigned bytes) is a frame.
+    """
+    try:
+        view = memoryview(pixels)
+    except TypeError:
+        raise ValueError(
+            f"a frame must be a bytes-like buffer of unsigned bytes; got "
+            f"{type(pixels).__name__}") from None
+    if view.format.lstrip("@=<>!") != "B" or view.itemsize != 1:
+        raise ValueError(
+            f"a frame must hold unsigned bytes (buffer format 'B'); got a "
+            f"{type(pixels).__name__} of format {view.format!r} with "
+            f"{view.itemsize}-byte items ({view.nbytes} bytes in all)")
+    if not view.c_contiguous:
+        raise ValueError(
+            f"a frame must be one C-contiguous buffer; got a non-contiguous "
+            f"{type(pixels).__name__} (copy it first, e.g. numpy.ascontiguousarray)")
+    return view
 
 
 class SelkiesSession(StreamingSession):
@@ -845,7 +996,11 @@ class SelkiesSession(StreamingSession):
     ``turns:`` URL with a ``username`` and ``credential`` is added as a
     TURN server.  The default lists a public STUN server, which the
     session then contacts when a viewer connects; pass
-    ``ice_servers=[]`` to contact none.  The media travels over UDP
+    ``ice_servers=[]`` to contact none.  UPnP is off in the ICE agent
+    (see :func:`_disable_upnp`), so no router is searched for or asked to
+    map a port either: with ``ice_servers=[]`` the session sends nothing
+    but its ICE connectivity checks, from its host candidates to the
+    candidates the viewer sent.  The media travels over UDP
     (or TURN), which a cloud provider may not expose: a viewer outside
     the provider's network needs a reachable TURN server, or a provider
     that forwards UDP.  None of this is covered by the loopback test.
@@ -891,11 +1046,41 @@ class SelkiesSession(StreamingSession):
         self._session_id = ""
 
     def start(self, config: StreamConfig) -> StreamInfo:
+        """Start the GLib loop and the signaling server; return where to connect.
+
+        Raises
+        ------
+        RuntimeError
+            When the session is already started: :meth:`stop` it first.
+            The running session is left untouched.
+        StreamStartError
+            When the pipeline cannot be built or the signaling socket
+            cannot listen (everything started is stopped again).
+
+        Notes
+        -----
+        **Import order.**  When GStreamer is not initialised yet and jax is
+        installed, jax is imported before ``Gst.init``.  In the streaming
+        test image (Ubuntu 24.04, its Mesa/LLVM, pip numpy and jaxlib), a
+        process that imported numpy, then initialised GStreamer, then
+        imported jax aborted (SIGSEGV or SIGABRT, three tries of three);
+        jax first, then GStreamer, runs.  A program that calls ``Gst.init``
+        itself before importing jax is outside this guard: import jax (or
+        :mod:`maddening.core`) first.
+        """
+        if self._negotiator is not None or self._signaling_thread is not None:
+            raise RuntimeError(
+                "this SelkiesSession is already started; stop() it before "
+                "starting it again")
+        import importlib.util
+
         import gi
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
 
         if not Gst.is_initialized():
+            if importlib.util.find_spec("jax") is not None:
+                import jax  # noqa: F401 - before Gst.init: see the Notes
             Gst.init(None)
 
         self._config = config
@@ -963,15 +1148,31 @@ class SelkiesSession(StreamingSession):
     ) -> None:
         """Push one raw frame; dropped while no viewer is connected.
 
+        Parameters
+        ----------
+        pixels : bytes-like
+            The frame's bytes, row after row: any C-contiguous buffer of
+            unsigned bytes (``bytes``, ``bytearray``, a ``uint8`` numpy
+            array such as an ``(height, width, 4)`` RGBA frame, a
+            ``memoryview`` of format ``B``) holding exactly
+            ``width * height * bytes-per-pixel`` bytes (4 for RGBA).  A
+            buffer of wider items (``float32``, ``uint32``) is refused even
+            when its element count matches: its bytes are not pixels.
+        width, height : int
+            Must be the stream's :class:`StreamConfig` size.
+        pixel_format : str
+            Must be the stream's ``pixel_format``.
+
         Raises
         ------
         ValueError
-            When the frame's size, format or byte count does not match
-            the stream's :class:`StreamConfig`: the encoder was set up for
-            that geometry, and a frame of another one would stop the
-            stream with an error nobody sees.
+            When the frame's size, format, buffer type or byte count does
+            not match the stream's :class:`StreamConfig`: the encoder was
+            set up for that geometry, and a frame of another one would stop
+            the stream, or show garbage, with no error anybody sees.
         """
         config = self._config
+        view = None
         if config is not None:
             expected = (config.width, config.height, config.pixel_format)
             if (width, height, pixel_format) != expected:
@@ -980,10 +1181,11 @@ class SelkiesSession(StreamingSession):
                     f"started for {config.width}x{config.height} {config.pixel_format}; "
                     "push frames of the configured size (a resolution change "
                     "needs a new session)")
+            view = _frame_bytes(pixels)
             bpp = _BYTES_PER_PIXEL.get(pixel_format)
-            if bpp is not None and len(pixels) != width * height * bpp:
+            if bpp is not None and view.nbytes != width * height * bpp:
                 raise ValueError(
-                    f"frame holds {len(pixels)} bytes; {width}x{height} "
+                    f"frame holds {view.nbytes} bytes; {width}x{height} "
                     f"{pixel_format} needs {width * height * bpp}")
         with self._media_lock:
             appsrc = self._appsrc
@@ -992,7 +1194,8 @@ class SelkiesSession(StreamingSession):
 
         from gi.repository import Gst
 
-        buf = Gst.Buffer.new_wrapped(bytes(pixels))
+        data = view.tobytes() if view is not None else bytes(pixels)
+        buf = Gst.Buffer.new_wrapped(data)
         appsrc.emit("push-buffer", buf)
 
     def update_framebuffer_gpu(self, buffer: GPUFramebuffer) -> None:

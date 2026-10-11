@@ -39,6 +39,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import sys
 import threading
@@ -88,7 +89,7 @@ def main() -> None:
     else:
         config = _build_config_from_env()
 
-    logger.info("Cloud entrypoint starting with config: %s", config)
+    logger.info("Cloud entrypoint starting with config: %s", _redacted(config))
 
     # Import simulation components
     from maddening.cloud.session import CloudConfig
@@ -180,6 +181,30 @@ def main() -> None:
         # shutdown, inside uvicorn.run(); the stream's here.
         if stream is not None:
             stream.stop()
+
+
+#: Keys whose values are credentials, never logged (``RTCIceServer``'s
+#: TURN ``username`` and ``credential``, and the like), compared lower-case.
+_SECRET_KEYS = frozenset({"credential", "username", "password", "passwd", "secret",
+                          "token", "api_key", "apikey"})
+
+
+def _redacted(value: Any) -> Any:
+    """*value* with every credential replaced by ``"<redacted>"``, for the log.
+
+    Walks dicts and lists: a dict key in ``_SECRET_KEYS`` (any case) has
+    its value replaced, and a ``scheme://user:password@host`` URL string has
+    its user and password replaced, so a TURN server in
+    ``stream_config.ice_servers`` is logged without its credentials.
+    """
+    if isinstance(value, dict):
+        return {key: "<redacted>" if str(key).lower() in _SECRET_KEYS else _redacted(item)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redacted(item) for item in value]
+    if isinstance(value, str) and "@" in value:
+        return re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*:(?://)?)[^@/]*@", r"\1<redacted>@", value)
+    return value
 
 
 def _builtin_node_registry() -> dict[str, type]:
@@ -313,12 +338,12 @@ class _Stream:
                 due, delay = time.monotonic(), 0.0
             if self._stopping.wait(delay):
                 return
-            _seq, sim_time, snapshot = self._server.relay.latest_frame()
             try:
+                _seq, sim_time, snapshot = self._server.relay.latest_frame()
                 self._renderer.update(sim_time, _NO_STATE if snapshot is None else snapshot)
             except Exception:  # noqa: BLE001 - reported once; the stream carries on
                 if not reported:
-                    logger.exception("A streamed frame could not be drawn or pushed")
+                    logger.exception("A streamed frame could not be read, drawn or pushed")
                     reported = True
 
     def stop(self) -> None:

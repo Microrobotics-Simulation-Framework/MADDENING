@@ -292,3 +292,71 @@ def test_main_serves_the_built_in_node_types(monkeypatch):
     entrypoint.main()
     assert built and set(built[0]) == set(nodes.__all__)
     assert all(built[0][name] is getattr(nodes, name) for name in nodes.__all__)
+
+
+# ---------------------------------------------------------------------------
+# Faults the feed survives, and what the log never holds
+# ---------------------------------------------------------------------------
+
+
+class _FlakyRelay:
+    """A relay whose first two reads raise, then return a snapshot."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def latest_frame(self):
+        self.reads += 1
+        if self.reads <= 2:
+            raise RuntimeError("relay read failed")
+        return self.reads, 0.5, {"spring": {"x": 1.0}}
+
+
+class _CountingRenderer:
+    def __init__(self) -> None:
+        self.updates = 0
+
+    def setup(self, graph_info) -> None:
+        pass
+
+    def update(self, sim_time, state) -> None:
+        self.updates += 1
+
+    def teardown(self) -> None:
+        pass
+
+
+def test_a_relay_read_that_raises_is_logged_once_and_the_feed_carries_on(caplog):
+    server = type("Server", (), {})()
+    server.relay = _FlakyRelay()
+    renderer = _CountingRenderer()
+    stream = entrypoint._Stream(server, renderer, fps=50)
+    with caplog.at_level(logging.ERROR, logger="maddening.cloud.entrypoint"):
+        stream.start(None)
+        deadline = time.monotonic() + 10.0
+        while renderer.updates < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stream.stop()
+    assert server.relay.reads > 2 and renderer.updates >= 3, (server.relay.reads, renderer.updates)
+    assert caplog.text.count("A streamed frame could not be read, drawn or pushed") == 1, caplog.text
+
+
+def test_the_logged_config_holds_no_ice_server_credential(monkeypatch, caplog):
+    import uvicorn
+
+    turn = {"urls": ["turn:198.51.100.7:3478?transport=udp"],
+            "username": "turn-user-not-for-logs", "credential": "turn-credential-not-for-logs"}
+    config = {"stream_config": {"width": 320, "height": 240, "ice_servers": [
+        {"urls": ["stun:198.51.100.8:3478"]}, turn,
+        {"urls": "turn://url-user-not-for-logs:url-pass-not-for-logs@198.51.100.9:3478"}]}}
+    monkeypatch.setattr(selkies_session, "_HAS_GST", False)
+    monkeypatch.setenv("MADDENING_CLOUD_CONFIG", json.dumps(config))
+    monkeypatch.setenv("MADDENING_HOST", "127.0.0.1")
+    monkeypatch.setattr(entrypoint.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    with caplog.at_level(logging.INFO, logger="maddening.cloud.entrypoint"):
+        entrypoint.main()
+    logged = [r.getMessage() for r in caplog.records if "starting with config" in r.getMessage()]
+    assert len(logged) == 1, caplog.text
+    assert "198.51.100.7" in logged[0] and "<redacted>" in logged[0], logged[0]
+    assert "not-for-logs" not in caplog.text, logged[0]

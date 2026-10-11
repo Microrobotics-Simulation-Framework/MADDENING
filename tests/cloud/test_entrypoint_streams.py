@@ -187,13 +187,16 @@ class EntryPoint:
             self.process.stdout.close()
 
 
-def _rest(method: str, path: str, body: Optional[dict] = None) -> tuple[int, Any]:
+def _rest(method: str, path: str, body: Optional[dict] = None, *,
+          token: Optional[str] = API_TOKEN) -> tuple[int, Any]:
     """One request to the entry point's API on loopback: ``(status, JSON body)``."""
     assert path.startswith(("/graph/", "/sim/")), f"{path} is not a route this module may request"
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         f"http://127.0.0.1:{API_PORT}{path}", method=method,
-        data=None if body is None else json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"})
+        data=None if body is None else json.dumps(body).encode(), headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as reply:
             return reply.status, json.loads(reply.read() or b"null")
@@ -249,6 +252,10 @@ def test_a_viewer_with_the_secret_watches_the_simulation_run(entrypoint, peers):
     # The stream the config asked for, on the documented port.
     width, height, fps, port = (int(entrypoint.stream_line.group(i)) for i in range(1, 5))
     assert (width, height, fps, port) == (WIDTH, HEIGHT, FPS, SIGNALING_PORT)
+
+    # The API binds 0.0.0.0, so it demands its token, from loopback too.
+    assert _rest("GET", "/graph/state", token=None)[0] == 401
+    assert _rest("POST", "/graph/nodes", SPRING, token="not-the-token")[0] == 401
 
     # The graph, built and started through the REST routes.
     status, body = _rest("POST", "/graph/nodes", SPRING)
@@ -343,3 +350,8 @@ def test_sigterm_stops_the_stream_and_the_process_exits_cleanly(entrypoint, peer
     log = entrypoint.log()
     assert "Received SIGTERM" in log, log
     assert "Traceback" not in log, log
+    # The whole log, start to exit, holds no credential: the session id is
+    # logged, the token derived from it, the secret and the API token never.
+    token = generate_session_token(entrypoint.session_id, SECRET)
+    for credential in (token, SECRET, API_TOKEN):
+        assert credential not in log, f"a credential is in the log: {credential[:6]}..."

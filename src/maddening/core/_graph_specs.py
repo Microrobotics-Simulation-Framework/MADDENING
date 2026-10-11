@@ -524,7 +524,7 @@ class _Asked(dict):
 jax.tree_util.register_pytree_node(
     _Asked,
     lambda d: (tuple(d[k] for k in sorted(d)), tuple(sorted(d))),
-    lambda keys, values: dict(zip(keys, values)))
+    lambda keys, values: _Asked(zip(keys, values)))
 
 
 def _flux_field_names(node, fields) -> Any:

@@ -2033,10 +2033,14 @@ class GraphManager:
         group's own Jacobi pass is traced once, abstractly, by the coupled
         block itself (``_run_coupled_block_impl(carried_only=True)``:
         nothing is compiled or run), and the loop is refused only if that
-        trace shows each field to be an operand of the next.  So a step
-        counter or a PRNG key held by a member that exchanges boundary
-        fluxes both ways is not refused: no flux reads it.  If the pass
-        cannot be traced that way the bound stands and the text says so.
+        trace shows it too (the text says of each link whether it is
+        established through operands or assumed through an operation the
+        trace does not look inside).  So a step counter or a PRNG key held
+        by a member that exchanges boundary fluxes both ways is not
+        refused, printed or not: no flux reads it.  If the pass cannot be
+        traced that way the bound stands and the text says so.  The step
+        asks the same question of its own state (a loop it finds is always
+        one of the bound), so it refuses what this refuses.
 
         A group the graph cannot describe yet (a member or a field that
         does not exist) is left to ``validate()``'s own errors.

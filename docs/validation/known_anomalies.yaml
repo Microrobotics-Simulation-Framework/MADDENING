@@ -19151,11 +19151,21 @@ anomalies:
       from floats the sweep has already moved by up to that much, so a flag
       whose threshold lies within the tolerance of the iterate can come
       back different (not under Jacobi).  The walk over the traced pass
-      can overstate what a field is computed from in one place, an
-      operation it does not look inside (a `jax.custom_jvp` or
-      `jax.custom_vjp` function, a primitive it does not know), which it
-      takes to use all of its operands: a loop that exists only through
-      such an operation is refused although it is none.  Where the pass
+      follows an operation only through its results, so a
+      `jax.debug.print` or `jax.debug.callback` in member code feeds
+      nothing.  It can overstate what a field is computed from only
+      through an operation it does not look inside (a `jax.custom_jvp` or
+      `jax.custom_vjp` function, a callback, a primitive with several
+      operands and several results, or an effect whose result is used,
+      such as an `io_callback` that returns a value, taken to read every
+      field), which it takes to use all of its operands: a loop that
+      exists only through such an operation is refused although it is
+      none, and the refusal's message calls that link ASSUMED and names
+      the primitive, every other link established through operands.  A
+      read counts only where the edges allow it too, so `compile()` and
+      the step refuse the same groups at the same state; the step's own
+      refusal is reached only for a state `compile()` did not see (a
+      write that gives a field another dtype).  Where the pass
       cannot be traced on its own at all (a hook that raises under the
       trace), what it reads is assumed from the edges, a member taken to
       use every field an edge hands it and a boundary flux its producer's
@@ -19175,6 +19185,9 @@ anomalies:
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_computed_from_one_another_in_a_loop_are_refused"
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_counter_and_a_key_beside_fluxes_both_ways_are_not_carried"
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_flags_handed_both_ways_but_computed_from_floats_are_solved"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_printed_counter_beside_fluxes_both_ways_steps_as_without_the_print"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_loop_through_a_custom_jvp_is_refused_as_assumed_and_says_through_what"
+      - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_write_that_makes_a_loop_of_non_floating_fields_is_refused_at_the_step"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-274"

@@ -72,7 +72,16 @@ class CouplingGroup:
         counter or a PRNG key that a node advances from its pre-step
         state is not one unless another member reads it or a boundary
         flux is computed from it, and is on no loop either way,
-        whatever edges and fluxes the node has.
+        whatever edges and fluxes the node has (printing it with
+        ``jax.debug.print`` or ``jax.debug.callback`` changes none of
+        this: an operation with no result feeds nothing).
+        At an iteration cap the solve has not converged at, it returns
+        its last floating iterate with the non-floating fields one pass
+        computes there from those fields evaluated at it; under
+        ``"gauss-seidel"`` a member swept after the floats it reads were
+        moved in that pass computes them from the moved floats, so they
+        need not be what the returned floats give (measured: ``q = 10``
+        returned beside ``p = 15`` for ``p = floor(q)``).
         Where the trace shows such fields computed from one another in
         a closed loop (two members that each compute a flag from the
         flag the other hands them) they have no value at an iterate,
@@ -380,9 +389,11 @@ class CouplingGroup:
         ``max_iterations=1`` there is no solve at all: the guess is what
         the one staggered pass starts from, so the predictor is another
         time-stepping scheme and moves the result at order one (measured
-        on a linear pair after four steps: one entry at ``-0.397`` with
-        ``"none"``, ``0.108`` with ``"linear"`` and ``0.927`` with
-        ``"quadratic"``).  Nothing warns of it.
+        on the affine pair of ``tests/core/test_coupling_units_of_one_field.py``,
+        three entries a member under ``"jacobi"``, after four steps: the
+        first entry of ``a`` at ``-12.07`` with ``"none"``, ``-20.00``
+        with ``"linear"`` and ``-22.08`` with ``"quadratic"``, where the
+        converged solve gives ``-76.54``).  Nothing warns of it.
     solver : {"ift", "fori"}
         How the fixed-point iteration is solved.  ``"ift"`` (default)
         runs a ``jax.lax.while_loop`` that exits as soon as the

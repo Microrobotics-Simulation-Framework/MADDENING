@@ -2710,7 +2710,11 @@ claims:
     pre-step state is on no such loop, and is not carried unless another
     member reads it or a flux is computed from it, whatever other edges and
     fluxes the member has; a pair exchanging fluxes both ways with such a
-    leaf steps as it did.
+    leaf steps as it did.  A jax.debug.print or jax.debug.callback in member
+    code makes no field carried and closes no loop.  compile() and the step
+    refuse the same groups at the same state (a read counts only where the
+    edges allow it too); the step's own refusal is reached only for a state
+    compile() did not see, such as one a write gave another dtype.
   sources:
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
     - src/maddening/core/coupling/_carried_fields.py::carried_nonfloat_chain
@@ -2725,11 +2729,15 @@ claims:
     carried fields at the returned iterate: under Gauss-Seidel a carried
     field the sweep recomputes from floats it has already moved can come
     back different (not under Jacobi).  What a field is computed from is
-    read from the traced pass, which can overstate in one place: an
+    read from the traced pass, which can overstate only through an
     operation the walk does not look inside (a custom_jvp or custom_vjp
-    function, an unknown primitive) is taken to use all of its operands.
-    Where the pass cannot be traced on its own, dependence is assumed from
-    the edges and the refusal's message says so.  Not claimed for
+    function, a callback, a primitive with several operands and several
+    results, or an effect whose result is used), taken to use all of its
+    operands; the refusal's message calls each such link of the loop
+    ASSUMED and names the primitive, and every other link established
+    through operands.  An operation with no result feeds nothing.  Where
+    the pass cannot be traced on its own, dependence is assumed from the
+    edges and the refusal's message says so.  Not claimed for
     float64 (x64), mixed dtypes, 16-bit floats, predictors or warm starts,
     checkpoint restarts or sharded graphs.
   oracle: closed form (fixtures exact in binary floating point, one fixed point); fori against ift; the same passes on every route.
@@ -2746,6 +2754,13 @@ claims:
     - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_count_computed_from_a_flux_that_reads_it_is_a_loop_and_is_refused
     - tests/core/test_coupling_carried_nonfloat_fields.py::test_flags_handed_both_ways_but_computed_from_floats_are_solved
     - tests/core/test_coupling_carried_nonfloat_fields.py::test_where_the_pass_cannot_be_traced_the_refusal_says_the_loop_is_assumed
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_side_effect_in_the_pass_makes_nothing_a_read
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_printed_field_steps_as_the_same_pair_unprinted
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_printed_counter_beside_fluxes_both_ways_steps_as_without_the_print
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_reads_through_an_operation_the_walk_does_not_look_inside_are_assumed
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_loop_through_a_custom_jvp_is_refused_as_assumed_and_says_through_what
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_compile_and_the_step_decide_alike_where_the_walk_overstates
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_write_that_makes_a_loop_of_non_floating_fields_is_refused_at_the_step
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_an_iterate_dependent_flag_is_the_one_the_returned_state_computes
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_flag_read_across_an_internal_edge_iterates_with_the_solve
     - tests/property/test_differential_coupling_solvers.py::test_a_flag_reading_a_coupled_input_agrees_between_the_solvers

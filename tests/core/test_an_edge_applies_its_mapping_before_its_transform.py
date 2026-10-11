@@ -24,7 +24,11 @@ The routes:
   member sub-cycled, whose edges are resolved at each of its sub-steps by
   a function of their own (the time-interpolated one);
 * a legacy closure of ``interface_mapping`` as the transform of a mapped
-  edge: two matrices, applied in the order mapping, closure.
+  edge: two matrices, applied in the order mapping, closure;
+* the flux hook of a node that reads a geometry it holds itself
+  (``geometry=("target", ...)``): the step resolves that node's edges a
+  second time for the hook, at the post-update geometry, by a call of its
+  own.
 
 Not here: a transform that changes the shape (a selection) after a
 mapping.  Where the target input declares a shape, ``add_edge`` holds the
@@ -43,6 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling.grid_mapping import multilinear_grid_mapping
 from maddening.core.coupling.interface_mapping import linear_interpolation_1d
 from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.graph_manager import GraphManager
@@ -289,3 +294,55 @@ def test_a_legacy_closure_as_the_transform_is_applied_after_the_mapping():
     np.testing.assert_array_equal(np.asarray(gm.resolve_boundary_inputs("t")["u"]), [13.0, 15.0])
     gm.step()
     np.testing.assert_array_equal(_x(gm, "t"), [13.0, 15.0])
+
+
+class Marker(SimulationNode):
+    """A point at its own position ``g`` (a geometry it holds) that keeps
+    what its input delivers; its flux ``q`` is what its flux hook is
+    handed."""
+
+    def __init__(self, name):
+        super().__init__(name, DT)
+
+    def initial_state(self):
+        return {"x": jnp.zeros(1, jnp.float32), "g": jnp.asarray([[0.5]], jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(1,), dtype=jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": boundary_inputs["u"], "g": state["g"]}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+        # validate() calls every flux hook with no inputs at all.
+        return {"q": boundary_inputs.get("u", jnp.zeros(1, jnp.float32))}
+
+
+def test_a_flux_hook_reading_its_own_geometry_is_handed_the_mapped_value_transformed():
+    """The step hands a node that reads a geometry it holds two resolutions
+    of its edges: one for ``update`` and one for its flux hook, at the
+    post-update geometry, by a call of its own.  Each maps, then transforms.
+
+    A grid ``s`` holds ``[0, 10]`` at the points 0 and 1; the marker ``m``
+    at 0.5 reads it there (multilinear, consistent) through the transform
+    ``clip(., 0, 4)``; ``r`` reads the marker's flux.  Mapping then
+    transform: ``clip(5, 0, 4) = 4``.  The other order: the grid clipped
+    to ``[0, 4]``, then read at 0.5: 2.  With the second resolution alone
+    swapped, ``update`` and the query are still handed 4 and only the flux
+    hook gets 2, which no other test of this file sees.
+    """
+    grid = np.array([0.0, 10.0], np.float32)
+    assert np.clip(np.interp(0.5, [0.0, 1.0], grid), 0.0, 4.0) == 4.0
+    assert np.interp(0.5, [0.0, 1.0], np.clip(grid, 0.0, 4.0)) == 2.0, "premise: the orders differ"
+    gm = GraphManager()
+    gm.add_node(Holds("s", grid))
+    gm.add_node(Marker("m"))
+    gm.add_node(Takes("r", 1))
+    gm.add_edge("s", "m", "x", "u", geometry=("target", "g"), transform=_at_most_four,
+                mapping=multilinear_grid_mapping((0.0,), (1.0,), (2,), n_points=1, mode="consistent"))
+    gm.add_edge("m", "r", "q", "u")
+    gm.compile()
+    np.testing.assert_array_equal(np.asarray(gm.resolve_boundary_inputs("m")["u"]), [4.0])
+    gm.step()
+    np.testing.assert_array_equal(_x(gm, "m"), [4.0])     # what update was handed
+    np.testing.assert_array_equal(_x(gm, "r"), [4.0])     # what the flux hook was handed

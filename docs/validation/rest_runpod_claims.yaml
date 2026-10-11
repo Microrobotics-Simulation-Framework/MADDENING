@@ -5353,10 +5353,10 @@ claims:
   area: run_pod-goals
   claim: >-
     "The goals must fail on a stencil wrapper or a halo exchange broken in
-    any of eleven ways: eight that every wrapper goal must catch (...
+    any of sixteen ways: eight that every wrapper goal must catch (...
     domain integrals summed over the first mesh axis only ...), and three
     that only a halo two cells wide shows, which are the stencil goal's";
-    the runbook: test_run_pod_seeded_faults.py "holds eleven faults as
+    the runbook: test_run_pod_seeded_faults.py "holds sixteen faults as
     seeds of sharded_node.py and halo.py".  (The seeds of the unstructured
     wrapper are RPD-063's.)
   sources:
@@ -5392,7 +5392,7 @@ claims:
 - id: RPD-025
   area: run_pod-goals
   claim: >-
-    The seeded test "applies each of the eleven to a scratch copy of the
+    The seeded test "applies each of the sixteen to a scratch copy of the
     library, runs --goal checklist --dry-run --keep-going, and requires
     stencil, hybrid and coupled to read FAIL (stencil alone for a fault of
     a halo two wide; and halo too for a seed of halo.py ...), every item
@@ -5577,7 +5577,7 @@ claims:
 - id: RPD-030
   area: run_pod-records
   claim: >-
-    "Schema of the JSON (schema_version 10)": the common keys (goal, dry_run,
+    "Schema of the JSON (schema_version 11)": the common keys (goal, dry_run,
     allow_fewer_devices, n_devices, environment with hostname ...
     git_commit, config, wall_s, results, checks {name, value, limit, sense,
     passed}, passed) on every file.
@@ -7230,7 +7230,7 @@ claims:
     - benchmarks/multigpu/run_pod.py::cells_were_renumbered
     - benchmarks/multigpu/run_pod.py::record_problems
   conditions: >-
-    the committed record (a dry run at 256 and 1024 cells) put into the
+    the committed record (a dry run at 256 and 961 cells) put into the
     layout of schema 9, goal by goal, every recorded check passing; with
     and without its schema number taken back; relabelled as a four-GPU run.
   oracle: >-
@@ -7257,4 +7257,100 @@ claims:
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
     relabelled_records: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_an_unstructured_goals_file_written_before_schema_10_is_refused_twice_over
+    mixed_commits: n/a
+
+- id: RPD-067
+  area: run_pod-runbook
+  claim: >-
+    "Which wrapper paths the goals run": one row for every documented
+    option of ShardedStencilNode and ShardedUnstructuredNode and every hook
+    of a node they read, and rows for ShardedPointwiseNode and HybridNode.
+    "run means a fault on that path moves a goal's answer, and a seed of
+    tests/cloud/multigpu/test_run_pod_seeded_faults.py proves it"; every
+    other row is "unproved" or "not run" and names the CPU test that covers
+    it.
+  sources:
+    - benchmarks/multigpu/README.md (Which wrapper paths the goals run)
+  conditions: >-
+    the runbook's text against the seed tables of the seeded-fault test
+    (_SEEDS, _PATH_SEEDS, _COUNT_SEEDS) and the goals each seed must fail;
+    the table edited six ways (a row promoted without a seed, a seed that
+    does not exist, a goal no seed of the row fails, an unknown status, a
+    test file that is not there, a seed left out, a wrapper without a row).
+  oracle: >-
+    every "run" row names seeds that exist and fail the goals it names;
+    every seed is in a "run" row; every other row names a test file that
+    exists; each edit is reported.
+  tests:
+    - tests/compliance/test_run_pod_runbook_coverage_table.py::test_every_run_row_is_proved_by_a_seed_and_every_seed_is_in_a_run_row
+    - tests/compliance/test_run_pod_runbook_coverage_table.py::test_the_check_of_the_table_fails_on_a_claim_no_seed_holds
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-068
+  area: run_pod-goals
+  claim: >-
+    "Four more were on no goal's path until schema 11": the zero fill of
+    ShardedStencilNode, domain_integral_axes() on both wrappers (an
+    integral summed over some mesh axes only, or over none, compared slot
+    by slot; the per-shard one carried in the state and read back), and the
+    unstructured wrapper's shard_info (the forward goal holds each shard's
+    [offset, cells] pair to the layout's, with a limit of zero).  A fault on
+    each fails the stencil goal's field-shares cases on every mesh, or the
+    forward goal's per-shard check, and no item those goals decide closes.
+  sources:
+    - benchmarks/multigpu/README.md (What a broken wrapper does to the goals)
+    - benchmarks/multigpu/run_pod.py::per_shard_entries_off
+    - benchmarks/multigpu/run_pod.py::stencil_cases
+    - benchmarks/multigpu/run_pod.py::forward_checks
+  conditions: >-
+    four CPU virtual devices, jax 0.10.2, 0.11.0 and 0.11.2; every mesh of
+    STENCIL_MESHES; 225 cells (a pad row on three shards) and 256 (none);
+    five seeds of sharded_node.py and halo.py and four of
+    sharded_unstructured.py, in-process on every push and as a dry run of
+    the goals on a scratch copy of the library in the slow lane.  A wrong
+    shard_info["n_local"] shows only where a shard has a pad row.
+  oracle: >-
+    the goals a seed names read FAIL and the others PASS; every failed
+    stencil check is a field-shares case's, on every mesh; the per-shard
+    check reads the number of entries the layout says; unseeded, every
+    check passes.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_one_step_under_the_zero_fill_with_integrals_a_shard_agrees_on_every_mesh
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_miscount_fails_the_forward_goals_exact_count
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper
+    - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount
+    relabelled_records: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper
     mixed_commits: n/a

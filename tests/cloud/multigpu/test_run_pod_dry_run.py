@@ -458,7 +458,7 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
     assert gpu[4:7] == [(100_000, "field-halo2", b, "1d") for b in rp.STENCIL_BOUNDARIES]
     assert gpu[-2:] == [(300_000, "field", "periodic", "2d"),
                         (1_000_000, "field", "periodic", "2d")]
-    assert len(gpu) == 4 * 7 + 2 == 30
+    assert len(gpu) == 4 * 8 + 2 == 34
     # the graph goals: every mesh at the smallest size, the pencil after
     assert rp.graph_cases([256, 1024], 4) == [(256, m) for m in _MESHES] + [(1024, "2d")]
     assert rp.graph_cases([256], 3) == [(256, m) for m in ("1d", "1d-axis1", "2d-flat")]

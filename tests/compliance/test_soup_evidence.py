@@ -349,7 +349,9 @@ def test_every_test_package_is_described_in_the_organization_table():
 # framework_verification.md listed tests/viz/ beside the packages CI runs,
 # and every lane passes --ignore=tests/viz.  The never-run paths are
 # check_anomalies.PATHS_CI_NEVER_RUNS, which test_gate_scripts.py derives
-# from .github/workflows and holds equal.
+# from .github/workflows, the extras and the test files and holds equal.  A
+# test file every lane skips at import (it waits for a package no job
+# installs) is one of them, and is written on the page beside its package.
 
 
 def test_every_package_no_ci_lane_collects_is_marked_on_the_committed_page():
@@ -364,24 +366,40 @@ def test_every_package_no_ci_lane_collects_is_marked_on_the_committed_page():
     marked = {key for key, line in rows.items() if "not run by CI" in line}
     assert marked == {f"`tests/{p.split('/')[1]}/`" for p in never}
     (row,) = [line for line in page.splitlines() if line.startswith("| Test packages |")]
+    skipped = gen._anomaly_gate.IMPORTS_NO_CI_JOB_INSTALLS
+    assert set(skipped) <= set(never) and skipped, skipped
     for path in never:
-        assert f"no lane collects `{path}/`" in row, row
+        if path in skipped:
+            assert f"every lane skips `{path}`" in row, row
+            organization = rows[f"`tests/{path.split('/')[1]}/`"]
+            assert f"**not run by CI**: `{path}` (it skips itself where" in organization, organization
+            assert all(f"`{module}`" in organization for module in skipped[path]), organization
+        else:
+            assert f"no lane collects `{path}/`" in row, row
 
 
 def test_the_never_run_map_reads_whole_packages_and_sub_paths(monkeypatch):
     monkeypatch.setattr(gen._anomaly_gate, "PATHS_CI_NEVER_RUNS",
-                        ("tests/viz", "tests/cloud/multigpu"))
-    unrun = gen.never_run(["cloud", "core", "viz", "vizier"])
-    assert unrun == {"cloud": ["tests/cloud/multigpu"], "viz": ["tests/viz"]}
-    table = gen.render_test_organization(["cloud", "core", "viz"])
+                        ("tests/viz", "tests/cloud/multigpu", "tests/api/test_needs_it.py"))
+    monkeypatch.setattr(gen._anomaly_gate, "IMPORTS_NO_CI_JOB_INSTALLS",
+                        {"tests/api/test_needs_it.py": ("a_package", "another")})
+    unrun = gen.never_run(["api", "cloud", "core", "viz", "vizier"])
+    assert unrun == {"api": ["tests/api/test_needs_it.py"], "cloud": ["tests/cloud/multigpu"],
+                     "viz": ["tests/viz"]}
+    table = gen.render_test_organization(["api", "cloud", "core", "viz"])
     lines = {line.split("|")[1].strip(): line for line in table.splitlines()
              if line.startswith("| `tests/")}
     assert "--ignore=tests/viz" in lines["`tests/viz/`"]
     assert "**not run by CI**: `tests/cloud/multigpu/`" in lines["`tests/cloud/`"]
+    # A file is written without a slash, with what its import waits for.
+    assert ("**not run by CI**: `tests/api/test_needs_it.py` (it skips itself where `a_package`, "
+            "`another` is not installed, and no CI job installs it)") in lines["`tests/api/`"]
     assert "not run" not in lines["`tests/core/`"]
-    row = gen._test_packages_row(["cloud", "core", "viz"])
-    assert "collect 2 of them, and no lane collects `tests/viz/`" in row
+    row = gen._test_packages_row(["api", "cloud", "core", "viz"])
+    assert "collect 3 of them, and no lane collects `tests/viz/`" in row
     assert "no lane collects `tests/cloud/multigpu/`" in row
+    assert "every lane skips `tests/api/test_needs_it.py`" in row
+    assert "tests/api/test_needs_it.py/" not in row + table
 
 
 def test_no_never_run_paths_leaves_the_table_unmarked(monkeypatch):

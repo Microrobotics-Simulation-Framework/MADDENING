@@ -65,10 +65,18 @@ from tests.property import coupled_topologies as ct
 from tests.property.test_coupling_invariances import report_differences
 
 NAMED = ct.named_topologies()
-#: The structure for the mapping kinds (wider interfaces), and every
-#: structure by name.
+#: The structures for the mapping kinds, and every structure by name.
 MAPPED = ct.mapped_topologies()
 STRUCTURES = {**NAMED, **MAPPED}
+#: The structure with wide interfaces: the one whose sparse cells run per
+#: push in every domain below.  The other structure of ``MAPPED``
+#: (``mapped-then-offset``, whose mapped edges carry a transform that does
+#: not commute with a mapping) is per push under the monolithic reference
+#: only -- the oracle that tells "the mapping, then the transform" from the
+#: other order -- and slow in the cells that compare two builds of one
+#: graph, which deliver the same offsets in either order.
+_WIDE = "mapped-ring-wide"
+assert _WIDE in MAPPED and set(MAPPED) == {_WIDE, "mapped-then-offset"}, sorted(MAPPED)
 _STEPS = 3
 
 #: The sparse kinds the monolithic reference is run over: every entry, a
@@ -221,18 +229,21 @@ def test_the_interface_norm_on_a_mapped_ring_reproduces_the_monolithic_reference
 
 def _sparse_reference_cases():
     """Every sparse kind on every structure, and the dense kind on the
-    structure built for the mapping kinds (the others have their dense run
+    structures built for the mapping kinds (the others have their dense run
     above).  Per push: the structure with wide interfaces under both
-    configurations, and every other structure under the first, each in its
-    own build order.  The rest -- the second configuration on the narrow
-    structures, the interleaved order -- is slow."""
+    configurations, the dense kind of the structure with offsets under
+    both, and every other cell under the first, each in its own build
+    order.  The rest -- the second configuration on the narrow structures
+    and on the sparse kinds of the structure with offsets, the interleaved
+    order -- is slow."""
     cases = []
     for name in sorted(STRUCTURES):
         kinds = _SPARSE_REFERENCE_KINDS + (("matrix",) if name in MAPPED else ())
         for kind in kinds:
             for choice in (0, 1):
                 for order in ("as-built", "interleaved"):
-                    per_push = order == "as-built" and (choice == 0 or name in MAPPED)
+                    per_push = order == "as-built" and (
+                        choice == 0 or name == _WIDE or (name in MAPPED and kind == "matrix"))
                     cases.append(pytest.param(
                         name, kind, choice, order, id=f"{name}-{kind}-{choice}-{order}",
                         marks=() if per_push else pytest.mark.slow))
@@ -1301,7 +1312,7 @@ def _twin_cases():
             for kind in _SPARSE_REFERENCE_KINDS:
                 if name not in MAPPED and kind == "sparse-full":
                     continue
-                per_push = name in MAPPED and kind != "sparse-full"
+                per_push = name == _WIDE and kind != "sparse-full"
                 cases.append(pytest.param(
                     domain, name, kind, id=f"{domain}-{name}-{kind}",
                     marks=() if per_push else pytest.mark.slow))
@@ -1376,7 +1387,7 @@ def _sparse_domain_reference_cases():
     for domain in _REFERENCE_DOMAINS:
         for kind in _SPARSE_REFERENCE_KINDS:
             for name in sorted(STRUCTURES):
-                per_push = name in MAPPED and kind != "sparse-full"
+                per_push = name == _WIDE and kind != "sparse-full"
                 cases.append(pytest.param(
                     domain, name, kind, id=f"{domain}-{name}-{kind}",
                     marks=() if per_push else pytest.mark.slow))
@@ -1463,7 +1474,7 @@ def _sparse_invariance_cases():
     for domain in DOMAINS:
         for kind in ("sparse-ragged", "sparse-scatter"):
             for name in ("chain-into-ring", *sorted(MAPPED)):
-                per_push = name in MAPPED and domain in ("bfloat16", "float16")
+                per_push = name == _WIDE and domain in ("bfloat16", "float16")
                 cases.append(pytest.param(
                     domain, kind, name, id=f"{domain}-{kind}-{name}",
                     marks=() if per_push else pytest.mark.slow))

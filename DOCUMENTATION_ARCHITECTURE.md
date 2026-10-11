@@ -2869,7 +2869,7 @@ def validate_anomaly_registry(
 Command-line interface for MADDENING compliance tooling.
 
 Usage:
-    python -m maddening.compliance check-anomalies <path> [--prefix PREFIX]
+    python -m maddening.compliance check-anomalies <path> [--prefix PREFIX] [--version-field NAME]
     python -m maddening.compliance check-meta <module> [--require-fields FIELDS]
 
 Examples:
@@ -3815,7 +3815,7 @@ The checklist is organised around the schema/instance split: verify that the inh
 
 - [ ] `.github/ISSUE_TEMPLATE/anomaly.md` exists in the downstream repository, matching or extending MADDENING's template with the same mandatory fields: title, severity, safety relevance, safety rationale, affected components, affected versions, workaround (Section 9.7)
 - [ ] `docs/validation/known_anomalies.yaml` exists in the downstream repository (Sections 9.7, 16)
-- [ ] The file uses the same schema as MADDENING's registry: `schema_version`, a project version field (e.g., `mime_version`), `generated_date`, and `anomalies` list (Section 9.7)
+- [ ] The file uses the same schema as MADDENING's registry: `schema_version`, a project version field (e.g., `mime_version`), `generated_date`, and `anomalies` list (Section 9.7). The validator requires exactly one project version field: a top-level key named `<project>_version`, the whole key matching `[a-z][a-z0-9_]*_version` and not `schema_version`, whose value is a quoted, non-empty string; `--version-field NAME` (e.g. `--version-field mime_version`) requires that exact name (Section 16)
 - [ ] All anomaly IDs use the downstream prefix (e.g., `MIME-ANO-001`, not `MADD-ANO-001`) (Section 16)
 - [ ] `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml --prefix MIME-ANO-` passes with zero errors (Section 16)
 - [ ] CI is configured to run the anomaly validator on every push and fail on YAML schema errors (Sections 9.7, 16)

@@ -203,6 +203,7 @@ class TestAFirstPartyBreakIsNotAMissingExtra:
 def _registry(tmp_path, components):
     data = {
         "schema_version": "1.0",
+        "maddening_version": "0.1.0",
         "generated_date": "2026-03-12",
         "anomalies": [{
             "anomaly_id": "MADD-ANO-001",

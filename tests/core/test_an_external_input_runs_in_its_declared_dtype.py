@@ -83,9 +83,7 @@ def _graph(kind: str = "uniform", **declared) -> GraphManager:
     if kind == "coupled":
         gm.add_coupling_group(["a", "b"], max_iterations=4)
     gm.add_external_input("a", "ext", **declared)
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="WARNING. cycle detected")
-        gm.compile()
+    gm.compile()
     return gm
 
 

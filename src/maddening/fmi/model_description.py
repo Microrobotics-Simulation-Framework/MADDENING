@@ -126,6 +126,10 @@ class FMIVariable:
         :attr:`~maddening.core.node.BoundaryInputSpec.expected_units`
         when the node declares one; for a parameter, from its
         :class:`~maddening.core.params.ParamSpec` ``units``.
+        :meth:`ModelDescription.to_xml` writes it on a ``Float32`` or
+        ``Float64`` variable only: FMI 3.0's schema has no ``unit`` on an
+        integer or a Boolean, so there it stays what the graph declares
+        (and what the instantiation token hashes) without reaching the XML.
     shape : tuple of int, optional
         Array shape, for FMI 3.0 dynamic arrays.  Empty / None means
         scalar.
@@ -351,9 +355,11 @@ class ModelDescription:
             })
 
         # <UnitDefinitions> — FMI 3.0 requires every referenced unit to
-        # appear here.  Emit one <Unit> per distinct unit string used
-        # by any variable.  Empty units are skipped.
-        used_units = {v.unit for v in self.variables if v.unit}
+        # appear here.  Emit one <Unit> per distinct unit string that a
+        # variable's element carries (`_writes_unit`): a unit only an
+        # integer, a Boolean or a clock declares is referenced by nothing
+        # in this document.  Empty units are skipped.
+        used_units = {v.unit for v in self.variables if _writes_unit(v)}
         if used_units:
             ud = ET.SubElement(root, "UnitDefinitions")
             for u in sorted(used_units):
@@ -396,7 +402,7 @@ class ModelDescription:
                 attrib["clocks"] = " ".join(str(c) for c in var.clocks)
             fmi_type = _DTYPE_TO_FMI_TYPE[var.dtype]
             v_el = ET.SubElement(mv, fmi_type, attrib=attrib)
-            if var.unit:
+            if _writes_unit(var):
                 v_el.set("unit", var.unit)
             if var.start is not None:
                 # In the lexical form of the variable's type: FMI 3.0's
@@ -570,6 +576,22 @@ def _fmi_kind(dtype: str) -> str:
     if fmi_type == "Boolean":
         return "bool"
     return "float" if fmi_type.startswith("Float") else "int"
+
+
+def _writes_unit(var: "FMIVariable") -> bool:
+    """Whether ``var``'s element carries its ``unit``.
+
+    FMI 3.0's schema gives the ``unit`` attribute to ``<Float32>`` and
+    ``<Float64>`` only.  Every integer width and ``<Boolean>`` have none
+    (and a ``<Clock>`` has no value type at all), so a unit written on one
+    is a schema error: FMPy's ``validate_fmu`` reported ``Element 'Int32',
+    attribute 'unit': The attribute 'unit' is not allowed`` for an integer
+    input whose node declares ``expected_units``, and its ``simulate_fmu``,
+    which validates by default, refused the FMU.  The one rule for the
+    attribute and for ``<UnitDefinitions>``, so a unit that no element
+    carries is not defined either.
+    """
+    return bool(var.unit) and not var.is_clock and _fmi_kind(var.dtype) == "float"
 
 
 def _xs_value(x: Any, dtype: str) -> str:

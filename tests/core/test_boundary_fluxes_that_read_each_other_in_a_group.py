@@ -1227,7 +1227,7 @@ def test_a_shape_the_second_sweep_hands_before_it_settles_is_traced_too(mode):
     (3,), and neither is read; the second sweep hands ``y`` as the first
     computed ``s``, a scalar, and ``b.g`` reads it there.  So the seed of
     ``b.g``, which ``a``'s update reads, is not its settled value after
-    the two sweeps."""
+    the two sweeps; the message says the read is that sweep's."""
     a = Relay("a", 1.0, {"t": (0.1, "kin")})
     b = Relay("b", -0.5, {"k": (0.2, "three"), "s": (0.3, "tin"), "g": (0.2, None)}, ndim=0)
     gm = GraphManager()
@@ -1240,7 +1240,8 @@ def test_a_shape_the_second_sweep_hands_before_it_settles_is_traced_too(mode):
     grouped(gm, ["a", "b"], mode=mode)
     with pytest.raises(ValueError, match="flux b.g would take 3") as info:
         gm.compile()
-    assert "flux b.g reads input 'y', which edge 'b.s->b.y' delivers from flux b.s" in str(info.value)
+    assert ("flux b.g reads input 'y' in seeding sweep 2, which hands it otherwise than once "
+            "the fluxes settle (edge 'b.s->b.y' delivers it from flux b.s)") in str(info.value)
 
 
 def test_an_input_taken_at_its_declared_shape_is_named_in_the_message():
@@ -1267,14 +1268,20 @@ def test_an_input_one_of_whose_edges_cannot_be_evaluated_is_not_derived_from_the
     cannot be evaluated: the pass would hand their sum, whose shape is
     not known, so ``r`` is not derived from the value alone; ``b``
     declares nothing, and what its flux reads is assumed, with that
-    reason."""
+    reason, naming the edge; ``a`` is reported as a hook that cannot be
+    traced, with the tracer's error, though its own input cannot be
+    derived either."""
     nodes = [UntraceableBare("a", *coefficients(None, 0), reads="r"),
              Bare("b", *coefficients(None, 1), reads="r")]
     gm = built(nodes, ROBIN_AB, ["a", "b"])
     with pytest.raises(ValueError, match="depend on each other in a loop") as info:
         gm.compile()
-    assert ("for 'b', the shape of its input ['r'] could not be derived (the value an edge "
-            "delivers into it could not be evaluated on shapes and dtypes") in str(info.value)
+    text = str(info.value)
+    assert ("for 'b', no shape could be derived for its input ['r']: edge 'a.q->b.r' carries "
+            "a flux of 'a', whose fluxes could not be evaluated on the inputs the pass hands "
+            "it; and boundary_input_spec() does not declare it") in text
+    assert ("for 'a', its compute_boundary_fluxes could not be traced on the inputs the pass "
+            "hands it (ConcretizationTypeError") in text
 
 
 ROBIN_AB = [(s.replace("node_", ""), f, t.replace("node_", ""), n, g) for s, f, t, n, g in ROBIN]
@@ -1377,14 +1384,53 @@ class TableKey(Side):
         return {"q": state["u"] * self.table["k"]}
 
 
+class CopyKey(Side):
+    """Its flux hook indexes a copy of its state."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        return {"q": state["u"] + 0.0 * dict(state)["gone"]}
+
+
+class JitInputKey(Side):
+    """Its flux hook indexes an input inside a ``jax.jit``, which hands it
+    copies of its dicts."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        return jax.jit(lambda st, bi: {"q": st["u"] + bi["s"]})(state, boundary_inputs)
+
+
+class JitStateKey(Side):
+    """Its flux hook indexes a field its state does not hold, inside a
+    ``jax.jit``."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        return jax.jit(lambda st: {"q": st["u"] + 0.0 * st["gone"]})(state)
+
+
+NOT_KNOWN = ("The key was not looked up in the boundary_inputs or the state the hook is "
+             "handed, so where it was looked up is not known")
+GET_ADVICE = "boundary_inputs.get("
+
+
 @pytest.mark.parametrize("cls, said", [
     (StateKey, "it indexes state['gone'], which is not a field of the node's state (its "
                "fields: ['u'])"),
-    (TableKey, "and not from indexing boundary_inputs or the state it is handed: KeyError('k')"),
-    (Counting, "it indexes boundary_inputs['s']")])
+    (JitStateKey, "it indexes state['gone'], which is not a field of the node's state (its "
+                  "fields: ['u'])"),
+    (TableKey, NOT_KNOWN),
+    (CopyKey, NOT_KNOWN),
+    (Counting, "it indexes boundary_inputs['s']"),
+    (JitInputKey, "it indexes boundary_inputs['s']")])
 def test_a_flux_hook_that_raises_key_error_is_told_which_dict_it_indexed(cls, said):
+    """The dict a hook's ``KeyError`` came from is named where it is
+    known (the dict handed, or its copy inside a ``jax.jit``), and where
+    it is not (a copy made with ``dict(...)``, a table of the hook's
+    own) the message says so and gives the advice for both: the
+    ``.get`` of an input, and the state's fields."""
     nodes = [cls("a", *coefficients(None, 0)), Side("b", *coefficients(None, 1))]
     gm = built(nodes, [("a", "q", "b", "r", 1.0), ("b", "u", "a", "r", 1.0)], ["a", "b"])
     errors = [line for line in gm.validate() if line.startswith("ERROR")]
     assert len(errors) == 1 and said in errors[0]
-    assert ("boundary_inputs[" in errors[0]) == (cls is Counting)
+    assert ("boundary_inputs[" in errors[0]) == (cls in (Counting, JitInputKey))
+    assert (GET_ADVICE in errors[0]) == (cls in (Counting, JitInputKey, TableKey, CopyKey))
+    assert ("not from indexing" in errors[0]) is False

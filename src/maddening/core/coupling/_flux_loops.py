@@ -110,7 +110,8 @@ the pass composes them (:func:`_handed`, after
 edge into the node, from a member or from outside the group, in the
 order of the ``add_edge`` calls (``InterfacePlan.edges_into``), an
 additive edge adding its value to what an earlier edge into the same
-input delivered and any other replacing it, then the external inputs;
+input delivered and any other replacing it (whatever the replaced edge
+delivered, or failed to), then the external inputs;
 each edge's value what its own rule delivers, evaluated abstractly on
 the state field it reads or on the abstract flux of the producer it
 reads; inputs **declared in** ``boundary_input_spec()`` **or not**.
@@ -121,11 +122,13 @@ matters.
 
 *The fluxes' shapes are those the sweeps settle at.*  A flux's shape or
 dtype may follow an input another flux delivers, so the abstract fluxes
-are computed by the pass's own sweeps (:func:`_abstract_fluxes`: the
-first without the inputs whose flux is not computed yet, each later one
-from the fluxes as they stand when it visits a member), repeated until
-a sweep changes no flux's shape or dtype.  The hooks are traced on what
-the last sweep hands them.
+are computed by the pass's own sweeps over **every flux producer of the
+group** (:func:`_abstract_fluxes`: the first without the edges whose
+flux is not computed yet, so that an input holds what the edges before
+such an edge delivered, a value a later edge replaces included; each
+later one from the fluxes as they stand when it visits a member),
+repeated until a sweep changes no flux's shape or dtype.  The hooks are
+traced on what the last sweep hands them.
 
 *Dependence is structural.*  A flux depends on an input when the traced
 program of the hook has a path from the input to the flux
@@ -134,7 +137,9 @@ multiplies its input by zero reads it.  An edge's transform or mapping is
 not looked at (an edge that delivers a flux times zero still delivers
 it), and every edge whose value the pass hands on is taken to be read
 by its target (:func:`_handed_on`: an edge followed into the same input
-by one that is not additive is replaced, and read by nothing).
+by one that is not additive is replaced, and read by nothing from the
+second seeding sweep on; what the first sweep hands through it is
+counted by the next paragraph).
 
 *A hook may branch on what it is handed*
 (``if "x" in boundary_inputs``, or on an input's shape), and a seeding
@@ -146,19 +151,31 @@ whose programs are not shown to be the same is taken to read the inputs
 that sweep hands otherwise whose difference changes its program (each
 tried alone, and all of them where only some together change it).  (Its value in that sweep is then not
 its settled one, and the reads make its ``S`` count that sweep: a flux
-whose sweep-``k`` shape is not its settled one has ``S > k``.)
+whose sweep-``k`` shape is not its settled one has ``S > k``.)  Two
+programs are the same when their equations are, a sub-program (a
+``jax.jit`` helper, the branches of a ``cond``, a loop's body) by its
+structure and a custom derivative's call by its value, not by its rule;
+where they differ in an equation whose parameter is a function or an
+object the comparison cannot look into, the read is still counted, and
+the message says it is assumed.
 
 *Dependence is assumed, and the message says so with the reason,* only
 where it cannot be established: the hook raises under the trace on the
 inputs the pass hands it (a hook that computes on values, such as
 ``float(state["u"])``; that is not a JAX-traceable function, which the
-node contract asks for), it does not return a dict, the shape of an
-input cannot be derived at all (an edge into it carries the flux of a
-hook that cannot be evaluated, or its rule fails, and the node does not
-declare it), or the fluxes' shapes have not settled after
+node contract asks for; reported as such even where an input cannot be
+derived either), it does not return a dict, the shape of an
+input cannot be derived at all (the edge that decides its value, or an
+additive one after it, carries the flux of a member whose fluxes cannot
+be evaluated, a flux the producer does not return or a flux from outside
+the group, or its rule fails, and the node does not declare it: the
+message names the edge), or the fluxes' shapes have not settled after
 ``SEED_SWEEPS`` sweeps and one more per producer (a shape that grows
 round a loop never does).  Every flux of that member is then taken to
-read every input a flux edge delivers to it.
+read every input a flux edge delivers to it.  A member with an input
+that cannot be derived is not evaluated in the sweeps either, so its
+fluxes are not derived, and the inputs they deliver cannot be: nothing
+downstream is traced on a shape the pass would not hand it.
 
 Hooks are traced only for a group that would be refused if every flux of
 a member read every input a flux edge delivers to it.  A group that
@@ -182,6 +199,28 @@ wrong in silence:
   ``step()`` keeps the program it traced, and an entry point traced
   later (``run_scan``) runs the new hook, with a loop that was never
   asked about.
+
+Within the contract, the question is asked of one configuration, and
+these are its edges:
+
+* *the timestep*: hooks are traced with the node's own ``timestep``.
+  ``run_adaptive`` hands the step a ``dt`` chosen at run time; a hook
+  whose structure (not only its value) follows ``dt`` is asked about at
+  that one value.
+* *geometry-anchored mappings*: an edge's value is derived from the
+  shape and dtype of its geometry field in the state at compile
+  (``InterfaceEdge.delivered_abstract``); a geometry field that is a
+  flux, or that the state does not hold, makes the input underivable,
+  and the group is refused saying so.  This derivation has not been
+  compared, edge by edge, against what an instrumented pass hands, as
+  the edges without a geometry have.
+* *flux edges from outside the group*: the step does not read them
+  (MADD-ANO-156, ``KeyError`` at the first step); the criterion takes
+  the input such an edge decides as underivable, and names the edge.
+* *dependence is structural and errs one way*: an equation the walk does
+  not know (a custom derivative's call among them) keeps every input,
+  so a flux can be taken to read an input it does not use, and a group
+  refused that would be right; never the reverse.
 
 (A seeding sweep hands a member its inputs without the ones a flux not
 yet computed delivers, so a hook must return its fluxes without such a
@@ -208,10 +247,85 @@ from maddening.core.coupling._interface_plan import FLUX
 SEED_SWEEPS = 2
 
 
+class _Opaque:
+    """:func:`_plain` of a value of a kind it cannot compare by value (a
+    function, an object of a type outside jax that has no equality of its
+    own): equal only to the same object, which it holds (so its identity
+    is not reused while the comparison lasts).  A program that holds one
+    and differs from another is not shown to differ by what it computes:
+    a fresh object in each trace makes two equal programs differ."""
+
+    __slots__ = ("held",)
+
+    def __init__(self, held):
+        self.held = held
+
+    def __eq__(self, other):
+        return isinstance(other, _Opaque) and other.held is self.held
+
+    def __hash__(self):
+        return id(self.held)
+
+
+def _aval_form(v) -> Any:
+    """The shape, dtype and weak type of a variable or literal of a program."""
+    aval = getattr(v, "aval", None)
+    try:
+        return (tuple(aval.shape), str(aval.dtype), bool(getattr(aval, "weak_type", False)))
+    except Exception:  # noqa: BLE001 - an abstract value with no shape (a token, a reference)
+        return ("aval", str(aval))
+
+
+#: Primitives whose callable parameters are rules for derivatives: the
+#: value is the call program's (``call_jaxpr``), whatever the rule.
+_CUSTOM_DERIVATIVES = ("custom_jvp_call", "custom_vjp_call")
+
+
+def _eqn_params(eqn) -> Any:
+    """:func:`_plain` of an equation's parameters, without the derivative
+    rules of a custom-derivative call (functions, made again in each
+    trace, that do not change the value the call computes)."""
+    params = dict(eqn.params)
+    if eqn.primitive.name.startswith(_CUSTOM_DERIVATIVES):
+        params = {k: v for k, v in params.items()
+                  if not (callable(v) or hasattr(v, "call_wrapped"))}
+    return _plain(params)
+
+
+def _jaxpr_form(jaxpr, consts=None) -> tuple:
+    """A sub-program (the ``jaxpr`` of a jitted call, the branches of a
+    ``cond``, the body of a loop) as a value: its inputs by place, shape
+    and dtype, each equation's primitive with its parameters applied to
+    its operands, its outputs, and its constants by value.  Two traces of
+    the same function give equal forms, whatever objects jax made for
+    them."""
+    from jax.extend.core import Literal  # noqa: PLC0415
+
+    names: dict = {v: ("input", i, _aval_form(v)) for i, v in enumerate(jaxpr.invars)}
+    for i, v in enumerate(jaxpr.constvars):
+        names[v] = (("constant", _plain(consts[i])) if consts is not None and i < len(consts)
+                    else ("constant input", i, _aval_form(v)))
+
+    def of(v):
+        return ("literal", _plain(v.val), _aval_form(v)) if isinstance(v, Literal) else names[v]
+
+    equations = []
+    for k, eqn in enumerate(jaxpr.eqns):
+        equations.append((eqn.primitive.name, _eqn_params(eqn), tuple(of(v) for v in eqn.invars)))
+        for j, v in enumerate(eqn.outvars):
+            names[v] = ("equation", k, j)
+    return ("program", tuple(names[v] for v in jaxpr.invars), tuple(equations),
+            tuple(of(v) for v in jaxpr.outvars))
+
+
 def _plain(value) -> Any:
     """A hashable stand-in for an equation's parameter or a constant:
-    equal for equal values, and for a value of a kind not listed here
-    (a sub-program, a function) equal to nothing, itself included."""
+    equal for equal values.  A sub-program is taken by its structure
+    (:func:`_jaxpr_form`); an object of a jax type with an equality and
+    a hash of its own (a sharding, a mesh's axes) by that equality; any
+    other object is :class:`_Opaque`, equal only to itself."""
+    from jax.extend.core import ClosedJaxpr, Jaxpr  # noqa: PLC0415
+
     if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
         return (type(value).__name__, value)
     if isinstance(value, enum.Enum):
@@ -226,24 +340,47 @@ def _plain(value) -> Any:
     if isinstance(value, dict):
         return ("dict", tuple(sorted(((str(k), _plain(v)) for k, v in value.items()),
                                      key=lambda item: item[0])))
-    return ("unknown", object())
+    if isinstance(value, ClosedJaxpr):
+        return _jaxpr_form(value.jaxpr, value.consts)
+    if isinstance(value, Jaxpr):
+        return _jaxpr_form(value)
+    kind = type(value)
+    if (kind.__module__.split(".")[0] in ("jax", "jaxlib") and kind.__eq__ is not object.__eq__
+            and kind.__hash__ is not None and not callable(value)
+            and not hasattr(value, "call_wrapped")):
+        try:
+            hash(value)
+            return ("value", kind.__module__, kind.__qualname__, value)
+        except Exception:  # noqa: BLE001 - not hashable after all: compared by identity
+            pass
+    return _Opaque(value)
 
 
-def _programs(closed, in_paths, out_paths, table: dict) -> dict:
+def _holds_opaque(key) -> bool:
+    """Does a :func:`_plain` form hold an :class:`_Opaque` anywhere?"""
+    if isinstance(key, _Opaque):
+        return True
+    return isinstance(key, tuple) and any(_holds_opaque(k) for k in key)
+
+
+def _programs(closed, in_paths, out_paths, table: dict, opaque: Optional[set] = None) -> dict:
     """``{flux: its program}`` for one trace of a flux hook.
 
     A flux's program is a number for each of its leaves that stands for
     the whole expression the leaf is computed by: the primitive of each
-    equation with its parameters, applied to the programs of its
-    operands, down to the hook's arguments (by their place in the
-    arguments), constants and literals (by value).  Numbers are drawn
-    from *table*, shared between the traces compared, so two leaves have
-    the same number exactly when they are the same expression of the
-    same arguments.  An equation whose parameters hold something
-    :func:`_plain` does not know (control flow, a jitted call) is the
-    same as no other, so its flux is never shown to be the same.
+    equation with its parameters (:func:`_eqn_params`, a sub-program by
+    its structure), applied to the programs of its operands, down to the
+    hook's arguments (by their place in the arguments), constants and
+    literals (by value).  Numbers are drawn from *table*, shared between
+    the traces compared, so two leaves have the same number exactly when
+    they are the same expression of the same arguments.  *opaque*
+    (shared alike) collects the numbers of the expressions that hold an
+    :class:`_Opaque` parameter: two programs that differ only there are
+    not shown to compute different things.
     """
     from jax.extend.core import Literal  # noqa: PLC0415
+
+    opaque = set() if opaque is None else opaque
 
     def number(key):
         return table.setdefault(key, len(table))
@@ -252,15 +389,23 @@ def _programs(closed, in_paths, out_paths, table: dict) -> dict:
     ids = {v: number(("argument", jax.tree_util.keystr(path)))
            for v, path in zip(jaxpr.invars, in_paths)}
     for v, const in zip(jaxpr.constvars, closed.consts):
-        ids[v] = number(("constant", _plain(const)))
+        form = _plain(const)
+        ids[v] = number(("constant", form))
+        if _holds_opaque(form):
+            opaque.add(ids[v])
 
     def of(v):
         return number(("literal", _plain(v.val))) if isinstance(v, Literal) else ids[v]
 
     for eqn in jaxpr.eqns:
-        key = (eqn.primitive.name, _plain(dict(eqn.params)), tuple(of(v) for v in eqn.invars))
+        params = _eqn_params(eqn)
+        operands = tuple(of(v) for v in eqn.invars)
+        key = (eqn.primitive.name, params, operands)
+        hidden = _holds_opaque(params) or any(n in opaque for n in operands)
         for k, v in enumerate(eqn.outvars):
             ids[v] = number(("equation", key, k))
+            if hidden:
+                opaque.add(ids[v])
     programs: dict = {}
     for v, path in zip(jaxpr.outvars, out_paths):
         programs.setdefault(path[0].key, []).append((jax.tree_util.keystr(path[1:]), of(v)))
@@ -302,51 +447,112 @@ def _handed(into, given: dict, state, fluxes: dict, declared: dict, mappings,
       transform, under :func:`jax.eval_shape`);
     * an additive edge adds its value to what an earlier edge into the
       same input delivered (``+``, with its promotion and broadcasting),
-      any other edge replaces it;
+      any other edge replaces it, **whatever it delivered** (a value
+      that could not be derived included: the pass hands the later
+      edge's value);
     * then the external inputs (*given*, ``{input: abstract value}``)
-      replace what the edges delivered.
+      replace what the edges delivered;
+    * an input keeps the place in the dict its first edge gave it, as a
+      key of the pass's dict does when a later edge replaces its value.
 
     *first*: compose as the first seeding sweep does (``strict=False``),
     which leaves out an edge whose flux is not computed yet (not in
-    *fluxes*).  Otherwise such an edge, like one whose rule cannot be
-    evaluated, gives its input no derivable value: the input is then
-    handed at the shape and dtype ``boundary_input_spec()`` declares
-    (*declared*) where it declares one, and is unknown otherwise.
+    *fluxes*, or ``None`` there: its hook could not be evaluated in this
+    sweep), and the input then holds what the edges before it delivered
+    (the value of an edge a later one replaces, where the later one is
+    left out).  Otherwise such an edge, like one whose rule cannot be
+    evaluated, gives its input no derivable value, and so does an
+    additive edge added to such a value: the input is then handed at the
+    shape and dtype ``boundary_input_spec()`` declares (*declared*)
+    where it declares one, and is unknown otherwise.
     """
     values: dict = {}
-    underived: set = set()
     for r in into:
         name = r.target[1]
-        fields = state.get(r.source[0]) or {}
-        source = (fields[r.source[1]] if r.source[1] in fields
-                  else (fluxes.get(r.source[0]) or {}).get(r.source[1]))
-        if source is None:
-            if not first:
-                underived.add(name)
+        source = _source_of(r, state, fluxes, first)
+        if source is _LEFT_OUT:
             continue
-        try:
-            delivered = r.delivered_abstract(source, state, mappings)
-            if delivered is not None and r.additive and name in values:
-                delivered = jax.eval_shape(operator.add, values[name], delivered)
-        except Exception:  # noqa: BLE001 - the edge's rule fails on these shapes
-            delivered = None
-        if delivered is None:
-            underived.add(name)
-            continue
-        values[name] = delivered
+        delivered = None
+        if source is not None:
+            try:
+                delivered = r.delivered_abstract(source, state, mappings)
+            except Exception:  # noqa: BLE001 - the edge's rule fails on these shapes
+                delivered = None
+        if r.additive and name in values:
+            try:
+                delivered = (None if delivered is None or values[name] is None
+                             else jax.eval_shape(operator.add, values[name], delivered))
+            except Exception:  # noqa: BLE001 - the two values do not add
+                delivered = None
+        values[name] = delivered        # None: not derivable; the key keeps its place
     for name, value in given.items():
         values[name] = value
-        underived.discard(name)
     fallback: list = []
     unknown: set = set()
-    for name in sorted(underived):
+    for name in sorted(name for name, value in values.items() if value is None):
         if name in declared:
             values[name] = jax.eval_shape(lambda v: v, declared[name])
             fallback.append(name)
         else:
-            values.pop(name, None)
+            del values[name]
             unknown.add(name)
     return values, unknown, fallback
+
+
+#: :func:`_source_of` of an edge the first seeding sweep leaves out.
+_LEFT_OUT = object()
+
+
+def _source_of(r, state, fluxes: dict, first: bool) -> Any:
+    """What edge *r* reads, as ``_coupled_block``'s ``_resolve_value``
+    finds it: the field of its source's state where the state holds one,
+    else the producer's flux in *fluxes*; where neither holds it,
+    :data:`_LEFT_OUT` in the first sweep (``strict=False`` skips the
+    edge) and ``None`` in a later one (no value can be derived; the pass
+    itself would raise ``KeyError``)."""
+    fields = state.get(r.source[0]) or {}
+    if r.source[1] in fields:
+        return fields[r.source[1]]
+    produced = fluxes.get(r.source[0]) or {}
+    if r.source[1] in produced:
+        return produced[r.source[1]]
+    return _LEFT_OUT if first else None
+
+
+def _underived_causes(into, names, state, fluxes: dict, members, mappings) -> list:
+    """Why no value could be derived for the inputs *names* of a member
+    (:func:`_handed` composing them on the settled *fluxes*): one clause
+    per edge into them whose value could not be derived and is not
+    replaced by a later edge that is not additive."""
+    causes: list = []
+    live: list = []
+    for name in sorted(names):
+        edges = [r for r in into if r.target[1] == name]
+        last = max((i for i, r in enumerate(edges) if not r.additive), default=0)
+        live.extend(edges[last:])
+    for r in live:
+        source = _source_of(r, state, fluxes, False)
+        producer, field = r.source
+        if source is None:
+            if producer not in members:
+                causes.append(f"edge {r.key!r} carries a flux from outside the group, which "
+                              f"the step does not read (MADD-ANO-156)")
+            elif fluxes.get(producer) is None:
+                causes.append(f"edge {r.key!r} carries a flux of {producer!r}, whose fluxes "
+                              f"could not be evaluated on the inputs the pass hands it")
+            else:
+                causes.append(f"edge {r.key!r} carries {producer}.{field}, which "
+                              f"{producer!r}'s compute_boundary_fluxes does not return")
+            continue
+        try:
+            failed = r.delivered_abstract(source, state, mappings) is None
+        except Exception:  # noqa: BLE001 - the edge's rule fails on these shapes
+            failed = True
+        if failed:
+            causes.append(f"the mapping or transform of edge {r.key!r} fails on the shape "
+                          f"and dtype it is handed")
+    return causes or ["an additive edge's value does not add to what the edges before it "
+                      "deliver"]
 
 
 def _called_as_handed(spec, names) -> Callable:
@@ -368,20 +574,26 @@ def _abstract_fluxes(members, handed_to: Callable, nodes, state,
     compute them, swept until they settle.
 
     ``(fluxes, sweeps, moving)``: *fluxes* ``{member: {flux: abstract
-    value}}`` after the last sweep (a member whose hook cannot be
-    evaluated is left out); *sweeps* one ``{member: what handed_to gave
+    value}}`` after the last sweep (``None`` for a member whose fluxes
+    could not be derived); *sweeps* one ``{member: what handed_to gave
     it}`` per sweep, the first :data:`SEED_SWEEPS` being the pass's
     seeding sweeps and the last the inputs at the settled fluxes;
     *moving* the members whose fluxes still changed in the last sweep
     (empty when the fluxes settled).
 
-    A sweep visits *members* in the sweep order and evaluates each hook
-    abstractly (:func:`jax.eval_shape`: nothing is run), called as the
-    graph calls it, on ``handed_to(member, fluxes as they stand,
-    first sweep)``: the members before it this sweep's fluxes and the
-    others the previous sweep's, the first sweep without an input whose
-    flux is not computed yet (``one_pass_gs`` and ``one_pass_jacobi``
-    seed so).  A flux whose shape or dtype follows an input another flux
+    *members* are every flux producer of the group in the sweep order,
+    as the pass seeds them (``for nn in group_node_names: if nn in
+    flux_producing_nodes``), so that each sweep's fluxes are those the
+    pass's own dict holds when it visits a member.  A sweep evaluates
+    each hook abstractly (:func:`jax.eval_shape`: nothing is run),
+    called as the graph calls it, on ``handed_to(member, fluxes as they
+    stand, first sweep)``: the members before it this sweep's fluxes and
+    the others the previous sweep's, the first sweep without an input
+    whose flux is not computed yet (``one_pass_gs`` and
+    ``one_pass_jacobi`` seed so).  A member with an input no value can
+    be derived for is not evaluated: its fluxes are not derived either,
+    rather than derived at a shape the pass would not give them and
+    handed on.  A flux whose shape or dtype follows an input another flux
     delivers can change from one sweep to the next, so the sweeps go on
     until one (after the seeding sweeps) changes no member's fluxes, and
     at most ``SEED_SWEEPS + len(members)``: a dependence of shapes along
@@ -396,20 +608,19 @@ def _abstract_fluxes(members, handed_to: Callable, nodes, state,
         handed: dict = {}
         for member in members:
             handed[member] = handed_to(member, fluxes, sweep == 0)
-            values = handed[member][0]
-            try:
-                out = jax.eval_shape(_called_as_handed(nodes[member], list(values)),
-                                     state[member], values, params_of(member))
-                if not isinstance(out, dict):
-                    raise TypeError("compute_boundary_fluxes did not return a dict")
-            except Exception:  # noqa: BLE001 - not on these inputs: left out, asked again next sweep
-                out = None
+            values, unknown = handed[member][0], handed[member][1]
+            out = None
+            if not unknown:
+                try:
+                    out = jax.eval_shape(_called_as_handed(nodes[member], list(values)),
+                                         state[member], values, params_of(member))
+                    if not isinstance(out, dict):
+                        raise TypeError("compute_boundary_fluxes did not return a dict")
+                except Exception:  # noqa: BLE001 - not on these inputs: not derived, asked again next sweep
+                    out = None
             if _signature(out) != _signature(fluxes.get(member)):
                 moving.add(member)
-            if out is None:
-                fluxes.pop(member, None)
-            else:
-                fluxes[member] = out
+            fluxes[member] = out
         sweeps.append(handed)
         if sweep + 1 >= SEED_SWEEPS and not moving:
             break
@@ -417,7 +628,8 @@ def _abstract_fluxes(members, handed_to: Callable, nodes, state,
 
 
 def _flux_reads(spec, state, node_params, handed: dict, absent=(),
-                why: Optional[list] = None, sweeps=None) -> Optional[dict]:
+                why: Optional[list] = None, sweeps=None,
+                unsure: Optional[dict] = None, seen_in: Optional[dict] = None) -> Optional[dict]:
     """Which boundary inputs each flux of one node depends on.
 
     ``{flux field: set of input names}``, from **abstract traces** of the
@@ -448,7 +660,13 @@ def _flux_reads(spec, state, node_params, handed: dict, absent=(),
       alone, changes its program, or every input that sweep hands
       otherwise where those alone do not make up the difference or the
       hook cannot be traced so (it indexes an input the sweep leaves
-      out).
+      out).  Where the programs compared hold an opaque parameter
+      (:class:`_Opaque`), the inputs found so are *unsure*: written to
+      *unsure* (``{flux: inputs}``, where not also found otherwise), and
+      still reported, so the caller can say the read is assumed.  An
+      input a flux does not read by value once the fluxes settle, and
+      reads as a seeding sweep hands it, is written to *seen_in*
+      (``{flux: {input: the first such sweep, from 1}}``).
 
     Only ``make_jaxpr`` and the equations' ``primitive`` / ``invars`` /
     ``outvars`` / ``params`` are read, which are the same on the jax
@@ -456,8 +674,8 @@ def _flux_reads(spec, state, node_params, handed: dict, absent=(),
 
     ``None`` when dependence cannot be established this way: the hook
     raises under the trace on the inputs it is handed, or does not return
-    a dict.  The reason is appended to *why*, and the caller takes every
-    flux to read every input.
+    a dict.  The reason, then the exception, are appended to *why*, and
+    the caller takes every flux to read every input.
     """
     from maddening.core._param_probes import _live_jaxpr_inputs  # noqa: PLC0415
 
@@ -487,13 +705,17 @@ def _flux_reads(spec, state, node_params, handed: dict, absent=(),
     except Exception as exc:  # noqa: BLE001 - not traceable: the caller assumes dependence
         if why is not None:
             why.append(f"{type(exc).__name__}: {str(exc).splitlines()[0][:160] if str(exc) else ''}")
+            why.append(exc)
         return None
     if sweeps is None:
         sweeps = [{n: v for n, v in handed.items() if n not in set(absent)}] if absent else []
     by_value = {flux: frozenset(names) for flux, names in reads.items()}
+    sure = {flux: set(names) for flux, names in reads.items()}
+    doubted: dict = {flux: set() for flux in reads}
     table: dict = {}
-    settled = _programs(closed, in_paths, out_paths, table)
-    for given in sweeps:
+    opaque: set = set()
+    settled = _programs(closed, in_paths, out_paths, table, opaque)
+    for sweep, given in enumerate(sweeps, start=1):
         otherwise = frozenset(
             n for n in (*handed, *given)
             if n not in given or n not in handed or _signature(given[n]) != _signature(handed[n]))
@@ -510,26 +732,41 @@ def _flux_reads(spec, state, node_params, handed: dict, absent=(),
                                if n in (given if n in changed else handed)})
                 if set(other[1]) != set(returned):
                     raise ValueError("other fluxes on these inputs")
-                traces[changed] = _programs(other[0], other[2], other[3], table)
+                traces[changed] = _programs(other[0], other[2], other[3], table, opaque)
             return traces[changed]
 
         for flux in reads:
             base = by_value[flux] & otherwise
+            seen: list = []
+
+            def program(changed, flux=flux, seen=seen):
+                seen.append(programs_as(changed).get(flux))
+                return seen[-1]
+
             try:
-                whole = programs_as(otherwise).get(flux)
-                if programs_as(base).get(flux) == whole:
+                whole = program(otherwise)
+                if program(base) == whole:
                     continue
                 # Which of the others change it, each alone; all of them
                 # where only some together do.
                 found = frozenset(n for n in otherwise - base
-                                  if programs_as(base | {n}).get(flux)
-                                  != programs_as(base).get(flux))
-                if programs_as(base | found).get(flux) != whole:
+                                  if program(base | {n}) != program(base))
+                if program(base | found) != whole:
                     found = otherwise
             except Exception:  # noqa: BLE001 - a hook that indexes an input the sweep leaves out
                 found = otherwise
-            reads[flux] |= found
-    return reads
+            # A difference in an expression that holds an opaque parameter
+            # is not shown to be one of what the flux computes.
+            hidden = any(n in opaque for leaves in seen if leaves for _path, n in leaves)
+            (doubted if hidden else sure)[flux].update(found)
+            if seen_in is not None:
+                for name in found - by_value[flux]:
+                    seen_in.setdefault(flux, {}).setdefault(name, sweep)
+    if unsure is not None:
+        for flux in reads:
+            if doubted[flux] - sure[flux]:
+                unsure[flux] = doubted[flux] - sure[flux]
+    return {flux: sure[flux] | doubted[flux] for flux in reads}
 
 
 def _flux_records(plan, is_flux: Callable[[str, str], bool] = lambda member, field: True) -> list:
@@ -544,13 +781,27 @@ def _flux_records(plan, is_flux: Callable[[str, str], bool] = lambda member, fie
 
 
 def _handed_on(plan, records: list, external) -> list:
-    """*records* without the edges whose value the pass does not hand on.
+    """*records* without the edges whose value the pass does not hand on
+    once its fluxes are all computed.
 
     Composed as :func:`_handed` composes: an edge is followed into the
     same input by an edge that is not additive (which replaces what it
     delivered), or delivers to an input that is an external input of its
-    target (which replaces it), and its value is never read, by the hook
-    or by the update.
+    target (which replaces it), and from the second seeding sweep on its
+    value is read by neither the hook nor the update.
+
+    **The first seeding sweep can hand it**: where the replacing edge
+    carries a flux that sweep has not computed yet, the sweep leaves that
+    edge out and the input holds the replaced value.  That is not lost:
+    :func:`_handed` composes the first sweep so, the hook is traced again
+    on it (:func:`_flux_reads`), and a flux that reads that input there
+    (by value, or by a program that differs there) is taken to read it
+    through the replacing edge, whose source the first
+    sweep reaches only after the member: one sweep late, so its seed is
+    right no earlier than the second sweep (``S >= 2``), which is what a
+    value computed from the replaced one in the first sweep needs.  An
+    arc to the replaced edge's own source is not drawn: the flux reads it
+    in no sweep after the first, so it is no part of a loop.
     """
     given = {(member, name) for member, name, _value in external}
     replaced: set = set()
@@ -696,12 +947,22 @@ def _an_order_the_seed_reaches(arcs: dict, records: list, order, jacobi: bool) -
     return found if reached <= SEED_SWEEPS else None
 
 
-def _describe(steps: list) -> str:
-    """The reads of a loop or a chain, one clause each."""
-    return "; ".join(
-        f"flux {flux[0]}.{flux[1]} reads input {name!r}, which edge {key!r} "
-        f"delivers from flux {read[0]}.{read[1]}"
-        for flux, read, name, key in steps)
+def _describe(steps: list, seen_in: Optional[dict] = None) -> str:
+    """The reads of a loop or a chain, one clause each.  A read found only
+    as a seeding sweep hands the input (*seen_in*, ``{member: {flux:
+    {input: sweep}}}``, :func:`_flux_reads`) says so."""
+    seen_in = seen_in or {}
+
+    def clause(flux, read, name, key):
+        sweep = seen_in.get(flux[0], {}).get(flux[1], {}).get(name)
+        if sweep is None:
+            return (f"flux {flux[0]}.{flux[1]} reads input {name!r}, which edge {key!r} "
+                    f"delivers from flux {read[0]}.{read[1]}")
+        return (f"flux {flux[0]}.{flux[1]} reads input {name!r} in seeding sweep {sweep}, "
+                f"which hands it otherwise than once the fluxes settle (edge {key!r} "
+                f"delivers it from flux {read[0]}.{read[1]})")
+
+    return "; ".join(clause(*step) for step in steps)
 
 
 def _refuse_unsolved_fluxes(group, plan, nodes, state,
@@ -724,7 +985,8 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         they are traced at all.
     params_of : callable
         ``params_of(name)``: the parameters the step hands that node's
-        hooks.  Called only for a member that is traced.
+        hooks.  Called only for a group its edges alone would refuse,
+        once for each flux producer of the group.
     sweep_order : callable
         Returns the members in the order a pass sweeps them.  Called only
         when a flux edge of the group delivers to a flux producer.
@@ -762,14 +1024,16 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
 
     from maddening.core._param_probes import _declared_boundary_zeros  # noqa: PLC0415
 
-    # The producers a flux edge of the group delivers to (the ones
-    # traced), and with them the producers of those fluxes, in the sweep
-    # order: each with the edges into it in the order the pass applies
-    # them, and its external inputs (``_resolve_boundary``).
+    # The members traced: the producers a flux edge of the group delivers
+    # to.  The sweeps run over every flux producer of the group in the
+    # sweep order, as the pass seeds them, each with the edges into it in
+    # the order the pass applies them and its external inputs
+    # (``_resolve_boundary``): a producer that no edge the criterion
+    # follows reads can still deliver a value the pass hands (an edge a
+    # later one replaces, in the first sweep).
     fed = list(dict.fromkeys(
         r.target[0] for r in records if r.target[0] in plan.flux_members))
-    involved = [m for m in order
-                if m in fed or any(r.source[0] == m for r in records)]
+    involved = [m for m in order if m in plan.flux_members]
     into = {member: plan.edges_into(member) for member in involved}
     given: dict = {member: {} for member in involved}
     for member, name, value in external:
@@ -801,6 +1065,8 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
     traced: dict = {}
     reason: dict = {}
     taken_as_declared: dict = {}
+    unsure: dict = {}
+    seen_in: dict = {}
     for member in fed:
         values, unknown, fallback = sweeps[-1][member]
         if member in unsettled:
@@ -812,26 +1078,31 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
                 f"input another flux delivers, round a loop or along more steps against the "
                 f"sweep order than that)")
             continue
-        if unknown:
-            traced[member] = None
-            reason[member] = (
-                "underived",
-                f"the shape of its input {sorted(unknown)} could not be derived (the value "
-                f"an edge delivers into it could not be evaluated on shapes and dtypes: the "
-                f"flux it carries comes from a hook that could not be evaluated on the "
-                f"inputs the pass hands it, or its rule fails on them), and "
-                f"boundary_input_spec() does not declare it")
-            continue
+        # Traced first, on what can be derived: a hook that cannot be
+        # traced at all is reported as such, whatever its inputs.
         why: list = []
+        unsure[member], seen_in[member] = {}, {}
         traced[member] = _flux_reads(
             nodes[member], state[member], params[member], values, (), why,
-            [sweeps[k][member][0] for k in range(SEED_SWEEPS)])
+            [sweeps[k][member][0] for k in range(SEED_SWEEPS)], unsure[member],
+            seen_in[member])
         taken_as_declared[member] = fallback
-        if traced[member] is None:
+        failure = why[1] if len(why) > 1 else None
+        if traced[member] is None and not (
+                unknown and isinstance(failure, KeyError) and failure.args
+                and failure.args[0] in unknown):
             reason[member] = (
                 "untraceable",
                 "its compute_boundary_fluxes could not be traced on the inputs the pass "
                 f"hands it ({why[0] if why else 'no reason recorded'})")
+        elif unknown:
+            traced[member] = None
+            reason[member] = (
+                "underived",
+                f"no shape could be derived for its input {sorted(unknown)}: "
+                + "; ".join(_underived_causes(into[member], unknown, state, fluxes,
+                                              plan.members, mappings))
+                + "; and boundary_input_spec() does not declare it")
 
     def depends(member, flux, name):
         reads = traced.get(member)
@@ -854,7 +1125,7 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         found = (
             f"its boundary fluxes read each other along a chain that runs against "
             f"the order the group sweeps its members in ({order}) for more than one "
-            f"step: {_describe(chain)}. Each pass rebuilds the fluxes from nothing in "
+            f"step: {_describe(chain, seen_in)}. Each pass rebuilds the fluxes from nothing in "
             f"{SEED_SWEEPS} sweeps over the members in that order, flux {last} would "
             f"take {sweeps}, and the pass reads it as those {SEED_SWEEPS} sweeps "
             f"leave it")
@@ -866,7 +1137,7 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         steps = chain
     else:
         found = (
-            f"its boundary fluxes depend on each other in a loop: {_describe(loop)}. "
+            f"its boundary fluxes depend on each other in a loop: {_describe(loop, seen_in)}. "
             f"Each pass rebuilds the fluxes from nothing in {SEED_SWEEPS} sweeps over "
             f"the members, which is exact for a flux that reads no other flux and is "
             f"not a solution of fluxes that need each other")
@@ -883,6 +1154,11 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
             f"{m!r} was traced with its input {taken_as_declared[m]} at the shape and dtype "
             f"its boundary_input_spec() declares, as what the edges deliver there could not "
             f"be derived" for m in as_declared)
+    # Reads found only where the programs compared hold a parameter the
+    # comparison cannot look into: assumed, and said so.
+    doubtful = list(dict.fromkeys(
+        (member, field, name) for (member, field), _read, name, _key in steps
+        if traced.get(member) is not None and name in unsure.get(member, {}).get(field, ())))
     if assumed:
         found += (
             ". What the fluxes of " + ", ".join(repr(m) for m in assumed) + " read is "
@@ -890,18 +1166,29 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
                 f"for {m!r}, {reason[m][1]}" for m in assumed)
             + ". Each of their fluxes is therefore taken to read every input a flux "
             "edge delivers to its node")
+    if doubtful:
+        found += (
+            ". " + "; ".join(f"that flux {m}.{f} reads input {n!r}" for m, f, n in doubtful)
+            + (" is" if len(doubtful) == 1 else " are") + " assumed, not established: the "
+            "programs it was compared by, as a seeding sweep hands that input and as the "
+            "settled inputs give it, differ, and hold an operation whose parameters are a "
+            "function or an object the comparison cannot look into (a host callback, for "
+            "example), so the difference is not shown to be one of what the flux computes")
+    if assumed or doubtful:
         remedies = {
             "untraceable": "write compute_boundary_fluxes as JAX operations on its "
                            "arguments (the step itself needs that)",
             "underived": "declare an input whose shape could not be derived in "
                          "boundary_input_spec()",
             "unsettled": "give each flux a shape and dtype that do not follow the shapes "
-                         "of the inputs other fluxes deliver"}
+                         "of the inputs other fluxes deliver",
+            "opaque": "compute such a flux without operations that take a function or "
+                      "an object as a parameter"}
+        kinds = {reason[m][0] for m in assumed} | ({"opaque"} if doubtful else set())
         closing = (
             "If these fluxes in fact read no other flux, the group compiles once that "
             "can be established: " + ", and ".join(
-                remedies[kind] for kind in remedies
-                if any(reason[m][0] == kind for m in assumed)) + ".")
+                remedies[kind] for kind in remedies if kind in kinds) + ".")
     else:
         closing = (
             "A group whose fluxes are each computed without reading, or branching on, "

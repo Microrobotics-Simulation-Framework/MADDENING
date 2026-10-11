@@ -608,6 +608,11 @@ def validate_anomaly_registry(
             continue
 
         aid = a.get("anomaly_id", "<missing>")
+        # A YAML list or mapping is unhashable: ``aid in ids_seen`` raised
+        # ``TypeError`` instead of reporting it (the class of MADD-ANO-130).
+        if isinstance(aid, (list, dict)):
+            errors.append(f"anomaly_id must be a string, found {aid!r}")
+            aid = repr(aid)
 
         # Uniqueness
         if aid in ids_seen:

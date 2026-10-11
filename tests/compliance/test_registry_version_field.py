@@ -199,6 +199,25 @@ class TestTheNameIsChecked:
         assert "LIB-ANO-001: unknown field 'extra'" in errors, errors
 
 
+    @pytest.mark.parametrize("raw_id", ["[LIB-ANO-001]", "{id: LIB-ANO-001}"])
+    def test_an_unhashable_anomaly_id_is_reported_not_raised(
+        self, tmp_path, raw_id
+    ):
+        """A list or mapping id raised ``TypeError`` at the duplicate check."""
+        path = _raw(tmp_path, (
+            'schema_version: "1.0"\nmy_lib_version: "0.1.0"\n'
+            'generated_date: "2026-03-12"\nanomalies:\n'
+            f'  - anomaly_id: {raw_id}\n    title: T\n    description: D\n'
+            '    severity: minor\n    safety_relevance: not_safety_relevant\n'
+            '    safety_relevance_rationale: R\n    resolution_status: open\n'
+        ))
+        errors = _validate(path, prefix="LIB-ANO-")
+        assert any(e.startswith("anomaly_id must be a string, found ")
+                   for e in errors), errors
+        assert any("does not match required prefix" in e
+                   for e in errors), errors
+
+
 class TestVersionFieldOption:
     def test_a_different_field_is_an_error_naming_both(self, tmp_path):
         path = _registry(tmp_path, mime_version="0.1.0")

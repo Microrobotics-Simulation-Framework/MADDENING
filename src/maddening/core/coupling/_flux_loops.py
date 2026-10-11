@@ -132,7 +132,9 @@ program of the hook has a path from the input to the flux
 (:func:`_flux_reads`), whatever its numerical size: a flux that
 multiplies its input by zero reads it.  An edge's transform or mapping is
 not looked at (an edge that delivers a flux times zero still delivers
-it), and every edge is taken to be read by its target.
+it), and every edge whose value the pass hands on is taken to be read
+by its target (:func:`_handed_on`: an edge followed into the same input
+by one that is not additive is replaced, and read by nothing).
 
 *A hook may branch on what it is handed*
 (``if "x" in boundary_inputs``, or on an input's shape), and a seeding
@@ -140,8 +142,9 @@ sweep can hand it less than the settled inputs: sweep 1 leaves out the
 inputs whose flux is not computed yet, and where a flux's shape takes
 more than one sweep to settle a sweep hands an input at another shape.
 So the hook is traced again as each seeding sweep calls it, and a flux
-whose programs are not shown to be the same is taken to read every
-input that sweep hands otherwise.  (Its value in that sweep is then not
+whose programs are not shown to be the same is taken to read the inputs
+that sweep hands otherwise whose difference changes its program (each
+tried alone, and all of them where only some together change it).  (Its value in that sweep is then not
 its settled one, and the reads make its ``S`` count that sweep: a flux
 whose sweep-``k`` shape is not its settled one has ``S > k``.)
 
@@ -441,10 +444,12 @@ def _flux_reads(spec, state, node_params, handed: dict, absent=(),
       value, with only those handed as the sweep hands them.  A flux
       whose program (:func:`_programs`) is the same in those two traces
       does in that sweep what it would do with only the inputs it reads
-      by value changed: it reads no other.  One whose program differs, or
-      whose hook cannot be traced so (it indexes an input the sweep
-      leaves out), is reported to read every input that sweep hands
-      otherwise.
+      by value changed: it reads no other.  Where its program differs,
+      it is reported to read each other input whose sweep's form, added
+      alone, changes its program, or every input that sweep hands
+      otherwise where those alone do not make up the difference or the
+      hook cannot be traced so (it indexes an input the sweep leaves
+      out).
 
     Only ``make_jaxpr`` and the equations' ``primitive`` / ``invars`` /
     ``outvars`` / ``params`` are read, which are the same on the jax
@@ -510,13 +515,21 @@ def _flux_reads(spec, state, node_params, handed: dict, absent=(),
             return traces[changed]
 
         for flux in reads:
+            base = by_value[flux] & otherwise
             try:
-                same = (programs_as(by_value[flux] & otherwise).get(flux)
-                        == programs_as(otherwise).get(flux))
+                whole = programs_as(otherwise).get(flux)
+                if programs_as(base).get(flux) == whole:
+                    continue
+                # Which of the others change it, each alone; all of them
+                # where only some together do.
+                found = frozenset(n for n in otherwise - base
+                                  if programs_as(base | {n}).get(flux)
+                                  != programs_as(base).get(flux))
+                if programs_as(base | found).get(flux) != whole:
+                    found = otherwise
             except Exception:  # noqa: BLE001 - a hook that indexes an input the sweep leaves out
-                same = False
-            if not same:
-                reads[flux] |= otherwise
+                found = otherwise
+            reads[flux] |= found
     return reads
 
 
@@ -529,6 +542,27 @@ def _flux_records(plan, is_flux: Callable[[str, str], bool] = lambda member, fie
     Both read a field that does not exist; ``validate()`` has that error.
     """
     return [r for r in plan.flux_edges() if r.source_kind == FLUX and is_flux(*r.source)]
+
+
+def _handed_on(plan, records: list, external) -> list:
+    """*records* without the edges whose value the pass does not hand on.
+
+    Composed as :func:`_handed` composes: an edge is followed into the
+    same input by an edge that is not additive (which replaces what it
+    delivered), or delivers to an input that is an external input of its
+    target (which replaces it), and its value is never read, by the hook
+    or by the update.
+    """
+    given = {(member, name) for member, name, _value in external}
+    replaced: set = set()
+    for member in dict.fromkeys(r.target[0] for r in records):
+        into = plan.edges_into(member)
+        for i, r in enumerate(into):
+            if (member, r.target[1]) in given or any(
+                    later.target[1] == r.target[1] and not later.additive
+                    for later in into[i + 1:]):
+                replaced.add(id(r))
+    return [r for r in records if id(r) not in replaced]
 
 
 def _flux_arcs(records: list, depends: Callable[[str, str, str], bool]) -> dict:
@@ -714,7 +748,8 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
     if not all(n in nodes and n in state for n in names):
         return                      # validate() has the error for it
     jacobi = group.iteration_mode == "jacobi"
-    records = _flux_records(plan)
+    external = tuple(external)
+    records = _handed_on(plan, _flux_records(plan), external)
     arcs = _flux_arcs(records, lambda member, flux, name: True)
     if not any(arcs.values()):
         return
@@ -805,7 +840,7 @@ def _refuse_unsolved_fluxes(group, plan, nodes, state,
         reads = traced.get(member)
         return reads is None or field in reads
 
-    records = _flux_records(plan, is_flux)
+    records = _handed_on(plan, _flux_records(plan, is_flux), external)
     arcs = _flux_arcs(records, depends)
     loop = _a_loop(arcs)
     if loop is None:

@@ -138,10 +138,10 @@ UNIFORMITY_TOLERANCE = 12.0
 FRAMES_WANTED = 20
 
 #: Timeouts for one step each.  Measured in the container on four cores
-#: (three runs are in the pull request): the answer arrives in about
-#: 0.2 s, ICE connects about 0.1 s later, and twenty frames are decoded
-#: within 1.5 s of the offer.  Each limit is many times that, for a
-#: loaded CI runner.
+#: (GStreamer 1.24.2): the answer arrives about 0.2 s after the offer,
+#: ICE connects about 0.1 s later, and twenty frames are decoded within
+#: 1.5 s; the whole module takes 3 s, its slowest test 0.75 s.  Each
+#: limit is many times its step, for a loaded CI runner.
 ANSWER_TIMEOUT_S = 10.0
 ICE_TIMEOUT_S = 15.0
 FRAMES_TIMEOUT_S = 30.0

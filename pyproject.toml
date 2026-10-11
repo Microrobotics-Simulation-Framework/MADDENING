@@ -274,12 +274,13 @@ packages = ["src/maddening"]
 testpaths = ["tests"]
 filterwarnings = [
     "error",
-    # GraphManager.compile() emits informational warnings about disconnected
-    # nodes and cycle staggering -- expected in unit tests with minimal graphs.
+    # GraphManager.compile() emits an informational warning about a
+    # disconnected node -- expected in unit tests with minimal graphs.  (A
+    # staggered cycle is an INFO issue and a logging record since 0.2.1, not
+    # a warning: nothing here ignores one, so one that came back would fail.)
     # (?s): a node's name may hold a line break, and "." must match it, or
     # the warning for such a node is an error here and nowhere else.
     "ignore:(?s)WARNING. node .* is disconnected:UserWarning",
-    "ignore:WARNING. cycle detected:UserWarning",
     # ... and about a coupling group whose block staggers an edge between two
     # components (MADD-ANO-159): the drawn graphs of the serialisation and
     # differential properties carry such groups.  Its own tests record it

@@ -164,22 +164,39 @@ def test_gradient_wrt_mapping_weights(coupled, kind):
 
 
 def test_mapping_then_transform_order_and_additive():
-    """``mapping`` applies first, then the scalar ``transform``; additive
-    edges accumulate the mapped value."""
+    """``mapping`` applies first, then the ``transform``; additive edges
+    accumulate what each edge delivers.
+
+    The transforms do **not** commute with the mapping, so the other order
+    delivers another value (while this test scaled by two, which commutes
+    with every linear mapping, it passed with the two applications
+    swapped).  The mapping sums pairs of cells, so its rows sum to 2: an
+    offset ``c`` applied first would arrive as ``2 c``, and a clip applied
+    first would bound the cells and not their sums.  Every route of the
+    rule is in ``test_an_edge_applies_its_mapping_before_its_transform.py``.
+    """
     gm = GraphManager()
     gm.add_node(HeatNode("a", 1e-4, n_cells=4, initial_temperature=1.0))
     gm.add_node(HeatNode("b", 1e-4, n_cells=2, initial_temperature=0.0))
-    m = matrix_mapping(np.array([[1, 0, 0, 0], [0, 0, 0, 1]], np.float32))
+    pair_sums = np.array([[1, 1, 0, 0], [0, 0, 1, 1]], np.float32)
+    m = matrix_mapping(pair_sums)
     gm.add_edge("a", "b", "temperature", "heat_source", mapping=m,
-                transform=lambda x: 2.0 * x)
-    gm.add_edge("a", "b", "temperature", "heat_source", mapping=m, additive=True)
+                transform=lambda x: x + 5.0)
+    gm.add_edge("a", "b", "temperature", "heat_source", mapping=m, additive=True,
+                transform=lambda x: jnp.clip(x, 0.0, 50.0))
     gm.compile()
-    gm.set_node_state("a", {"temperature": jnp.array([10.0, 0.0, 0.0, 30.0], jnp.float32)})
-    # b's heat source should be 2*[10, 30] + [10, 30] = [30, 90]; one step of
-    # dt=1e-4 adds source*dt to the interior... b has only 2 cells, both
-    # boundary cells, so check the resolved boundary input directly.
+    gm.set_node_state("a", {"temperature": jnp.array([10.0, 20.0, 30.0, 40.0], jnp.float32)})
+    # By hand, T = [10, 20, 30, 40] and H @ T = [10 + 20, 30 + 40] = [30, 70]:
+    #   the offset edge delivers  [30, 70] + 5            = [35, 75]
+    #   the clipped edge delivers clip([30, 70], 0, 50)   = [30, 50]
+    #   b's heat source is their sum                      = [65, 125]
+    # The other order (the transform first) would give
+    #   H @ (T + 5) = [40, 80]  and  H @ clip(T, 0, 50) = H @ T = [30, 70],
+    #   a sum of [70, 150].
+    # b has only 2 cells, both boundary cells, so check the resolved
+    # boundary input directly.
     bi = gm.resolve_boundary_inputs("b")
-    np.testing.assert_allclose(np.asarray(bi["heat_source"]), [30.0, 90.0])
+    np.testing.assert_array_equal(np.asarray(bi["heat_source"]), [65.0, 125.0])
 
 
 def test_shape_mismatch_rejected_at_add_edge():

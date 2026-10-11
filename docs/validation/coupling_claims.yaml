@@ -2989,7 +2989,11 @@ claims:
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (jacobi_flux_sweeps)
     - docs/validation/known_anomalies.yaml (MADD-ANO-071)
   conditions: >-
-    flux edges inside a group.
+    flux edges inside a group whose pass reads every flux as the flux of
+    its iterate: fluxes computed from the state, or reading each other
+    along a chain the two sweeps reach.  A group whose fluxes read each
+    other in a loop, or along a longer chain against the sweep where the
+    seed is read, is refused at compile() (CPL-197).
   oracle: the Gauss-Seidel fixed point; per-pass flux evaluation counts.
   tests:
     - tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point
@@ -6821,7 +6825,9 @@ claims:
     sub-cycled member reads the group's iterate at every sub-step, so its
     term is implicit over the group's step and not its own sub-step, under
     each boundary_interpolation (MADD-ANO-027).  An edge from the node's
-    own boundary flux is iterated inside a group; outside one it cannot be
+    own boundary flux is iterated inside a group where that flux does not
+    itself read the input the edge delivers (one that does is a loop of
+    one flux, which compile() refuses: CPL-197); outside one it cannot be
     read (CPL-186, MADD-ANO-157), and validate()'s line for it says that
     and not that it reads the previous step.  auto_couple() groups loops
     of two or more nodes and leaves the edge explicit.  validate() gives
@@ -7140,6 +7146,148 @@ claims:
     16bit: narrowed
     jit: n/a
     grad: n/a
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+- id: CPL-197
+  area: edges
+  claim: >-
+    What a coupling group converges to with flux edges between its members
+    is the solution of the coupled equations, or the group is not
+    compiled.  "A coupling group iterates the states of its members and not
+    their fluxes: every pass computes each flux again from the states", in
+    two sweeps, so compile() raises one ValueError, and validate() lists
+    one ERROR line in place of "handled by iterative coupling", for a group
+    whose "fluxes depend on each other in a loop", or read each other along
+    a chain that runs against the sweep order for more than one step where
+    the pass reads the seed; the message names the group, the fluxes, the
+    inputs and the edges, and the ways out it gives reach the coupled
+    solution.
+  sources:
+    - src/maddening/core/coupling/_flux_loops.py::_refuse_unsolved_fluxes
+    - src/maddening/core/coupling/_flux_loops.py::_flux_reads
+    - src/maddening/core/graph_manager.py::GraphManager._refuse_unsolved_group_fluxes
+    - src/maddening/core/coupling/helpers.py::add_robin_coupling
+    - docs/developer_guide/node_authoring.md#robin-coupling
+    - docs/validation/known_anomalies.yaml (MADD-ANO-276)
+  conditions: >-
+    Affine scalar members, so the reference is one linear system solved in
+    64-bit arithmetic; Gauss-Seidel and Jacobi, solver ift and fori;
+    tolerance 1e-6, each state within 5e-6 of its value in the reference
+    as a fraction of that value (measured: at most 1.0e-6).  Right and
+    compiled: a flux computed from the state (the Robin recipe, as the
+    guide writes it, with the input declared in boundary_input_spec(),
+    undeclared, or beside an undeclared input a state edge feeds); a chain
+    of three along the sweep and one step against it; under Gauss-Seidel a
+    chain two steps against the sweep whose last flux is read by a member
+    swept after its producer.  Refused: loops of one, two and three
+    fluxes, with hooks that index their input and hooks that tolerate its
+    absence; the chain two steps against the sweep under Jacobi, and under
+    both schedules where the last flux is read by its own producer; a flux
+    that reads its input times zero, an edge that delivers a flux times
+    zero, a hook that cannot be traced (the message says the dependence is
+    assumed, and why), a hook whose flux changes with which inputs it is
+    handed without reading any by value (an external input and an edge
+    from outside the group among them), a loop through an undeclared
+    input, and a loop in the second of two groups.  The chain with
+    undeclared inputs in each of its six sweep orders under both schedules
+    is refused in one (two steps against the sweep, Jacobi) and right in
+    eleven.  Ways out: the flux written to a state field by update() (the
+    Robin pair at loop gains 0.06, 0.25 and 0.56; the chain), and the
+    chain's nodes added in the order of the reads, which the message
+    offers only where such an order compiles (not for a chain that bounces
+    between two members).
+    The readers of a graph never compiled (resolve_boundary_inputs,
+    check_conservation) raise too.  The criterion is sufficient, not
+    necessary: dependence is structural, and a group it refuses may be one
+    whose loop has no numerical effect.  It is asked of its own trace of
+    each hook when the graph is compiled or validated: a dependence that
+    does not pass through the hook's arguments, and a hook changed after
+    compile(), are not seen.  A flux hook that indexes an input is an
+    ERROR line of validate() naming the node, the hook and the input, and
+    is asked once; one that indexes a field its state does not hold names
+    that field.  What a hook is traced on is composed as the pass composes
+    it (the edges in add_edge order, additive or replacing, edges from
+    outside the group and external inputs) at the shapes the sweeps settle
+    at, and each seeding sweep's inputs are traced too: an input two edges
+    compose at another shape, in either edge order and either flux name, is
+    refused where the hook reads the shape the pass hands and right, to the
+    bit of the pass, where it does not; a flux whose shape follows a later
+    member's flux, a shape that settles in the third sweep and one the
+    second sweep hands before it settles are refused; shapes that never
+    settle are assumed, with that reason; an edge a later edge replaces is
+    read by nothing from the second sweep on, whatever it delivered, and
+    in the first sweep where the replacing edge's flux is not computed yet
+    (every flux producer is swept as the pass seeds it): a loop through
+    such an input is refused, the guide's Robin pair with such edges
+    compiles, and a first-sweep read of the replaced value that makes a
+    chain too long is refused.  Sub-programs (a jitted helper, with a
+    custom derivative inside) are compared by structure: a ring of fluxes
+    computed from the state through one compiles; a difference in a host
+    callback is counted and said to be assumed.  A hook that cannot be
+    traced is named so, with the tracer's error, and an input that cannot
+    be derived is named with the edge that makes it so.  Not claimed for float64, mixed dtypes, 16-bit
+    floats, gradients, vmap, multi-rate graphs, sub-cycled groups,
+    predictors and warm starts, run_adaptive, checkpoints or sharded
+    graphs.
+  oracle: the float64 solution of the coupled linear system; the refusal and its text.
+  tests:
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_computed_from_the_state_alone_reaches_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_whose_seed_the_pass_reads_too_early_is_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_each_way_out_of_a_refused_chain_reaches_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_that_read_each_other_in_a_loop_are_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_dependence_is_structural_and_an_edge_is_not_looked_into
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_cannot_be_traced_is_taken_to_read_every_input_and_the_message_says_so
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_each_flux_of_a_node_is_asked_what_it_reads
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_that_changes_with_the_inputs_it_is_handed_is_not_a_seed_of_one_sweep
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_no_hook_is_traced_for_a_group_its_edges_alone_pass
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_outside_a_group_the_loop_cannot_be_read
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_from_the_state_is_right_whether_or_not_its_node_declares_the_input
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_guides_robin_recipe_compiles_as_written
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_undeclared_input_a_flux_does_read_in_a_loop_is_refused_as_established
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_is_traced_at_the_shape_it_is_handed_not_the_declared_one
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_with_undeclared_inputs_is_judged_as_one_with_declared_inputs
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_that_bounces_between_two_members_is_not_offered_an_order
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_the_shape_the_pass_hands_is_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_shape_the_hook_does_not_read_compiles_with_the_numbers_of_the_pass
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_whose_shape_follows_a_later_flux_is_judged_at_the_shape_the_sweeps_settle_at
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_what_the_refused_shape_cases_compute_without_the_refusal
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_additive_edge_adds_its_value_to_what_an_earlier_edge_delivered
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_cannot_be_evaluated_in_one_sweep_is_evaluated_in_the_next
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_shape_that_settles_in_the_third_sweep_is_traced_at_that_shape
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_shape_the_second_sweep_hands_before_it_settles_is_traced_too
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_input_taken_at_its_declared_shape_is_named_in_the_message
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_input_one_of_whose_edges_cannot_be_evaluated_is_not_derived_from_the_others
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_flux_shapes_that_never_settle_are_assumed_and_the_message_says_why
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_whose_value_a_later_edge_replaces_is_read_by_nothing
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_reads_only_the_shape_of_an_input_compiles
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_raises_key_error_is_told_which_dict_it_indexed
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_right_robin_pair_whose_inputs_a_replaced_edge_reaches_first_compiles
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_difference_in_a_parameter_that_cannot_be_compared_is_reported_as_assumed
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_two_hooks_that_cannot_be_traced_are_reported_as_such_with_the_tracers_error
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_whose_rule_fails_leaves_its_input_underivable_unless_a_later_edge_replaces_it
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_group_whose_edge_rule_fails_is_refused_naming_the_edge
+  status: verified
+  domains:
+    f32: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution
+    grad: narrowed
     vmap: narrowed
     multi_rate: narrowed
     sub_cycled: narrowed

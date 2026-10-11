@@ -82,16 +82,18 @@ class SpringNode(SimulationNode):
     """Restoring force toward a fixed rest height."""
 
     def __init__(self, stiffness=12.0, rest_height=2.0, **kwargs):
-        super().__init__(**kwargs)
-        self.stiffness = stiffness
-        self.rest_height = rest_height
+        # Constants go to the base class, which keeps them in self.params:
+        # that is what a saved graph (gm.to_dict()) carries.
+        super().__init__(stiffness=stiffness, rest_height=rest_height, **kwargs)
 
     def initial_state(self):
         return {"force": jnp.array(0.0)}
 
     def update(self, state, boundary_inputs, dt):
-        anchor = boundary_inputs.get("anchor_position", self.rest_height)
-        return {"force": -self.stiffness * (anchor - self.rest_height)}
+        stiffness = self.params["stiffness"]
+        rest_height = self.params["rest_height"]
+        anchor = boundary_inputs.get("anchor_position", rest_height)
+        return {"force": -stiffness * (anchor - rest_height)}
 
 
 # BounceNode is the node defined in the first example above.
@@ -109,6 +111,14 @@ gm.compile()
 final_state, history = gm.run_scan_with_history(n_steps=1000)
 print(f"Final ball height: {float(final_state['ball']['position']):.2f}")
 ```
+
+The spring hands its two constants to `super().__init__(...)` instead of
+keeping them as attributes (`self.stiffness = stiffness`).  A saved graph
+is rebuilt from each node's `params` and nothing else, so a constant kept
+anywhere else is not saved: a graph reloaded from `gm.to_dict()` would run
+the default stiffness, and `to_dict()` warns when a node was built with
+such an argument.  See
+[where a constant belongs](../developer_guide/node_authoring.md#where-a-constant-belongs-and-what-a-saved-graph-carries).
 
 ```{note}
 **Advisories on multi-node graphs.**
@@ -131,6 +141,14 @@ replace whatever the edge delivers on every step, with zeros when it is
 not fed, so `gm.compile()` raises a `ValueError` naming the pair and
 `gm.validate()` lists it.  Keep one of the two: leave the declaration
 out where the graph is built, or `gm.remove_edge(...)`.
+
+A field also has one declaration.  `gm.add_external_input` for a field
+that is already declared with another shape or dtype raises a
+`ValueError` naming both, and so does loading a file that holds two: the
+shape and dtype are what the step casts a supplied value to, what the
+FMU export types the input as and what `to_dict()` saves, and until 0.4.0
+the last of two won.  Declaring it again with the same shape and dtype is
+accepted and changes nothing.
 ```
 
 ### An edge from a node to itself

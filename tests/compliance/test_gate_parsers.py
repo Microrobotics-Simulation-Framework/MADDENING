@@ -212,6 +212,7 @@ def _validate(record, **kwargs):
         with open(path, "w") as f:
             yaml.safe_dump({
                 "schema_version": "1.0",
+                "maddening_version": "0.1.0",
                 "generated_date": "2026-03-12",
                 "anomalies": [record],
             }, f)

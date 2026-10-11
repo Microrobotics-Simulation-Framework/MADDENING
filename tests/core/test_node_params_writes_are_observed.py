@@ -25,6 +25,7 @@ import copy
 import json
 import os
 import pickle
+import struct
 import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -106,11 +107,30 @@ def test_every_mutation_through_the_mapping_counts():
     assert p._writes == 8 and p == {}
 
 
-def test_a_copy_is_a_fresh_mapping_and_the_rest_sees_a_dict():
+def test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it():
+    """``copy.deepcopy`` and ``pickle`` carry the counts and a lineage of
+    the copy's own: a graph copied with its nodes copies the counts it last
+    saw beside them, and a mapping that started again at zero read as
+    written (MADD-ANO-279).  ``copy.copy`` is a second mapping beside the
+    first, with nothing of a graph copied along: zero counts, its own
+    lineage.  The rest sees a ``dict``."""
     p = _ParamsDict(a=1.0, b=[1, 2])
     p["a"] = 2.0
+    successor = _ParamsDict({**p, "b": [3]})
+    successor._succeed(p)
     for twin in (copy.deepcopy(p), pickle.loads(pickle.dumps(p))):
-        assert type(twin) is _ParamsDict and twin == p and twin._writes == 0
+        assert type(twin) is _ParamsDict and twin == p
+        assert twin._write_counts() == p._write_counts() == {"a": 1}
+        assert twin._writes == 1 and twin._lineage is not p._lineage
+        twin["a"] = 3.0                                   # ... and counts on from there
+        assert twin._write_counts() == {"a": 2} and p._write_counts() == {"a": 1}
+    # Mappings that shared a lineage still share one, the copy's own.
+    for a, b in (copy.deepcopy((p, successor)), pickle.loads(pickle.dumps((p, successor)))):
+        assert a._lineage is b._lineage is not p._lineage
+        assert b._write_counts() == successor._write_counts() == {"a": 1, "b": 1}
+    beside = copy.copy(p)
+    assert type(beside) is _ParamsDict and beside == p and beside["b"] is p["b"]
+    assert beside._write_counts() == {} and beside._lineage is not p._lineage
     assert type(dict(p)) is dict and type(p.copy()) is dict
     assert isinstance(p, dict) and json.loads(json.dumps(p)) == {"a": 2.0, "b": [1, 2]}
     mapped = jax.tree.map(lambda x: x * 2, _ParamsDict(a=1.0, b=2.0))
@@ -419,6 +439,32 @@ def test_an_unchanged_mutable_value_is_not_a_write():
     assert not gm._dirty  # noqa: SLF001
 
 
+def test_a_copys_mapping_assigned_into_another_copys_node_is_taken_in():
+    """Each deep copy of a graph gets a lineage of its own, shared with
+    neither the original nor another copy.  The graph tells "my node's
+    mapping, counted on" from "a mapping from elsewhere" by the lineage
+    alone when the counts coincide: here two copies (and the original) each
+    write the stiffness once after the copy, so their counts are equal, and
+    one graph's mapping is assigned into another's node.  A lineage shared
+    between them would read "no write", and the graph would run its own
+    old leaf beside a node that says the new value (the audit's mutant
+    ``lineage_global``: 3.0 against 4.0)."""
+    gm = _spring()
+    gm.get_node("s").params["stiffness"] = 31.0
+    assert _k(gm) == 31.0
+    first, second = copy.deepcopy(gm), copy.deepcopy(gm)
+    for graph, k in ((first, 33.0), (second, 34.0), (gm, 35.0)):
+        graph.get_node("s").params["stiffness"] = k
+        assert _k(graph) == k
+    counts = {id(g): g.get_node("s").params._write_counts() for g in (gm, first, second)}
+    assert len(set(map(str, counts.values()))) == 1        # the counts coincide
+    for into, source, k in ((first, second, 34.0), (second, gm, 35.0)):
+        into.get_node("s").params = source.get_node("s").params
+        assert into.get_node("s").params["stiffness"] == k
+        assert _k(into) == k, f"the graph runs {_k(into)} beside its node's {k}"
+        assert _k_stepped(into) == pytest.approx(k, rel=1e-4)
+
+
 def test_values_compare_bit_for_bit():
     import numpy as np
 
@@ -426,6 +472,15 @@ def test_values_compare_bit_for_bit():
 
     assert _same_value([float("nan"), 1.0], [float("nan"), 1.0])
     assert not _same_value([0.0], [-0.0])
+    # A float and a complex are compared by their bits, as an array is: the
+    # sign and the payload of a NaN count, and a complex NaN equals itself.
+    nan = float("nan")
+    assert not _same_value(-nan, nan) and _same_value(-nan, -nan)
+    payload = struct.unpack("<d", struct.pack("<Q", 0x7FF8000000000001))[0]
+    assert payload != payload and not _same_value(payload, nan)
+    assert _same_value(complex(nan, 0.0), complex(nan, 0.0))
+    assert not _same_value(complex(nan, 0.0), complex(-nan, 0.0))
+    assert not _same_value(complex(0.0, 0.0), complex(0.0, -0.0))
     assert not _same_value([1.0], (1.0,))
     a = np.asarray([1.0, np.nan], np.float32)
     assert _same_value(a, a.copy())

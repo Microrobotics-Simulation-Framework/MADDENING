@@ -546,6 +546,63 @@ def test_each_way_out_the_refusal_names_compiles_and_steps():
     assert int(_report(staggered)["iterations"]) == 1
 
 
+class FluxCounter(SimulationNode):
+    """``x <- 1 + u / 4`` with the flux ``f = 2 x``; optionally a step counter ``n``."""
+
+    def __init__(self, name, *, counter):
+        super().__init__(name, 1.0)
+        self._counter = counter
+
+    def initial_state(self):
+        state = {"x": _zero(_F32)}
+        if self._counter:
+            state["n"] = _zero(jnp.int32)
+        return state
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=_F32, default=_zero(_F32))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        out = {"x": (1.0 + 0.25 * boundary_inputs["u"]).astype(_F32)}
+        if self._counter:
+            out["n"] = state["n"] + 1
+        return out
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        return {"f": 2.0 * state["x"]}
+
+
+def _flux_both_ways(*, counter):
+    from maddening.core.coupling.helpers import add_flux_coupling
+
+    gm = GraphManager()
+    gm.add_node(FluxCounter("a", counter=counter))
+    gm.add_node(FluxCounter("b", counter=False))
+    add_flux_coupling(gm, "a", "b", "f", "u")
+    add_flux_coupling(gm, "b", "a", "f", "u")
+    return _group(gm, ["a", "b"])
+
+
+def test_a_counter_on_a_loop_of_flux_edges_is_refused_though_it_feeds_nothing():
+    """The stated cost of deciding from the edges, pinned so that it is not a surprise.
+
+    A flux is taken to use its producer's whole state.  With fluxes both
+    ways, ``a``'s counter is read as feeding ``a``'s flux, that as feeding
+    ``b``'s, and that as feeding ``a``'s update: a loop, although the
+    counter is the pre-step count plus one.  The same pair without the
+    counter compiles and converges.  A refinement that reads which state
+    fields a flux function uses would let this group through; this test
+    then changes with it.
+    """
+    with pytest.raises(ValueError, match=r"a\.n \(int32\) -> a\.n \(int32\)") as refused:
+        _flux_both_ways(counter=True).compile()
+    assert "a boundary flux to use its producer's whole state" in str(refused.value)
+    plain = _flux_both_ways(counter=False)
+    plain.step()
+    assert _report(plain)["converged"]
+    assert float(plain.get_node_state("a")["x"]) == pytest.approx(2.0, rel=1e-5)
+
+
 def test_a_chain_that_does_not_close_is_not_a_loop():
     """Flags handed one way round an open chain are settled, not refused."""
     gm = _floor_loop(reader_first=True, relays=2)

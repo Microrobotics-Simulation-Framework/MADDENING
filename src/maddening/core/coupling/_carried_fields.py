@@ -105,7 +105,12 @@ would have to be carried from pass to pass outside the residual, and a
 solve could read ``converged=True`` while they still change.
 ``GraphManager.compile()`` refuses such a group
 (:func:`_refuse_nonfloat_loops`).  The decision is structural, so a loop is
-also seen where a node's ``update`` does not in fact use what it reads.
+also seen where a node's ``update`` does not in fact use what it reads.  The
+case to know: two members that exchange boundary fluxes both ways, one of
+them holding a step counter or a PRNG key.  A flux is taken to use its
+producer's whole state, so the counter is read as feeding itself round the
+two fluxes, and the group is refused although the counter is computed from
+the pre-step state alone.
 """
 
 from __future__ import annotations
@@ -257,7 +262,9 @@ def nonfloat_loop_refusal(group_nodes, chain: CarriedChain, state) -> Optional[s
         "loop in floating point (the residual then measures it), or compute it "
         "in a node outside the group, or set max_iterations=1 (one staggered "
         "pass, which iterates nothing). The loop is read from the edges: a member "
-        "is taken to use every field it reads in every field it computes."
+        "is taken to use every field it reads in every field it computes, and a "
+        "boundary flux to use its producer's whole state and everything the "
+        "producer reads."
     )
 
 

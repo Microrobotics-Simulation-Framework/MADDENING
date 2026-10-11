@@ -9999,8 +9999,13 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      None known.
+      The same class held for the entry's id: an `anomaly_id` given as a
+      list or a mapping raised `TypeError` (an unhashable value), in
+      v0.3.1 and in this release until it was reported as an error
+      ("anomaly_id must be a string, found ...") before 0.4.0 shipped.
+      None other known.
     verification:
+      - "tests/compliance/test_registry_version_field.py::TestTheNameIsChecked::test_an_unhashable_anomaly_id_is_reported_not_raised"
       - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_validator_reports_an_unhashable_enum_value_instead_of_raising"
       - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_gate_fails_on_a_planted_value_and_says_which_entry"
     github_issue: null

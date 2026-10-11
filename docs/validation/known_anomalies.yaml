@@ -18446,3 +18446,83 @@ anomalies:
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_same_call_in_float64_converges"
       - "tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py::test_the_loop_backend_solves_the_same_system_in_float32"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-265"
+    title: "An edge into a field that is also a declared external input never reached the node: the input replaced what the edge delivered on every step, with zeros when it was not fed, and nothing said so"
+    description: >
+      `GraphManager.add_edge("a", "b", "y", "p")` and
+      `GraphManager.add_external_input("b", "p")` on one graph, in either
+      order, compiled and stepped.  The step writes a node's external inputs
+      into its boundary inputs after its edges, so the input replaced the
+      edge's value: with `a` holding 7.0, `b` read 0.0 when `external_inputs`
+      was not passed and 3.0 when the input was fed 3.0, never 7.0.  An
+      additive edge was replaced the same way (0.0 and 3.0, not 7.0 or 10.0),
+      and so is a transformed or mapped one, inside a coupling group or
+      outside.  `validate()` returned no issue and no entry point warned
+      (`step`, `run`, `run_scan` and the others alike).  Measured on
+      `git archive` of v0.1.0, v0.2.0, v0.3.0 and v0.3.1 (CPU, jaxlib
+      0.11.0).  On those releases a dict that left the input out
+      (`external_inputs={}`, or one naming other inputs) was not completed
+      with zeros (MADD-ANO-099), so there, and only there, the edge's 7.0
+      reached the node; once 0.4.0's development completed the dict, the edge
+      was ignored on every call.  A graph assembled in two places is one way
+      to arrive at such a pair: one part declares the input for the case
+      where nothing is wired to the field, and a later part wires a node to
+      it.  The node then runs on zeros, and one that divides by its input
+      or normalises it goes on to NaN with nothing naming the cause.
+      Resolved in 0.4.0 by refusing the graph.  `compile()` raises one
+      `ValueError` that names every such edge and its external input, says
+      that the input would replace the edge, offers how a graph may come to
+      have both, and spells the two calls that resolve each pair (leave the
+      `add_external_input` out where the graph is built, since there is no
+      `remove_external_input`; or `remove_edge`).  `validate()` lists the
+      same text as one `ERROR` line.  `step`, `run`, `run_scan`,
+      `run_scan_with_history`, `run_sweep`, `run_adaptive` and
+      `run_adaptive_scan` raise it when they compile, a graph loaded with
+      `from_dict` raises it at its compile, the REST server answers 400 with
+      it from `POST /graph/compile`, `/sim/step` and `/sim/run`, and no FMU
+      is described from such a graph (the export takes a compiled graph and
+      compiles nothing).  The readers that turn edges into a node's inputs
+      without compiling (`resolve_boundary_inputs`, `check_conservation`,
+      through `GraphManager._boundary_inputs_from`) raise it too: until this
+      entry they applied the step's old rule and answered zeros for a graph
+      that had never been compiled.  What an external input does to a field
+      without an edge is unchanged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the node ran on zeros, or on the
+      fed value, where the graph's author had wired an edge, and nothing
+      said so.  Not `critical`: it needs an edge and an external input
+      declared on one field, and the node's state shows the value it ran on.
+      `context_dependent` because the size of the difference is whatever the
+      edge would have delivered.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.graph_manager.GraphManager.validate"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On an affected release, give a field an edge or an external input, not
+      both: leave the `add_external_input` call out, or remove the edge.  A
+      0.3.x graph that has both runs on the edge only when `external_inputs`
+      is a dict that leaves the input out.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A graph with both on one field no longer compiles and must drop one of
+      them; the error names the pair and the two calls.  That includes a
+      graph that fed the input on every step and so ran as its author meant:
+      its edge never delivered and is to be removed.  The refusal is by
+      name, at compile time; nothing is checked when the edge or the input
+      is added, since a graph is built in any order.
+    verification:
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_compile_raises_one_value_error_and_validate_lists_it_in_either_order"
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_the_message_names_the_pair_and_both_fixes_and_only_suggests_how_it_came_about"
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_every_kind_of_edge_onto_an_external_input_is_refused"
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_several_pairs_give_one_error_that_names_them_all_in_the_order_of_the_edges"
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_every_stepping_entry_point_refuses_with_the_text_compile_raises"
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_a_config_that_holds_both_loads_and_is_refused_when_it_is_compiled"
+      - "tests/core/test_an_edge_onto_an_external_input_is_refused.py::test_no_fmu_is_described_from_such_a_graph"
+      - "tests/api/test_an_edge_onto_an_external_input_is_refused_over_rest.py::test_an_edge_posted_onto_an_external_input_is_a_400_wherever_the_graph_is_compiled"
+    github_issue: null

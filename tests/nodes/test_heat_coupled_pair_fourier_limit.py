@@ -403,11 +403,16 @@ def test_a_transform_it_does_not_recognise_is_not_judged():
 
 
 def test_no_warning_when_something_else_also_writes_the_datum():
+    """The second writer is an external input on the wired field: a graph
+    ``compile()`` refuses (MADD-ANO-265).  The advisory has nothing to say
+    of it, and ``validate()`` lists the refusal."""
     gm = _rods(GraphManager(), [0.45, 0.45])
     _couple(gm, "a", "b")
     gm.add_external_input("a", "right_temperature")
     _group(gm, ["a", "b"])
     assert _anomaly_issues(gm) == []
+    assert any("an edge and a declared external input target the same field" in i
+               for i in gm.validate())
 
 
 def test_no_warning_for_an_additive_exchange():

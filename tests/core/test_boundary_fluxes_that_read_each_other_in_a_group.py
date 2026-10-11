@@ -392,6 +392,18 @@ class Branching(Side):
         return {"q": q, "steady": 2.0 * state["u"]}
 
 
+class Fallback(Side):
+    """Its flux reads ``s`` only when ``x`` is not handed to it."""
+
+    def boundary_input_spec(self):
+        return {name: BoundaryInputSpec(shape=(), dtype=F, default=ZERO) for name in "rsx"}
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        if "x" in boundary_inputs:
+            return {"q": 2.0 * state["u"]}
+        return {"q": state["u"] + boundary_inputs.get("s", ZERO)}
+
+
 def _reads(node, handed, absent=()):
     gm = GraphManager()
     gm.add_node(node)
@@ -408,6 +420,9 @@ def test_each_flux_of_a_node_is_asked_what_it_reads():
     branching = Branching("n", *coefficients(None, 0))
     assert _reads(branching, ["r", "x"]) == {"q": set(), "steady": set()}
     assert _reads(branching, ["r", "x"], ["x"]) == {"q": {"x"}, "steady": set()}
+    # Traced on the inputs the graph hands it, not on every input it declares.
+    assert _reads(Fallback("n", *coefficients(None, 0)), ["r", "s"]) == {"q": {"s"}}
+    assert _reads(Fallback("n", *coefficients(None, 0)), ["r", "s", "x"]) == {"q": set()}
     # An input the node does not declare cannot be traced: nothing is established.
     assert _reads(branching, ["r", "undeclared"]) is None
 

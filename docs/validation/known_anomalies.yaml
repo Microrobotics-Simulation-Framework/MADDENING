@@ -18392,9 +18392,8 @@ anomalies:
       was ignored on every call.  A graph assembled in two places is one way
       to arrive at such a pair: one part declares the input for the case
       where nothing is wired to the field, and a later part wires a node to
-      it.  The node then runs on zeros, and one that needs a non-zero input
-      (a unit quaternion, a divisor) goes on to NaN with nothing naming the
-      cause.
+      it.  The node then runs on zeros, and one that divides by its input
+      or normalises it goes on to NaN with nothing naming the cause.
       Resolved in 0.4.0 by refusing the graph.  `compile()` raises one
       `ValueError` that names every such edge and its external input, says
       that the input would replace the edge, offers how a graph may come to

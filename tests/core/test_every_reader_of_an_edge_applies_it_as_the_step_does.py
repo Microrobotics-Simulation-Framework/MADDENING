@@ -328,15 +328,18 @@ def test_an_edge_that_reads_a_flux_output_is_resolved_not_dropped():
 
 
 def test_two_nodes_that_read_each_others_flux_are_refused_not_guessed():
-    """Robin-Robin: each input is what the coupling iteration converged
-    to.  The diagnostic used to drop both flux edges without a word."""
+    """Each input needs the other node's flux, and a flux is not held in
+    the state, so the diagnostic cannot rebuild either from one.  It used
+    to drop both flux edges without a word.  (A coupling group does not
+    iterate fluxes either; with fluxes computed from the state, as here,
+    it compiles and solves.)"""
     gm = GraphManager()
     gm.add_node(_FluxOfState("a", [1.0, 4.0]))
     gm.add_node(_FluxOfState("b", [2.0, 3.0]))
     add_flux_coupling(gm, "a", "b", "qa", "u")
     add_flux_coupling(gm, "b", "a", "qa", "u")
     state = {"a": {"x": jnp.asarray([1.0, 4.0], F32)}, "b": {"x": jnp.asarray([2.0, 3.0], F32)}}
-    with pytest.raises(ValueError, match="depend on its own") as caught:
+    with pytest.raises(ValueError, match="lead back to its own") as caught:
         check_conservation(gm, state, [("a", "qa", "b", "qa")])
     assert "a -> b -> a" in str(caught.value)
 

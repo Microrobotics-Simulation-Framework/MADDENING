@@ -191,13 +191,32 @@ def add_robin_coupling(
     """Robin-Robin coupling between two nodes.
 
     Each node receives a Robin BC constructed from the other's value
-    and flux.  Requires both nodes to implement
-    ``compute_boundary_fluxes``.
+    and flux.
 
     The Robin combination is::
 
         robin_a = alpha * value_b + (1 - alpha) * flux_b
         robin_b = alpha * value_a + (1 - alpha) * flux_a
+
+    The two nodes must be in one coupling group (outside one, the flux
+    edge that closes the loop cannot be read: MADD-ANO-157).  A group
+    iterates its members' states and computes their boundary fluxes
+    again from the states on every pass, so what the group converges to
+    is the coupled solution when each flux field is
+
+    * a boundary flux (``compute_boundary_fluxes``) computed from the
+      node's **state**, not from the Robin datum it is handed; or
+    * a **state field** the node writes in ``update()``, which the group
+      iterates like any other.
+
+    If each node's ``compute_boundary_fluxes`` reads its Robin input,
+    the two fluxes depend on each other in a loop no pass solves, and
+    ``GraphManager.compile()`` refuses the group (``ValueError``; an
+    ``ERROR`` line of ``validate()``).  Before 0.4.0 such a group
+    compiled and reported ``converged=True`` at a state that was not the
+    coupled solution (MADD-ANO-273).  Carry such a flux in the state.
+    ``alpha=1`` does not lift the refusal: the flux edges are still
+    there, delivering the flux times zero.
 
     Parameters
     ----------
@@ -206,9 +225,10 @@ def add_robin_coupling(
     node_a, node_b : str
         Node names.
     value_field_a, flux_field_a : str
-        State field and flux field on node A.
+        State field and flux field on node A.  The flux field is a key
+        of ``compute_boundary_fluxes`` or a state field (see above).
     value_field_b, flux_field_b : str
-        State field and flux field on node B.
+        State field and flux field on node B, likewise.
     input_a, input_b : str
         Boundary input names (receiving Robin BC).
     alpha : float
@@ -315,10 +335,17 @@ def check_conservation(
         reads a field that is neither a state field nor a flux output of
         its source.
     ValueError
-        Two nodes read each other's flux outputs (Robin-Robin coupling,
-        say).  Such inputs are what the coupling iteration converged to
-        and cannot be rebuilt from a state alone; the diagnostic used to
-        drop them and compare fluxes computed without them.
+        The boundary inputs of a compared node read flux outputs through
+        edges that lead back to the node's own (two nodes that read each
+        other's fluxes, Robin-Robin coupling say).  A flux is not held
+        in the state, and each of these needs the other before it can be
+        computed, so the diagnostic cannot rebuild them from *state*; it
+        used to drop them and compare fluxes computed without them.
+        Asked of the edges alone, so it is raised too for a pair whose
+        fluxes are each computed from the state (which a coupling group
+        compiles and solves).  A coupling group whose fluxes do depend
+        on each other in a loop is refused by ``compile()``: the
+        iteration does not solve for them either.
     """
     from maddening.core._graph_specs import _node_fluxes  # noqa: PLC0415
 
@@ -337,9 +364,12 @@ def check_conservation(
             loop = " -> ".join(pending[pending.index(name):] + (name,))
             raise ValueError(
                 f"check_conservation: the boundary inputs of {name!r} read flux outputs "
-                f"that depend on its own ({loop}).  Inside a coupling group those are "
-                f"the values the iteration converged to, which cannot be rebuilt from a "
-                f"state alone, so the fluxes at this interface cannot be compared here"
+                f"through edges that lead back to its own ({loop}).  A flux is not held "
+                f"in the state, and each of these needs the other before it can be "
+                f"computed, so they cannot be rebuilt from a state alone and the fluxes "
+                f"at this interface cannot be compared here.  (A coupling group does not "
+                f"iterate fluxes either: compile() refuses one whose fluxes depend on "
+                f"each other in a loop.)"
             )
         upstream: dict[str, dict] = {}
         for edge in gm._edges:

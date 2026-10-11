@@ -2921,7 +2921,11 @@ claims:
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (jacobi_flux_sweeps)
     - docs/validation/known_anomalies.yaml (MADD-ANO-071)
   conditions: >-
-    flux edges inside a group.
+    flux edges inside a group whose pass reads every flux as the flux of
+    its iterate: fluxes computed from the state, or reading each other
+    along a chain the two sweeps reach.  A group whose fluxes read each
+    other in a loop, or along a longer chain against the sweep where the
+    seed is read, is refused at compile() (CPL-197).
   oracle: the Gauss-Seidel fixed point; per-pass flux evaluation counts.
   tests:
     - tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point
@@ -6753,7 +6757,9 @@ claims:
     sub-cycled member reads the group's iterate at every sub-step, so its
     term is implicit over the group's step and not its own sub-step, under
     each boundary_interpolation (MADD-ANO-027).  An edge from the node's
-    own boundary flux is iterated inside a group; outside one it cannot be
+    own boundary flux is iterated inside a group where that flux does not
+    itself read the input the edge delivers (one that does is a loop of
+    one flux, which compile() refuses: CPL-197); outside one it cannot be
     read (CPL-186, MADD-ANO-157), and validate()'s line for it says that
     and not that it reads the previous step.  auto_couple() groups loops
     of two or more nodes and leaves the edge explicit.  validate() gives
@@ -7072,6 +7078,85 @@ claims:
     16bit: narrowed
     jit: n/a
     grad: n/a
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
+- id: CPL-197
+  area: edges
+  claim: >-
+    What a coupling group converges to with flux edges between its members
+    is the solution of the coupled equations, or the group is not
+    compiled.  "A coupling group iterates the states of its members and not
+    their fluxes: every pass computes each flux again from the states", in
+    two sweeps, so compile() raises one ValueError, and validate() lists
+    one ERROR line in place of "handled by iterative coupling", for a group
+    whose "fluxes depend on each other in a loop", or read each other along
+    a chain that runs against the sweep order for more than one step where
+    the pass reads the seed; the message names the group, the fluxes, the
+    inputs and the edges, and the ways out it gives reach the coupled
+    solution.
+  sources:
+    - src/maddening/core/coupling/_flux_loops.py::_refuse_unsolved_fluxes
+    - src/maddening/core/coupling/_flux_loops.py::_flux_reads
+    - src/maddening/core/graph_manager.py::GraphManager._refuse_unsolved_group_fluxes
+    - src/maddening/core/coupling/helpers.py::add_robin_coupling
+    - docs/developer_guide/node_authoring.md#robin-coupling
+    - docs/validation/known_anomalies.yaml (MADD-ANO-273)
+  conditions: >-
+    Affine scalar members, so the reference is one linear system solved in
+    64-bit arithmetic; Gauss-Seidel and Jacobi, solver ift and fori;
+    tolerance 1e-6, states within 5e-6 of the reference.  Right and
+    compiled: a flux computed from the state (the Robin recipe); a chain
+    of three along the sweep and one step against it; under Gauss-Seidel a
+    chain two steps against the sweep whose last flux is read by a member
+    swept after its producer.  Refused: loops of one, two and three
+    fluxes, with hooks that index their input and hooks that tolerate its
+    absence; the chain two steps against the sweep under Jacobi, and under
+    both schedules where the last flux is read by its own producer; a flux
+    that reads its input times zero, an edge that delivers a flux times
+    zero, a hook that cannot be traced (the message says the dependence is
+    assumed), and a hook whose flux changes with which inputs it is handed
+    without reading any by value.  Ways out: the flux written to a state
+    field by update() (the Robin pair at loop gains 0.06, 0.25 and 0.56;
+    the chain), and the chain's nodes added in the order of the reads.
+    The readers of a graph never compiled (resolve_boundary_inputs,
+    check_conservation) raise too.  The criterion is sufficient, not
+    necessary: dependence is structural, and a group it refuses may be one
+    whose loop has no numerical effect.  A hook that indexes an input the
+    first sweep leaves out raises a ValueError naming the edge at the first
+    step, not at compile().  Not claimed for float64, mixed dtypes, 16-bit
+    floats, gradients, vmap, multi-rate graphs, sub-cycled groups,
+    predictors and warm starts, run_adaptive, checkpoints or sharded
+    graphs.
+  oracle: the float64 solution of the coupled linear system; the refusal and its text.
+  tests:
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_computed_from_the_state_alone_reaches_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_whose_seed_the_pass_reads_too_early_is_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_each_way_out_of_a_refused_chain_reaches_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_that_read_each_other_in_a_loop_are_refused
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_dependence_is_structural_and_an_edge_is_not_looked_into
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_cannot_be_traced_is_taken_to_read_every_input_and_the_message_says_so
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_each_flux_of_a_node_is_asked_what_it_reads
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_that_changes_with_the_inputs_it_is_handed_is_not_a_seed_of_one_sweep
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_no_hook_is_traced_for_a_group_its_edges_alone_pass
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_outside_a_group_the_loop_cannot_be_read
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_indexes_its_input_is_asked_for_its_fluxes_with_the_declared_inputs
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_indexes_an_input_the_first_sweep_leaves_out_is_told_so
+  status: verified
+  domains:
+    f32: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution
+    grad: narrowed
     vmap: narrowed
     multi_rate: narrowed
     sub_cycled: narrowed

@@ -401,6 +401,13 @@ Requirements:
 - Return a dict of JAX arrays
 - Keys become available as `source_field` on edges
 - Called automatically after each node update during edge resolution
+- Inside a coupling group, compute a flux from the state, or from inputs
+  that do not come from another member's flux in a loop: a flux is not part
+  of what a group iterates, so fluxes that read each other in a loop are
+  refused at `compile()` (see "Robin coupling" below for the way out).  A
+  hook that reads an input another member's flux delivers should read it
+  with `boundary_inputs.get(name, default)`: the first of the two sweeps
+  that compute a group's fluxes may reach the node before that flux exists.
 - On a multi-rate graph, a node slower than the base step holds its state
   between the base steps it fires on, and the hook is called on **every**
   base step with the state the node holds after that step and the
@@ -901,6 +908,22 @@ group: each node reads the other's flux, a flux exists only once its node has
 stepped, and outside a group one of the two reads would come before it (the
 step fails with a `KeyError` naming the flux field).  The value and the flux
 are added as they are, so choose `alpha` for fields in commensurate units.
+
+**What each node's flux may read.**  A coupling group iterates the states of
+its members and not their fluxes: every pass computes each flux again from the
+states.  So the recipe above solves the coupled equations when each node's
+`q` is computed from its **state** (a node that holds its boundary data in
+its state).  If `compute_boundary_fluxes` reads the Robin datum the node is
+handed (`q = h * (u - robin_in)`, say), the two fluxes depend on each other
+in a loop that the passes do not solve, and `compile()` refuses the group
+with a `ValueError` that names the loop; `validate()` lists it as an `ERROR`.
+Before 0.4.0 such a group compiled and reported `converged=True` at a state
+that was not the coupled solution (MADD-ANO-273).  For such nodes carry the
+flux in the state: compute `q` in `update()`, return it as a state field, and
+pass that field as `flux_field_a` / `flux_field_b`.  The group then iterates
+`q` together with `u` and measures its convergence; on two affine nodes whose
+flux loop has gain 0.56 that reaches the coupled solution to 3e-7 of itself,
+where the flux edges were 0.5 to 0.8 off.
 
 ## Transform Registration
 

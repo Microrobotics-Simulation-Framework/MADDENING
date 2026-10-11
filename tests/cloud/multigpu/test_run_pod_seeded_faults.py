@@ -37,6 +37,19 @@ node: a shard left out of the reduction or counted twice, ghost rows
 counted, the node's ``own`` mask ignored at a size that has pad rows, each
 of which must read off by its number of cells; and a step that does not
 keep ones ones, which must fail the precondition's own check.
+
+And two documented paths of ``ShardedUnstructuredNode`` were on no goal's
+path at all: the goals' node read no boundary input and took no ``params``,
+so a wrapper that zeroed every per-cell input, or doubled every injected
+parameter, passed all eight goals and closed all six items.  The node now
+reads a per-cell source and takes its weight from the injected ``params``
+in every goal that builds it, and the ``gradient`` goal differentiates with
+respect to both.  Their seeds (``_PATH_SEEDS``) are exact text of the
+wrapper: those two, an input whose ghost rows are not exchanged or whose
+rows are one off, a parameter that reaches one shard only -- each of which
+must fail ``indivisible``, ``forward`` and ``gradient`` -- and an input or
+a parameter that arrives right and loses its cotangent, which only the
+``gradient`` goal can see and must.
 """
 
 from __future__ import annotations
@@ -627,7 +640,7 @@ def test_the_gradient_goal_itself_fails_in_a_dry_run_on_each_seeded_cg_fault(nam
 _UNSTRUCTURED = "cloud/multigpu/sharded_unstructured.py"
 _PSUM = "                        out[k] = lax.psum(v, axis_name=mesh_axis)\n"
 _TOTAL = '            return {"x": new, "total": jnp.sum(new * own)}\n'
-_RELAX = "            return (1.0 - self._w) * x[: tbl.shape[0]] + self._w * g\n"
+_RELAX = "            new = own + w * (jnp.take(x, tbl, axis=0).mean(axis=-1) - own)\n"
 
 
 class CountSeed(NamedTuple):
@@ -652,16 +665,18 @@ _COUNT_SEEDS = {
         _TOTAL,
         '            return {"x": new, "total": jnp.sum(new * own)\n'
         '                    + jnp.sum(state_padded["x"][n_local:])}  # SEEDED FAULT\n'),
-    # Pad rows counted: a pad row starts at zero and takes half of its
-    # shard's first cell in the step, so each reads half a cell.
+    # Pad rows counted: a pad row starts at zero and moves towards its
+    # shard's first cell by the injected weight in the step, so each reads
+    # ``NODE_WEIGHT`` of a cell (a quarter).
     "own_mask_ignored": CountSeed(
         _TOTAL, '            return {"x": new, "total": jnp.sum(new)}  # SEEDED FAULT\n'),
     # One ulp over 1 in every cell, on both sides: the field parity cannot
-    # tell, and a limit of 1e-5 on the precondition would pass it.
+    # tell, and a limit of 1e-5 on the precondition would pass it.  (The
+    # mean is 2**-21 over 1, and the injected weight is a quarter.)
     "a_step_that_does_not_keep_ones": CountSeed(
         _RELAX,
-        "            return (1.0 - self._w) * x[: tbl.shape[0]] + self._w * g * (1.0 + 2.0 ** -22)"
-        "  # SEEDED FAULT\n"),
+        "            new = own + w * (jnp.take(x, tbl, axis=0).mean(axis=-1) * (1.0 + 2.0 ** -21)"
+        " - own)  # SEEDED FAULT\n"),
 }
 
 #: 225 = 15 x 15 cells do not divide by four: three of the four shards
@@ -704,13 +719,19 @@ def _count_seeded_runner(tmp: Path, name: str | None):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+    return _runner_with_unstructured_wrapper(name, _count_seeded_source(seed))
+
+
+def _runner_with_unstructured_wrapper(name: str, source: str):
+    """The runner as a module of its own, with the ``ShardedUnstructuredNode``
+    of ``source`` (the wrapper's seeded text) in its namespace."""
     from maddening.core.compliance import stability as stab
 
     before = dict(stab._STABILITY_REGISTRY)
     real = stab.stability
     stab.stability = lambda level: (lambda obj: obj)
     try:
-        wrapper = _exec_module(f"run_pod_seeded_unstructured_{name}", _count_seeded_source(seed))
+        wrapper = _exec_module(f"run_pod_seeded_unstructured_{name}", source)
     finally:
         stab.stability = real
     assert stab._STABILITY_REGISTRY == before, "a seeded copy registered a stable surface"
@@ -803,12 +824,12 @@ def test_a_seeded_miscount_fails_the_forward_goals_exact_count(name, tmp_path):
     is finite.  Measured (reverse Cuthill-McKee, four shards; the same on
     jax 0.10.2, 0.11.0 and 0.11.2), at 225 and 256 cells: shard 1 left out
     or counted twice, 56 and 64; ghost rows counted, 76 and 78; the mask
-    ignored, 1.5 (three pad rows, half a cell each) and 0 -- at 256 cells
-    there is no pad row and nothing is miscounted.  And at the session's
-    sizes: a shard 25,122, 75,076 and 250,000 cells; ghost rows 1,532,
-    2,646 and 4,830; the mask 1.5 at 100,489 cells and 0 at 300,304 and
-    1,000,000.  A step that does not keep ones ones fails the precondition
-    on every side, by one ulp of 1."""
+    ignored, 0.75 (three pad rows, a quarter of a cell each: the injected
+    weight) and 0 -- at 256 cells there is no pad row and nothing is
+    miscounted.  And at the session's sizes: a shard 25,122, 75,076 and
+    250,000 cells; ghost rows 1,532, 2,646 and 4,830; the mask 0.75 at
+    100,489 cells and 0 at 300,304 and 1,000,000.  A step that does not
+    keep ones ones fails the precondition on every side, by one ulp of 1."""
     seed = _COUNT_SEEDS[name]
     rp = _count_seeded_runner(tmp_path, name)
     results, checks, layouts, _built = _forward_part(rp)
@@ -827,7 +848,8 @@ def test_a_seeded_miscount_fails_the_forward_goals_exact_count(name, tmp_path):
         off_by = {"shard_1_left_out_of_the_reduction": layout.n_local[1],
                   "shard_1_counted_twice": layout.n_local[1],
                   "ghost_rows_counted": sum(layout.n_ghost),
-                  "own_mask_ignored": 0.5 * sum(layout.n_local_max - k for k in layout.n_local),
+                  "own_mask_ignored": rp.NODE_WEIGHT * sum(layout.n_local_max - k
+                                                           for k in layout.n_local),
                   }[name]
         assert status[count_un] == status[still_un] == "passed"
         for method in rp.METHODS:
@@ -883,3 +905,297 @@ def test_the_forward_goal_itself_fails_in_a_dry_run_on_each_seeded_miscount(name
     else:
         assert not [n for n in failed if f" {_ONES_UNSHARDED} " in n], failed
     assert "CHECK FAILED" in log
+
+
+# --- the unstructured wrapper's per-cell inputs and its injected parameters -----
+
+_CELL_INPUT = ("                k: (exchange_unstructured(v, layout=layout, mesh_axis=mesh_axis, "
+               "method=exchange)\n")
+_INJECTION = ('            extra = {"params": local_params} if (accepts_params and local_params) '
+              "else {}\n")
+
+#: Every goal that builds ``ShardedUnstructuredNode``: each feeds the node its
+#: per-cell source and injects its weight on every step.
+_UNSTRUCTURED_GOALS = ("indivisible", "forward", "gradient")
+
+
+class PathSeed(NamedTuple):
+    old: str
+    new: str
+    #: The rollout derivatives (``run_pod.ROLLOUT_WRT``) the fault moves.  A
+    #: fault in a value moves all three: the loss's square term puts the
+    #: final field into every adjoint.
+    moves: tuple = ("start", "source", "weight")
+    #: The goals it must fail; every other goal that builds the wrapper
+    #: must pass.  A fault that hands the node the right values and drops a
+    #: cotangent is the ``gradient`` goal's alone.
+    fails: tuple = _UNSTRUCTURED_GOALS
+
+
+_PATH_SEEDS = {
+    # The first two passed all eight goals, and closed all six items on a
+    # dry run relabelled as four GPUs, until schema 10.
+    "cell_inputs_are_zeroed": PathSeed(
+        "                    if k in cell_bi else v)\n",
+        "                    * 0.0 if k in cell_bi else v)  # SEEDED FAULT\n"),
+    "injected_params_are_doubled": PathSeed(
+        _INJECTION,
+        '            extra = {"params": {n: 2.0 * leaf for n, leaf in local_params.items()}} '
+        "if (accepts_params and local_params) else {}  # SEEDED FAULT\n"),
+    # An input split over the mesh and padded, not ghost-exchanged: every
+    # owned row right, every ghost row zero.
+    "cell_inputs_ghost_rows_are_not_exchanged": PathSeed(
+        _CELL_INPUT,
+        "                k: (jnp.concatenate([v, jnp.zeros((layout.n_ghost_max,) + v.shape[1:], "
+        "v.dtype)])  # SEEDED FAULT\n"),
+    # Each row of a shard holds the row before it.
+    "cell_inputs_are_one_row_off": PathSeed(
+        _CELL_INPUT,
+        "                k: (exchange_unstructured(jnp.roll(v, 1, axis=0), layout=layout, "
+        "mesh_axis=mesh_axis, method=exchange)  # SEEDED FAULT\n"),
+    # The injection reaches shard 0; the others run on the node's own value.
+    "injected_params_reach_shard_0_only": PathSeed(
+        _INJECTION,
+        '            extra = {"params": {n: jnp.where(idx == 0, leaf, inner.params[n]) '
+        "for n, leaf in local_params.items()}} if (accepts_params and local_params) else {}"
+        "  # SEEDED FAULT\n"),
+    # Right values, no cotangent: nothing a forward run compares can tell.
+    "cell_inputs_lose_their_cotangent": PathSeed(
+        _CELL_INPUT,
+        "                k: (exchange_unstructured(lax.stop_gradient(v), layout=layout, "
+        "mesh_axis=mesh_axis, method=exchange)  # SEEDED FAULT\n",
+        moves=("source",), fails=("gradient",)),
+    "injected_params_lose_their_cotangent": PathSeed(
+        _INJECTION,
+        '            extra = {"params": {n: lax.stop_gradient(leaf) for n, leaf in '
+        "local_params.items()}} if (accepts_params and local_params) else {}  # SEEDED FAULT\n",
+        moves=("weight",), fails=("gradient",)),
+}
+
+#: 225 cells: three shards carry a pad row and the cells stay as reverse
+#: Cuthill-McKee scatters them.  256: four equal shards, which the runner
+#: renumbers into partition order so that the wrapper takes a per-cell
+#: input at all (``cells_in_an_order_the_wrapper_takes``).
+_PATH_CELLS = (225, 256)
+
+
+def _path_seeded_source(seed: PathSeed) -> str:
+    text = (_PKG / _UNSTRUCTURED).read_text(encoding="utf-8")
+    assert text.count(seed.old) == 1, (
+        f"the seed no longer matches {_UNSTRUCTURED} exactly once ({text.count(seed.old)} "
+        "matches): the wrapper changed; update the seed to the new code")
+    return text.replace(seed.old, seed.new)
+
+
+@pytest.mark.parametrize("name", sorted(_PATH_SEEDS))
+def test_every_path_seed_applies_once_to_the_wrapper_as_it_stands(name):
+    seeded = _path_seeded_source(_PATH_SEEDS[name])
+    assert "SEEDED FAULT" in seeded
+    compile(seeded, name, "exec")
+
+
+def test_the_path_seeds_name_goals_that_build_the_wrapper_and_derivatives_it_takes():
+    """The seeds' expectations are about the runner as it stands: the goals
+    that build ``NeighbourMeanNode`` are the three named here (each calls
+    ``build_pair`` and ``node_inputs``, and no other goal does), a seed
+    fails all of them or the ``gradient`` goal alone, and the items those
+    goals decide are 1, 3 and 5."""
+    rp = _runner()
+    text = _RUNNER.read_text(encoding="utf-8")
+    def body(function: str) -> str:
+        return text.split(f"def {function}(")[1].split("\ndef ")[0]
+
+    # the gradient goal builds its pairs in the part the per-push test runs
+    assert "run_gradient_rollout(" in body("run_gradient")
+    parts = {**{goal: f"run_{goal}" for goal in rp.ALL_GOALS}, "gradient": "run_gradient_rollout"}
+    builds = {goal for goal, fn in parts.items() if " build_pair(" in body(fn)}
+    feeds = {goal for goal, fn in parts.items() if " node_inputs(" in body(fn)}
+    assert builds == feeds == set(_UNSTRUCTURED_GOALS)
+    for name, seed in _PATH_SEEDS.items():
+        assert set(seed.moves) <= set(rp.ROLLOUT_WRT) and seed.moves, name
+        assert seed.fails in (_UNSTRUCTURED_GOALS, ("gradient",)), name
+        assert (seed.fails == _UNSTRUCTURED_GOALS) == (seed.moves == rp.ROLLOUT_WRT), name
+    decided = {i for i, (_c, goals) in rp.CHECKLIST.items() if set(goals) & set(_UNSTRUCTURED_GOALS)}
+    assert decided == {1, 3, 5}
+    assert {i for i, (_c, goals) in rp.CHECKLIST.items() if "gradient" in goals} == {3}
+    assert rp.NODE_WEIGHT not in (0.5, 0.0, 1.0)       # not the node's own, and a relaxation
+
+
+def _paths_part(rp, cells: int) -> tuple[dict, dict, bool]:
+    """``({check name: status} of the forward goal, {method: {wrt: max_rel}} of
+    the gradient goal's rollout, renumbered)`` at ``cells``: the goals' own
+    functions, in-process on four CPU virtual devices."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp._load_backend()
+    args = SimpleNamespace(mesh=None, synthetic="grid", partition="auto", cells=[cells],
+                           n_devices=_N_DEV, steps=2, grad_steps=3, warmup=0, repeats=1)
+    doc = rp.run_forward(args, {})
+    (entry,) = doc["results"]
+    n, edges, _pa, source = rp._mesh_source(args, cells)
+    pa, _how = rp._partition_for(args, source, n, edges, None, _N_DEV)
+    edges, pa, renumbered = rp.cells_in_an_order_the_wrapper_takes(n, edges, pa, _N_DEV)
+    assert renumbered == entry["renumbered"]
+    rollout = rp.run_gradient_rollout(args, rp._mesh_for(_N_DEV), n, edges, pa)
+    keys = {"start": "parity", "source": "parity_source", "weight": "parity_weight"}
+    return ({c["name"]: rp.check_status(c) for c in doc["checks"]},
+            {m: {wrt: rollout[m][key]["max_rel"] for wrt, key in keys.items()}
+             for m in rp.METHODS}, renumbered)
+
+
+@pytest.mark.parametrize("cells, renumbered", list(zip(_PATH_CELLS, (False, True))))
+def test_the_unstructured_goals_pass_on_the_wrapper_as_it_stands(cells, renumbered):
+    """The control of the seeds below: the ``forward`` goal and the
+    ``gradient`` goal's rollout, in-process on the real wrapper, pass every
+    check at a size with pad rows and at the one the runner renumbers."""
+    rp = _runner()
+    forward, rollout, was = _paths_part(rp, cells)
+    assert was is renumbered
+    assert set(forward.values()) == {"passed"}, forward
+    assert all(rel <= rp.LIMITS["gradient"] for by in rollout.values()
+               for rel in by.values()), rollout
+
+
+@pytest.mark.parametrize("name", sorted(_PATH_SEEDS))
+def test_the_unstructured_goals_show_each_seeded_fault_of_an_input_or_a_parameter(
+        name, tmp_path):
+    """The per-push half of the slow test below: the ``forward`` goal and
+    the ``gradient`` goal's rollout, run in-process on the seeded wrapper
+    at a size with pad rows.  A fault in a value fails the field's parity
+    under both transports -- and nothing else of the ``forward`` goal: its
+    count runs on a zero source, which every one of these faults leaves
+    zero, and stays exact -- and moves all three derivatives; a dropped
+    cotangent passes the whole ``forward`` goal and moves its own
+    derivative only."""
+    seed = _PATH_SEEDS[name]
+    rp = _runner_with_unstructured_wrapper(name, _path_seeded_source(seed))
+    cells = _PATH_CELLS[0]
+    forward, rollout, _ = _paths_part(rp, cells)
+    failed = {n for n, s in forward.items() if s != "passed"}
+    field = {f"{cells} cells {m} x vs unsharded max_rel" for m in rp.METHODS}
+    assert failed == (field if seed.fails == _UNSTRUCTURED_GOALS else set()), forward
+    assert {n for n, s in forward.items() if s == "failed"} == failed
+    for method in rp.METHODS:
+        moved = {wrt for wrt, rel in rollout[method].items()
+                 if not rel <= rp.LIMITS["gradient"]}
+        assert moved == set(seed.moves), (method, rollout[method])
+        # by orders of magnitude, not by rounding
+        assert all(rollout[method][wrt] > 100 * rp.LIMITS["gradient"] for wrt in seed.moves)
+
+
+def test_a_per_cell_input_is_refused_on_equal_shards_until_the_cells_are_renumbered():
+    """Why the unstructured goals renumber some meshes, and that it is all
+    they change.  At 256 cells reverse Cuthill-McKee gives four shards of
+    64: partition layout and global order have one length, the wrapper
+    cannot tell them apart and refuses the per-cell source by name.  With
+    the cells in partition order it takes it.  The renumbered mesh is the
+    same graph under the permutation, with each shard's cells in the order
+    they had; a mesh with a pad row, or already in partition order, is
+    returned untouched."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner()
+    rp._load_backend()
+    mesh = rp._mesh_for(_N_DEV)
+    n, edges = rp.synthetic_mesh("grid", _PATH_CELLS[1])
+    pa, how = rp.partition_cells(n, edges, _N_DEV, "rcm")
+    assert how == "rcm" and set(np.bincount(pa)) == {n // _N_DEV}
+    assert not np.array_equal(np.argsort(pa, kind="stable"), np.arange(n))
+
+    _, sharded, layout = rp.build_pair(n, edges, mesh, pa, "all_to_all")
+    _, bi, params = rp.node_inputs(n, layout, mesh)
+    with pytest.raises(ValueError, match="does not keep cells in global order"):
+        sharded.update(sharded.initial_state(), bi, 1.0, params=params)
+
+    new_edges, new_pa, renumbered = rp.cells_in_an_order_the_wrapper_takes(n, edges, pa, _N_DEV)
+    assert renumbered
+    order = np.argsort(pa, kind="stable")              # new id k is old cell order[k]
+    assert np.array_equal(new_pa, pa[order]) and np.all(np.diff(new_pa) >= 0)
+    assert np.array_equal(order[new_edges], edges)     # the same graph, relabelled
+    for d in range(_N_DEV):                            # each shard's cells in their old order
+        assert np.all(np.diff(order[new_pa == d]) > 0)
+    ref, sharded, layout = rp.build_pair(n, new_edges, mesh, new_pa, "all_to_all")
+    bi_ref, bi, params = rp.node_inputs(n, layout, mesh)
+    got = sharded.gather_global(sharded.update(sharded.initial_state(), bi, 1.0, params=params))
+    want = ref.update(ref.initial_state(), bi_ref, 1.0, params=params)
+    assert np.array_equal(np.asarray(got["x"]), np.asarray(want["x"]))
+
+    for cells, method in ((_PATH_CELLS[0], "rcm"), (_PATH_CELLS[1], "contiguous")):
+        n, edges = rp.synthetic_mesh("grid", cells)
+        pa, _ = rp.partition_cells(n, edges, _N_DEV, method)
+        same_edges, same_pa, renumbered = rp.cells_in_an_order_the_wrapper_takes(
+            n, edges, pa, _N_DEV)
+        assert not renumbered and same_edges is edges and np.array_equal(same_pa, pa)
+    # and the same call a second time changes nothing more
+    assert not rp.cells_in_an_order_the_wrapper_takes(n, new_edges, new_pa, _N_DEV)[2]
+
+
+def _run_unstructured_goals(tmp: Path, src: Path) -> tuple[dict, dict, str]:
+    """``({goal: exit status}, {goal: [its file]}, the logs' tails)`` of the
+    three goals that build the unstructured wrapper, each as a dry run of
+    its own at ``_PATH_CELLS``, on the library under ``src``."""
+    rp = _runner()
+    codes, docs, log = {}, {}, ""
+    for goal in _UNSTRUCTURED_GOALS:
+        out = tmp / "out"
+        proc = run_pod(_RUNNER, ["--goal", goal, "--dry-run", "--cells",
+                                 *map(str, _PATH_CELLS), "--out", out],
+                       pythonpath=str(src), timeout=900, n_devices=_N_DEV)
+        codes[goal], docs[goal] = proc.returncode, rp._load_results(out, goal)
+        log += proc.stdout[-3000:] + proc.stderr[-2000:]
+    return codes, docs, log
+
+
+# Per push: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_unstructured_goals_show_each_seeded_fault_of_an_input_or_a_parameter
+# and tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_unstructured_goals_pass_on_the_wrapper_as_it_stands
+@pytest.mark.slow
+@pytest.mark.parametrize("name", [None, *sorted(_PATH_SEEDS)],
+                         ids=["no_seed", *sorted(_PATH_SEEDS)])
+def test_a_seeded_fault_of_an_input_or_a_parameter_fails_every_goal_on_its_path(
+        name, tmp_path):
+    """The goals as a dry run starts them, on a scratch copy of the library
+    with one seed: each goal the seed names exits 1 with a record
+    ``--summarise`` accepts, every other one exits 0, and read as a
+    four-GPU run every checklist item a failing goal decides has FAILED
+    (1, 3 and 5; a dropped cotangent, 3).  Unseeded, all three pass."""
+    rp = _runner()
+    seed = None if name is None else _PATH_SEEDS[name]
+    src = _scratch_library(tmp_path, None if seed is None
+                           else Seed(seed.old, seed.new, file=_UNSTRUCTURED))
+    codes, docs, log = _run_unstructured_goals(tmp_path, src)
+    fails = () if seed is None else seed.fails
+    verdicts = {g: rp.goal_verdict(d) for g, d in docs.items()}
+    assert verdicts == {g: "FAIL" if g in fails else "PASS" for g in _UNSTRUCTURED_GOALS}, (
+        verdicts, log)
+    assert codes == {g: int(g in fails) for g in _UNSTRUCTURED_GOALS}, (codes, log)
+    for goal, (doc,) in docs.items():
+        assert rp.record_problems(doc) == [], (goal, rp.record_problems(doc))
+        assert "raised" not in doc, (goal, doc.get("raised"))
+    status = {i: s for i, (s, _) in rp.checklist_status(_as_four_gpus(docs)).items()}
+    failing = {i for i, (_c, goals) in rp.CHECKLIST.items() if set(goals) & set(fails)}
+    assert {i for i, s in status.items() if s == "FAILED"} == failing, status
+    assert "CLOSED" not in {status[i] for i in failing}
+    if seed is None:
+        return
+    assert failing == ({1, 3, 5} if fails == _UNSTRUCTURED_GOALS else {3})
+    # what failed is the parity with the unsharded node, at both sizes --
+    # the one with pad rows and the one the runner renumbers
+    for goal in fails:
+        (doc,) = docs[goal]
+        failed = [c["name"] for c in doc["checks"] if rp.check_status(c) == "failed"]
+        assert failed and all(" vs unsharded max_rel" in n for n in failed), (goal, failed)
+        if goal != "indivisible":
+            for cells in _PATH_CELLS:
+                assert any(n.startswith(f"{cells} cells ") for n in failed), (goal, failed)
+    (gradient,) = docs["gradient"]
+    failed = {c["name"] for c in gradient["checks"] if rp.check_status(c) == "failed"}
+    named = {"start": " grad vs unsharded", "source": " grad wrt the per-cell source vs",
+             "weight": " grad wrt the injected weight vs"}
+    for wrt, part in named.items():
+        assert any(part in n for n in failed) == (wrt in seed.moves), (wrt, sorted(failed))
+    assert not [n for n in failed if " sharded_cg " in n], failed
+

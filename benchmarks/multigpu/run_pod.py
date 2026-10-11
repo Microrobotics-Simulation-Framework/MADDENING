@@ -338,9 +338,6 @@ LIMITS = {
     # A rollout adjoint without a Krylov solve: the same round-off, once
     # more through the reverse pass.  Unchanged from schema 2.
     "gradient": 1e-5,
-    # PLACEHOLDER (p4-92): the rollout's derivative with respect to the
-    # injected weight, one float32 sum over every cell.
-    "gradient_weight": 1e-4,
     # The coupling group's implicit-function-theorem adjoint is a GMRES
     # solve that stops at rtol = 100 ulp = 1.2e-5 of the right-hand side;
     # two correct solves (sharded and unsharded) may stop on different
@@ -411,6 +408,10 @@ NODE_WEIGHT = 0.25
 #: in one reverse pass: the start, the per-cell source (both per cell) and
 #: the injected weight (one number).
 ROLLOUT_WRT = ("start", "source", "weight")
+
+#: The weight of the square term in that rollout's loss (:func:`rollout_loss`
+#: says what it is for and gives the measurements).
+ROLLOUT_SQUARE = 4.0
 
 #: The parameters the ``hybrid`` and ``coupled`` goals differentiate with
 #: respect to, as ``(node, params key)``; the check names spell them out.
@@ -1792,21 +1793,26 @@ def forward_checks(results: list, n_devices: int) -> list:
 
 def rollout_loss(x, weights, cells):
     """The scalar the ``gradient`` goal's rollout ends in: ``sum(x * weights)
-    + sum(cells * x**2) / 2``.
+    + ROLLOUT_SQUARE / 2 * sum(cells * x**2)``.
 
     The first term gives every cell an adjoint of its own (white noise).
     The second is there for the derivative with respect to the weight, the
-    one derivative that is a sum over every cell: relaxing a field lowers
-    ``sum(x**2)``, so that sum's terms are mostly of one sign and it is of
-    the size of its terms' sum of magnitudes, where the first term's alone
-    is a sum of ``n`` terms of either sign that cancels to about
-    ``sqrt(n)`` of them (``LIMITS["gradient_weight"]``).
+    one derivative that is a single sum over every cell and step.  Under
+    the first term alone that sum is of terms of either sign and cancels:
+    in float64 its terms' magnitudes add up to 215, 12,700 and 2,300 times
+    the sum itself at the session's 100,489, 300,304 and 1,000,000 cells,
+    so two float32 orders of addition would differ by rounding times that
+    -- no limit on such a number tells a correct wrapper from a wrong one.
+    Relaxing a field lowers ``sum(x**2)``, so the second term's share has
+    one sign nearly everywhere, and with it the ratio is 1.7, 1.2 and 1.5
+    there (8 and 28 at the dry run's 225 and 256 cells, where the field is
+    smooth and the sum small; 1.7 at 1024).
 
     ``cells`` is 1 on a cell and 0 on a pad row of the partition layout
     (all ones unsharded): a pad row is no cell, and it does not stay zero
     under the step.  ``weights`` is zero there already.
     """
-    return jnp.sum(x * weights) + 0.5 * jnp.sum(cells * (x * x))
+    return jnp.sum(x * weights) + (0.5 * ROLLOUT_SQUARE) * jnp.sum(cells * (x * x))
 
 
 def _laplacian_matvec_unsharded():
@@ -1964,6 +1970,87 @@ def run_gradient_cg(args, mesh, n_cg: int, rng) -> dict:
     return cg
 
 
+def run_gradient_rollout(args, mesh, n: int, edges: np.ndarray, pa: np.ndarray) -> dict:
+    """The rollout part of the ``gradient`` goal on one mesh: reverse mode
+    through ``args.grad_steps`` steps of ``NeighbourMeanNode``, sharded under
+    each transport against unsharded, with respect to everything in
+    ``ROLLOUT_WRT`` at once.
+
+    The start's derivative crosses the ghost exchange backwards; the
+    source's is the adjoint of the wrapper's per-cell input path (split
+    over the mesh, ghost-exchanged) and the weight's that of its params
+    injection (replicated to every shard, so its cotangents are summed
+    over the mesh).  A wrapper that hands the node the right values and
+    drops a cotangent passes every forward check and fails here.
+    """
+    D = args.n_devices
+    w_global = np.random.default_rng(1).standard_normal(n).astype(np.float32)
+    rollout = {}
+    # (i) reverse mode through a rollout: jitted grad on both sides,
+    # compile time apart, statics placed once (like-for-like).  One
+    # reverse pass gives the derivative with respect to the start, to
+    # the per-cell source and to the injected weight (ROLLOUT_WRT).
+    ref_node, _, layout = build_pair(n, edges, mesh, pa, "all_to_all")
+    bi_ref, _, params = node_inputs(n, layout, mesh)
+    w_j = jnp.asarray(w_global)
+
+    def loss_ref(x0, source, weight, ref_node=ref_node, w_j=w_j):
+        st = {"x": x0}
+        for _ in range(args.grad_steps):
+            st = {"x": ref_node.update(st, {"source": source}, 1.0,
+                                       params={"weight": weight})["x"]}
+        return rollout_loss(st["x"], w_j, jnp.ones_like(w_j))
+
+    at_ref = (ref_node.initial_state()["x"], bi_ref["source"], params["weight"])
+    g_ref_fn = jax.jit(jax.grad(loss_ref, argnums=(0, 1, 2)))
+    ref_compile_s, _ = compile_seconds(g_ref_fn, *at_ref)
+    g_ref = dict(zip(ROLLOUT_WRT, _host(g_ref_fn(*at_ref))))
+    ref_t = timed(lambda: g_ref_fn(*at_ref), warmup=args.warmup, repeats=args.repeats)
+    rollout["unsharded"] = {"grad": ref_t, "compile_s": ref_compile_s}
+    for method in METHODS:
+        _, sharded, layout = build_pair(n, edges, mesh, pa, method)
+        _, bi, _ = node_inputs(n, layout, mesh)
+        state0 = sharded.initial_state()
+        x0 = state0["x"]
+        w_layout = place_on_mesh(layout_slab(w_global, layout), mesh)
+        cells = place_on_mesh(layout_slab(np.ones(n, np.float32), layout), mesh)
+        step_fn = sharded._get_sharded_fn(state0, bi, params)
+        statics = _placed_statics(sharded, layout, mesh)
+        dt_j = jnp.asarray(1.0)
+        presharded = require_presharded(
+            [x0, bi["source"], w_layout, cells, *statics.values()], mesh,
+            f"gradient/rollout/{method}")
+
+        def loss_sh(x0, source, weight, step_fn=step_fn, statics=statics, dt_j=dt_j,
+                    w_layout=w_layout, cells=cells):
+            st = {"x": x0}
+            for _ in range(args.grad_steps):
+                st = {"x": step_fn(st, {"source": source}, dt_j, statics,
+                                   {"weight": weight})["x"]}
+            return rollout_loss(st["x"], w_layout, cells)
+
+        at = (x0, bi["source"], params["weight"])
+        g_fn = jax.jit(jax.grad(loss_sh, argnums=(0, 1, 2)))
+        compile_s, _ = compile_seconds(g_fn, *at)
+        g_sh = dict(zip(ROLLOUT_WRT, _host(g_fn(*at))))
+        for wrt in ("start", "source"):         # per cell, in partition layout
+            g_sh[wrt] = gather_value(per_shard=g_sh[wrt].reshape(D, layout.n_local_max),
+                                     layout=layout)
+        stats = timed(lambda: g_fn(*at), warmup=args.warmup, repeats=args.repeats)
+        parity = {wrt: _diff(g_sh[wrt], g_ref[wrt]) for wrt in ROLLOUT_WRT}
+        rollout[method] = {"grad": stats, "compile_s": compile_s,
+                                    "input_presharded": presharded,
+                                    "parity": parity["start"],
+                                    "parity_source": parity["source"],
+                                    "parity_weight": parity["weight"]}
+        print(f"[gradient] cells={n:>8} rollout {method:<10} grad {stats['median_ms']:8.2f} ms"
+              f" (unsharded {ref_t['median_ms']:8.2f})  compile {compile_s:6.2f} s"
+              f"  max|dg|={parity['start']['max_abs']:.2e}  rel: start "
+              f"{parity['start']['max_rel']:.2e} source {parity['source']['max_rel']:.2e}"
+              f" weight {parity['weight']['max_rel']:.2e}")
+    return rollout
+
+
 def run_gradient(args, out: dict) -> dict:
     _load_backend()
     mesh = _mesh_for(args.n_devices)
@@ -1973,76 +2060,20 @@ def run_gradient(args, out: dict) -> dict:
         n, edges, pa, source = _mesh_source(args, n_hint)
         pa, how = _partition_for(args, source, n, edges, pa, D)
         edges, pa, renumbered = cells_in_an_order_the_wrapper_takes(n, edges, pa, D)
-        rng = np.random.default_rng(1)
-        w_global = rng.standard_normal(n).astype(np.float32)
         entry = {"cells": n, "mesh": source, "partition": how, "renumbered": renumbered,
                  "n_devices": D, "grad_steps": args.grad_steps, "rollout": {},
                  "sharded_cg": None}
 
         # (i) reverse mode through a rollout: jitted grad on both sides,
-        # compile time apart, statics placed once (like-for-like).  One
-        # reverse pass gives the derivative with respect to the start, to
-        # the per-cell source and to the injected weight (ROLLOUT_WRT).
-        ref_node, _, layout = build_pair(n, edges, mesh, pa, "all_to_all")
-        bi_ref, _, params = node_inputs(n, layout, mesh)
-        w_j = jnp.asarray(w_global)
-
-        def loss_ref(x0, source, weight, ref_node=ref_node, w_j=w_j):
-            st = {"x": x0}
-            for _ in range(args.grad_steps):
-                st = {"x": ref_node.update(st, {"source": source}, 1.0,
-                                           params={"weight": weight})["x"]}
-            return rollout_loss(st["x"], w_j, jnp.ones_like(w_j))
-
-        at_ref = (ref_node.initial_state()["x"], bi_ref["source"], params["weight"])
-        g_ref_fn = jax.jit(jax.grad(loss_ref, argnums=(0, 1, 2)))
-        ref_compile_s, _ = compile_seconds(g_ref_fn, *at_ref)
-        g_ref = dict(zip(ROLLOUT_WRT, _host(g_ref_fn(*at_ref))))
-        ref_t = timed(lambda: g_ref_fn(*at_ref), warmup=args.warmup, repeats=args.repeats)
-        entry["rollout"]["unsharded"] = {"grad": ref_t, "compile_s": ref_compile_s}
-        for method in METHODS:
-            _, sharded, layout = build_pair(n, edges, mesh, pa, method)
-            _, bi, _ = node_inputs(n, layout, mesh)
-            state0 = sharded.initial_state()
-            x0 = state0["x"]
-            w_layout = place_on_mesh(layout_slab(w_global, layout), mesh)
-            cells = place_on_mesh(layout_slab(np.ones(n, np.float32), layout), mesh)
-            step_fn = sharded._get_sharded_fn(state0, bi, params)
-            statics = _placed_statics(sharded, layout, mesh)
-            dt_j = jnp.asarray(1.0)
-            presharded = require_presharded(
-                [x0, bi["source"], w_layout, cells, *statics.values()], mesh,
-                f"gradient/rollout/{method}")
-
-            def loss_sh(x0, source, weight, step_fn=step_fn, statics=statics, dt_j=dt_j,
-                        w_layout=w_layout, cells=cells):
-                st = {"x": x0}
-                for _ in range(args.grad_steps):
-                    st = {"x": step_fn(st, {"source": source}, dt_j, statics,
-                                       {"weight": weight})["x"]}
-                return rollout_loss(st["x"], w_layout, cells)
-
-            at = (x0, bi["source"], params["weight"])
-            g_fn = jax.jit(jax.grad(loss_sh, argnums=(0, 1, 2)))
-            compile_s, _ = compile_seconds(g_fn, *at)
-            g_sh = dict(zip(ROLLOUT_WRT, _host(g_fn(*at))))
-            for wrt in ("start", "source"):         # per cell, in partition layout
-                g_sh[wrt] = gather_value(per_shard=g_sh[wrt].reshape(D, layout.n_local_max),
-                                         layout=layout)
-            stats = timed(lambda: g_fn(*at), warmup=args.warmup, repeats=args.repeats)
-            parity = {wrt: _diff(g_sh[wrt], g_ref[wrt]) for wrt in ROLLOUT_WRT}
-            entry["rollout"][method] = {"grad": stats, "compile_s": compile_s,
-                                        "input_presharded": presharded,
-                                        "parity": parity["start"],
-                                        "parity_source": parity["source"],
-                                        "parity_weight": parity["weight"]}
-            print(f"[gradient] cells={n:>8} rollout {method:<10} grad {stats['median_ms']:8.2f} ms"
-                  f" (unsharded {ref_t['median_ms']:8.2f})  compile {compile_s:6.2f} s"
-                  f"  max|dg|={parity['start']['max_abs']:.2e}  rel: start "
-                  f"{parity['start']['max_rel']:.2e} source {parity['source']['max_rel']:.2e}"
-                  f" weight {parity['weight']['max_rel']:.2e}")
+        # compile time apart, statics placed once (like-for-like).
+        entry["rollout"] = run_gradient_rollout(args, mesh, n, edges, pa)
 
         # (ii) reverse + forward mode through the Jacobi-preconditioned sharded CG
+        # Its right-hand side and direction: the second and third draws of
+        # the stream whose first is the rollout's loss weights, as they
+        # have been since both parts drew from one generator.
+        rng = np.random.default_rng(1)
+        rng.standard_normal(n)
         entry["sharded_cg"] = run_gradient_cg(args, mesh, (n // D) * D, rng)
         results.append(entry)
     out["results"] = results
@@ -2062,7 +2093,7 @@ def gradient_checks(results: list, n_devices: int) -> list:
             checks += _parity_checks(f"{prefix} wrt the per-cell source vs unsharded",
                                      rollout["parity_source"], LIMITS["gradient"])
             checks += _parity_checks(f"{prefix} wrt the injected weight vs unsharded",
-                                     rollout["parity_weight"], LIMITS["gradient_weight"])
+                                     rollout["parity_weight"], LIMITS["gradient"])
         checks += gradient_cg_checks(r["sharded_cg"])
     return checks
 

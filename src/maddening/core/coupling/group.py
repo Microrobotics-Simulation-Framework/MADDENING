@@ -151,7 +151,7 @@ class CouplingGroup:
         same problem in comparable units converges (measured under
         Jacobi: a pair that ``"iqn-ils"`` converges in 8 passes took 25
         and stopped unconverged with one field in units ``2**20`` smaller;
-        MADD-ANO-274).  Write a group's quantities in units that
+        MADD-ANO-285).  Write a group's quantities in units that
         make them comparable in size, or use ``"none"`` or ``"fixed"``.
         ``"l2"``
         uses a global L2 norm with ``tolerance`` as threshold;

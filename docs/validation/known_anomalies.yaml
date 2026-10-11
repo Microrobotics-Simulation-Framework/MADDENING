@@ -6417,7 +6417,7 @@ anomalies:
       program it always did.  That evaluation was first made with the
       group's own pass, which is the iterate's value under Jacobi and with
       the producer swept first, and not otherwise, and it was not made
-      under `"fori"`: MADD-ANO-273 records what that left and the rule
+      under `"fori"`: MADD-ANO-284 records what that left and the rule
       both solvers follow now.
     severity: "major"
     safety_relevance: "context_dependent"
@@ -6445,7 +6445,7 @@ anomalies:
       A map that switches on a flag has a fixed point only where the flag
       is consistent; where none exists (the flag flips on every pass) the
       group reaches the cap with converged=False, as before (on every
-      route since MADD-ANO-273's resolution; until then a reader swept
+      route since MADD-ANO-284's resolution; until then a reader swept
       before the flag's producer under "ift", and Jacobi under "fori",
       could read converged=True on such a map).  Both solvers evaluate a
       flag that a pass reads from the iterate at the iterate itself, by
@@ -6453,7 +6453,7 @@ anomalies:
       longest chain of such fields, so they take the same passes to the
       same fixed point; such fields computed from one another in a
       closed loop are refused at
-      compile() (MADD-ANO-273, whose residual risk says what a non-zero
+      compile() (MADD-ANO-284, whose residual risk says what a non-zero
       tolerance leaves under Gauss-Seidel).  The IFT derivative treats a
       flag as locally constant (zero derivative), as the unrolled fori
       loop does.  A group with non-floating fields pays one more pass per
@@ -19055,7 +19055,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-273"
+  - anomaly_id: "MADD-ANO-284"
     title: "An integer or Boolean field carried by an edge inside a coupling group stopped the solve after one or two passes with converged=True, residual=0.0, far from the fixed point"
     description: >
       A coupling group's solvers iterate its floating fields and read
@@ -19190,7 +19190,7 @@ anomalies:
       - "tests/core/test_coupling_carried_nonfloat_fields.py::test_a_write_that_makes_a_loop_of_non_floating_fields_is_refused_at_the_step"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-274"
+  - anomaly_id: "MADD-ANO-285"
     title: "Under acceleration=\"aitken\", \"iqn-ils\" and \"iqn-imvj\" a coupled run depends on the units ONE field is written in: its passes, its state and its verdict move"
     description: >
       A coupling group's norms divide each field's change by that field's

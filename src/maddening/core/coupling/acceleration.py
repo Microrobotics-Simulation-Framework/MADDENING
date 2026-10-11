@@ -99,7 +99,7 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float, kept=None):
     the measurement, not the run it is taken on: the accelerated
     iterations form their steps over all the fields together and repeat
     a run under one common factor only (``CouplingGroup.convergence_norm``;
-    MADD-ANO-274).
+    MADD-ANO-285).
 
     **The dead band is an assertion the caller makes, so its default
     asserts nothing (``atol=0.0``).**  Leaving the norm is not the same
@@ -3176,7 +3176,7 @@ def aitken_relaxation(
     # two (``pow2_frame``), so their ratio does not depend on the one
     # unit the group's state is written in (a common factor: both sums
     # run over every accelerated field, and fields written in different
-    # units are not brought to one scale; MADD-ANO-274).  The ratio itself is
+    # units are not brought to one scale; MADD-ANO-285).  The ratio itself is
     # scale-free; what was not was the guard on its denominator, an
     # absolute ``denom > 1e-30`` on ``sum(delta_r**2)``, which is
     # ``O(scale**2)``: the same group written at 1e-12 of its units froze

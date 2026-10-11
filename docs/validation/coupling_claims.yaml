@@ -430,7 +430,7 @@ claims:
     One field rescaled by itself (the other fields left): the same run, bit
     for bit, under acceleration "none" and "fixed" only; NOT claimed under
     "aitken", "iqn-ils" and "iqn-imvj", whose passes, state and verdict
-    move (MADD-ANO-274, open).
+    move (MADD-ANO-285, open).
   oracle: the same group at another scale (bit-identity for powers of two; the stated band for decimal factors).
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in
@@ -472,7 +472,7 @@ claims:
   conditions: >-
     "any power-of-two scale", ONE factor on every field, every acceleration,
     norm and solver; NOT claimed for a factor on one field alone, under which
-    "aitken" and the IQN accelerations take another path (MADD-ANO-274,
+    "aitken" and the IQN accelerations take another path (MADD-ANO-285,
     open; "none" and "fixed" are bit-identical there, CPL-009).  The
     harness checks 2**-53 to 2**66 only.  Below about 2**-115 the node
     arithmetic of the fixture itself underflows (products of O(1e-3) gains
@@ -2720,7 +2720,7 @@ claims:
     - src/maddening/core/coupling/_carried_fields.py::carried_nonfloat_chain
     - src/maddening/core/coupling/_carried_fields.py::traced_reads
     - src/maddening/core/graph_manager.py::GraphManager._nonfloat_loop_refusals
-    - docs/validation/known_anomalies.yaml (MADD-ANO-070, MADD-ANO-273)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-070, MADD-ANO-284)
   conditions: >-
     integer, boolean and key leaves; every acceleration; max_iterations >= 2
     (one staggered pass reads a carried field as stored).  Exact at a zero

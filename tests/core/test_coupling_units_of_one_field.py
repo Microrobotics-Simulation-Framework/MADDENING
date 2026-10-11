@@ -14,7 +14,7 @@ step treats each field by itself:
 * ``"aitken"``, ``"iqn-ils"`` and ``"iqn-imvj"``: their step is formed from
   sums over all the accelerated fields together (one power-of-two frame for
   the whole vector), so a field in much smaller units carries no weight in
-  it and the iteration takes another path.  Open, MADD-ANO-274; documented
+  it and the iteration takes another path.  Open, MADD-ANO-285; documented
   on ``CouplingGroup.convergence_norm``.  The second test pins that the
   dependence is there, in the one form that does not depend on rounding:
   the pass counts are not the unscaled run's.  **When the accelerators
@@ -113,7 +113,7 @@ def test_without_a_coupled_step_one_fields_units_do_not_change_the_run(group):
 
 
 def test_under_iqn_one_field_in_other_units_is_another_run():
-    """The open dependence (MADD-ANO-274), pinned by pass counts alone.
+    """The open dependence (MADD-ANO-285), pinned by pass counts alone.
 
     With both fields at order one ``"iqn-ils"`` converges on every step.
     With ``b`` in units ``2**20`` smaller the same problem does not take

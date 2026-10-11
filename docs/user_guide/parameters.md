@@ -482,13 +482,37 @@ For a spring observed through position only, `k`, `c` and `m` enter as
 weakest eigenvector is `(1, 1, 1)/√3`.  `rank` is 2 of 3, and all
 three bounds are `+inf` — each parameter lies partly along the invisible
 direction, so none of them is separately determined.  Read `rank` rather
-than `cond` for that verdict: `cond` is `eigvals[-1] / eigvals[0]` and in
-float32 rescaling the residual (by `noise_std`, say) can round the
-smallest eigenvalue to zero and turn a large `cond` into `inf`, whereas
-`rank`'s threshold scales with the matrix (until the matrix itself leaves
+than `cond` for that verdict: `cond` is `eigvals[-1] / eigvals[0]`, which
+for a direction that is not in the data is `inf` or merely enormous
+(of order `1e14` for this spring in float32) as the rounding of the
+sensitivities falls, whereas `rank` is held to a stated cutoff -- an eigenvalue counts
+when it is above `max(n, sqrt(m)) * eps` of the largest, for `n`
+parameters and `m` residual rows -- and that threshold scales with the
+matrix (until the matrix itself leaves
 float32's normal range -- or flushes to exactly zero from a Jacobian that
 is not, at `|J|` below about `1e-19` -- which `fim` reports with a
 `PrecisionLimitWarning`, and `fim_core` with `precision_limited`).
+
+The eigenvalues are those of `JᵀJ` read from the Jacobian itself (its
+squared singular values), not from the matrix in `report.fim`.  Each
+entry of that matrix is a sum over the `m` rows, rounded at the working
+precision, and a record whose sensitivities are constant or piecewise
+constant -- a steady state, a step -- makes every rounding fall the same
+way: the entries are then off by hundreds of `eps`, enough to make two
+parameters that enter the model only through their sum look separately
+identifiable.  So take identifiability from `rank` and `crb`, and do not
+decide it by inverting or decomposing `report.fim` yourself.  With the
+default cutoff a direction that is exactly unidentifiable is never
+counted while the sensitivities are right to about `sqrt(eps)` relative
+(`3e-4` in float32, `1e-8` in float64), whatever the record's length,
+and a direction is counted only when it is at least `sqrt(cutoff)` of
+the strongest in the Jacobian (in float32, `5e-4` for a short record and
+`3e-3` at 4,000 rows).  A verdict
+within a factor of two of the cutoff comes with a
+`PrecisionLimitWarning`; re-running under `jax_enable_x64` with the
+parameters and the state in float64 settles it, since the sensitivities
+are then computed to float64's precision and the cutoff moves nine
+decades down.
 Freeze one of them, then fit:
 
 `scale="relative"` — the default, and the coordinates the eigenvectors
@@ -591,14 +615,18 @@ unavailable*, not *unidentifiable*.  `crb` keeps `fim`'s polarity, `+inf`
 unless finiteness was positively established, so `crb < tol` is False for
 an unidentifiable parameter and for a `NaN` matrix alike.
 
-The two are not bit-identical and are not meant to be: `fim_core`
-computes its verdicts at the matrix's own precision and lets the
-compiler schedule `J.T @ J`, where `fim` widens to float64 on the host
-and keeps the Gram product eager.  Measured over 40,000 synthetic Fisher
-matrices spanning six decades of eigenvalue ratio, they reach a
-different `(rank, precision_limited)` on 0.39% of them, never above five
-times the rank cutoff, and 62% of the differences sit in the half-to-two
-times band where `precision_limited` fires on 97% of cases anyway.
+The two are not bit-identical and are not meant to be: both read the
+singular values of the Jacobian, but `fim_core` decomposes it at its own
+precision on the device and lets the compiler schedule `J.T @ J`, where
+`fim` decomposes it in float64 on the host and keeps the Gram product
+eager.  Measured over 1,740 synthetic Jacobians (2 to 25 parameters, 20
+to 4,000 rows, the deciding eigenvalue from 0.2 to 50 times the rank
+cutoff), they reached the same `(rank, precision_limited)` on every one.
+Past 41,286 rows in float32 `fim_core`'s default cutoff is the larger of
+the two -- `(m * eps)**2`, the square of the conventional bound on a
+decomposition at that precision, 3.8 times `fim`'s at 100,000 rows --
+and a direction between the two cutoffs is unresolved and
+`precision_limited` in `fim_core` where `fim` resolves it.
 
 <!-- snippet: continues -->
 ```python

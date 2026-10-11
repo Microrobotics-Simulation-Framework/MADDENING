@@ -2434,7 +2434,7 @@ class FIMCore:
     where it is 3.8 times the first at ``m = 1e5``; never in float64).
     The two agree on ``rank`` and on which ``crb`` entries are ``+inf``
     over the tested spread; the finite ``crb`` values differ in the last
-    digits, and a verdict close enough to the cutoff for the two to
+    bits, and a verdict close enough to the cutoff for the two to
     disagree is exactly the one ``precision_limited`` is there to flag.
 
     ``crb`` keeps :func:`fim`'s fail-closed polarity: ``+inf`` unless

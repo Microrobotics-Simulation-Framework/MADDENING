@@ -656,9 +656,11 @@ def _near_cutoff(rng, factor, n=3, m=8):
 # Per push: tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
 @pytest.mark.slow
 def test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff():
-    """SYS-043: "they reach a different (rank, precision_limited) on 0.39% of them, never
-    above five times the rank cutoff" -- on matrices whose deciding eigenvalue is spread
-    log-uniformly from a hundredth to a hundred times the cutoff."""
+    """SYS-043: ``fim`` and ``fim_core`` "reached the same (rank, precision_limited) on
+    every one" of the guide's population; held here as a bound, never a different pair above
+    five times the rank cutoff, on matrices whose deciding eigenvalue is spread log-uniformly
+    from a hundredth to a hundred times the cutoff (to 4,096 rows: past 41,286 in float32
+    ``fim_core``'s cutoff is the larger, and the two differ by design)."""
     rng = np.random.default_rng(11)
     disagreements, limited_count = [], 0
     for n, m in ((3, 8), (3, 512), (6, 512), (6, 4096)):

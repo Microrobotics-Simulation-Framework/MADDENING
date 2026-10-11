@@ -629,26 +629,65 @@ claims:
   area: fim
   claim: >-
     rank counts "the eigenvalues strictly above rank_rtol * eigvals[-1],
-    where rank_rtol defaults to max(n, sqrt(m)) * eps"; "Verdicts move only
-    for m > n**2, and only ever toward 'unresolved'".
+    where rank_rtol defaults to max(n, sqrt(m)) * eps"; the eigenvalues
+    "are the eigenpairs of J^T J read from J itself -- its squared singular
+    values and right singular vectors, decomposed in float64 -- and not an
+    eigendecomposition of the stored fim"; "With that default an exactly
+    unidentifiable direction is never counted while J's entries are right
+    to about sqrt(eps) relative, whatever m is"; "The value of the default
+    moves only for m > n**2".
   sources:
-    - src/maddening/sysid.py:640 (FIMReport)
-    - src/maddening/sysid.py:2345 (fim, rank_rtol)
+    - src/maddening/sysid.py::FIMReport
+    - src/maddening/sysid.py::fim
+    - src/maddening/sysid.py::_resolve_rank_rtol
+    - src/maddening/sysid.py::_jacobian_spectrum
   conditions: >-
-    short (m <= n**2) and long residuals; a missing direction. Not claimed
-    for 16-bit floats.
-  oracle: the cutoff recomputed; the verdict for m <= n**2 bit for bit against n * eps.
+    short (m <= n**2) and long residuals; a missing direction of a random
+    Jacobian, and of a pair that enters only through its sum with constant,
+    step, ramp and noise sensitivities at 1e3 to 2e4 rows per push (to 1e5
+    in the slow lane), float32 leaves and float64 leaves under x64; the
+    neighbours of that pair at 0.25, 0.9, 1.1 and 4 times the cutoff; a
+    Gram product seeded off by 2048 eps; fewer rows than parameters; an
+    eigenvalue exactly on the cutoff and an all-zero matrix ("strictly
+    above").  The guarantee is of the decomposition: it does not cover
+    sensitivities that leave the model wrong by more than about sqrt(eps)
+    relative, nor the eigenvalues of the stored fim (MADD-ANO-273).  In
+    fim_core the decomposition runs at J's precision and the default
+    cutoff is max(max(n, sqrt(m)) * eps, (max(m, n) * eps)**2), the second
+    term larger past 41,286 rows in float32.  Not claimed for 16-bit
+    floats.
+  oracle: >-
+    the cutoff recomputed; the verdict for m <= n**2 bit for bit against
+    n * eps; rank 1 and an infinite bound on every draw of the seeded
+    populations; the verdict against the squared singular value ratio of
+    the same J in float64, either side of the cutoff.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_the_default_cutoff_is_max_of_n_and_sqrt_m
     - tests/core/test_sysid_degenerate_inputs.py::test_a_long_residual_does_not_make_a_missing_direction_identifiable
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_missing_direction_reads_at_the_square_of_one_rounding_on_every_backend
     - tests/core/test_sysid_degenerate_inputs.py::test_a_short_residual_verdict_is_bit_for_bit_what_it_was
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_in_float32
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_with_float64_leaves
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_jitted_core_reads_rank_one_for_the_degenerate_pair
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float32_verdict_changes_at_the_stated_cutoff
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float64_verdict_changes_at_the_stated_cutoff
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_report_carries_the_gram_product_and_decides_nothing_from_it
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_core_cutoff_covers_a_decomposition_at_the_jacobians_precision
+    - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_the_core_makes_no_nan_on_a_zero_fisher_matrix
+    - tests/core/test_sysid_claims_edges.py::test_a_residual_that_reads_no_parameter_is_a_real_rank_zero
   status: verified
+  notes: >-
+    Until this row was re-read (the audit of the release tip), its three
+    cited tests drew random Jacobians only, and none failed when "strictly
+    above" became "at or above"; the verdict was read from the eigenvalues
+    of the float32 Gram product, whose rounding a constant sensitivity
+    aligns (MADD-ANO-273).
   domains:
-    f32: tests/core/test_sysid_degenerate_inputs.py::test_the_default_cutoff_is_max_of_n_and_sqrt_m
-    f64: tests/core/test_sysid_claims_under_x64.py::test_the_rank_cutoff_is_max_of_n_and_sqrt_m_times_the_decompositions_eps
+    f32: tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_in_float32
+    f64: tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_with_float64_leaves
     mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_rank_cutoff_is_max_of_n_and_sqrt_m_times_the_decompositions_eps
     16bit: narrowed
-    jit: n/a
+    jit: tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_jitted_core_reads_rank_one_for_the_degenerate_pair
     grad: n/a
     vmap: n/a
     multi_rate: n/a
@@ -700,18 +739,27 @@ claims:
   area: fim
   claim: >-
     PrecisionLimitWarning "If the eigenvalue ratio deciding rank lands
-    within _PRECISION_WARN_FACTOR of the cutoff ... The message names the
-    ratio, the cutoff and the remedy"; "it does not fire on an exactly
-    singular F"; "Nor does it fire on a close call against a rank_rtol the
-    caller raised"; "0.0 resolves every positive eigenvalue and suppresses
-    the precision warning".
+    within _PRECISION_WARN_FACTOR of the cutoff and the cutoff is the
+    precision's own ... The message names the ratio, the cutoff and the
+    remedy: re-run under jax_enable_x64 with the parameters and the state
+    in float64 ... That re-run settles it either way"; "it does not fire on
+    an exactly unidentifiable direction"; "Nor does it fire on a close call
+    against a rank_rtol the caller raised"; "0.0 resolves every positive
+    eigenvalue and suppresses the precision warning".
   sources:
-    - src/maddening/sysid.py:2345 (fim, Warns)
-    - src/maddening/sysid.py:164 (_x64_enabled)
+    - src/maddening/sysid.py::fim
+    - src/maddening/sysid.py::_precision_limited
+    - src/maddening/sysid.py::_x64_enabled
   conditions: >-
-    float32 at the floor; well conditioned; exactly singular; raised and
-    zero rank_rtol; under x64, with float64 leaves and with float32 leaves
-    (whose remedy is float64 leaves). Not claimed for 16-bit floats.
+    float32 at the floor; well conditioned; exactly singular (a zero
+    column; a pair that enters only through its sum, with constant, step,
+    ramp and noise sensitivities: no warning, and rank 1 at both
+    precisions); the neighbours of that pair inside the band (0.9 and 1.1
+    times the cutoff: warned) and outside it (0.25 and 4: silent); raised
+    and zero rank_rtol; under x64, with float64 leaves and with float32
+    leaves (whose remedy is float64 leaves).  The remedy is a re-run with
+    float64 sensitivities: it is not claimed to help a float64 report,
+    whose message says so.  Not claimed for 16-bit floats.
   oracle: the warning and its text, or its absence; the x64 re-run's verdict.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
@@ -720,13 +768,23 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_rank_rtol_zero_leaves_no_threshold_to_sit_near
     - tests/core/test_sysid_degenerate_inputs.py::test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit
     - tests/core/test_sysid_degenerate_inputs.py::test_the_warning_names_the_eigenvalue_nearest_the_cutoff
+    - tests/core/test_sysid_degenerate_inputs.py::test_the_x64_rerun_the_warning_recommends_actually_settles_the_verdict
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_x64_rerun_agrees_with_float32_on_the_audited_record
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float32_verdict_changes_at_the_stated_cutoff
+    - tests/verification/hypothesis/test_hypothesis_sysid.py::TestPrecisionLimitedRank::test_the_threshold_still_separates_a_smaller_population
   status: verified
   notes: >-
     mixed_dtype domain failing on d2429a6: with float32 leaves in an x64
     process the PrecisionLimitWarning's remedy was to re-run under x64,
     which was already on. Fixed: the remedy is chosen on jax_enable_x64 as
     well as on the decomposition's dtype, and names float64 leaves there;
-    the range-limited warning follows the same rule.
+    the range-limited warnings follow the same rule (the one for an F
+    flushed to exactly zero did not until MADD-ANO-273's fix).  While the
+    verdict read the eigenvalues of F, the warning fired on 7% to 17% of
+    the draws of an exactly unidentifiable pair with constant or step
+    sensitivities and named an x64 re-run that reported the same full
+    rank (MADD-ANO-273); the pair is now rank 1 at either precision with
+    no warning.
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
     f64: tests/core/test_sysid_degenerate_inputs.py::test_under_x64_the_warning_stops_recommending_x64
@@ -750,10 +808,16 @@ claims:
     so a decomposition that resolves nothing reads +inf as well, never
     0.0".
   sources:
-    - src/maddening/sysid.py:640 (FIMReport, crb)
+    - src/maddening/sysid.py::FIMReport
+    - src/maddening/sysid.py::_rank_and_crb
   conditions: >-
-    the spring's (k, c, m) scale degeneracy; a non-finite and a partly NaN
-    decomposition.  The residual differentiable in the parameters at the
+    the spring's (k, c, m) scale degeneracy; a pair that enters only
+    through its sum, with constant, step, ramp and noise sensitivities at
+    1e3 to 2e4 rows (float32 and float64 leaves; fim and fim_core), every
+    draw of a seeded population; a non-finite and a partly NaN
+    decomposition.  The null space is that of the singular values of J,
+    not of the stored fim's eigenvalues (MADD-ANO-273).  The residual
+    differentiable in the parameters at the
     point asked: beside a jump (MADD-ANO-021) a finite crb is the bound of
     the smooth piece the point is on and bounds nothing the jump can do
     (the bouncing ball at its generating parameters: 1.3e-3 relative on
@@ -764,6 +828,9 @@ claims:
     - tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
     - tests/core/test_sysid_degenerate_inputs.py::test_an_eigendecomposition_that_is_not_finite_reports_no_finite_bound
     - tests/core/test_sysid_degenerate_inputs.py::test_a_partly_resolved_decomposition_with_a_nan_direction_fails_safe
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_in_float32
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_with_float64_leaves
+    - tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_jitted_core_reads_rank_one_for_the_degenerate_pair
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
@@ -1188,8 +1255,8 @@ claims:
   claim: >-
     The rank verdict holds under rescaling "while F can be formed: once the
     cutoff rank_rtol * max(eigvals) falls below 2 * m * tiny of the
-    precision ..., the products the smallest directions are built from
-    flush to zero and the verdict moves with the scale ... and fim says so
+    precision ..., the products F is built from flush to zero and the
+    eigenvalues sit where the precision cannot hold them ... and fim says so
     with a PrecisionLimitWarning (and FIMCore with precision_limited) rather
     than reporting it."; "The same is said when every product flushed and
     F came out exactly zero although J has a nonzero entry".
@@ -1406,9 +1473,11 @@ claims:
   area: fim_core
   claim: >-
     fim and fim_core "are not bit-identical and are not meant to be ...
-    Measured over 40,000 synthetic Fisher matrices spanning six decades of
-    eigenvalue ratio, they reach a different (rank, precision_limited) on
-    0.39% of them, never above five times the rank cutoff".
+    Measured over 1,740 synthetic Jacobians (2 to 25 parameters, 20 to
+    4,000 rows, the deciding eigenvalue from 0.2 to 50 times the rank
+    cutoff), they reached the same (rank, precision_limited) on every
+    one"; past 41,286 rows in float32 fim_core's default cutoff is the
+    larger of the two.
   sources:
     - docs/user_guide/parameters.md (Asking the same question inside a loop)
   conditions: >-
@@ -1420,10 +1489,11 @@ claims:
     - tests/core/test_sysid_claims_edges.py::test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff
   status: verified
   notes: >-
-    The bound holds; the 0.39% rate is not reproduced here: over 2,600
-    matrices of this population (precision band reached on 15% of them) the
-    two never disagreed.  The rate depends on the population and the
-    backend's Gram product; read it as the measurement it is.
+    The guide's sentence used to give a rate of 0.39% over 40,000 matrices,
+    measured while both read the eigenvalues of a Gram product; both read
+    the singular values of J now, and over the populations measured since
+    (1,740 for the guide, 2,600 here) the two never disagreed below 41,286
+    rows.  The cited test holds the bound, not a rate.
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff
     f64: narrowed

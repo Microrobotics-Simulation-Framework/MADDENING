@@ -1,4 +1,4 @@
-"""Integer, Boolean and key fields that a coupling group's own edges carry.
+"""Integer, Boolean and key fields that a coupling group's pass reads from the iterate.
 
 A coupling group solves ``s = P(s)``, ``P`` one pass over its members (a
 Jacobi pass or a Gauss-Seidel sweep).  Its solvers iterate the group's
@@ -12,25 +12,55 @@ Write the group's state as ``s = (x, c, o)``:
 
 * ``x``, every floating field;
 * ``c``, the **carried** non-floating fields: the non-floating state fields
-  that a pass reads *from the iterate* (:func:`carried_nonfloat_fields`).
-  A member reads the iterate in three ways only: the source field of an
-  internal edge; the geometry field a mapping on such an edge reads from
-  its source; and, through an internal edge whose source is a boundary
-  flux, the producer's whole state and whatever the producer itself reads
-  (its flux is computed from both);
+  that a pass reads *from the iterate* when it computes any field of any
+  member.  A flag one member computes and another reads across an edge of
+  the group is one; so is a flag that a member's own boundary flux is
+  computed from, where another member reads that flux;
 * ``o``, the remaining non-floating fields.  No pass reads them (a member
   integrates from its pre-step state, not from its own iterate), so they
-  are outputs only: ``P`` is a function of ``(x, c)``.
+  are outputs only: ``P`` is a function of ``(x, c)``.  A step counter and
+  a PRNG key that a node advances from its pre-step state are of this
+  kind, whatever edges and fluxes the node has.
+
+How "reads" is established
+--------------------------
+From the program, not from the edges.  The group's Jacobi pass ``J`` is
+traced once, abstractly (``jax.make_jaxpr``: nothing is compiled or run),
+as a function of its members' iterate, with everything a pass hands a node's
+hooks exactly as a step hands it -- every boundary input an edge delivers,
+whether or not the node declares it, each flux computed by the producer's
+own hook from the producer's state and inputs.  Output field ``g`` *reads*
+input field ``f`` when ``f`` can reach ``g`` through the traced equations
+(``_param_probes._live_jaxpr_inputs``, the walk the parameter probes use).
+"``f`` feeds ``g``" below means exactly that, for two non-floating fields.
+
+The walk can only overstate: a field it reports unread is never an operand
+on the way to the output.  It overstates in one place, an equation it does
+not look inside -- a function wrapped in ``jax.custom_jvp`` or
+``jax.custom_vjp``, a primitive it does not know, an equation with effects
+-- which it takes to read all of its inputs for each of its outputs.
+
+The trace is taken only for a group that *may* carry such a field, which is
+asked of the edges first (:func:`possible_chain`, an upper bound: a member
+taken to use everything an edge hands it, a flux its producer's whole
+state).  A group whose edges allow none is not traced, and is compiled to
+the program it always was.
+
+**When dependence is assumed instead.**  Only when that one trace cannot be
+taken: the pass raises when traced on its own (:func:`carried_nonfloat_chain`
+catches the exception and keeps its text).  The bound from the edges then
+stands in, the refusal below can be of a loop that is not there, and its
+message says that the dependence was assumed, and why.
 
 The rule
 --------
 **Every pass a solve measures starts from carried fields evaluated at its
 floating iterate.**  For an iterate ``x`` the carried fields are set to
-``c(x)``, obtained by evaluating the members as a *Jacobi* pass does, every
+``c(x)``, obtained by evaluating the members as the Jacobi pass does, every
 member reading the same frozen state, and keeping the carried fields; this
 is repeated ``L`` times, ``L`` the length of the longest chain of carried
-fields that feed one another (:func:`carried_nonfloat_chain`).  Both solvers
-(``"ift"`` and ``"fori"``) and both sweeps then iterate the one map
+fields that feed one another.  Both solvers (``"ift"`` and ``"fori"``) and
+both sweeps then iterate the one map
 
     ``G(x) = P_x(x, c(x))``
 
@@ -40,10 +70,7 @@ at ``(x*, c(x*))``.
 
 Why it is right
 ---------------
-Write ``J`` for the Jacobi pass and ``J_c(x, c)`` for the carried fields it
-computes.  "Field ``f`` feeds field ``g``" means: ``g``'s member reads ``f``
-from the iterate.  That is decided from the edges, without looking inside a
-node's ``update``, so it can only overstate what feeds what.
+Write ``J_c(x, c)`` for the carried fields the Jacobi pass computes.
 
 *Lemma 1 (the evaluation is a function of the iterate).*  If no chain of
 carried fields closes on itself, give each carried field its depth: one
@@ -55,7 +82,9 @@ nothing an evaluation changes; a field of depth ``k + 1`` is computed from
 ``x`` and from fields of depth at most ``k``, which the induction has
 settled.  So after ``L`` evaluations (``L`` the largest depth) the carried
 fields are ``c(x)``, whatever they held before, and ``c(x)`` is the only
-solution of ``c = J_c(x, c)``.
+solution of ``c = J_c(x, c)``.  (The lemma needs "feeds" to hold wherever
+one field is in fact computed from another; a relation that overstates,
+as the walk's may, costs evaluations and nothing else.)
 
 *Lemma 2 (the fixed points are the pass's own).*  ``(x, c)`` is a fixed
 point of ``P`` -- of either sweep, the carried fields included -- if and
@@ -99,25 +128,34 @@ What is not claimed
 
 What is refused
 ---------------
-Where carried fields feed one another in a closed loop, no number of
-evaluations yields "their value at ``x``" (Lemma 1 has no base), the fields
-would have to be carried from pass to pass outside the residual, and a
-solve could read ``converged=True`` while they still change.
-``GraphManager.compile()`` refuses such a group
-(:func:`_refuse_nonfloat_loops`).  The decision is structural, so a loop is
-also seen where a node's ``update`` does not in fact use what it reads.  The
-case to know: two members that exchange boundary fluxes both ways, one of
-them holding a step counter or a PRNG key.  A flux is taken to use its
-producer's whole state, so the counter is read as feeding itself round the
-two fluxes, and the group is refused although the counter is computed from
-the pre-step state alone.
+A group with ``max_iterations >= 2`` in which carried fields feed one
+another in a closed loop: in the trace of its Jacobi pass, a non-floating
+state field is an operand of the arithmetic that computes a second, that
+one of a third, and so on back to the first (a loop of one is a field that
+is an operand of its own value).  Two members that each compute a flag from
+the flag the other hands them are the plain case.  No number of evaluations
+yields "their value at ``x``" (Lemma 1 has no base): the fields would have
+to be carried from pass to pass outside the residual, and a solve could
+read ``converged=True`` while they still change.
+``GraphManager.compile()`` raises a ``ValueError`` naming the fields
+(:func:`nonfloat_loop_refusal`), ``validate()`` lists it as an error, and
+the step raises it too if it is ever traced for such a group.
+
+Not refused: a member that holds a step counter or a PRNG key and
+exchanges boundary fluxes with another, both ways -- the trace shows the
+counter is computed from the pre-step state and that no flux reads it, so it
+is not carried at all; and two members that hand each other flags which
+each computes from floating inputs alone -- carried, each of depth one.
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional
 
+import jax
 import jax.numpy as jnp
+
+from maddening.core._param_probes import _live_jaxpr_inputs
 
 
 class CarriedChain(NamedTuple):
@@ -126,7 +164,7 @@ class CarriedChain(NamedTuple):
     Attributes
     ----------
     fields : tuple
-        ``((node, field), ...)``, sorted: :func:`carried_nonfloat_fields`.
+        ``((node, field), ...)``, sorted.
     depth : int
         The length of the longest chain of carried fields that feed one
         another: how many evaluations settle them (Lemma 1 of the module
@@ -135,11 +173,17 @@ class CarriedChain(NamedTuple):
     loop : tuple or None
         ``None``, or carried fields that feed one another in a closed loop,
         in order: each feeds the next and the last feeds the first.
+    assumed : str or None
+        ``None`` where "feeds" was read from a trace of the group's pass,
+        or for a group whose edges allow no carried field.  Otherwise why
+        it could not be, in which case the fields and the loop are the
+        bound the edges give (:func:`possible_chain`).
     """
 
     fields: tuple
     depth: int
     loop: Optional[tuple]
+    assumed: Optional[str] = None
 
 
 def _non_floating(value) -> bool:
@@ -151,63 +195,9 @@ def _non_floating(value) -> bool:
     return not jnp.issubdtype(jnp.asarray(value).dtype, jnp.inexact)
 
 
-def _iterate_reads(plan) -> dict:
-    """``{member: the (node, field) pairs it reads from the iterate}``.
-
-    What one Jacobi evaluation of the member can depend on, among the
-    iterate's state fields: the source field of each internal edge into it
-    and the geometry a mapping on that edge reads from its source; and, for
-    an edge whose source is not a state field (a boundary flux), the
-    producer's whole state together with everything the producer reads in
-    turn, since the pass computes the flux from the producer's state and
-    from the producer's own boundary inputs.
-    """
-    direct: dict[str, set] = {nn: set() for nn in plan.members}
-    flux_from: dict[str, set] = {nn: set() for nn in plan.members}
-    for rec in plan.internal:
-        (src, fld), tgt = rec.source, rec.target[0]
-        if rec.read_from_state:
-            direct[tgt].add((src, fld))
-        else:
-            flux_from[tgt].add(src)
-        if rec.anchor is not None and rec.anchor[0] == "source":
-            direct[tgt].add((src, rec.anchor[1]))
-
-    def through(nn, seen):
-        out = set(direct[nn])
-        for src in sorted(flux_from[nn]):
-            out.update((src, fld) for fld in plan.member_fields.get(src, ()))
-            if src not in seen:
-                out |= through(src, seen | {src})
-        return out
-
-    return {nn: through(nn, frozenset((nn,))) for nn in plan.members}
-
-
-def carried_nonfloat_fields(plan, state) -> tuple:
-    """The non-floating state fields a pass of the group reads from the iterate.
-
-    Sorted ``(node, field)`` pairs; non-floating as *state* holds them (an
-    integer, Boolean or PRNG-key leaf).  See the module docstring.
-    """
-    return carried_nonfloat_chain(plan, state).fields
-
-
-def carried_nonfloat_chain(plan, state) -> CarriedChain:
-    """The group's carried non-floating fields, their longest chain, or a loop.
-
-    Field ``f`` feeds field ``g`` when ``g``'s member reads ``f`` from the
-    iterate (:func:`_iterate_reads`): every field a member computes may
-    depend on everything the member reads, so the relation is decided
-    between members and overstates at most.
-    """
-    reads = _iterate_reads(plan)
-    carried = sorted({
-        (nn, fld) for pairs in reads.values() for nn, fld in pairs
-        if fld in state.get(nn, {}) and _non_floating(state[nn][fld])})
-    carried_set = set(carried)
-    fed_by = {(nn, fld): sorted(carried_set & reads[nn]) for nn, fld in carried}
-
+def _chain(fields, fed_by, assumed=None) -> CarriedChain:
+    """The longest chain among *fields*, or a loop; ``fed_by[f]`` are the fields feeding ``f``."""
+    fields = sorted(fields)
     depth: dict[tuple, int] = {}
     on_path: list[tuple] = []
 
@@ -219,7 +209,7 @@ def carried_nonfloat_chain(plan, state) -> CarriedChain:
             return tuple(on_path[on_path.index(field):])
         on_path.append(field)
         deepest = 0
-        for feeder in fed_by[field]:
+        for feeder in sorted(fed_by.get(field, ())):
             loop = visit(feeder)
             if loop is not None:
                 return loop
@@ -228,15 +218,92 @@ def carried_nonfloat_chain(plan, state) -> CarriedChain:
         depth[field] = deepest + 1
         return None
 
-    for field in carried:
+    for field in fields:
         loop = visit(field)
         if loop is not None:
             # In feeding order (``visit`` walked from a field to its
             # feeders), starting at the loop's first field in sorted order.
             ring = list(reversed(loop))
             start = ring.index(min(ring))
-            return CarriedChain(tuple(carried), 0, tuple(ring[start:] + ring[:start]))
-    return CarriedChain(tuple(carried), max(depth.values(), default=0), None)
+            return CarriedChain(tuple(fields), 0, tuple(ring[start:] + ring[:start]), assumed)
+    return CarriedChain(tuple(fields), max(depth.values(), default=0), None, assumed)
+
+
+def possible_chain(plan, state, assumed=None) -> CarriedChain:
+    """The non-floating fields the group *may* carry, as far as its edges say.
+
+    An upper bound, decided without looking at a node's code
+    (``InterfacePlan.iterate_reads``): a member is taken to use every
+    field an edge hands it in every field it computes, and a boundary flux
+    to use its producer's whole state and everything the producer is
+    handed.  ``fields`` empty means the group carries none, whatever its
+    nodes compute; ``loop`` ``None`` means it carries none in a closed
+    loop.  Anything else is a question for :func:`carried_nonfloat_chain`.
+    """
+    reads = plan.iterate_reads()
+    carried = {
+        (nn, fld) for pairs in reads.values() for nn, fld in pairs
+        if fld in state.get(nn, {}) and _non_floating(state[nn][fld])}
+    return _chain(carried, {(nn, fld): carried & reads[nn] for nn, fld in carried}, assumed)
+
+
+def _field_of(path) -> tuple:
+    """``(node, field)`` of a leaf of ``{node: {field: leaf}}``."""
+    return path[0].key, path[1].key
+
+
+def traced_reads(evaluate: Callable, members: dict) -> dict:
+    """``{output field: the input fields it reads}`` in one abstract trace of *evaluate*.
+
+    *evaluate* maps ``{node: {field: array}}`` (the members' iterate) to a
+    dict of the same layout (what one Jacobi pass computes from it);
+    fields are ``(node, field)`` pairs.  ``jax.make_jaxpr`` traces it once
+    -- nothing is compiled, nothing runs -- and each output is walked back
+    to the inputs that can reach it (``_live_jaxpr_inputs``; see the module
+    docstring for where that walk overstates).  Raises whatever the trace
+    raises.
+    """
+    closed, out_shape = jax.make_jaxpr(evaluate, return_shape=True)(members)
+    in_fields = [_field_of(p) for p, _ in jax.tree_util.tree_flatten_with_path(members)[0]]
+    out_fields = [_field_of(p) for p, _ in jax.tree_util.tree_flatten_with_path(out_shape)[0]]
+    jaxpr = closed.jaxpr
+    if len(in_fields) != len(jaxpr.invars) or len(out_fields) != len(jaxpr.outvars):
+        raise ValueError("the pass's fields do not line up with its traced program")
+    reads: dict[tuple, set] = {}
+    for i, out_field in enumerate(out_fields):
+        live = _live_jaxpr_inputs(jaxpr, [j == i for j in range(len(out_fields))])
+        reads.setdefault(out_field, set()).update(
+            in_field for in_field, keep in zip(in_fields, live) if keep)
+    return reads
+
+
+def carried_nonfloat_chain(plan, state, evaluate: Optional[Callable] = None) -> CarriedChain:
+    """The group's carried non-floating fields, their longest chain, or a loop.
+
+    *evaluate* is the group's Jacobi pass as a function of its members'
+    iterate (:func:`traced_reads`).  A group whose edges allow no carried
+    field (:func:`possible_chain`) is not traced.  Otherwise the carried
+    fields are the non-floating fields of *state* that any output of the
+    traced pass reads, and one feeds another when the second's output
+    reads the first.  Where the trace raises, or *evaluate* is ``None``,
+    the bound from the edges is returned with ``assumed`` saying why.
+    """
+    bound = possible_chain(plan, state)
+    if not bound.fields:
+        return bound
+    if evaluate is None:
+        return bound._replace(assumed="no trace of the group's pass was asked for")
+    members = {nn: state[nn] for nn in plan.order}
+    try:
+        reads = traced_reads(evaluate, members)
+    except Exception as exc:  # noqa: BLE001 - whatever a node's hooks raise when traced alone
+        return bound._replace(assumed=(
+            f"its pass could not be traced on its own ({type(exc).__name__}: "
+            f"{str(exc)[:200]})"))
+    nonfloat = {(nn, fld) for nn, fields in members.items() for fld, value in fields.items()
+                if _non_floating(value)}
+    carried = nonfloat & set().union(*reads.values())
+    return _chain(carried, {field: carried & reads.get(field, set()) for field in carried})
 
 
 def nonfloat_loop_refusal(group_nodes, chain: CarriedChain, state) -> Optional[str]:
@@ -249,40 +316,36 @@ def nonfloat_loop_refusal(group_nodes, chain: CarriedChain, state) -> Optional[s
         return f"{nn}.{fld} ({jnp.asarray(state[nn][fld]).dtype})"
 
     ring = " -> ".join(named(f) for f in (*chain.loop, chain.loop[0]))
+    if chain.assumed is None:
+        how = (
+            "This is read from one trace of the group's pass: each field named is "
+            "an operand of the arithmetic that computes the next (an operation the "
+            "trace does not look inside, such as a custom_jvp or custom_vjp "
+            "function, is taken to use all of its operands).")
+    else:
+        how = (
+            f"This could not be read from the group's pass, because {chain.assumed}; "
+            "it is assumed from the edges instead, a member taken to use every "
+            "field an edge hands it in every field it computes and a boundary flux "
+            "its producer's whole state, so the loop may not be one.")
     return (
-        f"Coupling group {sorted(group_nodes)}: non-floating fields feed one another "
-        f"in a closed loop of the group's own edges: {ring}. The group's iteration "
+        f"Coupling group {sorted(group_nodes)}: non-floating fields are computed "
+        f"from one another in a closed loop: {ring}. {how} The group's iteration "
         "acts on floating-point fields and reads its convergence from them; an "
-        "integer, Boolean or key field that an edge of the group carries is "
-        "evaluated at each iterate from the fields that feed it, which needs the "
-        "fields that feed one another to form chains that end. Around a closed "
-        "loop they have no value at an iterate: they would be carried from pass "
-        "to pass where the residual does not read them, and the group could "
-        "report converged=True while they still change. Store one field of the "
-        "loop in floating point (the residual then measures it), or compute it "
-        "in a node outside the group, or set max_iterations=1 (one staggered "
-        "pass, which iterates nothing). The loop is read from the edges: a member "
-        "is taken to use every field it reads in every field it computes, and a "
-        "boundary flux to use its producer's whole state and everything the "
-        "producer reads."
+        "integer, Boolean or key field that a pass reads from the iterate is "
+        "evaluated at each iterate from the fields it is computed from, which needs "
+        "the fields that are computed from one another to form chains that end. "
+        "Around a closed loop they have no value at an iterate: they would be "
+        "carried from pass to pass where the residual does not read them, and the "
+        "group could report converged=True while they still change. Store one field "
+        "of the loop in floating point (the residual then measures it), or compute "
+        "it in a node outside the group, or set max_iterations=1 (one staggered "
+        "pass, which iterates nothing)."
     )
 
 
-def _refuse_nonfloat_loops(groups, plans, state) -> None:
-    """Refuse, at ``compile()``, a group whose carried non-floating fields close a loop.
-
-    One ``ValueError`` naming every such group.  *plans* is ``{group key:
-    InterfacePlan}`` as ``compile()`` builds it.  A group with
-    ``max_iterations=1`` iterates nothing and is let through.
-    """
-    refusals = []
-    for group in groups:
-        if group.max_iterations <= 1:
-            continue
-        plan = plans["+".join(sorted(group.nodes))]
-        refusal = nonfloat_loop_refusal(
-            group.nodes, carried_nonfloat_chain(plan, state), state)
-        if refusal is not None:
-            refusals.append(refusal)
+def _refuse_nonfloat_loops(refusals) -> None:
+    """Raise one ``ValueError`` for *refusals* (texts of :func:`nonfloat_loop_refusal`), if any."""
+    refusals = [text for text in refusals if text]
     if refusals:
         raise ValueError("\n".join(refusals))

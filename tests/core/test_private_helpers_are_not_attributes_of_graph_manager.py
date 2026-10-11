@@ -28,6 +28,7 @@ HELPER_MODULES = (
     "maddening.core._graph_specs",
     "maddening.core._param_probes",
     "maddening.core.coupling._bounds",
+    "maddening.core.coupling._carried_fields",
     "maddening.core.coupling._coupled_block",
     "maddening.core.coupling._fixed_point",
     "maddening.core.coupling._group_layout",

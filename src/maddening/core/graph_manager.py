@@ -1958,7 +1958,10 @@ class GraphManager:
         and an edge on one field never meet here: the step would let the
         input replace whatever the edges delivered, so ``compile()``
         refuses such a graph, and so does this reader, with the same
-        ``ValueError`` (MADD-ANO-265), compiled or not.
+        ``ValueError`` (MADD-ANO-265), compiled or not.  The same for a
+        coupling group ``compile()`` refuses because its non-floating
+        fields are computed from one another in a closed loop
+        (:meth:`_nonfloat_loop_refusals`).
         Every reader of the edges that is not the step --
         :meth:`resolve_boundary_inputs`, the conservation diagnostic, the
         surrogate dataset generator -- goes through it, so none of them
@@ -1976,6 +1979,8 @@ class GraphManager:
         # refuses too: an edge onto a declared external input.
         _graph_specs._refuse_edges_onto_external_inputs(
             self._edges, self._external_inputs)
+        # ... and a group whose non-floating fields close a loop.
+        _carried_fields._refuse_nonfloat_loops(self._nonfloat_loop_refusals())
         p = self._params_or_default(params)
         resolved = _graph_specs._ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
         # The shape compile() holds each of these edges' sources to, asked
@@ -2009,6 +2014,83 @@ class GraphManager:
             if ei.target_node == node_name:
                 out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
         return out
+
+    def _nonfloat_loop_refusals(self) -> list[str]:
+        """What ``compile()`` refuses about non-floating fields on a group's loop.
+
+        One text per coupling group with ``max_iterations >= 2`` whose
+        integer, Boolean or key fields are computed from one another in a
+        closed loop (``coupling/_carried_fields.py`` says why such a group
+        cannot be iterated).  ``compile()`` raises them as one
+        ``ValueError`` before it asks anything else, ``validate()`` lists
+        each as an ``ERROR``, and the readers of a graph never compiled
+        (:meth:`_boundary_inputs_from`) raise them too.
+
+        Decided in two steps.  The edges are asked first whether such a
+        loop is possible at all (``_carried_fields.possible_chain``, an
+        upper bound that looks at no node's code); for nearly every graph
+        the answer is no, and nothing is traced.  Where it is yes, the
+        group's own Jacobi pass is traced once, abstractly, by the coupled
+        block itself (``_run_coupled_block_impl(carried_only=True)``:
+        nothing is compiled or run), and the loop is refused only if that
+        trace shows each field to be an operand of the next.  So a step
+        counter or a PRNG key held by a member that exchanges boundary
+        fluxes both ways is not refused: no flux reads it.  If the pass
+        cannot be traced that way the bound stands and the text says so.
+
+        A group the graph cannot describe yet (a member or a field that
+        does not exist) is left to ``validate()``'s own errors.
+        """
+        refusals: list[str] = []
+        for group in self._coupling_groups:
+            if group.max_iterations <= 1:
+                continue
+            try:
+                members = [name for name in self._nodes if name in group.nodes]
+                if not any(_carried_fields._non_floating(leaf) for name in members
+                           for leaf in jax.tree.leaves(self._state[name])):
+                    continue
+                plan = _interface_plan.interface_plan(
+                    group.nodes, self._edges, members, self._state, self._nodes)
+                chain = _carried_fields.possible_chain(plan, self._state)
+            except Exception:  # noqa: BLE001 - validate() names what is wrong with it
+                continue
+            if chain.loop is None:
+                continue
+            chain = self._traced_carried_chain(group, members, chain)
+            text = _carried_fields.nonfloat_loop_refusal(group.nodes, chain, self._state)
+            if text is not None:
+                refusals.append(text)
+        return refusals
+
+    def _traced_carried_chain(self, group, members, bound):
+        """*group*'s carried non-floating fields as a trace of its pass gives them.
+
+        The coupled block is set up as a step sets it up -- the graph's
+        nodes and edges, every external input at its zero default, the
+        graph's parameters -- and asked for nothing but the chain
+        (``carried_only=True``).  A Jacobi pass reads every member from the
+        same state, so the order of the members and which edges the
+        schedule calls back-edges do not enter.  Where the block cannot be
+        set up outside a step, *bound* is returned with the reason.
+        """
+        try:
+            edges_into, inputs_of = _interface_plan.by_target(
+                self._edges, self._external_inputs)
+            p = self._params_or_default(None)
+            return _coupled_block._run_coupled_block_impl(
+                group, members, self._state, self._state,
+                self._default_external_inputs(), None,
+                nodes=dict(self._nodes), edges_by_target=edges_into,
+                ext_by_target=inputs_of, back_edge_set=set(),
+                has_external=set(inputs_of), all_edges=self._edges,
+                node_params=_graph_specs._ResolvedParams(
+                    p.get("nodes", {}), p.get("mappings", {})),
+                carried_only=True)
+        except Exception as exc:  # noqa: BLE001 - reported in the refusal's own text
+            return bound._replace(assumed=(
+                f"its pass could not be set up outside a step ({type(exc).__name__}: "
+                f"{str(exc)[:200]})"))
 
     def add_external_input(
         self,
@@ -2508,6 +2590,9 @@ class GraphManager:
                 self._edges, self._external_inputs)
         except ValueError as exc:
             issues.append(f"ERROR: {exc}")
+        # A coupling group whose non-floating fields are computed from one
+        # another in a closed loop: what compile() raises, one line a group.
+        issues.extend(f"ERROR: {text}" for text in self._nonfloat_loop_refusals())
 
         # Disconnected-node warning.  Only meaningful when the graph
         # has multiple nodes -- a single-node graph is trivially
@@ -2717,6 +2802,11 @@ class GraphManager:
         # input (MADD-ANO-265): one ValueError naming every such edge.
         _graph_specs._refuse_edges_onto_external_inputs(
             self._edges, self._external_inputs)
+        # So is a coupling group whose integer, Boolean or key fields are
+        # computed from one another in a closed loop: such fields have no
+        # value at a floating iterate (``coupling/_carried_fields.py``).
+        # One ValueError naming every such group.
+        _carried_fields._refuse_nonfloat_loops(self._nonfloat_loop_refusals())
         issues = self.validate()
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:
@@ -2779,13 +2869,6 @@ class GraphManager:
                 self._state, self._nodes)
             for g in self._coupling_groups
         }
-        # A group whose integer, Boolean or key fields feed one another in
-        # a closed loop of its own edges is refused: such fields have no
-        # value at a floating iterate, so no solve can be made to read
-        # them (``coupling/_carried_fields.py``).  One ValueError naming
-        # every such group.
-        _carried_fields._refuse_nonfloat_loops(
-            self._coupling_groups, interface_plans, self._state)
         # Positions an interface reading rests on (read in grid spacings,
         # or what a delivered value is computed at), held in a dtype that
         # cannot resolve the group's tolerance where they are

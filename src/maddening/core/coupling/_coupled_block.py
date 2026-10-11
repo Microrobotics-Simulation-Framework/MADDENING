@@ -41,6 +41,7 @@ from maddening.core._graph_specs import (
 )
 from maddening.core.coupling._interface_plan import KERNEL_LENGTH, interface_plan
 from maddening.core.coupling._carried_fields import (
+    CarriedChain,
     carried_nonfloat_chain,
     nonfloat_loop_refusal,
 )
@@ -193,7 +194,7 @@ def _run_coupled_block_impl(
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
     multigpu_device_map=None, node_params=None, fires=None,
-    strict_sink=None, probe_sink=None, strict_mesh=None,
+    strict_sink=None, probe_sink=None, strict_mesh=None, carried_only=False,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -234,6 +235,14 @@ def _run_coupled_block_impl(
     device (:func:`_multi_device_mesh`), on every device of which
     ``strict_convergence`` raises (:func:`_strict_error_if`); ``None`` on
     one device.
+
+    ``carried_only=True`` solves nothing: the block is set up as for a
+    step, and returns the group's carried non-floating fields
+    (``_carried_fields.CarriedChain``) as one abstract trace of its Jacobi
+    pass at *new_state* gives them.  ``compile()`` and ``validate()`` ask
+    it of a group whose edges allow a closed loop of such fields, so that
+    what they refuse is decided on the pass the step will run and not on
+    a second description of it.
     """
     from maddening.core.coupling.acceleration import (
         aitken_relaxation,
@@ -759,6 +768,25 @@ def _run_coupled_block_impl(
 
     one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
 
+    def _carried_chain_at(state):
+        """The group's carried non-floating fields, from its Jacobi pass at *state*.
+
+        Which non-floating fields a pass reads from the iterate, and which
+        of them is computed from which, read from one abstract trace of
+        ``one_pass_jacobi`` as a function of the members' iterate
+        (``_carried_fields.carried_nonfloat_chain``): the pass itself, with
+        every input it hands a hook and every flux it computes.  Not traced
+        for a group whose edges allow no such field.
+        """
+        def evaluate(members):
+            out = one_pass_jacobi({**state, **members})
+            return {nn: out[nn] for nn in group_node_names}
+
+        return carried_nonfloat_chain(plan, state, evaluate)
+
+    if carried_only:
+        return _carried_chain_at(new_state)
+
     def _compute_residual(s_new, s_old):
         # In the group's residual dtype (``_group_residual_dtype``: the
         # promotion of its floating fields, at least float32), which every
@@ -895,12 +923,19 @@ def _run_coupled_block_impl(
         # starts from those fields *evaluated at its floating iterate*.
         # Stated and proved in ``coupling/_carried_fields.py``.  Static: a
         # group that carries no such field builds none of this, and its
-        # compiled step is the one it was.  ``max_iterations=1`` iterates
-        # nothing and takes none of it either.
-        carried_chain = carried_nonfloat_chain(plan, state_after_first)
-        if max_iters > 1 and carried_chain.loop is not None:
+        # compiled step is the one it was (a step counter or a PRNG key
+        # that a member advances from its pre-step state is not carried,
+        # whatever edges and fluxes the member has: the trace of the pass
+        # says so).  ``max_iterations=1`` iterates nothing and takes none
+        # of it either.
+        if max_iters > 1:
+            carried_chain = _carried_chain_at(state_after_first)
+        else:
+            carried_chain = CarriedChain((), 0, None)
+        if carried_chain.loop is not None:
             # ``compile()`` refuses this group before any step is traced
-            # (``_refuse_nonfloat_loops``); this is the same refusal for a
+            # (``GraphManager._nonfloat_loop_refusal``, which asks this
+            # block the same question); this is the same refusal for a
             # step built without it.
             raise ValueError(nonfloat_loop_refusal(
                 group.nodes, carried_chain, state_after_first))

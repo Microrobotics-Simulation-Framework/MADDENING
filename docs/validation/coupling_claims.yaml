@@ -7109,8 +7109,11 @@ claims:
   conditions: >-
     Affine scalar members, so the reference is one linear system solved in
     64-bit arithmetic; Gauss-Seidel and Jacobi, solver ift and fori;
-    tolerance 1e-6, states within 5e-6 of the reference.  Right and
-    compiled: a flux computed from the state (the Robin recipe); a chain
+    tolerance 1e-6, each state within 5e-6 of its value in the reference
+    as a fraction of that value (measured: at most 1.0e-6).  Right and
+    compiled: a flux computed from the state (the Robin recipe, as the
+    guide writes it, with the input declared in boundary_input_spec(),
+    undeclared, or beside an undeclared input a state edge feeds); a chain
     of three along the sweep and one step against it; under Gauss-Seidel a
     chain two steps against the sweep whose last flux is read by a member
     swept after its producer.  Refused: loops of one, two and three
@@ -7119,16 +7122,26 @@ claims:
     both schedules where the last flux is read by its own producer; a flux
     that reads its input times zero, an edge that delivers a flux times
     zero, a hook that cannot be traced (the message says the dependence is
-    assumed), and a hook whose flux changes with which inputs it is handed
-    without reading any by value.  Ways out: the flux written to a state
-    field by update() (the Robin pair at loop gains 0.06, 0.25 and 0.56;
-    the chain), and the chain's nodes added in the order of the reads.
+    assumed, and why), a hook whose flux changes with which inputs it is
+    handed without reading any by value (an external input and an edge
+    from outside the group among them), a loop through an undeclared
+    input, and a loop in the second of two groups.  The chain with
+    undeclared inputs in each of its six sweep orders under both schedules
+    is refused in one (two steps against the sweep, Jacobi) and right in
+    eleven.  Ways out: the flux written to a state field by update() (the
+    Robin pair at loop gains 0.06, 0.25 and 0.56; the chain), and the
+    chain's nodes added in the order of the reads, which the message
+    offers only where such an order compiles (not for a chain that bounces
+    between two members).
     The readers of a graph never compiled (resolve_boundary_inputs,
     check_conservation) raise too.  The criterion is sufficient, not
     necessary: dependence is structural, and a group it refuses may be one
-    whose loop has no numerical effect.  A hook that indexes an input the
-    first sweep leaves out raises a ValueError naming the edge at the first
-    step, not at compile().  Not claimed for float64, mixed dtypes, 16-bit
+    whose loop has no numerical effect.  It is asked of its own trace of
+    each hook when the graph is compiled or validated: a dependence that
+    does not pass through the hook's arguments, and a hook changed after
+    compile(), are not seen.  A flux hook that indexes an input is an
+    ERROR line of validate() naming the node, the hook and the input, and
+    is asked once.  Not claimed for float64, mixed dtypes, 16-bit
     floats, gradients, vmap, multi-rate graphs, sub-cycled groups,
     predictors and warm starts, run_adaptive, checkpoints or sharded
     graphs.
@@ -7147,8 +7160,15 @@ claims:
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_no_hook_is_traced_for_a_group_its_edges_alone_pass
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution
     - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_outside_a_group_the_loop_cannot_be_read
-    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_indexes_its_input_is_asked_for_its_fluxes_with_the_declared_inputs
-    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_indexes_an_input_the_first_sweep_leaves_out_is_told_so
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_from_the_state_is_right_whether_or_not_its_node_declares_the_input
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_guides_robin_recipe_compiles_as_written
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_undeclared_input_a_flux_does_read_in_a_loop_is_refused_as_established
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_is_traced_at_the_shape_it_is_handed_not_the_declared_one
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_with_undeclared_inputs_is_judged_as_one_with_declared_inputs
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_that_bounces_between_two_members_is_not_offered_an_order
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked
+    - tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once
   status: verified
   domains:
     f32: tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution

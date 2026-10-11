@@ -19063,19 +19063,21 @@ anomalies:
       Measured on the 0.4.0 development tree (release branch at 877e9399,
       CPU, jaxlib 0.11.0, float32, tolerance 1e-6) on two affine nodes coupled
       by the developer guide's Robin recipe, against the coupled 6x6 system
-      in float64: states off by 4.3e-4, 1.5e-2 and 0.49 of themselves under
-      Gauss-Seidel and by 3.5e-3, 5.0e-2 and 0.77 under Jacobi for flux-loop
+      in float64.  One measure throughout this entry: the largest distance
+      of a member's state from its value in the coupled solution, as a
+      fraction of that value.  It was 4.3e-4, 1.5e-2 and 0.49 under
+      Gauss-Seidel and 3.5e-3, 5.0e-2 and 0.77 under Jacobi for flux-loop
       gains of 0.06, 0.25 and 0.56, under solver "ift" and "fori" alike, with
       `strict_convergence` silent, `validate()` reporting the loop as
       "handled by iterative coupling", and one run carrying
       `spectral_usable=True` beside an error bound 2000 times below its
       distance to the solution.  A pair that exchanges fluxes only stopped
-      after one pass at (1.9, 2.71) where the solution is (10, 10).  The same
-      cause without a loop: a chain of three fluxes running two steps against
-      the order the group sweeps its members in was 6.3e-2 off under Jacobi
-      (and right under Gauss-Seidel, whose pass recomputes a flux after its
-      producer's update), and 4.0e-2 off under both where the last flux is
-      read by its own producer.  Never released: at v0.1.0, v0.3.0 and v0.3.1
+      after one pass at (1.9, 2.71) where the solution is (10, 10): 0.81.
+      The same cause without a loop: a chain of three fluxes running two
+      steps against the order the group sweeps its members in was 0.15 off
+      under Jacobi (and right, 3.8e-7, under Gauss-Seidel, whose pass
+      recomputes a flux after its producer's update), and 6.3e-2 off under
+      both where the last flux is read by its own producer.  Never released: at v0.1.0, v0.3.0 and v0.3.1
       (`git archive` of each tag, CPU, jaxlib 0.11.0) the Robin pair and the
       flux-only pair raise `KeyError` naming the flux at the first step under
       both schedules (MADD-ANO-071); the two-sweep seed that lets them run
@@ -19090,12 +19092,14 @@ anomalies:
       the same text as one `ERROR` line where it said the loop was handled,
       and the readers of a graph never compiled (`resolve_boundary_inputs`)
       raise it too.  Whether a flux depends on an input is decided from an
-      abstract trace of the hook (`jax.make_jaxpr`), and only for a group its
-      edges alone would refuse; no other group is traced and no pass is
-      changed.  On the way, `validate()` no longer raises a bare `KeyError`
-      for a flux hook that indexes an input (it asked every such hook for its
-      flux names with no inputs), and a seeding sweep that leaves out an
-      input a hook indexes raises a `ValueError` naming the edge.
+      abstract trace of the hook (`jax.make_jaxpr`) on the inputs the pass
+      hands it, at the shapes its edges deliver, whether or not
+      `boundary_input_spec()` declares them, and only for a group its edges
+      alone would refuse; no other group is traced and no pass is changed.
+      On the way, a flux hook that indexes an input (`boundary_inputs[name]`)
+      is an `ERROR` line of `validate()` naming the node, the hook and the
+      input: `validate()` asks every flux hook for its flux names with no
+      inputs, and raised a bare `KeyError` for such a hook.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -19124,11 +19128,19 @@ anomalies:
       planned for 0.5.0.  The criterion is sufficient and errs towards
       refusing: dependence is structural (a flux that multiplies its input by
       zero, or an edge that delivers a flux times zero, counts), a hook that
-      cannot be traced is taken to read every input (the message says so),
-      and so is a flux whose program differs between the inputs the two
-      seeding sweeps hand its hook.  A flux hook that indexes an input the
-      first seeding sweep leaves out raises a `ValueError` naming the edge at
-      the first step, not at `compile()`.  `check_conservation` refuses every
+      cannot be traced, or an input whose shape cannot be derived, is taken
+      to read every input (the message says so, with the reason), and so is
+      a flux whose program differs between the inputs the two seeding sweeps
+      hand its hook.  The criterion is asked at `compile()` and `validate()`
+      of its own trace of each hook, with the hook's arguments as the only
+      inputs.  It cannot see, and such a group is still wrong in silence: a
+      dependence that does not pass through the hook's arguments (an
+      `update` that stashes its boundary input on the node object for the
+      flux hook to read), and a hook changed after the question was asked (a
+      Python switch on `node.params` flipped after `compile()`: `step()`
+      keeps its program, an entry point traced later runs the new hook with
+      a loop that was never asked about; 1.1e-2 off on one such pair).  Both
+      are outside the node contract.  `check_conservation` refuses every
       pair whose flux edges form a loop, also where each flux is computed
       from the state and the group compiles.
     verification:
@@ -19139,6 +19151,10 @@ anomalies:
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed"
       - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution"
-      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_indexes_its_input_is_asked_for_its_fluxes_with_the_declared_inputs"
-      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_hook_that_indexes_an_input_the_first_sweep_leaves_out_is_told_so"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_from_the_state_is_right_whether_or_not_its_node_declares_the_input"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_guides_robin_recipe_compiles_as_written"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_with_undeclared_inputs_is_judged_as_one_with_declared_inputs"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once"
     github_issue: null

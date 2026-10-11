@@ -1273,15 +1273,17 @@ def sharded_cg(
         # to their own right-hand side (``_differentiable_solve``).
         return _run(mv, rhs, jnp.zeros_like(rhs), None, M_constant).value
 
-    primal_value = None
+    primal_value: Optional[Callable[[], jax.Array]] = None
     if x0_given or atol is not None:
-        def primal_value():
-            # The ordinary solve, from ``x0`` and with ``atol``, as a
-            # constant of the differentiation.
+        def _the_ordinary_solve():
+            # From ``x0`` and with ``atol``, as a constant of the
+            # differentiation.
             return _run(
                 _constant_under_differentiation(matvec, b), lax.stop_gradient(b),
                 lax.stop_gradient(x0), atol, M_constant,
             ).value
+
+        primal_value = _the_ordinary_solve
 
     return _differentiable_solve(
         matvec, b, solve_value=_derivative_solve,
@@ -1361,13 +1363,16 @@ def sharded_gmres(
           preconditioned residual passed its test can therefore read
           ``converged=False`` (measured in float32 on a diagonally
           scaled Laplacian of 32 unknowns behind block-Jacobi at
-          ``rtol=1e-6``: ``||b - A x||`` 18 times the tolerance).  Until
+          ``rtol=1e-6``: ``||b - A x||`` 12 to 18 times the tolerance, by
+          CPU).  Until
           0.4.0 both fields were the preconditioned system's
           (MADD-ANO-263): a number not in ``b``'s units, 0.40 times
           ``||b - A x||`` behind a Jacobi preconditioner of diagonal 2.5.
-          At the float32 floor ``.residual_norm`` reads above the same
-          residual evaluated in float64 (measured: 8.1e-6 against
-          6.1e-6, with ``converged=False``).  ``.iters`` counts whole
+          At the float32 floor ``.residual_norm`` and the same residual
+          evaluated in float64 differ by rounding of the order of the
+          residual (measured on one CPU: 8.1e-6 against 6.1e-6, with
+          ``converged=False``; on the system above the two were 4 % apart
+          on one CPU and 19 % on another).  ``.iters`` counts whole
           cycles, a multiple of ``restart``; ``.value`` and ``.iters``
           are what they were before 0.4.0.
         * lineax backend (the default without a preconditioner):
@@ -1441,13 +1446,15 @@ def sharded_gmres(
         return _run(mv, rhs, jnp.zeros_like(rhs), None, M_constant,
                     of_a_derivative=x0_given or atol is not None).value
 
-    primal_value = None
+    primal_value: Optional[Callable[[], jax.Array]] = None
     if x0_given or atol is not None:
-        def primal_value():
+        def _the_ordinary_solve():
             return _run(
                 _constant_under_differentiation(matvec, b), lax.stop_gradient(b),
                 lax.stop_gradient(x0), atol, M_constant,
             ).value
+
+        primal_value = _the_ordinary_solve
 
     return _differentiable_solve(
         matvec, b, solve_value=_derivative_solve,

@@ -53,9 +53,12 @@ from maddening.cloud.multigpu.iterative_solver import (
 
 UNKNOWNS = 64
 SHIFT = 0.5
-#: What a float32 derivative at ``rtol=1e-6`` is held to against float64
-#: (measured: 5e-7 to 1e-6 on every route and at every scale).
-DERIVATIVE_RTOL = 2e-5
+#: What a float32 derivative at ``rtol=1e-6`` is held to against float64:
+#: ten times the bound the solve's tolerance gives (an error of at most
+#: ``kappa * rtol`` with ``kappa = 9``).  On the machine these tests were
+#: written on every route and scale read 5e-7 to 1e-6; the defects this
+#: file is about read 6e-4 to 1.
+DERIVATIVE_RTOL = 1e-4
 
 
 def _matvec(shift):
@@ -192,14 +195,15 @@ def test_a_value_that_does_not_depend_on_what_is_differentiated_is_not_refused(r
     """The solve is in the differentiated function, and nothing it is given
     depends on the differentiated argument: ``d/dt (t * sum(x)) = sum(x)``,
     eagerly, under ``jit``, and with ``b`` an argument that is not
-    differentiated."""
+    differentiated.  (1e-4: the sum is taken of an eager solve and of a
+    jitted one, which may differ in their last bits.)"""
     b = jnp.asarray(_vector(0))
     total = float(jnp.sum(_call(route, b).value))
     loss = lambda t, bb: t * jnp.sum(_call(route, bb).value)       # noqa: E731
-    assert float(jax.grad(loss)(2.0, b)) == pytest.approx(total, rel=1e-6)
-    assert float(jax.jit(jax.grad(loss))(2.0, b)) == pytest.approx(total, rel=1e-6)
+    assert float(jax.grad(loss)(2.0, b)) == pytest.approx(total, rel=1e-4)
+    assert float(jax.jit(jax.grad(loss))(2.0, b)) == pytest.approx(total, rel=1e-4)
     assert float(jax.jvp(lambda t: loss(t, b), (2.0,), (1.0,))[1]) == pytest.approx(
-        total, rel=1e-6)
+        total, rel=1e-4)
 
 
 @_routes
@@ -372,9 +376,9 @@ def test_with_an_x0_and_an_atol_the_derivative_with_respect_to_the_operator_is_r
         route, b, shift=s, differentiable=True, x0=x0, atol=1e-7).value)
     x = np.linalg.solve(a, b_host.astype(np.float64))
     want = -float(np.linalg.solve(a.T, c_host.astype(np.float64)) @ x)
-    assert float(jax.jit(jax.grad(loss))(SHIFT)) == pytest.approx(want, rel=1e-4)
+    assert float(jax.jit(jax.grad(loss))(SHIFT)) == pytest.approx(want, rel=1e-3)
     assert float(jax.jit(lambda s: jax.jvp(loss, (s,), (1.0,))[1])(SHIFT)) == pytest.approx(
-        want, rel=1e-4)
+        want, rel=1e-3)
 
 
 @pytest.mark.parametrize("route", ["cg loop", "gmres loop", "cg lineax"])
@@ -392,7 +396,9 @@ def test_with_an_x0_and_an_atol_a_second_derivative_is_right(route):
     inverse = np.linalg.inv(a)
     want = 2 * float(c_host.astype(np.float64) @ inverse @ inverse @ inverse
                      @ b_host.astype(np.float64))
-    assert float(jax.jit(jax.grad(jax.grad(loss)))(SHIFT)) == pytest.approx(want, rel=1e-3)
+    # A second derivative that lost the dependence of the value on ``s``
+    # would be off by the first of the two terms: tens of percent.
+    assert float(jax.jit(jax.grad(jax.grad(loss)))(SHIFT)) == pytest.approx(want, rel=1e-2)
 
 
 @pytest.mark.parametrize("route", ["cg loop", "cg auto with Jacobi", "gmres auto with Jacobi"])

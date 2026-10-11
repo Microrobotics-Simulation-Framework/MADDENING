@@ -239,9 +239,11 @@ def test_the_default_call_answers_inside_a_shard_map_body_that_is_not_jitted():
     device's value solves its system, the residual taken in float64 on the
     host.  Devices 0 and 2 (one eigenvector, lineax) meet ``rtol``.  On
     devices 1 and 3 the condition number is 4001 and the float32 loop
-    stops at about 6e-4 ``||b||`` (it reports ``converged=False`` and that
-    residual, MADD-ANO-263): they are held to 2e-3, where the NaN lineax
-    returns there, or a start left untouched, would read 1."""
+    stops at about 6e-4 ``||b||`` on the machine this was written on (it
+    reports ``converged=False`` and that residual, MADD-ANO-263; a value
+    at the float32 floor differs by CPU): they are held to 1e-2, where
+    the NaN lineax returns there, or a start left untouched, would read
+    1."""
     case = "lineax breaks down on devices 1 and 3"
     value, converged, _, _ = _per_device("auto", False, case)
     assert converged[0] and converged[2]
@@ -249,7 +251,7 @@ def test_the_default_call_answers_inside_a_shard_map_body_that_is_not_jitted():
         x = np.asarray(value[device], np.float64)
         rhs = np.asarray(block, np.float64)
         ax = (2 + np.float32(BREAKS_DOWN)) * x - np.roll(x, 1) - np.roll(x, -1)
-        limit = 2 * RTOL if device % 2 == 0 else 2e-3
+        limit = 2 * RTOL if device % 2 == 0 else 1e-2
         assert np.linalg.norm(rhs - ax) <= limit * np.linalg.norm(rhs), device
 
 

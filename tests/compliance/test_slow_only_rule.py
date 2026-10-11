@@ -362,12 +362,23 @@ def xfail(item, strict_default):
                     bool(mark.kwargs.get("strict", strict_default)), a]
     return None
 
+def strict_by_default(config):
+    # The ini option an xfail mark without strict= falls back to: pytest 9
+    # names it strict_xfail and keeps the older name, earlier ones know
+    # only xfail_strict.  Neither known: say so, never assume.
+    for name in ("strict_xfail", "xfail_strict"):
+        try:
+            return bool(config.getini(name))
+        except (ValueError, KeyError):
+            continue
+    raise RuntimeError("this pytest has neither the strict_xfail nor the xfail_strict option")
+
 class Dump:
     items = []
 
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, config, items):
-        strict_default = bool(config.getini("xfail_strict"))
+        strict_default = strict_by_default(config)
         Dump.items = [[i.nodeid, i.get_closest_marker("slow") is not None,
                        i.get_closest_marker("skip") is not None, skipif(i),
                        xfail(i, strict_default)] for i in items]
@@ -1189,6 +1200,12 @@ def test_the_collection_holds_the_marks_as_pytest_decides_them(tmp_path):
     for target in ("test_xfail_on_a_false_condition", "test_enough_devices", "test_cases"):
         assert witness_problems("tests/x.py", [(1, f"tests/test_marks.py::{target}")], under_tests,
                                 ["tests/test_marks.py::test_slow"], **readers) == [], target
+    # A mark that does not say whether it is strict takes the ini's default, as pytest does.
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nxfail_strict = true\nmarkers =\n    slow: slow\n", encoding="utf-8")
+    strict = partition(collected(["test_marks.py"], tmp_path, tmp_path / "strict.json"))
+    assert strict.xfail[name("test_loose")].strict
+    assert not strict.xfail[name("TestMarked::test_closer")].strict      # it says strict=False
 
 
 def _witness_functions() -> set[str]:

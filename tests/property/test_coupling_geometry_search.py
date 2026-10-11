@@ -924,9 +924,10 @@ def test_a_gauss_seidel_group_whose_gather_cancels_a_few_digits_is_bounded_per_p
     stall at ``residual=0.0``, where the bound stands on the counted floor
     alone (a Gauss-Seidel bound at the stall is held per push in
     ``tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py``).
-    And on this cell MADD-ANO-212's first band starts lower: the bound is
-    1.30 of the distance at 70, 0.98 at 100 and 0.84 at 300, which is why
-    the other two amplitudes are the slow lane's.
+    And on this cell the bound is 1.30 of the distance at 70 and under it
+    from 100 on (0.98 at 100, still stopped on the tolerance; 0.84 at 300,
+    stalled): measured, the cause not established here.  That is why the
+    other two amplitudes of the slow set are not run on it.
     """
     assert gc.KNOBS[PINNED_CELL.knob]["iteration_mode"] == "gauss-seidel" and PINNED_CELL.m == 1
     grid = SIGN_CHANGING_BOUNDED[0] * np.asarray([1.0, -1.0, 1.0, -1.0])

@@ -135,12 +135,12 @@ def _mapped() -> GraphManager:
 TRANSFORM_RUNS = {"last": 0, "first": 0}
 
 
-def _last(x):
+def take_last(x):
     TRANSFORM_RUNS["last"] += 1
     return x[-1]
 
 
-def _first(x):
+def take_first(x):
     TRANSFORM_RUNS["first"] += 1
     return x[0]
 
@@ -155,11 +155,11 @@ def _coupled_transformed() -> GraphManager:
     for name in ("rod_a", "rod_b"):
         gm.add_node(HeatNode(name, 1e-4, n_cells=8, thermal_diffusivity=0.1,
                              initial_temperature=300.0))
-    gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature", transform=_last)
+    gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature", transform=take_last)
     pick = np.zeros((1, 8), np.float32)
     pick[0, 0] = 1.0
     gm.add_edge("rod_b", "rod_a", "temperature", "right_temperature",
-                mapping=matrix_mapping(pick), transform=_first)
+                mapping=matrix_mapping(pick), transform=take_first)
     gm.add_coupling_group(["rod_a", "rod_b"])
     gm.compile()
     gm.step()

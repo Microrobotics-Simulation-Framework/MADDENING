@@ -651,7 +651,7 @@ claims:
     eigenvalue exactly on the cutoff and an all-zero matrix ("strictly
     above").  The guarantee is of the decomposition: it does not cover
     sensitivities that leave the model wrong by more than about sqrt(eps)
-    relative, nor the eigenvalues of the stored fim (MADD-ANO-273).  In
+    relative, nor the eigenvalues of the stored fim (MADD-ANO-289).  In
     fim_core the decomposition runs at J's precision and the default
     cutoff adds the conventional bound max(m, n) * eps to half of fim's
     allowance (t(r) = sqrt(r) / (1 + sqrt(r)): t(r_dev) = t(r_h) / 2 +
@@ -691,7 +691,7 @@ claims:
     cited tests drew random Jacobians only, and none failed when "strictly
     above" became "at or above"; the verdict was read from the eigenvalues
     of the float32 Gram product, whose rounding a constant sensitivity
-    aligns (MADD-ANO-273).
+    aligns (MADD-ANO-289).
   domains:
     f32: tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_in_float32
     f64: tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_with_float64_leaves
@@ -789,11 +789,11 @@ claims:
     which was already on. Fixed: the remedy is chosen on jax_enable_x64 as
     well as on the decomposition's dtype, and names float64 leaves there;
     the range-limited warnings follow the same rule (the one for an F
-    flushed to exactly zero did not until MADD-ANO-273's fix).  While the
+    flushed to exactly zero did not until MADD-ANO-289's fix).  While the
     verdict read the eigenvalues of F, the warning fired on 7% to 17% of
     the draws of an exactly unidentifiable pair with constant or step
     sensitivities and named an x64 re-run that reported the same full
-    rank (MADD-ANO-273); the pair is now rank 1 at either precision with
+    rank (MADD-ANO-289); the pair is now rank 1 at either precision with
     no warning.
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
@@ -826,7 +826,7 @@ claims:
     1e3 to 2e4 rows (float32 and float64 leaves; fim and fim_core), every
     draw of a seeded population; a non-finite and a partly NaN
     decomposition.  The null space is that of the singular values of J,
-    not of the stored fim's eigenvalues (MADD-ANO-273).  The residual
+    not of the stored fim's eigenvalues (MADD-ANO-289).  The residual
     differentiable in the parameters at the
     point asked: beside a jump (MADD-ANO-021) a finite crb is the bound of
     the smooth piece the point is on and bounds nothing the jump can do

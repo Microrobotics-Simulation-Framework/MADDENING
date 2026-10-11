@@ -973,7 +973,7 @@ def test_a_missing_direction_reads_at_the_square_of_one_rounding_on_every_backen
     ``eps`` on 0.11.2.  The test that stood here could therefore only run
     where the backend rounded loosely, and skipped elsewhere.  That was for
     random Jacobians; a constant sensitivity aligned the same rounding and
-    reached 475 ``eps``, past the cutoff as well (MADD-ANO-273,
+    reached 475 ``eps``, past the cutoff as well (MADD-ANO-289,
     ``tests/core/test_sysid_fim_reads_the_jacobian.py``).
 
     The verdict is read from the singular values of ``J`` in float64 now, and

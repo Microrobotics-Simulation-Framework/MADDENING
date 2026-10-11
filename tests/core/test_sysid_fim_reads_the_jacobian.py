@@ -8,7 +8,7 @@ float32) where the rank cutoff ``max(n, sqrt(m)) * eps`` allowed for 63.
 Read from that matrix's eigenvalues, two parameters that enter a residual
 only through their sum -- exactly unidentifiable, for any data -- reported
 ``rank = 2 of 2`` and a finite Cramer-Rao bound, with no warning, at either
-precision (MADD-ANO-273).  The tree's own test of the cutoff drew random
+precision (MADD-ANO-289).  The tree's own test of the cutoff drew random
 Jacobians only, and a random Jacobian does not align anything.
 
 So the populations here are built, not only drawn:

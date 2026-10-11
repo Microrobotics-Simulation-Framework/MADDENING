@@ -782,7 +782,7 @@ class FIMReport:
     entries are off by up to ``m * eps / 2`` relative.  The two agree to
     that rounding; ``rank``, ``crb`` and ``cond`` follow ``eigvals``,
     so do not decide identifiability by decomposing or inverting ``fim``
-    yourself (MADD-ANO-273: read that way, two parameters that enter a
+    yourself (MADD-ANO-289: read that way, two parameters that enter a
     residual only through their sum reported rank 2 of 2 and a finite
     ``crb``).
 
@@ -2163,7 +2163,7 @@ def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float], *,
       the verdict rounds a sum over the rows at the working precision.
       That is what the eigenvalues of ``F`` could not offer -- each
       entry of ``F`` is such a sum, and constant or piecewise constant
-      sensitivities align its roundings (MADD-ANO-273).
+      sensitivities align its roundings (MADD-ANO-289).
     * *The decomposition*, backward stable (Householder ``R``, then an
       SVD): ``p(m, n) * eps_d * sigma_max``, ``p`` a low-degree
       polynomial for which ``max(m, n)`` is the conventional stand-in
@@ -2237,7 +2237,7 @@ def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float], *,
     of ``0.020``.  It is kept because a cutoff fitted to one backend's
     summation order would not cover another's -- the inner products a
     Householder decomposition takes over constant rows are the aligned
-    sums that put ``F`` off by up to ``m * eps / 2`` (MADD-ANO-273), and
+    sums that put ``F`` off by up to ``m * eps / 2`` (MADD-ANO-289), and
     how much of that survives depends on the order the backend sums in
     -- and because the cost of the margin is not silent:
     :class:`FIMCore` flags every direction it reads from ``r_h / 2`` to
@@ -2341,7 +2341,7 @@ def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float], *,
         the working precision -- is not covered by the default
         cutoff**: such eigenvalues carry the rounding of a sum over
         ``m`` rows, which reaches ``m * eps / 2`` of the largest when
-        the terms align (MADD-ANO-273), so it has to pass a
+        the terms align (MADD-ANO-289), so it has to pass a
         ``rank_rtol`` of at least ``max(n, m) * eps`` itself.  Nothing
         in this module is such a caller.
     rank_rtol : float, optional
@@ -3003,7 +3003,7 @@ def _fim_gram(J):
     off by up to ``m * eps / 2`` relative -- measured 475 ``eps`` at
     ``m = 4000`` in float32 -- which is enough to give an exactly
     unidentifiable pair a second eigenvalue six times the rank cutoff
-    (MADD-ANO-273).  The two flags are the ones the reports need from
+    (MADD-ANO-289).  The two flags are the ones the reports need from
     it: a non-finite ``F`` (:func:`fim` raises, :class:`FIMCore` says
     ``finite``) and an ``F`` flushed to exactly zero
     (:func:`_range_limited`).
@@ -3616,7 +3616,7 @@ def fim(
         Before 0.4.0's release the verdict read the eigenvalues of the
         stored ``F`` and this warning described that route's rounding;
         there the re-run it named did not settle a constant sensitivity
-        (MADD-ANO-273), which now reports its rank deficiency at either
+        (MADD-ANO-289), which now reports its rank deficiency at either
         precision without a warning.
 
     Raises

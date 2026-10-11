@@ -330,15 +330,15 @@ def test_fori_without_diagnostics_iterates_the_same_map(accel):
         assert float(gm.get_node_state("a")["q"]) == Q_STAR
 
 
-def _boolean_loop(solver, mode, reader_first, *, below):
+def _boolean_loop(solver, mode, reader_first, *, below, relays=0):
     """``q <- 2 + 4 p`` with ``p <- (q > 1)``: one fixed point, ``q = 6`` with ``p`` set.
 
     With ``below`` the flag is ``q < 5``: set, it gives ``q = 6`` which
     clears it; clear, ``q = 2`` which sets it.  No state is consistent.
     """
     gm = _loop(Above("b", 5.0 if below else 1.0, below=below), reader_first=reader_first,
-               p_dtype=jnp.bool_, k=4.0, c=2.0, solver=solver, iteration_mode=mode,
-               max_iterations=12)
+               relays=relays, p_dtype=jnp.bool_, k=4.0, c=2.0, solver=solver,
+               iteration_mode=mode, max_iterations=12)
     gm.step()
     return gm
 
@@ -366,6 +366,23 @@ def test_a_flag_that_flips_on_every_pass_reaches_the_cap_unconverged(
     # The float goes 2, 6, 2, ...: every pass moves it by 4, which the norm
     # reads against its magnitude.
     assert r["iterations"] == 12 and r["residual"] > 0.5
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+def test_at_the_cap_the_returned_fields_are_the_pass_at_the_returned_floats(solver):
+    """An unconverged solve still returns fields that describe one state.
+
+    The flag and its relayed copy are those a pass computes from the
+    returned float with the carried fields evaluated at it: the flag of
+    that float, and a copy equal to it.  (The loop's last raw pass left a
+    copy one pass behind the flag.)
+    """
+    gm = _boolean_loop(solver, "jacobi", False, below=True, relays=1)
+    assert not _report(gm)["converged"]
+    q = float(gm.get_node_state("a")["q"])
+    assert q in (2.0, 6.0)
+    assert bool(gm.get_node_state("b")["p"]) is (q < 5.0)
+    assert bool(gm.get_node_state("r1")["p"]) is (q < 5.0)
 
 
 @pytest.mark.parametrize("solver, mode, reader_first", ROUTES)

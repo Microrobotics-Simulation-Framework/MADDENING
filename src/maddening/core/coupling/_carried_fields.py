@@ -138,7 +138,12 @@ class CarriedChain(NamedTuple):
 
 
 def _non_floating(value) -> bool:
-    return not jnp.issubdtype(jnp.asarray(value).dtype, jnp.floating)
+    """An integer, Boolean or PRNG-key leaf: what a group carries beside its floats.
+
+    Not a complex one: the coupling solver carries none, and says so
+    itself at the first step (``acceleration.float_image``).
+    """
+    return not jnp.issubdtype(jnp.asarray(value).dtype, jnp.inexact)
 
 
 def _iterate_reads(plan) -> dict:
@@ -178,7 +183,7 @@ def carried_nonfloat_fields(plan, state) -> tuple:
     """The non-floating state fields a pass of the group reads from the iterate.
 
     Sorted ``(node, field)`` pairs; non-floating as *state* holds them (an
-    integer, Boolean, complex or PRNG-key leaf).  See the module docstring.
+    integer, Boolean or PRNG-key leaf).  See the module docstring.
     """
     return carried_nonfloat_chain(plan, state).fields
 

@@ -94,8 +94,12 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float, kept=None):
     absolute number enters, and it is the only place one can: "how
     small is indistinguishable from zero" is the one question that
     genuinely has units.  Everywhere above the dead band the criterion
-    is a ratio, so it says the same thing whether a force is quoted in
-    newtons or micronewtons.
+    is a ratio, so this measurement of a given change says the same
+    thing whether a force is quoted in newtons or micronewtons.  That is
+    the measurement, not the run it is taken on: the accelerated
+    iterations form their steps over all the fields together and repeat
+    a run under one common factor only (``CouplingGroup.convergence_norm``;
+    MADD-ANO-274).
 
     **The dead band is an assertion the caller makes, so its default
     asserts nothing (``atol=0.0``).**  Leaving the norm is not the same
@@ -3169,16 +3173,18 @@ def aitken_relaxation(
     residual = x_raw_flat - x_old_flat
     delta_r = residual - prev_residual_flat
     # The two dot products, taken on the vectors rescaled by one power of
-    # two (``pow2_frame``), so their ratio does not depend on the
-    # units the group's state is written in.  The ratio itself is
+    # two (``pow2_frame``), so their ratio does not depend on the one
+    # unit the group's state is written in (a common factor: both sums
+    # run over every accelerated field, and fields written in different
+    # units are not brought to one scale; MADD-ANO-274).  The ratio itself is
     # scale-free; what was not was the guard on its denominator, an
     # absolute ``denom > 1e-30`` on ``sum(delta_r**2)``, which is
     # ``O(scale**2)``: the same group written at 1e-12 of its units froze
     # omega part-way through the solve and hit its cap unconverged where
     # the group at scale 1 converged in 88 passes, and at 1e-16 Aitken was
     # plain fixed-point iteration from the first pass -- while every
-    # convergence norm divides each field by its own magnitude so that a
-    # verdict does not depend on units.  Squares of a float32 residual
+    # convergence norm divides each field by its own magnitude so that
+    # the measurement does not depend on units.  Squares of a float32 residual
     # change near 1e-20 also flush to zero (subnormal), which no constant
     # in the guard can fix.  Multiplying by a power of two is exact, so
     # wherever nothing underflowed before, the ratio -- and omega -- is

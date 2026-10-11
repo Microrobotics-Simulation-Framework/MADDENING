@@ -407,8 +407,10 @@ claims:
   area: configuration
   claim: >-
     convergence_norm: "All three scale each field's change by the field's own
-    magnitude, so a group's verdict does not depend on the units its
-    quantities are written in."
+    magnitude, so the *norm* of a given change does not depend on the units
+    any quantity is written in.  The *run* it is taken on is the same run
+    under one common factor on every quantity"; under a change of the units
+    of one field, only with acceleration "none" or "fixed".
   sources:
     - src/maddening/core/coupling/group.py:80 (CouplingGroup, convergence_norm)
     - docs/developer_guide/coupling_algorithm_guide.md#reading-coupling_diagnostics
@@ -425,6 +427,10 @@ claims:
     iteration cap with the estimate inside that band about the threshold
     (measured: 0.85 to 1.51 thresholds over eleven decimal factors, two
     verdicts differing).  Anywhere else the verdict is the unscaled one.
+    One field rescaled by itself (the other fields left): the same run, bit
+    for bit, under acceleration "none" and "fixed" only; NOT claimed under
+    "aitken", "iqn-ils" and "iqn-imvj", whose passes, state and verdict
+    move (MADD-ANO-274, open).
   oracle: the same group at another scale (bit-identity for powers of two; the stated band for decimal factors).
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in
@@ -452,18 +458,22 @@ claims:
 - id: CPL-010
   area: configuration
   claim: >-
-    "Aitken and IQN do not depend on units ... Each now works on the vectors
-    rescaled by one exact power of two, which leaves every configuration at
-    ordinary scales bit-identical (125 dumped) and makes a group at any
-    power-of-two scale reproduce the unscaled run bit for bit -- which the
-    new units oracle in the coupling differential harness now checks for
-    every acceleration, norm and solver."
+    "Aitken and IQN do not depend on the one unit a group is written in ...
+    Each now works on the vectors rescaled by one exact power of two, which
+    leaves every configuration at ordinary scales bit-identical (125 dumped)
+    and makes a group at any power-of-two scale, the same on every field,
+    reproduce the unscaled run bit for bit -- which the new units oracle in
+    the coupling differential harness now checks for every acceleration,
+    norm and solver."
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
     - src/maddening/core/_pow2_frame.py (pow2_frame)
     - src/maddening/core/coupling/acceleration.py:1702 (aitken_relaxation)
   conditions: >-
-    "any power-of-two scale", every acceleration, norm and solver; the
+    "any power-of-two scale", ONE factor on every field, every acceleration,
+    norm and solver; NOT claimed for a factor on one field alone, under which
+    "aitken" and the IQN accelerations take another path (MADD-ANO-274,
+    open; "none" and "fixed" are bit-identical there, CPL-009).  The
     harness checks 2**-53 to 2**66 only.  Below about 2**-115 the node
     arithmetic of the fixture itself underflows (products of O(1e-3) gains
     and O(1e-35) states), so a scale must keep the map's own operands
@@ -910,12 +920,18 @@ claims:
     converged states, "quadratic" uses quadratic extrapolation from the last
     three converged states.  Reduces iteration count for smoothly varying
     problems"; only floating fields are extrapolated; the fixed point does
-    not move, and the returned iterate moves within the solve's tolerance.
+    not move, and where the solve converges the returned iterate moves
+    within the solve's tolerance.
   sources:
     - src/maddening/core/coupling/group.py:223 (CouplingGroup, predictor)
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (predictor)
   conditions: >-
-    any acceleration; a multi-rate group learns only from applied solves
+    any acceleration; a solve that converges (max_iterations >= 2 and
+    converged=True): at max_iterations=1 nothing is solved, the guess is the
+    state the single staggered pass starts from, and the predictor moves the
+    result at order one without a warning (documented on
+    CouplingGroup.predictor and max_iterations; not a claim).  A multi-rate
+    group learns only from applied solves
     (CPL-073). Not claimed for mixed dtypes, 16-bit floats, vmap,
     run_adaptive or sharded graphs.
   oracle: iteration counts with and without; converged state against the predictor-free run; closed-form leaves.

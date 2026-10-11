@@ -6494,11 +6494,15 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The seed is the Gauss-Seidel pass's: the second sweep reads the
-      first sweep's fluxes in schedule order, so a flux that depends on
-      another flux which depends on a third is seeded one sweep behind;
-      exact for fluxes that depend on state only, which is every flux the
-      built-in nodes compute, and the converged fixed point is the same.
+      The seed is the Gauss-Seidel pass's: two sweeps over the members in
+      schedule order, the second reading the first's fluxes.  It is the
+      flux of the iterate for a flux computed from the state (a built-in
+      node's flux also reads its Dirichlet or anchor input, which an edge
+      delivers from a state field) and for fluxes that read each other
+      along a chain the two sweeps reach.  It is not for fluxes that read
+      each other in a loop, or along a longer chain against the sweep: such
+      a group converged to a state that is not the coupled solution, and
+      is refused at `compile()` (MADD-ANO-276).
     verification:
       - "tests/property/test_differential_leaves.py::test_two_flux_producers_exchanging_fluxes_step_under_jacobi"
       - "tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point"
@@ -19219,4 +19223,131 @@ anomalies:
       - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_iqn_under_jacobi_reports_the_solve_it_did_not_finish"
       - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_strict_convergence_raises_on_the_stalled_solve"
       - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_the_plain_loop_and_the_recommended_combinations_converge_on_the_pair"
+  - anomaly_id: "MADD-ANO-276"
+    title: "A coupling group whose boundary fluxes read each other in a loop converged, converged=True, to a state that does not solve the coupled equations"
+    description: >
+      A boundary flux (`compute_boundary_fluxes`) is not part of a coupling
+      group's iterate: every pass rebuilds each member's fluxes from the
+      states, in two sweeps.  That is the flux of the iterate when a flux is
+      computed from the state, and when fluxes read each other along a chain
+      the two sweeps reach.  Where fluxes read each other in a loop -- each
+      node's flux depends on an input the other's flux delivers, as with
+      `add_robin_coupling` between two nodes whose flux depends on the Robin
+      datum they are handed -- two sweeps from nothing cut the loop, the
+      iteration converges to the fixed point of the cut equations, and the
+      group reports `converged=True` with a residual at the float floor.
+      Measured on the 0.4.0 development tree (release branch at 877e9399,
+      CPU, jaxlib 0.11.0, float32, tolerance 1e-6) on two affine nodes coupled
+      by the developer guide's Robin recipe, against the coupled 6x6 system
+      in float64.  One measure throughout this entry: the largest distance
+      of a member's state from its value in the coupled solution, as a
+      fraction of that value.  It was 4.3e-4, 1.5e-2 and 0.49 under
+      Gauss-Seidel and 3.5e-3, 5.0e-2 and 0.77 under Jacobi for flux-loop
+      gains of 0.06, 0.25 and 0.56, under solver "ift" and "fori" alike, with
+      `strict_convergence` silent, `validate()` reporting the loop as
+      "handled by iterative coupling", and one run carrying
+      `spectral_usable=True` beside an error bound 2000 times below its
+      distance to the solution.  A pair that exchanges fluxes only stopped
+      after one pass at (1.9, 2.71) where the solution is (10, 10): 0.81.
+      The same cause without a loop: a chain of three fluxes running two
+      steps against the order the group sweeps its members in was 0.15 off
+      under Jacobi (and right, 3.8e-7, under Gauss-Seidel, whose pass
+      recomputes a flux after its producer's update), and 6.3e-2 off under
+      both where the last flux is read by its own producer.  Never released: at v0.1.0, v0.3.0 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0) the Robin pair and the
+      flux-only pair raise `KeyError` naming the flux at the first step under
+      both schedules (MADD-ANO-071); the two-sweep seed that lets them run
+      was added during 0.4.0 development.  Found by the whole-tree audit of
+      the release tip.
+      Resolved in 0.4.0 by refusing the group.  `compile()` raises one
+      `ValueError` that names the group, the fluxes, the inputs and the edges
+      of the loop (or of the chain, where the pass reads a seed the two
+      sweeps do not reach), says what the iteration can do with it, and gives
+      the way out: carry the quantity in a state field the node writes in
+      `update()`, which the group iterates and measures.  `validate()` lists
+      the same text as one `ERROR` line where it said the loop was handled,
+      and the readers of a graph never compiled (`resolve_boundary_inputs`)
+      raise it too.  Whether a flux depends on an input is decided from an
+      abstract trace of the hook (`jax.make_jaxpr`) on the inputs the pass
+      hands it, at the shapes its edges deliver, whether or not
+      `boundary_input_spec()` declares them, and only for a group its edges
+      alone would refuse; no other group is traced and no pass is changed.
+      On the way, a flux hook that indexes an input (`boundary_inputs[name]`)
+      is an `ERROR` line of `validate()` naming the node, the hook and the
+      input: `validate()` asks every flux hook for its flux names with no
+      inputs, and raised a bare `KeyError` for such a hook.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the group reported convergence
+      at a state up to 0.8 of itself from the coupled solution, and no
+      diagnostic showed it.  Not `critical`: it needs fluxes that depend on
+      each other through flux edges inside one group, and it never reached
+      a release.
+      `context_dependent` because the size of the error is the strength of
+      the flux loop.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.graph_manager.GraphManager.validate"
+      - "maddening.core.coupling.helpers.add_robin_coupling"
+    affected_versions: "none"
+    workaround: >
+      Never reachable in a release.  In 0.4.0 a refused group is coupled by
+      carrying the flux in the state: compute it in `update()`, return it as
+      a state field, and name that field as the edge's `source_field`
+      (`flux_field_a` / `flux_field_b` of `add_robin_coupling`).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Such a group no longer compiles through flux edges; iterating fluxes
+      themselves (fluxes in the iterate and in the convergence norm) is
+      planned for 0.5.0.  The criterion is sufficient and errs towards
+      refusing: dependence is structural (a flux that multiplies its input by
+      zero, or an edge that delivers a flux times zero, counts), a hook that
+      cannot be traced, or an input whose shape cannot be derived, is taken
+      to read every input (the message says so, with the reason), and so is
+      a flux whose program differs between the inputs the two seeding sweeps
+      hand its hook.  The criterion is asked at `compile()` and `validate()`
+      of its own trace of each hook, with the hook's arguments as the only
+      inputs.  It cannot see, and such a group is still wrong in silence: a
+      dependence that does not pass through the hook's arguments (an
+      `update` that stashes its boundary input on the node object for the
+      flux hook to read), and a hook changed after the question was asked (a
+      Python switch on `node.params` flipped after `compile()`: `step()`
+      keeps its program, an entry point traced later runs the new hook with
+      a loop that was never asked about; 1.1e-2 off on one such pair).  Both
+      are outside the node contract.  `check_conservation` refuses every
+      pair whose flux edges form a loop, also where each flux is computed
+      from the state and the group compiles.  Within the contract the
+      question is asked of one configuration: the hooks are traced at the
+      node's own `timestep` (under `run_adaptive` the step hands a `dt`
+      chosen at run time, so a hook whose structure follows `dt` is asked
+      about at one value); a geometry-anchored mapping's value is derived
+      from the shape of its geometry field in the state at compile, which
+      has not been compared edge by edge against an instrumented pass as
+      the edges without a geometry have (0 disagreements over 1,200 random
+      graphs); a flux edge from outside the group is not read by the step
+      (MADD-ANO-156) and makes its input underivable; a flux is held to
+      the criterion whether or not its value reaches a state, so a loop
+      among fluxes that no update reads is refused though it changes no
+      state; and a difference between two traces in an operation whose
+      parameter is a function or an object the comparison cannot look into
+      (a host callback) is counted as a read and said to be assumed.
+    verification:
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_that_read_each_other_in_a_loop_are_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_whose_seed_the_pass_reads_too_early_is_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_that_changes_with_the_inputs_it_is_handed_is_not_a_seed_of_one_sweep"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_computed_from_the_state_alone_reaches_the_coupled_solution"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_from_the_state_is_right_whether_or_not_its_node_declares_the_input"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_guides_robin_recipe_compiles_as_written"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_with_undeclared_inputs_is_judged_as_one_with_declared_inputs"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution"
     github_issue: null

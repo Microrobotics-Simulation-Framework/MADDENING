@@ -401,6 +401,16 @@ Requirements:
 - Return a dict of JAX arrays
 - Keys become available as `source_field` on edges
 - Called automatically after each node update during edge resolution
+- Inside a coupling group, compute a flux from the state, or from inputs
+  that do not come from another member's flux in a loop: a flux is not part
+  of what a group iterates, so fluxes that read each other in a loop are
+  refused at `compile()` (see "Robin coupling" below for the way out).
+- Read every input with `boundary_inputs.get(name, default)`, never
+  `boundary_inputs[name]`: the hook is called without the inputs that are
+  not available yet.  `validate()` asks it for its flux names with none, and
+  lists a hook that indexes an input as an `ERROR` naming the node and the
+  input; and the first of the two sweeps that compute a coupling group's
+  fluxes leaves out an input whose flux does not exist yet.
 - On a multi-rate graph, a node slower than the base step holds its state
   between the base steps it fires on, and the hook is called on **every**
   base step with the state the node holds after that step and the
@@ -901,6 +911,28 @@ group: each node reads the other's flux, a flux exists only once its node has
 stepped, and outside a group one of the two reads would come before it (the
 step fails with a `KeyError` naming the flux field).  The value and the flux
 are added as they are, so choose `alpha` for fields in commensurate units.
+
+**What each node's flux may read.**  A coupling group iterates the states of
+its members and not their fluxes: every pass computes each flux again from the
+states.  So the recipe above solves the coupled equations when each node's
+`q` is computed from its **state** (a node that holds its boundary data in
+its state).  If `compute_boundary_fluxes` reads the Robin datum the node is
+handed (`q = h * (u - robin_in)`, say), the two fluxes depend on each other
+in a loop that the passes do not solve, and `compile()` refuses the group
+with a `ValueError` that names the loop; `validate()` lists it as an `ERROR`.
+(Releases to 0.3.1 failed on such a pair with a `KeyError` at the first step;
+during 0.4.0's development it ran and reported `converged=True` at a state
+that was not the coupled solution: MADD-ANO-276.)  For such nodes carry the
+flux in the state: compute `q` in `update()`, return it as a state field, and
+pass that field as `flux_field_a` / `flux_field_b`.  The group then iterates
+`q` together with `u` and measures its convergence; on two affine nodes whose
+flux loop has gain 0.56 that leaves each state within 1.0e-6 of its value in
+the coupled solution, as a fraction of that value, where the flux edges left
+them 0.49 (Gauss-Seidel) and 0.77 (Jacobi) off by the same measure.  Whether
+a flux reads an input is decided by tracing `compute_boundary_fluxes` on the
+inputs the node is handed, whether or not `boundary_input_spec()` declares
+them; a hook that cannot be traced (one that computes on values, such as
+`float(state["u"])`) is taken to read every input, and the message says so.
 
 ## Transform Registration
 

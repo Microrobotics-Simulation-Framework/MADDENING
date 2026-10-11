@@ -966,6 +966,43 @@ class InterfaceEdge:
         return tuple((leaf.dtype, int(np.prod(leaf.shape, dtype=np.int64)))
                      for leaf in jax.tree_util.tree_leaves(out))
 
+    @property
+    def additive(self) -> bool:
+        """Is what this edge delivers added to what an earlier edge into
+        the same input delivered (``EdgeSpec.additive``)?"""
+        return bool(getattr(self.edge, "additive", False))
+
+    def delivered_abstract(self, source, state, mappings=None):
+        """The shapes and dtypes of what this edge hands its target for a
+        source value of the shapes and dtypes of *source*.
+
+        The edge's own rule (``maddening.core.edge._delivered``), under
+        :func:`jax.eval_shape` as in :meth:`delivered_leaves`: never run
+        on numbers.  *source* stands for the value read at the source: a
+        state field, or a boundary flux, which is not in *state* and which
+        the caller therefore passes.  A geometry-dependent mapping is
+        handed the abstract value of its geometry field in *state*;
+        ``None`` where *state* does not hold that field.
+
+        Read by ``_flux_loops._handed`` for the inputs a coupling pass
+        hands a member's ``compute_boundary_fluxes``, declared in
+        ``boundary_input_spec()`` or not.
+        """
+        geom: tuple = ()
+        if self.anchor is not None:
+            side, field = self.anchor
+            holder = (state.get(self.source[0] if side == "source" else self.target[0])
+                      or {})
+            if field not in holder:
+                return None
+            geom = (holder[field],)
+        edge = self.edge
+
+        def rule(value, *geometry):
+            return _delivered(edge, value, mappings, *geometry)
+
+        return jax.eval_shape(rule, source, *geom)
+
 
 def _edge_record(edge, state=None, nodes=None, *, declared: int = 0,
                  role: str = INTERNAL) -> InterfaceEdge:
@@ -1249,6 +1286,41 @@ class InterfacePlan:
         """
         return any(rec.source_kind == FLUX and rec.target[0] in self.flux_members
                    for rec in self._declared(INTERNAL, INBOUND))
+
+    def edges_into(self, member) -> tuple:
+        """The records of the edges into *member*, in the order a pass
+        applies them.
+
+        Every edge whose target is *member*, from another member or from
+        outside the group, in the order of the ``add_edge`` calls: the
+        order in which a pass composes a member's boundary inputs
+        (``_coupled_block._run_coupled_block_impl._resolve_boundary``
+        walks ``edges_by_target[member]``, which
+        ``GraphManager._build_step_fn`` fills from every edge of the
+        graph in that order; an additive edge adds to what an earlier
+        edge into the same input delivered, any other edge replaces it).
+
+        Read by ``_flux_loops._refuse_unsolved_fluxes``: what a pass
+        hands a member's ``compute_boundary_fluxes``.  **Differs from**
+        :attr:`internal`, the canonical order the interface norm sums
+        in, which sorts by the source's place in the sweep and by the
+        source field.
+        """
+        return tuple(r for r in self._declared(INTERNAL, INBOUND) if r.target[0] == member)
+
+    def external_inputs(self, external_inputs) -> tuple:
+        """``(member, field, value)`` of each declared external input into
+        a member, *value* being the shape and dtype the step hands.
+
+        Read by ``GraphManager._refuse_unsolved_group_fluxes`` for
+        ``_flux_loops._refuse_unsolved_fluxes``: the inputs a pass hands
+        a member's hooks beside what the edges deliver.  *external_inputs*
+        are the graph's ``ExternalInputSpec``, in the order declared.
+        """
+        return tuple(
+            (ei.target_node, ei.target_field,
+             jax.ShapeDtypeStruct(tuple(ei.shape), jnp.dtype(ei.dtype)))
+            for ei in external_inputs if ei.target_node in self.members)
 
     # -- geometry -----------------------------------------------------------
 

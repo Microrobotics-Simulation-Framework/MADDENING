@@ -205,8 +205,9 @@ without one (every shard the same number of cells) it refuses the input
 unless each device owns a contiguous, ascending block of cell ids.  So on
 a partition with no pad row -- 256, 1024, 300,304 and 1,000,000 cells cut
 into four by reverse Cuthill-McKee, or a mesh file with a balanced
-partition -- these three goals renumber the cells into partition order
-before they build anything (`renumbered: true` in the record): the same
+partition -- `forward` and `gradient` renumber the cells into partition order
+before they build anything (`renumbered: true` in the record; `indivisible`
+cuts contiguous blocks, in order already, and records `false`): the same
 graph and partition, each shard's cells in the order they had, the node's
 start, source and loss weights laid over the new numbering.  A partition
 with a pad row (100,489 cells) runs with its cells as the partitioner left
@@ -218,6 +219,10 @@ four, and the scattered order ran only in the seeded-fault tests.)
 
 | fault (seed) | where | goals that must fail | items |
 |---|---|---|---|
+| injected parameters dropped (the node steps with its own) | `sharded_node.py` | `stencil`, `hybrid`, `coupled`: the derivatives with respect to them | 1, 3, 4, 6 |
+| a halo axis `axis_map` leaves unsharded edge-filled under every boundary | `sharded_node.py` | `stencil`, `hybrid`, `coupled`: the `1d` and `1d-axis1` cases | 1, 3, 4, 6 |
+| `shard_info`'s extent alone wrong (the padded one; its offsets right) | `sharded_node.py` | `stencil`: the Dirichlet cases | 1, 3 |
+| scalar boundary inputs zeroed | `sharded_node.py` | `stencil`: the Dirichlet cases (their `wall`) | 1, 3 |
 | a sharded static halo-exchanged along the first mesh axis `axis_map` lists, whatever axis it is split along | `sharded_node.py` | `stencil`: the `field-mask1` case | 1, 3 |
 | a sharded static placed on the mesh along the first mesh axis `axis_map` lists | `sharded_node.py` | `stencil`: the `field-mask1` case | 1, 3 |
 | the fields split as if the mesh's axes were in the spatial axes' order | `sharded_node.py` | `stencil`: the `2d-crossed` case | 1, 3 |
@@ -244,11 +249,11 @@ four, and the scattered order ran only in the seeded-fault tests.)
 | an integral declared one a shard summed over the mesh axis | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 | each shard's integral stacked into the next shard's slot | `sharded_unstructured.py` | `forward`: the per-shard check, every size | 1 |
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds twenty-two faults
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds twenty-six faults
 as seeds of `sharded_node.py` and `halo.py` -- the four and the three
-above, the two of the `field-mask1` case, the two of the crossed pencil, domain integrals summed over the first mesh axis only, the three of a halo two
+above, the four of paths the goals carried without a seed (injected parameters, an unsharded halo axis, `shard_info`'s extent, scalar inputs), the two of the `field-mask1` case, the two of the crossed pencil, domain integrals summed over the first mesh axis only, the three of a halo two
 cells wide and the seven of the `field-shares` cases -- and seven of `sharded_unstructured.py`.  Slow-marked, it
-applies each of the twenty-two to a scratch copy of the library, runs `--goal
+applies each of the twenty-six to a scratch copy of the library, runs `--goal
 checklist --dry-run --keep-going`, and requires `stencil`, `hybrid` and
 `coupled` to read `FAIL` (`stencil` alone for a fault of a halo two wide or of the `field-shares` cases;
 and `halo` too for a seed of `halo.py`; the other checklist goals `PASS`),
@@ -286,23 +291,28 @@ is not **run**.
 |---|---|---|---|
 | `axis_map`: a spatial axis split over a mesh axis, each halo from the neighbouring shard (a 1-D mesh along either axis, the 2 × 2 pencil, a mesh axis of one device) | run | `halo`, `stencil`, `hybrid`, `coupled` | `wrong_neighbour_along_spatial_axis_1`, `later_axes_are_zero_at_the_global_edges` |
 | `axis_map` in another order than the mesh's axes (the crossed pencil, `2d-crossed`: its first mesh axis splits spatial axis 1) | run | `stencil` | `fields_split_as_if_the_mesh_order_were_the_spatial_order`, `shard_info_offsets_from_the_mesh_axes_in_spatial_order` |
-| a halo axis `axis_map` leaves unsharded, which the wrapper fills itself | unproved | | `tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py` |
+| a halo axis `axis_map` leaves unsharded, which the wrapper fills itself (axis 1 on `1d`, axis 0 on `1d-axis1`) | run | `stencil`, `hybrid`, `coupled` | `unsharded_halo_axes_always_edge_filled` |
 | `boundary="periodic"` at the global edges | run | `stencil`, `hybrid`, `coupled` | `later_axes_are_zero_at_the_global_edges` |
 | `boundary="edge"`, the default (also under the goals' Dirichlet ends, which the node holds over it) | run | `halo`, `stencil` | `wide_edge_halos_repeat_the_block_not_its_edge_cell`, `halos_two_wide_are_zero_at_the_global_edges` |
 | `boundary="zero"` | run | `halo`, `stencil` | `the_zero_fill_is_the_edge_fill`, `zero_filled_halos_are_ones` |
 | `halo_width()`: one cell, and two | run | `halo`, `stencil` | `outer_halo_cells_copy_the_innermost_one`, `halos_two_wide_are_zero_at_the_global_edges` |
+| a `halo_width()` that differs between axes (every goal's node reads as far along both) | not run | | `tests/cloud/multigpu/test_differential_sharding.py` |
+| a 3-D grid with an unsharded leading axis (`axis_map` on spatial axes 1 and 2; every goal's grid is 2-D) | not run | | `tests/cloud/multigpu/test_sharded_stencil_node.py` |
+| a field or a grid input with trailing dimensions (the `stencil` goal's lattice: its populations, `(ny, nx, 9)`, and its body force, `(ny, nx, 2)`) | unproved | | `tests/cloud/multigpu/test_lbm_sharded.py` |
+| `initial_state()`: the inner node's state placed on the mesh (the `hybrid` and `coupled` graphs start from it; the `stencil` goal places its start itself) | unproved | | `tests/cloud/multigpu/test_stencil_domain_integral_state.py` |
 | a `halo_width()` that follows a parameter, read again at each `compile()` | not run | | `tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py` |
 | `halo_boundary()`: a fill the node declares, and the refusal of another | not run | | `tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py` |
 | `static_data`: a `StaticArray(replication="shard")`, halo-exchanged along its `shard_axis` and handed over as `static_padded` | run | `stencil`, `hybrid`, `coupled` | `static_halos_are_nan` |
 | a sharded static split along the second axis `axis_map` lists (the `stencil` goal's `field-mask1` case, on the pencil; every other case splits it along the first) | run | `stencil` | `statics_exchanged_along_the_first_mesh_axis_axis_map_lists`, `statics_placed_along_the_first_mesh_axis_axis_map_lists` |
-| `shard_info`: the block's offset and extent along each sharded axis | run | `stencil`, `hybrid`, `coupled` | `shard_info_extent_from_the_first_mesh_axis`, `shard_info_extent_from_spatial_axis_0` |
+| `shard_info`: the block's offset along each sharded axis (and the extent it is computed from) | run | `stencil`, `hybrid`, `coupled` | `shard_info_extent_from_the_first_mesh_axis`, `shard_info_extent_from_spatial_axis_0` |
+| `shard_info`: the extent as handed to the node, which only Dirichlet ends read (the `stencil` goal's; the graph goals' `Field2D` has periodic ends) | run | `stencil` | `shard_info_extent_is_the_padded_one` |
 | a grid-shaped boundary input, split and halo-padded like the state | run | `stencil`, `hybrid`, `coupled` | `grid_inputs_are_zeroed` |
-| a scalar boundary input, replicated to every shard | unproved | | `tests/cloud/multigpu/test_sharded_boundary_inputs.py` |
+| a scalar boundary input, replicated to every shard (the `stencil` goal's Dirichlet `wall`; the graph goals take none) | run | `stencil` | `scalar_inputs_are_zeroed` |
 | `domain_integral_fields()`: the shards' partial sums summed over the mesh | run | `stencil`, `hybrid`, `coupled` | `domain_integrals_are_halved`, `domain_integrals_summed_over_the_first_mesh_axis_only` |
 | a domain integral carried in the state, handed back to `update_padded` (a per-shard one as that shard's slice, a reduced one whole) | run | `stencil` | `integrals_in_the_state_are_zeroed_on_the_way_in`, `reduced_integrals_in_the_state_arrive_as_zeros`, `reduced_integrals_in_the_state_are_summed_again_on_the_way_in` |
 | `domain_integral_axes()`: an integral summed over some mesh axes only, or over none | run | `stencil` | `per_shard_integrals_are_summed_over_every_axis`, `per_shard_integrals_land_in_the_next_shards_slot` |
 | a mesh axis `axis_map` does not use | not run | | `tests/cloud/multigpu/test_unused_mesh_axis_integrals.py` |
-| `params`: injected parameters replicated to every shard, and their derivative | unproved | | `tests/cloud/multigpu/test_property_injected_params_gradient.py` |
+| `params`: injected parameters replicated to every shard, and their derivative | run | `stencil`, `hybrid`, `coupled` | `injected_params_are_dropped` |
 | the coupling hooks forwarded to the node (`update_evaluations()`, the flux and interface hooks) | unproved | | `tests/cloud/multigpu/test_sharded_wrapper_coupling_hooks.py` |
 | a `ShardedStencilNode` wrapped in another | not run | | `tests/cloud/multigpu/test_nested_stencil_wrapper_params.py` |
 | the cache of sharded statics and `invalidate_static_cache()` after a write | not run | | `tests/cloud/multigpu/test_sharded_static_cache.py` |
@@ -314,9 +324,13 @@ is not **run**.
 
 | path | status | goals | seeds, or the CPU test |
 |---|---|---|---|
-| `layout` and `exchange`: the state split over the shards and its ghost rows exchanged, under `"all_to_all"` and `"ppermute"` | unproved | | `tests/cloud/multigpu/test_property_exchange_transports.py` |
+| `layout`: the state split over the shards and its ghost rows exchanged | unproved | | `tests/cloud/multigpu/test_property_exchange_transports.py` |
+| `exchange`: the transport the wrapper uses, `"all_to_all"` or `"ppermute"` (a wrapper that uses `"all_to_all"` whatever `exchange` says passes every goal: both give the same answer, and the `exchange` goal times the transports themselves, not through the wrapper) | unproved | | `tests/cloud/multigpu/test_exchange_ppermute.py` |
+| a per-cell field or input with trailing dimensions (every goal's node holds one value a cell) | not run | | `tests/cloud/multigpu/test_unstructured_misshapen_inputs.py` |
 | `mesh_axis`: a mesh axis of another name | not run | | `tests/cloud/multigpu/test_sharded_unstructured.py` |
-| `static_data`: a `StaticArray(replication="partition")`, split and ghost-exchanged like the state | unproved | | `tests/cloud/multigpu/test_unstructured_layout_contract.py` |
+| `static_data`: a `StaticArray(replication="partition")`, split like the state (the goals' node reads its neighbour table and its `own` mask) | unproved | | `tests/cloud/multigpu/test_unstructured_layout_contract.py` |
+| a partition static's ghost rows, exchanged like the state's (a wrapper that zeroes them passes every goal: the goals' node reads its statics at the rows it owns only) | unproved | | `tests/cloud/multigpu/test_unstructured_layout_contract.py` |
+| `invalidate_static_cache()` (the unstructured goals build no graph, so nothing calls it) | not run | | `tests/cloud/multigpu/test_sharded_params.py` |
 | a per-cell boundary input in partition layout, and its cotangent | run | `indivisible`, `forward`, `gradient` | `cell_inputs_are_zeroed`, `cell_inputs_ghost_rows_are_not_exchanged`, `cell_inputs_are_one_row_off`, `cell_inputs_lose_their_cotangent` |
 | a scalar boundary input, replicated to every shard | not run | | `tests/cloud/multigpu/test_unstructured_misshapen_inputs.py` |
 | `params`: injected parameters replicated to every shard, and their cotangent | run | `indivisible`, `forward`, `gradient` | `injected_params_are_doubled`, `injected_params_reach_shard_0_only`, `injected_params_lose_their_cotangent` |
@@ -346,13 +360,20 @@ is not **run**.
 The `gradient` goal's `sharded_cg` part runs neither wrapper (its operator
 is the runner's own), and its seeds are seeds of the runner.
 
-Two rows are **run** at one size of the session's three only.  A wrong
-`shard_info["n_local"]` shows where a shard has a pad row, and the
-unstructured goals keep their cells in the partitioner's scattered order
-where the partition has one: at 100,489 cells, and not at 300,304 or
-1,000,000, which divide by four and run renumbered into partition order.
-So on the GPUs the scattered order is exercised at one size of three, the
-smallest.
+Where the session exercises the partitioner's scattered cell order.
+`halo` and `exchange` never renumber (they hand the wrapper no per-cell
+input): their exchanges run on the scattered order at every size.
+`forward` and `gradient` renumber every partition without a pad row into
+partition order (`renumbered: true`): 300,304 and 1,000,000 cells, and a
+`--mesh` file whose partition is balanced -- the session's mesh is,
+1,001,664 cells in four parts of 250,416.  So the wrapper's
+`initial_state()`, `gather_global()` and per-cell inputs see the scattered
+order at 100,489 cells only, in the first `forward` run and in
+`gradient`; the second `forward` run (`--mesh`) exercises the real mesh's
+graph, renumbered, and not the scattered order.  `indivisible` cuts its
+cells into contiguous blocks, which are in order already.  A wrong
+`shard_info["n_local"]` shows only where a shard has a pad row: at 100,489
+cells, in the first run.
 
 ### The transport question
 
@@ -396,11 +417,11 @@ pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the 
 The dry run runs its two default sizes, 256 and 961 cells: the
 unstructured goals renumber the first and leave the second as the
 partitioner scattered it, and `forward.json`, `gradient.json` and
-`indivisible.json` say which under `renumbered`.  It takes about 140 s on
-four shared cores; allow three minutes.  (Measured on the same four
-cores: 127 s at schema 10, whose second size was 1024 cells and whose
-`stencil` goal had four cases fewer, 53 s against 62 s; with `--cells
-256` alone schema 10 took 82 s on three quiet cores.)  Most
+`indivisible.json` say which under `renumbered`.  It takes two to four
+minutes on four cores: 132 to 211 s measured at schema 11 on four cores
+shared with other work, and the goals' own times summed to 156 s at
+schema 12 (shared too); allow five minutes.  (With `--cells 256` alone
+schema 10 took 82 s on three quiet cores.)  Most
 of it XLA compiling the `stencil` cases and the coupled group's adjoint on
 each of the four meshes.  It must print `checks n/n passed` for all eight goals, no
 `CHECK NOT RUN` line, and exit 0.  Spell every option out: the runner
@@ -452,6 +473,31 @@ manual routes:
 * **SkyPilot's CLI** (`sky launch` with `--gpus RTX4090:4
   --cloud runpod --no-use-spot --workdir .`), typed by the maintainer.
 
+**The image: one built from the session's commit, never `:latest`.**  The
+launcher's default, `JobConfig.container_image =
+"ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest"`, is
+the only tag published, and it was built on 2026-03-25 from an older
+Dockerfile: Ubuntu 22.04 (system Python 3.10), CUDA 12.2,
+`jax[cuda12]>=0.4,<0.6`.  This tree needs Python >= 3.12 and jax >= 0.10,
+so a pod on that image stops at section 2a's interpreter check, on metered
+time.  Before the session the maintainer builds the image from
+`docker/Dockerfile.cloud` at the session's commit (`git rev-parse HEAD`)
+and pushes it, on a machine with docker:
+
+```sh
+docker build -f docker/Dockerfile.cloud --build-arg JAX_SPEC='jax[cuda12]==0.11.2' \
+    -t ghcr.io/microrobotics-simulation-framework/maddening-cloud:<commit> .
+docker push ghcr.io/microrobotics-simulation-framework/maddening-cloud:<commit>
+```
+
+and launches on that tag: `JobConfig(...,
+container_image="ghcr.io/microrobotics-simulation-framework/maddening-cloud:<commit>")`
+on the `CloudLauncher` route, `--image-id
+docker:ghcr.io/microrobotics-simulation-framework/maddening-cloud:<commit>`
+on the SkyPilot CLI route.  `JAX_SPEC` pins the JAX that CI's newer lane
+tests, the version section 2a installs; without it the image carries the
+newest JAX in the range of the `cuda12` extra.
+
 **The session is on 4 × RTX 4090, 24 GB each.**  What that changes:
 
 * The cards talk over PCIe; an RTX 4090 has no NVLink.  Every transport
@@ -498,20 +544,32 @@ Until the runner records those, the session makes them true by procedure:
 
 ```sh
 cd ~/sky_workdir
+python3 -c "import sys; assert sys.version_info >= (3, 12), sys.version" || echo "python3 older than 3.12: stop (section 3)"
 nvidia-smi -L                                    # four GPUs, else stop (section 3)
-pip install -q "jax[cuda12]>=0.10,<0.13" && pip install -q -e .
+PIP="python3 -m pip install -q --break-system-packages"
+$PIP "jax[cuda12]==0.11.2" && $PIP -e .          # the JAX CI tests, exactly
 echo "/results/" >> .git/info/exclude            # the session's output is not the tree
 test -z "$(git status --porcelain)" || { git status --short; echo "dirty tree: stop"; }
-python -c "import jax, jaxlib, maddening; print(jax.__version__, jaxlib.__version__, jax.devices()); print(maddening.__file__)"
+python3 -c "import jax, jaxlib, maddening; print(jax.__version__, jaxlib.__version__, jax.devices()); print(maddening.__file__)"
 mkdir -p results/multigpu
-{ date -u; git rev-parse HEAD; git status --porcelain; python -c "import maddening; print(maddening.__file__)"; \
-  nvidia-smi; pip freeze | grep -iE "^(jax|jaxlib|jax-cuda|lineax|equinox|numpy|scipy)"; } \
+{ date -u; python3 --version; git rev-parse HEAD; git status --porcelain; python3 -c "import maddening; print(maddening.__file__)"; \
+  nvidia-smi; python3 -m pip freeze | grep -iE "^(jax|jaxlib|jax-cuda|lineax|equinox|numpy|scipy)"; } \
     > results/multigpu/session.txt 2>&1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export JAX_DEFAULT_MATMUL_PRECISION=highest       # float32 matrix products at float32 (below)
 env | grep -E "^(JAX|XLA)_" >> results/multigpu/session.txt
 set -o pipefail
 ```
+
+**The interpreter and the JAX.**  The first line stops a pod whose image
+is older than this tree (section 1 says which image to launch).  The
+install names `jax[cuda12]==0.11.2`, the JAX of CI's newer lane, exactly:
+pip leaves an installed JAX that satisfies a range alone, so a range
+would keep whatever the image carries.  Every command on the pod says
+`python3`: the image's interpreter is Ubuntu 24.04's system Python, which
+has no `python` and whose pip refuses to install into it without
+`--break-system-packages` (PEP 668; the Dockerfile passes it too).
+`session.txt` records `python3 --version`.
 
 **Float32 matrix products.**  On an NVIDIA card JAX computes float32
 matrix products at reduced precision unless told otherwise
@@ -530,7 +588,7 @@ A dirty tree is the stop condition of section 3, before anything is
 spent on goals.  Run `git status --porcelain` again after the last goal:
 it must still print nothing.
 
-Optional: `pip install pymetis` for a real graph partition of the mesh.
+Optional: `$PIP pymetis` for a real graph partition of the mesh.
 
 ### 2b. The goals, in this order, each under its time box
 
@@ -550,7 +608,7 @@ failure and does not stop the session, but it keeps the item open.  On
 four GPUs there are none.
 
 ```sh
-R="python benchmarks/multigpu/run_pod.py --out results/multigpu"
+R="python3 benchmarks/multigpu/run_pod.py --out results/multigpu"
 L=results/multigpu
 timeout 10m $R --goal indivisible 2>&1 | tee $L/indivisible.log      # checklist 5
 timeout 10m $R --goal halo        2>&1 | tee $L/halo.log             # checklist 2
@@ -558,10 +616,24 @@ timeout 25m $R --goal coupled     2>&1 | tee $L/coupled.log          # checklist
 timeout 45m $R --goal stencil     2>&1 | tee $L/stencil.log          # checklist 1 and 3
 timeout 20m $R --goal hybrid      2>&1 | tee $L/hybrid.log           # checklist 4
 timeout 10m $R --goal exchange    2>&1 | tee $L/exchange.log         # the transport ranking
-timeout 20m $R --goal forward     2>&1 | tee $L/forward.log   # add --mesh /path/to/mesh.npz for a real mesh
+timeout 20m $R --goal forward     2>&1 | tee $L/forward.log          # checklist 1: the three synthetic sizes
 timeout 20m $R --goal gradient    2>&1 | tee $L/gradient.log         # checklist 1 and 3, unstructured
-python benchmarks/multigpu/run_pod.py --summarise results/multigpu | tee $L/summary.txt
+M=results/multigpu-mesh; mkdir -p $M                                  # the real mesh: a directory of its own
+timeout 15m python3 benchmarks/multigpu/run_pod.py --out $M --goal forward \
+    --mesh /path/to/mesh.npz 2>&1 | tee $M/forward.log               # one size, the file's
+python3 benchmarks/multigpu/run_pod.py --summarise results/multigpu | tee $L/summary.txt
+python3 benchmarks/multigpu/run_pod.py --summarise $M | tee $M/summary.txt
 ```
+
+`forward` runs twice.  The first run is the goal at the three synthetic
+sizes, with the other seven in `results/multigpu`.  The second, with
+`--mesh`, runs ONE size, the file's (the session's mesh: 1,001,664
+cells), and writes its own `forward.json`: a goal's file is named for the
+goal, and `--summarise` reads every `<goal>*.json` of one directory, so
+the run goes to `results/multigpu-mesh`, and that directory is summarised
+on its own (it decides no item by itself: items 1 and 3 need `stencil`
+and `gradient`, which are in the first directory).  Its exit status is
+read like any other goal's.
 
 The checklist goals come first because they are cheap and decisive; the
 coupled goal is third because item 6 is the one no other measurement
@@ -734,7 +806,7 @@ result with it); stop at the first non-zero exit.
 
 ```sh
 T=results/stress; mkdir -p $T
-big() { timeout "$1" python benchmarks/multigpu/run_pod.py --goal "$2" --cells "$3" \
+big() { timeout "$1" python3 benchmarks/multigpu/run_pod.py --goal "$2" --cells "$3" \
             --partition contiguous --warmup 1 --repeats 3 \
             --out $T/cells-$3 2>&1 | tee $T/$2-$3.log; }
 big 2m forward  10000000;  echo $?
@@ -796,14 +868,14 @@ the tiling rules that make a wrong halo show (an odd number of tiles
 along every split axis, sharing no factor with the devices there).
 
 ```sh
-C="python benchmarks/multigpu/run_capacity.py --device-memory-gb 24 --rung-timeout-s 120"
+C="python3 benchmarks/multigpu/run_capacity.py --device-memory-gb 24 --rung-timeout-s 120"
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95       # with PREALLOCATE=false of section 2a
 timeout 18m $C --mesh 2x2 --ramp 0.25 0.5 0.75 0.85 0.9 --soak-minutes 3 \
     --out results/capacity-2x2 2>&1 | tee results/capacity-2x2.log;  echo $?
 timeout 5m  $C --mesh 4x1 --ramp 0.25 0.85 \
     --out results/capacity-4x1 2>&1 | tee results/capacity-4x1.log;  echo $?
-python benchmarks/multigpu/run_capacity.py --summarise results/capacity-2x2 | tee results/capacity-2x2.txt
-python benchmarks/multigpu/run_capacity.py --summarise results/capacity-4x1 | tee results/capacity-4x1.txt
+python3 benchmarks/multigpu/run_capacity.py --summarise results/capacity-2x2 | tee results/capacity-2x2.txt
+python3 benchmarks/multigpu/run_capacity.py --summarise results/capacity-4x1 | tee results/capacity-4x1.txt
 ```
 
 Each rung is a process of its own under `--rung-timeout-s`, so an
@@ -888,7 +960,7 @@ This is the same `stencil` goal with the variable unset, at the smallest
 size, into a directory of its own:
 
 ```sh
-env -u JAX_DEFAULT_MATMUL_PRECISION timeout 10m python benchmarks/multigpu/run_pod.py \
+env -u JAX_DEFAULT_MATMUL_PRECISION timeout 10m python3 benchmarks/multigpu/run_pod.py \
     --goal stencil --cells 100000 --out results/stress/stencil-default-precision 2>&1 \
     | tee results/stress/stencil-default-precision.log;  echo $?
 ```

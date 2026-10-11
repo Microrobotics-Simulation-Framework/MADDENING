@@ -238,10 +238,9 @@ def test_the_checklist_items_are_decided_by_the_runbooks_goals(rp):
 
 def test_every_seeded_fault_the_runbook_names_is_a_seed():
     """RPD-024: the runner's docstring counts the seeded faults, and the counts are the
-    seeded test's: sixteen of the stencil wrapper and its halo exchange, among them
+    seeded test's: every seed of the stencil wrapper and its halo exchange, among them
     domain integrals summed over the first mesh axis only (it used to count seven
-    and leave it out) the three of a halo two cells wide and the five of the zero fill and of
-    integrals not summed over every mesh axis; and seven of the
+    and leave it out), counted by the cases that catch it; and seven of the
     unstructured wrapper's per-cell inputs and injected parameters.  The runbook's
     counts are ``tests/compliance/test_run_pod_runbook_counts_its_seeds.py``'s, since
     a docs-only change runs only the compliance tests."""
@@ -262,6 +261,8 @@ def test_every_seeded_fault_the_runbook_names_is_a_seed():
     halo_two = [s for s in faults._SEEDS.values() if s.kind == "field-halo2"]
     shares = [s for s in faults._SEEDS.values() if s.kind == "field-shares"]
     mask1 = [s for s in faults._SEEDS.values() if s.kind == "field-mask1"]
+    dirichlet = [s for s in faults._SEEDS.values()
+                 if s.kind == "field" and s.only_under == ("dirichlet",)]
     crossed = [s for s in faults._SEEDS.values() if s.only_in == (faults._CROSSED,)]
     every = [s for s in faults._SEEDS.values() if set(faults._WRAPPER_GOALS) <= set(s.fails)]
     only_gradient = [s for s in faults._PATH_SEEDS.values() if s.fails == ("gradient",)]
@@ -272,6 +273,7 @@ def test_every_seeded_fault_the_runbook_names_is_a_seed():
             (len(shares), "that only its ``field-shares`` cases show"),
             (len(mask1), "that only its ``field-mask1`` case shows"),
             (len(crossed), "that only its crossed pencil shows"),
+            (len(dirichlet), "that only its Dirichlet ends show"),
             (len(halo_two), "that only a halo two cells wide shows"),
             (len(faults._PATH_SEEDS) - len(only_gradient), "that each of them must catch"),
             (len(only_gradient), "that leave every value right")):

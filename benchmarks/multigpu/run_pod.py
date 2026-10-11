@@ -102,14 +102,17 @@ goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
 those cases that way on such a count.  The goals must fail on a stencil
-wrapper or a halo exchange broken in any of twenty-two ways: eight that every
+wrapper or a halo exchange broken in any of twenty-six ways: ten that every
 wrapper goal must catch (a static's halos NaN, grid-shaped inputs zeroed,
 domain integrals halved, domain integrals summed over the first mesh axis
 only, sharded axes after the first zero-filled at the global edges, halos
 taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
-extent divided by the first mesh axis's size or read off spatial axis 0),
-and fourteen that only the ``stencil`` goal can catch, each in cases of
-its own: two that only its ``field-mask1`` case shows (a static split
+extent divided by the first mesh axis's size or read off spatial axis 0,
+injected parameters dropped, a halo axis ``axis_map`` leaves unsharded
+always edge-filled), and sixteen that only the ``stencil`` goal can catch,
+each in cases of its own: two that only its Dirichlet ends show
+(``shard_info``'s extent alone wrong, scalar inputs zeroed), two that only
+its ``field-mask1`` case shows (a static split
 along the second axis ``axis_map`` lists, halo-exchanged along the first
 mesh axis it lists or placed along it), two that only its crossed pencil
 shows (the fields split, or ``shard_info``'s offsets taken, as if the
@@ -348,12 +351,15 @@ CG_SOLVES = ("solve", "adjoint", "tangent")
 #: gradient vectors), and why; and the limit on a Krylov solve's true
 #: residual.  A dry run on CPU virtual devices is held to the same limits,
 #: and its parity checks land one to three orders of magnitude inside
-#: them.  Measured for every goal at the dry run's 256 and 1024 cells (the
-#: record under tests/cloud/multigpu/run_pod_record/): the closest is the
-#: D2Q9 lattice's forward velocity at 0.11 of the forward limit, then the
-#: coupled and hybrid gradients and the field with a halo of two at 0.03
-#: of theirs, the rollouts at 0.02 (with respect to the start, the per-cell
-#: source and the injected weight alike), and ``sharded_cg`` at 0.001.  And
+#: them.  Measured for every goal at the dry run's 256 and 961 cells (the
+#: record under tests/cloud/multigpu/run_pod_record/, schema 12): the
+#: closest is the D2Q9 lattice's forward velocity at 0.11 of the forward
+#: limit, then the field under the zero fill with its stacked integrals at
+#: 0.04, the coupled and hybrid gradients and the field with a halo of two
+#: at 0.03 of theirs, the rollouts at 0.02 (with respect to the start, the
+#: per-cell source and the injected weight alike), the field with its
+#: static split along the second axis and the crossed pencil at 0.013, and
+#: ``sharded_cg`` at 0.001.  And
 #: at the session's 1e5, 3e5 and 1e6 cells (CPU, jax 0.11.0): the
 #: ``gradient`` goal's rollouts 1.2e-7 to 2.5e-7 against 1e-5 with respect
 #: to the start and the source (of size 3 to 6 and 18 to 31), the weight's
@@ -2076,8 +2082,9 @@ def rollout_loss(x, weights, cells):
     -- no limit on such a number tells a correct wrapper from a wrong one.
     Relaxing a field lowers ``sum(x**2)``, so the second term's share has
     one sign nearly everywhere, and with it the ratio is 1.7, 1.2 and 1.5
-    there (8 and 28 at the dry run's 225 and 256 cells, where the field is
-    smooth and the sum small; 1.7 at 1024).
+    there (8 and 28 at 225 and 256 cells, the seeded-fault tests' sizes,
+    where the field is smooth and the sum small; 1.7 at 1024, the dry
+    run's second size until schema 11).
 
     ``cells`` is 1 on a cell and 0 on a pad row of the partition layout
     (all ones unsharded): a pad row is no cell, and it does not stay zero

@@ -302,6 +302,34 @@ _SEEDS = {
         "                offset = lax.axis_index(  # SEEDED FAULT: mesh axes in spatial order\n"
         "                    mesh_axis_tup[sorted(axis_map.values()).index(sax)]) * extent\n",
         only_in=(_CROSSED,), mesh=_CROSSED, fails=("stencil",)),
+    # The four below are on paths the goals already carried into an answer
+    # but no seed held until schema 12: rows of the runbook's table that read
+    # "unproved", and part of its ``shard_info`` row.  ``shard_info``'s
+    # extent alone wrong (its offset right): only the Dirichlet ends read it,
+    # which the ``stencil`` goal alone runs.
+    "shard_info_extent_is_the_padded_one": Seed(
+        "                shard_info[sax] = (offset, extent)\n",
+        "                shard_info[sax] = (offset, extent + 2 * int(halo_widths[sax]))"
+        "  # SEEDED FAULT\n",
+        fails=("stencil",), only_under=("dirichlet",), boundary="dirichlet"),
+    # Every injected parameter dropped: the node steps with its own.
+    "injected_params_are_dropped": Seed(
+        "            if accepts_params and local_params:\n"
+        '                extra_kwargs["params"] = local_params\n',
+        "            if False and accepts_params and local_params:  # SEEDED FAULT\n"
+        '                extra_kwargs["params"] = local_params\n'),
+    # A halo axis ``axis_map`` leaves unsharded edge-filled under any boundary.
+    "unsharded_halo_axes_always_edge_filled": Seed(
+        "                    left, right, spatial_axis=sa, halo=h, boundary=boundary,\n",
+        '                    left, right, spatial_axis=sa, halo=h, boundary="edge",'
+        "  # SEEDED FAULT\n",
+        only_in=("1d", "1d-axis1")),
+    # Every scalar boundary input zeroed: the stencil goal's one is the
+    # Dirichlet ``wall``.
+    "scalar_inputs_are_zeroed": Seed(
+        "                k: (_pad_like_state(v) if k in grid_bi else v)\n",
+        "                k: (_pad_like_state(v) if k in grid_bi else v * 0)  # SEEDED FAULT\n",
+        fails=("stencil",), only_under=("dirichlet",), boundary="dirichlet"),
     # A REDUCED integral carried in the state, which the ``field-shares``
     # node reads back into its field since schema 12 (``Field2D.MEAN_PULL``,
     # its ``averages``).  The first passed all eight goals until then: the
@@ -501,7 +529,10 @@ def _one_step_forward(rp, wrapper_class, mesh_label: str, kind: str = "field",
     assert ref.halo_width() == sharded.halo_width() == dict.fromkeys(
         (0, 1), 2 if kind == "field-halo2" else 1)
     start = dict(ref.initial_state())
-    got = {label: rp._host(node.update(state, bi, ref.delta_t, params={"diffusivity": p}))
+    # a diffusivity other than the node's own (the goal's is the node's), so
+    # that a wrapper that drops an injected parameter moves the step
+    params = {"diffusivity": p * 1.25}
+    got = {label: rp._host(node.update(state, bi, ref.delta_t, params=params))
            for label, node, state in (("unsharded", ref, start),
                                       ("sharded", sharded, rp._placed_like(sharded, start)))}
     return {field: rp._diff(got["sharded"][field], got["unsharded"][field])["max_rel"]
@@ -957,8 +988,9 @@ _PER_SHARD_SEEDS = {
 }
 
 #: 225 = 15 x 15 cells do not divide by four: three of the four shards
-#: carry a pad row (57, 56, 56, 56 cells under reverse Cuthill-McKee).  The
-#: dry run's own 256 and 1024 divide, as 300,304 and 1,000,000 do, and have
+#: carry a pad row (57, 56, 56, 56 cells under reverse Cuthill-McKee), as
+#: the dry run's second size, 961, does (241, 240, 240, 240) -- 225 keeps
+#: these runs small.  256 divides, as 300,304 and 1,000,000 do, and has
 #: none: the ``own`` mask masks nothing there.
 _COUNT_CELLS = (225, 256)
 _ONES_UNSHARDED = "unsharded"

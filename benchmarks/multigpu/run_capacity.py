@@ -57,7 +57,7 @@ as exactly one of::
     passed          every check that ran passed
     check failed    a number is wrong: the one outcome that is a defect
     out of memory   the device's allocator refused (resource exhausted),
-                    or the process was killed (status 137, SIGKILL)
+                    or the process was killed (status -9 or 137, SIGKILL)
     timed out       the time box ran out
     crashed         anything else; the record keeps the end of its stderr
 
@@ -70,11 +70,18 @@ The record a rung left decides before the way its process ended does.
 A record that holds a failed check is ``check failed`` however the
 process ended: with any status, killed, or at its time box.  A record
 that is complete, every check passed, is ``passed`` also when the
-process was then killed, ran out its time box or was ended by another
-signal on its way out: the ramp goes on, and the record's
-``outcome_detail`` and a note of the summary say how it ended.  The
-outcomes ``out of memory``, ``timed out`` and ``crashed`` are those of
-a rung that left no verdict.
+process was then ended from outside on its way out -- its time box, or a
+signal: a negative status, which is how ``subprocess`` reports the signal
+that ended a child it started (the ramp starts each rung's interpreter
+itself), or 137, a shell's report of SIGKILL -- and the ramp goes on,
+the record's ``outcome_detail`` and a note of the summary saying how it
+ended.  Every other status is one the process chose, 139 included (it
+reads as 128 + SIGSEGV only through a shell, and no shell stands between
+the ramp and a rung): a complete passing record whose process then
+exits 1, 5, 139 or any status but 0 is ``crashed``, since the process
+contradicted its own record and the ramp does not take the pass.
+Otherwise the outcomes ``out of memory``, ``timed out`` and ``crashed``
+are those of a rung that left no verdict.
 
 The soak.  ``--soak-minutes M`` then repeats build, steps and comparison
 at ``--soak-at`` (0.75) of the ceiling's cells until the time is up,

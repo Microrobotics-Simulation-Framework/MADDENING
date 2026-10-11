@@ -654,6 +654,23 @@ def test_the_exit_statuses_are_the_ones_the_header_documents():
         assert outcome in rc.__doc__, outcome
 
 
+def test_the_header_names_every_status_the_ramp_reads_as_ended_from_outside():
+    """The header and the code agree on which statuses are a signal's: a
+    negative one (``subprocess``'s report of the signal that ended a child it
+    started) and 137, a shell's SIGKILL; every other status, 139 included, is
+    one the process chose -- so a complete passing record whose process then
+    exits 139 is ``crashed``, like one that exits 1 or 5 (the table above)."""
+    doc = " ".join(rc.__doc__.split())
+    assert "a signal: a negative status" in doc and "or 137, a shell's report of SIGKILL" in doc
+    assert "Every other status is one the process chose, 139 included" in doc
+    assert "exits 1, 5, 139 or any status but 0 is ``crashed``" in doc
+    for status in (-9, -11, -6, -15, 137):
+        assert rc._ended_from_outside(_launched(status)) is not None, status
+    for status in (0, 1, 2, 5, 7, 128, 134, 139, 143, 255):
+        assert rc._ended_from_outside(_launched(status)) is None, status
+    assert _COMPLETE_AND_PASSED["status 139"] == _COMPLETE_AND_PASSED["exit 5"] == "crashed"
+
+
 # --- the host guard -------------------------------------------------------------
 
 
@@ -855,6 +872,9 @@ _ENDS = {
     "time box": _launched(-9, timed_out=True),
     "SIGKILL": _launched(-9),
     "status 137": _launched(137),
+    # 128 + SIGSEGV, as a shell would report it: from a process the ramp started
+    # itself, a status the process chose (the header says which statuses are signals)
+    "status 139": _launched(139, stderr="Segmentation fault"),
     "segfault": _launched(-11, stderr="Fatal Python error: Segmentation fault"),
     "abort naming an allocation": _launched(-6, stderr="F external/xla/...\n" + _XLA_OOM),
     "exit 0": _launched(0),
@@ -870,12 +890,13 @@ _A_CHECK_FAILED = dict.fromkeys(_ENDS, "check failed")
 _COMPLETE_AND_PASSED = {
     "time box": "passed", "SIGKILL": "passed", "status 137": "passed", "segfault": "passed",
     "abort naming an allocation": "passed", "exit 0": "passed", "exit 1": "crashed",
-    "exit 1 at the time box": "timed out", "exit 5": "crashed", "exit 7": "crashed"}
+    "exit 1 at the time box": "timed out", "exit 5": "crashed", "exit 7": "crashed",
+    "status 139": "crashed"}
 _NO_VERDICT = {
     "time box": "timed out", "SIGKILL": "out of memory", "status 137": "out of memory",
     "segfault": "crashed", "abort naming an allocation": "out of memory", "exit 0": "crashed",
     "exit 1": "crashed", "exit 1 at the time box": "timed out", "exit 5": "crashed",
-    "exit 7": "crashed"}
+    "exit 7": "crashed", "status 139": "crashed"}
 _LEFT = {
     "rung, a check failed (done)": _A_CHECK_FAILED,
     "rung, a check failed, then it raised": _A_CHECK_FAILED,

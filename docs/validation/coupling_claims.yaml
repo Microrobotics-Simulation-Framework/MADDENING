@@ -7105,7 +7105,7 @@ claims:
     - src/maddening/core/graph_manager.py::GraphManager._refuse_unsolved_group_fluxes
     - src/maddening/core/coupling/helpers.py::add_robin_coupling
     - docs/developer_guide/node_authoring.md#robin-coupling
-    - docs/validation/known_anomalies.yaml (MADD-ANO-273)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-276)
   conditions: >-
     Affine scalar members, so the reference is one linear system solved in
     64-bit arithmetic; Gauss-Seidel and Jacobi, solver ift and fori;

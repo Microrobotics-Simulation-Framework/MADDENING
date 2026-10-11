@@ -215,7 +215,7 @@ def add_robin_coupling(
     ``ERROR`` line of ``validate()``).  Releases to 0.3.1 failed on such
     a pair with a ``KeyError`` at the first step, and during 0.4.0's
     development it ran and reported ``converged=True`` at a state that
-    was not the coupled solution (MADD-ANO-273).  Carry such a flux in
+    was not the coupled solution (MADD-ANO-276).  Carry such a flux in
     the state.
     ``alpha=1`` does not lift the refusal: the flux edges are still
     there, delivering the flux times zero.

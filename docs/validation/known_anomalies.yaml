@@ -6502,7 +6502,7 @@ anomalies:
       along a chain the two sweeps reach.  It is not for fluxes that read
       each other in a loop, or along a longer chain against the sweep: such
       a group converged to a state that is not the coupled solution, and
-      is refused at `compile()` (MADD-ANO-273).
+      is refused at `compile()` (MADD-ANO-276).
     verification:
       - "tests/property/test_differential_leaves.py::test_two_flux_producers_exchanging_fluxes_step_under_jacobi"
       - "tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point"
@@ -19047,7 +19047,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-273"
+  - anomaly_id: "MADD-ANO-276"
     title: "A coupling group whose boundary fluxes read each other in a loop converged, converged=True, to a state that does not solve the coupled equations"
     description: >
       A boundary flux (`compute_boundary_fluxes`) is not part of a coupling

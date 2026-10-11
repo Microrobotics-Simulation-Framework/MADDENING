@@ -1983,7 +1983,8 @@ class GraphManager:
 
             _flux_loops._refuse_unsolved_fluxes(
                 g, g_plan, self._nodes, self._state, params_of,
-                lambda g=g: self._group_sweep_order(g))
+                lambda g=g: self._group_sweep_order(g),
+                [(ei.target_node, ei.target_field) for ei in self._external_inputs])
 
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*

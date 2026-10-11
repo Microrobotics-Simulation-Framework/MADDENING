@@ -359,10 +359,11 @@ def test_infinity_is_a_tolerance(route):
 def test_none_and_zero_are_the_relative_test(route, atol):
     """What stays as it was.  ``atol=None``, ``atol=0.0`` and
     ``atol=-0.0`` are the relative test, and a system float32 can solve to
-    ``rtol=1e-3`` is solved (measured: the residual at 0.87 of the
-    tolerance or less on the loop routes, where the flag is that
-    comparison, and far under it on the lineax routes with a zero
-    ``atol``, whose entrywise test without a floor is the stricter one)."""
+    ``rtol=1e-3`` is solved (measured on lineax 0.0.7 and 0.1.1: the
+    residual at 0.64 of the tolerance on the CG loop routes and at 1e-3 on
+    the GMRES loop routes, where the flag is that comparison; with a zero
+    ``atol`` at 0.0095 on the CG lineax routes and 1e-4 on the GMRES ones,
+    whose entrywise test without a floor is the stricter one)."""
     result = _call(route, 2.5, jnp.asarray(NOISE), rtol=1e-3, atol=atol)
     want = np.linalg.solve(_matrix(2.5), NOISE.astype(np.float64))
     assert bool(result.converged)
@@ -585,6 +586,52 @@ def test_where_its_floor_is_positive_the_lineax_route_reports_lineaxs_verdict(ro
     result = _call(route, 2.05, jnp.asarray(THREE_ENTRIES), rtol=1e-2)
     assert bool(result.converged)
     assert float(result.residual_norm) > 1.2 * 1e-2 * _norm(THREE_ENTRIES)
+
+
+#: White noise (``default_rng(0)``, no entry zero) times ``2**100``.  The
+#: solve runs on it rescaled by ``p = 2**-101`` (``max|b| * p`` in
+#: ``[0.5, 1)``), so the floor lineax is handed for a positive ``atol`` is
+#: ``atol * p``, and the rule changes at ``atol = tiny / p``.
+SCALED_NOISE = (np.random.default_rng(0).standard_normal(N).astype(np.float64)
+                * 2.0 ** 100).astype(np.float32)
+#: The calls on it: lineax's verdict at a floor just above ``tiny`` is False
+#: (its entrywise test without the relative floor is the stricter one: GMRES
+#: stops early without meeting it, CG reaches its budget), while the norm statement holds with a
+#: margin (measured on lineax 0.0.7 and 0.1.1: the residual at 0.11 to 0.15
+#: of the tolerance for GMRES, 0.018 for CG).
+EITHER_SIDE = {"cg default": {"rtol": 1e-3, "max_iters": 16},
+               "cg lineax": {"rtol": 1e-3, "max_iters": 16},
+               "gmres default": {"rtol": 1e-6, "restart": 10},
+               "gmres lineax": {"rtol": 1e-6, "restart": 10}}
+
+
+@pytest.mark.parametrize("route", list(EITHER_SIDE))
+def test_either_side_of_tiny_over_p_the_rule_that_decides_converged_is_pinned(route):
+    """For a POSITIVE ``atol`` the floor lineax is handed is ``atol * p``,
+    so which rule decides depends on ``atol`` beside ``tiny / p``.  At 0.99
+    of it the floor is subnormal and the norm statement decides: True.  At
+    1.01 the floor lies in ``[tiny, 2 tiny)`` and lineax's verdict decides:
+    False, where the norm statement would read True.  The value and the
+    residual are the same on both sides (the floor is far below
+    ``rtol * |b_i|``), so only the rule moves: not monotone in ``atol``,
+    and every True is true of ``residual_norm``.  Pinned by the rule as the
+    code computes it; a threshold moved by a factor of two either way
+    fails here."""
+    kw = EITHER_SIDE[route]
+    p = 2.0 ** -np.frexp(np.max(np.abs(SCALED_NOISE.astype(np.float64))))[1]
+    threshold = float(np.finfo(np.float32).tiny) / p
+    results = {}
+    for side in (0.99, 1.01):
+        atol = float(np.float32(side * threshold))
+        result = _call(route, 2.5, jnp.asarray(SCALED_NOISE), atol=atol, **kw)
+        tolerance = max(atol, kw["rtol"] * _norm(SCALED_NOISE))
+        assert float(result.residual_norm) < 0.3 * tolerance, side
+        results[side] = result
+    below, above = results[0.99], results[1.01]
+    assert np.asarray(below.value).tobytes() == np.asarray(above.value).tobytes()
+    assert float(below.residual_norm) == float(above.residual_norm)
+    assert bool(below.converged)
+    assert not bool(above.converged)
 
 
 # ---------------------------------------------------------------------------

@@ -19187,8 +19187,10 @@ anomalies:
       only (the relative floor `rtol * max|b|`, which is zero then, is new
       in 0.4.0; in 0.3.x the default floor was an absolute 1e-8):
       `sharded_gmres`'s default route read `converged=True` at a residual
-      of 5e-8 to 5e-5 of `||b||` on white noise (96 to 4096 unknowns,
-      `restart` 50 and 1; on different rows by lineax version), and
+      of 1.2e-6 to 6.7e-5 of `||b||` on white noise
+      (`numpy.random.default_rng(0)`, 96 to 1024 unknowns behind
+      `2.5 x[i] - x[i-1] - x[i+1]`, `restart=1`; lineax 0.0.7 and 0.1.1;
+      with `restart=50` lineax's verdict was False), and
       `sharded_cg`'s lineax routes at 0.40 `||b||` on the unit vector.  A
       tolerance that underflows does the same, since XLA's CPU backend
       flushes a subnormal to zero: `rtol=1e-44` in float32.  Found on
@@ -19196,8 +19198,20 @@ anomalies:
       (1) while fixing it.
       Fixed in 0.4.0 where lineax's verdict is read: it is `converged`
       only where the floor lineax was handed is at least the smallest
-      normal number of the dtype, so that every quotient has a positive
-      denominator.  Under that, `converged` is the statement of the loop
+      normal number of the dtype, `tiny`, so that every quotient has a
+      positive denominator.  That floor is the caller's `atol` times the
+      power of two `p` the solve rescales `b` by (`max|b| * p` in
+      `[0.5, 1)`), or `rtol * max|b| * p` without an `atol`: so a
+      positive `atol` is under the rule where it is under `tiny / p`,
+      between `tiny * max|b|` and twice that (float32: about 1.2e-8
+      beside `max|b| = 1e30`).  Across that point the flag of one `b`
+      changes from lineax's verdict to the statement below, so it is not
+      monotone in `atol` (measured in float32 on 64 unknowns, white noise
+      times `2**100`, GMRES and CG on lineax 0.0.7 and 0.1.1: True at 0.99
+      of `tiny / p`, `residual_norm` at 0.02 to 0.15 of the tolerance, and
+      False at 1.01, with the same value and residual); every True of the
+      statement is true of `residual_norm`.  Under that, `converged` is
+      the statement of the loop
       backends on the value lineax returned,
       `residual_norm <= max(atol, rtol * ||b||)`, which for a tolerance of
       exactly zero is `residual_norm == 0`.  `value` and `iters` are
@@ -19233,8 +19247,10 @@ anomalies:
       entrywise one, so an explicit `atol=0.0` on a right-hand side
       without zero entries can read True where lineax's stricter verdict
       read False.  `coupling._ift._ift_linear_solve` reads lineax's verdict
-      too, with the floor `rtol * max|b|` of its own `rtol`; it was not
-      changed here.
+      too, with the floor `rtol * max|b|` of its own `rtol`, which is
+      positive and normal; it was not changed here.  `ift_linear_solve`
+      stopped on the same `0 / 0` and is entered separately
+      (MADD-ANO-276).
     verification:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_lineax_stopping_on_zero_over_zero_is_not_reported_as_converged"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_floor_folded_when_the_call_is_compiled_is_a_floor_of_zero_too"
@@ -19243,6 +19259,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_an_explicit_atol_of_zero_is_the_relative_test_on_every_route"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_none_and_zero_are_the_relative_test"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_where_its_floor_is_positive_the_lineax_route_reports_lineaxs_verdict"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_either_side_of_tiny_over_p_the_rule_that_decides_converged_is_pinned"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-275"
@@ -19271,12 +19288,20 @@ anomalies:
       `converged=False`.  At a solution of 0.31 of the largest number the
       two calls agree.
       `differentiable=` is new in 0.4.0, so no released version has this.
-      Found on 2026-10-11 while fixing MADD-ANO-272.  Not fixed in 0.4.0:
-      taking those two products in the frame of `b` answers all of the
-      cases above, and it moved `residual_norm` by rounding in 24 of 894
-      compared calls (all with `differentiable=True` on a device mesh,
-      where the compiled product is fused differently), which the fix of
-      MADD-ANO-272 was required not to do.
+      Found on 2026-10-11 while fixing MADD-ANO-272.  Not fixed in 0.4.0.
+      Taking those two products in the frame of `b` answers all of the
+      cases above.  Its rounding beside that of 0.4.0's fix as shipped,
+      both against the build before them (float32, `differentiable=True`,
+      jax 0.11.0, lineax 0.0.7): in 288 calls outside loop bodies (six
+      routes, eager and `jit`, with and without a 4-device mesh) neither
+      moves any field; in 120 calls inside `lax.scan` bodies each moves
+      `residual_norm` by 1 or 2 ulp in 19, and neither moves `value`,
+      `converged` or `iters`.  (A first measurement of the frame's form
+      counted 24 moved calls of 894 on a device mesh; their size was not
+      recorded and that comparison did not survive.)  Rounding does not
+      tell the two apart, so the fix is not refused for it: it is left to
+      a later release because the defect is loud and the differentiable
+      solve was not restructured late in 0.4.0.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >

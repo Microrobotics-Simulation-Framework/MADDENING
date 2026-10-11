@@ -239,10 +239,11 @@ python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # needs no JAX
 pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the runner dry-run test
 ```
 
-The dry run takes about 110 s on three shared cores (about 130 s with
-`--cells 256 1024`; 80 s and 100 s before schema 10 added the `stencil`
-cases with a halo of two, which on three quiet cores took it from 60 s to
-82 s; 44 s and 65 s before schema 6 added the meshes), most
+The dry run takes 82 s on three quiet cores and 60 s on eight (97 s on
+eight with `--cells 256 1024`); allow about 110 s on three shared ones.
+Schema 10's `stencil` cases with a halo of two took it from 60 s to 82 s
+on the three quiet cores ("about 80 s on three shared cores" before, and
+44 s before schema 6 added the meshes), most
 of it XLA compiling the `stencil` cases and the coupled group's adjoint on
 each of the four meshes.  It must print `checks n/n passed` for all eight goals, no
 `CHECK NOT RUN` line, and exit 0.  Spell every option out: the runner

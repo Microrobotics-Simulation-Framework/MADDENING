@@ -281,6 +281,21 @@ def test_a_solution_just_under_the_top_of_the_dtype_is_answered(route, primal):
     assert float(result.residual_norm) < 3e-3 * _norm(NEAR_THE_TOP)
 
 
+def test_with_the_flag_an_infinite_rtol_does_not_read_converged_beside_an_infinite_norm():
+    """The one place under ``differentiable=True`` where a norm that is
+    not finite stands beside a finite value (MADD-ANO-275, open: the
+    report's product on the bare value overflows just under the top of
+    the dtype).  The GMRES loop always runs its first cycle, so with an
+    infinite ``rtol`` its value is still the solution; the norm of the
+    report is infinite, and ``inf <= inf`` read ``converged=True``
+    (measured before the fix).  The flag is False."""
+    result = sharded_gmres(_operator(OVERFLOWS), jnp.asarray(NEAR_THE_TOP),
+                           rtol=float("inf"), backend="loop", differentiable=True)
+    assert np.all(np.isfinite(np.asarray(result.value)))
+    assert np.isinf(float(result.residual_norm))
+    assert not bool(result.converged)
+
+
 @pytest.mark.parametrize("route", ["cg default", "cg loop", "gmres default", "gmres loop"])
 def test_under_vmap_only_the_member_whose_solution_overflows_is_nan(route):
     batch = jnp.asarray(np.stack([HUGE, HUGE / np.float32(1024)]).astype(np.float32))
@@ -517,6 +532,26 @@ def test_lineax_stopping_on_zero_over_zero_is_not_reported_as_converged(route, f
     result = _call(route, 2.5, jnp.asarray(UNIT), **kw)
     assert float(result.residual_norm) > 0.1 * _norm(UNIT)
     assert not bool(result.converged)
+
+
+@pytest.mark.parametrize("route", LINEAX_ROUTES)
+def test_a_floor_folded_when_the_call_is_compiled_is_a_floor_of_zero_too(route):
+    """Why the rule is "under the smallest normal number" and not "equal
+    to zero".  Here the right-hand side and ``rtol`` are constants of a
+    jitted function, so the floor ``rtol * max|b|`` is folded when the
+    function is compiled: a subnormal that is not zero.  lineax's
+    arithmetic at run time flushes it, and its quotient is ``0 / 0`` all
+    the same.  Measured with the rule written as ``floor == 0`` (jax
+    0.11.0, lineax 0.0.7): ``converged=True`` at a residual of 0.40
+    ``||b||`` (CG) and 0.17 (GMRES), for every ``rtol`` from 1e-44 to
+    1.2e-38."""
+    kw = {"restart": 2} if route.startswith("gmres") else {}
+    for rtol in (1e-44, 1e-39):
+        converged, residual_norm = jax.jit(lambda: (lambda result: (
+            result.converged, result.residual_norm))(
+                _call(route, 2.5, jnp.asarray(UNIT), rtol=rtol, **kw)))()
+        assert float(residual_norm) > 0.1 * _norm(UNIT), rtol
+        assert not bool(converged), rtol
 
 
 @_routes

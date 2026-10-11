@@ -19077,6 +19077,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_right_hand_side_whose_norm_overflows_is_solved_where_its_solution_fits"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_result_is_a_finite_value_beside_a_finite_norm_or_nan_in_both"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_an_infinite_atol_does_not_read_converged_beside_a_norm_that_overflowed"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_with_the_flag_an_infinite_rtol_does_not_read_converged_beside_an_infinite_norm"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_under_vmap_only_the_member_whose_solution_overflows_is_nan"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_solution_just_under_the_top_of_the_dtype_is_answered"
     github_issue: null
@@ -19236,6 +19237,7 @@ anomalies:
       changed here.
     verification:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_lineax_stopping_on_zero_over_zero_is_not_reported_as_converged"
+      - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_a_floor_folded_when_the_call_is_compiled_is_a_floor_of_zero_too"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_with_a_tolerance_of_zero_converged_is_a_residual_norm_of_zero"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_the_same_for_a_zero_tolerance_that_is_traced"
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py::test_an_explicit_atol_of_zero_is_the_relative_test_on_every_route"

@@ -5,17 +5,29 @@
 ``memory_estimate`` and their ``print_*`` forms promise to be strictly
 read-only: no write to the state, ``_meta``, ``params``, node
 parameters, the dirty / compiled flags, the schedule or a cache, and no
-compile or trace.  The guard (``inspection_guard_support``) fingerprints
-every attribute of the graph around each call and records JAX's compile
-events; the second half of this file shows the guard fails on each way a
-method could break the promise.
+compile or trace of the step.  The guard (``inspection_guard_support``)
+fingerprints every attribute of the graph around each call and records
+JAX's compile events; the second half of this file shows the guard fails
+on each way a method could break the promise.
 
 Two methods read through code that dispatches eager ``jax.numpy``
 operations, which JAX compiles once per shape: ``coupling_report``
 (through ``coupling_diagnostics``' float floor) and ``params_table`` on a
 never-compiled graph (through each node's ``params_pytree()``).  Their
 *first* call may fire compile events and nothing else; every method's
-*second* call must fire none.
+*second* call must fire none, with one exception.
+
+The exception: on a coupling group one of whose internal edges has a
+transform or a mapping, **every** call of ``coupling_report`` traces that
+edge's rule once, under ``jax.eval_shape``, for the shape and dtype it
+delivers (the float floor reads them).  The step is not compiled or
+traced again and no attribute of the graph changes, but a transform is
+user code and runs as Python once per report, so one with a side effect
+shows it.  That is held here as it is
+(``test_coupling_report_traces_an_internal_edges_rule_once_a_call``, and
+the ``coupled_transformed`` kind of the matrix): a cache of what an edge
+delivers would turn that test over, and with it the sentence in
+``docs/user_guide/inspection.md``.
 """
 
 from __future__ import annotations
@@ -30,12 +42,21 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.core import inspection
-from tests.core.inspection_graphs import BUILDERS, UNCOMPILED, build, graph
+from tests.core.inspection_graphs import (
+    BUILDERS,
+    TRACES_AN_EDGE,
+    TRANSFORM_RUNS,
+    UNCOMPILED,
+    build,
+    graph,
+)
 from tests.core.inspection_guard_support import (
     INSPECTION_CALLS,
+    TRACE_EVENT,
     assert_read_only,
     compile_events,
     eager_first_call,
+    read_only_call,
     unavailable,
 )
 
@@ -55,7 +76,43 @@ def test_inspection_method_changes_nothing_and_compiles_nothing(kind, method):
     gm = graph(kind)
     call = METHODS[method]
     assert_read_only(gm, call, allow_eager_compile=_eager_first_call(method, kind))
-    assert_read_only(gm, call)       # warm: no exception for anyone
+    if kind in TRACES_AN_EDGE and "coupling_report" in method:
+        # Warm, and the one exception: the edges' rules are traced again,
+        # and nothing is lowered or compiled.
+        _result, events = read_only_call(gm, call)
+        assert events and all(e.endswith(TRACE_EVENT) for e in events), sorted(set(events))
+    else:
+        assert_read_only(gm, call)   # warm: no exception for anyone else
+
+
+def test_coupling_report_traces_an_internal_edges_rule_once_a_call():
+    """What the guide says of ``coupling_report()`` on a group with a
+    transform or a mapping on an internal edge, pinned as it is: each call
+    runs each such edge's transform once as Python (a trace of the edge's
+    rule: a transform on one edge here, a mapping then a transform on the
+    other), fires trace events and nothing else, and leaves the graph and
+    the step's trace count alone.  No other inspection method runs a
+    transform.  A cache of what an edge delivers makes the first assertion
+    fail: change it and the guide's sentence together."""
+    gm = graph("coupled_transformed")
+    step_traces = gm.trace_count
+    assert step_traces == 1
+    METHODS["coupling_report"](gm)                       # the first call's eager compiles
+    for _ in range(3):
+        before = dict(TRANSFORM_RUNS)
+        rows, events = read_only_call(gm, METHODS["coupling_report"])
+        assert {k: TRANSFORM_RUNS[k] - before[k] for k in before} == {"last": 1, "first": 1}
+        assert events and all(e.endswith(TRACE_EVENT) for e in events), sorted(set(events))
+        assert len(rows) == 1 and gm.trace_count == step_traces
+    before = dict(TRANSFORM_RUNS)
+    for name, call in METHODS.items():
+        if "coupling_report" not in name and unavailable(name) is None:
+            assert_read_only(gm, call, allow_eager_compile=eager_first_call(name, uncompiled=False))
+            assert TRANSFORM_RUNS == before, name
+    # A group with plain edges fires nothing on a warm report.
+    plain = graph("coupled")
+    METHODS["coupling_report"](plain)
+    assert read_only_call(plain, METHODS["coupling_report"])[1] == []
 
 
 def test_a_traced_graph_stays_traced_after_every_method():
@@ -134,6 +191,22 @@ def test_guard_catches_a_fresh_jit_compile(fresh_single):
     x = jnp.arange(7.0)
     message = _caught(fresh_single, lambda gm: jax.jit(lambda v: v * 3.0 + 1.0)(x))
     assert "compiled or traced" in message
+
+
+def test_guard_catches_a_compile_where_only_a_trace_is_allowed(fresh_single):
+    """The allowance for a traced edge admits a trace and nothing more."""
+    x = jnp.arange(11.0)
+    message = _caught_tracing(fresh_single, lambda gm: jax.jit(lambda v: v * 5.0 - 1.0)(x))
+    assert "compiled or lowered" in message
+    assert_read_only(fresh_single, lambda gm: jax.eval_shape(lambda v: v[-1], x), allow_trace=True)
+    message = _caught_tracing(fresh_single, lambda gm: setattr(gm, "_n_traces", gm._n_traces + 1))
+    assert "<trace_count>" in message
+
+
+def _caught_tracing(gm, mutant) -> str:
+    with pytest.raises(AssertionError) as info:
+        assert_read_only(gm, mutant, allow_trace=True)
+    return str(info.value)
 
 
 def test_guard_catches_a_params_leaf_coerced_in_place():

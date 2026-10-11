@@ -406,7 +406,7 @@ def test_ci_runs_the_budget_on_the_default_lane():
     assert 'MADDENING_TEST_JAX_TIMING: "1"' in ci
     assert "--cache-mode" in ci
     # ...one cache per shard, so shard i of a PR reads shard i of the base
-    assert re.search(r"key=jaxcc-v1-.*-shard\$\{\{ matrix\.shard \}\}of4", ci)
+    assert re.search(r"key=jaxcc-v1-.*-shard\$\{\{ matrix\.shard \}\}of6", ci)
     # ...and without a size cap: with one, every cache write rescans the
     # whole directory, quadratic over a cold run (measured: a lane past
     # 95 minutes).
@@ -771,10 +771,10 @@ def test_a_lane_missing_a_shards_cache_mode_is_labelled_mixed(tmp_path):
     (work / "scripts").symlink_to(REPO_ROOT / "scripts")
     (work / "tests" / "duration_allowlist.txt").write_text(
         "tests/a/test_x.py::test_cached # pending triage\n")
-    for shard in (1, 2, 3, 4):
+    for shard in (1, 2, 3, 4, 5, 6):
         _report(work / "results", _case("tests/a/test_x.py", f"test_{shard}", 0.2),
                 name=f"test-results-shard{shard}.xml")
-    for shard in (1, 2, 3):                         # shard 4 wrote no mode file
+    for shard in (1, 2, 3, 4, 5):                   # shard 6 wrote no mode file
         (work / "results" / f"cache-mode-shard{shard}.txt").write_text("warm\n")
     summary = tmp_path / "summary.md"
     script = _render(step["run"], {"matrix.jax-version": "0.10.2"})
@@ -977,31 +977,32 @@ def _lane(tmp_path, shards, modes, allow_text):
     return summary.read_text(), proc.stdout
 
 
-@pytest.mark.parametrize("reports, listed", [(4, True), (3, False)])
+@pytest.mark.parametrize("reports, listed", [(6, True), (5, False)])
 def test_a_lane_missing_a_shards_report_lists_no_allowlist_entry_as_removable(
         tmp_path, reports, listed):
-    """An allowlisted test absent from three shards' reports may be on the fourth.
+    """An allowlisted test absent from five shards' reports may be on the sixth.
 
     Every shard wrote its cache mode (the budget step writes it before the
     gate, so a shard whose test step crashed without a report still has
-    one): all four are ``cold``, so only the missing report can keep the
-    entry off the removable list.  With all four reports the same entry is
+    one): all six are ``cold``, so only the missing report can keep the
+    entry off the removable list.  With all six reports the same entry is
     listed -- the fixture can express what the step guards.
     """
     shards = {n: [_case(f"tests/s{n}/test_x.py", "test_t", 0.2)] for n in range(1, reports + 1)}
-    md, out = _lane(tmp_path, shards, {n: "cold" for n in (1, 2, 3, 4)},
+    md, out = _lane(tmp_path, shards, {n: "cold" for n in (1, 2, 3, 4, 5, 6)},
                     "tests/s9/test_gone.py::test_elsewhere # kept: x\n")
     assert "**Compilation cache: cold**" in md
     assert ("may be removable" in md) is listed, md
-    assert ("only 3 of 4 shard reports" in out) is (not listed), out
+    assert ("only 5 of 6 shard reports" in out) is (not listed), out
 
 
 def test_the_lane_summary_labels_each_shard_from_its_hits(tmp_path):
-    """End to end through the workflow step: four shards restored a cache, one did not use it."""
+    """End to end through the workflow step: six shards restored a cache, one did not use it."""
     def lookups(hits, misses):
         return [_case("tests/a/test_x.py", "test_t", 0.1,
                       jax={"jax_cache_hits": hits, "jax_cache_misses": misses})]
-    shards = {1: lookups(3856, 521), 2: lookups(625, 2916), 3: lookups(6334, 1), 4: lookups(4195, 0)}
+    shards = {1: lookups(3856, 521), 2: lookups(625, 2916), 3: lookups(6334, 1), 4: lookups(4195, 0),
+              5: lookups(2907, 12), 6: lookups(3310, 44)}
     md, _ = _lane(tmp_path, shards, {n: "warm" for n in shards}, "# empty\n")
     assert "**Compilation cache: mixed**" in md
     assert "shard 2 restored but unused (cold), 625 of 3541 lookups hit (18%)" in md

@@ -8,6 +8,7 @@ Private: ``GraphManager`` and the coupling machinery read them from here.
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional, Sequence
 
@@ -500,6 +501,108 @@ def _refuse_edge_sources(rules: Sequence[_EdgeSourceRule], state, *,
 
 
 
+class _FluxHookNeedsItsInputs(ValueError):
+    """A flux hook raised ``KeyError`` when asked for its flux names with
+    no boundary inputs (:func:`_flux_field_names`)."""
+
+
+class _Asked(dict):
+    """A dict that records each key looked up in it and not found
+    (``d[key]``; ``d.get(key)`` and ``key in d`` look nothing up that
+    raises), with the name of the dict it stands for (*role*), into the
+    list :data:`_MISSED` holds while :func:`_flux_field_names` asks: which
+    dict a hook's ``KeyError`` came from.  The role travels with the
+    dict's tree structure, so the copy a ``jax.jit`` inside the hook is
+    handed records alike."""
+
+    def __init__(self, *args, role: str = ""):
+        super().__init__(*args)
+        self.role = role
+
+    def __missing__(self, key):
+        missed = _MISSED.get()
+        if missed is not None:
+            missed.append((self.role, key))
+        raise KeyError(key)
+
+
+#: The ``(role, key)`` lookups an :class:`_Asked` missed, while
+#: :func:`_flux_field_names` asks a hook (``None`` otherwise).
+_MISSED: contextvars.ContextVar = contextvars.ContextVar("_MISSED", default=None)
+
+
+def _asked_flatten(d: _Asked) -> tuple:
+    return tuple(d[k] for k in sorted(d)), (tuple(sorted(d)), d.role)
+
+
+def _asked_unflatten(aux: tuple, values) -> _Asked:
+    keys, role = aux
+    return _Asked(zip(keys, values), role=role)
+
+
+# Flattened as a dict is (its values in the order of its sorted keys), so a
+# hook that maps over its state or its inputs sees what it sees in the step.
+jax.tree_util.register_pytree_node(_Asked, _asked_flatten, _asked_unflatten)
+
+
+def _flux_field_names(node, fields) -> Any:
+    """The names of the boundary fluxes *node* returns, asked of the hook.
+
+    ``compute_boundary_fluxes(fields, {}, 0.0)``, as ``validate()`` has
+    always asked, once.  A hook that indexes an input
+    (``boundary_inputs["u"]``) raises ``KeyError`` on the empty dict,
+    which left ``validate()`` and ``compile()`` with that bare error for
+    every edge from one of the node's fluxes.  It is raised as
+    :class:`_FluxHookNeedsItsInputs`, which names the node, the hook and
+    what it indexed, and says what the hook must do; ``validate()`` lists
+    it as an ``ERROR`` line.  The hook is handed both dicts as
+    :class:`_Asked`, so the message names the dict the missing key was
+    looked up in: ``boundary_inputs[...]``, ``state[...]`` (a field the
+    node's state does not hold), directly or inside a ``jax.jit``; where
+    the key was looked up in neither (in a copy made with ``dict(...)``,
+    or in a table of the hook's own), it says what is known.
+    """
+    state, inputs = _Asked(fields, role="state"), _Asked(role="boundary_inputs")
+    missed: list = []
+    token = _MISSED.set(missed)
+    try:
+        return node.compute_boundary_fluxes(state, inputs, 0.0).keys()
+    except KeyError as exc:
+        missing = exc.args[0] if exc.args else "?"
+        asked = (f"KeyError({missing!r}) when it was asked for its flux names with no "
+                 f"boundary inputs")
+        name = getattr(node, "name", "?")
+        advice = (
+            "a flux hook is called without the inputs that are not available yet "
+            "(validate() asks it with none, and the first of the two sweeps that compute "
+            "a coupling group's fluxes leaves out an input whose flux does not exist yet), "
+            "so it must return its fluxes without them: read the input with "
+            f"boundary_inputs.get({missing!r}, <a default of its shape and dtype>).")
+        if ("boundary_inputs", missing) in missed:
+            raise _FluxHookNeedsItsInputs(
+                f"compute_boundary_fluxes of node {name!r} raised {asked}: it indexes "
+                f"boundary_inputs[{missing!r}]. {advice[0].upper()}{advice[1:]}"
+            ) from exc
+        if ("state", missing) in missed:
+            raise _FluxHookNeedsItsInputs(
+                f"compute_boundary_fluxes of node {name!r} raised {asked}: it indexes "
+                f"state[{missing!r}], which is not a field of the node's state (its fields: "
+                f"{list(fields)}). A flux hook is handed the state that initial_state() "
+                "and update() give the node: return that field from both, or read one "
+                "they return."
+            ) from exc
+        raise _FluxHookNeedsItsInputs(
+            f"compute_boundary_fluxes of node {name!r} raised {asked}: {exc!r}. The key was "
+            "not looked up in the boundary_inputs or the state the hook is handed, so where "
+            "it was looked up is not known: in a copy of one of them (dict(state), "
+            "{**boundary_inputs}), or in a table of the hook's own. If it is one of the "
+            f"node's boundary inputs, {advice} If it is a field of its state: the node's "
+            f"state holds {list(fields)}."
+        ) from exc
+    finally:
+        _MISSED.reset(token)
+
+
 def _geometry_edge_issues(edges, nodes, state) -> list[str]:
     """``validate()``'s issues about the geometry each edge names.
 
@@ -538,9 +641,13 @@ def _geometry_edge_issues(edges, nodes, state) -> list[str]:
         fields = state[holder]
         if field not in fields:
             node = nodes[holder].node
-            is_flux = (
-                type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes
-                and field in node.compute_boundary_fluxes(fields, {}, 0.0))
+            try:
+                is_flux = (
+                    type(node).compute_boundary_fluxes
+                    is not SimulationNode.compute_boundary_fluxes
+                    and field in _flux_field_names(node, fields))
+            except _FluxHookNeedsItsInputs:
+                is_flux = False     # validate() has the hook's own error
             if is_flux:
                 issues.append(
                     f"ERROR: edge {e.key}: geometry field {field!r} of {holder!r} is a "

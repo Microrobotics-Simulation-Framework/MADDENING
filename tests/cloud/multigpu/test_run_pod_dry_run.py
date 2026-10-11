@@ -39,6 +39,8 @@ _GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid", "exchange", "fo
 #: The meshes every wrapper goal runs at its smallest size on four devices,
 #: as (devices along spatial axis 0, along spatial axis 1).
 _MESHES = {"1d": [4, 1], "1d-axis1": [1, 4], "2d-flat": [1, 4], "2d": [2, 2]}
+#: ... and the crossed pencil, on which the stencil goal runs one case.
+_CROSSED = {"2d-crossed": [2, 2]}
 #: The grid of 256 cells on four devices: never square (nx = ny + 4).
 _SHAPE = (16, 20)
 
@@ -90,7 +92,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 9
+    assert doc["schema_version"] == 12
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -201,27 +203,38 @@ def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
     axis 1."""
     doc = _load(dry_run_dir, "stencil")
     cases = {(s["node"], s["mesh"], s["boundary"]): s for s in doc["results"]}
+    ends = ("periodic", "edge", "dirichlet")
     assert set(cases) == {(node, mesh, b) for mesh in _MESHES
-                          for node, b in (("field", "periodic"), ("field", "edge"),
-                                          ("field", "dirichlet"), ("lbm", "periodic"))}
-    assert len(doc["results"]) == 16
+                          for node, b in (*(("field", b) for b in ends), ("lbm", "periodic"),
+                                          # the field with a halo of two cells
+                                          *(("field-halo2", b) for b in ends),
+                                          # and under the zero fill, with two integrals
+                                          # the wrapper stacks over the mesh
+                                          ("field-shares", "zero"))} | {
+        # the static split along the second axis, on the pencil; the crossed pencil
+        ("field-mask1", "2d", "periodic"), ("field", "2d-crossed", "periodic")}
+    assert len(doc["results"]) == 34
     for (node, mesh, boundary), s in cases.items():
         assert tuple(s["shape"]) == _SHAPE and s["cells"] == 16 * 20
-        assert s["mesh_shape"] == _MESHES[mesh]
+        assert s["mesh_shape"] == {**_MESHES, **_CROSSED}[mesh]
         assert s["input_partitioned"] is True
-        fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"}}[node]
+        fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"},
+                  "field-halo2": {"f", "averages"}, "field-mask1": {"f", "averages"},
+                  "field-shares": {"f", "averages", "shares", "strips"}}[node]
         assert set(s["forward"]["parity"]) == fields
         assert all(p["max_rel"] < 1e-5 for p in s["forward"]["parity"].values())
         assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
         assert s["gradient"]["parity_grad_parameter"] < 1e-5
-        assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity"}[node]
+        assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity",
+                                  "field-halo2": "diffusivity", "field-mask1": "diffusivity",
+                                  "field-shares": "diffusivity"}[node]
         for side in ("sharded", "unsharded"):
             _check_timing(s["forward"][side]["rollout"])
             _check_timing(s["gradient"][side]["grad"])
         py, pz = s["mesh_shape"]
         prefix = f"{node} {mesh} {py}x{pz} 16x20 {boundary}"
         assert sum(c["name"].startswith(prefix + " ") or c["name"].startswith(prefix + ":")
-                   for c in doc["checks"]) == 10
+                   for c in doc["checks"]) == 10 + 2 * (len(fields) - 2)
     # the three conditions are different models: nothing here compares a
     # mode with itself under another name; and one model on every mesh
     for mesh in _MESHES:
@@ -261,6 +274,8 @@ def test_indivisible_json_records_the_refusals_and_the_uneven_unstructured_run(d
     un = r["unstructured"]
     assert un["cells"] % _N_DEV != 0 and len(set(un["cells_per_device"])) > 1
     assert un["parity_x"]["max_rel"] < 1e-5
+    # an uneven split has a pad row: its cells are never renumbered
+    assert un["renumbered"] is False
 
 
 def _check_timing(t: dict):
@@ -299,6 +314,10 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
     doc = _load(dry_run_dir, "forward")
     (r,) = doc["results"]
     assert r["cells"] == _CELLS and r["steps"] == doc["config"]["steps"]
+    # four equal shards: renumbered into partition order unless the
+    # partitioner left them in it (the per-cell source needs one or the other)
+    assert isinstance(r["renumbered"], bool)
+    assert r["n_local_max"] * _N_DEV != _CELLS or r["renumbered"] or r["partition"] != "rcm"
     for method in _METHODS:
         m = r["methods"][method]
         assert m["input_presharded"] is True
@@ -311,8 +330,12 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
         # the float total: information, held to no limit (its sum cancels)
         assert m["parity_total"]["finite"] and "max_rel" in m["parity_total"]
         # the reduction, exactly: a field of ones sums to the number of cells
+        # and each shard's [offset, cells] pair, from shard_info, is the layout's
         assert m["ones"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
-                             "entries_not_one": 0}
+                             "entries_not_one": 0, "per_shard": [
+                                 [float(d * r["n_local_max"]), float(k)]
+                                 for d, k in enumerate(r["n_local"])]}
+        assert sum(r["n_local"]) == _CELLS and len(r["n_local"]) == 4
     assert r["ones_unsharded"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
                                    "entries_not_one": 0}
 
@@ -327,9 +350,13 @@ def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     assert r["grad_steps"] == doc["config"]["grad_steps"]
     _check_timing(r["rollout"]["unsharded"]["grad"])
     for method in _METHODS:
-        p = r["rollout"][method]["parity"]
         _check_timing(r["rollout"][method]["grad"])
-        assert p["finite"] and p["reference_scale"] > 0 and p["max_rel"] < 1e-5
+        # one reverse pass: with respect to the start, the per-cell source
+        # and the injected weight
+        for key in ("parity", "parity_source", "parity_weight"):
+            p = r["rollout"][method][key]
+            assert p["finite"] and p["reference_scale"] > 0 and p["max_rel"] < 1e-5, key
+    assert isinstance(r["renumbered"], bool)
     cg = r["sharded_cg"]
     assert cg["dof"] == (_CELLS // _N_DEV) * _N_DEV
     assert cg["input_presharded"] is True
@@ -406,9 +433,9 @@ def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
     assert "Checks not run" not in out and "Failed checks" not in out     # 4 devices
     assert "Records that cannot decide" not in out and "MIXED COMMITS" not in out
     for mesh, (py, pz) in _MESHES.items():
-        for case in ("field", "lbm"):
-            for boundary in (("periodic", "edge", "dirichlet") if case == "field"
-                             else ("periodic",)):
+        for case in ("field", "lbm", "field-halo2"):
+            for boundary in (("periodic",) if case == "lbm"
+                             else ("periodic", "edge", "dirichlet")):
                 assert f"{case} {mesh} {py}x{pz} 16x20 {boundary}" in out, out
     # every item names the one commit its files record
     assert all(line.endswith(lines[0].split()[-1]) and " commit " in line for line in lines)
@@ -422,19 +449,36 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
     for mesh in _MESHES:
         smallest += [(256, "field", b, mesh) for b in rp.STENCIL_BOUNDARIES]
         smallest.append((256, "lbm", "periodic", mesh))
+        # the field again with a halo of two cells, under each boundary
+        smallest += [(256, "field-halo2", b, mesh) for b in rp.STENCIL_BOUNDARIES]
+        # and once under the zero fill, with integrals the wrapper stacks a shard
+        smallest.append((256, "field-shares", "zero", mesh))
+    # where the pencil fits: its static split along the second axis, and the crossed pencil
+    smallest += [(256, "field-mask1", "periodic", "2d"), (256, "field", "periodic", "2d-crossed")]
     assert rp.stencil_cases([1024, 256], 4) == [(1024, "field", "periodic", "2d"), *smallest]
+    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2", "field-shares",
+                                     "field-mask1"}
+    assert rp.stencil_goal_meshes(4) == (*_MESHES, *_CROSSED)
+    assert rp.stencil_goal_meshes(2) == rp.meshes_that_fit(2) == ("1d", "1d-axis1", "2d-flat")
+    assert rp.FIELD_BOUNDARIES == (*rp.STENCIL_BOUNDARIES, "zero")
     # no pencil mesh on 2 or 3 devices: the other three carry every case,
     # and the larger sizes run on the 1-D mesh
     assert rp.stencil_cases([256, 1024], 2) == [
         (256, kind, b, mesh) for mesh in ("1d", "1d-axis1", "2d-flat")
         for kind, b in (("field", "periodic"), ("field", "edge"), ("field", "dirichlet"),
-                        ("lbm", "periodic"))] + [(1024, "field", "periodic", "1d")]
+                        ("lbm", "periodic"), ("field-halo2", "periodic"),
+                        ("field-halo2", "edge"), ("field-halo2", "dirichlet"),
+                        ("field-shares", "zero"))
+    ] + [(1024, "field", "periodic", "1d")]
     gpu = rp.stencil_cases(list(rp.GPU_CELLS), 4)
     assert gpu[:4] == [(100_000, "field", b, "1d") for b in rp.STENCIL_BOUNDARIES] + [
         (100_000, "lbm", "periodic", "1d")]
+    assert gpu[4:7] == [(100_000, "field-halo2", b, "1d") for b in rp.STENCIL_BOUNDARIES]
     assert gpu[-2:] == [(300_000, "field", "periodic", "2d"),
                         (1_000_000, "field", "periodic", "2d")]
-    assert len(gpu) == 18
+    assert gpu[-4:-2] == [(100_000, "field-mask1", "periodic", "2d"),
+                          (100_000, "field", "periodic", "2d-crossed")]
+    assert len(gpu) == 4 * 8 + 2 + 2 == 36
     # the graph goals: every mesh at the smallest size, the pencil after
     assert rp.graph_cases([256, 1024], 4) == [(256, m) for m in _MESHES] + [(1024, "2d")]
     assert rp.graph_cases([256], 3) == [(256, m) for m in ("1d", "1d-axis1", "2d-flat")]

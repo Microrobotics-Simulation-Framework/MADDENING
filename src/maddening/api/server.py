@@ -264,6 +264,113 @@ class _Reply(JSONResponse):
             return _UNWRITABLE_REPLY
 
 
+#: The most of a refused value a 422 echoes, in characters of its JSON
+#: text, and the most errors one 422 lists.  A validation error carries
+#: the value it refused (``input``), and for a body that is the body, or a
+#: field of it as large as the body: a ``PUT /graph/params`` 16 bytes under
+#: :data:`MAX_REQUEST_BODY_BYTES` was answered with a 32 MiB reply, encoded
+#: on the event loop.  A value this small is echoed as before (a number, a
+#: name, the text ``NaN``, a short body); a larger one is left out and the
+#: error says so.  One error per element of a typed list would echo a body
+#: element by element, so the list is cut as well.  Together they hold a
+#: 422 to about 100 kB plus its ``loc`` and ``msg`` texts.
+_MAX_ECHOED_INPUT_CHARS = 1024
+_MAX_ERRORS_LISTED = 64
+
+
+def _small_enough_to_echo(value: Any, limit: int) -> bool:
+    """Whether *value*'s JSON text can be at most *limit* characters,
+    decided in at most about *limit* steps whatever the value's size.
+
+    Every scalar is at least one character and every container two, so a
+    container of more than the characters left is refused by its length,
+    before any of it is visited: 11 million empty lists cost one ``len``.
+    A lower bound of the text's length, so ``True`` is checked again on
+    the text itself (:func:`_echoed_input`).
+    """
+    left = limit
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (str, bytes)):
+            left -= len(item) + 2
+        elif isinstance(item, Mapping):
+            left -= 2
+            if len(item) > left:
+                return False
+            for key, inner in item.items():
+                stack.append(key)
+                stack.append(inner)
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            left -= 2
+            if len(item) > left:
+                return False
+            stack.extend(item)
+        else:
+            left -= 1
+        if left < 0:
+            return False
+    return True
+
+
+def _echoed_input(error: Any) -> Any:
+    """One validation error as a 422 carries it: with the value it refused
+    when that is small, and with a note in its place when it is not.
+
+    The value is encoded for the reply here (``jsonable_encoder``, as the
+    whole list used to be), and the text it is written as is what is held
+    to :data:`_MAX_ECHOED_INPUT_CHARS`: a value that is not small is never
+    encoded, and one that cannot be encoded or measured (an integer of more
+    digits than Python prints, a tree nested past the interpreter's depth)
+    is left out like a large one.  ``input_omitted`` stands where ``input``
+    stood; every other key of the error is kept.
+    """
+    limit = _MAX_ECHOED_INPUT_CHARS
+    note = (f"the refused value is longer than {limit} characters as JSON and is "
+            "not echoed")
+
+    def small(value: Any) -> tuple[bool, Any]:
+        if not _small_enough_to_echo(value, limit):
+            return False, None
+        try:
+            encoded = jsonable_encoder(value)
+            text = json.dumps(_reply_tree(encoded), ensure_ascii=False,
+                              separators=(",", ":"), default=str)
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            return False, None
+        return len(text) <= limit, encoded
+
+    if not isinstance(error, Mapping):
+        # FastAPI's errors are dicts; anything else is held to the size too.
+        fits, encoded = small(error)
+        return encoded if fits else {"type": "error_not_echoed", "loc": [], "msg": note}
+    kept: dict[Any, Any] = {}
+    for key, item in error.items():
+        if key != "input":
+            kept[key] = item
+            continue
+        fits, encoded = small(item)
+        if fits:
+            kept["input"] = encoded
+        else:
+            kept["input_omitted"] = note
+    return jsonable_encoder(kept)
+
+
+def _validation_detail(errors: Any) -> list[Any]:
+    """The ``detail`` of a 422: the first :data:`_MAX_ERRORS_LISTED` errors
+    of a request, each through :func:`_echoed_input`, and a last entry that
+    counts the ones not listed."""
+    errors = list(errors)
+    detail = [_echoed_input(error) for error in errors[:_MAX_ERRORS_LISTED]]
+    if len(errors) > _MAX_ERRORS_LISTED:
+        detail.append({
+            "type": "errors_not_listed", "loc": [],
+            "msg": f"{len(errors) - _MAX_ERRORS_LISTED} more errors are not listed: "
+                   f"a reply lists the first {_MAX_ERRORS_LISTED} of {len(errors)}"})
+    return detail
+
+
 def _text_value_refusal(value: Any) -> Optional[str]:
     """Why a parameter's *value* holds text the graph's config could not
     carry, or ``None``.
@@ -528,8 +635,19 @@ MAX_GRAPH_STATE_ELEMENTS = 5 * MAX_NODE_STATE_ELEMENTS
 #: bounded field admits is :data:`MAX_NODE_PARAM_ELEMENTS` numbers in
 #: ``POST /graph/nodes`` / ``PUT /graph/params``, at most 26 bytes each in
 #: JSON (``-1.2345678901234567e-308, ``), about 26 MB; this is the next
-#: power of two.  Parsing JSON takes 25-40 times the body, so about
-#: 1.3 GB at the bound, again the order of :data:`MAX_NODE_BUILD_BYTES`.
+#: power of two.  What a body at the bound costs, measured on two that
+#: ``PUT /graph/params`` refuses, each 16 bytes under it (CPU, four cores,
+#: 2026-10-11): parsing takes 4 to 24 times the body (128 MiB for 16.8
+#: million zeros, 771 MiB for 11.2 million empty lists), and the request
+#: as a whole 75 to 80 times, a peak of 2.4 to 2.6 GiB over 4 to 13 s.
+#: Most of that is the element count, which is taken on the parsed tree
+#: by a walk that queues every element of a list with its path before it
+#: counts one (:func:`_oversized_param`); counting while parsing is not
+#: done yet.  So a body at the bound costs the order of
+#: :data:`MAX_NODE_BUILD_BYTES`, somewhat above it, not the 1.3 GB this
+#: comment gave from a rule of 25 to 40 times the body.  Until the 422
+#: stopped echoing the value it refused (:data:`_MAX_ECHOED_INPUT_CHARS`)
+#: the same two requests took 12 and 23 s and were answered with 32 MiB.
 #: Bodies were unbounded, and parsed whole before any cap was checked.
 MAX_REQUEST_BODY_BYTES = 32 * 1024 ** 2
 
@@ -3704,10 +3822,14 @@ class SimulationServer:
         # handler that replaced the first encoded with _json_reply, which
         # refuses the *text* ``NaN``: ``POST /sim/run?n_steps=NaN`` was a
         # 500.  Both are written by _Reply, which refuses nothing.
+        #
+        # The echo is of a small value only (_validation_detail): the
+        # handler serves every route's body, query and path, and a refused
+        # body was encoded and sent back whole.
         @app.exception_handler(RequestValidationError)
         async def _request_validation_error(_request, exc):
             return _Reply(status_code=422,
-                          content={"detail": jsonable_encoder(exc.errors())})
+                          content={"detail": _validation_detail(exc.errors())})
 
         @app.exception_handler(StarletteHTTPException)
         async def _http_exception(_request, exc):

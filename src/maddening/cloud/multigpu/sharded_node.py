@@ -275,6 +275,10 @@ class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
     state yourself with :attr:`sharding`.
     """
 
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "_inner"
+
     def __init__(
         self,
         node: SimulationNode,
@@ -316,11 +320,13 @@ class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         self._inner = node
-        # One node, one params dict: the wrapper and the node it wraps
-        # share it, so a write through any surface (REST, sysid, a
-        # recompile) reaches the ``self.params`` the inner ``update``
-        # actually reads.  A copy silently strands the write on the
-        # wrapper.
+        # One node, one params dict: the wrapper's ``params`` IS the
+        # wrapped node's (``_params_owner_attr``), so a write through any
+        # surface (REST, sysid, a recompile) reaches the ``self.params``
+        # the inner ``update`` actually reads, and so does an assignment
+        # (``node.params = {...}``), on either of the two.  This statement
+        # drops the copy the base constructor stored a line above; a copy
+        # silently strands the write on the wrapper.
         self.params = node.params
         self._mesh = mesh
         self._shard_axes = shard_axes
@@ -564,6 +570,10 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     ``HeatNode`` was refused with a message about its ``grid_x`` static.
     """
 
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "_inner"
+
     def __init__(
         self,
         node: SimulationNode,
@@ -678,8 +688,10 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         self._inner = node
-        # Share the inner node's params dict rather than copying it, so a
-        # write through any surface reaches the code that reads it.
+        # The wrapper's ``params`` IS the inner node's
+        # (``_params_owner_attr``), not a copy of it, so a write or an
+        # assignment through either reaches the code that reads it.  This
+        # statement drops the copy the base constructor stored a line above.
         self.params = node.params
         self._mesh = mesh
         self._axis_map = dict(axis_map)

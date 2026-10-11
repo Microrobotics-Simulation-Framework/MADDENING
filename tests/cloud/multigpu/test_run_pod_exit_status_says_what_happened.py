@@ -110,11 +110,11 @@ def test_a_forward_run_too_large_to_count_exactly_exits_0_and_reads_incomplete(
     assert not any("ones" in m for m in large["methods"].values())
     not_run = [c for c in doc["checks"] if c.get("not_run")]
     assert [c["name"] for c in not_run] == [
-        "256 cells ones: total == cells exactly, sharded and unsharded"]
+        "256 cells ones: total == cells, sharded and unsharded, and per-shard (offset, cells), exactly"]
     assert all(c["passed"] for c in doc["checks"] if not c.get("not_run"))
     assert doc["passed"] is False and rp.record_problems(doc) == []
     assert rp.goal_verdict([doc]) == "INCOMPLETE"
-    assert "CHECK NOT RUN [forward] 256 cells ones: total == cells exactly" in printed
+    assert "CHECK NOT RUN [forward] 256 cells ones: total == cells, sharded and unsharded" in printed
     assert "INCOMPLETE (checks not run; the checklist items stay open): forward" in printed
     assert "CHECK FAILED" not in printed and "FAILED:" not in printed
     assert len(jax.devices()) < 2 or doc["n_devices"] >= 2

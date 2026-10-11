@@ -18,8 +18,9 @@ three are the timing goals::
                  wrapper with both numbers named (the stencil refusal
                  saying the unstructured wrapper is not a way out for a
                  stencil node), and the unstructured wrapper takes an
-                 uneven split of a node written for it and matches the
-                 unsharded node.                    -> indivisible.json
+                 uneven split of a node written for it -- its per-cell
+                 source and injected weight included -- and matches
+                 the unsharded node.                -> indivisible.json
     halo         checklist 2: ``halo_exchange`` on every mesh of
                  ``STENCIL_MESHES`` for every boundary mode and halo
                  widths 1 and 2, and ``exchange_unstructured`` under both
@@ -41,9 +42,14 @@ three are the timing goals::
                  reads the halo corners); forward rollout and the adjoint
                  (initial state and a parameter) against the unsharded
                  node.  At the smallest size, the field under periodic,
-                 ``"edge"`` (the wrapper's default) and Dirichlet ends and
-                 the lattice, each on every mesh; periodic ends on the
-                 pencil at the others.              -> stencil.json
+                 ``"edge"`` (the wrapper's default) and Dirichlet ends,
+                 the lattice, and the field with a halo of two cells
+                 under the same three ends (``field-halo2``), each on
+                 every mesh, and the field with periodic ends on the
+                 pencil with its static split along the second axis
+                 (``field-mask1``) and on the crossed pencil
+                 (``CROSSED_MESH``); periodic ends on the pencil at
+                 the others.                        -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
                  a graph, with a non-local correction and a grid-shaped
                  source, forward (the field and its domain integral) and
@@ -57,12 +63,16 @@ three are the timing goals::
                  ``ShardedUnstructuredNode``.       -> exchange.json
     forward      checklist 1 for ``ShardedUnstructuredNode``: 1e6-cell
                  forward run on a real unstructured mesh (``--mesh``) or a
-                 synthetic one, both transports, checked against the
-                 unsharded node; and its cross-shard sum exactly, on a
-                 field of ones (``EXACT_COUNT_CELLS``). -> forward.json
+                 synthetic one, both transports, of a node that reads a
+                 per-cell source and an injected parameter on every
+                 step, checked against the unsharded node; and its
+                 cross-shard sum exactly, on a field of ones
+                 (``EXACT_COUNT_CELLS``).           -> forward.json
     gradient     checklist 3 for ``ShardedUnstructuredNode``: ``jax.grad``
-                 through a sharded rollout (both transports) and through
-                 the Jacobi-preconditioned ``sharded_cg`` against the
+                 through a sharded rollout (both transports) with
+                 respect to its start, to the per-cell source and to
+                 the injected parameter, and through the
+                 Jacobi-preconditioned ``sharded_cg``, against the
                  unsharded references, on a system both sides' solves
                  must have converged on.            -> gradient.json
     checklist    the five checklist goals, in the order above.
@@ -72,7 +82,9 @@ The meshes (``STENCIL_MESHES``, as devices along spatial axes 0 and 1 over
 ``D``): ``"1d"`` (D x 1) and ``"1d-axis1"`` (1 x D), a 1-D mesh sharding
 one spatial axis each; ``"2d-flat"`` (1 x D), a 2-D mesh whose two axes
 have different sizes; and ``"2d"`` (2 x D/2), the pencil, which exchanges
-two axes.  On four devices the pencil is 2 x 2, and on a mesh axis of two
+two axes.  The ``stencil`` goal also runs one case on ``"2d-crossed"``
+(``CROSSED_MESH``, D/2 x 2), the pencil with its mesh axes mapped to the
+spatial axes in the other order.  On four devices the pencil is 2 x 2, and on a mesh axis of two
 devices a shard's left and right neighbour are one device: the 1-D meshes
 give each spatial axis all four.  Every grid is non-square
 (``field_shape``: ``nx = ny + D``), and every grid-shaped input differs on
@@ -89,13 +101,35 @@ another check of the goal ran and passed (the run exits 0 for it and the
 goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
 as failed and the run exits 1, as for a goal with no checks; the halo,
 stencil, hybrid and coupled goals record
-those cases that way on such a count.  Each of the wrapper goals must fail
-on a stencil wrapper broken in any of eight ways (a static's halos NaN,
-grid-shaped inputs zeroed, domain integrals halved, domain integrals summed
-over the first mesh axis only, sharded axes after the first zero-filled at
-the global edges, halos taken from the wrong neighbour along spatial axis
-1, ``shard_info``'s extent divided by the first mesh axis's size or read
-off spatial axis 0):
+those cases that way on such a count.  The goals must fail on a stencil
+wrapper or a halo exchange broken in any of twenty-six ways: ten that every
+wrapper goal must catch (a static's halos NaN, grid-shaped inputs zeroed,
+domain integrals halved, domain integrals summed over the first mesh axis
+only, sharded axes after the first zero-filled at the global edges, halos
+taken from the wrong neighbour along spatial axis 1, ``shard_info``'s
+extent divided by the first mesh axis's size or read off spatial axis 0,
+injected parameters dropped, a halo axis ``axis_map`` leaves unsharded
+always edge-filled), and sixteen that only the ``stencil`` goal can catch,
+each in cases of its own: two that only its Dirichlet ends show
+(``shard_info``'s extent alone wrong, scalar inputs zeroed), two that only
+its ``field-mask1`` case shows (a static split
+along the second axis ``axis_map`` lists, halo-exchanged along the first
+mesh axis it lists or placed along it), two that only its crossed pencil
+shows (the fields split, or ``shard_info``'s offsets taken, as if the
+mesh's axes were in the spatial axes' order), three that only a halo two
+cells wide shows (wider halos zero at the global edges, an outer halo
+cell copied from the innermost one, the one-cell edge rule at width two),
+and seven that only its ``field-shares`` cases show (the zero fill
+replaced by the edge fill or by ones; an integral the node asks to keep
+one a shard summed over the mesh, stacked a slot off, or zeroed on its
+way back into the step; a reduced integral handed back to the step as
+zeros, or summed over the mesh again).  And the
+goals that build the unstructured wrapper (``indivisible``, ``forward``,
+``gradient``) must fail on that wrapper broken in any of seven ways: five
+that each of them must catch (per-cell inputs zeroed, their ghost rows not
+exchanged, their rows one off, injected parameters doubled or reaching one
+shard only), and two that leave every value right, which are the
+``gradient`` goal's (an input's or a parameter's cotangent dropped):
 ``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
 scratch copy of the library and requires it.  ``--summarise DIR`` reads
 the JSON files back and prints
@@ -211,7 +245,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 12
 
 #: Exit status of a run this runner refused before a check decided anything
 #: (argparse's own status for an option it does not take).
@@ -223,7 +257,14 @@ EXIT_CRASHED = 5
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
-DRY_RUN_CELLS = (256, 1024)
+#: A dry run's sizes, one of each kind for the unstructured goals: 256 cells
+#: cut into four equal shards, which they renumber into partition order
+#: (``cells_in_an_order_the_wrapper_takes``), and 961 = 31 x 31, which do
+#: not divide by four: a pad row on three shards, and the cells left as the
+#: partitioner scatters them.  (1024 until schema 11: both sizes ran
+#: renumbered.  The stencil goals' grids are the ones 1024 gave:
+#: ``field_shape`` rounds 31 up to 32.)
+DRY_RUN_CELLS = (256, 961)
 #: The session's question is "on 4 GPUs".  A transport ranking may decide
 #: on fewer with ``--allow-fewer-devices``; a checklist item never closes on
 #: fewer, whatever that flag says: on 2 devices a shard's left and right
@@ -244,6 +285,10 @@ MIN_DEVICES_WITH_ESCAPE = 2     # --allow-fewer-devices: still needs a real exch
 #: a boundary input beyond the grid, applied by the node after the exchange.
 STENCIL_BOUNDARIES = ("periodic", "edge", "dirichlet")
 STENCIL_WALL = 1.5              # the Dirichlet value; unlike any edge cell of the field
+#: What ``Field2D`` takes beyond its grid: those three and ``"zero"``, the
+#: wrapper's third fill, which the ``stencil`` goal runs in its
+#: ``field-shares`` cases.
+FIELD_BOUNDARIES = (*STENCIL_BOUNDARIES, "zero")
 
 #: The sharding checklist's goals, cheapest first, then the timing goals.
 CHECKLIST_GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid")
@@ -306,13 +351,22 @@ CG_SOLVES = ("solve", "adjoint", "tangent")
 #: gradient vectors), and why; and the limit on a Krylov solve's true
 #: residual.  A dry run on CPU virtual devices is held to the same limits,
 #: and its parity checks land one to three orders of magnitude inside
-#: them.  Measured for every goal at the dry run's 256 and 1024 cells (the
-#: record under tests/cloud/multigpu/run_pod_record/): the closest is the
-#: D2Q9 lattice's forward velocity at 0.11 of the forward limit, then the
-#: coupled and hybrid gradients at 0.03 of theirs, the rollouts at 0.01,
-#: and ``sharded_cg`` at 0.001.  And for the ``gradient`` goal at the
-#: session's 1e5, 3e5 and 1e6 cells: rollouts 1e-7 against 1e-5,
-#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4 (8e-7 at 1e7 unknowns).  The
+#: them.  Measured for every goal at the dry run's 256 and 961 cells (the
+#: record under tests/cloud/multigpu/run_pod_record/, schema 12): the
+#: closest is the D2Q9 lattice's forward velocity at 0.11 of the forward
+#: limit, then the field under the zero fill with its stacked integrals at
+#: 0.04, the coupled and hybrid gradients and the field with a halo of two
+#: at 0.03 of theirs, the rollouts at 0.02 (with respect to the start, the
+#: per-cell source and the injected weight alike), the field with its
+#: static split along the second axis and the crossed pencil at 0.013, and
+#: ``sharded_cg`` at 0.001.  And
+#: at the session's 1e5, 3e5 and 1e6 cells (CPU, jax 0.11.0): the
+#: ``gradient`` goal's rollouts 1.2e-7 to 2.5e-7 against 1e-5 with respect
+#: to the start and the source (of size 3 to 6 and 18 to 31), the weight's
+#: derivative (8e4 to 9e5) the unsharded one's to the last bit, and
+#: ``sharded_cg`` 4e-7 to 6e-7 against 4e-4 (8e-7 at 1e7 unknowns); the
+#: ``stencil`` goal's cases with a halo of two 2.8e-7 at most (the
+#: derivative with respect to the initial field).  The
 #: residual limit is of another kind: a converged solve reads just under
 #: its tolerance, half the limit.  The few-ulp CPU numbers are pinned by
 #: the unit tests under tests/cloud/multigpu/.
@@ -375,28 +429,48 @@ LIMITS = {
 }
 
 #: The ``forward`` goal checks its cross-shard reduction on a field of
-#: ones, at every size under this many cells.  ``NeighbourMeanNode`` leaves
-#: a field of ones a field of ones, bit for bit (the mean of ones is 1,
-#: ``(1 - w) + w`` is 1 at ``w = 0.5``, and a padded neighbour slot points
-#: at the cell itself), so the step's ``total`` is a float32 sum of ones:
-#: exact in ANY order of addition while the count is under 2**24, since
-#: every partial sum is an integer float32 holds, and equal to the number
-#: of cells.  One public ``update`` of the sharded node from such a field,
-#: placed as the wrapper places its own initial state (the compiled step
-#: is the one already timed: same shape, dtype and sharding), must
-#: therefore return ``total == cells`` and a field still all ones, with a
-#: limit of zero; and so must the unsharded node.  A shard left out of the
+#: ones, at every size under this many cells.  Under a zero source
+#: ``NeighbourMeanNode`` leaves a field of ones a field of ones, bit for
+#: bit (the mean of ones is 1, ``1 + w * (1 - 1)`` is 1 at any ``w``, and
+#: a padded neighbour slot points at the cell itself), so the step's
+#: ``total`` is a float32 sum of ones: exact in ANY order of addition while
+#: the count is under 2**24, since every partial sum is an integer float32
+#: holds, and equal to the number of cells.  One public ``update`` of the
+#: sharded node from such a field, placed as the wrapper places its own
+#: initial state and fed a source of zeros through the same per-cell path
+#: with the same injected weight (the compiled step is the one already
+#: timed: same shapes, dtypes and sharding), must therefore return
+#: ``total == cells`` and a field still all ones, with a limit of zero;
+#: and so must the unsharded node.  This is the one step of the goal whose
+#: source is zero: every other one carries it.  A shard left out of the
 #: reduction or counted twice reads off by that shard's cells (25,122 to
 #: 250,000 at the session's sizes), ghost rows counted off by their number
 #: (1,532, 2,646 and 4,830 there; 15,276 at 10,004,569 cells), and pad rows
-#: counted -- the node's ``own`` mask ignored -- off by half a cell each (a
-#: pad row starts at zero and takes half of its shard's first cell in the
-#: step): 1.5 cells at 100,489 and at 10,004,569 cells, which leave one
-#: pad row on each of three shards.  300,304 and 1,000,000 cells divide by
-#: four and have no pad row: the mask masks nothing there, and no check of
-#: a total can see it ignored.  At this many cells or more (the stress
-#: tail's 3e7 and 1e8) the count is recorded as a check not run.
+#: counted -- the node's ``own`` mask ignored -- off by a quarter of a cell
+#: each (a pad row starts at zero and moves towards its shard's first cell
+#: by the injected weight in the step): 0.75 cells at 100,489 and at
+#: 10,004,569 cells, which leave one pad row on each of three shards (half
+#: a cell each, 1.5, until schema 10: the weight was 0.5).  300,304 and
+#: 1,000,000 cells divide by four and have no pad row: the mask masks
+#: nothing there, and no check of a total can see it ignored.  At this
+#: many cells or more (the stress tail's 3e7 and 1e8) the count is
+#: recorded as a check not run.
 EXACT_COUNT_CELLS = 2 ** 24
+
+#: What the unstructured goals inject as ``NeighbourMeanNode``'s ``weight``
+#: through the wrapper's ``params``.  Not the node's own value (0.5), so a
+#: wrapper that drops the injection computes another field; and a power of
+#: two, as that one is (the node's docstring says why).
+NODE_WEIGHT = 0.25
+
+#: What the ``gradient`` goal's rollout is differentiated with respect to,
+#: in one reverse pass: the start, the per-cell source (both per cell) and
+#: the injected weight (one number).
+ROLLOUT_WRT = ("start", "source", "weight")
+
+#: The weight of the square term in that rollout's loss (:func:`rollout_loss`
+#: says what it is for and gives the measurements).
+ROLLOUT_SQUARE = 4.0
 
 #: The parameters the ``hybrid`` and ``coupled`` goals differentiate with
 #: respect to, as ``(node, params key)``; the check names spell them out.
@@ -476,7 +550,8 @@ def _load_backend() -> None:
     LBMNode = _lbm.LBMNode
     SimulationNode = _node.SimulationNode
     StaticArray = _sd.StaticArray
-    NeighbourMeanNode = _make_node_class(SimulationNode, StaticArray, jnp)
+    NeighbourMeanNode = _make_node_class(SimulationNode, StaticArray, _node.BoundaryInputSpec,
+                                         jnp)
     Field2D, FarField, Pointwise2D = _make_checklist_classes(
         SimulationNode, StaticArray, _node.BoundaryInputSpec, _params.ParamSpec, jnp)
 
@@ -762,9 +837,10 @@ def _partition_for(args, source: str, n: int, edges: np.ndarray,
 # ---------------------------------------------------------------------------
 
 
-def _make_node_class(SimulationNode, StaticArray, jnp):  # noqa: N803 -- class factory
+def _make_node_class(SimulationNode, StaticArray, BoundaryInputSpec, jnp):  # noqa: N803
     class NeighbourMeanNode(SimulationNode):
-        """``x <- (1 - w) x + w * mean_j x[nbr_j]`` over an arbitrary graph.
+        """``x <- x + w * (mean_j x[nbr_j] - x) + dt * (s + mean_j s[nbr_j]) / 2``
+        over an arbitrary graph.
 
         The unsharded ``update`` gathers from a global neighbour table; the
         sharded ``update_padded`` gathers from the same table rewritten in
@@ -772,22 +848,69 @@ def _make_node_class(SimulationNode, StaticArray, jnp):  # noqa: N803 -- class f
         cell itself, so both paths compute exactly the same arithmetic and
         the sharded result is bit-comparable to the unsharded one.  ``total``
         (sum of ``x`` over owned cells) exercises the ``psum`` path.
+
+        Two parts of it are there to make one path of
+        ``ShardedUnstructuredNode`` each carry a value into the answer, so
+        that a fault on that path moves the result (the ``forward``,
+        ``gradient`` and ``indivisible`` goals, and the seeded-fault test
+        that runs them against a broken wrapper):
+
+        * ``s`` is the boundary input ``source``, one value per cell
+          (:func:`node_source`: no two cells alike, no two shards alike).
+          The unsharded node takes it in global cell order; sharded, it is
+          in partition layout, which the wrapper splits over the mesh and
+          ghost-exchanges like a state field (its per-cell input path).  It
+          is read at the cell and at its neighbours, so its ghost rows
+          count as well as its owned ones;
+        * ``w`` is the parameter ``weight``.  The goals inject
+          ``NODE_WEIGHT`` through ``params=``, which the wrapper replicates
+          to every shard and hands to ``update_padded``; the node's own
+          value (0.5) is another number, so an injection that is dropped,
+          or that reaches some shards only, moves the answer as a wrong
+          value does.  In the ``gradient`` goal the derivative is taken
+          with respect to both as well as to the start;
+        * ``per_shard`` is a domain integral the node asks the wrapper not
+          to sum (``domain_integral_axes``): one ``[offset, cells]`` pair a
+          shard, which the wrapper stacks along the mesh axis.  Both
+          numbers come from ``shard_info``: ``offset`` is the shard's tag
+          (its index times the padded block length), and ``cells`` is the
+          sum of the new field over the rows ``shard_info["n_local"]``
+          says the shard owns, as the wrapper's docstring tells a node to
+          mask its pad rows.  On the ``forward`` goal's field of ones the
+          pair is two integers, the layout's own, in the layout's order:
+          a wrong offset, a wrong count, per-shard values summed after
+          all or stacked in another order each read off exactly
+          (:func:`per_shard_entries_off`).
+
+        Why it is written ``x + w * (mean - x)``: both weights are powers of
+        two and every goal steps with ``dt = 1``, so the two products are
+        exact and each new value is the same correctly rounded sums whether
+        or not a backend fuses a product into the addition after it.  The
+        sharded field is the unsharded one bit for bit, and a field of ones
+        stays a field of ones under a zero source at any ``w``
+        (``mean - x`` is exactly zero): see ``EXACT_COUNT_CELLS``.
         """
 
         def __init__(self, name: str, n: int, tbl: np.ndarray, *,
                      partition_assignment: np.ndarray | None = None,
                      weight: float = 0.5, timestep: float = 1.0) -> None:
-            super().__init__(name=name, timestep=timestep)
+            super().__init__(name=name, timestep=timestep, weight=float(weight))
             self._n = int(n)
             self._tbl = np.asarray(tbl, dtype=np.int32)
             self._pa = partition_assignment
-            self._w = float(weight)
 
         def state_fields(self) -> list[str]:
             return ["x"]
 
         def domain_integral_fields(self) -> set[str]:
-            return {"total"}
+            return {"total", "per_shard"}
+
+        def domain_integral_axes(self) -> dict:
+            return {"per_shard": ()}           # summed over no mesh axis: one a shard
+
+        def boundary_input_spec(self) -> dict:
+            return {"source": BoundaryInputSpec(shape=(self._n,),
+                                                description="per-cell source")}
 
         @property
         def static_data(self) -> dict:
@@ -804,22 +927,117 @@ def _make_node_class(SimulationNode, StaticArray, jnp):  # noqa: N803 -- class f
             i = np.arange(self._n, dtype=np.float32)
             return {"x": jnp.asarray(np.sin(0.01 * i) + 0.1 * np.cos(0.37 * i))}
 
-        def _relax(self, x, tbl):
-            g = jnp.take(x, tbl, axis=0).mean(axis=-1)
-            return (1.0 - self._w) * x[: tbl.shape[0]] + self._w * g
+        def _relax(self, x, tbl, source, params, dt):
+            """One step of the rows ``tbl`` holds: ``x`` and ``source`` have
+            those rows first (all of them unsharded; a shard's owned rows,
+            then its ghosts)."""
+            w = (self.params if params is None else {**self.params, **params})["weight"]
+            own = x[: tbl.shape[0]]
+            new = own + w * (jnp.take(x, tbl, axis=0).mean(axis=-1) - own)
+            if source is not None:
+                near = jnp.take(source, tbl, axis=0).mean(axis=-1)
+                new = new + dt * (0.5 * (source[: tbl.shape[0]] + near))
+            return new
 
-        def update(self, state, boundary_inputs, dt):
-            new = self._relax(state["x"], jnp.asarray(self._tbl))
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            source = boundary_inputs.get("source")
+            if source is not None:
+                source = jnp.asarray(source, jnp.float32)
+            new = self._relax(state["x"], jnp.asarray(self._tbl), source, params, dt)
             return {"x": new, "total": jnp.sum(new)}
 
         def update_padded(self, state_padded, boundary_inputs, dt, *, static_padded=None,
-                          shard_info=None):
+                          shard_info=None, params=None):
             n_local = shard_info[0][1]
-            new = self._relax(state_padded["x"], static_padded["nbr"][:n_local])
+            new = self._relax(state_padded["x"], static_padded["nbr"][:n_local],
+                              boundary_inputs.get("source"), params, dt)
             own = static_padded["own"][:n_local]
-            return {"x": new, "total": jnp.sum(new * own)}
+            total = jnp.sum(new * own)
+            offset, block = shard_info[0]
+            mine = jnp.arange(block) < shard_info["n_local"]
+            per_shard = jnp.stack([jnp.asarray(offset, jnp.float32),
+                                   jnp.sum(jnp.where(mine, new, 0.0))])
+            return {"x": new, "total": total, "per_shard": per_shard}
 
     return NeighbourMeanNode
+
+
+def node_source(n: int) -> np.ndarray:
+    """The per-cell ``source`` of the unstructured goals, in global cell
+    order: two waves of the cell index whose periods (273 and 10.3 cells)
+    divide no shard's length, so no two cells and no two shards read the
+    same values, at about a tenth of the field's size -- a source the
+    wrapper drops, or hands to the wrong cells, moves the field by about
+    that much a step, four orders of magnitude over the forward limit."""
+    i = np.arange(n, dtype=np.float64)
+    return (0.05 * np.cos(0.023 * i) + 0.03 * np.sin(0.61 * i + 0.4)).astype(np.float32)
+
+
+def node_inputs(n: int, layout, mesh, *, source: np.ndarray | None = None) -> tuple:
+    """What the unstructured goals feed ``NeighbourMeanNode``, for each side:
+    ``(inputs of the unsharded node, inputs of the sharded one, params)``.
+
+    The source (:func:`node_source` unless one is given) is in global cell
+    order for the unsharded node and in partition layout, placed on the
+    mesh once, for the wrapper's per-cell input path; ``params`` is the
+    injected ``weight`` (``NODE_WEIGHT``), the same object on both sides.
+    """
+    source = node_source(n) if source is None else np.asarray(source, np.float32)
+    return ({"source": jnp.asarray(source)},
+            {"source": place_on_mesh(layout_slab(source, layout), mesh)},
+            {"weight": jnp.asarray(NODE_WEIGHT, jnp.float32)})
+
+
+def cells_in_an_order_the_wrapper_takes(n: int, edges: np.ndarray, pa: np.ndarray,
+                                        n_devices: int) -> tuple:
+    """``(edges, partition, renumbered)``: the mesh as it is, or with its
+    cells renumbered into partition order where a per-cell input needs it.
+
+    ``ShardedUnstructuredNode`` tells a per-cell boundary input in partition
+    layout from one in global cell order by its length (``n_devices *
+    n_local_max`` rows against ``n_cells``).  When every shard owns the same
+    number of cells the two lengths are one, and it refuses the input
+    unless the two orders are one as well: each device owning a contiguous,
+    ascending block of cell ids.  A partition that leaves no pad row is
+    common -- reverse Cuthill-McKee cuts 256, 1024, 300,304 and 1,000,000
+    cells into four equal blocks, and a mesh file may bring one -- so there,
+    and only there, the cells are renumbered in the order the refusal
+    names, ``np.argsort(partition, kind="stable")``: the same graph and the
+    same partition, each shard's cells in the order they had (its slab,
+    its ghosts and its exchange are what they were), with the node's
+    start, source and loss weights -- all functions of the cell index --
+    laid over it in the new numbering.  Elsewhere nothing is touched, so a
+    partition with a pad row still runs with its cells scattered over the
+    global order.
+    """
+    pa = np.asarray(pa, dtype=np.int32)
+    counts = np.bincount(pa, minlength=n_devices)
+    if int(counts.max()) * n_devices != n:
+        return edges, pa, False                    # a pad row: the two lengths differ
+    order = np.argsort(pa, kind="stable")
+    if np.array_equal(order, np.arange(n)):
+        return edges, pa, False                    # the two orders are one already
+    new_id = np.empty(n, dtype=np.int32)
+    new_id[order] = np.arange(n, dtype=np.int32)
+    return new_id[np.asarray(edges)], pa[order], True
+
+
+def cells_were_renumbered(entry: dict) -> bool:
+    """What a goal that builds ``NeighbourMeanNode`` recorded of
+    :func:`cells_in_an_order_the_wrapper_takes`, read by each of them when
+    it derives its checks from its results.
+
+    A file from before schema 10 records no such thing, and its node read
+    neither a per-cell source nor an injected weight: with its schema
+    number edited to this one its checks would otherwise derive as they
+    were recorded.  The missing entry makes its results unreadable
+    (``KeyError``), which ``--summarise`` reports as a file that cannot
+    decide its goal.
+    """
+    renumbered = entry["renumbered"]
+    if not isinstance(renumbered, bool):
+        raise TypeError(f"renumbered is {renumbered!r}, not a bool")
+    return renumbered
 
 
 def build_pair(n: int, edges: np.ndarray, mesh, pa: np.ndarray, exchange: str):
@@ -851,8 +1069,9 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         * the conductance ``k`` of a face is the mean of the ``mask`` of
           the two cells it joins, so every step reads ``mask`` one cell
           into its halo.  ``mask`` is a ``StaticArray(replication="shard")``
-          along ``mask_axis`` (0, or 1 where the wrapper shards axis 1
-          only): the wrapper halo-exchanges it along that axis
+          along ``mask_axis`` (:func:`mask_axis_for`: the spatial axis the
+          first mesh axis of ``axis_map`` splits, or the second): the
+          wrapper halo-exchanges it along that axis
           (periodically under ``"periodic"``, the edge cell repeated
           otherwise), and the node fills the other axis itself by the same
           rule, taking its own slice out of the whole static by
@@ -880,19 +1099,94 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         ``wall`` there: the wrapper fills ``"edge"`` and ``update_padded``
         overwrites the halos at the *global* edges, finding them on each
         sharded axis from ``shard_info``.
+
+        ``reach`` is how many cells the node reads beyond a block, its
+        ``halo_width()`` on both axes: 1, or 2 (the ``stencil`` goal's
+        ``field-halo2`` cases).  At 2 every part above reads the second
+        cell as well, so that the wrapper's fill of the *outer* halo cell
+        moves the answer -- where it comes from the next shard, and at a
+        global edge under each boundary:
+
+        * the diffusion gains the four second neighbours (two cells along
+          an axis) at ``FAR_SHARE`` of the weight of the first, each
+          through the mean of the two cells' ``mask``: the field's and the
+          static's second halo cell;
+        * the smoothing of ``source`` gains the same four cells: the
+          second halo cell of a grid-shaped input, which under
+          ``"dirichlet"`` is the one array whose global-edge halo is the
+          wrapper's own fill (the field's is overwritten with ``wall``,
+          two cells deep);
+        * a block may be no wider than the halo (two rows a shard at the
+          smallest grid): the whole of a neighbour's block is then halo.
+
+        At 1 the arithmetic is what it was before the option existed.
+
+        ``boundary="zero"`` is the wrapper's third fill: zeros beyond the
+        grid for the field and for a grid-shaped input, the edge cell
+        repeated for a static (which has no boundary condition to take).
+
+        ``shares`` (the ``stencil`` goal's ``field-shares`` cases) adds two
+        domain integrals the wrapper must *not* sum over every mesh axis
+        (``domain_integral_axes``).  It names the mesh axes the wrapper
+        shards along, in mesh order, as ``(mesh axis, spatial axis,
+        devices)``; each block's part is its share of ``averages``:
+
+        * ``shares`` is summed over no mesh axis: one pair a block, which
+          the wrapper stacks along every mesh axis it uses.  It is carried
+          in the state and read back: ``SHARE_DECAY`` times the old value
+          plus the block's new share, so the slice of the stack the
+          wrapper hands each shard counts, as well as the slot each
+          shard's value lands in;
+        * ``strips`` is summed over the first of those mesh axes only and
+          stacked along the rest (on a 1-D mesh: summed over its one
+          axis, by name).
+
+        The unsharded node returns both in the stacked shape
+        (``stacked=True``), from the same field cut into the same blocks,
+        so the blocks are compared slot by slot; and the goal's loss
+        weighs every slot differently (:func:`_slot_weights`).
+
+        With ``shares`` the field also relaxes towards the mean it had a
+        step before, read out of its own ``averages`` in the state
+        (``MEAN_PULL``): a *reduced* integral, which the wrapper hands
+        every shard whole, carried back into the answer -- the same term
+        in ``update`` and ``update_padded``.  ``shares`` reads back the
+        per-shard kind; until schema 12 nothing read back the reduced
+        kind, and a wrapper that handed it to ``update_padded`` as zeros
+        passed all eight goals.  Without ``shares`` the node declares and
+        computes what it did.
         """
+
+        #: The weight of a second neighbour against a first one (``reach=2``).
+        FAR_SHARE = 0.25
+        #: How much of its old value ``shares`` keeps a step.
+        SHARE_DECAY = 0.5
+        #: The value ``shares`` and ``strips`` start from, in every slot.
+        SHARE_START = (0.25, 0.5)
+        #: With ``shares``: the rate the field relaxes at towards the mean
+        #: in its old ``averages`` (a reduced integral read back).
+        MEAN_PULL = 0.5
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
                      exchange: float = 0.0, timestep: float = 0.1,
-                     boundary: str = "periodic", mask_axis: int = 0) -> None:
+                     boundary: str = "periodic", mask_axis: int = 0, reach: int = 1,
+                     shares: tuple | None = None, stacked: bool = False) -> None:
             super().__init__(name=name, timestep=timestep, diffusivity=diffusivity,
                              exchange=exchange)
-            if boundary not in STENCIL_BOUNDARIES:
-                raise ValueError(f"boundary {boundary!r} is not one of {STENCIL_BOUNDARIES}")
+            if boundary not in FIELD_BOUNDARIES:
+                raise ValueError(f"boundary {boundary!r} is not one of {FIELD_BOUNDARIES}")
+            self._split = tuple((str(a), int(s), int(d)) for a, s, d in (shares or ()))
+            spatial = [s for _, s, _ in self._split]
+            if spatial != sorted(set(spatial)) or set(spatial) - {0, 1}:
+                raise ValueError(f"shares {shares!r}: spatial axes 0 and 1, ascending")
+            self._stacked = bool(stacked)
             if mask_axis not in (0, 1):
                 raise ValueError(f"mask_axis {mask_axis!r} is not 0 or 1")
+            if reach not in (1, 2):
+                raise ValueError(f"reach {reach!r} is not 1 or 2")
             self.boundary = boundary
             self._mask_axis = int(mask_axis)
+            self._reach = int(reach)
             self._shape = (int(ny), int(nx))
             j = np.arange(ny, dtype=np.float32)[:, None]
             i = np.arange(nx, dtype=np.float32)[None, :]
@@ -902,13 +1196,39 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
                                                 shard_axis=self._mask_axis)}
 
         def halo_width(self) -> dict:
-            return {0: 1, 1: 1}
+            return {0: self._reach, 1: self._reach}
 
         def state_fields(self) -> list:
             return ["f"]
 
         def domain_integral_fields(self) -> set:
-            return {"averages"}
+            return {"averages", "shares", "strips"} if self._split else {"averages"}
+
+        def domain_integral_axes(self) -> dict:
+            return {"shares": (), "strips": (self._split[0][0],)} if self._split else {}
+
+        def _block_shares(self, f):
+            """``(b0, b1, 2)``: each block's share of ``averages``, the grid cut
+            as the mesh cuts it (one block along an axis it does not shard)."""
+            per_axis = {s: d for _, s, d in self._split}
+            b0, b1 = per_axis.get(0, 1), per_axis.get(1, 1)
+            ny, nx = self._shape
+            blocks = f.reshape(b0, ny // b0, b1, nx // b1)
+            return jnp.stack([blocks.sum(axis=(1, 3)), (blocks * blocks).sum(axis=(1, 3))],
+                             axis=-1) / (ny * nx)
+
+        def _tallies(self, old_shares, new) -> dict:
+            """The two integrals of the unsharded node after a step: in the
+            shape the wrapper stacks them to (``stacked``), or as one block."""
+            if not self._split:
+                return {}
+            if not self._stacked:
+                part = self._averages(new)
+                return {"shares": self.SHARE_DECAY * old_shares + part, "strips": part}
+            lead = tuple(d for _, _, d in self._split)
+            shares = self._block_shares(new)
+            return {"shares": self.SHARE_DECAY * old_shares + shares.reshape((*lead, 2)),
+                    "strips": shares.sum(axis=self._split[0][1]).reshape((*lead[1:], 2))}
 
         @property
         def static_data(self) -> dict:
@@ -926,7 +1246,13 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
             f = jnp.asarray((1.0 + np.sin(2 * np.pi * y) * np.cos(4 * np.pi * x)
                              + 0.25 * np.cos(6 * np.pi * (x + y))).astype(np.float32))
-            return {"f": f, "averages": self._averages(f)}
+            state = {"f": f, "averages": self._averages(f)}
+            if self._split:
+                lead = tuple(d for _, _, d in self._split) if self._stacked else ()
+                start = jnp.asarray(self.SHARE_START, jnp.float32)
+                state["shares"] = jnp.broadcast_to(start, (*lead, 2))
+                state["strips"] = jnp.broadcast_to(start, (*lead[1:], 2))
+            return state
 
         def boundary_input_spec(self) -> dict:
             spec = {"ambient": BoundaryInputSpec(shape=(), description="far-field value, "
@@ -946,65 +1272,83 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         def _pad_mode(self) -> str:
             """How ``update`` fills the halo of the field and of a grid-shaped
             input: as the wrapper's fill does (``"edge"`` under Dirichlet)."""
-            return {"periodic": "wrap", "edge": "edge", "dirichlet": "edge"}[self.boundary]
+            return {"periodic": "wrap", "edge": "edge", "dirichlet": "edge",
+                    "zero": "constant"}[self.boundary]
 
         @property
         def _static_mode(self) -> str:
             """How a sharded static's halo is filled: the wrapper's rule."""
             return "wrap" if self.boundary == "periodic" else "edge"
 
-        @staticmethod
-        def _new(f_pad, mask_pad, ambient, source_pad, p, dt):
-            f = f_pad[1:-1, 1:-1]
-            m = mask_pad[1:-1, 1:-1]
-            div = sum(0.5 * (m + mask_pad[sl]) * (f_pad[sl] - f)
-                      for sl in ((slice(None, -2), slice(1, -1)), (slice(2, None), slice(1, -1)),
-                                 (slice(1, -1), slice(None, -2)), (slice(1, -1), slice(2, None))))
+        def _new(self, f_pad, mask_pad, ambient, source_pad, p, dt, old_averages=None):
+            h = self._reach
+
+            def at(a, dy, dx):
+                """The block's cells of a padded array, shifted by ``(dy, dx)``."""
+                return a[h + dy: a.shape[0] - h + dy, h + dx: a.shape[1] - h + dx]
+
+            def ring(distance):
+                return ((-distance, 0), (distance, 0), (0, -distance), (0, distance))
+
+            f, m = at(f_pad, 0, 0), at(mask_pad, 0, 0)
+            div = sum(0.5 * (m + at(mask_pad, *to)) * (at(f_pad, *to) - f) for to in ring(1))
+            if h == 2:
+                div = div + self.FAR_SHARE * sum(
+                    0.5 * (m + at(mask_pad, *to)) * (at(f_pad, *to) - f) for to in ring(2))
             out = f + dt * (p["diffusivity"] * div + p["exchange"] * (ambient - f))
+            if self._split:
+                out = out + dt * self.MEAN_PULL * (old_averages[0] - f)
             if source_pad is not None:
-                s = (0.5 * source_pad[1:-1, 1:-1]
-                     + 0.125 * (source_pad[:-2, 1:-1] + source_pad[2:, 1:-1]
-                                + source_pad[1:-1, :-2] + source_pad[1:-1, 2:]))
+                (up, down, left, right) = (at(source_pad, *to) for to in ring(1))
+                s = 0.5 * at(source_pad, 0, 0) + 0.125 * (up + down + left + right)
+                if h == 2:
+                    (up, down, left, right) = (at(source_pad, *to) for to in ring(2))
+                    s = s + (0.125 * self.FAR_SHARE) * (up + down + left + right)
                 out = out + dt * s
             return out
 
         def _hold_walls(self, f_pad, wall, shard_info):
-            """Dirichlet halos: the rows and columns beyond a *global* edge.
-            A block holds an edge of a sharded axis when ``shard_info`` puts
-            it there; an axis not in ``shard_info`` is whole on the block."""
+            """Dirichlet halos: the rows and columns beyond a *global* edge,
+            ``reach`` deep.  A block holds an edge of a sharded axis when
+            ``shard_info`` puts it there; an axis not in ``shard_info`` is
+            whole on the block."""
+            h = self._reach
             info = shard_info or {}
             held = []
             for axis in (0, 1):
-                local = f_pad.shape[axis] - 2
+                local = f_pad.shape[axis] - 2 * h
                 offset, extent = info.get(axis, (0, local))
                 held.append((offset == 0, offset + extent == self._shape[axis]))
             (top, bottom), (left, right) = held
-            f_pad = f_pad.at[0, :].set(jnp.where(top, wall, f_pad[0, :]))
-            f_pad = f_pad.at[-1, :].set(jnp.where(bottom, wall, f_pad[-1, :]))
-            f_pad = f_pad.at[:, 0].set(jnp.where(left, wall, f_pad[:, 0]))
-            return f_pad.at[:, -1].set(jnp.where(right, wall, f_pad[:, -1]))
+            f_pad = f_pad.at[:h, :].set(jnp.where(top, wall, f_pad[:h, :]))
+            f_pad = f_pad.at[-h:, :].set(jnp.where(bottom, wall, f_pad[-h:, :]))
+            f_pad = f_pad.at[:, :h].set(jnp.where(left, wall, f_pad[:, :h]))
+            return f_pad.at[:, -h:].set(jnp.where(right, wall, f_pad[:, -h:]))
 
         def update(self, state, boundary_inputs, dt, *, params=None):
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
             source = boundary_inputs.get("source")
+            h = self._reach
             source_pad = None if source is None else jnp.pad(
-                jnp.asarray(source, jnp.float32), 1, mode=self._pad_mode)
-            f_pad = jnp.pad(state["f"], 1, mode=self._pad_mode)
+                jnp.asarray(source, jnp.float32), h, mode=self._pad_mode)
+            f_pad = jnp.pad(state["f"], h, mode=self._pad_mode)
             if self.boundary == "dirichlet":
                 wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
                 f_pad = self._hold_walls(f_pad, wall, None)
-            mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), 1,
+            mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), h,
                                mode=self._static_mode)
-            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
-            return {"f": new, "averages": self._averages(new)}
+            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt, state.get("averages"))
+            return {"f": new, "averages": self._averages(new),
+                    **self._tallies(state.get("shares"), new)}
 
         def update_padded(self, state_padded, boundary_inputs, dt, *, static_padded=None,
                           shard_info=None, params=None):
+            h = self._reach
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
             if ambient.ndim == 2:                  # grid-shaped: arrives halo-padded
-                ambient = ambient[1:-1, 1:-1]
+                ambient = ambient[h:-h, h:-h]
             source_pad = boundary_inputs.get("source")
             f_pad = state_padded["f"]
             if self.boundary == "dirichlet":
@@ -1016,13 +1360,22 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             # that axis is sharded too).
             other = 1 - self._mask_axis
             pad = [(0, 0), (0, 0)]
-            pad[other] = (1, 1)
+            pad[other] = (h, h)
             mask_pad = jnp.pad(static_padded["mask"], pad, mode=self._static_mode)
             width = f_pad.shape[other]
-            offset = (shard_info or {}).get(other, (0, width - 2))[0]
+            offset = (shard_info or {}).get(other, (0, width - 2 * h))[0]
             mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=other)
-            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
-            return {"f": f_pad.at[1:-1, 1:-1].set(new), "averages": self._averages(new)}
+            # ``averages`` arrives whole: the wrapper reduced it over the mesh
+            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt,
+                            state_padded.get("averages"))
+            part = self._averages(new)
+            out = {"f": f_pad.at[h:-h, h:-h].set(new), "averages": part}
+            if self._split:
+                # this shard's slice of the stack arrives with one leading
+                # axis a mesh axis it is stacked along; it leaves with none
+                out["shares"] = self.SHARE_DECAY * state_padded["shares"].reshape(2) + part
+                out["strips"] = part
+            return out
 
     class FarField(SimulationNode):
         """A replicated scalar solver: ``u <- u + dt * conductance * (field_mean - u)``."""
@@ -1341,6 +1694,17 @@ def field_shape(cells: int, n_devices: int) -> tuple:
 #: :func:`_neighbour_direction_not_run`).
 STENCIL_MESHES = ("1d", "1d-axis1", "2d-flat", "2d")
 
+#: The pencil with its mesh axes crossed: the same ``2 x D/2`` mesh, its
+#: first mesh axis (two devices) splitting spatial axis 1 and its second
+#: splitting spatial axis 0 -- an ``axis_map`` whose order is not the
+#: order of the mesh's axes, which no mesh above has.  The ``stencil`` goal
+#: runs one case on it, ``Field2D`` with periodic ends at its smallest size
+#: (:func:`stencil_cases`); no other goal does.  Until schema 12 every
+#: 2-D mesh mapped its mesh axes to the spatial axes in order, and a
+#: wrapper that split the fields as if every mesh did passed all eight
+#: goals.  As devices along spatial axes 0 and 1: ``D/2 x 2``.
+CROSSED_MESH = "2d-crossed"
+
 
 def stencil_mesh(label: str, n_devices: int) -> tuple:
     """``(mesh, axis_map, mesh_shape)`` of mesh ``label`` over ``n_devices``."""
@@ -1350,8 +1714,11 @@ def stencil_mesh(label: str, n_devices: int) -> tuple:
         return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 0}, shape
     if label == "1d-axis1":
         return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 1}, shape
-    if label == "2d" and not _pencil_mesh_fits(n_devices):
+    if label in ("2d", CROSSED_MESH) and not _pencil_mesh_fits(n_devices):
         raise ValueError(_pencil_mesh_needs(n_devices))
+    if label == CROSSED_MESH:
+        return (create_device_mesh(shape=(2, n_devices // 2)),
+                {"spatial_y": 1, "spatial_z": 0}, shape)
     return create_device_mesh(shape=shape), {"spatial_y": 0, "spatial_z": 1}, shape
 
 
@@ -1359,6 +1726,14 @@ def meshes_that_fit(n_devices: int) -> tuple:
     """The ``STENCIL_MESHES`` this device count can build: every one but the
     pencil, which needs an even count of at least 4."""
     return STENCIL_MESHES if _pencil_mesh_fits(n_devices) else STENCIL_MESHES[:-1]
+
+
+def stencil_goal_meshes(n_devices: int) -> tuple:
+    """Every mesh the ``stencil`` goal runs a case on with this device
+    count: :func:`meshes_that_fit`, and :data:`CROSSED_MESH` where the
+    pencil fits."""
+    crossed = (CROSSED_MESH,) if _pencil_mesh_fits(n_devices) else ()
+    return meshes_that_fit(n_devices) + crossed
 
 
 def graph_mesh(n_devices: int) -> str:
@@ -1383,9 +1758,9 @@ def graph_cases(cells, n_devices: int) -> list:
 def _mesh_shape_of(label: str, n_devices: int) -> tuple:
     """Devices along (spatial axis 0, spatial axis 1) on mesh ``label``."""
     shapes = {"1d": (n_devices, 1), "1d-axis1": (1, n_devices), "2d-flat": (1, n_devices),
-              "2d": (2, n_devices // 2)}
+              "2d": (2, n_devices // 2), CROSSED_MESH: (n_devices // 2, 2)}
     if label not in shapes:
-        raise ValueError(f"unknown mesh {label!r} (one of {STENCIL_MESHES})")
+        raise ValueError(f"unknown mesh {label!r} (one of {(*STENCIL_MESHES, CROSSED_MESH)})")
     return shapes[label]
 
 
@@ -1523,14 +1898,19 @@ def run_forward(args, out: dict) -> dict:
     for n_hint in _sizes(args):
         n, edges, pa, source = _mesh_source(args, n_hint)
         pa, how = _partition_for(args, source, n, edges, pa, D)
-        entry = {"cells": n, "mesh": source, "partition": how, "n_devices": D,
-                 "steps": args.steps, "methods": {}}
+        edges, pa, renumbered = cells_in_an_order_the_wrapper_takes(n, edges, pa, D)
+        entry = {"cells": n, "mesh": source, "partition": how, "renumbered": renumbered,
+                 "n_devices": D, "steps": args.steps, "methods": {}}
         ref_node = None
         ref_state = None
         for method in METHODS:
             ref_node, sharded, layout = build_pair(n, edges, mesh, pa, method)
+            # Every step below reads the per-cell source and the injected
+            # weight, on both sides (``NeighbourMeanNode``).
+            bi_ref, bi, params = node_inputs(n, layout, mesh)
             entry["n_local_max"] = layout.n_local_max
             entry["n_ghost_max"] = layout.n_ghost_max
+            entry["n_local"] = [int(k) for k in layout.n_local]
             entry["traffic_cells_per_shard"] = exchange_traffic(layout)
             state = sharded.initial_state()       # placed on the mesh by the wrapper
             dt = 1.0
@@ -1538,15 +1918,16 @@ def run_forward(args, out: dict) -> dict:
 
             # The compiled step alone, with pre-placed statics: this is the
             # number that compares across transports.
-            fn = sharded._get_sharded_fn(state, {}, None)
+            fn = sharded._get_sharded_fn(state, bi, params)
             statics = _placed_statics(sharded, layout, mesh)
-            presharded = require_presharded([state["x"], *statics.values()], mesh,
-                                            f"forward/{method}")
-            compile_s, _ = compile_seconds(fn, state, {}, dt_j, statics, {})
+            presharded = require_presharded([state["x"], bi["source"], *statics.values()],
+                                            mesh, f"forward/{method}")
+            compile_s, _ = compile_seconds(fn, state, bi, dt_j, statics, params)
 
-            def device_block(state=state, fn=fn, statics=statics, dt_j=dt_j):
+            def device_block(state=state, fn=fn, statics=statics, dt_j=dt_j, bi=bi,
+                             params=params):
                 for _ in range(args.steps):
-                    state = {"x": fn(state, {}, dt_j, statics, {})["x"]}
+                    state = {"x": fn(state, bi, dt_j, statics, params)["x"]}
                 return state["x"]
 
             device = timed(device_block, warmup=args.warmup, repeats=args.repeats)
@@ -1555,24 +1936,25 @@ def run_forward(args, out: dict) -> dict:
             # host every call; its first call is host work only (the
             # executable is already compiled).
             t0 = time.perf_counter()
-            jax.block_until_ready(sharded.update(state, {}, dt)["x"])
+            jax.block_until_ready(sharded.update(state, bi, dt, params=params)["x"])
             wrapper_first_call_s = time.perf_counter() - t0
 
-            def step_block(state=state, sharded=sharded, dt=dt):
+            def step_block(state=state, sharded=sharded, dt=dt, bi=bi, params=params):
                 for _ in range(args.steps):
-                    state = {"x": sharded.update(state, {}, dt)["x"]}
+                    state = {"x": sharded.update(state, bi, dt, params=params)["x"]}
                 return state["x"]
 
             wrapper = timed(step_block, warmup=args.warmup, repeats=args.repeats)
             # parity against the unsharded node after ``steps`` steps
             final = state
             for _ in range(args.steps):
-                final = sharded.update({"x": final["x"]}, {}, dt)
+                final = sharded.update({"x": final["x"]}, bi, dt, params=params)
             got = sharded.gather_global(final)
             if ref_state is None:
                 ref_state = ref_node.initial_state()
                 for _ in range(args.steps):
-                    ref_state = ref_node.update({"x": ref_state["x"]}, {}, dt)
+                    ref_state = ref_node.update({"x": ref_state["x"]}, bi_ref, dt,
+                                                params=params)
             m = {
                 "compile_s": compile_s,
                 "wrapper_first_call_s": wrapper_first_call_s,
@@ -1587,16 +1969,24 @@ def run_forward(args, out: dict) -> dict:
                 # One more public step, from a field of ones placed as the
                 # wrapper places its own initial state: the program is the
                 # one compiled above (require_presharded: same sharding).
+                # Its source is zero, through the same per-cell path -- the
+                # one configuration in which ones stay ones and the total
+                # is the number of cells exactly; every other step of the
+                # goal carries the source.
                 ones = {"x": place_on_mesh(layout_slab(np.ones(n, np.float32), layout), mesh)}
-                require_presharded([ones["x"]], mesh, f"forward/{method} ones")
-                m["ones"] = _ones_record(sharded.gather_global(sharded.update(ones, {}, dt)))
+                _, no_source, _ = node_inputs(n, layout, mesh, source=np.zeros(n, np.float32))
+                require_presharded([ones["x"], no_source["source"]], mesh,
+                                   f"forward/{method} ones")
+                m["ones"] = _ones_record(sharded.gather_global(
+                    sharded.update(ones, no_source, dt, params=params)))
             entry["methods"][method] = m
             print(f"[forward] cells={n:>8} {method:<10} wrapper {m['wrapper_step']['ms_per_step']:8.3f}"
                   f" ms/step  device {m['device_step']['ms_per_step']:8.3f} ms/step"
                   f"  compile {compile_s:6.2f} s  max|dx|={m['parity_x']['max_abs']:.2e}")
         if n < EXACT_COUNT_CELLS:
-            entry["ones_unsharded"] = _ones_record(
-                ref_node.update({"x": jnp.ones(n, jnp.float32)}, {}, 1.0))
+            entry["ones_unsharded"] = _ones_record(ref_node.update(
+                {"x": jnp.ones(n, jnp.float32)}, {"source": jnp.zeros(n, jnp.float32)}, 1.0,
+                params={"weight": jnp.asarray(NODE_WEIGHT, jnp.float32)}))
         results.append(entry)
     out["results"] = results
     return finish_checks(out, forward_checks(results, D))
@@ -1608,9 +1998,25 @@ def _ones_record(stepped: dict) -> dict:
     largest ``|x - 1|`` of the stepped field and how many entries are not
     exactly 1 (zero and none when the step leaves ones ones)."""
     x = np.asarray(stepped["x"], np.float64)
-    return {"total": float(np.asarray(stepped["total"]).reshape(-1)[0]),
-            "max_abs_from_one": float(np.max(np.abs(x - 1.0))) if x.size else 0.0,
-            "entries_not_one": int(np.count_nonzero(x != 1.0))}
+    record = {"total": float(np.asarray(stepped["total"]).reshape(-1)[0]),
+              "max_abs_from_one": float(np.max(np.abs(x - 1.0))) if x.size else 0.0,
+              "entries_not_one": int(np.count_nonzero(x != 1.0))}
+    if "per_shard" in stepped:                      # the sharded side only
+        record["per_shard"] = np.asarray(stepped["per_shard"], np.float64).tolist()
+    return record
+
+
+def per_shard_entries_off(per_shard, n_local_max: int, n_local: list) -> float:
+    """How many entries of the stacked ``[offset, cells]`` pairs a step from
+    a field of ones returned are not the layout's: shard ``d``'s offset is
+    ``d * n_local_max`` and it owns ``n_local[d]`` cells, both integers a
+    float32 holds exactly under ``EXACT_COUNT_CELLS``.  Anything that is
+    not one pair a shard has every entry off."""
+    want = np.asarray([[d * n_local_max, k] for d, k in enumerate(n_local)], np.float64)
+    got = np.asarray(per_shard, np.float64)
+    if got.shape != want.shape:
+        return float(want.size)
+    return float(np.count_nonzero(got != want))
 
 
 def _ones_checks(prefix: str, cells: int, record: dict) -> list:
@@ -1630,6 +2036,7 @@ def forward_checks(results: list, n_devices: int) -> list:
     exactly, on a field of ones (``EXACT_COUNT_CELLS``)."""
     checks = []
     for r in results:
+        cells_were_renumbered(r)
         for method in METHODS:
             m = r["methods"][method]
             prefix = f"{r['cells']} cells {method}"
@@ -1640,12 +2047,17 @@ def forward_checks(results: list, n_devices: int) -> list:
                                      m["parity_total"]["finite"]))
             if r["cells"] < EXACT_COUNT_CELLS:
                 checks += _ones_checks(prefix, r["cells"], m["ones"])
+                checks.append(check(
+                    f"{prefix} ones: per-shard (offset, cells) entries off the layout's",
+                    per_shard_entries_off(m["ones"]["per_shard"], r["n_local_max"],
+                                          r["n_local"]), LIMITS["exact"]))
         if r["cells"] < EXACT_COUNT_CELLS:
             checks += _ones_checks(f"{r['cells']} cells unsharded", r["cells"],
                                    r["ones_unsharded"])
         else:
             checks.append(check_not_run(
-                f"{r['cells']} cells ones: total == cells exactly, sharded and unsharded",
+                f"{r['cells']} cells ones: total == cells, sharded and unsharded, and "
+                "per-shard (offset, cells), exactly",
                 f"a float32 sum of ones is exact only under 2**24 = {EXACT_COUNT_CELLS} "
                 "cells"))
     return checks
@@ -1654,6 +2066,31 @@ def forward_checks(results: list, n_devices: int) -> list:
 # ---------------------------------------------------------------------------
 # Goal c: gradient parity
 # ---------------------------------------------------------------------------
+
+
+def rollout_loss(x, weights, cells):
+    """The scalar the ``gradient`` goal's rollout ends in: ``sum(x * weights)
+    + ROLLOUT_SQUARE / 2 * sum(cells * x**2)``.
+
+    The first term gives every cell an adjoint of its own (white noise).
+    The second is there for the derivative with respect to the weight, the
+    one derivative that is a single sum over every cell and step.  Under
+    the first term alone that sum is of terms of either sign and cancels:
+    in float64 its terms' magnitudes add up to 215, 12,700 and 2,300 times
+    the sum itself at the session's 100,489, 300,304 and 1,000,000 cells,
+    so two float32 orders of addition would differ by rounding times that
+    -- no limit on such a number tells a correct wrapper from a wrong one.
+    Relaxing a field lowers ``sum(x**2)``, so the second term's share has
+    one sign nearly everywhere, and with it the ratio is 1.7, 1.2 and 1.5
+    there (8 and 28 at 225 and 256 cells, the seeded-fault tests' sizes,
+    where the field is smooth and the sum small; 1.7 at 1024, the dry
+    run's second size until schema 11).
+
+    ``cells`` is 1 on a cell and 0 on a pad row of the partition layout
+    (all ones unsharded): a pad row is no cell, and it does not stay zero
+    under the step.  ``weights`` is zero there already.
+    """
+    return jnp.sum(x * weights) + (0.5 * ROLLOUT_SQUARE) * jnp.sum(cells * (x * x))
 
 
 def _laplacian_matvec_unsharded():
@@ -1811,6 +2248,87 @@ def run_gradient_cg(args, mesh, n_cg: int, rng) -> dict:
     return cg
 
 
+def run_gradient_rollout(args, mesh, n: int, edges: np.ndarray, pa: np.ndarray) -> dict:
+    """The rollout part of the ``gradient`` goal on one mesh: reverse mode
+    through ``args.grad_steps`` steps of ``NeighbourMeanNode``, sharded under
+    each transport against unsharded, with respect to everything in
+    ``ROLLOUT_WRT`` at once.
+
+    The start's derivative crosses the ghost exchange backwards; the
+    source's is the adjoint of the wrapper's per-cell input path (split
+    over the mesh, ghost-exchanged) and the weight's that of its params
+    injection (replicated to every shard, so its cotangents are summed
+    over the mesh).  A wrapper that hands the node the right values and
+    drops a cotangent passes every forward check and fails here.
+    """
+    D = args.n_devices
+    w_global = np.random.default_rng(1).standard_normal(n).astype(np.float32)
+    rollout = {}
+    # (i) reverse mode through a rollout: jitted grad on both sides,
+    # compile time apart, statics placed once (like-for-like).  One
+    # reverse pass gives the derivative with respect to the start, to
+    # the per-cell source and to the injected weight (ROLLOUT_WRT).
+    ref_node, _, layout = build_pair(n, edges, mesh, pa, "all_to_all")
+    bi_ref, _, params = node_inputs(n, layout, mesh)
+    w_j = jnp.asarray(w_global)
+
+    def loss_ref(x0, source, weight, ref_node=ref_node, w_j=w_j):
+        st = {"x": x0}
+        for _ in range(args.grad_steps):
+            st = {"x": ref_node.update(st, {"source": source}, 1.0,
+                                       params={"weight": weight})["x"]}
+        return rollout_loss(st["x"], w_j, jnp.ones_like(w_j))
+
+    at_ref = (ref_node.initial_state()["x"], bi_ref["source"], params["weight"])
+    g_ref_fn = jax.jit(jax.grad(loss_ref, argnums=(0, 1, 2)))
+    ref_compile_s, _ = compile_seconds(g_ref_fn, *at_ref)
+    g_ref = dict(zip(ROLLOUT_WRT, _host(g_ref_fn(*at_ref))))
+    ref_t = timed(lambda: g_ref_fn(*at_ref), warmup=args.warmup, repeats=args.repeats)
+    rollout["unsharded"] = {"grad": ref_t, "compile_s": ref_compile_s}
+    for method in METHODS:
+        _, sharded, layout = build_pair(n, edges, mesh, pa, method)
+        _, bi, _ = node_inputs(n, layout, mesh)
+        state0 = sharded.initial_state()
+        x0 = state0["x"]
+        w_layout = place_on_mesh(layout_slab(w_global, layout), mesh)
+        cells = place_on_mesh(layout_slab(np.ones(n, np.float32), layout), mesh)
+        step_fn = sharded._get_sharded_fn(state0, bi, params)
+        statics = _placed_statics(sharded, layout, mesh)
+        dt_j = jnp.asarray(1.0)
+        presharded = require_presharded(
+            [x0, bi["source"], w_layout, cells, *statics.values()], mesh,
+            f"gradient/rollout/{method}")
+
+        def loss_sh(x0, source, weight, step_fn=step_fn, statics=statics, dt_j=dt_j,
+                    w_layout=w_layout, cells=cells):
+            st = {"x": x0}
+            for _ in range(args.grad_steps):
+                st = {"x": step_fn(st, {"source": source}, dt_j, statics,
+                                   {"weight": weight})["x"]}
+            return rollout_loss(st["x"], w_layout, cells)
+
+        at = (x0, bi["source"], params["weight"])
+        g_fn = jax.jit(jax.grad(loss_sh, argnums=(0, 1, 2)))
+        compile_s, _ = compile_seconds(g_fn, *at)
+        g_sh = dict(zip(ROLLOUT_WRT, _host(g_fn(*at))))
+        for wrt in ("start", "source"):         # per cell, in partition layout
+            g_sh[wrt] = gather_value(per_shard=g_sh[wrt].reshape(D, layout.n_local_max),
+                                     layout=layout)
+        stats = timed(lambda: g_fn(*at), warmup=args.warmup, repeats=args.repeats)
+        parity = {wrt: _diff(g_sh[wrt], g_ref[wrt]) for wrt in ROLLOUT_WRT}
+        rollout[method] = {"grad": stats, "compile_s": compile_s,
+                                    "input_presharded": presharded,
+                                    "parity": parity["start"],
+                                    "parity_source": parity["source"],
+                                    "parity_weight": parity["weight"]}
+        print(f"[gradient] cells={n:>8} rollout {method:<10} grad {stats['median_ms']:8.2f} ms"
+              f" (unsharded {ref_t['median_ms']:8.2f})  compile {compile_s:6.2f} s"
+              f"  max|dg|={parity['start']['max_abs']:.2e}  rel: start "
+              f"{parity['start']['max_rel']:.2e} source {parity['source']['max_rel']:.2e}"
+              f" weight {parity['weight']['max_rel']:.2e}")
+    return rollout
+
+
 def run_gradient(args, out: dict) -> dict:
     _load_backend()
     mesh = _mesh_for(args.n_devices)
@@ -1819,59 +2337,21 @@ def run_gradient(args, out: dict) -> dict:
     for n_hint in _sizes(args):
         n, edges, pa, source = _mesh_source(args, n_hint)
         pa, how = _partition_for(args, source, n, edges, pa, D)
-        rng = np.random.default_rng(1)
-        w_global = rng.standard_normal(n).astype(np.float32)
-        entry = {"cells": n, "mesh": source, "partition": how, "n_devices": D,
-                 "grad_steps": args.grad_steps, "rollout": {}, "sharded_cg": None}
+        edges, pa, renumbered = cells_in_an_order_the_wrapper_takes(n, edges, pa, D)
+        entry = {"cells": n, "mesh": source, "partition": how, "renumbered": renumbered,
+                 "n_devices": D, "grad_steps": args.grad_steps, "rollout": {},
+                 "sharded_cg": None}
 
         # (i) reverse mode through a rollout: jitted grad on both sides,
         # compile time apart, statics placed once (like-for-like).
-        ref_node, _, _ = build_pair(n, edges, mesh, pa, "all_to_all")
-        w_j = jnp.asarray(w_global)
-
-        def loss_ref(x0, ref_node=ref_node, w_j=w_j):
-            st = {"x": x0}
-            for _ in range(args.grad_steps):
-                st = {"x": ref_node.update(st, {}, 1.0)["x"]}
-            return jnp.sum(st["x"] * w_j)
-
-        x0_global = ref_node.initial_state()["x"]
-        g_ref_fn = jax.jit(jax.grad(loss_ref))
-        ref_compile_s, _ = compile_seconds(g_ref_fn, x0_global)
-        g_ref = np.asarray(jax.device_get(g_ref_fn(x0_global)))
-        ref_t = timed(lambda: g_ref_fn(x0_global), warmup=args.warmup, repeats=args.repeats)
-        entry["rollout"]["unsharded"] = {"grad": ref_t, "compile_s": ref_compile_s}
-        for method in METHODS:
-            _, sharded, layout = build_pair(n, edges, mesh, pa, method)
-            state0 = sharded.initial_state()
-            x0 = state0["x"]
-            w_layout = place_on_mesh(layout_slab(w_global, layout), mesh)
-            step_fn = sharded._get_sharded_fn(state0, {}, None)
-            statics = _placed_statics(sharded, layout, mesh)
-            dt_j = jnp.asarray(1.0)
-            presharded = require_presharded([x0, w_layout, *statics.values()], mesh,
-                                            f"gradient/rollout/{method}")
-
-            def loss_sh(x0, step_fn=step_fn, statics=statics, dt_j=dt_j, w_layout=w_layout):
-                st = {"x": x0}
-                for _ in range(args.grad_steps):
-                    st = {"x": step_fn(st, {}, dt_j, statics, {})["x"]}
-                return jnp.sum(st["x"] * w_layout)
-
-            g_fn = jax.jit(jax.grad(loss_sh))
-            compile_s, _ = compile_seconds(g_fn, x0)
-            g_layout = np.asarray(jax.device_get(g_fn(x0)))
-            g_sh = gather_value(per_shard=g_layout.reshape(D, layout.n_local_max), layout=layout)
-            stats = timed(lambda: g_fn(x0), warmup=args.warmup, repeats=args.repeats)
-            entry["rollout"][method] = {"grad": stats, "compile_s": compile_s,
-                                        "input_presharded": presharded,
-                                        "parity": _diff(g_sh, g_ref)}
-            print(f"[gradient] cells={n:>8} rollout {method:<10} grad {stats['median_ms']:8.2f} ms"
-                  f" (unsharded {ref_t['median_ms']:8.2f})  compile {compile_s:6.2f} s"
-                  f"  max|dg|={entry['rollout'][method]['parity']['max_abs']:.2e}"
-                  f"  rel={entry['rollout'][method]['parity']['max_rel']:.2e}")
+        entry["rollout"] = run_gradient_rollout(args, mesh, n, edges, pa)
 
         # (ii) reverse + forward mode through the Jacobi-preconditioned sharded CG
+        # Its right-hand side and direction: the second and third draws of
+        # the stream whose first is the rollout's loss weights, as they
+        # have been since both parts drew from one generator.
+        rng = np.random.default_rng(1)
+        rng.standard_normal(n)
         entry["sharded_cg"] = run_gradient_cg(args, mesh, (n // D) * D, rng)
         results.append(entry)
     out["results"] = results
@@ -1883,9 +2363,16 @@ def gradient_checks(results: list, n_devices: int) -> list:
     :func:`exchange_checks`)."""
     checks = []
     for r in results:
+        cells_were_renumbered(r)
         for method in METHODS:
-            checks += _parity_checks(f"{r['cells']} cells rollout {method} grad vs unsharded",
-                                     r["rollout"][method]["parity"], LIMITS["gradient"])
+            rollout = r["rollout"][method]
+            prefix = f"{r['cells']} cells rollout {method} grad"
+            checks += _parity_checks(f"{prefix} vs unsharded", rollout["parity"],
+                                     LIMITS["gradient"])
+            checks += _parity_checks(f"{prefix} wrt the per-cell source vs unsharded",
+                                     rollout["parity_source"], LIMITS["gradient"])
+            checks += _parity_checks(f"{prefix} wrt the injected weight vs unsharded",
+                                     rollout["parity_weight"], LIMITS["gradient"])
         checks += gradient_cg_checks(r["sharded_cg"])
     return checks
 
@@ -2010,16 +2497,19 @@ def run_indivisible(args, out: dict) -> dict:
     n = ny_bad * nx + (1 if (ny_bad * nx) % D == 0 else 0)
     edges = ring_edges(n)
     pa, how = partition_cells(n, edges, D, "contiguous")
-    ref, sharded, _layout = build_pair(n, edges, mesh, pa, "all_to_all")
+    edges, pa, renumbered = cells_in_an_order_the_wrapper_takes(n, edges, pa, D)
+    ref, sharded, layout = build_pair(n, edges, mesh, pa, "all_to_all")
+    bi_ref, bi, params = node_inputs(n, layout, mesh)
     counts = np.bincount(pa, minlength=D)
     state, ref_state = sharded.initial_state(), ref.initial_state()
     for _ in range(args.steps):
-        state = sharded.update({"x": state["x"]}, {}, 1.0)
-        ref_state = ref.update({"x": ref_state["x"]}, {}, 1.0)
+        state = sharded.update({"x": state["x"]}, bi, 1.0, params=params)
+        ref_state = ref.update({"x": ref_state["x"]}, bi_ref, 1.0, params=params)
     got = sharded.gather_global(state)
     parity = _diff(got["x"], np.asarray(jax.device_get(ref_state["x"])))
-    entry["unstructured"] = {"cells": n, "partition": how, "cells_per_device": counts.tolist(),
-                             "steps": args.steps, "parity_x": parity}
+    entry["unstructured"] = {"cells": n, "partition": how, "renumbered": renumbered,
+                             "cells_per_device": counts.tolist(), "steps": args.steps,
+                             "parity_x": parity}
     print(f"[indivisible] stencil {ny_bad}x{nx}: {entry['stencil']['raised']}  stencil axis 1 "
           f"{ny_ok}x{nx_bad}: {entry['stencil_axis1']['raised']}  pointwise: "
           f"{entry['pointwise']['raised']}  unstructured {n} cells {counts.tolist()}: "
@@ -2088,6 +2578,7 @@ def indivisible_checks(results: list, n_devices: int) -> list:
         checks.append(check_not_run("pencil (2-D mesh) refusal naming the axis that does "
                                     "not divide", _pencil_mesh_needs(D)))
     un = entry["unstructured"]
+    cells_were_renumbered(un)
     n, counts = un["cells"], list(un["cells_per_device"])
     checks.append(check_that(f"unstructured {n} cells on {D} devices is an uneven split",
                              len(set(counts)) > 1, str(counts)))
@@ -2385,8 +2876,28 @@ def _lbm_force(ny: int, nx: int) -> np.ndarray:
 #: of cancellation, 5e-5 apart between two correct programs.
 STENCIL_NODES = {
     "field": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
+    # ``Field2D(reach=2)``: every halo two cells wide (the node's docstring).
+    "field-halo2": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
+    # ``Field2D`` whose static is split along the SECOND axis ``axis_map``
+    # lists (:func:`mask_axis_for`), on the pencil: its one case.
+    "field-mask1": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
     "lbm": {"fields": ("f", "velocity"), "parameter": "viscosity", "loss_of": "velocity"},
+    # ``Field2D(shares=...)`` under the wrapper's zero fill: two integrals the
+    # wrapper sums over some mesh axes or none (the node's docstring).
+    "field-shares": {"fields": ("f", "averages", "shares", "strips"),
+                     "parameter": "diffusivity", "loss_of": "f"},
 }
+
+#: The one boundary the ``field-shares`` cases run under.
+SHARES_BOUNDARY = "zero"
+
+
+def _slot_weights(shape: tuple):
+    """A weight for every entry of a stacked integral, no two alike (1 to
+    1.5 in steps of an exact binary fraction of the count), so that the
+    ``stencil`` goal's loss and its adjoint tell one slot from another."""
+    size = int(np.prod(shape))
+    return jnp.asarray((1.0 + 0.5 * np.arange(size) / size).reshape(shape), jnp.float32)
 
 
 def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_inputs,
@@ -2412,6 +2923,9 @@ def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_
         value = jnp.sum(w * x * x) / x.size
         if "averages" in final:
             value = value + final["averages"][0]
+        for stacked in ("shares", "strips"):
+            if stacked in final:
+                value = value + jnp.sum(_slot_weights(final[stacked].shape) * final[stacked])
         return value
 
     return (jax.jit(lambda s, p: advance(s, p, steps)),
@@ -2422,10 +2936,14 @@ def stencil_cases(cells, n_devices: int) -> list:
     """``(cells, node, boundary, mesh)`` cases the ``stencil`` goal runs.
 
     At the smallest size: ``Field2D`` under every ``STENCIL_BOUNDARIES``
-    entry and the D2Q9 lattice, on every mesh this device count can build
-    (:func:`meshes_that_fit`).  At the other sizes: ``Field2D`` with
-    periodic ends on the goal's own mesh (:func:`graph_mesh`, the pencil
-    where it fits).
+    entry, the D2Q9 lattice, and ``Field2D`` with a halo of two under every
+    ``STENCIL_BOUNDARIES`` entry again (``field-halo2``), on every mesh this
+    device count can build (:func:`meshes_that_fit`); and where the pencil
+    fits, ``Field2D`` with periodic ends twice more: on the pencil with its
+    static split along the second sharded axis (``field-mask1``), and on
+    the crossed pencil (:data:`CROSSED_MESH`).  At the other sizes: ``Field2D`` with periodic
+    ends on the goal's own mesh (:func:`graph_mesh`, the pencil where it
+    fits).
     """
     smallest = min(cells)
     cases = []
@@ -2434,6 +2952,11 @@ def stencil_cases(cells, n_devices: int) -> list:
             for mesh in meshes_that_fit(n_devices):
                 cases += [(n, "field", b, mesh) for b in STENCIL_BOUNDARIES]
                 cases.append((n, "lbm", "periodic", mesh))
+                cases += [(n, "field-halo2", b, mesh) for b in STENCIL_BOUNDARIES]
+                cases.append((n, "field-shares", SHARES_BOUNDARY, mesh))
+            if _pencil_mesh_fits(n_devices):
+                cases += [(n, "field-mask1", "periodic", "2d"),
+                          (n, "field", "periodic", CROSSED_MESH)]
         else:
             cases.append((n, "field", "periodic", graph_mesh(n_devices)))
     return cases
@@ -2444,11 +2967,20 @@ def _stencil_prefix(entry: dict) -> str:
     return f"{entry['node']} {entry['mesh']} {py}x{pz} {ny}x{nx} {entry['boundary']}"
 
 
-def mask_axis_for(axis_map: dict) -> int:
+def mask_axis_for(axis_map: dict, second: bool = False) -> int:
     """The spatial axis ``Field2D`` shards its static ``mask`` along under
-    ``axis_map``: one the wrapper shards (it refuses any other), axis 0
-    where it can."""
-    return min(axis_map.values())
+    ``axis_map``: one the wrapper shards (it refuses any other) -- the one
+    the first mesh axis ``axis_map`` lists splits, or with ``second`` the
+    one the second splits (the ``stencil`` goal's ``field-mask1`` case).
+
+    The first listed is axis 0 on ``"1d"``, ``"2d-flat"`` and the pencil,
+    and axis 1 on ``"1d-axis1"`` and the crossed pencil.  Until schema 12
+    every case split its static along it, and a wrapper that halo-exchanged
+    every sharded static along the first mesh axis ``axis_map`` lists,
+    whatever axis the static is split along, passed all eight goals.
+    """
+    axes = list(axis_map.values())
+    return axes[1] if second else axes[0]
 
 
 def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
@@ -2460,9 +2992,16 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
         return (make(), ShardedStencilNode(make(), mesh, axis_map=axis_map, boundary="periodic"),
                 {"body_force": jnp.asarray(_lbm_force(ny, nx))}, jnp.float32(LBM_VISCOSITY))
 
-    def make():
+    split = None
+    if kind == "field-shares":
+        split = tuple((a, axis_map[a], int(mesh.shape[a])) for a in mesh.axis_names
+                      if a in axis_map)
+
+    def make(stacked=False):
         return Field2D("field", ny, nx, exchange=0.3, boundary=boundary,
-                       mask_axis=mask_axis_for(axis_map))
+                       mask_axis=mask_axis_for(axis_map, second=kind == "field-mask1"),
+                       reach=2 if kind == "field-halo2" else 1,
+                       shares=split, stacked=stacked)
     # "dirichlet" is the node's own condition over the wrapper's default
     # "edge" fill; the other two are the wrapper's fill of that name.
     sharded = ShardedStencilNode(make(), mesh, axis_map=axis_map,
@@ -2470,16 +3009,25 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
     bi = {"source": jnp.asarray(_source_field(ny, nx))}
     if boundary == "dirichlet":
         bi["wall"] = jnp.float32(STENCIL_WALL)
-    return make(), sharded, bi, jnp.float32(0.2)
+    return make(stacked=True), sharded, bi, jnp.float32(0.2)
 
 
 def _placed_like(sharded, state: dict) -> dict:
     """``state`` placed as the wrapper places a state it built: each grid
     field partitioned over the mesh, each domain integral replicated."""
     integrals = set(sharded.domain_integral_fields())
-    return {k: (sharded._place_integral(k, v) if k in integrals        # noqa: SLF001
-                else jax.device_put(v, sharded._sharding_for_field(v)))  # noqa: SLF001
-            for k, v in state.items()}
+
+    def placed(k, v):
+        if k not in integrals:
+            return jax.device_put(v, sharded._sharding_for_field(v))  # noqa: SLF001
+        if sharded._integral_reduction(k)[1]:                        # noqa: SLF001
+            # stacked along the mesh axes it is not summed over: already
+            # what a step returns, one slot a shard
+            return jax.device_put(v, NamedSharding(
+                sharded._mesh, sharded._integral_spec(k)))           # noqa: SLF001
+        return sharded._place_integral(k, v)                         # noqa: SLF001
+
+    return {k: placed(k, v) for k, v in state.items()}
 
 
 def _stencil_side(node, s0, p, *, dt, weight, bi, spec, args) -> tuple:
@@ -2528,7 +3076,8 @@ def run_stencil_case(case, args, unsharded_cache: dict | None = None) -> dict:
              "input_partitioned": _is_partitioned(sharded_start["f"], D),
              "forward": {}, "gradient": {}}
     side = functools.partial(_stencil_side, dt=dt, weight=weight, bi=bi, spec=spec, args=args)
-    key = (kind, boundary, ny, nx)
+    # (the unsharded ``field-shares`` node stacks its integrals as the mesh does)
+    key = (kind, boundary, ny, nx, mesh_label if kind == "field-shares" else None)
     if unsharded_cache is None or key not in unsharded_cache:
         unsharded = side(ref, start, p)
         if unsharded_cache is not None:
@@ -2540,6 +3089,10 @@ def run_stencil_case(case, args, unsharded_cache: dict | None = None) -> dict:
     got["sharded"], entry["forward"]["sharded"], entry["gradient"]["sharded"] = side(
         sharded, sharded_start, p)
     (s_s, l_s, gf_s, gp_s), (s_u, l_u, gf_u, gp_u) = got["sharded"], got["unsharded"]
+    for field in spec["fields"]:
+        if np.shape(s_s[field]) != np.shape(s_u[field]):
+            raise ValueError(f"{kind} on {mesh_label}: the sharded {field!r} has shape "
+                             f"{np.shape(s_s[field])}, the unsharded {np.shape(s_u[field])}")
     entry["forward"]["parity"] = {field: _diff(s_s[field], s_u[field])
                                   for field in spec["fields"]}
     entry["gradient"]["parity_loss"] = _rel_each(l_s, l_u)
@@ -2681,7 +3234,8 @@ def run_hybrid(args, out: dict) -> dict:
 
         def graph(sharded: bool, _ny=ny, _nx=nx, _correction=correction, _mesh=mesh,
                   _axis_map=axis_map):
-            inner = Field2D("field", _ny, _nx, exchange=0.3, mask_axis=mask_axis_for(_axis_map))
+            inner = Field2D("field", _ny, _nx, exchange=0.3,
+                            mask_axis=mask_axis_for(_axis_map))
             physics = (ShardedStencilNode(inner, _mesh, axis_map=_axis_map,
                                           boundary="periodic") if sharded else inner)
             gm = GraphManager()

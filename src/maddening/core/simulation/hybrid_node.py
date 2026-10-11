@@ -54,6 +54,10 @@ class HybridNode(SimulationNode):
         Optional override name.  Defaults to the physics node's name.
     """
 
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "physics_node"
+
     def __init__(
         self,
         physics_node: SimulationNode,
@@ -72,11 +76,15 @@ class HybridNode(SimulationNode):
         _refuse_params_no_keyword_reaches(physics_node, caller="HybridNode")
         self.physics_node = physics_node
         # One node, one params dict, as the sharded wrappers do: the
-        # hybrid's ``params_pytree()`` reads the physics node's, so a copy
-        # made here stranded every write to ``hybrid.params`` -- the graph
-        # took ``params_pytree()``'s unchanged value back over it at its
-        # next read of ``gm.params``, and a ``PUT /graph/params`` answered
-        # 200, echoed the new value and lost it.
+        # hybrid's ``params`` IS the physics node's (``_params_owner_attr``),
+        # and this statement drops the copy the base constructor stored
+        # above.  The hybrid's ``params_pytree()`` reads the physics node's,
+        # so a copy kept here stranded every write to ``hybrid.params`` --
+        # the graph took ``params_pytree()``'s unchanged value back over it
+        # at its next read of ``gm.params``, and a ``PUT /graph/params``
+        # answered 200, echoed the new value and lost it -- and a mapping
+        # only shared from here on stranded an assignment
+        # (``hybrid.params = {...}``) the same way.
         self.params = physics_node.params
         self.correction_fn = correction_fn
 

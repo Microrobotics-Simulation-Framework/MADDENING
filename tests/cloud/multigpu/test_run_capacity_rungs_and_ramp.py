@@ -654,6 +654,23 @@ def test_the_exit_statuses_are_the_ones_the_header_documents():
         assert outcome in rc.__doc__, outcome
 
 
+def test_the_header_names_every_status_the_ramp_reads_as_ended_from_outside():
+    """The header and the code agree on which statuses are a signal's: a
+    negative one (``subprocess``'s report of the signal that ended a child it
+    started) and 137, a shell's SIGKILL; every other status, 139 included, is
+    one the process chose -- so a complete passing record whose process then
+    exits 139 is ``crashed``, like one that exits 1 or 5 (the table above)."""
+    doc = " ".join(rc.__doc__.split())
+    assert "a signal: a negative status" in doc and "or 137, a shell's report of SIGKILL" in doc
+    assert "Every other status is one the process chose, 139 included" in doc
+    assert "exits 1, 5, 139 or any status but 0 is ``crashed``" in doc
+    for status in (-9, -11, -6, -15, 137):
+        assert rc._ended_from_outside(_launched(status)) is not None, status
+    for status in (0, 1, 2, 5, 7, 128, 134, 139, 143, 255):
+        assert rc._ended_from_outside(_launched(status)) is None, status
+    assert _COMPLETE_AND_PASSED["status 139"] == _COMPLETE_AND_PASSED["exit 5"] == "crashed"
+
+
 # --- the host guard -------------------------------------------------------------
 
 
@@ -759,6 +776,285 @@ def test_a_soak_block_that_fails_its_checks_is_the_check_failed_status(tmp_path,
     record = json.loads((out / rc.SOAK_FILE).read_text())
     assert len(record["blocks"]) == 1                    # it stopped at the first bad block
     assert _summarise(out)[0] == rc.EXIT_CHECK_FAILED
+
+
+# --- the record a rung left, and how its process then ended ----------------------
+
+
+def _soak(tmp_path: Path, k, *, name: str):
+    """One soak here, as the ramp starts it: ``(exit status, record)``."""
+    record = tmp_path / name
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        status = rc.exit_status(["--child", "soak", "--record", str(record), "--dry-run",
+                                 "--mesh", "2x2", *S.TILE_ARGS, "--k", *map(str, k),
+                                 "--steps", "3", "--rung-index", "0", "--soak-minutes", "0.0001"])
+    return status, json.loads(record.read_text())
+
+
+@pytest.fixture(scope="module")
+def left(tmp_path_factory, passing):
+    """Records as a rung's and a soak's own process leaves them at the
+    moments it can be ended, from real runs here (576 cells on the pencil):
+    every write of a record is kept, so the ones before the last are what
+    a process ended there would have left."""
+    tmp = tmp_path_factory.mktemp("left")
+    written: dict = {}
+    real_write, real_reference, real_compare = rc.write_json, rc.tile_reference, \
+        rc.compare_with_tiling
+
+    def keeping(path, doc):
+        written.setdefault(Path(path).name, []).append(json.loads(json.dumps(doc)))
+        real_write(path, doc)
+
+    def off_by_a_cell(state, reference, tile, shape, chunk_bytes):
+        got = real_compare(state, reference, tile, shape, chunk_bytes)
+        got["fields"]["f"]["max_rel"] = 3e-3
+        return got
+
+    k = (1, 3, 1)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(rc, "write_json", keeping)
+        assert _soak(tmp, k, name="soak_passed.json")[0] == rc.EXIT_OK
+        patch.setattr(rc, "compare_with_tiling", off_by_a_cell)
+        assert _soak(tmp, k, name="soak_failed.json")[0] == rc.EXIT_CHECK_FAILED
+        patch.setattr(rc, "compare_with_tiling", real_compare)
+        patch.setattr(rc, "tile_reference", lambda tile, tile_state, steps: {
+            name: np.roll(value, 1, axis=1)
+            for name, value in real_reference(tile, tile_state, steps).items()})
+        assert _rung(tmp, "2x2", k, name="rung_failed.json")[0] == rc.EXIT_CHECK_FAILED
+
+        def closed_pipe(label, checks):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        # ... and the same rung raising after its last write (its stdout gone):
+        # its process then records "crashed" over the checks, and exits 5.
+        patch.setattr(rc, "_print_checks", closed_pipe)
+        assert _rung(tmp, "2x2", k, name="rung_raised.json")[0] == rc.EXIT_CRASHED
+
+    def last(name, phase):
+        return [doc for doc in written[name] if doc["phase"] == phase][-1]
+
+    records = {
+        "rung, a check failed (done)": last("rung_failed.json", "done"),
+        "rung, a check failed, then it raised": last("rung_raised.json", "done"),
+        "rung, every check passed (done)": passing[k],
+        "rung, still running": last("rung_failed.json", "running"),
+        # Not a record a rung writes (its checks, its outcome and "done" go in
+        # one write): every check passed, and no verdict of its own.
+        "rung, checks without a verdict": dict(passing[k], outcome=None, phase="judging"),
+        "soak, a block failed (running)": last("soak_failed.json", "running"),
+        "soak, a block failed (done)": last("soak_failed.json", "done"),
+        "soak, its blocks passed (running)": last("soak_passed.json", "running"),
+        "soak, every block passed (done)": last("soak_passed.json", "done"),
+    }
+    assert set(records) == set(_LEFT)
+    # What each is, by what it holds: the cases are these, not their names.
+    failed = records["rung, a check failed (done)"]
+    assert failed["outcome"] == "check failed" and _failed(failed)
+    raised = records["rung, a check failed, then it raised"]
+    assert raised["outcome"] == "crashed" and _failed(raised) == _failed(failed)
+    assert raised["raised"]["type"] == "BrokenPipeError"
+    running = records["rung, still running"]
+    assert running["outcome"] is None and "checks" not in running
+    assert running["memory"]["readings"]
+    for name, blocks_failed in (("soak, a block failed (running)", True),
+                                ("soak, its blocks passed (running)", False)):
+        soak = records[name]
+        assert soak["kind"] == rc.SOAK_KIND and soak["outcome"] is None and "checks" not in soak
+        assert bool(_failed(soak["blocks"][-1])) is blocks_failed and soak["blocks"]
+    assert records["soak, a block failed (done)"]["outcome"] == "check failed"
+    assert records["soak, every block passed (done)"]["outcome"] == "passed"
+    return records
+
+
+#: The ways a rung's process ends.
+_ENDS = {
+    "time box": _launched(-9, timed_out=True),
+    "SIGKILL": _launched(-9),
+    "status 137": _launched(137),
+    # 128 + SIGSEGV, as a shell would report it: from a process the ramp started
+    # itself, a status the process chose (the header says which statuses are signals)
+    "status 139": _launched(139, stderr="Segmentation fault"),
+    "segfault": _launched(-11, stderr="Fatal Python error: Segmentation fault"),
+    "abort naming an allocation": _launched(-6, stderr="F external/xla/...\n" + _XLA_OOM),
+    "exit 0": _launched(0),
+    "exit 1": _launched(1, stderr="Traceback ..."),
+    "exit 1 at the time box": _launched(1, timed_out=True),
+    "exit 5": _launched(5, stderr="Traceback ..."),
+    "exit 7": _launched(7),
+}
+#: The outcome by what the record holds, per ending.  A failed check: that,
+#: always.  A complete record that passed: a pass, unless the process chose
+#: a status other than 0.  No verdict: the ending decides.
+_A_CHECK_FAILED = dict.fromkeys(_ENDS, "check failed")
+_COMPLETE_AND_PASSED = {
+    "time box": "passed", "SIGKILL": "passed", "status 137": "passed", "segfault": "passed",
+    "abort naming an allocation": "passed", "exit 0": "passed", "exit 1": "crashed",
+    "exit 1 at the time box": "timed out", "exit 5": "crashed", "exit 7": "crashed",
+    "status 139": "crashed"}
+_NO_VERDICT = {
+    "time box": "timed out", "SIGKILL": "out of memory", "status 137": "out of memory",
+    "segfault": "crashed", "abort naming an allocation": "out of memory", "exit 0": "crashed",
+    "exit 1": "crashed", "exit 1 at the time box": "timed out", "exit 5": "crashed",
+    "exit 7": "crashed", "status 139": "crashed"}
+_LEFT = {
+    "rung, a check failed (done)": _A_CHECK_FAILED,
+    "rung, a check failed, then it raised": _A_CHECK_FAILED,
+    "rung, every check passed (done)": _COMPLETE_AND_PASSED,
+    "rung, still running": _NO_VERDICT,
+    "rung, checks without a verdict": _NO_VERDICT,
+    "soak, a block failed (running)": _A_CHECK_FAILED,
+    "soak, a block failed (done)": _A_CHECK_FAILED,
+    "soak, its blocks passed (running)": _NO_VERDICT,
+    "soak, every block passed (done)": _COMPLETE_AND_PASSED,
+}
+_ENDED_FROM_OUTSIDE = ("time box", "SIGKILL", "status 137", "segfault",
+                       "abort naming an allocation")
+
+
+def _last_lines(text: str) -> list:
+    return [line for line in text.splitlines()
+            if line.startswith(("CEILING", "STOPPED BY", "SOAK", "note:"))]
+
+
+def _the_summary_agrees(out: Path, summary: dict, status: int, text: str) -> str:
+    """``--summarise`` of the records the ramp left: the ramp's status, its
+    outcome for every rung and the soak, its last lines, and no record
+    that disagrees with itself.  Returns the table."""
+    got, table = _summarise(out)
+    assert got == status == summary["exit_status"], table
+    assert "RECORDS THAT DISAGREE" not in table
+    for row in summary["rungs"] + ([summary["soak"]] if summary["soak"] else []):
+        derived = rc.rederive(json.loads((out / row["file"]).read_text()))
+        assert derived["outcome"] == row["outcome"] and derived["problems"] == [], row["file"]
+    assert _last_lines(table) == _last_lines(text)
+    return table
+
+
+@pytest.mark.parametrize("ended", sorted(_ENDS))
+@pytest.mark.parametrize("held", sorted(_LEFT))
+def test_the_record_a_rung_left_decides_before_the_way_its_process_ended(
+        held, ended, tmp_path, passing, left):
+    """Every record a rung or a soak can leave, with every way its process
+    can then end, above a rung that passed: a failed check in the record is
+    ``check failed`` and status 1 whatever ended the process, and the ramp
+    and ``--summarise`` read the same records the same way."""
+    outcome, end = _LEFT[held][ended], _ENDS[ended]
+    is_soak = held.startswith("soak")
+    if is_soak:
+        launch = S.scripted([passing[(1, 3, 1)], (left[held], end)])
+        argv = ("--cells", "576", "--soak-minutes", "0.0001", "--soak-at", "1.0")
+    else:
+        launch = S.scripted([passing[(1, 1, 1)], (left[held], end)])
+        argv = ("--cells", "192", "576")
+    status, out, summary, text = _ramp(tmp_path, *argv, launch=launch)
+    assert len(launch.calls) == 2
+    assert status == (rc.EXIT_CHECK_FAILED if outcome == "check failed" else rc.EXIT_OK), text
+    row = summary["soak"] if is_soak else summary["rungs"][1]
+    assert row["outcome"] == outcome, row["detail"]
+    record = json.loads((out / row["file"]).read_text())
+    assert record["outcome"] == outcome
+    assert record["launch"]["returncode"] == end.returncode
+    assert record["launch"]["timed_out"] is end.timed_out
+    table = _the_summary_agrees(out, summary, status, text)
+    # The ceiling is the largest rung that passed, and never a rung with a
+    # failed check: the summary names that rung as what stopped the ramp.
+    passed_here = outcome == "passed" and not is_soak
+    assert summary["ceiling"]["rung"] == (2 if passed_here else 1)
+    if is_soak:
+        assert summary["stopped_by"] is None and f"SOAK: 576 cells: {outcome}" in table
+    elif passed_here:
+        assert summary["stopped_by"] is None and "CEILING: rung 2, 576 cells" in table
+    else:
+        assert summary["stopped_by"]["outcome"] == outcome
+        assert f"STOPPED BY: rung 2 (576 cells): {outcome}" in table
+    if outcome == "check failed":
+        assert "f vs the tiled reference max_rel" in row["detail"].splitlines()[0]
+        assert ("its process then" in row["detail"]) is (ended != "exit 1")
+        assert record["launch"]["stderr_tail"] == end.stderr_tail
+    # A pass whose process was ended from outside says so, in the record, in
+    # the ramp's notes and in the summary's; a clean pass says nothing.
+    note = f"note: {'the soak' if is_soak else 'rung 2'}: every check passed and the record was"
+    assert (note in table) is (outcome == "passed" and ended in _ENDED_FROM_OUTSIDE)
+    if outcome == "passed":
+        assert (ended in _ENDED_FROM_OUTSIDE) is (ended != "exit 0")
+        assert ("outcome_detail" in record) is (ended != "exit 0")
+        assert record["launch"]["stderr_tail"] == ("" if ended == "exit 0" else end.stderr_tail)
+        if ended != "exit 0":
+            assert f"(status {end.returncode})" in record["outcome_detail"]
+            assert ("at its time box" in record["outcome_detail"]) is end.timed_out
+
+
+@pytest.mark.parametrize("held, ended, outcome, status", [
+    ("rung, a check failed (done)", "time box", "check failed", 1),
+    ("rung, a check failed (done)", "SIGKILL", "check failed", 1),
+    ("rung, a check failed (done)", "status 137", "check failed", 1),
+    ("rung, every check passed (done)", "time box", "passed", 0),
+    ("rung, every check passed (done)", "SIGKILL", "passed", 0),
+    ("rung, still running", "time box", "timed out", 6),
+    ("rung, still running", "SIGKILL", "out of memory", 6)])
+def test_a_first_rung_is_read_by_its_record_before_its_ending(held, ended, outcome, status,
+                                                             tmp_path, passing, left):
+    """The same as the first rung: a failed check is status 1 and not "no
+    ceiling", a complete pass is a ceiling, and a rung that left no
+    verdict is no ceiling."""
+    launch = S.scripted([(dict(left[held], k=[1, 3, 1]), _ENDS[ended])])
+    got, out, summary, text = _ramp(tmp_path, "--cells", "576", launch=launch)
+    assert got == status and summary["rungs"][0]["outcome"] == outcome, text
+    assert (summary["ceiling"] is not None) is (outcome == "passed")
+    _the_summary_agrees(out, summary, status, text)
+
+
+def test_a_failed_check_under_a_kill_stops_the_ramp_and_no_soak_follows(tmp_path, passing, left):
+    """The audit's case as the session would run it: sizes still to come
+    and a soak asked for, and rung 2 killed at its time box after writing
+    a record with failed checks."""
+    launch = S.scripted([passing[(1, 1, 1)],
+                         (left["rung, a check failed (done)"], _ENDS["time box"])])
+    status, out, summary, text = _ramp(tmp_path, "--cells", "192", "576", "5000",
+                                       "--soak-minutes", "0.0001", launch=launch)
+    assert len(launch.calls) == 2                        # no third rung, no soak
+    assert status == rc.EXIT_CHECK_FAILED and summary["soak"] is None
+    assert [r["outcome"] for r in summary["rungs"]] == ["passed", "check failed"]
+    assert "STOPPED BY: rung 2 (576 cells): check failed" in text
+    _the_summary_agrees(out, summary, status, text)
+
+
+def test_the_ramp_goes_on_after_a_pass_whose_process_was_killed_on_its_way_out(tmp_path, passing):
+    """A rung that passed and was then killed is not the ceiling's reason:
+    the next size runs, and the ceiling is the largest that passed."""
+    launch = S.scripted([(passing[(1, 1, 1)], _ENDS["SIGKILL"]), passing[(1, 3, 1)]])
+    status, out, summary, text = _ramp(tmp_path, "--cells", "192", "576", launch=launch)
+    assert len(launch.calls) == 2 and status == rc.EXIT_OK, text
+    assert [r["outcome"] for r in summary["rungs"]] == ["passed", "passed"]
+    assert summary["ceiling"]["rung"] == 2 and summary["stopped_by"] is None
+    assert [n.split(":")[0] for n in summary["notes"]] == ["rung 1"]
+    assert "killed (status -9) on its way out" in summary["notes"][0]
+    _the_summary_agrees(out, summary, status, text)
+
+
+def test_a_soak_ended_after_a_failed_block_is_check_failed_by_that_blocks_checks(left):
+    """A soak writes each block's checks as it goes and its own last.  One
+    recorded as ``check failed`` with a failed block and no checks of its
+    own agrees with itself; nothing else without checks does."""
+    def without_checks(record, **changes):
+        return rc.rederive({k: v for k, v in {**record, **changes}.items() if k != "checks"})
+
+    ended = without_checks(left["soak, a block failed (running)"], outcome="check failed")
+    assert ended["outcome"] == "check failed" and ended["problems"] == []
+    assert ended["failed"] == ["f vs the tiled reference max_rel"]
+    # ... the failure must be in a block: an outcome the blocks do not bear out
+    # is still a problem, and so is a pass, or a rung, that records no checks.
+    unsupported = without_checks(left["soak, its blocks passed (running)"],
+                                 outcome="check failed")
+    assert unsupported["problems"] == [
+        "it is recorded as a failed check, but no check fails by its own values"]
+    assert "it records no checks" in without_checks(left["soak, every block passed (done)"]
+                                                    )["problems"]
+    assert "it records no checks" in without_checks(left["rung, a check failed (done)"]
+                                                    )["problems"]
+    blockless = without_checks(left["soak, a block failed (done)"], blocks=[])
+    assert "it records no checks" in blockless["problems"]
 
 
 # --- --summarise re-derives; the runner's summary reads none of it --------------

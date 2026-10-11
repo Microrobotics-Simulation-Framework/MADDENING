@@ -167,6 +167,9 @@ CONDITIONAL_BODY_SKIPS: dict[str, str] = {
     f"{_RUN_POD}test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault": _FOUR_DEVICES,
     f"{_RUN_POD}test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged": _FOUR_DEVICES,
     f"{_RUN_POD}test_the_forward_goal_counts_a_field_of_ones_exactly_on_both_sides": _FOUR_DEVICES,
+    f"{_RUN_POD}test_the_unstructured_goals_pass_on_the_wrapper_as_it_stands": _FOUR_DEVICES,
+    f"{_RUN_POD}test_the_unstructured_goals_show_each_seeded_fault_of_an_input_or_a_parameter":
+        _FOUR_DEVICES,
     "tests/compliance/test_step_program_digests_are_frozen.py::"
     "test_the_digests_have_only_grown_since_their_capture":
         "skips where the clone is too shallow to hold the commit the digests were captured on, "

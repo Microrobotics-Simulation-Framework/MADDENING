@@ -65,10 +65,14 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install JAX with CUDA 12 support (same range as pyproject's `cuda12`
-# extra) + MADDENING[server]
+# Install JAX with CUDA 12 support + MADDENING[server].  JAX_SPEC is the
+# requirement: by default the range of pyproject's `cuda12` extra; an image
+# for a hardware session pins the version CI tests, as the multi-GPU
+# runbook (benchmarks/multigpu/README.md, section 1) builds it:
+#   --build-arg JAX_SPEC='jax[cuda12]==0.11.2'
+ARG JAX_SPEC="jax[cuda12]>=0.10,<0.13"
 RUN pip3 install --no-cache-dir --break-system-packages \
-    "jax[cuda12]>=0.10,<0.13" && \
+    "${JAX_SPEC}" && \
     pip3 install --no-cache-dir --break-system-packages \
     -e ".[server]" && \
     pip3 install --no-cache-dir --break-system-packages \

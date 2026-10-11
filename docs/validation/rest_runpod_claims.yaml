@@ -7212,6 +7212,7 @@ claims:
   tests:
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_an_unstructured_goals_file_written_before_schema_10_is_refused_twice_over
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_corrupted_record_reopens_the_items_it_decides_and_says_why
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
     - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_runbook_names_the_runners_schema_version
   status: verified
   domains:
@@ -7227,6 +7228,6 @@ claims:
     shutdown: n/a
     wrapper_nodes: n/a
     checkpoint_restore: n/a
-    dry_run_cpu: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
     relabelled_records: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_an_unstructured_goals_file_written_before_schema_10_is_refused_twice_over
     mixed_commits: n/a

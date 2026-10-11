@@ -1256,6 +1256,30 @@ def test_an_input_taken_at_its_declared_shape_is_named_in_the_message():
             "derived") in str(info.value)
 
 
+class UntraceableBare(Untraceable):
+    """An :class:`Untraceable` that declares no input."""
+
+    boundary_input_spec = SimulationNode.boundary_input_spec
+
+
+def test_an_input_one_of_whose_edges_cannot_be_evaluated_is_not_derived_from_the_others():
+    """``b``'s input ``r`` is ``a``'s value plus ``a``'s flux, whose hook
+    cannot be evaluated: the pass would hand their sum, whose shape is
+    not known, so ``r`` is not derived from the value alone; ``b``
+    declares nothing, and what its flux reads is assumed, with that
+    reason."""
+    nodes = [UntraceableBare("a", *coefficients(None, 0), reads="r"),
+             Bare("b", *coefficients(None, 1), reads="r")]
+    gm = built(nodes, ROBIN_AB, ["a", "b"])
+    with pytest.raises(ValueError, match="depend on each other in a loop") as info:
+        gm.compile()
+    assert ("for 'b', the shape of its input ['r'] could not be derived (the value an edge "
+            "delivers into it could not be evaluated on shapes and dtypes") in str(info.value)
+
+
+ROBIN_AB = [(s.replace("node_", ""), f, t.replace("node_", ""), n, g) for s, f, t, n, g in ROBIN]
+
+
 class Grows(SimulationNode):
     """Its flux ``v`` is one entry longer than the input ``z`` it is
     handed, and reads it: round a loop its shape never settles."""

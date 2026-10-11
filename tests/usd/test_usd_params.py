@@ -210,6 +210,50 @@ def test_an_unknown_dtype_on_a_stage_warns_and_falls_back():
     assert np.dtype(reloaded._external_inputs[0].dtype) == np.dtype("float32")
 
 
+def _a_stage_with_a_second_prim_for_the_one_input(**changed):
+    """The stage of a graph with one ``int32`` input, and a copy of that
+    input's prim beside it with the attributes in ``changed`` set: what a
+    graph that held two declarations of the field was written as (one prim
+    per declaration, ``ext0`` and ``ext1``)."""
+    from pxr import Sdf
+
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0))
+    gm.add_external_input("s", "anchor_position", shape=(), dtype=jnp.int32)
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    layer = stage.GetRootLayer()
+    assert Sdf.CopySpec(layer, "/Simulation/external_inputs/ext0",
+                        layer, "/Simulation/external_inputs/ext1")
+    second = stage.GetPrimAtPath("/Simulation/external_inputs/ext1")
+    for name, value in changed.items():
+        second.GetAttribute(name).Set(value)
+    return stage
+
+
+@pytest.mark.parametrize("changed, now", [
+    ({"maddening:dtype": "float32"}, "shape () and dtype float32"),
+    ({"maddening:shape": [3]}, "shape (3,) and dtype int32"),
+], ids=["another_dtype", "another_shape"])
+def test_a_stage_with_two_declarations_of_one_input_that_differ_is_refused(changed, now):
+    """A field has one declaration, and the stage is a door that declares:
+    the load names the field and both, and does not pick one."""
+    stage = _a_stage_with_a_second_prim_for_the_one_input(**changed)
+    with pytest.raises(ValueError) as refused:
+        load_graph_from_usd(stage)
+    text = str(refused.value)
+    assert text.startswith("external input 's.anchor_position' is already declared, "
+                           "with shape () and dtype int32")
+    assert f"declares it again with {now}" in text
+    assert "out of the file it is loaded from" in text
+
+
+def test_a_stage_with_the_same_declaration_twice_loads_it_once():
+    reloaded = load_graph_from_usd(_a_stage_with_a_second_prim_for_the_one_input())
+    assert [(tuple(e.shape), np.dtype(e.dtype).name) for e in reloaded._external_inputs] == [
+        ((), "int32")]
+
+
 def _refuse(token):
     """A strict reader: RFC 8259 has no literal for these."""
     raise ValueError(f"non-standard JSON token {token!r}")

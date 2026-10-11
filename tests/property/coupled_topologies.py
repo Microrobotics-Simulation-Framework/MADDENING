@@ -18,11 +18,16 @@ flag and a typed PRNG key), optionally a flux ``q = 2 x``, and optionally
 on the three-argument ``update`` contract, whose constants are read from
 ``self.params`` when the step is traced.
 
-**The edges** carry a field (``x``, or the flux ``q``), an optional linear
-transform (``negate``, ``scale_2.0``, ``scale_0.5``, ``identity``), an
-optional interface mapping (``matrix_mapping``: a dense ``H`` from the
-source's size to the target's, a traced parameter) and the ``additive``
-flag; two or more edges into one port sum.
+**The edges** carry a field (``x``, or the flux ``q``), an optional
+transform -- a linear one (``negate``, ``scale_2.0``, ``scale_0.5``,
+``identity``) or, on a mapped edge of :func:`mapped_topologies`, an offset
+(:data:`OFFSET_TRANSFORM`) --, an optional interface mapping
+(``matrix_mapping``: a dense ``H`` from the source's size to the target's,
+a traced parameter) and the ``additive`` flag; two or more edges into one
+port sum.  The step applies the mapping first and the transform second.
+Every linear transform commutes with every ``H``, so only the offset can
+tell that order from the other one: ``H v + c`` against ``H (v + c)``,
+which differ wherever a row of ``H`` does not sum to one.
 
 **The mapping kind** (``build(..., mapping_kind=)``, :data:`MAPPING_KINDS`)
 says how a mapped edge holds that ``H``: as the dense matrix (``"matrix"``,
@@ -116,7 +121,7 @@ from maddening.core.coupling.sparse_mapping import (
 )
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.transforms import scale
+from maddening.core.transforms import list_transforms, register_transform, scale
 from tests.core.coupling_reason_rules import assert_reason_rules
 from tests.property import coupled_graphs as cg
 
@@ -128,6 +133,32 @@ scale(0.5)
 #: Powers of two (and the identity), so a transform rounds nothing.
 TRANSFORM_FACTORS = {None: 1.0, "identity": 1.0, "negate": -1.0,
                      "scale_2.0": 2.0, "scale_0.5": 0.5}
+
+#: The affine transform an edge may carry, ``v -> v + 0.75``, by its
+#: registered name.  It is the one transform here that does not commute
+#: with a mapping, so the one on which "the mapping first, then the
+#: transform" can be told from the other order (the linear ones passed with
+#: the two applications swapped).  0.75 is a float in every dtype the
+#: structures run in; the addition rounds, which :meth:`LinearModel._flops`
+#: counts.  Kept out of :data:`TRANSFORM_FACTORS`: a reader of that table
+#: that met an offset would model it as the identity, and fails on the
+#: missing key instead.  Read through :func:`transform_terms`.
+OFFSET_TRANSFORM = "tests_offset_0.75"
+TRANSFORM_OFFSETS = {OFFSET_TRANSFORM: 0.75}
+
+# Registered once per process, as ``scale`` does it: a second import of this
+# module under another name must not register another function.
+if OFFSET_TRANSFORM not in list_transforms():
+    @register_transform(OFFSET_TRANSFORM, "Add 0.75 to every entry.")
+    def _add_three_quarters(v):
+        return v + 0.75
+
+
+def transform_terms(name) -> tuple:
+    """``(factor, offset)`` of a transform: the edge delivers ``factor * (H v) + offset``."""
+    if name in TRANSFORM_OFFSETS:
+        return 1.0, TRANSFORM_OFFSETS[name]
+    return TRANSFORM_FACTORS[name], 0.0
 
 #: The non-float leaves a node may carry, all recomputed from the pre-step
 #: state, so independent of the coupling iterate.
@@ -331,7 +362,8 @@ class TNode:
 
 @dataclasses.dataclass(frozen=True)
 class TEdge:
-    """``src.field -> dst.u{port}``, through ``mapping`` (``H``) then ``transform``."""
+    """``src.field -> dst.u{port}``, through ``mapping`` (``H``) then ``transform``
+    (a name of :data:`TRANSFORM_FACTORS` or of :data:`TRANSFORM_OFFSETS`)."""
 
     src: str
     dst: str
@@ -1255,7 +1287,9 @@ class LinearModel:
         A node sub-cycled ``d`` times is its update composed ``d`` times
         with the inputs held (the fixed point's map, under either
         interpolation): ``P = alpha**d``, and ``c`` and every ``K`` carry
-        ``s_d = sum_k alpha**k``.
+        ``s_d = sum_k alpha**k``.  ``c`` holds the node's own constant and
+        ``G`` times the offset of every edge into it that carries one
+        (:func:`transform_terms`).
         """
         rnd = self._rnd
         if nd.name in self.idle:
@@ -1275,7 +1309,14 @@ class LinearModel:
             if e.dst != nd.name:
                 continue
             G = np.asarray(rnd(v["G"][e.port]), LD)
-            fac = LD(TRANSFORM_FACTORS[e.transform] * (2.0 if e.field == "q" else 1.0))
+            factor, shift = transform_terms(e.transform)
+            fac = LD(factor * (2.0 if e.field == "q" else 1.0))
+            if shift:
+                # An offset is delivered whatever the source holds -- it is
+                # added after the mapping, so no ``H`` multiplies it --: it
+                # joins the node's constant through the port's gain, once
+                # per sub-step.
+                c = c + s_d * (G @ np.full(G.shape[1], LD(float(rnd(shift))), LD))
             if i in self._bound:
                 # One matrix per sub-step: ``x_d = alpha**d x_0 + sum_k
                 # alpha**(d-1-k) (G fac H_k v + ...)``.
@@ -1429,19 +1470,22 @@ class LinearModel:
     # -- rounding ---------------------------------------------------------------
 
     def _input_magnitudes(self, name, read: dict):
-        """Per port, ``sum_e |fac| |H| |v_e|`` (elementwise) at the values *read*."""
+        """Per port, ``sum_e (|fac| |H| |v_e| + |offset_e|)`` (elementwise) at the values *read*."""
         nd = self.topo.node(name)
         out = [np.zeros(nd.n) for _ in range(nd.ports)]
         for i, e in enumerate(self.topo.edges):
             if e.dst != name:
                 continue
-            fac = abs(TRANSFORM_FACTORS[e.transform]) * (2.0 if e.field == "q" else 1.0)
+            factor, shift = transform_terms(e.transform)
+            fac = abs(factor) * (2.0 if e.field == "q" else 1.0)
             v = np.abs(np.asarray(read[(i,)], np.float64))
             if i in self._bound:
                 H = np.max([np.abs(np.asarray(Hk, np.float64)) for Hk in self._bound[i]], axis=0)
             else:
                 H = np.abs(self._rnd(self.values["H"][i])) if e.mapped else np.eye(nd.n)
             out[e.port] = out[e.port] + fac * (H @ v)
+            if shift:
+                out[e.port] = out[e.port] + abs(shift)
         return out
 
     def _flops(self, name) -> int:
@@ -1452,6 +1496,8 @@ class LinearModel:
             into = [e for e in self.topo.edges if e.dst == name and e.port == j]
             t += nd.n + 1 + len(into) + max(
                 (self.topo.node(e.src).n if e.mapped else 0) for e in into)
+            # An offset is one more rounded addition on its edge.
+            t += sum(1 for e in into if e.transform in TRANSFORM_OFFSETS)
         return t
 
     def rounding(self, name, pre: dict, read: dict) -> np.ndarray:
@@ -1464,7 +1510,8 @@ class LinearModel:
         factor and any reassociation or FMA contraction XLA applies (none
         adds a rounding to the chain).  ``T`` counts the chain
         (:meth:`_flops`): the three constant terms and, per port, the
-        product, the additive edges' sum and a mapping's inner product.  A
+        product, the additive edges' sum, a mapping's inner product and
+        the addition of each edge's offset.  A
         node sub-cycled ``d`` times adds each sub-step's rounding, carried
         by ``alpha`` to the end.  *read* maps ``(edge index,)`` to the value
         the edge read (the larger of the candidates, where a pass may read
@@ -1756,7 +1803,11 @@ class LinearModel:
                 block = np.asarray(self._rnd(self.values["H"][i]), np.float64)
                 gamma = (n_src + 1) * self.eps
             if not raw and not at_source:
-                block = TRANSFORM_FACTORS[e.transform] * block
+                factor, shift = transform_terms(e.transform)
+                assert not shift, (
+                    "the interface norm's reading of an edge under an offset is not "
+                    f"modelled (its magnitude would carry the constant): {e}")
+                block = factor * block
             B = np.zeros((block.shape[0], k))
             B[:, off[e.src]:off[e.src] + n_src] = block
             fields.append((B, gamma))
@@ -2282,7 +2333,8 @@ def single_pass(model: LinearModel, gi: int, pre: dict, state: Optional[dict] = 
             for i, e in enumerate(topo.edges):
                 if e.dst != m:
                     continue
-                fac = LD(TRANSFORM_FACTORS[e.transform] * (2.0 if e.field == "q" else 1.0))
+                factor, shift = transform_terms(e.transform)
+                fac = LD(factor * (2.0 if e.field == "q" else 1.0))
                 internal = topo.group_of(e.src) == gi
                 if internal:
                     before, now = pre[e.src], (pre[e.src] if jacobi else in_pass[e.src])
@@ -2306,6 +2358,11 @@ def single_pass(model: LinearModel, gi: int, pre: dict, state: Optional[dict] = 
                 ports[e.port] = ports[e.port] + fac * (H @ value)
                 port_mag[e.port] = port_mag[e.port] + abs(float(fac)) * (
                     np.abs(np.asarray(H, np.float64)) @ np.abs(np.asarray(value, np.float64)))
+                if shift:
+                    # The mapping, then the transform: its offset is added
+                    # to what ``H`` delivered, at every sub-step.
+                    ports[e.port] = ports[e.port] + LD(float(rnd(shift)))
+                    port_mag[e.port] = port_mag[e.port] + abs(shift)
             drive = sum((np.asarray(rnd(v["G"][j]), LD) @ ports[j] for j in range(nd.ports)),
                         np.zeros(nd.n, LD))
             drive_mag = sum((np.abs(rnd(v["G"][j])) @ port_mag[j] for j in range(nd.ports)),
@@ -2519,7 +2576,23 @@ def mapped_topologies() -> dict:
       fourth mapped edge inside the group that shares a port with an
       unmapped edge from outside, a mapped *flux* edge between two outside
       nodes, and two mapped edges on one field pair into a reader (so two
-      mappings share an edge key but for its ordinal).
+      mappings share an edge key but for its ordinal);
+    * ``mapped-then-offset``: a ring group ``a (2) <-> b (3)`` between a
+      driver and a reader, whose mapped edges carry the **offset**
+      (:data:`OFFSET_TRANSFORM`) wherever an edge can sit: into the group
+      (``src -> a``, sharing its port with the group's own return edge),
+      inside it (``a -> b``), out of it (``b -> out``) and beside that one
+      in an additive pair between equal sizes (``a -> out``).  The
+      reference adds each offset after ``H`` (:meth:`LinearModel._node_terms`);
+      a step that transformed first would deliver ``H (v + c)``, off by
+      ``c (H 1 - 1)``, a multiple of the offset on every drawn ``H``.  The
+      return edge ``b -> a`` is linear: the one internal edge under an
+      offset is enough, and the interface norm's reading of such an edge
+      is not modelled (:meth:`LinearModel.norm_fields`; no configuration
+      this structure is built with uses that norm).
+
+    New structures join at the end: the cases built on these are named by
+    structure, and a name that sorts last keeps every list in its order.
     """
     b = TopologyBuilder()
     b.node("drv", 2, alpha=1.0, beta=1.0, flux=True)
@@ -2537,7 +2610,22 @@ def mapped_topologies() -> dict:
     p = b.edge("m2", "out")
     b.edge("m2", "out", port=p, transform="scale_2.0")
     b.group("m0", "m1", "m2")
-    return {"mapped-ring-wide": b.build("mapped-ring-wide")}
+    out = {"mapped-ring-wide": b.build("mapped-ring-wide")}
+
+    b = TopologyBuilder()
+    b.node("src", 3, alpha=1.0, beta=1.0, leaves=("count",))
+    b.node("a", 2, alpha=0.5, beta=1.0)
+    b.node("b", 3, alpha=-0.25, leaves=("flag",))
+    b.node("out", 2, alpha=0.25, leaves=("tag",))
+    p = b.edge("src", "a", transform=OFFSET_TRANSFORM)
+    b.edge("b", "a", port=p, transform="negate")
+    b.edge("a", "b", transform=OFFSET_TRANSFORM)
+    p = b.edge("b", "out", transform=OFFSET_TRANSFORM)
+    b.edge("a", "out", port=p, mapped=True, transform=OFFSET_TRANSFORM)
+    b.group("a", "b")
+    out["mapped-then-offset"] = b.build("mapped-then-offset")
+    assert list(out)[-1] == max(out), "a new structure's name sorts last"
+    return out
 
 
 def topology_knobs(topo: Topology, choice: int = 0) -> list:
@@ -2684,7 +2772,9 @@ def relay_values(topo: Topology, values: dict, relayed: Topology, edge_index: in
     e = topo.edges[edge_index]
     n = topo.node(e.dst).n
     dtype = np.asarray(values["nodes"][e.src]["x0"]).dtype
-    fac = TRANSFORM_FACTORS[e.transform] * (2.0 if e.field == "q" else 1.0)
+    factor, shift = transform_terms(e.transform)
+    assert not shift, f"a relay on an edge under an offset is not modelled: {e}"
+    fac = factor * (2.0 if e.field == "q" else 1.0)
     out = {"nodes": dict(values["nodes"]), "H": {}}
     out["nodes"]["rly"] = {"G": [np.eye(n, dtype=dtype)], "b": np.zeros(n, dtype),
                            "x0": np.asarray(np.asarray(values["nodes"][e.src]["x0"]) * dtype.type(fac),

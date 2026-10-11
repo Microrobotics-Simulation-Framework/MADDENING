@@ -187,7 +187,7 @@ def test_a_file_the_runner_can_read_but_would_not_write_exits_3_with_its_tables(
     path.write_text(json.dumps(doc), encoding="utf-8")
     assert rp.summarise(directory) == 3
     out = capsys.readouterr().out
-    assert "schema_version 5, not 9" in out
+    assert "schema_version 5, not 12" in out
     assert "Halo exchange vs NumPy" in out
 
 
@@ -237,21 +237,48 @@ def test_the_checklist_items_are_decided_by_the_runbooks_goals(rp):
 
 
 def test_every_seeded_fault_the_runbook_names_is_a_seed():
-    """RPD-024: the runner's docstring counts the seeded faults, and the count is the
-    seeded test's: eight, the last of them domain integrals summed over the first mesh
-    axis only (it used to count seven and leave it out).  The runbook's count is
-    ``tests/compliance/test_run_pod_runbook_counts_its_seeds.py``'s, since a docs-only
-    change runs only the compliance tests."""
+    """RPD-024: the runner's docstring counts the seeded faults, and the counts are the
+    seeded test's: every seed of the stencil wrapper and its halo exchange, among them
+    domain integrals summed over the first mesh axis only (it used to count seven
+    and leave it out), counted by the cases that catch it; and seven of the
+    unstructured wrapper's per-cell inputs and injected parameters.  The runbook's
+    counts are ``tests/compliance/test_run_pod_runbook_counts_its_seeds.py``'s, since
+    a docs-only change runs only the compliance tests."""
     import re
 
     faults = _load(Path(__file__).resolve().parent / "test_run_pod_seeded_faults.py",
                    "run_pod_seeded_faults_for_their_names")
-    words = {"seven": 7, "eight": 8, "nine": 9}
+    word = dict(enumerate(("zero", "one", "two", "three", "four", "five", "six", "seven",
+                           "eight", "nine", "ten", "eleven", "twelve", "thirteen",
+                           "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+                           "nineteen", "twenty", "twenty-one", "twenty-two", "twenty-three",
+                           "twenty-four", "twenty-five", "twenty-six", "twenty-seven",
+                           "twenty-eight")))
     runner = _RUNNER.read_text(encoding="utf-8")
-    in_runner = re.search(r"broken in any of (\w+) ways", runner)
-    assert in_runner
-    assert words[in_runner.group(1)] == len(faults._SEEDS)
-    assert "domain integrals summed over the first mesh axis only" in runner.replace("\n", " ")
+    stencil, unstructured = re.findall(r"broken in any of ([\w-]+)\s+ways", runner)
+    assert stencil == word[len(faults._SEEDS)]
+    assert unstructured == word[len(faults._PATH_SEEDS)]
+    halo_two = [s for s in faults._SEEDS.values() if s.kind == "field-halo2"]
+    shares = [s for s in faults._SEEDS.values() if s.kind == "field-shares"]
+    mask1 = [s for s in faults._SEEDS.values() if s.kind == "field-mask1"]
+    dirichlet = [s for s in faults._SEEDS.values()
+                 if s.kind == "field" and s.only_under == ("dirichlet",)]
+    crossed = [s for s in faults._SEEDS.values() if s.only_in == (faults._CROSSED,)]
+    every = [s for s in faults._SEEDS.values() if set(faults._WRAPPER_GOALS) <= set(s.fails)]
+    only_gradient = [s for s in faults._PATH_SEEDS.values() if s.fails == ("gradient",)]
+    said = " ".join(runner.split())
+    for count, what in (
+            (len(every), "that every wrapper goal must catch"),
+            (len(faults._SEEDS) - len(every), "that only the ``stencil`` goal can catch"),
+            (len(shares), "that only its ``field-shares`` cases show"),
+            (len(mask1), "that only its ``field-mask1`` case shows"),
+            (len(crossed), "that only its crossed pencil shows"),
+            (len(dirichlet), "that only its Dirichlet ends show"),
+            (len(halo_two), "that only a halo two cells wide shows"),
+            (len(faults._PATH_SEEDS) - len(only_gradient), "that each of them must catch"),
+            (len(only_gradient), "that leave every value right")):
+        assert f"{word[count]} {what}" in said, (count, what)
+    assert "domain integrals summed over the first mesh axis only" in said
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +324,7 @@ def test_a_dry_run_runs_every_goal_in_order_at_small_sizes(rp, tmp_path, monkeyp
     visible = len(jax.devices())
     assert {s[1:] for s in seen} == {(tuple(rp.DRY_RUN_CELLS), 1, 3, 3, 300,
                                       min(rp.MIN_DECIDING_DEVICES, visible))}
-    assert rp.DRY_RUN_CELLS == (256, 1024)
+    assert rp.DRY_RUN_CELLS == (256, 961)
     assert rp.GPU_CELLS == (100_000, 300_000, 1_000_000)
     for goal in rp.ALL_GOALS:
         assert json.loads((tmp_path / f"{goal}.json").read_text())["dry_run"] is True

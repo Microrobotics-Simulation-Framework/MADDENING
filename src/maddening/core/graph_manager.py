@@ -84,7 +84,7 @@ from maddening.core.schedule import (
 # nothing reads.
 from maddening.core import _adaptive_scan, _graph_specs, _param_probes
 from maddening.core.coupling import (
-    _bounds, _coupled_block, _group_layout, _interface_plan, _reports,
+    _bounds, _coupled_block, _flux_loops, _group_layout, _interface_plan, _reports,
 )
 from maddening.core.coupling import reason_codes as _reason_codes
 # Public names defined with the machinery that uses them stay importable from here.
@@ -152,6 +152,70 @@ class ExternalInputSpec:
                 else jnp.float32
             ),
         )
+
+
+def _as_declared(spec: ExternalInputSpec) -> tuple[Any, str]:
+    """``(shape, dtype name)`` of a declaration, in the form two
+    declarations of one field are compared in and an error quotes.
+
+    ``jnp.float32``, ``"float32"`` and ``np.dtype("float32")`` are one dtype,
+    and ``[3]`` and ``(3,)`` one shape.  The dtype is the one written down,
+    not the one the process canonicalises it to: ``float64`` and ``float32``
+    are two declarations without ``jax_enable_x64`` too (``to_dict`` saves
+    the name and the FMU export types the input by it).  A shape or dtype
+    that is neither is quoted as it was given.
+    """
+    try:
+        shape: Any = tuple(spec.shape)
+    except TypeError:
+        shape = spec.shape
+    try:
+        dtype = jnp.dtype(spec.dtype).name
+    except TypeError:
+        dtype = repr(spec.dtype)
+    return shape, dtype
+
+
+def _second_declaration_refusal(
+    held: ExternalInputSpec, spec: ExternalInputSpec, *, first: str, second: str, resolve: str,
+) -> Optional[str]:
+    """Why ``spec`` cannot be declared beside ``held``, a declaration of the
+    same field, or ``None`` when the two are one declaration.
+
+    An external input's shape and dtype are read in several places: the
+    step casts a supplied value to the dtype, the zeros of an omitted input
+    are made in both, the FMU export types the input by them and
+    ``to_dict`` saves them.  The graph kept every declaration of a field in
+    a list, and those readers did not take the same one: declared ``int32``
+    and then ``float32``, the step and the FMU ran ``float32``, the cast
+    warning said the value ran as ``int32``, and the saved configuration
+    held both.  So a field has one declaration, and a second that differs
+    is refused where it is made instead of one of the two being chosen.
+
+    A second that says the same again changes nothing a reader could
+    disagree about, and is accepted without being kept twice: a builder
+    that declares its inputs and is run a second time keeps working, as it
+    did before 0.4.0 (measured on v0.3.0 and v0.3.1: both were kept, the
+    last decided the zeros of an omitted input, and nothing else read
+    them).
+
+    ``first`` and ``second`` name the two for the message (a call, an entry
+    of a config), and ``resolve`` says what to do about them at that door.
+    """
+    was, now = _as_declared(held), _as_declared(spec)
+    if was == now:
+        return None
+    return (
+        f"external input '{spec.target_node}.{spec.target_field}' is already declared, "
+        f"with shape {was[0]!r} and dtype {was[1]} ({first}), and {second} declares it "
+        f"again with shape {now[0]!r} and dtype {now[1]}. A field has one declaration: "
+        "its shape and dtype are what the step casts a supplied value to, what the "
+        "zeros of an omitted input are made in, what the FMU export types the input as "
+        "and what to_dict() saves, and two declarations were not read alike (the step "
+        "and the FMU took the last, the cast warning spoke of the first, and the saved "
+        f"configuration held both). {resolve} Declaring it again with the same shape "
+        "and dtype is accepted and changes nothing."
+    )
 
 
 # ------------------------------------------------------------------
@@ -252,6 +316,10 @@ class GraphManager:
         # boundary input supplied, keyed by compile generation and by the
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
+        # True while compile() runs validate(): the groups' fluxes have
+        # just been asked (``_refuse_unsolved_group_fluxes``), and the
+        # hooks that needed tracing are not traced a second time.
+        self._group_fluxes_asked: bool = False
         # The underflow-range check (``_warn_underflow_range``): pending
         # until the first untraced step after each compile and after each
         # write of node states that is not a step's (``set_node_state``,
@@ -1959,6 +2027,61 @@ class GraphManager:
     def edges(self) -> list[EdgeSpec]:
         return list(self._edges)
 
+    def _group_sweep_order(self, group) -> list[str]:
+        """The members of *group* in the order a coupling pass sweeps them.
+
+        The schedule :meth:`compile` builds, restricted to the group:
+        the block order of the topological order of the nodes (within a
+        loop, the order of the ``add_node`` calls).  Computed here from
+        the graph as it stands, by ``compile()``'s own expression, so it
+        can be asked before a compile.  (An edge that names a node the
+        graph does not hold orders nothing here; ``validate()`` has its
+        error, and nothing is compiled.)
+        """
+        schedule = _group_layout._block_schedule(
+            topological_sort(list(self._nodes), self._edges), self._coupling_groups)
+        return [n for n in schedule if n in group.nodes]
+
+    def _refuse_unsolved_group_fluxes(self, group=None, plan=None) -> None:
+        """Raise ``ValueError`` for a coupling group whose pass would not
+        compute the boundary fluxes of its own iterate: fluxes that
+        depend on each other in a loop, or along a chain that runs
+        against the sweep order for more than one step
+        (``coupling._flux_loops``, which holds the argument and the
+        criterion).
+
+        *group* alone, or every group in turn when it is ``None`` (the
+        first refusal is raised).  *plan* is the group's interface plan
+        where the caller has built it.  Nothing is traced, and the
+        schedule is not asked for, unless a flux edge of the group
+        delivers to a flux producer; a member's
+        ``compute_boundary_fluxes`` is traced (never run) only for a
+        group its edges alone would refuse.  Reads the graph and writes
+        nothing.  ``compile()`` asks once and has ``validate()`` skip
+        the question it has just answered.
+        """
+        if self._group_fluxes_asked:
+            return
+        groups = self._coupling_groups if group is None else [group]
+        for g in groups:
+            g_plan = plan if (plan is not None and group is not None) else (
+                _interface_plan.interface_plan(
+                    g.nodes, self._edges, sorted(g.nodes), self._state, self._nodes))
+
+            def params_of(owner):
+                # What the step hands the hook: the node's entry of the
+                # graph's parameters, and before a first compile the
+                # node's own (as ``_node_param_reads`` takes them).  Read
+                # without syncing: this is an inspection.
+                leaves = (self._params or {}).get("nodes", {}).get(owner)
+                return leaves if leaves is not None else self._nodes[owner].node.params_pytree()
+
+            _flux_loops._refuse_unsolved_fluxes(
+                g, g_plan, self._nodes, self._state, params_of,
+                lambda g=g: self._group_sweep_order(g),
+                g_plan.external_inputs(self._external_inputs),
+                (self._params or {}).get("mappings"))
+
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*
         state: every incoming edge (mapping, transform, additive) plus the
@@ -1998,9 +2121,13 @@ class GraphManager:
         if node_name not in self._nodes:
             raise KeyError(f"unknown node {node_name!r}")
         # What compile() refuses, a reader of a graph never compiled
-        # refuses too: an edge onto a declared external input.
+        # refuses too: an edge onto a declared external input, and a
+        # coupling group whose boundary fluxes read each other in a loop.
+        # (A compiled graph that nothing has edited passed both.)
         _graph_specs._refuse_edges_onto_external_inputs(
             self._edges, self._external_inputs)
+        if self._dirty or self._compiled_step is None:
+            self._refuse_unsolved_group_fluxes()
         p = self._params_or_default(params)
         resolved = _graph_specs._ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
         # The shape compile() holds each of these edges' sources to, asked
@@ -2072,6 +2199,22 @@ class GraphManager:
             the same number.  A value the cast changes (a float64 ``0.1``
             into a float32 input, a fraction into an integer one) is
             reported with a ``UserWarning``, once per input.
+
+        Raises
+        ------
+        ValueError
+            If *target_field* is not a valid field name, or if the field of
+            that node is already declared with another shape or dtype.  A
+            field has one declaration, since the step, the zeros of an
+            omitted input, the FMU export and :meth:`to_dict` all read it:
+            declare the input once (there is no ``remove_external_input``;
+            :meth:`remove_node` drops a node's declarations with it).
+            Declaring it again with the same shape and dtype is accepted
+            and changes nothing: the graph keeps the one declaration and is
+            not marked for a recompile.  Until 0.4.0 a second declaration
+            was appended to the first and the graph ran the last one (in
+            0.3.x that decided the zeros of an omitted input and nothing
+            else: a supplied value ran in the dtype it arrived in).
         """
         refusal = _graph_specs._field_name_refusal(target_field)
         if refusal is not None:
@@ -2082,6 +2225,26 @@ class GraphManager:
                 f"{target_field!r} is invalid: {refusal}."
             )
         spec = ExternalInputSpec(target_node, target_field, shape, dtype)
+        for held in self._external_inputs:
+            if (held.target_node, held.target_field) != (target_node, target_field):
+                continue
+            refusal = _second_declaration_refusal(
+                held, spec,
+                first="an earlier add_external_input call, or the file this graph was "
+                      "loaded from",
+                second=f"add_external_input({target_node!r}, {target_field!r}, ...)",
+                resolve="Declare the input once, with the shape and dtype it is to run "
+                        "in: there is no remove_external_input, so leave the other "
+                        "declaration out where the graph is built (or out of the file "
+                        "it is loaded from), or take the node out with remove_node, "
+                        "which drops its external inputs, and add it again. Until "
+                        "0.4.0 the second declaration was taken and the graph ran the "
+                        "last one, so keeping the last keeps what it did.")
+            if refusal is not None:
+                raise ValueError(refusal)
+            # The same declaration again: one is kept, and nothing the
+            # compiled step reads has changed.
+            return
         self._external_inputs.append(spec)
         self._dirty = True
 
@@ -2415,6 +2578,7 @@ class GraphManager:
         # lines about edges from a node to itself at the end.
         flux_sourced: set[int] = set()
         unknown_source: set[int] = set()
+        flux_names: dict[str, Any] = {}
 
         # A node's ``delta_t`` written after ``add_node`` read it.
         issues.extend(_graph_specs._timestep_drift_issues(self._nodes))
@@ -2435,10 +2599,19 @@ class GraphManager:
                         node_obj = self._nodes[e.source_node].node
                         from maddening.core.node import SimulationNode as _SimBase
                         if type(node_obj).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
-                            flux_keys = node_obj.compute_boundary_fluxes(
-                                self._state[e.source_node], {}, 0.0
-                            ).keys()
-                            if e.source_field in flux_keys:
+                            # Each hook is asked once, however many edges
+                            # read its fluxes.  One that cannot answer
+                            # without inputs has its own ERROR line, and
+                            # its edges are taken to read a flux.
+                            if e.source_node not in flux_names:
+                                try:
+                                    flux_names[e.source_node] = _graph_specs._flux_field_names(
+                                        node_obj, self._state[e.source_node])
+                                except _graph_specs._FluxHookNeedsItsInputs as exc:
+                                    flux_names[e.source_node] = None
+                                    issues.append(f"ERROR: {exc}")
+                            flux_keys = flux_names[e.source_node]
+                            if flux_keys is None or e.source_field in flux_keys:
                                 is_flux_field = True
                                 flux_sourced.add(id(e))
                     if not is_flux_field:
@@ -2575,6 +2748,9 @@ class GraphManager:
 
         # Coupling group validation
         coupled_nodes: set[str] = set()
+        # The groups refused for their fluxes (``_refuse_unsolved_group_fluxes``):
+        # nothing below says of their loops that the group iterates them.
+        flux_refused: set[int] = set()
         for group in self._coupling_groups:
             for n in group.nodes:
                 if n not in node_names:
@@ -2608,6 +2784,13 @@ class GraphManager:
             issues.extend(_group_layout._flux_edge_coupling_errors(
                 group, self._nodes, plan, self._state,
             ))
+            # Boundary fluxes that read each other in a loop (or along a
+            # chain the pass's seed does not reach): what compile() raises.
+            try:
+                self._refuse_unsolved_group_fluxes(group, plan)
+            except ValueError as exc:
+                issues.append(f"ERROR: {exc}")
+                flux_refused.add(id(group))
             issues.extend(_group_layout._geometry_edge_coupling_errors(group, self._nodes, plan))
             coupled_nodes |= group.nodes
             issues.extend(self._coupling_group_advisories(group))
@@ -2623,6 +2806,10 @@ class GraphManager:
             cyc_set = set(cyc)
             covering = next(
                 (g for g in self._coupling_groups if cyc_set <= g.nodes), None)
+            if covering is not None and id(covering) in flux_refused:
+                # Not handled: the group has its ERROR line above, and
+                # this line used to be all validate() said of it.
+                continue
             if covering is not None:
                 # The schedule the group iterates in: this line said
                 # "(Gauss-Seidel)" of every group, a Jacobi one included.
@@ -2659,6 +2846,8 @@ class GraphManager:
                 continue
             group = next(
                 (g for g in self._coupling_groups if e.source_node in g.nodes), None)
+            if group is not None and id(group) in flux_refused:
+                continue    # the group is not iterated: its ERROR line says why
             msg = _graph_specs._self_edge_message(e, group, id(e) in flux_sourced)
             if group is None:
                 # A back edge, like the staggered edge of a longer loop:
@@ -2742,7 +2931,15 @@ class GraphManager:
         # input (MADD-ANO-265): one ValueError naming every such edge.
         _graph_specs._refuse_edges_onto_external_inputs(
             self._edges, self._external_inputs)
-        issues = self.validate()
+        # And a coupling group whose boundary fluxes read each other in a
+        # loop, or along a chain the pass's seed does not reach: one
+        # ValueError for the first such group (validate() lists each).
+        self._refuse_unsolved_group_fluxes()
+        self._group_fluxes_asked = True
+        try:
+            issues = self.validate()
+        finally:
+            self._group_fluxes_asked = False
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:
             raise RuntimeError(
@@ -7554,8 +7751,26 @@ class GraphManager:
                         f"config ({owner!r} is neither one of its nodes nor one of its "
                         f"mapped edge keys): {exc}"
                     ) from exc
-        for ei in config.get("external_inputs", []):
+        # A field has one declaration (see ``add_external_input``).  A
+        # config that holds two that differ -- ``to_dict`` of a graph built
+        # before the second was refused saved both -- is refused here by its
+        # entries, which is what its author can edit; two that say the same
+        # load as the one declaration they are.
+        loaded: dict[tuple[str, str], tuple[int, ExternalInputSpec]] = {}
+        for i, ei in enumerate(config.get("external_inputs", [])):
             spec = ExternalInputSpec.from_dict(ei)
+            at, held = loaded.setdefault((spec.target_node, spec.target_field), (i, spec))
+            if at != i:
+                refusal = _second_declaration_refusal(
+                    held, spec,
+                    first=f"external_inputs[{at}] of this config",
+                    second=f"external_inputs[{i}]",
+                    resolve="Delete from the config's \"external_inputs\" the entry the "
+                            "graph is not to run with, and load it again. A graph saved "
+                            "before the second declaration was refused (0.4.0) could hold "
+                            "both, and ran the later one.")
+                if refusal is not None:
+                    raise ValueError(refusal)
             gm.add_external_input(
                 target_node=spec.target_node,
                 target_field=spec.target_field,

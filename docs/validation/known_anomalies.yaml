@@ -6496,11 +6496,15 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The seed is the Gauss-Seidel pass's: the second sweep reads the
-      first sweep's fluxes in schedule order, so a flux that depends on
-      another flux which depends on a third is seeded one sweep behind;
-      exact for fluxes that depend on state only, which is every flux the
-      built-in nodes compute, and the converged fixed point is the same.
+      The seed is the Gauss-Seidel pass's: two sweeps over the members in
+      schedule order, the second reading the first's fluxes.  It is the
+      flux of the iterate for a flux computed from the state (a built-in
+      node's flux also reads its Dirichlet or anchor input, which an edge
+      delivers from a state field) and for fluxes that read each other
+      along a chain the two sweeps reach.  It is not for fluxes that read
+      each other in a loop, or along a longer chain against the sweep: such
+      a group converged to a state that is not the coupled solution, and
+      is refused at `compile()` (MADD-ANO-276).
     verification:
       - "tests/property/test_differential_leaves.py::test_two_flux_producers_exchanging_fluxes_step_under_jacobi"
       - "tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point"
@@ -7506,7 +7510,9 @@ anomalies:
       bound the peak within a small factor (measured 3 to 4 times the
       state for the lattices, 48 to 76 bytes per operator entry for the
       wavelet basis), not exactly.  A body up to the limit is still parsed
-      whole (about 1.3 GB at the limit); bodies are parsed one at a time,
+      whole (a refused one at the limit measured a peak of 2.4 to 2.6 GiB,
+      not the 1.3 GB estimated here at first: MADD-ANO-274's residual);
+      bodies are parsed one at a time,
       but a node build and a surrogate training job (MADD-ANO-092) can run
       at once.  `from_dict` and `load_graph_from_usd` refuse only what
       exceeds the machine's physical memory, so a config can still ask for
@@ -10008,8 +10014,13 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      None known.
+      The same class held for the entry's id: an `anomaly_id` given as a
+      list or a mapping raised `TypeError` (an unhashable value), in
+      v0.3.1 and in this release until it was reported as an error
+      ("anomaly_id must be a string, found ...") before 0.4.0 shipped.
+      None other known.
     verification:
+      - "tests/compliance/test_registry_version_field.py::TestTheNameIsChecked::test_an_unhashable_anomaly_id_is_reported_not_raised"
       - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_validator_reports_an_unhashable_enum_value_instead_of_raising"
       - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_gate_fails_on_a_planted_value_and_says_which_entry"
     github_issue: null
@@ -19054,6 +19065,302 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-273"
+    title: "ModelDescription.to_xml wrote the unit attribute on integer and Boolean variables: a modelDescription.xml that FMI 3.0's schema refuses, with nothing said at export"
+    description: >
+      `ModelDescription.to_xml` set `unit` on every variable element that
+      carried one, and listed it in `<UnitDefinitions>`.  FMI 3.0's schema
+      has the attribute on `<Float32>` and `<Float64>` only, so a
+      description with a unit on an `Int8` to `UInt64` or a `Boolean`
+      variable is invalid: FMPy's `validate_fmu` reports `Element 'Int32',
+      attribute 'unit': The attribute 'unit' is not allowed`, and
+      `simulate_fmu`, which validates by default, refuses the FMU.  Measured
+      on `git archive` of v0.3.0 and v0.3.1 (CPU, jaxlib 0.11.0): a
+      hand-built `FMIVariable(dtype="int32", unit="m")` (and `"bool"`,
+      `"uint8"`) was written with the attribute, and so was the input of a
+      manager that exposes `_external_input_specs` with `expected_units`.
+      `build_model_description` of a real graph did not reach it there: it
+      exported no inputs (MADD-ANO-078) and its outputs carry no unit.
+      During 0.4.0's development the export of a real graph came to write
+      it too, once inputs and parameters were exported with their units: an
+      `int32` external input into a field whose node declares
+      `expected_units` (the built-in spring's `anchor_position`, the ball's
+      `table_position`), and an integer or Boolean parameter whose
+      `ParamSpec` names `units`.  Resolved in 0.4.0: one rule decides the
+      attribute and the unit's definition together, so `unit` is written on
+      the two float types only and a unit that no element carries is not
+      defined (a clock's included).  `FMIVariable.unit` still holds what
+      the graph declares, and the instantiation token still covers it.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No wrong number: the file is invalid and an importer that validates
+      refuses it.  Silent only at export.
+    affected_components:
+      - "maddening.fmi.model_description.ModelDescription.to_xml"
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.0 and v0.3.1 leave `unit` empty on a hand-built `FMIVariable`
+      whose dtype is not a float.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: null
+    verification:
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_unit_is_written_on_a_float_variable_and_on_no_other"
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_units_definition_is_left_out_with_its_last_float_variable"
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_fmpy_validates_a_unit_bearing_variable_of_every_type"
+      - "tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_fmi3_schema_validates_a_unit_bearing_variable_of_every_type"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-274"
+    title: "A 422 sent the refused value back whole: a request body the server refused was encoded and returned at its full size"
+    description: >
+      A validation error carries the value it refused (`input`), and for a
+      request body that is the body, or a field of it as large as the body:
+      a missing field carries the whole object, a field of the wrong type
+      its value.  The reply was the errors encoded whole, so a refused
+      request was answered with a body of about its own size, encoded on
+      the event loop.  Measured on `git archive` of v0.1.0, v0.2.0, v0.3.0
+      and v0.3.1 (CPU, jaxlib 0.11.0): `POST /graph/nodes` with 1.2 MB of
+      `[[],[],...]` answered 422 with 900 kB, on every route that takes a
+      body, and nothing bounded the body there (MADD-ANO-086).  0.4.0's
+      development bounded the body at 32 MiB and kept the echo in its own
+      handler: a `PUT /graph/params` 16 bytes under the limit (11.2 million
+      `[],`) was answered after 22.5 s with a 422 of 32.00 MiB, and
+      `GET /healthz` sent meanwhile waited for it.  Resolved in 0.4.0: a
+      422 echoes a refused value of at most 1024 characters of JSON (a
+      number, a name, the text `NaN`, a short body), and leaves a larger
+      one out with `input_omitted` in its place saying so; whether a value
+      is that small is decided in about 1024 steps whatever its size, so a
+      large one is never encoded.  A reply lists at most 64 errors and
+      counts the rest.  The handler is the app's one handler of validation
+      errors, for the body, query and path of every route.  The same
+      request is now answered after 13.3 s with under 1 kB.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No wrong result: a cost a caller can impose, graded `major` as the
+      other unbounded costs of a request were (MADD-ANO-086, MADD-ANO-092).
+      The reply grew with the request, and encoding it held the event loop,
+      so every other request waited, the health check among them.  Up to
+      v0.3.1 the API was unauthenticated; since 0.4.0 it takes a local user
+      on a loopback bind, or a token holder.  `context_dependent`: what the
+      server shares its host and its callers with is the deployment's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep the API on loopback and let only trusted callers
+      reach it (MADD-ANO-051's workaround).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The reply is bounded; what refusing a large body costs is not much
+      smaller.  A body at the 32 MiB limit that `PUT /graph/params` refuses
+      still takes a peak of 2.4 to 2.6 GiB and 4 to 13 s (measured: 16.8
+      million zeros, 11.2 million empty lists), on the event loop, so other
+      requests still wait for it.  Most of that is the element count, which
+      is taken on the parsed tree by a walk that queues every element of a
+      list before it counts one; counting while parsing, and refusing off
+      the event loop, are not done.  A long name is still quoted in an
+      error's `loc` or `msg` where a route's own check quotes it.
+    verification:
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_no_body_route_answers_a_refused_body_with_the_body"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_params_body_refused_for_its_element_count_is_not_sent_back"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_value_too_long_to_echo_is_not_walked"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_a_small_refused_value_is_still_echoed_by_every_kind_of_parameter"
+      - "tests/api/test_a_422_echoes_only_a_small_refused_value.py::test_the_handler_cuts_a_list_of_errors_however_it_came_about"
+  - anomaly_id: "MADD-ANO-275"
+    title: "IQN acceleration under the Jacobi schedule can stall, unconverged, on a coupling group the plain Jacobi loop solves"
+    description: >
+      With `iteration_mode="jacobi"`, `acceleration="iqn-ils"` or
+      `"iqn-imvj"` can turn a group that the plain Jacobi loop solves into
+      one that does not converge.  Measured on a float32 pair of `tanh`
+      nodes with 2 and 4 entries, each reading the other through a matrix
+      mapping (default norm and solver; the same with dense or sparse
+      mappings, or with the matrices in edge transforms): plain Jacobi is
+      5e-8 from the fixed point after 12 passes, while `iqn-ils` under
+      Jacobi takes the error from 0.82 at a cap of 3 passes to 4.0 at a cap
+      of 5 and is still 0.18 away at a cap of 40.  At tolerances of 1e-4
+      and 1e-6 with `max_iterations=50` both IQN accelerations stop at the
+      cap with a residual of 0.18, 0.14 from the fixed point.  Gauss-Seidel
+      with either IQN converges on the pair in 6 to 10 passes, and Jacobi
+      with no acceleration (9 to 12) or with Aitken (33 to 35) does too.
+      The stall is occasional: 2 of 7 pairs drawn with those sizes, none of
+      36 pairs of equal sizes.  It does not hang on one rounding: with
+      every constant of the pair perturbed by a relative 1e-7 to 1e-2,
+      neither IQN acceleration converged on any of 48 pairs and plain
+      Jacobi converged on all of them.
+
+      It is loud: the report says `converged=False` with
+      `iterations == max_iterations`, and `strict_convergence=True` raises.
+      Registered because the coupling guide presented the combination as
+      working ("marginally better than Gauss-Seidel + IQN on the chain and
+      ring families"), and here the accelerator loses a solve the plain
+      loop wins.  The guide's paragraph on Jacobi with IQN now says so.
+
+      The releases from 0.1.0 to 0.3.1 end the same pair the same way: 50
+      passes of 50 under either IQN acceleration with a residual of 0.44,
+      0.96 from the fixed point, where their plain Jacobi loop stops after
+      11 passes, 7e-7 away (each tag run with the matrices in edge
+      transforms; those releases report `iterations` and `residual` for a
+      group built with `diagnostics=True`, and have no `converged` key).
+      Aitken under Jacobi ended there as well in those releases and
+      converges in 0.4.0.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      `minor`: the solve is reported unconverged (`converged=False` at the
+      cap; an error under `strict_convergence=True`), so nothing wrong is
+      presented as a result.  What is lost is a solve that another
+      configuration of the same group completes.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.acceleration"
+      - "maddening.core.coupling.group.CouplingGroup.iteration_mode"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Read `converged` (or set `strict_convergence=True`).  Where an IQN
+      acceleration under `iteration_mode="jacobi"` ends at the cap on a
+      group the plain Jacobi loop solves, use
+      `iteration_mode="gauss-seidel"` with IQN, or keep Jacobi with
+      `acceleration="none"` or `"aitken"`.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      # A strict xfail: a change that ends the stall is noticed.
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_iqn_under_jacobi_converges_where_plain_jacobi_does"
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_iqn_under_jacobi_reports_the_solve_it_did_not_finish"
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_strict_convergence_raises_on_the_stalled_solve"
+      - "tests/core/test_a_stalled_iqn_solve_under_jacobi_says_so.py::test_the_plain_loop_and_the_recommended_combinations_converge_on_the_pair"
+  - anomaly_id: "MADD-ANO-276"
+    title: "A coupling group whose boundary fluxes read each other in a loop converged, converged=True, to a state that does not solve the coupled equations"
+    description: >
+      A boundary flux (`compute_boundary_fluxes`) is not part of a coupling
+      group's iterate: every pass rebuilds each member's fluxes from the
+      states, in two sweeps.  That is the flux of the iterate when a flux is
+      computed from the state, and when fluxes read each other along a chain
+      the two sweeps reach.  Where fluxes read each other in a loop -- each
+      node's flux depends on an input the other's flux delivers, as with
+      `add_robin_coupling` between two nodes whose flux depends on the Robin
+      datum they are handed -- two sweeps from nothing cut the loop, the
+      iteration converges to the fixed point of the cut equations, and the
+      group reports `converged=True` with a residual at the float floor.
+      Measured on the 0.4.0 development tree (release branch at 877e9399,
+      CPU, jaxlib 0.11.0, float32, tolerance 1e-6) on two affine nodes coupled
+      by the developer guide's Robin recipe, against the coupled 6x6 system
+      in float64.  One measure throughout this entry: the largest distance
+      of a member's state from its value in the coupled solution, as a
+      fraction of that value.  It was 4.3e-4, 1.5e-2 and 0.49 under
+      Gauss-Seidel and 3.5e-3, 5.0e-2 and 0.77 under Jacobi for flux-loop
+      gains of 0.06, 0.25 and 0.56, under solver "ift" and "fori" alike, with
+      `strict_convergence` silent, `validate()` reporting the loop as
+      "handled by iterative coupling", and one run carrying
+      `spectral_usable=True` beside an error bound 2000 times below its
+      distance to the solution.  A pair that exchanges fluxes only stopped
+      after one pass at (1.9, 2.71) where the solution is (10, 10): 0.81.
+      The same cause without a loop: a chain of three fluxes running two
+      steps against the order the group sweeps its members in was 0.15 off
+      under Jacobi (and right, 3.8e-7, under Gauss-Seidel, whose pass
+      recomputes a flux after its producer's update), and 6.3e-2 off under
+      both where the last flux is read by its own producer.  Never released: at v0.1.0, v0.3.0 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0) the Robin pair and the
+      flux-only pair raise `KeyError` naming the flux at the first step under
+      both schedules (MADD-ANO-071); the two-sweep seed that lets them run
+      was added during 0.4.0 development.  Found by the whole-tree audit of
+      the release tip.
+      Resolved in 0.4.0 by refusing the group.  `compile()` raises one
+      `ValueError` that names the group, the fluxes, the inputs and the edges
+      of the loop (or of the chain, where the pass reads a seed the two
+      sweeps do not reach), says what the iteration can do with it, and gives
+      the way out: carry the quantity in a state field the node writes in
+      `update()`, which the group iterates and measures.  `validate()` lists
+      the same text as one `ERROR` line where it said the loop was handled,
+      and the readers of a graph never compiled (`resolve_boundary_inputs`)
+      raise it too.  Whether a flux depends on an input is decided from an
+      abstract trace of the hook (`jax.make_jaxpr`) on the inputs the pass
+      hands it, at the shapes its edges deliver, whether or not
+      `boundary_input_spec()` declares them, and only for a group its edges
+      alone would refuse; no other group is traced and no pass is changed.
+      On the way, a flux hook that indexes an input (`boundary_inputs[name]`)
+      is an `ERROR` line of `validate()` naming the node, the hook and the
+      input: `validate()` asks every flux hook for its flux names with no
+      inputs, and raised a bare `KeyError` for such a hook.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the group reported convergence
+      at a state up to 0.8 of itself from the coupled solution, and no
+      diagnostic showed it.  Not `critical`: it needs fluxes that depend on
+      each other through flux edges inside one group, and it never reached
+      a release.
+      `context_dependent` because the size of the error is the strength of
+      the flux loop.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.graph_manager.GraphManager.validate"
+      - "maddening.core.coupling.helpers.add_robin_coupling"
+    affected_versions: "none"
+    workaround: >
+      Never reachable in a release.  In 0.4.0 a refused group is coupled by
+      carrying the flux in the state: compute it in `update()`, return it as
+      a state field, and name that field as the edge's `source_field`
+      (`flux_field_a` / `flux_field_b` of `add_robin_coupling`).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Such a group no longer compiles through flux edges; iterating fluxes
+      themselves (fluxes in the iterate and in the convergence norm) is
+      planned for 0.5.0.  The criterion is sufficient and errs towards
+      refusing: dependence is structural (a flux that multiplies its input by
+      zero, or an edge that delivers a flux times zero, counts), a hook that
+      cannot be traced, or an input whose shape cannot be derived, is taken
+      to read every input (the message says so, with the reason), and so is
+      a flux whose program differs between the inputs the two seeding sweeps
+      hand its hook.  The criterion is asked at `compile()` and `validate()`
+      of its own trace of each hook, with the hook's arguments as the only
+      inputs.  It cannot see, and such a group is still wrong in silence: a
+      dependence that does not pass through the hook's arguments (an
+      `update` that stashes its boundary input on the node object for the
+      flux hook to read), and a hook changed after the question was asked (a
+      Python switch on `node.params` flipped after `compile()`: `step()`
+      keeps its program, an entry point traced later runs the new hook with
+      a loop that was never asked about; 1.1e-2 off on one such pair).  Both
+      are outside the node contract.  `check_conservation` refuses every
+      pair whose flux edges form a loop, also where each flux is computed
+      from the state and the group compiles.  Within the contract the
+      question is asked of one configuration: the hooks are traced at the
+      node's own `timestep` (under `run_adaptive` the step hands a `dt`
+      chosen at run time, so a hook whose structure follows `dt` is asked
+      about at one value); a geometry-anchored mapping's value is derived
+      from the shape of its geometry field in the state at compile, which
+      has not been compared edge by edge against an instrumented pass as
+      the edges without a geometry have (0 disagreements over 1,200 random
+      graphs); a flux edge from outside the group is not read by the step
+      (MADD-ANO-156) and makes its input underivable; a flux is held to
+      the criterion whether or not its value reaches a state, so a loop
+      among fluxes that no update reads is refused though it changes no
+      state; and a difference between two traces in an operation whose
+      parameter is a function or an object the comparison cannot look into
+      (a host callback) is counted as a read and said to be assumed.
+    verification:
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_that_read_each_other_in_a_loop_are_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_whose_seed_the_pass_reads_too_early_is_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_that_changes_with_the_inputs_it_is_handed_is_not_a_seed_of_one_sweep"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_computed_from_the_state_alone_reaches_the_coupled_solution"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_of_fluxes_the_seed_reaches_gives_the_coupled_solution"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_gauss_seidel_reads_along_the_sweep_the_flux_it_recomputed"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_flux_carried_in_a_state_field_reaches_the_coupled_solution"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_from_the_state_is_right_whether_or_not_its_node_declares_the_input"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_guides_robin_recipe_compiles_as_written"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_chain_with_undeclared_inputs_is_judged_as_one_with_declared_inputs"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_the_hook_is_traced_with_every_input_the_pass_hands_it"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_every_group_of_the_graph_is_asked"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_flux_hook_that_indexes_an_input_is_refused_by_name_and_asked_once"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_a_loop_through_an_edge_that_replaces_an_unread_producers_flux_is_refused"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_an_edge_a_later_flux_edge_replaces_is_read_in_the_first_sweep"
+      - "tests/core/test_boundary_fluxes_that_read_each_other_in_a_group.py::test_fluxes_from_the_state_through_a_jitted_helper_compile_at_the_coupled_solution"
   - anomaly_id: "MADD-ANO-277"
     title: "A constructor argument a node keeps outside params was dropped by every save: the reloaded graph ran the constructor's default"
     description: >

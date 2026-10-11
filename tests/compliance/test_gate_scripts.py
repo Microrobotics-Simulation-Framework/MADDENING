@@ -2338,7 +2338,7 @@ class TestAnomalyGateVerifiesSomething:
 
         def every_reference_unavailable(
             _path, *, prefix="", repo_root=None,
-            resolve_references=True, notes=None,
+            resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
                 notes.append(
@@ -2367,7 +2367,7 @@ class TestAnomalyGateVerifiesSomething:
 
         def one_unavailable(
             _path, *, prefix="", repo_root=None,
-            resolve_references=True, notes=None,
+            resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
                 notes.append("MADD-ANO-001: one entry was NOT checked")
@@ -2876,9 +2876,291 @@ def test_a_broken_first_party_import_fails_the_anomaly_gate(
         del sys.modules[name]
 
 
+#: Import names that are not the name of the distribution that provides them.
+_DISTRIBUTION_OF_MODULE = {"pxr": "usd-core", "zmq": "pyzmq", "sky": "skypilot",
+                           "skimage": "scikit-image", "PIL": "pillow", "yaml": "pyyaml",
+                           "gi": "pygobject"}
+
+
+def _distribution(name):
+    """A distribution name as PEP 503 compares it."""
+    import re
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _ci_jobs(root):
+    """What each workflow job installs and runs:
+    ``[(job id, extras, [(targets, ignores), ...])]``.
+
+    ``extras`` are those of the project a ``pip install`` of it names
+    (``pip install -e ".[ci,usd]"``), in steps without an ``if:``.  A step
+    under an ``if:`` may not run in a given cell or at all (``if:
+    matrix.python-version == '3.99'`` never holds), and nothing here
+    evaluates the condition, so its extras are NOT counted as installed:
+    a package that arrives only there leaves the file recorded as never
+    run, which errs towards citing nothing it cannot show.  Extras written
+    with a ``${{ }}`` expression cannot be read without evaluating it and
+    are refused with the step named.  An invocation is a pytest (or
+    pytest-wrapping) command with a positional argument under ``tests``;
+    a target that is a node id stands for its file, which is what is
+    imported."""
+    import re
+    import shlex
+
+    import yaml
+
+    jobs = []
+    for wf in sorted((Path(root) / ".github" / "workflows").glob("*.yml")):
+        data = yaml.safe_load(wf.read_text()) or {}
+        for job_id, job in (data.get("jobs") or {}).items():
+            extras, invocations = set(), []
+            for step in (job or {}).get("steps") or []:
+                run = (step or {}).get("run")
+                if not isinstance(run, str):
+                    continue
+                conditional = "if" in step
+                for command in run.replace("\\\n", " ").splitlines():
+                    command = command.split(" #", 1)[0].strip()
+                    for named in re.findall(r"pip install[^\n]*?\.\[([^\]]+)\]", command):
+                        assert "${{" not in named, (
+                            f"{wf.name} job {job_id} step {step.get('name')!r}: the extras of "
+                            f"`{command}` are written with a ${{{{ }}}} expression, which this "
+                            "derivation does not evaluate; write each set of extras out in a "
+                            "step of its own (one under an `if:` counts as not installed)")
+                        if not conditional:
+                            extras |= {e.strip() for e in named.split(",")}
+                    if "pytest" not in command and "audit_property" not in command:
+                        continue
+                    try:
+                        tokens = shlex.split(command)
+                    except ValueError:
+                        continue
+                    targets = [os.path.normpath(t.split("::", 1)[0]) for t in tokens
+                               if os.path.normpath(t).split(os.sep)[0] == "tests"]
+                    ignores = [os.path.normpath(t.split("=", 1)[1]) for t in tokens
+                               if t.startswith("--ignore=")]
+                    ignores += [os.path.normpath(b) for a, b in zip(tokens, tokens[1:])
+                                if a == "--ignore"]
+                    if targets:
+                        invocations.append((targets, ignores))
+            jobs.append((f"{wf.name}:{job_id}", extras, invocations))
+    return jobs
+
+
+def _installed_by(pyproject, extras):
+    """The distributions a job that installs the project with ``extras``
+    asks for by name: the base dependencies and the extras' own lists (an
+    extra that names the project's other extras is followed).  A package
+    that only arrives as a dependency of one of these is not counted: a
+    test's own requirement belongs in an extra by name."""
+    import re
+
+    name_and_extras = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?")
+    project = pyproject["project"]
+    table = project.get("optional-dependencies") or {}
+    own = _distribution(project["name"])
+    requirements = list(project.get("dependencies") or [])
+    pending, seen = list(extras), set()
+    while pending:
+        extra = pending.pop()
+        if extra in seen:
+            continue
+        seen.add(extra)
+        for requirement in table[extra]:     # an extra the project does not have: KeyError
+            match = name_and_extras.match(requirement)
+            if _distribution(match.group(1)) == own:
+                pending += [e.strip() for e in (match.group(2) or "").split(",") if e.strip()]
+            else:
+                requirements.append(requirement)
+    return {_distribution(name_and_extras.match(r).group(1)) for r in requirements}
+
+
+def _awaited_at_import(path, gate):
+    """The modules a file's own top-level code hands to
+    ``pytest.importorskip``: where one is missing, the whole file is
+    skipped.  Calls inside a function, a class or a lambda run later and
+    are not read; a class body, a decorator and a default value run at
+    import and are read; a name that is not a literal reads as ``"?"``,
+    which no job installs.  A ``minversion`` is not read: the module is
+    counted as present when it is installed, whatever its version."""
+    import ast
+
+    text = Path(path).read_text(encoding="utf-8")
+    if "importorskip" not in text:
+        return []
+    tree = ast.parse(text)
+    aliases = gate._pytest_aliases(tree)
+    awaited = []
+
+    def walk(node):
+        if isinstance(node, ast.Lambda):
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # The body runs later; what the def line evaluates runs now.
+            for child in [*node.decorator_list, *node.args.defaults,
+                          *(d for d in node.args.kw_defaults if d is not None)]:
+                walk(child)
+            return
+        if isinstance(node, ast.Call) and gate._dotted(node.func, aliases) == "pytest.importorskip":
+            first = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "modname"), None)
+            literal = isinstance(first, ast.Constant) and isinstance(first.value, str)
+            awaited.append(first.value if literal else "?")
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    for stmt in tree.body:
+        walk(stmt)
+    return awaited
+
+
+def _paths_no_ci_lane_runs(root, gate):
+    """``(paths, {file: modules})`` derived from a tree: the paths no CI
+    lane runs, and for each file among them the modules it waits for at
+    import that none of the jobs collecting it installs.
+
+    * A path some test command ignores, which no command runs (itself or
+      anything under it).
+    * A test file whose top-level code (or that of a ``conftest.py`` above
+      it) calls ``pytest.importorskip`` for a module that no job collecting
+      the file installs: every lane collects it and skips it whole.
+
+    Not seen: a file skipped through a module it imports (a helper whose
+    own top-level code waits for a package), one skipped at import in
+    another way (a ``pytest.skip(allow_module_level=True)`` behind a failed
+    ``import``), and one whose ``importorskip`` names a ``minversion`` no
+    job's install meets (the version is not decided from the source).  A
+    package installed only by a step under an ``if:`` counts as not
+    installed (:func:`_ci_jobs`).
+    """
+    import tomllib
+
+    root = Path(root)
+    jobs = _ci_jobs(root)
+    invocations = [inv for _job, _extras, invs in jobs for inv in invs]
+    assert invocations, "no test command found in .github/workflows"
+
+    def within(path, top):
+        return path == top or path.startswith(top + os.sep)
+
+    ignored = {i for _targets, ignores in invocations for i in ignores}
+    never = {
+        path for path in ignored
+        if not any(
+            (any(within(path, t) for t in targets)
+             and not any(within(path, i) for i in ignores))
+            or any(within(t, path) for t in targets)
+            for targets, ignores in invocations)
+    }
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    installed = {job: _installed_by(pyproject, extras) for job, extras, _invs in jobs}
+    waits = {}
+    conftests = {}
+    for path in sorted((root / "tests").rglob("*.py")):
+        rel = os.path.relpath(path, root)
+        if any(within(rel, n) for n in never) or not gate._TEST_FILE.fullmatch(path.name):
+            continue
+        awaited = list(_awaited_at_import(path, gate))
+        for parent in path.relative_to(root).parents:
+            conftest = root / parent / "conftest.py"
+            if str(parent) != "." and conftest.is_file():
+                if conftest not in conftests:
+                    conftests[conftest] = _awaited_at_import(conftest, gate)
+                awaited += conftests[conftest]
+        if not awaited:
+            continue
+        missing = []        # per job that collects the file: what it does not install
+        for job, _extras, invs in jobs:
+            collects = any(any(within(rel, t) for t in targets)
+                           and not any(within(rel, i) for i in ignores)
+                           for targets, ignores in invs)
+            if collects:
+                missing.append({m for m in awaited if _distribution(_DISTRIBUTION_OF_MODULE.get(
+                    m.split(".")[0], m.split(".")[0])) not in installed[job]})
+        if missing and all(missing):
+            everywhere = set.intersection(*missing) or set.union(*missing)
+            waits[rel.replace(os.sep, "/")] = tuple(sorted(everywhere))
+    return {p.replace(os.sep, "/") for p in never} | set(waits), waits
+
+
+_SEEDED_WORKFLOW = """
+jobs:
+  test:
+    steps:
+      - run: |
+          pip install -e ".[ci]"
+          python -m pytest tests/ -v --ignore=tests/viz
+  test-usd:
+    steps:
+      - run: pip install -e ".[ci,usd]"
+      - run: |
+          python -m pytest -v \\
+            tests/usd/ \\
+            tests/test_smoke.py::test_one
+"""
+
+_SEEDED_PYPROJECT = """
+[project]
+name = "seeded"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+ci = ["pytest>=7.0", "httpx>=0.24", "pyzmq>=25.0", "seeded[extra]"]
+extra = ["Zstandard>=0.22"]
+usd = ["usd-core>=21.8"]
+viz3d = ["pyvista>=0.42"]
+"""
+
+
+def _seeded_tree(root):
+    files = {
+        ".github/workflows/ci.yml": _SEEDED_WORKFLOW,
+        "pyproject.toml": _SEEDED_PYPROJECT,
+        "tests/viz/test_ignored.py": "def test_a():\n    pass\n",
+        # Waits for a package no job installs: collected by `test`, skipped whole.
+        "tests/api/test_renderer.py":
+            'import pytest\n\npv = pytest.importorskip("pyvista")\n\ndef test_a():\n    pass\n',
+        # The same through an alias, under an `if`, and with a second module the job has.
+        "tests/api/test_alias.py":
+            'from pytest import importorskip as need\nimport sys\n\nneed("httpx")\n'
+            'if sys.platform != "x":\n    need("pyvista.plotting")\n\ndef test_a():\n    pass\n',
+        # Installed by name, by another import name, through an extra of an extra.
+        "tests/api/test_installed.py":
+            'import pytest\n\npytest.importorskip("httpx")\npytest.importorskip("zmq")\n'
+            'pytest.importorskip("zstandard")\npytest.importorskip("numpy.linalg")\n\n'
+            'def test_a():\n    pass\n',
+        # Asked for inside a test: that test may skip, the file is run.
+        "tests/api/test_in_a_body.py":
+            'import pytest\n\ndef test_a():\n    pytest.importorskip("pyvista")\n\n'
+            'class TestB:\n    pv = None\n    def test_b(self):\n        pytest.importorskip("pyvista")\n',
+        # A conftest's wait is the directory's; the usd job installs it and runs the directory.
+        "tests/usd/conftest.py": 'import pytest\n\npytest.importorskip("pxr")\n',
+        "tests/usd/test_stage.py": "def test_a():\n    pass\n",
+        # The usd job installs it and does not collect this file; `test` collects it without.
+        "tests/core/test_needs_usd.py":
+            'import pytest\n\npytest.importorskip("pxr")\n\ndef test_a():\n    pass\n',
+        # A module name that is not a literal cannot be shown installed.
+        "tests/core/test_computed.py":
+            'import pytest\n\nNAME = "httpx"\npytest.importorskip(NAME)\n\ndef test_a():\n    pass\n',
+        # Not a test file: nothing collects it, so it is no lane's to skip.
+        "tests/core/helpers.py": 'import pytest\n\npytest.importorskip("pyvista")\n',
+        "tests/test_smoke.py": "def test_one():\n    pass\n",
+    }
+    for rel, text in files.items():
+        path = Path(root) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
 class TestAnomalyGateRefusesEvidenceCINeverRuns:
     """Every CI lane runs ``pytest tests/ --ignore=tests/viz``: a resolved
-    entry citing a test there passed (audit_040_p4_1, A23; latent)."""
+    entry citing a test there passed (audit_040_p4_1, A23; latent).  And a
+    test file that skips itself at import for want of a package no job
+    installs is collected by every lane and run by none:
+    ``tests/api/test_frame_renderer_3d.py`` waited for ``pyvista`` with
+    fourteen tests, and the record of what CI never runs named ``tests/viz``
+    alone."""
 
     def test_a_test_under_tests_viz_is_refused(self, tmp_path, capsys):
         (tmp_path / "tests" / "viz").mkdir(parents=True)
@@ -2893,6 +3175,27 @@ class TestAnomalyGateRefusesEvidenceCINeverRuns:
         assert rc == 1, err
         assert f"'{ref}': 'tests/viz/test_network.py' is under tests/viz/" in err
 
+    @pytest.mark.parametrize("status", ["resolved", "open"])
+    def test_a_test_in_a_file_every_lane_skips_at_import_is_refused(self, status, tmp_path, capsys):
+        """The same refusal as for ``tests/viz``, whatever the entry's
+        status, and it says why the file never runs."""
+        gate = _load("check_anomalies")
+        (rel, needs), = gate.IMPORTS_NO_CI_JOB_INSTALLS.items()
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            f'import pytest\n\npytest.importorskip("{needs[0]}")\n\ndef test_a():\n    pass\n')
+        ref = f"{rel}::test_a"
+        path = _registry_citing(tmp_path, status, ["tests/test_probe.py::test_runs", ref])
+        rc = gate.main([str(path), "--repo-root", str(tmp_path)])
+        err = capsys.readouterr().err
+        assert rc == 1, err
+        assert f"'{ref}': '{rel}' skips itself whole where {needs[0]} is not installed" in err
+        assert "--ignore" not in err
+        # The entry with that reference left out passes: the refusal is the reference's.
+        path = _registry_citing(tmp_path, status, ["tests/test_probe.py::test_runs"])
+        assert gate.main([str(path), "--repo-root", str(tmp_path)]) == 0, capsys.readouterr().err
+
     def test_a_directory_that_only_shares_the_prefix_is_not(self, tmp_path, capsys):
         (tmp_path / "tests" / "vizier").mkdir(parents=True)
         (tmp_path / "tests" / "vizier" / "test_x.py").write_text(
@@ -2903,62 +3206,107 @@ class TestAnomalyGateRefusesEvidenceCINeverRuns:
             [str(path), "--repo-root", str(tmp_path)])
         assert rc == 0, capsys.readouterr().err
 
-    @staticmethod
-    def _ci_test_invocations():
-        """``(targets, ignores)`` for every command in the workflows that
-        runs tests: a pytest (or pytest-wrapping) command with a positional
-        argument under ``tests``."""
-        import shlex
-
-        import yaml
-
-        invocations = []
-        for wf in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
-            data = yaml.safe_load(wf.read_text()) or {}
-            for job in (data.get("jobs") or {}).values():
-                for step in (job or {}).get("steps") or []:
-                    run = (step or {}).get("run")
-                    if not isinstance(run, str):
-                        continue
-                    for command in run.replace("\\\n", " ").splitlines():
-                        command = command.split(" #", 1)[0].strip()
-                        if "pytest" not in command and "audit_property" not in command:
-                            continue
-                        try:
-                            tokens = shlex.split(command)
-                        except ValueError:
-                            continue
-                        targets = [os.path.normpath(t) for t in tokens
-                                   if os.path.normpath(t).split(os.sep)[0] == "tests"]
-                        ignores = [os.path.normpath(t.split("=", 1)[1]) for t in tokens
-                                   if t.startswith("--ignore=")]
-                        ignores += [os.path.normpath(b) for a, b in zip(tokens, tokens[1:])
-                                    if a == "--ignore"]
-                        if targets:
-                            invocations.append((targets, ignores))
-        return invocations
-
     def test_the_paths_the_gate_refuses_are_the_paths_no_ci_lane_runs(self):
-        """Derived from ``.github/workflows`` rather than trusted: a path
-        is never run when some test command ignores it and no command runs
-        it or anything under it."""
-        invocations = self._ci_test_invocations()
-        assert invocations, "no test command found in .github/workflows"
-
-        def within(path, root):
-            return path == root or path.startswith(root + os.sep)
-
-        ignored = {i for _targets, ignores in invocations for i in ignores}
-        never = {
-            path for path in ignored
-            if not any(
-                (any(within(path, t) for t in targets)
-                 and not any(within(path, i) for i in ignores))
-                or any(within(t, path) for t in targets)
-                for targets, ignores in invocations)
-        }
+        """Derived from ``.github/workflows``, the extras in
+        ``pyproject.toml`` and the test files rather than trusted
+        (:func:`_paths_no_ci_lane_runs`)."""
         gate = _load("check_anomalies")
-        assert {p.replace("/", os.sep) for p in gate.PATHS_CI_NEVER_RUNS} == never
+        never, waits = _paths_no_ci_lane_runs(REPO_ROOT, gate)
+        assert set(gate.PATHS_CI_NEVER_RUNS) == never, (
+            "scripts/check_anomalies.py PATHS_CI_NEVER_RUNS is not what the workflows, the "
+            "extras and the test files give.  A test file listed here that should run needs "
+            "its package named in an extra that a job collecting it installs; one that cannot "
+            "run in CI is recorded there (and in IMPORTS_NO_CI_JOB_INSTALLS), and "
+            "scripts/generate_soup_tables.py then writes it on the verification page")
+        assert gate.IMPORTS_NO_CI_JOB_INSTALLS == waits
+        assert len(gate.PATHS_CI_NEVER_RUNS) == len(set(gate.PATHS_CI_NEVER_RUNS))
+
+    def test_the_derivation_sees_a_file_that_skips_itself_for_a_package_no_job_installs(
+            self, tmp_path):
+        """A seeded tree: what is found, and each thing that must not be."""
+        gate = _load("check_anomalies")
+        _seeded_tree(tmp_path)
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert waits == {"tests/api/test_renderer.py": ("pyvista",),
+                         "tests/api/test_alias.py": ("pyvista.plotting",),
+                         "tests/core/test_needs_usd.py": ("pxr",),
+                         "tests/core/test_computed.py": ("?",)}
+        assert never == {"tests/viz"} | set(waits)
+        # A job that installs the extra runs the files that waited for it ...
+        workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+        workflow.write_text(_SEEDED_WORKFLOW.replace('".[ci]"', '".[ci,viz3d]"'))
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert never == {"tests/viz", "tests/core/test_needs_usd.py", "tests/core/test_computed.py"}
+        # ... and a job that installs it without collecting the file does not.
+        workflow.write_text(_SEEDED_WORKFLOW.replace('".[ci,usd]"', '".[ci,usd,viz3d]"'))
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert "tests/api/test_renderer.py" in never and waits["tests/api/test_renderer.py"] == (
+            "pyvista",)
+        # The directory's conftest waits for the directory: without the job that installs it,
+        # every file under it is skipped.
+        workflow.write_text(_SEEDED_WORKFLOW.replace('".[ci,usd]"', '".[ci]"'))
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert waits["tests/usd/test_stage.py"] == ("pxr",)
+
+    def test_a_class_body_a_conditional_install_and_inline_extras(self, tmp_path):
+        """What runs at import beyond the module's own statements; a step that
+        may never run; extras the derivation cannot read without evaluating."""
+        gate = _load("check_anomalies")
+        _seeded_tree(tmp_path)
+        seeded = {
+            # A class body, a default value and a decorator run at import.
+            "tests/core/test_class_body.py":
+                'import pytest\n\nclass TestA:\n    pv = pytest.importorskip("pyvista")\n'
+                '    def test_a(self):\n        pass\n',
+            "tests/core/test_default.py":
+                'import pytest\n\ndef test_a(pv=pytest.importorskip("pyvista")):\n    pass\n',
+            "tests/core/test_decorator.py":
+                'import pytest\n\n@pytest.mark.skipif(not pytest.importorskip("pyvista"), reason="x")\n'
+                'def test_a():\n    pass\n',
+        }
+        for rel, text in seeded.items():
+            (tmp_path / rel).write_text(text, encoding="utf-8")
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert {rel: waits.get(rel) for rel in seeded} == dict.fromkeys(seeded, ("pyvista",)), waits
+        assert "tests/api/test_in_a_body.py" not in never      # a test's own body still runs later
+        workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+        step = '      - {}run: pip install -e ".[ci,viz3d]"\n'
+        # A step under an `if:` that may never hold installs nothing here ...
+        conditional = _SEEDED_WORKFLOW.replace(
+            "  test:\n    steps:\n",
+            "  test:\n    steps:\n" + step.format("if: matrix.python-version == '3.99'\n        "))
+        workflow.write_text(conditional, encoding="utf-8")
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert {job: extras for job, extras, _ in _ci_jobs(tmp_path)}["ci.yml:test"] == {"ci"}
+        assert waits["tests/api/test_renderer.py"] == ("pyvista",)
+        # ... where the same step without it does.
+        workflow.write_text(_SEEDED_WORKFLOW.replace("  test:\n    steps:\n",
+                                                     "  test:\n    steps:\n" + step.format("")),
+                            encoding="utf-8")
+        never, waits = _paths_no_ci_lane_runs(tmp_path, gate)
+        assert "tests/api/test_renderer.py" not in never
+        # Extras written with an expression are refused with the step named, not read as a name.
+        workflow.write_text(_SEEDED_WORKFLOW.replace(
+            '".[ci]"', "\".[ci${{ matrix.python-version == '3.12' && ',viz3d' || '' }}]\""),
+            encoding="utf-8")
+        with pytest.raises(AssertionError, match=r"job test step None: the extras .* expression"):
+            _paths_no_ci_lane_runs(tmp_path, gate)
+
+    def test_what_a_job_installs_is_read_from_the_extras_it_names(self, tmp_path):
+        import tomllib
+
+        _seeded_tree(tmp_path)
+        pyproject = tomllib.loads((tmp_path / "pyproject.toml").read_text())
+        assert _installed_by(pyproject, set()) == {"numpy"}
+        assert _installed_by(pyproject, {"ci"}) == {"numpy", "pytest", "httpx", "pyzmq", "zstandard"}
+        assert _installed_by(pyproject, {"ci", "usd"}) - _installed_by(pyproject, {"ci"}) == {"usd-core"}
+        assert {job: extras for job, extras, _ in _ci_jobs(tmp_path)} == {
+            "ci.yml:test": {"ci"}, "ci.yml:test-usd": {"ci", "usd"}}
+        (_, _, (smoke,)), = [j for j in _ci_jobs(tmp_path) if j[0] == "ci.yml:test-usd"]
+        assert smoke == (["tests/usd", "tests/test_smoke.py"], [])
+        # The real tree: every job that runs tests installs the project with an extra.
+        real = [(job, extras) for job, extras, invs in _ci_jobs(REPO_ROOT) if invs]
+        assert real and all(extras for _job, extras in real), real
 
 
 class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:

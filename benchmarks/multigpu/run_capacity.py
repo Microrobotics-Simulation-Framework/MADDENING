@@ -57,7 +57,7 @@ as exactly one of::
     passed          every check that ran passed
     check failed    a number is wrong: the one outcome that is a defect
     out of memory   the device's allocator refused (resource exhausted),
-                    or the process was killed (status 137, SIGKILL)
+                    or the process was killed (status -9 or 137, SIGKILL)
     timed out       the time box ran out
     crashed         anything else; the record keeps the end of its stderr
 
@@ -65,6 +65,23 @@ or never starts: ``refused by the host guard`` (the host would have to
 hold more than half of its available memory).  The ramp stops at the
 first rung that did not pass; the summary names the ceiling -- the
 largest size that passed, its fill, and what stopped the next one.
+
+The record a rung left decides before the way its process ended does.
+A record that holds a failed check is ``check failed`` however the
+process ended: with any status, killed, or at its time box.  A record
+that is complete, every check passed, is ``passed`` also when the
+process was then ended from outside on its way out -- its time box, or a
+signal: a negative status, which is how ``subprocess`` reports the signal
+that ended a child it started (the ramp starts each rung's interpreter
+itself), or 137, a shell's report of SIGKILL -- and the ramp goes on,
+the record's ``outcome_detail`` and a note of the summary saying how it
+ended.  Every other status is one the process chose, 139 included (it
+reads as 128 + SIGSEGV only through a shell, and no shell stands between
+the ramp and a rung): a complete passing record whose process then
+exits 1, 5, 139 or any status but 0 is ``crashed``, since the process
+contradicted its own record and the ramp does not take the pass.
+Otherwise the outcomes ``out of memory``, ``timed out`` and ``crashed``
+are those of a rung that left no verdict.
 
 The soak.  ``--soak-minutes M`` then repeats build, steps and comparison
 at ``--soak-at`` (0.75) of the ceiling's cells until the time is up,
@@ -75,7 +92,8 @@ Exit status::
 
     0   every rung that ran to its checks passed them (an out-of-memory
         or a time-out above a passing rung is a result, and is recorded)
-    1   a check failed, in a rung or in the soak
+    1   a check failed, in a rung or in the soak, however the process
+        that recorded it then ended
     2   an option was refused (a tiling the rules above do not allow, a
         size smaller than one tile, an ``--out`` holding goal files)
     3   ``--summarise`` only: a record cannot be read, or its recorded
@@ -577,13 +595,16 @@ def rederive(doc: dict) -> dict:
     if outcome not in OUTCOMES:
         problems.append(f"its outcome is {outcome!r}, not one of {OUTCOMES}")
     checks = doc.get("checks")
+    blocks = doc.get("blocks") if doc.get("kind") == SOAK_KIND else None
+    block_checks = [c for block in blocks or [] for c in (block.get("checks") or [])]
     if not isinstance(checks, list):
         checks = []
-        if outcome in (PASSED, CHECK_FAILED):
+        # A soak writes its own checks last and each block's as it goes: one
+        # that ended after a block failed holds that block's checks and no
+        # others, and is ``check failed`` by them.
+        if outcome == PASSED or (outcome == CHECK_FAILED and not block_checks):
             problems.append("it records no checks")
-    blocks = doc.get("blocks") if doc.get("kind") == SOAK_KIND else None
-    for block in blocks or []:
-        checks = checks + list(block.get("checks") or [])
+    checks = checks + block_checks
     for c in checks:
         if not isinstance(c, dict):
             problems.append("a check is not a record")
@@ -1497,28 +1518,64 @@ def launch_child(argv: list[str], timeout_s: float, stderr_path: Path) -> Launch
     return Launched(proc.returncode, timed_out, _tail(stderr_path), time.perf_counter() - t0)
 
 
+def _ended_from_outside(launched: Launched) -> str | None:
+    """How a rung's process was ended when it did not end itself -- killed
+    at its time box, killed, or ended by any other signal -- and ``None``
+    for a status the process chose."""
+    rc = launched.returncode
+    if rc is None or not (rc < 0 or rc in _KILLED):
+        return None
+    if launched.timed_out:
+        return f"killed at its time box (status {rc})"
+    return f"killed (status {rc})" if rc in _KILLED else f"ended by signal {-rc} (status {rc})"
+
+
 def classify(launched: Launched, record: dict | None) -> tuple[str, str]:
     """``(outcome, detail)`` of a rung from how its process ended and the
     record it left.
 
-    The process's own word is taken only where the record bears it out: a
+    The record is read first, by its own values (:func:`rederive`, as
+    ``--summarise`` reads it), and where it holds a verdict that verdict
+    stands however the process ended:
+
+    * a record with a failed check is ``check failed`` -- whatever the
+      status, the time box or a kill after it was written (a failed check
+      must never end as a ceiling);
+    * a record that is complete, every check passed, is ``passed`` when
+      the process exited 0, and also when it was ended from outside after
+      writing it (the time box, a kill, any other signal): that ending
+      says nothing about the size, and the detail keeps it.
+
+    Only a record without a verdict leaves the outcome to the ending.  And
+    the process's own word is taken only where the record bears it out: a
     status of 0 without a record whose checks pass by their own values is
-    a crash, not a pass.
+    a crash, not a pass, and a record that passed does not make a pass of
+    a status other than 0 that the process chose.
     """
     try:
         derived = rederive(record) if record is not None else None
     except _UNREADABLE:
         derived = None
     rc = launched.returncode
+    ended = _ended_from_outside(launched)
+    if derived is not None and derived["failed"]:
+        detail = "; ".join(derived["failed"][:6])
+        if rc != EXIT_CHECK_FAILED or launched.timed_out:
+            detail += ("\nthe record holds the failed check(s); its process then "
+                       + (f"was {ended}" if ended else f"ended with status {rc}"
+                          + (", at its time box" if launched.timed_out else "")))
+        return CHECK_FAILED, detail
+    if derived is not None and derived["outcome"] == PASSED and not derived["problems"]:
+        if rc == EXIT_OK:
+            return PASSED, ""
+        if ended:
+            return PASSED, ("every check passed and the record was complete; its process was "
+                            f"then {ended} on its way out, which says nothing about this size")
     if launched.timed_out:
         return TIMED_OUT, f"killed at its time box, while {(record or {}).get('phase')}"
     if rc == EXIT_OK:
-        if derived is not None and derived["outcome"] == PASSED and not derived["problems"]:
-            return PASSED, ""
         return CRASHED, "it exited 0 without a record whose checks pass: " + (
             "; ".join(derived["problems"]) if derived else "no record")
-    if rc == EXIT_CHECK_FAILED and derived is not None and derived["failed"]:
-        return CHECK_FAILED, "; ".join(derived["failed"][:6])
     if rc == EXIT_RUNG_OUT_OF_MEMORY and record is not None and record.get("outcome") == OUT_OF_MEMORY:
         return OUT_OF_MEMORY, str(record.get("outcome_detail", ""))
     if rc == EXIT_RUNG_HOST_GUARD and record is not None and record.get("outcome") == HOST_GUARD:
@@ -1590,7 +1647,9 @@ def _run_one(args, launch, kind: str, row: dict, timeout_s: float) -> dict:
     record["launch"] = {"returncode": launched.returncode, "timed_out": launched.timed_out,
                         "wall_s": launched.wall_s, "time_box_s": timeout_s,
                         "stderr_log": stderr_path.name,
-                        "stderr_tail": "" if outcome == PASSED else launched.stderr_tail}
+                        # a pass that ended cleanly keeps none; one with a detail does
+                        "stderr_tail": ("" if outcome == PASSED and not detail
+                                        else launched.stderr_tail)}
     # A rung that died before judging left its readings: its fill is what
     # they give (how far it had got), so the record agrees with itself.
     memory = record.setdefault("memory", {"readings": []})
@@ -1623,6 +1682,15 @@ def ceiling_of(rows: list) -> dict | None:
     """The largest rung that passed."""
     passed = [r for r in rows if r["outcome"] == PASSED]
     return max(passed, key=lambda r: r["cells"]) if passed else None
+
+
+def passes_not_ended_cleanly(rows: list, soak: dict | None) -> list:
+    """A note for every rung (and the soak) that passed and whose process
+    was then ended from outside (:func:`classify`): the pass stands, and
+    the reader is told how the process ended."""
+    return [("the soak" if r is soak else f"rung {r['rung']}") + f": {r['detail']}"
+            for r in rows + ([soak] if soak else [])
+            if r["outcome"] == PASSED and r.get("detail")]
 
 
 def run_ramp(args, launch: Callable[[list, float, Path], Launched] = launch_child) -> int:
@@ -1705,6 +1773,7 @@ def run_ramp(args, launch: Callable[[list, float, Path], Launched] = launch_chil
                              tile, SOAK_FILE), timeout_s)
         soak_record, _ = read_record(args.out / SOAK_FILE)
         soak["growth"] = None if soak_record is None else soak_record.get("growth")
+    notes += passes_not_ended_cleanly(rows, soak)
     status = ramp_status(rows, soak)
     summary = {
         "schema_version": CAPACITY_SCHEMA_VERSION,
@@ -1822,7 +1891,7 @@ def summarise(directory: Path) -> int:
     stopped_by = None if first_bad is None else {
         "rung": first_bad["rung"], "cells": first_bad["cells"], "outcome": first_bad["outcome"],
         "detail": first_bad["detail"]}
-    _print_table(rows, soak, [], stopped_by)
+    _print_table(rows, soak, passes_not_ended_cleanly(rows, soak), stopped_by)
     if problems:
         print(f"\nRECORDS THAT DISAGREE WITH THEMSELVES ({len(problems)}); exit "
               f"{EXIT_RECORD_INVALID}:")

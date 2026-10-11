@@ -128,6 +128,44 @@ def _mapped() -> GraphManager:
     return gm
 
 
+#: How many times each transform of the ``coupled_transformed`` kind has run
+#: as Python, which is once per JAX trace of its edge.  A test reads the
+#: difference around a call: the shared graph is built once, so the counts
+#: only grow.
+TRANSFORM_RUNS = {"last": 0, "first": 0}
+
+
+def take_last(x):
+    TRANSFORM_RUNS["last"] += 1
+    return x[-1]
+
+
+def take_first(x):
+    TRANSFORM_RUNS["first"] += 1
+    return x[0]
+
+
+def _coupled_transformed() -> GraphManager:
+    """A coupling group whose two internal edges each run user code: a
+    transform on one, a mapping and then a transform on the other.  The
+    group's report asks each such edge what it delivers (its shape and
+    dtype), which traces the edge's rule: with the group's diagnostics
+    off, as here (a build of half a second), and with them on alike."""
+    gm = GraphManager()
+    for name in ("rod_a", "rod_b"):
+        gm.add_node(HeatNode(name, 1e-4, n_cells=8, thermal_diffusivity=0.1,
+                             initial_temperature=300.0))
+    gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature", transform=take_last)
+    pick = np.zeros((1, 8), np.float32)
+    pick[0, 0] = 1.0
+    gm.add_edge("rod_b", "rod_a", "temperature", "right_temperature",
+                mapping=matrix_mapping(pick), transform=take_first)
+    gm.add_coupling_group(["rod_a", "rod_b"])
+    gm.compile()
+    gm.step()
+    return gm
+
+
 def _after_run_scan() -> GraphManager:
     gm = _pair()
     gm.compile()
@@ -162,6 +200,7 @@ BUILDERS = {
     "coupled_diagnostics": _coupled_diagnostics,
     "coupled_fori": _coupled_fori,
     "coupled_capped": _coupled_capped,
+    "coupled_transformed": _coupled_transformed,
     "multirate": _multirate,
     "subcycled": _subcycled,
     "mapped": _mapped,
@@ -171,6 +210,10 @@ BUILDERS = {
 
 #: Kinds that have never been compiled.
 UNCOMPILED = frozenset({"empty", "single_uncompiled"})
+
+#: Kinds with a coupling group one of whose internal edges has a transform
+#: or a mapping: ``coupling_report`` traces that edge's rule on every call.
+TRACES_AN_EDGE = frozenset({"coupled_transformed"})
 
 
 def build(kind: str) -> GraphManager:

@@ -4566,15 +4566,23 @@ claims:
     "Every start, min and max is written in its type's lexical form, which
     FMI 3.0's schema requires ... An integer's bounds are the integers
     inside the declared interval, and a Boolean carries no min / max.  A
-    Boolean or integer input or output is variability="discrete"".
+    Boolean or integer input or output is variability="discrete"".  "A
+    unit is written on a Float32 or Float64 variable only ... and a unit
+    that no float variable carries is not listed in <UnitDefinitions>".
   sources:
     - docs/user_guide/fmu_export.md (Variables)
     - src/maddening/fmi/model_description.py:83 (FMIVariable, start)
+    - src/maddening/fmi/model_description.py::_writes_unit
   conditions: >-
     Boolean, integer and float variables; a hand-built start in float form;
     the DefaultExperiment attributes and a clock's interval from NumPy
     scalars of every float and integer type, and non-finite ones (written
-    with repr until 0.4.0, MADD-ANO-219); FMPy and the FMI 3.0 schema. Not claimed for 16-bit floats.
+    with repr until 0.4.0, MADD-ANO-219); a unit-bearing input of every
+    type of the writer's table (the 64-bit ones under x64), unit-bearing
+    integer and Boolean parameters, the built-in nodes' int32 and int8
+    inputs, and a hand-built description with a unit on every type and on
+    a clock (written on every type until 0.4.0, MADD-ANO-273); FMPy and the
+    FMI 3.0 schema. Not claimed for 16-bit floats.
   oracle: the XML attributes; schema validation; simulate_fmu with its default validation.
   tests:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -4584,6 +4592,11 @@ claims:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_hand_built_start_in_float_form_is_written_in_the_types_form
     - tests/fmi/test_default_step_is_one_graph_step.py::test_every_number_a_hand_built_description_writes_is_an_xs_double
     - tests/fmi/test_default_step_is_one_graph_step.py::test_a_non_finite_experiment_time_is_written_in_the_schemas_spelling
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_unit_bearing_descriptions_hold_every_type_with_a_unit
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_unit_is_written_on_a_float_variable_and_on_no_other
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_units_definition_is_left_out_with_its_last_float_variable
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_fmpy_validates_a_unit_bearing_variable_of_every_type
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_fmi3_schema_validates_a_unit_bearing_variable_of_every_type
   status: verified
   domains:
     f32: tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -5870,11 +5883,23 @@ claims:
     "An archive must carry its time, and exactly the model's state fields,
     parameters and pending inputs"; "a snapshot of a diverged model ...
     does not restore.  The error names the field.  A non-finite value the
-    FMU was instantiated with is not a divergence and restores".
+    FMU was instantiated with is not a divergence and restores".  "Nor is
+    a non-finite reading in a coupling group's report ... A snapshot
+    holding one restores on both doors ... A non-finite value in a node's
+    field, or in a group's warm starts, is still refused."
   sources:
     - docs/user_guide/fmu_export.md (The trust boundary)
     - src/maddening/fmi/sidecar.py:675 (FmuSidecar.set_fmu_state)
-  conditions: a missing and an extra input member; a model with no inputs; clocks; NaN-seeded diagnostics slots; a field that became non-finite.
+    - src/maddening/fmi/sidecar.py::_is_report_slot
+  conditions: >-
+    a missing and an extra input member; a model with no inputs; clocks;
+    NaN-seeded diagnostics slots; a field that became non-finite; NaN and
+    both infinities in every floating report slot of a group, through the
+    sidecar and the bridge, with the snapshot the FMU then hands out rolled
+    back to and the step after it the same to the bit; the same values in
+    a node's field, a warm start and an integer report slot (refused by
+    both in the same words).  The reported group, whose step writes the inf
+    itself, and the experimental geometry slots are slow tests.
   oracle: the refusal; the restore.
   tests:
     - tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing
@@ -5883,6 +5908,13 @@ claims:
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_snapshot_of_the_nan_seeded_diagnostics_restores_on_both_paths
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_field_that_became_non_finite_still_does_not_restore
     - tests/fmi/test_params_causality.py::TestSnapshotValues::test_set_fmu_state_refuses_a_snapshot_whose_keys_differ_as_the_bridge_does
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_snapshot_whose_report_holds_a_non_finite_reading_rolls_back_to_the_bit
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_non_finite_reading_forged_into_any_floating_report_slot_restores
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_non_finite_value_in_anything_that_is_not_a_report_slot_is_still_refused
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_groups_warm_starts_are_state_and_take_no_non_finite_value
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_an_integer_report_slot_takes_no_non_finite_value_on_either_path
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_group_stopped_at_its_cap_writes_inf_and_its_snapshot_rolls_back_to_the_bit
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_the_geometry_slots_read_inf_on_an_ordinary_step_and_the_snapshot_rolls_back
   status: verified
   domains:
     f32: n/a
@@ -5894,7 +5926,7 @@ claims:
     vmap: n/a
     multi_rate: n/a
     sub_cycled: n/a
-    predictors_warm_starts: n/a
+    predictors_warm_starts: tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_groups_warm_starts_are_state_and_take_no_non_finite_value
     adaptive: n/a
     checkpoint_restart: tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing
     sharded: n/a

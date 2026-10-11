@@ -1,12 +1,12 @@
 {
-  "schema_version": 9,
+  "schema_version": 12,
   "goal": "halo",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-10-10T20:45:36Z",
+    "timestamp_utc": "2026-10-11T15:49:07Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "0b061d1c9ef52c4dda932ba0c1207d3e0c0c4d3a"
+    "git_commit": "4bf56934a003c3a1e3303e9b65fd323c522d97f2"
   },
   "config": {
     "goal": "all",
@@ -34,7 +34,7 @@
     "dry_run": true,
     "cells": [
       256,
-      1024
+      961
     ],
     "n_devices": 4,
     "allow_fewer_devices": false,
@@ -414,10 +414,10 @@
         }
       ],
       "unstructured": {
-        "cells": 1024,
+        "cells": 961,
         "partition": "rcm",
-        "n_local_max": 256,
-        "n_ghost_max": 55,
+        "n_local_max": 241,
+        "n_ghost_max": 53,
         "methods": {
           "all_to_all": {
             "forward_max_abs": 0.0,
@@ -769,28 +769,28 @@
       "passed": true
     },
     {
-      "name": "unstructured 1024 cells all_to_all: owned and ghost slots vs NumPy max_abs",
+      "name": "unstructured 961 cells all_to_all: owned and ghost slots vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "unstructured 1024 cells all_to_all: adjoint vs NumPy max_abs",
+      "name": "unstructured 961 cells all_to_all: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "unstructured 1024 cells ppermute: owned and ghost slots vs NumPy max_abs",
+      "name": "unstructured 961 cells ppermute: owned and ghost slots vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "unstructured 1024 cells ppermute: adjoint vs NumPy max_abs",
+      "name": "unstructured 961 cells ppermute: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
@@ -798,5 +798,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 1.5182385850057472
+  "wall_s": 3.9089733450000494
 }

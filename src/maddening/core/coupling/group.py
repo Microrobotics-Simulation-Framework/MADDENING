@@ -80,8 +80,10 @@ class CouplingGroup:
         computes there from those fields evaluated at it; under
         ``"gauss-seidel"`` a member swept after the floats it reads were
         moved in that pass computes them from the moved floats, so they
-        need not be what the returned floats give (measured: ``q = 10``
-        returned beside ``p = 15`` for ``p = floor(q)``).
+        need not be what the returned floats give (measured on a chain
+        of three such fields capped at two passes: ``q = 10`` returned
+        beside ``p = 15`` for ``p = floor(q)``; ``p = 10`` under
+        ``"jacobi"``).
         Where the trace shows such fields computed from one another in
         a closed loop (two members that each compute a flag from the
         flag the other hands them) they have no value at an iterate,

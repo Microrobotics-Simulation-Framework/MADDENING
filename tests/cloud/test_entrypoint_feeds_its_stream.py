@@ -61,8 +61,16 @@ def _feeders() -> list[threading.Thread]:
 
 
 def _stream(server, session, config=CONFIG):
-    with pytest.warns(PerformanceWarning, match="CPU path"):
-        return entrypoint._stream_through(server, session, config)
+    made: list = []
+    try:
+        with pytest.warns(PerformanceWarning, match="CPU path"):
+            made.append(entrypoint._stream_through(server, session, config))
+    except BaseException:
+        # A stream left feeding outlives the test (its thread is a daemon).
+        if made and made[0] is not None:
+            made[0].stop()
+        raise
+    return made[0]
 
 
 # ---------------------------------------------------------------------------

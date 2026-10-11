@@ -1,6 +1,7 @@
 # MADDENING WebRTC streaming test image (CPU only, no GPU, no network at run time)
 #
-# Runs the loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py):
+# Runs the loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py,
+# tests/cloud/test_entrypoint_streams.py):
 # a SelkiesSession and a second GStreamer webrtcbin (the test's peer) in
 # one container, with no network.  Ubuntu 24.04's system Python 3.12 is
 # used because PyGObject (python3-gi) is a compiled extension built for
@@ -71,14 +72,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Third-party Python dependencies first, in their own layer, so an edit
 # under src/ does not reinstall them.  jax is pinned to one of the two
 # versions CI tests (the streaming code does not depend on which);
-# pytest and hypothesis are what tests/conftest.py imports.  PyGObject
-# comes from apt (python3-gi) above, not from pip: the `streaming`
-# extra's PyGObject would otherwise be built from source.
+# the next two lines are the `server` extra, which docker/Dockerfile.cloud
+# installs for the cloud entry point (tests/cloud/test_entrypoint_streams.py
+# runs that entry point: FastAPI and uvicorn serve its API, matplotlib
+# draws the frames it streams); pytest and hypothesis are what
+# tests/conftest.py imports.  PyGObject comes from apt (python3-gi) above,
+# not from pip: the `streaming` extra's PyGObject would otherwise be built
+# from source.
 ARG JAX_VERSION=0.11.2
 RUN pip3 install --break-system-packages \
         "jax==${JAX_VERSION}" "jaxlib==${JAX_VERSION}" \
         "lineax>=0.0.7" "numpy>=1.24" "pyyaml>=6.0" "scipy>=1.14" \
-        "websockets>=11.0" \
+        "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0" "pyzmq>=25.0" \
+        "rich>=12.0" "matplotlib>=3.5" "zstandard>=0.22" \
         "pytest>=7.0" "hypothesis>=6.165,<7"
 
 # MADDENING itself, installed editable from the tree at /src.  At run

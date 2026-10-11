@@ -473,6 +473,13 @@ class _WebRTCNegotiator:
     lock.  The pipeline is built when the viewer's offer arrives (the
     answer's payload type comes from the offer) and torn down when the
     viewer leaves, so no frame is encoded, or kept, while nobody watches.
+    Frames are let into it only once the answer has been applied: a frame
+    that reaches ``webrtcbin`` before the offer is applied gives its sink
+    pad caps the offer no longer matches, and ``webrtcbin`` then answers
+    with a new receive-only transceiver, an inactive m-line that carries
+    no video (ICE connects, DTLS never does).  A session already being fed
+    when the viewer connects -- a running simulation -- hit that whenever
+    the offer took longer to apply than the first frame took to encode.
 
     One viewer at a time: a newly authenticated viewer replaces the
     current one, which is closed with code 4000 (``_CLOSE_REPLACED``).
@@ -484,8 +491,9 @@ class _WebRTCNegotiator:
         pipeline to build for a viewer; it must name its ``appsrc``
         ``src``, its encoder ``encoder`` and its ``webrtcbin`` ``webrtc``.
     on_pipeline : callable
-        Called on the GLib thread with ``(appsrc, encoder)`` when a
-        viewer's pipeline starts and with ``(None, None)`` when it stops.
+        Called on the GLib thread with ``(appsrc, encoder)`` once a
+        viewer's answer has been applied (frames may flow from then on)
+        and with ``(None, None)`` when its pipeline stops.
     stun_server : str or None
         ``webrtcbin``'s ``stun-server``.
     turn_servers : list of str
@@ -636,7 +644,6 @@ class _WebRTCNegotiator:
             logger.error("The streaming pipeline would not start")
             self._fail(client)
             return
-        self._on_pipeline(pipeline.get_by_name("src"), pipeline.get_by_name("encoder"))
         logger.info("Answering the viewer's offer (H.264 payload type %d on m-line %d)",
                     payload_type, mline)
 
@@ -696,6 +703,10 @@ class _WebRTCNegotiator:
             return
         client.send({"type": "sdp", "sdp": {"type": "answer", "sdp": answer_text}})
         self._answer_sent = True
+        # Only now may frames reach webrtcbin (see the class docstring).
+        pipeline = self._pipeline
+        if pipeline is not None:
+            self._on_pipeline(pipeline.get_by_name("src"), pipeline.get_by_name("encoder"))
         # Candidates gathered before the answer went out follow it, so the
         # viewer never gets a candidate for a description it does not have.
         for mline, candidate in self._pending_local:
@@ -796,7 +807,8 @@ class SelkiesSession(StreamingSession):
     out.  Only a client holding the session token can do this.
 
     The encoding pipeline exists only while a viewer is connected: frames
-    pushed while nobody watches are dropped, not queued.
+    pushed while nobody watches, or before the viewer's answer has been
+    applied, are dropped, not queued.
 
     Parameters
     ----------

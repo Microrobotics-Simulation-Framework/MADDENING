@@ -54,9 +54,12 @@ import contextlib
 import json
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any, Optional
 
 import pytest
@@ -184,12 +187,17 @@ class Peer:
 
     ``webrtcbin`` with one receive-only H.264 transceiver.  Decoded frames
     are reduced to ``(width, height, mean RGB, spread)`` in
-    :attr:`frames`; every message the server sent is in :attr:`received`.
+    :attr:`frames`, and kept whole (``height x width x 3`` RGB, ``uint8``)
+    in :attr:`pixels` when ``keep_pixels`` is set; every message the
+    server sent is in :attr:`received`.
     """
 
-    def __init__(self, url: str, *, payload_type: int = 102) -> None:
+    def __init__(self, url: str, *, payload_type: int = 102,
+                 keep_pixels: bool = False) -> None:
         self.url = url
         self.frames: list[tuple[int, int, np.ndarray, float]] = []
+        self.pixels: list[np.ndarray] = []
+        self._keep_pixels = keep_pixels
         self.received: list[dict] = []
         self.sent_candidates: list[dict] = []
         self.answer = threading.Event()
@@ -307,9 +315,12 @@ class Peer:
         ok, info = buffer.map(Gst.MapFlags.READ)
         if ok:
             try:
-                rgb = np.frombuffer(info.data, dtype=np.uint8)[: width * height * 3]
-                rgb = rgb.reshape(height, width, 3).astype(np.float64)
+                raw = np.frombuffer(info.data, dtype=np.uint8)[: width * height * 3]
+                raw = raw.reshape(height, width, 3)
+                rgb = raw.astype(np.float64)
                 mean = rgb.reshape(-1, 3).mean(axis=0)
+                if self._keep_pixels:
+                    self.pixels.append(raw.copy())
                 self.frames.append((width, height, mean, float(np.abs(rgb - mean).mean())))
             finally:
                 buffer.unmap(info)
@@ -565,6 +576,55 @@ def test_a_second_viewer_replaces_the_first(started, peers):
     assert [m.get("type") for m in first.received].count("sdp") == 1
 
 
+#: A session in a child process, fed the palette from before any viewer
+#: connects (as a running simulation feeds it), until its stdin closes.
+_FED_SESSION = """
+import sys, threading, time
+from tests.cloud import test_webrtc_loopback as m
+session, url = m._start()
+print(url, session.session_token, flush=True)
+closed = threading.Event()
+threading.Thread(target=lambda: (sys.stdin.read(), closed.set()), daemon=True).start()
+index = 0
+while not closed.is_set():
+    session.update_framebuffer_cpu(m._solid_rgba(m._palette_colour(index)),
+                                   m.WIDTH, m.HEIGHT, "RGBA")
+    index += 1
+    time.sleep(1.0 / m.FPS)
+session.stop()
+"""
+
+
+def test_a_viewer_in_another_process_decodes_a_session_that_was_already_fed(peers):
+    """The deployment's shape: the viewer is elsewhere, and frames flow before it offers.
+
+    Every other test here runs the viewer in the session's own process
+    and pushes frames only once it has connected; there the offer is
+    applied within milliseconds, before the first frame is encoded.  A
+    frame that reaches ``webrtcbin`` first made it answer with an
+    inactive m-line (ICE connected, DTLS never did, no video), which is
+    what a viewer of the cloud entry point got.
+    """
+    child = subprocess.Popen([sys.executable, "-c", _FED_SESSION],
+                             cwd=Path(__file__).resolve().parents[2],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout is not None and child.stdin is not None
+        url, token = child.stdout.readline().split()
+        peer = _peer(peers, url, token)
+        peer.connect()
+        deadline = time.monotonic() + FRAMES_TIMEOUT_S
+        while len(peer.frames) < FRAMES_WANTED and time.monotonic() < deadline:
+            time.sleep(0.05)
+        _assert_decoded_the_palette(peer)
+        child.stdin.close()
+        assert child.wait(CLOSE_TIMEOUT_S) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(CLOSE_TIMEOUT_S)
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -714,6 +774,56 @@ def test_viewer_candidates_that_arrive_before_the_offer_is_applied_are_applied_a
     assert webrtc.emitted[0] == ("add-ice-candidate", 0,
                                  "candidate:1 1 UDP 1 192.0.2.1 5000 typ host")
     assert webrtc.emitted[1][0] == "create-answer"
+
+
+#: An offer a browser could send: one receive-only H.264 m-line (PT 102).
+_OFFER = "\r\n".join([
+    "v=0", "o=- 1 0 IN IP4 0.0.0.0", "s=-", "t=0 0", "a=group:BUNDLE video0",
+    "m=video 9 UDP/TLS/RTP/SAVPF 102", "c=IN IP4 0.0.0.0", "a=mid:video0", "a=recvonly",
+    "a=rtcp-mux", "a=ice-ufrag:abcd", "a=ice-pwd:abcdefghijklmnopqrstuvwx",
+    "a=fingerprint:sha-256 " + ":".join(["00"] * 32), "a=setup:actpass",
+    "a=rtpmap:102 H264/90000", "a=fmtp:102 packetization-mode=1;profile-level-id=42e01f",
+    ""])
+
+
+class _NamedElements:
+    """Stands in for the viewer's pipeline once the offer has been applied."""
+
+    def get_by_name(self, name: str) -> str:
+        return f"<{name}>"
+
+
+def test_frames_are_let_into_the_pipeline_only_once_the_answer_is_applied():
+    """A frame that reaches ``webrtcbin`` before the offer is applied spoils the answer.
+
+    So the offer builds the pipeline without handing its ``appsrc`` over,
+    and the applied answer hands it over.  (End to end, in another
+    process: ``test_a_viewer_in_another_process_decodes_a_session_that_was_already_fed``.)
+    """
+    from maddening.cloud.selkies_session import _WebRTCNegotiator
+
+    handed: list = []
+    negotiator = _WebRTCNegotiator(
+        lambda payload_type: ("appsrc name=src ! fakesink  identity name=encoder  "
+                              "webrtcbin name=webrtc"),
+        lambda appsrc, encoder: handed.append((appsrc, encoder)))
+    client = _RecordingClient()
+    negotiator._client = client  # noqa: SLF001 - the negotiator's GLib-thread state
+    try:
+        negotiator._offer(client, {"type": "offer", "sdp": _OFFER})  # noqa: SLF001
+        assert negotiator._pipeline is not None  # noqa: SLF001 - the offer built it
+        assert handed == [], "frames were let in before the offer was applied"
+    finally:
+        negotiator._teardown()  # noqa: SLF001
+    assert handed == [(None, None)]
+
+    negotiator, client, webrtc = _negotiator_with_a_viewer()
+    handed.clear()
+    negotiator._on_pipeline = lambda appsrc, encoder: handed.append((appsrc, encoder))  # noqa: SLF001
+    negotiator._pipeline = _NamedElements()  # noqa: SLF001
+    negotiator._answer_applied(webrtc, None, "v=0\r\n")  # noqa: SLF001
+    assert [m["type"] for m in client.sent] == ["sdp"]
+    assert handed == [("<src>", "<encoder>")]
 
 
 # ---------------------------------------------------------------------------

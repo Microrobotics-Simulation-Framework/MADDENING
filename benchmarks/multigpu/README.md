@@ -200,6 +200,83 @@ seed no longer matches the library, and check one step of the stencil
 goals' own node, and the `forward` goal and the `gradient` goal's rollout
 themselves, against each seeded wrapper in-process.
 
+### Which wrapper paths the goals run
+
+One row for every documented option of the two wrappers and every hook of
+a node they read, with what the eight goals do with it.  **run** means a
+fault on that path moves a goal's answer, and a seed of
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` proves it: the goals
+named read `FAIL` on the seeded library.  **unproved** means a goal's
+cases pass through the path, or may, and no seed shows that a fault there
+fails a goal: for the session it counts as not run.  **not run** means no
+goal reaches it: it is covered on CPU virtual devices only, by the test
+file named.  A hardware session that passes says nothing about a row that
+is not **run**.
+
+`ShardedStencilNode`:
+
+| path | status | goals | seeds, or the CPU test |
+|---|---|---|---|
+| `axis_map`: a spatial axis split over a mesh axis, each halo from the neighbouring shard (a 1-D mesh along either axis, the 2 × 2 pencil, a mesh axis of one device) | run | `halo`, `stencil`, `hybrid`, `coupled` | `wrong_neighbour_along_spatial_axis_1`, `later_axes_are_zero_at_the_global_edges` |
+| a halo axis `axis_map` leaves unsharded, which the wrapper fills itself | unproved | | `tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py` |
+| `boundary="periodic"` at the global edges | run | `stencil`, `hybrid`, `coupled` | `later_axes_are_zero_at_the_global_edges` |
+| `boundary="edge"`, the default (also under the goals' Dirichlet ends, which the node holds over it) | run | `halo`, `stencil` | `wide_edge_halos_repeat_the_block_not_its_edge_cell`, `halos_two_wide_are_zero_at_the_global_edges` |
+| `boundary="zero"` | not run | | `tests/cloud/multigpu/test_halo_global_edge_fill.py` |
+| `halo_width()`: one cell, and two | run | `halo`, `stencil` | `outer_halo_cells_copy_the_innermost_one`, `halos_two_wide_are_zero_at_the_global_edges` |
+| a `halo_width()` that follows a parameter, read again at each `compile()` | not run | | `tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py` |
+| `halo_boundary()`: a fill the node declares, and the refusal of another | not run | | `tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py` |
+| `static_data`: a `StaticArray(replication="shard")`, halo-exchanged along its `shard_axis` and handed over as `static_padded` | run | `stencil`, `hybrid`, `coupled` | `static_halos_are_nan` |
+| `shard_info`: the block's offset and extent along each sharded axis | run | `stencil`, `hybrid`, `coupled` | `shard_info_extent_from_the_first_mesh_axis`, `shard_info_extent_from_spatial_axis_0` |
+| a grid-shaped boundary input, split and halo-padded like the state | run | `stencil`, `hybrid`, `coupled` | `grid_inputs_are_zeroed` |
+| a scalar boundary input, replicated to every shard | unproved | | `tests/cloud/multigpu/test_sharded_boundary_inputs.py` |
+| `domain_integral_fields()`: the shards' partial sums summed over the mesh | run | `stencil`, `hybrid`, `coupled` | `domain_integrals_are_halved`, `domain_integrals_summed_over_the_first_mesh_axis_only` |
+| a domain integral carried in the state, handed back to `update_padded` | unproved | | `tests/cloud/multigpu/test_stencil_domain_integral_state.py` |
+| `domain_integral_axes()`: an integral summed over some mesh axes only, or over none | not run | | `tests/cloud/multigpu/test_partial_axis_integrals.py` |
+| a mesh axis `axis_map` does not use | not run | | `tests/cloud/multigpu/test_unused_mesh_axis_integrals.py` |
+| `params`: injected parameters replicated to every shard, and their derivative | unproved | | `tests/cloud/multigpu/test_property_injected_params_gradient.py` |
+| the coupling hooks forwarded to the node (`update_evaluations()`, the flux and interface hooks) | unproved | | `tests/cloud/multigpu/test_sharded_wrapper_coupling_hooks.py` |
+| a `ShardedStencilNode` wrapped in another | not run | | `tests/cloud/multigpu/test_nested_stencil_wrapper_params.py` |
+| the cache of sharded statics and `invalidate_static_cache()` after a write | not run | | `tests/cloud/multigpu/test_sharded_static_cache.py` |
+| the refusal of a step XLA would miscompile inside a loop | unproved | | `tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py` |
+| `dt` and a state in float64 | not run | | `tests/cloud/multigpu/test_sharded_stencil_node.py` |
+| the refusals at construction (an extent the devices do not divide, an empty `axis_map`, an unknown `boundary`, a pointwise node) | unproved | | `tests/cloud/multigpu/test_property_shard_construction.py` |
+
+`ShardedUnstructuredNode`:
+
+| path | status | goals | seeds, or the CPU test |
+|---|---|---|---|
+| `layout` and `exchange`: the state split over the shards and its ghost rows exchanged, under `"all_to_all"` and `"ppermute"` | unproved | | `tests/cloud/multigpu/test_property_exchange_transports.py` |
+| `mesh_axis`: a mesh axis of another name | not run | | `tests/cloud/multigpu/test_sharded_unstructured.py` |
+| `static_data`: a `StaticArray(replication="partition")`, split and ghost-exchanged like the state | unproved | | `tests/cloud/multigpu/test_unstructured_layout_contract.py` |
+| a per-cell boundary input in partition layout, and its cotangent | run | `indivisible`, `forward`, `gradient` | `cell_inputs_are_zeroed`, `cell_inputs_ghost_rows_are_not_exchanged`, `cell_inputs_are_one_row_off`, `cell_inputs_lose_their_cotangent` |
+| a scalar boundary input, replicated to every shard | not run | | `tests/cloud/multigpu/test_unstructured_misshapen_inputs.py` |
+| `params`: injected parameters replicated to every shard, and their cotangent | run | `indivisible`, `forward`, `gradient` | `injected_params_are_doubled`, `injected_params_reach_shard_0_only`, `injected_params_lose_their_cotangent` |
+| `domain_integral_fields()`: the shards' partial sums summed over the mesh axis | run | `forward` | `shard_1_left_out_of_the_reduction`, `shard_1_counted_twice` |
+| `domain_integral_axes()`: an integral left as one value a shard | not run | | `tests/cloud/multigpu/test_unstructured_gather_global_integrals.py` |
+| `shard_info`: the shard's offset and its own cell count (the node reads the padded block length only) | not run | | `tests/cloud/multigpu/test_shard_info_keys.py` |
+| a domain integral carried in the state | not run | | `tests/cloud/multigpu/test_integral_listed_as_state_field.py` |
+| `update_evaluations()` forwarded, `interface_dof_indices()` refused | not run | | `tests/cloud/multigpu/test_sharded_wrapper_coupling_hooks.py` |
+| `initial_state()` and `gather_global()`: global cell order to partition layout and back | unproved | | `tests/cloud/multigpu/test_unstructured_gather_global_integrals.py` |
+| the refusals (a node with a `halo_width()`, another cell count, an input in global cell order, the two orders of equal shards) | not run | | `tests/cloud/multigpu/test_unstructured_layout_contract.py` |
+| not a path of the wrapper: the goals' own node summing the rows it owns, and its step from a field of ones | run | `forward` | `ghost_rows_counted`, `own_mask_ignored`, `a_step_that_does_not_keep_ones` |
+
+`ShardedPointwiseNode`:
+
+| path | status | goals | seeds, or the CPU test |
+|---|---|---|---|
+| the refusal of an axis the devices do not divide (`indivisible` requires it, with both numbers named) | unproved | | `tests/cloud/multigpu/test_property_shard_construction.py` |
+| a step: `initial_state()` placing the state along `shard_axes`, `update` handing the state and `params` to the node | not run | | `tests/cloud/multigpu/test_sharded_node.py` |
+
+`HybridNode`:
+
+| path | status | goals | seeds, or the CPU test |
+|---|---|---|---|
+| `HybridNode(ShardedStencilNode(inner))` in a graph: forward and adjoint through a non-local correction and an external grid-shaped input | run | `hybrid` | `static_halos_are_nan`, `grid_inputs_are_zeroed`, `domain_integrals_are_halved`, `shard_info_extent_from_spatial_axis_0` |
+| `HybridNode` around the other two wrappers | not run | | `tests/cloud/multigpu/test_differential_sharding.py` |
+
+The `gradient` goal's `sharded_cg` part runs neither wrapper (its operator
+is the runner's own), and its seeds are seeds of the runner.
+
 ### The transport question
 
 | goal | question | decides |

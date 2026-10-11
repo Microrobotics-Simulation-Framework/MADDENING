@@ -2338,7 +2338,7 @@ class TestAnomalyGateVerifiesSomething:
 
         def every_reference_unavailable(
             _path, *, prefix="", repo_root=None,
-            resolve_references=True, notes=None,
+            resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
                 notes.append(
@@ -2367,7 +2367,7 @@ class TestAnomalyGateVerifiesSomething:
 
         def one_unavailable(
             _path, *, prefix="", repo_root=None,
-            resolve_references=True, notes=None,
+            resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
                 notes.append("MADD-ANO-001: one entry was NOT checked")

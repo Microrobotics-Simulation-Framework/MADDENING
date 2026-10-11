@@ -48,34 +48,32 @@ ENV_VAR = "MADDENING_TEST_SHARD"
 
 #: ``{test file path relative to the repository root: shard}``.
 #:
-#: The eleven heaviest files, placed longest first onto the lightest shard,
-#: from the per-file times of the first CI run after the slow-test triage
-#: (PR #147's cold run, 2026-09-24, both JAX lanes, the slower lane per
-#: file).  The previous eight pins, set before the triage moved about 180
-#: tests to the slow lane, had drifted to 11.3 / 6.0 / 7.7 / 9.8 minutes
-#: (slowest 30% over the mean); these give 8.8 / 8.8 / 8.8 / 8.5 (1.3%).
-#: Recompute from the "Test durations" lane summary when a shard runs
-#: persistently long; moving a pin moves only that file.
+#: The six pins that level the six shards, from the per-file times of three
+#: cold push runs on the release branch (38089224978, 38093868119, 38096508004;
+#: 2026-10-10 and 11).  By hash alone the slowest of six jobs is predicted
+#: at 33 to 37 minutes on those runs; with these, at 28 to 30 against a
+#: mean of 24 to 30 (four shards ran 43 to 48).  Each was chosen as the one
+#: file whose move off the slowest shard lowers the slowest shard most, over
+#: the runs and both JAX lanes; every other file stays where its hash puts
+#: it.  The minutes are the slower JAX lane's, the mean of the runs.
+#: Recompute from the "Test durations" lane summaries of several runs when
+#: a shard runs persistently long (one run carries its runners' speeds, a
+#: factor of up to 1.6); moving a pin moves only that file.
 PINS: dict[str, int] = {
-    "tests/nodes/adaptive/test_wavelet_node.py": 3,                 # 2.4 min
-    "tests/core/test_coupling_convergence_reporting.py": 2,         # 1.8 min
-    "tests/property/test_coupling_error_bound.py": 1,               # 1.8 min
-    "tests/compliance/test_gate_scripts.py": 4,                     # 1.5 min
-    "tests/core/test_coupling_error_bound.py": 2,                   # 1.3 min
-    "tests/core/test_coupling_solver_equivalence.py": 1,            # 1.2 min
-    "tests/core/test_coupling_non_finite_state.py": 3,              # 0.9 min
-    "tests/verification/test_verify_node_harness.py": 4,            # 0.9 min
-    "tests/nodes/adaptive/test_wavelet_engine.py": 3,               # 0.7 min
-    "tests/core/test_coupling_while_default.py": 1,                 # 0.6 min
-    "tests/core/test_coupling_precision_floor.py": 2,               # 0.6 min
+    "tests/property/test_differential_coupling_topologies.py": 3,               # 5.1 min
+    "tests/nodes/adaptive/test_wavelet_node.py": 3,                             # 2.4 min
+    "tests/core/test_coupling_claims_in_every_domain.py": 6,                    # 2.4 min
+    "tests/core/test_coupling_claims_graphs.py": 2,                             # 2.2 min
+    "tests/test_examples_smoke.py": 6,                                          # 1.6 min
+    "tests/verification/test_verify_node_harness.py": 1,                        # 1.2 min
 }
 #: The job count the pins were balanced for.
-PINS_FOR = 4
+PINS_FOR = 6
 
 #: The suffix of a shard spec that asks for the weighted split.
 WEIGHTED = "weighted"
 #: The job count ``slow-tests.yml`` runs per JAX version.  Ten, not the
-#: four of the per-push lane: the measured lane is 635 minutes of tests
+#: six of the per-push lane: the measured lane is 635 minutes of tests
 #: (each file's slower JAX version, 2026-10-10; 477 three days earlier),
 #: so eight balanced shards sit at 79 minutes each and ten at 64.  Twelve
 #: would sit at 53 (the slowest predicted at 56 with a job's fixed cost),

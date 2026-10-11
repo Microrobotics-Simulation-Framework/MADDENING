@@ -76,6 +76,10 @@ def test_the_assignment_is_a_fixed_function_of_the_path():
     assert _sharding.shard_of("tests/nodes/test_spring.py", 4) == 4
     assert _sharding.shard_of("tests/fmi/test_c_unit.py", 4) == 1
     assert _sharding.shard_of("tests/nodes/test_spring.py", 3) == 2
+    # ...and at the count the per-push lane runs.
+    assert _sharding.shard_of("tests/core/test_graph_manager.py", 6) == 3
+    assert _sharding.shard_of("tests/nodes/test_spring.py", 6) == 2
+    assert _sharding.shard_of("tests/fmi/test_c_unit.py", 6) == 5
 
 
 def test_pins_apply_only_at_the_job_count_they_were_balanced_for():
@@ -83,7 +87,7 @@ def test_pins_apply_only_at_the_job_count_they_were_balanced_for():
     # that leaked would put it on a shard the count may not even have.
     for path, pinned in _sharding.PINS.items():
         assert _sharding.shard_of(path, _sharding.PINS_FOR) == pinned
-        for n in (1, 2, 3, 5, 8):
+        for n in (1, 2, 3, 4, 5, 8):
             if n == _sharding.PINS_FOR:
                 continue
             by_hash = int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1
@@ -254,7 +258,7 @@ def test_the_per_push_split_does_not_read_the_weights():
     weighted = _sharding.Plugin(1, n, _sharding.load_weights())
     assert weighted.weighted
     assert any(weighted.shard_of(p) != _sharding.shard_of(p, n) for p in _tree_test_files()), (
-        "the weighted split at four shards equals the hash split: the table is not being used")
+        "the weighted split at the per-push count equals the hash split: the table is not being used")
 
 
 def test_the_slow_lanes_weighted_shards_are_balanced_and_under_the_target():
@@ -346,8 +350,8 @@ def test_the_shipped_weights_table_is_what_the_generator_writes():
 
 
 #: Every way a workflow writes a lane's shard count besides the matrix: the
-#: shard spec, artifact and cache names (``of4``), step titles (``of 4``,
-#: ``of 4 shard``) and the slow lane's issue titles (``shard ${shard}/4``).
+#: shard spec, artifact and cache names (``of6``), step titles (``of 6``,
+#: ``of 6 shard``) and the slow lane's issue titles (``shard ${shard}/10``).
 _COUNT_MENTIONS = re.compile(
     r"matrix\.shard \}\}/([0-9]+)|matrix\.shard \}\}of([0-9]+)|matrix\.shard \}\} of ([0-9]+)"
     r"|\$\{shard\}/([0-9]+)|\bof ([0-9]+) shards?\b|-ne ([0-9]+) \]")
@@ -387,8 +391,8 @@ def _pytest_args(job, step_name):
 
 @pytest.mark.parametrize("workflow, job", [("ci.yml", "test"), ("slow-tests.yml", "slow")])
 def test_no_matrix_leg_drops_or_adds_a_shard(workflow, job):
-    # `exclude: [{shard: 4}]` would leave the shard axis intact -- so the
-    # count check above passes -- while a quarter of the suite runs nowhere.
+    # `exclude: [{shard: 6}]` would leave the shard axis intact -- so the
+    # count check above passes -- while a sixth of the suite runs nowhere.
     matrix = _workflow(workflow)["jobs"][job]["strategy"]["matrix"]
     assert matrix["shard"] == list(range(1, LANES[workflow][0] + 1))
     for key in ("exclude", "include"):
@@ -484,9 +488,9 @@ def _mentions(node, path=()):
 
 @pytest.mark.parametrize("workflow", sorted(SHARD_SETTING))
 def test_each_lane_sets_its_shard_once_from_the_matrix(workflow):
-    """``MADDENING_TEST_SHARD=1/4 python -m pytest ...`` points all four shards at one.
+    """``MADDENING_TEST_SHARD=1/6 python -m pytest ...`` points all six shards at one.
 
-    Three quarters of the suite then runs nowhere, and the checks above still
+    Five sixths of the suite then runs nowhere, and the checks above still
     pass: they read the step's env, and the pytest arguments after
     ``pytest``.  So the variable may be named once per workflow -- in the
     pytest step's env, with the matrix value -- and nowhere else: no
@@ -674,7 +678,7 @@ def test_the_root_conftest_keeps_only_this_shards_files(shard_run):
     """``MADDENING_TEST_SHARD`` must reach ``tests/_sharding.py`` through the conftest.
 
     If the conftest stopped registering the plugin, every CI shard would
-    run the whole suite: four times the CI time, no test dropped, and every
+    run the whole suite: six times the CI time, no test dropped, and every
     check of ``_sharding.py`` itself still green.
     """
     out = shard_run.proc.stdout + shard_run.proc.stderr

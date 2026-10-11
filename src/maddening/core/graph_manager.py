@@ -7263,7 +7263,7 @@ class GraphManager:
         :meth:`SimulationNode.to_dict
         <maddening.core.node.SimulationNode.to_dict>` for the rule, which
         goes by the argument's name, and for what it cannot tell); in
-        every release before 0.4.0 nothing said so (MADD-ANO-273).  A
+        every release before 0.4.0 nothing said so (MADD-ANO-277).  A
         class that overrides ``to_dict`` is not asked: the entry is what
         the override returns, except that for a node whose ``update``
         takes ``params`` the keys of ``node.params`` in the entry's

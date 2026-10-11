@@ -111,7 +111,7 @@ def test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it():
     """``copy.deepcopy`` and ``pickle`` carry the counts and a lineage of
     the copy's own: a graph copied with its nodes copies the counts it last
     saw beside them, and a mapping that started again at zero read as
-    written (MADD-ANO-275).  ``copy.copy`` is a second mapping beside the
+    written (MADD-ANO-279).  ``copy.copy`` is a second mapping beside the
     first, with nothing of a graph copied along: zero counts, its own
     lineage.  The rest sees a ``dict``."""
     p = _ParamsDict(a=1.0, b=[1, 2])

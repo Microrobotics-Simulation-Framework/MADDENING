@@ -4,7 +4,7 @@ carry, as ``to_dict()`` does for a config.
 A stage holds, for each node, its class, name, timestep and ``params``, and
 ``load_graph_from_usd`` rebuilds ``cls(name=..., timestep=..., **params)``:
 a constructor argument a class keeps outside ``params`` is dropped by this
-door exactly as by a config (MADD-ANO-273).  The writer reads
+door exactly as by a config (MADD-ANO-277).  The writer reads
 ``node.params`` itself, not ``node.to_dict()``, so the warning ``to_dict()``
 gives did not reach it, and for a time during 0.4.0 development the config
 warned and the stage did not.  Every door that saves a node's constants now

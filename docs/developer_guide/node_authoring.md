@@ -378,7 +378,7 @@ class Spring(SimulationNode):
 With the first class, `Spring("s", 0.01, stiffness=40.0)` saved and
 reloaded is a spring of stiffness 12, and the reloaded graph runs. Since
 0.4.0 every door that saves a node's constants says so (in every release
-before, nothing did, MADD-ANO-273): `to_dict()` (a config, `GET /graph`,
+before, nothing did, MADD-ANO-277): `to_dict()` (a config, `GET /graph`,
 the reply to `POST /graph/nodes`) and `save_graph_to_usd` give a
 `UserWarning` naming the node, its class, the arguments and the fix.
 

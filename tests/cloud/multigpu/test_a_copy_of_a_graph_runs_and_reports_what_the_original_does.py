@@ -8,7 +8,7 @@ sync read "fewer writes than I saw" as a write of that key and put the
 node's value over the leaf: a graph with a node write in its past and a
 calibration in ``gm.params`` after it ran the calibrated value, and its
 deep copy ran, reported and saved the node's, with nothing said
-(MADD-ANO-275; never released: no release has ``gm.params``).  A copy made
+(MADD-ANO-279; never released: no release has ``gm.params``).  A copy made
 by ``copy.deepcopy`` or ``pickle`` now carries the counts and the lineage.
 ``copy.copy(gm)`` is refused: a shallow copy shared the graph's record of
 the writes it had seen but not its compiled step, so after a write to a

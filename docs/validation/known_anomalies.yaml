@@ -3883,7 +3883,7 @@ anomalies:
       arguments found one more loss, `AdaptiveNode(dtype=...)`, which no
       release carried and which is fixed in the same change.  The general
       case -- a node class written outside the package that keeps a
-      constructor argument outside `params` -- is MADD-ANO-273.
+      constructor argument outside `params` -- is MADD-ANO-277.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -19054,7 +19054,7 @@ anomalies:
       - "tests/cloud/multigpu/test_what_the_sharded_solvers_do_not_report_or_refuse_yet.py::test_the_same_system_a_thousand_times_smaller_is_solved"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-273"
+  - anomaly_id: "MADD-ANO-277"
     title: "A constructor argument a node keeps outside params was dropped by every save: the reloaded graph ran the constructor's default"
     description: >
       A saved node is its `params` and nothing else: `SimulationNode.to_dict`
@@ -19156,7 +19156,7 @@ anomalies:
       - "tests/core/test_a_config_keeps_what_a_to_dict_override_adds_to_params.py::test_behind_each_wrapper_the_entry_has_both"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-274"
+  - anomaly_id: "MADD-ANO-278"
     title: "An assignment to node.params on a sharded wrapper or a HybridNode replaced the wrapper's mapping alone: the step ran the old value while node.params read the new one back"
     description: >
       The guide documents two spellings of a write to a node's constants:
@@ -19233,7 +19233,7 @@ anomalies:
       - "tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_that_shares_its_nodes_mapping_reaches_the_node"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-275"
+  - anomaly_id: "MADD-ANO-279"
     title: "A deep copy of a graph put a node's value back over a constant calibrated in gm.params: the copy ran and saved another value than the original"
     description: >
       A node's `params` counts its writes, and a graph keeps, beside each

@@ -3942,7 +3942,7 @@ claims:
     30, with no warning (MADD-ANO-203).  Whole-tree audit of 2026-10-10
     (B1): the assignment on a sharded wrapper replaced the wrapper's
     mapping alone, so the step ran the old value while node.params read
-    the new one (MADD-ANO-274); this row said "not claimed for sharded
+    the new one (MADD-ANO-278); this row said "not claimed for sharded
     graphs" and nothing a user reads did.
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
@@ -4048,7 +4048,7 @@ claims:
   notes: >-
     Whole-tree audit of 2026-10-10 (C, H1): the quickstart's own graph built
     with SpringNode(stiffness=40.0) saved 'params': {} and reloaded as the
-    k = 12 graph with no warning, at every tag from v0.1.0 (MADD-ANO-273).
+    k = 12 graph with no warning, at every tag from v0.1.0 (MADD-ANO-277).
     The rule is by instance and not by parameter names alone, because
     LBMNode writes no wall_mask key for a node built without one.  Audit of
     2026-10-11: the first rule took -0.0 for the default 0.0 and 2 for 2.0
@@ -4126,7 +4126,7 @@ claims:
     Audit of 2026-10-11 (Q9): copy.deepcopy(gm) after a counted node write
     and a later calibration ran, reported and saved the node's value (2.0)
     where the original ran the calibrated one (5.0), on a node on its own,
-    a hybrid and a pointwise wrapper (MADD-ANO-275; never released).
+    a hybrid and a pointwise wrapper (MADD-ANO-279; never released).
   domains:
     f32: tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_copy_runs_and_reports_what_the_original_does
     f64: n/a

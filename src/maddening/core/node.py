@@ -194,7 +194,7 @@ class _ParamsDict(dict):
     leaf calibrated in ``gm.params`` since.  Until 0.4.0 shipped such a copy
     started at zero, and ``copy.deepcopy(gm)`` of a graph with a node write
     in its past and a calibration after it ran the node's value where the
-    original ran the calibrated one, with nothing said (MADD-ANO-275).  The
+    original ran the calibrated one, with nothing said (MADD-ANO-279).  The
     lineage is copied once per copy operation, so mappings that shared one
     still do and share none with the originals.  ``copy.copy(p)`` and
     ``dict(p)`` are another matter: a second mapping beside this one, with

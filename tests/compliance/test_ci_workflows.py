@@ -1030,6 +1030,7 @@ STREAMING_DOCKERFILE = "docker/Dockerfile.streaming-test"
 STREAMING_RUN_OPTIONS = {
     "--rm": "nothing is kept",
     "--network": "must be 'none': the server and the peer need no network",
+    "--cap-drop": "must be ALL: no capability but the one added below",
     "--cap-add": "must be NET_ADMIN, for the entry point's in-container veth pair",
     "-e": "MADDENING_REQUIRE_STREAMING_TESTS=1 only",
     "-v": "the checkout, read-only, at /src",
@@ -1126,7 +1127,7 @@ def test_the_streaming_job_runs_its_container_with_no_network_and_no_device():
     pairs, i = [], 0
     while i < len(options):
         name, _, value = options[i].partition("=")
-        if not value and name in ("--network", "--cap-add", "-e", "-v"):
+        if not value and name in ("--network", "--cap-drop", "--cap-add", "-e", "-v"):
             i += 1
             value = options[i]
         pairs.append((name, value))
@@ -1135,6 +1136,8 @@ def test_the_streaming_job_runs_its_container_with_no_network_and_no_device():
     assert not unknown, f"test-streaming's docker run passes {unknown}: see STREAMING_RUN_OPTIONS"
     assert ("--network", "none") in pairs, f"test-streaming must run --network none: {pairs}"
     assert [v for n, v in pairs if n == "--network"] == ["none"], pairs
+    assert [v for n, v in pairs if n == "--cap-drop"] == ["ALL"], (
+        f"test-streaming must drop every capability Docker grants by default: {pairs}")
     assert [v for n, v in pairs if n == "--cap-add"] == ["NET_ADMIN"], pairs
     assert [v for n, v in pairs if n == "-e"] == ["MADDENING_REQUIRE_STREAMING_TESTS=1"], (
         "without it a missing GStreamer would skip the tests and the job would pass")

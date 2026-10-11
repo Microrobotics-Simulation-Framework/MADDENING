@@ -18,7 +18,7 @@
 # Run the tests against the working tree (mounted read-only over the
 # copy baked into the image, so an edit needs no rebuild):
 #
-#   docker run --rm --network none --cap-add NET_ADMIN \
+#   docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
 #     --cpuset-cpus=0-3 --memory=8g \
 #     -v "$PWD":/src:ro maddening-streaming-test \
 #     python3 -m pytest tests/cloud/test_webrtc_loopback.py \
@@ -26,10 +26,13 @@
 #
 # --network none keeps the container off every network; no STUN or TURN
 # server is contacted, and the cloud entry point the second module runs
-# serves its API and signaling socket on loopback inside the container.  --cap-add NET_ADMIN lets the entry point
-# (docker/streaming-test-entrypoint.sh) add a veth pair inside that
-# network-less container, because libnice never gathers ICE candidates on
-# the loopback interface, which is all --network none leaves.  No GPU is
+# serves its API and signaling socket on loopback inside the container.
+# --cap-add NET_ADMIN (after --cap-drop ALL, the only capability) lets the
+# entry point (docker/streaming-test-entrypoint.sh) add a veth pair inside
+# that network-less container, because libnice never gathers ICE
+# candidates on the loopback interface, which is all --network none
+# leaves; the entry point then runs the tests with every capability set
+# cleared and no_new_privs set (docker/README.md says why).  No GPU is
 # used or needed (x264enc is a software encoder).
 
 FROM ubuntu:24.04
@@ -54,6 +57,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   ugly   x264enc (the encoder SelkiesSession uses)
 #   nice   the ICE transport webrtcbin is built on
 #   libav  avdec_h264 (the peer's decoder)
+# and, for the entry point, iproute2 (`ip`, the test interface) and
+# libcap2-bin (`capsh`, which clears the capabilities before the tests).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
@@ -69,6 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-libav \
         gstreamer1.0-tools \
         iproute2 \
+        libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Third-party Python dependencies first, in their own layer, so an edit
@@ -100,6 +106,6 @@ RUN pip3 install --break-system-packages --no-deps -e /src \
     && python3 -c "import maddening, jax; print('maddening', maddening.__file__, 'jax', jax.__version__)"
 
 # Adds the in-container test interface (see the script), then runs the
-# command given to `docker run`.
+# command given to `docker run` with no capability.
 COPY docker/streaming-test-entrypoint.sh /usr/local/bin/streaming-test-entrypoint
 ENTRYPOINT ["/usr/local/bin/streaming-test-entrypoint"]

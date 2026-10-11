@@ -465,9 +465,12 @@ jobs:
     # selection is held whole by tests/compliance/test_ci_sharding.py), so
     # this is the only job that runs them: inside the image built from
     # docker/Dockerfile.streaming-test, with no network (--network none).
-    # NET_ADMIN lets the image's entry point add a veth pair inside that
-    # network-less container, because libnice never gathers ICE candidates
-    # on the loopback interface, which is all --network none leaves.
+    # NET_ADMIN (the only capability left by --cap-drop ALL) lets the
+    # image's entry point add a veth pair inside that network-less
+    # container, because libnice never gathers ICE candidates on the
+    # loopback interface, which is all --network none leaves; the entry
+    # point then runs pytest with every capability set cleared and
+    # no_new_privs set (docker/README.md says why).
     # MADDENING_REQUIRE_STREAMING_TESTS=1 makes a missing dependency fail
     # the job: a skip here would mean the tests ran nowhere.
     #
@@ -491,7 +494,7 @@ jobs:
       - name: Run the loopback WebRTC tests
         timeout-minutes: 10
         run: |
-          docker run --rm --network none --cap-add NET_ADMIN \
+          docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
             -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
             -v "$PWD":/src:ro maddening-streaming-test:ci \
             python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py -v -rs --tb=short -p no:cacheprovider

@@ -26,7 +26,7 @@ plugins and PyGObject, so it skips outside the
 repository root::
 
     docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
-    docker run --rm --network none --cap-add NET_ADMIN \\
+    docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \\
       --cpuset-cpus=0-3 --memory=8g \\
       -v "$PWD":/src:ro maddening-streaming-test \\
       python3 -m pytest tests/cloud/test_entrypoint_streams.py -q -p no:cacheprovider

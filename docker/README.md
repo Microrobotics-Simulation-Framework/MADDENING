@@ -43,7 +43,7 @@ From the repository root:
 ```sh
 docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
 
-docker run --rm --network none --cap-add NET_ADMIN \
+docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
   --cpuset-cpus=0-3 --memory=8g \
   -v "$PWD":/src:ro maddening-streaming-test \
   python3 -m pytest tests/cloud/test_webrtc_loopback.py \
@@ -60,9 +60,35 @@ so an edit needs no rebuild; rebuild after a dependency changes.
   all `--network none` leaves.  The image's entry point
   (`streaming-test-entrypoint.sh`) adds a veth pair whose two ends stay
   inside the container, with the never-routed address 192.0.2.1, for the
-  session and the peer to meet on.  The capability covers only the
-  container's own network namespace.
+  session and the peer to meet on.
+* The capability is not confined to the container's own network
+  namespace.  The container runs in the host's initial user namespace
+  (`/proc/self/uid_map` reads `0 0 4294967295`), so with NET_ADMIN it
+  reaches the kernel paths that check `capable(CAP_NET_ADMIN)` rather
+  than a capability over its own namespace: nf_tables, and the loading
+  of `rtnl-link-*` and `netdev-*` kernel modules through the host's
+  `/sbin/modprobe` (a link of a kind the host has not loaded yet).  So it
+  is held as briefly as possible: `--cap-drop ALL` leaves NET_ADMIN the
+  only capability, the entry point uses it for the veth pair alone (the
+  veth driver is loaded wherever Docker runs), and then starts the
+  command with every capability set cleared (effective, permitted,
+  inheritable, ambient) and `no_new_privs` set, through `capsh`, so
+  neither the tests nor anything they execute can hold NET_ADMIN again.
+  The bounding set still lists it: removing it from there needs
+  `CAP_SETPCAP`, which `--cap-drop ALL` takes away, and under
+  `no_new_privs` the bounding set grants nothing.
+  `test_webrtc_loopback.py` checks that the test process holds no
+  capability and that a change to the test interface is refused.
 * `--cpuset-cpus` and `--memory` are optional limits.
+
+**Import order.**  In this image a process that imports numpy, then
+initialises GStreamer (`Gst.init`), then imports jax aborts (SIGSEGV or
+SIGABRT, three tries of three); jax first, then GStreamer, runs.
+`SelkiesSession.start()` therefore imports jax before it calls
+`Gst.init` when jax is installed and GStreamer is not initialised yet;
+the cloud entry point and the test modules import jax first anyway.  A
+program that calls `Gst.init` itself must import jax (or
+`maddening.core`) before it.
 
 Set `MADDENING_REQUIRE_STREAMING_TESTS=1` (`-e ...`) to make a missing
 dependency fail the run instead of skipping it, as the `test-streaming`

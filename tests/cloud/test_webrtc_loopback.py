@@ -33,7 +33,7 @@ virtualenv) and runs in the container built from
 from the repository root::
 
     docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
-    docker run --rm --network none --cap-add NET_ADMIN \\
+    docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \\
       --cpuset-cpus=0-3 --memory=8g \\
       -v "$PWD":/src:ro maddening-streaming-test \\
       python3 -m pytest tests/cloud/test_webrtc_loopback.py -q -p no:cacheprovider
@@ -42,7 +42,9 @@ from the repository root::
 (``webrtcbin``'s ICE agent) never gathers candidates on a loopback
 interface, so the image's entry point adds a veth pair that stays inside
 the container (192.0.2.1, a never-routed documentation address) for both
-ends to meet on; that is what ``--cap-add NET_ADMIN`` is for.
+ends to meet on; that is what ``--cap-add NET_ADMIN`` is for, and the
+entry point runs the tests with every capability cleared once the pair
+exists (``test_the_tests_hold_no_capability_and_cannot_change_a_link``).
 ``MADDENING_REQUIRE_STREAMING_TESTS=1`` (set by the CI job) turns a
 missing dependency into a failure instead of a skip, so the one job that
 can run these tests cannot pass by skipping them.
@@ -143,7 +145,9 @@ FRAMES_WANTED = 20
 #: Timeouts for one step each.  Measured in the container on four cores
 #: (GStreamer 1.24.2): the answer arrives about 0.2 s after the offer,
 #: ICE connects about 0.1 s later, and twenty frames are decoded within
-#: 1.5 s; the whole module takes 3 s, its slowest test 0.75 s.  Each
+#: 1.5 s.  The whole module (31 tests) takes 10.4-10.6 s; its slowest
+#: test, 2.8 s, is the SSDP listener's (a fixed 2 s watch after the
+#: frames), the next 1.6-1.9 s (the session in a child process).  Each
 #: limit is many times its step, for a loaded CI runner.
 ANSWER_TIMEOUT_S = 10.0
 ICE_TIMEOUT_S = 15.0
@@ -1087,3 +1091,29 @@ def test_selkies_renderer_streams_what_its_inner_renderer_draws(peers):
     _assert_decoded_the_palette(peer)
     assert inner.torn_down and not session.is_alive()
     assert not _SESSION_THREADS & {t.name for t in threading.enumerate() if t.is_alive()}
+
+
+def test_the_tests_hold_no_capability_and_cannot_change_a_link():
+    """The image's entry point keeps NET_ADMIN for the veth pair alone.
+
+    The container runs with ``--cap-drop ALL --cap-add NET_ADMIN`` in the
+    host's initial user namespace, where NET_ADMIN reaches more than the
+    container's own network namespace (``docker/README.md``).  Once the
+    pair exists, the entry point starts the command with the effective,
+    permitted, inheritable and ambient sets cleared and ``no_new_privs``
+    set, so no ``execve`` can hand a capability back.  Read here from the
+    test process itself, and shown by the kernel refusing a change to the
+    test interface (setting it up again, which changes nothing when it is
+    allowed).
+    """
+    status = dict(line.rstrip("\n").split(":\t", 1)
+                  for line in Path("/proc/self/status").read_text().splitlines() if ":\t" in line)
+    held = {name: status[name].strip() for name in ("CapEff", "CapPrm", "CapInh", "CapAmb")}
+    assert all(int(value, 16) == 0 for value in held.values()), held
+    assert status["NoNewPrivs"].strip() == "1", status["NoNewPrivs"]
+    assert Path("/sys/class/net/maddening1").exists(), (
+        "the image's entry point did not make its test interface")
+    change = subprocess.run(["ip", "link", "set", "dev", "maddening1", "up"],
+                            capture_output=True, text=True, timeout=30)
+    assert change.returncode != 0 and "Operation not permitted" in change.stderr, (
+        change.returncode, change.stderr)

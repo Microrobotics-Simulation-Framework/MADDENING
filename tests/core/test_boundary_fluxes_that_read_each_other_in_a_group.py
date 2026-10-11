@@ -282,8 +282,8 @@ def test_a_chain_whose_seed_the_pass_reads_too_early_is_refused(edges, mode):
     ("jacobi", "fori"), pytest.param("gauss-seidel", "ift", marks=pytest.mark.slow)])
 @pytest.mark.parametrize("way", ["carried", pytest.param("added in order", marks=pytest.mark.slow)])
 def test_each_way_out_of_a_refused_chain_reaches_the_coupled_solution(way, mode, solver):
-    """The flux in a state field, and the nodes added so the chain runs
-    along the sweep (2.3e-7 to 3.7e-7)."""
+    """The flux in a state field (6.7e-8), and the nodes added so the
+    chain runs along the sweep (3.7e-7 Gauss-Seidel, 2.3e-7 Jacobi)."""
     nodes = chain_nodes("cba", cls=Carried) if way == "carried" else chain_nodes("abc")
     gm = built(nodes, SEED_CHAIN, ["a", "b", "c"], mode=mode, solver=solver)
     assert off(gm, exact(nodes, SEED_CHAIN)) < CLOSE

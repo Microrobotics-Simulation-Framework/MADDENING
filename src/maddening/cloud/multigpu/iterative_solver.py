@@ -90,8 +90,11 @@ with AMG / block-Jacobi in v0.4.0+.
 Limits that stay documented rather than fixed: at the bottom of the
 dtype's range the value cannot hold the solution (``Returns`` of
 :func:`sharded_cg`); under ``differentiable=True`` inside a ``shard_map``
-body JAX's ``pvary`` error can be raised (``matvec`` of
-:func:`sharded_cg`); and complex, float16 and bfloat16 right-hand sides
+body a tolerance that is traced (an argument of the body, or closed over
+from an enclosing ``jit``) raises JAX's ``pvary`` error, measured on the
+default and loop backends of :func:`sharded_cg` (a concrete one answers;
+for a preconditioner see its ``matvec``); and complex, float16 and
+bfloat16 right-hand sides
 are not tested (every measurement in these docstrings is float32 or
 float64).
 """

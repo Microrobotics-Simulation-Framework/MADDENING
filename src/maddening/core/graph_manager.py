@@ -1659,17 +1659,20 @@ class GraphManager:
         optimiser may move the leaf)."""
         return _trainable_mask(self._params_or_default(params), self.param_specs())
 
+    @stability(StabilityLevel.EVOLVING)
     def unconstrain(self, params: Optional[dict] = None) -> dict:
         """Map trainable leaves to unconstrained optimiser coordinates
         (``log`` for positive constants, ``logit`` for intervals); other
         leaves pass through.  Inverse of :meth:`constrain`."""
         return _unconstrain(self._params_or_default(params), self.param_specs())
 
+    @stability(StabilityLevel.EVOLVING)
     def constrain(self, u: dict) -> dict:
         """Map optimiser coordinates back to a physical ``params`` pytree
         (also clips bounded identity leaves)."""
         return _constrain(u, self.param_specs())
 
+    @stability(StabilityLevel.EVOLVING)
     def check_params(self, params: Optional[dict] = None) -> None:
         """Raise ``ValueError`` if any leaf is outside its declared bounds
         or the pytree names a node/key the step cannot use."""

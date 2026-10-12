@@ -307,11 +307,6 @@
           "parameters": [],
           "returns": "None"
         },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict"
-        },
         "params": {
           "kind": "property",
           "parameters": [],
@@ -603,11 +598,6 @@
           "kind": "method",
           "parameters": [],
           "returns": "None"
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict"
         },
         "params": {
           "kind": "property",
@@ -926,11 +916,6 @@
           "parameters": [],
           "returns": "UnstructuredPartitionLayout",
           "settable": false
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict"
         },
         "params": {
           "kind": "property",
@@ -1339,43 +1324,15 @@
           "returns": "float",
           "settable": false
         },
-        "check_params": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[dict]",
-              "default": "None",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "params"
-            }
-          ],
-          "returns": "None"
-        },
         "compile": {
           "kind": "method",
           "parameters": [],
           "returns": "None"
         },
-        "constrain": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "dict",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "u"
-            }
-          ],
-          "returns": "dict"
-        },
         "coupling_diagnostics": {
           "kind": "method",
           "parameters": [],
           "returns": "dict[str, dict]"
-        },
-        "coupling_report": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "InspectionTable"
         },
         "edges": {
           "kind": "property",
@@ -1429,18 +1386,6 @@
             }
           ],
           "returns": "None"
-        },
-        "format_graph": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "int",
-              "default": "100",
-              "kind": "KEYWORD_ONLY",
-              "name": "width"
-            }
-          ],
-          "returns": "str"
         },
         "from_dict": {
           "kind": "classmethod",
@@ -1501,11 +1446,6 @@
           ],
           "returns": "None"
         },
-        "memory_estimate": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "InspectionTable"
-        },
         "node_names": {
           "kind": "property",
           "parameters": [],
@@ -1517,26 +1457,11 @@
           "parameters": [],
           "returns": "list[str]"
         },
-        "param_spec_overrides": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict[str, dict[str, ParamSpec]]"
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict"
-        },
         "params": {
           "kind": "property",
           "parameters": [],
           "returns": "dict",
           "settable": true
-        },
-        "params_table": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "InspectionTable"
         },
         "point_resolver": {
           "kind": "method",
@@ -1548,162 +1473,6 @@
             }
           ],
           "returns": "Callable[[dict], Any]"
-        },
-        "print_coupling_report": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[TextIO]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "file"
-            },
-            {
-              "annotation": "int",
-              "default": "100",
-              "kind": "KEYWORD_ONLY",
-              "name": "width"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "rich"
-            }
-          ],
-          "returns": "None"
-        },
-        "print_graph": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[TextIO]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "file"
-            },
-            {
-              "annotation": "int",
-              "default": "100",
-              "kind": "KEYWORD_ONLY",
-              "name": "width"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "rich"
-            }
-          ],
-          "returns": "None"
-        },
-        "print_graph_diagram": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[str]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "theme"
-            },
-            {
-              "annotation": "str",
-              "default": "'LR'",
-              "kind": "KEYWORD_ONLY",
-              "name": "direction"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "use_ascii"
-            },
-            {
-              "annotation": "Optional[TextIO]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "file"
-            }
-          ],
-          "returns": "None"
-        },
-        "print_memory_estimate": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[TextIO]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "file"
-            },
-            {
-              "annotation": "int",
-              "default": "100",
-              "kind": "KEYWORD_ONLY",
-              "name": "width"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "rich"
-            }
-          ],
-          "returns": "None"
-        },
-        "print_params_table": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[TextIO]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "file"
-            },
-            {
-              "annotation": "int",
-              "default": "100",
-              "kind": "KEYWORD_ONLY",
-              "name": "width"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "rich"
-            }
-          ],
-          "returns": "None"
-        },
-        "print_state_summary": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[TextIO]",
-              "default": "None",
-              "kind": "KEYWORD_ONLY",
-              "name": "file"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "include_meta"
-            },
-            {
-              "annotation": "int",
-              "default": "100",
-              "kind": "KEYWORD_ONLY",
-              "name": "width"
-            },
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "rich"
-            }
-          ],
-          "returns": "None"
         },
         "rate_dividers": {
           "kind": "property",
@@ -2050,39 +1819,6 @@
           ],
           "returns": "None"
         },
-        "set_param_spec": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "str",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "node"
-            },
-            {
-              "annotation": "str",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "key"
-            },
-            {
-              "annotation": "ParamSpec",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "spec"
-            }
-          ],
-          "returns": "None"
-        },
-        "state_summary": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "bool",
-              "default": "False",
-              "kind": "KEYWORD_ONLY",
-              "name": "include_meta"
-            }
-          ],
-          "returns": "InspectionTable"
-        },
         "step": {
           "kind": "method",
           "parameters": [
@@ -2119,59 +1855,11 @@
           ],
           "returns": "dict"
         },
-        "to_dot": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "str",
-              "default": "'LR'",
-              "kind": "KEYWORD_ONLY",
-              "name": "rankdir"
-            }
-          ],
-          "returns": "str"
-        },
-        "to_mermaid": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "str",
-              "default": "'LR'",
-              "kind": "KEYWORD_ONLY",
-              "name": "direction"
-            }
-          ],
-          "returns": "str"
-        },
         "trace_count": {
           "kind": "property",
           "parameters": [],
           "returns": "int",
           "settable": false
-        },
-        "trainable_mask": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[dict]",
-              "default": "None",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "params"
-            }
-          ],
-          "returns": "dict"
-        },
-        "unconstrain": {
-          "kind": "method",
-          "parameters": [
-            {
-              "annotation": "Optional[dict]",
-              "default": "None",
-              "kind": "POSITIONAL_OR_KEYWORD",
-              "name": "params"
-            }
-          ],
-          "returns": "dict"
         },
         "validate": {
           "kind": "method",
@@ -2346,11 +2034,6 @@
           "kind": "method",
           "parameters": [],
           "returns": "None"
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict[str, maddening.core.params.ParamSpec]"
         },
         "params": {
           "kind": "property",
@@ -2693,11 +2376,6 @@
           "parameters": [],
           "returns": "None"
         },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict[str, maddening.core.params.ParamSpec]"
-        },
         "params": {
           "kind": "property",
           "parameters": [],
@@ -2992,11 +2670,6 @@
           "kind": "method",
           "parameters": [],
           "returns": "None"
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict[str, maddening.core.params.ParamSpec]"
         },
         "params": {
           "kind": "property",
@@ -3309,11 +2982,6 @@
           "kind": "method",
           "parameters": [],
           "returns": "None"
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict[str, maddening.core.params.ParamSpec]"
         },
         "params": {
           "kind": "property",
@@ -3630,11 +3298,6 @@
           "kind": "method",
           "parameters": [],
           "returns": "None"
-        },
-        "param_specs": {
-          "kind": "method",
-          "parameters": [],
-          "returns": "dict[str, maddening.core.params.ParamSpec]"
         },
         "params": {
           "kind": "property",

@@ -1314,6 +1314,7 @@ class SimulationNode(ABC):
             return False
         return _signature_takes_params(fn)
 
+    @stability(StabilityLevel.EVOLVING)
     def param_specs(self) -> dict[str, ParamSpec]:
         """Per-parameter :class:`ParamSpec` for the leaves of
         :meth:`params_pytree`.

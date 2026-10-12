@@ -131,6 +131,12 @@ def pins_the_built_step(build: Callable) -> Callable:
     return built
 
 
+def _in_force() -> Optional[str]:
+    """The ``jax_default_matmul_precision`` in force here: a context's value
+    inside one (a :func:`pinned` body), else the global setting."""
+    return jax.config.jax_default_matmul_precision
+
+
 def custom_jvp_at_call_precision(
     fun: Callable, rule: Callable, *, nondiff_argnums: tuple = (),
 ) -> Callable:
@@ -162,6 +168,6 @@ def custom_jvp_at_call_precision(
 
     @functools.wraps(fun)
     def call(*args):
-        return derivative(jax.config.jax_default_matmul_precision, *args)
+        return derivative(_in_force(), *args)
 
     return call

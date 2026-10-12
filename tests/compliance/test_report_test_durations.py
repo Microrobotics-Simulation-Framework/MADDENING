@@ -467,9 +467,10 @@ def test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects(gate):
     entries = gate.read_allowlist(ALLOWLIST)
     files = sorted({nodeid.split("::", 1)[0] for nodeid in entries})
     # Not this job's shard (which would deselect other shards' files), nor
-    # this job's timing plugin.
+    # this job's timing and release plugins.
     env = {k: v for k, v in os.environ.items()
-           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
+           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING",
+                         "MADDENING_TEST_RELEASE_BETWEEN_FILES", "PYTEST_ADDOPTS")}
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
@@ -568,7 +569,8 @@ def test_a_report_holding_only_a_collection_error_does_not_pass(gate, tmp_path, 
     (project / "tests" / "test_broken.py").write_text("import a_module_that_does_not_exist\n")
     (project / "tests" / "test_fine.py").write_text("def test_fine():\n    pass\n")
     env = {k: v for k, v in os.environ.items()
-           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
+           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING",
+                         "MADDENING_TEST_RELEASE_BETWEEN_FILES", "PYTEST_ADDOPTS")}
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     proc = subprocess.run([sys.executable, "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider",
                            "--junitxml=broken.xml", "-o", "junit_family=xunit1"],

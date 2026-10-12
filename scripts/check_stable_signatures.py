@@ -22,6 +22,9 @@ The snapshot covers, for each tagged surface:
   *resolves* (inherited members included, because
   ``BallNode().update(...)`` is the promise, not ``BallNode.update``'s
   definition site), restricted to members defined inside ``maddening``.
+  A member tagged with a level of its own other than ``STABLE``
+  (``GraphManager.set_param_spec`` is ``EVOLVING``) promises that level,
+  not the class's, and is not recorded.
 
 Accepting an intended change::
 
@@ -226,6 +229,38 @@ def _owned_by_maddening(value: Any) -> bool:
     return module == "maddening" or module.startswith("maddening.")
 
 
+def _tag_of(static: Any) -> Any:
+    """The ``@stability`` level one class-dict entry carries, or ``None``.
+
+    The tag sits on the function: under ``@property`` it is on ``fget``,
+    and on a ``classmethod`` or ``staticmethod`` it may be on the wrapper or
+    on ``__func__``, depending on which side of it the decorator went.
+    """
+    for candidate in (static, getattr(static, "fget", None),
+                      getattr(static, "__func__", None)):
+        level = getattr(candidate, "_stability_level", None)
+        if level is not None:
+            return level
+    return None
+
+
+def member_level(cls: type, name: str) -> Any:
+    """The level of the nearest definition of ``name`` along ``cls``'s MRO
+    that carries a ``@stability`` tag, or ``None`` when none does.
+
+    An untagged override takes the level of the tagged definition it
+    overrides: ``BallNode.param_specs`` is the ``EVOLVING`` hook
+    ``SimulationNode.param_specs`` declares, not a new ``STABLE`` method.
+    A subclass that wants a different level tags its override.
+    """
+    for klass in inspect.getmro(cls):
+        if name in vars(klass):
+            level = _tag_of(vars(klass)[name])
+            if level is not None:
+                return level
+    return None
+
+
 def class_members(cls: type) -> dict[str, dict[str, Any]]:
     """Public methods and properties the class resolves, as snapshot records.
 
@@ -233,13 +268,24 @@ def class_members(cls: type) -> dict[str, dict[str, Any]]:
     makes is about what an instance answers to, so a change to
     ``SimulationNode.update`` correctly shows up against every tagged node
     that inherits it.
+
+    A member whose own tag (see :func:`member_level`) is not ``STABLE`` is
+    left out: ``GraphManager.set_param_spec`` is ``EVOLVING`` and
+    ``GraphManager.format_graph`` is ``EXPERIMENTAL``, and recording them
+    would promise them as ``STABLE`` against their own tags.  It is the rule
+    :func:`build_snapshot` applies to surfaces: only ``STABLE`` is recorded.
     """
+    from maddening.core.compliance.metadata import StabilityLevel  # noqa: PLC0415
+
     members: dict[str, dict[str, Any]] = {}
     for name in dir(cls):
         if name.startswith("_"):
             continue
         static = inspect.getattr_static(cls, name, None)
         if static is None or not _owned_by_maddening(static):
+            continue
+        level = member_level(cls, name)
+        if level is not None and level is not StabilityLevel.STABLE:
             continue
         if isinstance(static, property):
             if static.fget is None:

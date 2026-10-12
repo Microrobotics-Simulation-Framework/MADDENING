@@ -352,6 +352,8 @@ PER_PUSH = [
         expect=("All demos completed successfully",)),
     Run("coupling.interface_mapping_demo", ("--steps", "20"),
         expect=("All checks passed",)),
+    Run("coupling.sparse_mapping_round_trip_demo", ("--cells", "20000", "--steps", "5"),
+        expect=("states identical: True", "All checks passed")),
     # In-process TestClient: no port, no server process.
     Run("servers.rest_params_demo", ("--steps", "5"), needs=("fastapi", "httpx"),
         expect=("All checks passed",)),
@@ -379,6 +381,9 @@ SLOW = [
      "20 000 coupled heat steps", "--heat-steps 2000"),
     (Run("coupling.flux_coupling_demo", expect=("All demos completed successfully",)),
      "all seven sections, 13 graphs", "--sections 1,2,3"),
+    (Run("coupling.sparse_mapping_round_trip_demo", expect=("All checks passed",)),
+     "rods of 200 000 and 100 000 cells, the sizes its memory figures are for",
+     "coupling.sparse_mapping_round_trip_demo --cells 20000 --steps 5"),
     (Run("servers.lbm_pipe_interactive", ("--frames", "2"), needs=("pyvista",),
          expect=("Rendered 2 frames",)),
      "3-D LBM plus off-screen VTK rendering", "none: needs pyvista, absent in CI"),

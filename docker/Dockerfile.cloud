@@ -53,8 +53,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-gi \
     python3-gi-cairo \
     libgirepository1.0-dev \
-    # Utilities
+    # Utilities.  git: the multi-GPU runner records the commit it ran with
+    # `git rev-parse HEAD`, and the runbook checks the tree is clean with
+    # `git status`; without git every record names no commit, and every
+    # checklist item it would close stays open.
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ─────────────────────────────────────────────

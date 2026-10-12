@@ -547,6 +547,7 @@ Until the runner records those, the session makes them true by procedure:
 ```sh
 cd ~/sky_workdir
 python3 -c "import sys; assert sys.version_info >= (3, 12), sys.version" || echo "python3 older than 3.12: stop (section 3)"
+git rev-parse --verify HEAD || echo "no git, or no git checkout: stop (section 3)"
 nvidia-smi -L                                    # four GPUs, else stop (section 3)
 PIP="python3 -m pip install -q --break-system-packages"
 $PIP "jax[cuda12]==0.11.2" && $PIP -e .          # the JAX CI tests, exactly
@@ -572,6 +573,16 @@ would keep whatever the image carries.  Every command on the pod says
 has no `python` and whose pip refuses to install into it without
 `--break-system-packages` (PEP 668; the Dockerfile passes it too).
 `session.txt` records `python3 --version`.
+
+**Git, on the pod.**  Every result file records the commit
+`git rev-parse HEAD` names, and the summary closes an item only on files
+that record one.  The image installs `git` for that (`docker/Dockerfile.cloud`);
+an image without it (the one built on 2026-10-12 from `46de0bab`, before
+this line, was measured so) records no commit in any file, and its
+`git status --porcelain` prints nothing, so the dirty-tree check above
+would pass and the whole session would close nothing.  The second line of
+the block stops such a pod before the first goal, as it stops a work
+directory synced without `.git`.
 
 **Float32 matrix products.**  On an NVIDIA card JAX computes float32
 matrix products at reduced precision unless told otherwise

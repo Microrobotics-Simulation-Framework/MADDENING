@@ -36,7 +36,10 @@ python -m maddening info        # the versions and devices JAX sees
 - The `[verify]` extra installs only `hypothesis`.
 - The `[terminal]` extra adds `termaid`, for `gm.print_graph_diagram()`.
 - On an NVIDIA GPU, JAX computes float32 matrix products at reduced
-  precision unless you set `JAX_DEFAULT_MATMUL_PRECISION=highest`; see
+  precision by default.  The lattice Boltzmann nodes now pin their own
+  products to full float32, so their GPU results change slightly; for
+  other float32 matrix products (an MLP or FNO surrogate's layers, your
+  own nodes) set `JAX_DEFAULT_MATMUL_PRECISION=highest`.  See
   [Installation](installation.md).
 
 ## Building a graph

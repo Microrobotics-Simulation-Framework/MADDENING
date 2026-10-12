@@ -332,6 +332,11 @@ PER_PUSH = [
     # XLA_FLAGS it inherits.
     Run("advanced.sharding_demo", ("--n-cells", "64", "--steps", "20"),
         expect=("All checks passed",)),
+    # The same device pinning; nearly all of its time is XLA compile (three
+    # sharded graphs and the adjoint of a sharded CG solve), so a smaller
+    # size saves little: listed in tests/duration_allowlist.txt.
+    Run("advanced.unstructured_sharding_demo", ("--n-cells", "256", "--steps", "20"),
+        expect=("All checks passed",)),
     # Skips its packaging / validation stages, saying why, when the C
     # compiler or FMPy is missing; CI has both.
     Run("advanced.fmu_export_demo", ("--steps", "5"), expect=("All checks passed",)),

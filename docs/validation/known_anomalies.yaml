@@ -20413,3 +20413,108 @@ anomalies:
     verification:
       - "tests/cloud/test_entrypoint_feeds_its_stream.py::test_the_logged_config_holds_no_ice_server_credential"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-289"
+    title: "fim and fim_core read the rank from the eigenvalues of F = J^T J, whose rounding a constant or piecewise constant sensitivity aligns: two parameters that enter a residual only through their sum reported rank 2 of 2 and a finite Cramer-Rao bound, with no warning, in float32 and float64 (never released)"
+    description: >
+      For `r_i = (k1 + k2) * u_i - y_i` only `k1 + k2` is identifiable,
+      for any data: the two columns of `J` are proportional and the right
+      report is rank 1 with `crb = +inf` for both parameters.  `fim` and
+      `fim_core` (both new in 0.4.0) decided the rank from the eigenvalues
+      of `F = J.T @ J` as the working precision formed it.  Each entry of
+      `F` is a sum of `m` rounded products; with `u` constant (a steady
+      state) or a step every term of the sum is the same number, so the
+      roundings have one sign, and the entries came back off by up to
+      about `m * eps / 2` relative where the default rank cutoff
+      `max(n, sqrt(m)) * eps` assumed the `sqrt(m)` growth measured on
+      random Jacobians.
+      Measured before the fix (CPU, jax 0.11.0; reproduced from the
+      audit's scripts): on one record of 4000 samples of a steady state,
+      float32, `fim` returned `rank = 2 of 2`, `crb = [0.01167, 0.00802]`,
+      `cond = 2.1e4` and no warning, the deciding eigenvalue ratio at 6.2
+      times the cutoff and the entries of `F` off by 475 `eps` (the cutoff
+      allowed for 63), where the same float32 `J` in float64 has
+      `sigma_2 / sigma_1 = 2.8e-15`.  Over 150 random draws per cell the
+      silent full rank appeared 0 / 10 / 28 / 12 times at
+      `m = 1e3 / 4e3 / 2e4 / 1e5` for a constant input and 5 / 17 / 23 / 7
+      for a step, and a further 10 to 21 draws per cell were full rank
+      with a `PrecisionLimitWarning` whose remedy was a re-run under x64;
+      never for ramp or noise inputs.  With float64 leaves under x64 the
+      silent full rank appeared up to 17 times of 150, so that remedy did
+      not settle it.  `fim_core`, jitted, constant input at `m = 2e4`:
+      rank 2 in 51 of 150 draws, `precision_limited` in 8 of them.
+      Never released: v0.3.0 and v0.3.1 have no `maddening.sysid` (checked
+      with `git log v0.3.1 -- src/maddening/sysid.py`).  Found on
+      2026-10-11 by the whole-tree audit of the release tip.
+      Fixed in 0.4.0: the verdict -- `rank`, `crb`, `cond`, `eigvals` and
+      `eigvecs` -- is read from the singular values of `J`
+      (`lambda_i = sigma_i ** 2`), decomposed in float64 on the host in
+      `fim` and at `J`'s precision on the device in `fim_core`; the stored
+      `F` is the published matrix only.  The cutoff's value is unchanged in
+      `fim`; `_resolve_rank_rtol` carries the proof that an exactly
+      unidentifiable direction is not counted while `J`'s entries are right
+      to about `sqrt(eps)` relative, with no factor of `m`.  In `fim_core`
+      the default cutoff adds the conventional bound on a decomposition at
+      that precision, `max(m, n) * eps`, to half of that allowance, which
+      makes it the larger past about 16,300 rows in float32, and every
+      direction it reads between half of `fim`'s cutoff and twice its own
+      sets `precision_limited`.  A singular value under the float64
+      decomposition's own bound is reported as `0.0` only where it is also
+      under the cutoff in force, so that never changes `rank` or `crb`.
+      After the fix every draw of the three sweeps above is rank 1 with
+      both bounds infinite and no warning.  `fit`, `fit_lm` and
+      `fit_multiple_shooting` were not affected: their guards already read
+      singular values in float64 (measured on a constant-sensitivity pair:
+      each reported the undetermined direction, before and after).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: an identifiability report
+      that calls two parameters separately determined, with a finite
+      variance bound for each, when no data can separate them -- the
+      direction `FIMReport` fails safe against everywhere else.  Not
+      `critical`: it needs sensitivities that are constant or piecewise
+      constant over a record of a thousand rows or more together with an
+      exact degeneracy, it appeared on up to 19% of such draws, and a fit
+      of the same parameters reports the degeneracy through its own
+      guards.  `context_dependent` because what the report is used to
+      decide -- which parameters to fit, which experiment to trust --
+      decides the consequence.
+    affected_components:
+      - "maddening.sysid.fim"
+      - "maddening.sysid.fim_core"
+    affected_versions: "none"
+    workaround: >
+      None is needed on a release: `fim` is new in 0.4.0.  On a
+      development tree before the fix, decompose the Jacobian yourself
+      (`numpy.linalg.svd` of `jax.jacfwd` of the residual, in float64) and
+      read the rank from its singular values.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The stored matrix (`FIMReport.fim`, `FIMCore.fim`) is still the
+      Gram product formed at the working precision, with the aligned
+      rounding described above: a caller who inverts or decomposes it
+      instead of reading `rank` and `crb` meets the defect again (the
+      docstrings and the guide say so).  The guarantee is of the
+      decomposition, not of `J`: sensitivities that leave the model wrong
+      by more than about `sqrt(eps)` relative can still make a missing
+      direction look present.  In `fim_core` the bound on a decomposition
+      at `J`'s precision is the conventional `max(m, n) * eps`, not a
+      theorem about the routine in use; the constant-sensitivity
+      populations measure what it leaves; it is loose on CPU, and the
+      directions it withholds are flagged rather than dropped.  `fim` copies
+      `J` to the host and decomposes a float64 copy (peak memory about 4.5
+      times `J`'s size).  `cond` of a rank-deficient
+      float32 report is now `inf` (exactly proportional columns) or a
+      very large finite number (`2e14` for the spring's scale direction)
+      where the rounding of `F` used to give `inf` or a number near `1e7`
+      at random: read `rank`.
+    verification:
+      - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_in_float32"
+      - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_a_pair_only_its_sum_identifies_is_rank_one_with_float64_leaves"
+      - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_jitted_core_reads_rank_one_for_the_degenerate_pair"
+      - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float32_verdict_changes_at_the_stated_cutoff"
+      - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_report_carries_the_gram_product_and_decides_nothing_from_it"
+      - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_x64_rerun_agrees_with_float32_on_the_audited_record"
+    github_issue: null

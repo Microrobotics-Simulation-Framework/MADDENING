@@ -159,6 +159,15 @@ _CONTINUITY_WEIGHT_WHY = (
 #: which is a far better place to be than the previous structural blind
 #: spot; ``TestPrecisionLimitedRank`` holds the separation from both
 #: sides so that a later edit cannot quietly give it up.
+#:
+#: **Those measurements are of the route the verdict used to take** (the
+#: eigenvalues of a stored ``F``).  ``fim`` reads ``J``'s singular values
+#: in float64 now, whose verdict is sharp at the cutoff to about one part
+#: in a thousand, so the band no longer covers a decomposition's
+#: scatter there: it marks the verdicts close enough to a cutoff the
+#: precision sets for ``J``'s own accuracy to decide them
+#: (:func:`_resolve_rank_rtol`), and in ``fim_core`` the scatter of a
+#: decomposition at ``J``'s precision as well.  The factor is unchanged.
 _PRECISION_WARN_FACTOR = 2.0
 
 
@@ -760,44 +769,59 @@ class FIMReport:
     fail-safe inversion, arriving by a different route.  ``kw_only``
     makes that class of break impossible, here and for the next field.
 
+    ``fim`` is ``F = JᵀJ`` as the working precision forms it.
     ``eigvals`` ascend; ``eigvecs[:, i]`` is the direction for
     ``eigvals[i]`` in the (possibly relatively scaled) parameter space
-    ordered as ``param_names``.
+    ordered as ``param_names``.  They are the eigenpairs of ``JᵀJ``
+    read from ``J`` itself -- its squared singular values and right
+    singular vectors, decomposed in float64 -- and **not** an
+    eigendecomposition of the stored ``fim``: each entry of that matrix
+    is a sum over the ``m`` residual rows, rounded at the working
+    precision, and where the sensitivities are constant or piecewise
+    constant (a steady state, a step) the roundings align and the
+    entries are off by up to ``m * eps / 2`` relative.  The two agree to
+    that rounding; ``rank``, ``crb`` and ``cond`` follow ``eigvals``,
+    so do not decide identifiability by decomposing or inverting ``fim``
+    yourself (MADD-ANO-289: read that way, two parameters that enter a
+    residual only through their sum reported rank 2 of 2 and a finite
+    ``crb``).
 
     ``rank`` counts the directions the data actually resolves: the
     eigenvalues strictly above ``rank_rtol * eigvals[-1]``, where
     ``rank_rtol`` defaults to ``max(n, sqrt(m)) * eps`` for ``n``
-    parameters and ``m`` residual rows at the matrix's own precision.
-    The ``n`` term is the relative form ``numpy.linalg.matrix_rank``
-    uses and bounds ``eigh``; the ``sqrt(m)`` term is the error in
-    forming ``F = J.T @ J`` over ``m`` rows, which ``F`` itself cannot
-    show and which the cutoff ignored before 0.4.0 --
-    :func:`~maddening.sysid._resolve_rank_rtol` has the measurement.
+    parameters and ``m`` residual rows at the parameters' precision.
+    With that default an exactly unidentifiable direction is never
+    counted while ``J``'s entries are right to about ``sqrt(eps)``
+    relative, whatever ``m`` is, and a direction is counted only if it
+    is at least ``sqrt(rank_rtol)`` of the strongest in ``J`` --
+    :func:`~maddening.sysid._resolve_rank_rtol` has the proof, and what
+    it does not cover.
     ``rank < len(param_names)`` says
     the data leaves that many independent parameter combinations
     undetermined.  Unlike ``cond`` the verdict does not move when the
     residual is rescaled (by ``noise_std``, say), because the threshold
-    scales with the matrix; a float32 ``cond`` can flip between a finite
-    number and ``inf`` under exactly that rescaling.  That holds while
+    scales with the matrix.  That holds while
     ``F`` can be formed: once the cutoff ``rank_rtol * max(eigvals)``
     falls below ``2 * m * tiny`` of the precision (``m`` residual rows),
-    the products the smallest directions are built from flush to zero and
-    the verdict moves with the scale -- in float32, a residual of size
-    ``1e-3`` divided by ``noise_std=1e15`` -- and :func:`fim` says so with
+    the products ``F`` is built from flush to zero and the eigenvalues
+    sit where the precision cannot hold them -- in float32, a residual
+    of size ``1e-3`` divided by ``noise_std=1e15`` -- and :func:`fim`
+    says so with
     a :class:`~maddening.warnings.PrecisionLimitWarning` (and
     :class:`FIMCore` with ``precision_limited``) rather than reporting it.
     The same is said when every product flushed and ``F`` came out exactly
     zero although ``J`` has a nonzero entry (``|J|`` below about
-    ``sqrt(tiny)``, ``1e-19`` in float32): the cutoff is then ``0`` and
+    ``sqrt(tiny)``, ``1e-19`` in float32): the report then carries ``F``'s
+    own eigenvalues, all zero, the cutoff is ``0`` and
     ``rank`` reads ``0``, which earlier 0.4.0 development builds reported
     as a fact, with every ``crb`` ``inf`` and no warning (MADD-ANO-176).
 
-    The verdict is a comparison of two numbers, and at float32 it can be
-    a comparison of two numbers that differ by less than the
-    decomposition can resolve.  :func:`fim` says so when that happens --
+    The verdict is a comparison of two numbers, and it can land within
+    a factor of two of a cutoff that the precision itself sets.
+    :func:`fim` says so when that happens --
     a :class:`~maddening.warnings.PrecisionLimitWarning` naming the
     measured ratio, the cutoff and the ``jax_enable_x64`` re-run that
-    settles it -- rather than reporting the coin-flip as a fact.  No
+    settles it -- rather than reporting the close call as a fact.  No
     warning means the deciding ratio was more than
     ``_PRECISION_WARN_FACTOR`` away from the cutoff, not that the
     problem is well conditioned.
@@ -2077,20 +2101,23 @@ def _check_noise_std(sig, original) -> None:
 
 
 def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float], *,
-                       n_residual: Optional[int]) -> float:
+                       n_residual: Optional[int],
+                       decomposed_at: Optional[Any] = None) -> float:
     """The relative eigenvalue cutoff ``rank`` is decided against.
 
-    One definition, used by the rank itself and by the check that asks
-    whether that rank was decided at the noise floor: a warning derived
-    from a *different* cutoff from the one in force would be describing
-    a verdict nobody took.
+    One definition, used by the rank itself, by the check that asks
+    whether that rank was decided at the precision's floor, and by
+    :func:`fit_lm`'s identifiability guard
+    (:func:`_gauss_newton_flatness`): a warning derived from a
+    *different* cutoff from the one in force would be describing a
+    verdict nobody took.
 
     Parameters
     ----------
     dtype
-        Precision of the decomposition; supplies ``eps``.
+        Precision of ``J`` (the parameters'); supplies ``eps``.
     n : int
-        Number of parameters -- the order of ``F``.
+        Number of parameters -- the columns of ``J``.
     rank_rtol : float, optional
         A cutoff the caller stated, which is returned as given (after
         validation).  ``None`` asks for the default derived below.
@@ -2100,68 +2127,142 @@ def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float], *,
         cutoff that silently ignores the residual length; pass ``None``
         where there is genuinely no ``J`` (a bare eigendecomposition),
         which falls back to the ``n``-only form.
+    decomposed_at : dtype, optional
+        The precision the singular values of ``J`` were computed at,
+        where that is ``J``'s own and not float64: :func:`fim_core`, on
+        the device.  ``None`` -- the float64 host decomposition
+        :func:`fim` and the fitters' guard use -- adds nothing.
 
     Notes
     -----
-    The default is ``max(n, sqrt(m)) * eps``.  It is an estimate of the
-    error in the eigenvalues of ``F`` as this module computes them,
-    relative to ``max(eigvals)``, and it has two terms because the
-    computation has two stages.
+    **What the cutoff is applied to.**  The eigenvalues of ``JᵀJ`` taken
+    as the squared singular values of ``J``: ``lambda_i = sigma_i**2``,
+    a direction resolved when ``sigma_i**2 > rtol * sigma_max**2``.  Not
+    the eigenvalues of a stored ``F = J.T @ J`` (:func:`_fim_gram` says
+    what that matrix's rounding does).
 
-    ``eigh`` returns each eigenvalue of a symmetric matrix with an
-    absolute error of order ``p(n) * eps * ||F||``; ``n * eps`` is the
-    conventional stand-in for ``p(n)``, and the relative form
-    ``numpy.linalg.matrix_rank`` uses.
+    **The default** is ``max(n, sqrt(m)) * eps``, at least ``n * eps``.
 
-    Forming ``F = J.T @ J`` costs again, and that cost cannot be seen
-    from ``F``: each entry is an inner product over ``m`` rows, whose
-    rounding error grows with ``m``.  The worst case over summation
-    orders is ``m * eps * sum_k |J_ki J_kj|``, i.e. ``m * eps`` relative
-    to ``max(eigvals)`` -- but that bound requires every rounding to
-    align, and neither XLA's blocked accumulation nor a real Jacobian
-    does that.  Measured on this module's own arithmetic, with an
-    *exactly* rank-deficient ``F`` so that float64 says the answer is
-    zero and anything float32 reports is the floor, the floor grows as
-    ``sqrt(m)`` and not as ``m`` (p99 over 400 draws per cell, worst
-    over spread / clustered / twin-null spectra, in units of ``eps``):
+    **What it guarantees, and the proof.**  Let ``J`` be the exact
+    scaled Jacobian and ``J + E`` the matrix whose singular values are
+    read: ``E`` holds the rounding of the sensitivities as the working
+    precision computed them and the backward error of the
+    decomposition.  Singular values move by at most ``||E||_2`` (Weyl).
+    If a direction is exactly unidentifiable, ``sigma_i(J) = 0``, so
+    ``sigma_i(J + E) <= ||E||_2`` while
+    ``sigma_max(J + E) >= sigma_max(J) - ||E||_2``: with
+    ``e = ||E||_2 / sigma_max(J)`` the ratio read is at most
+    ``e / (1 - e)``, and the direction is **not counted whenever**
+    ``e <= sqrt(rtol) / (1 + sqrt(rtol))``.  Two contributions to ``e``:
 
-    ====  ======  ======  ======  ======  ======  ======
-    n\\m   20      50      320     800     2000    4000
-    ====  ======  ======  ======  ======  ======  ======
-    2     0.75    1.13    2.63    3.88    7.13    9.13
-    3     1.75    1.75    3.00    4.50    6.38    8.74
-    5     2.50    2.50    2.50    2.38    2.50    2.50
-    12    4.50    5.00    4.01    4.50    4.00    3.53
-    25    --      5.72    6.58    6.00    6.50    6.01
-    ====  ======  ======  ======  ======  ======  ======
+    * *The sensitivities.*  If every entry of ``J`` is right to a
+      relative ``delta`` (``|E_ij| <= delta * |J_ij|``), then
+      ``||E||_2 <= ||E||_F <= delta * ||J||_F <= delta * sqrt(n) *
+      sigma_max(J)``.  **No factor of** ``m``: a relative error per
+      entry scales with the Frobenius norm, and nothing on the way to
+      the verdict rounds a sum over the rows at the working precision.
+      That is what the eigenvalues of ``F`` could not offer -- each
+      entry of ``F`` is such a sum, and constant or piecewise constant
+      sensitivities align its roundings (MADD-ANO-289).
+    * *The decomposition*, backward stable (Householder ``R``, then an
+      SVD): ``p(m, n) * eps_d * sigma_max``, ``p`` a low-degree
+      polynomial for which ``max(m, n)`` is the conventional stand-in
+      (``numpy.linalg.matrix_rank``'s tolerance) and ``eps_d`` the
+      precision it ran at.
 
-    A factor of 200 in ``m`` moves the ``n = 2`` floor by 12x, which is
-    ``sqrt(200) = 14`` and not ``200``; and the ``m`` term only overtakes
-    the ``n`` term for small ``n``, which is why ``max`` rather than a
-    sum.  ``sqrt(m)`` is also the textbook statistical model of an
-    accumulated rounding error over ``m`` terms, so this is the expected
-    law rather than a curve fitted to the table.
+    So an exactly unidentifiable direction is never counted while
+    ``delta * sqrt(n) + p * eps_d <= sqrt(rtol) / (1 + sqrt(rtol))``.
+    With the default ``rtol >= n * eps`` and the float64 host
+    decomposition (``p * eps_d`` below ``1e-10`` for any ``J`` that fits
+    in memory) that is ``delta`` up to ``sqrt(eps)`` to within a
+    fraction of a percent: ``3.4e-4`` (2,900 ``eps``) in float32, and
+    ``1.4e-8`` in float64 for ``p`` up to ``1e6``.  A model has to lose
+    half the digits of a sensitivity before a direction that is not in
+    the data is counted, at any ``m`` and for any pattern of rows.
 
-    The ``n``-only form is *below* that floor wherever ``sqrt(m) > n``:
-    at ``n = 2, m = 4000`` the cutoff was 2 eps against a floor of 11
-    eps, so ``fim`` reported directions that were not in the data as
-    resolved, with a finite ``crb``.  Because the new form is a ``max``
-    it can only widen: no problem's cutoff moves down, and every problem
-    with ``m <= n**2`` is unaffected exactly.
+    **What it does not cover.**  ``J`` itself beyond that ``delta``: a
+    sensitivity that came out of the model wrong by more than
+    ``sqrt(eps)`` relative (cancellation, a rollout that amplifies its
+    own rounding) is a wrong input to this function, and no cutoff on a
+    decomposition sees it.  A ``J`` that is not the derivative of the
+    data's dependence at all (:func:`fim`'s condition on jumps).  And
+    the stored ``F``, whose eigenvalues are not what is reported.
 
-    ``max(n, m) * eps`` -- the worst-case bound taken literally -- was
-    considered and rejected by the same measurement.  It is 1315x the
-    observed floor at its loosest, and over the sweep it rejects 45% of
-    the directions that float32 and float64 *agree* are resolved, up to
-    a true eigenvalue ratio of 2.4e-04, four decades above the floor.  A
-    rank cutoff that discards four decades of real resolution is not a
-    more careful answer, it is a different and wronger one.
+    **Why of order** ``eps`` **when the singular values resolve**
+    ``eps**2``.  The margin is the allowance for ``delta`` above: a
+    cutoff at the decomposition's own floor would count a direction on
+    the strength of sensitivities accurate to the last bit, which no
+    rollout delivers.  Its value is the one the cutoff had while the
+    verdict read ``F``'s eigenvalues (``n * eps`` for ``eigh``, and
+    ``sqrt(m) * eps`` for the measured growth of ``F``'s rounding on
+    *random* Jacobians -- 9 ``eps`` at ``n = 2, m = 4000`` -- which a
+    constant sensitivity exceeds fifty-fold), kept so that no verdict
+    moves except those that route's rounding decided, so that the
+    matrix the report carries does resolve what the report counts
+    (``F``'s own entries are good to that order away from aligned
+    rows), and because :func:`fit_lm`'s guard reads the same number.
+    Because it is a ``max`` it only widens ``n * eps``, and every
+    problem with ``m <= n**2`` has exactly that.
+
+    **The device decomposition** (``decomposed_at``).  There ``eps_d``
+    is ``J``'s own ``eps`` and ``p * eps_d`` is no longer negligible, so
+    the cutoff has to carry it on top of an allowance for ``delta``.
+    Write ``t(r) = sqrt(r) / (1 + sqrt(r))`` (the right-hand side of the
+    condition above, increasing in ``r``), ``r_h`` for the default
+    above and ``d = max(m, n) * eps_d``.  The device default is the
+    ``r`` with ``t(r) = t(r_h) / 2 + d``, or ``r_h`` where that is
+    larger::
+
+        r_dev = max(r_h, (q / (1 - q))**2),   q = t(r_h) / 2 + d
+
+    and ``1.0`` -- nothing resolved -- once ``q >= 1/2`` (``t(1)``).
+    **Proof** that an exactly unidentifiable direction is still never
+    counted while ``delta * sqrt(n) <= t(r_h) / 2``: where the second
+    term is in force, ``t(r_dev) = q``, and the condition
+    ``delta * sqrt(n) + d <= q`` is that inequality exactly; where
+    ``r_h`` is in force, ``t(r_h) >= q`` gives
+    ``t(r_h) - d >= t(r_h) / 2``, the same inequality again.  So the
+    device route allows the sensitivities half the error ``fim``'s
+    allows (``t(r_h)``, a little under ``sqrt(r_h)``) at every ``m``.
+    ``r_dev`` equals ``r_h`` below about ``(4 * eps)**(-2/3)`` rows
+    (16,300 in float32 at ``n = 2``; 1.1e10 in float64), is 2.3 times
+    it at 41,286 float32 rows, 6.1 times at 100,000 and 0.020 at a
+    million, and is ``1.0`` from 4.1 million float32 rows, where the
+    conventional bound on a float32 decomposition is half of
+    ``sigma_max``.
+    ``p = max(m, n)`` is a convention about a backward-stable SVD, not
+    a theorem about a particular routine, and it is loose on CPU: on an
+    exactly rank-one float32 ``J`` of a million constant rows the
+    device decomposition left a ratio of ``2e-12``, against ``r_dev``
+    of ``0.020``.  It is kept because a cutoff fitted to one backend's
+    summation order would not cover another's -- the inner products a
+    Householder decomposition takes over constant rows are the aligned
+    sums that put ``F`` off by up to ``m * eps / 2`` (MADD-ANO-289), and
+    how much of that survives depends on the order the backend sums in
+    -- and because the cost of the margin is not silent:
+    :class:`FIMCore` flags every direction it reads from ``r_h / 2`` to
+    ``2 * r_dev`` as ``precision_limited``.
     """
     if rank_rtol is None:
+        eps = float(np.finfo(dtype).eps)
         floor = float(n)
         if n_residual is not None:
             floor = max(floor, math.sqrt(float(n_residual)))
-        return floor * float(np.finfo(dtype).eps)
+        cutoff = floor * eps
+        if decomposed_at is not None:
+            # The Notes' proof: half of the host route's allowance for the
+            # sensitivities plus the decomposition's conventional bound,
+            # on the scale t(r) = sqrt(r) / (1 + sqrt(r)).
+            root = math.sqrt(cutoff)
+            longest = float(max(int(n), int(n_residual or 0)))
+            q = (root / (1.0 + root) / 2.0
+                 + longest * float(np.finfo(decomposed_at).eps))
+            if q >= 0.5:
+                # t(1) = 1/2: no cutoff under 1 meets it, and a cutoff of
+                # 1 resolves nothing.
+                return 1.0
+            cutoff = max(cutoff, (q / (1.0 - q)) ** 2)
+        return cutoff
     rank_rtol = float(rank_rtol)
     if not np.isfinite(rank_rtol) or rank_rtol < 0.0:
         raise ValueError(
@@ -2199,15 +2300,14 @@ def _precision_limited(eigvals, rank_rtol: float, eps_floor: float,
     have a different one sitting on it.
 
     A ratio that is zero or negative is deliberately **not** reported.
-    A non-positive eigenvalue of a PSD matrix is unambiguously rounding,
-    but it is also what an exactly rank-deficient Fisher matrix produces
-    -- ``scale="relative"`` with a parameter at ``0.0`` is the common
-    case, and :attr:`FIMReport.zero_scaled` already explains it.
-    Warning there fires on 100% of exact zero-column reports and ~65% of
-    exactly-dependent ones (measured), for a verdict float64 agrees
-    with; that is the routine firing that gets a warning suppressed.
-    The cost is the 1% of precision-limited verdicts whose smallest
-    eigenvalue came back non-positive, which stay silent.
+    The eigenvalues are squared singular values of ``J``, so none is
+    negative, and a zero is an exact deficiency the report already
+    explains: a column that is exactly zero (``scale="relative"`` with a
+    parameter at ``0.0``, named in :attr:`FIMReport.zero_scaled`), a
+    singular value :func:`_jacobian_spectrum` snapped (only ever under
+    the cutoff in force), or an ``F`` flushed to zero
+    (:func:`_range_limited` flags that one).  None is a close call, and
+    warning there would fire on every exact zero column.
     """
     ev = np.asarray(eigvals, dtype=np.float64)
     hi = float(ev[-1]) if ev.size else 0.0
@@ -2234,17 +2334,24 @@ def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float], *,
     Parameters
     ----------
     eigvals, eigvecs : array
-        Ascending eigenvalues and their orthonormal columns, as
-        ``jnp.linalg.eigh`` returns them for the symmetric PSD ``F``.
+        Ascending eigenvalues of ``JᵀJ`` and their orthonormal columns.
+        :func:`fim` passes the squared singular values of ``J`` and its
+        right singular vectors (:func:`_jacobian_spectrum`).  **A caller
+        holding only** ``F`` **-- an** ``eigh`` **of a matrix formed at
+        the working precision -- is not covered by the default
+        cutoff**: such eigenvalues carry the rounding of a sum over
+        ``m`` rows, which reaches ``m * eps / 2`` of the largest when
+        the terms align (MADD-ANO-289), so it has to pass a
+        ``rank_rtol`` of at least ``max(n, m) * eps`` itself.  Nothing
+        in this module is such a caller.
     rank_rtol : float, optional
         Eigenvalues at or below ``rank_rtol * eigvals[-1]`` count as
         zero.  ``None`` uses ``max(n, sqrt(m)) * eps`` at the matrix's
         own precision -- see :func:`_resolve_rank_rtol`.
     n_residual : int, optional
-        Number of residual rows ``m`` that ``F = J.T @ J`` was summed
-        over, when it is known.  ``None`` -- the default, for a caller
-        holding only a decomposition -- drops the ``sqrt(m)`` term and
-        so understates the cutoff for a long residual.  :func:`fim`
+        Number of residual rows ``m`` of ``J``, when it is known.
+        ``None`` -- the default, for a caller holding only a
+        decomposition -- drops the ``sqrt(m)`` term.  :func:`fim`
         always passes it.
 
     Notes
@@ -2252,24 +2359,15 @@ def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float], *,
     Two thresholds are involved and they measure different things.
 
     The first is on the eigenvalues and decides which *directions* the
-    data resolves.  It has to be relative to the largest eigenvalue:
-    ``eigh`` returns each eigenvalue with an absolute error of order
-    ``eps * ||F||``, so anything below that is noise whatever units the
-    residual carries -- it can even come back negative, as the spring's
-    ``(stiffness, damping, mass)`` scale direction does.  ``n * eps`` is
-    the form ``numpy.linalg.matrix_rank`` uses (``max(shape) * eps``,
-    and ``F`` is square); ``sqrt(m) * eps`` is the part of the floor
-    ``F`` itself cannot show, contributed by summing ``m`` residual rows
-    into each entry, and :func:`_resolve_rank_rtol` explains why it is
-    ``sqrt(m)`` and not ``m``.  The cutoff sits at ``eps`` rather than
-    ``sqrt(eps)`` because ``F = JᵀJ`` has already squared the
-    conditioning of ``J``: a direction below ``sqrt(eps)`` in ``J`` is
-    below ``eps`` here, and forming ``F`` is what lost it.  Being
-    relative is also what keeps ``rank`` steady where ``cond`` is not --
-    dividing the residual by a large ``noise_std`` can round the
-    smallest eigenvalue of a float32 matrix to exactly zero and send
-    ``cond`` to ``inf``, but it moves the eigenvalue and the threshold
-    together.
+    data resolves.  It has to be relative to the largest eigenvalue, so
+    that it moves with the residual's units and with ``noise_std``
+    (dividing the residual by a large ``noise_std`` moves the eigenvalue
+    and the threshold together, which is what keeps ``rank`` steady
+    where ``cond`` is not).  :func:`_resolve_rank_rtol` says what the
+    default guarantees and why it is of order ``eps`` although the
+    singular values resolve to ``eps`` of the largest, i.e. ``eps**2``
+    here: the margin between the two is what ``J``'s own errors are
+    allowed.
 
     The second is on the null-space projector ``P = V₀ V₀ᵀ`` and decides
     which *parameters* those unresolved directions spoil.  The bound on
@@ -2358,16 +2456,28 @@ class FIMCore:
     ``zero_scaled`` -- all live in :func:`fim`, which is the reporting
     path and is unchanged.
 
-    **The arithmetic runs at the matrix's own precision.**
-    :func:`fim`'s ``rank``/``crb``/precision-band verdicts widen the
-    eigendecomposition to float64 on the host first; these are computed
-    in float32 (or whatever ``F`` is) on the device, because widening
-    would mean a transfer and JAX has no float64 without the global
-    ``jax_enable_x64``.  The rule applied is identical and the two agree
-    on ``rank`` and on which ``crb`` entries are ``+inf`` over the
-    tested spread; the finite ``crb`` values differ in the last bits,
-    and a verdict close enough to the cutoff for the two to disagree is
-    exactly the one ``precision_limited`` is there to flag.
+    **The arithmetic runs at the Jacobian's own precision.**
+    :func:`fim` decomposes ``J`` in float64 on the host; here the same
+    decomposition (``J``'s singular values, never the eigenvalues of
+    ``F``) runs in float32 (or whatever ``J`` is) on the device, because
+    widening would mean a transfer and JAX has no float64 without the
+    global ``jax_enable_x64``.  The rule applied is identical, with one
+    stated difference in the default cutoff: singular values computed at
+    ``J``'s precision carry that decomposition's rounding, conventionally
+    bounded by ``max(m, n) * eps`` of the largest, and the default here
+    adds that bound to half of :func:`fim`'s allowance for the
+    sensitivities (:func:`_resolve_rank_rtol` has the formula and the
+    proof).  It equals :func:`fim`'s below about 16,300 rows in float32
+    (1.1e10 in float64), is 6.1 times it at 100,000 rows and 0.020 at a
+    million, and resolves nothing from 4.1 million float32 rows.
+    **Every ratio this route reads between the two cutoffs** (from half
+    of :func:`fim`'s to twice this one) **sets** ``precision_limited``:
+    those are the directions :func:`fim` counts, or warns about, and
+    this route does not count, so the margin is never a silent
+    withdrawal -- a gate reads "verdict unavailable" there and
+    :func:`fim` settles it.  Elsewhere the two agree on ``rank`` and on
+    which ``crb`` entries are ``+inf`` over the tested spread; the
+    finite ``crb`` values differ in the last bits.
 
     ``crb`` keeps :func:`fim`'s fail-closed polarity: ``+inf`` unless
     finiteness was *positively* established, so ``crb < tol`` reads
@@ -2379,15 +2489,24 @@ class FIMCore:
     fim : jnp.ndarray
         ``F = Jᵀ Σ⁻¹ J``, shape ``(n, n)``.
     eigvals, eigvecs : jnp.ndarray
-        Ascending eigenvalues and their orthonormal columns.
+        Ascending eigenvalues and their orthonormal columns: the squared
+        singular values of ``J`` and its right singular vectors.
     rank : jnp.ndarray
         0-d ``int32``: directions resolved above ``rank_rtol``.
     cond : jnp.ndarray
         0-d float: ``eigvals[-1] / eigvals[0]``, ``+inf`` when the
         smallest eigenvalue is not positive -- including when it is
-        ``NaN``, where :attr:`FIMReport.cond` reports ``NaN``.  ``inf``
-        is the fail-closed reading and this is the gating path; the
-        reporting path keeps the number it has always published.
+        ``NaN``, where :attr:`FIMReport.cond` reports ``NaN``.  **Not a
+        verdict, and rarely** ``inf`` **for an unidentifiable
+        direction:** this route does not snap (:func:`fim` reports an
+        exactly dependent pair's eigenvalue as ``0.0``), so such a pair
+        reads the device decomposition's rounding, a finite ``cond``
+        (from ``9.9e10`` to ``1.9e17`` measured in float32 on constant
+        and step inputs at 1,000 and 20,000 rows, ``inf`` in none of 160
+        draws), while ``rank`` and ``crb`` were right in every one.
+        Gate on ``rank``, ``crb`` and ``precision_limited``; ``inf``
+        here only ever means a smallest eigenvalue that is exactly zero,
+        negative or ``NaN``.
     crb : jnp.ndarray
         Cramér–Rao bound per parameter, ``(n,)``.
     finite : jnp.ndarray
@@ -2404,7 +2523,9 @@ class FIMCore:
         formed in (:func:`_range_limited`), which includes an ``F`` that
         flushed to exactly zero from a ``J`` that is not -- the
         conditions :func:`fim` turns into a
-        :class:`~maddening.warnings.PrecisionLimitWarning`.
+        :class:`~maddening.warnings.PrecisionLimitWarning` -- or, under
+        the default cutoff, a direction lies between :func:`fim`'s
+        cutoff and this route's larger one (see above).
         A live gate should read it as a third outcome, "verdict
         unavailable", rather than as a refusal.
     deciding_ratio : jnp.ndarray
@@ -2501,9 +2622,21 @@ def _device_rank_crb(eigvals, eigvecs, rank_rtol: float, n: int):
 
 
 def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
-                              factor: float = _PRECISION_WARN_FACTOR):
+                              factor: float = _PRECISION_WARN_FACTOR, *,
+                              band_from: Optional[float] = None):
     """``(limited, deciding ratio)`` on the device, by
-    :func:`_precision_limited`'s rule.
+    :func:`_precision_limited`'s rule -- and, given ``band_from``, for
+    every ratio between the two routes' cutoffs as well.
+
+    ``band_from`` is :func:`fim`'s cutoff, passed where
+    :func:`fim_core`'s default is the larger
+    (:func:`_resolve_rank_rtol`'s ``decomposed_at``): every positive
+    ratio from ``band_from / factor`` to ``rank_rtol * factor`` is then
+    flagged too.  That covers each direction :func:`fim` would count or
+    warn about and this route does not count, and this route's own
+    band.  The deciding ratio is then the flagged one nearest
+    ``rank_rtol`` in log distance, unless :func:`_precision_limited`'s
+    rule fired, whose ratio is kept.
 
     Both of its conditions and both of its refusals survive: the ratio
     must be within ``factor`` of the cutoff *and* at the precision
@@ -2545,6 +2678,12 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
                & (rank_rtol / factor <= deciding)
                & (deciding <= rank_rtol * factor)
                & (deciding <= factor * eps_floor))
+    if band_from is not None:
+        between = (pos & (band_from / factor <= ratios)
+                   & (ratios <= rank_rtol * factor))
+        nearest = ratios[jnp.argmin(jnp.where(between, distance, jnp.inf))]
+        deciding = jnp.where(limited, deciding, nearest)
+        limited = limited | (usable & jnp.any(between))
     return limited, jnp.where(limited, deciding, zero)
 
 
@@ -2791,20 +2930,19 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
     Split out so that :func:`fim` can jit *this* -- under
     ``reuse_trace=True``, the only case where a compiled Jacobian is kept
     between calls and so the only case where compiling it pays -- and
-    leave the rest eager.  That is not squeamishness: ``J`` is bit-for-bit the same
+    leave the rest eager.  ``J`` is bit-for-bit the same
     jitted or not, but ``F = J.T @ J`` is not -- ``jax.jit`` folds the
     transpose into the dot's dimension numbers instead of materialising
     it, which accumulates in a different order and moves ``F`` by up to
-    a float32 ulp.  That is inside the ``max(n, sqrt(m)) * eps`` floor
-    this module declares its answers are good to, and it still moves
-    published verdicts, because ``rank`` and ``cond`` are decided by
-    comparisons *at* that floor: measured over this module's own test
-    problems, the spring's ``(k, c, m)`` scale direction -- whose
-    smallest eigenvalue is a rounding artefact either side of zero --
-    moved ``cond`` from ``inf`` to ``3.45e+07``, and a Fisher matrix
-    built with its smallest eigenvalue ratio *on* the cutoff moved
-    ``rank`` from 3 to 2.  :func:`fim` is the reporting path and its
-    numbers do not move; :func:`fim_core` jits the lot and says so.
+    a float32 ulp.  While the verdicts were read from ``F``'s
+    eigenvalues that ulp moved published ones (the spring's
+    ``(k, c, m)`` scale direction went from ``cond = inf`` to
+    ``3.45e+07``, an on-cutoff matrix from rank 3 to 2); they are read
+    from ``J``'s singular values now (:func:`_jacobian_spectrum`), which
+    do not depend on how the product is scheduled, and what the eager
+    product keeps is the published matrix itself.  :func:`fim` is the
+    reporting path and its ``F`` does not move; :func:`fim_core` jits
+    the lot and says so.
     """
     leaves, treedef = jax.tree.flatten(params)
     keep = [_is_differentiable(leaf) for leaf in leaves]
@@ -2854,21 +2992,108 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
     return J, zero_scaled
 
 
-def _fim_spectrum(J):
-    """``(F, all-finite, eigvals, eigvecs)`` from the scaled Jacobian.
+def _fim_gram(J):
+    """``(F, all-finite, any-nonzero)`` from the scaled Jacobian.
 
-    One definition, run two ways: eagerly by :func:`fim`, where it is
-    the same three operations in the same order that function has
-    always performed, and inside the trace by :func:`fim_core`.
-    ``eigh`` is evaluated before the finiteness of ``F`` is known
-    because a traced computation cannot branch on it; on a non-finite
-    ``F`` it returns ``NaN`` eigenvalues and eigenvectors rather than
-    raising, which is what :func:`fim` then refuses to build a report
-    from.
+    ``F = J.T @ J`` is the matrix the reports carry.  It is **not** what
+    ``rank``, ``crb``, ``cond``, ``eigvals`` or ``eigvecs`` are read
+    from (:func:`_jacobian_spectrum`): each entry is a sum of ``m``
+    rounded products, and where the sensitivities are constant or
+    piecewise constant every rounding has one sign, so the entries are
+    off by up to ``m * eps / 2`` relative -- measured 475 ``eps`` at
+    ``m = 4000`` in float32 -- which is enough to give an exactly
+    unidentifiable pair a second eigenvalue six times the rank cutoff
+    (MADD-ANO-289).  The two flags are the ones the reports need from
+    it: a non-finite ``F`` (:func:`fim` raises, :class:`FIMCore` says
+    ``finite``) and an ``F`` flushed to exactly zero
+    (:func:`_range_limited`).
     """
     F = J.T @ J
-    eigvals, eigvecs = jnp.linalg.eigh(F)
-    return F, jnp.all(jnp.isfinite(F)), eigvals, eigvecs
+    return F, jnp.all(jnp.isfinite(F)), jnp.any(F != 0.0)
+
+
+def _jacobian_spectrum(J, *, cutoff: float, gram_is_zero: bool = False):
+    """``(eigvals, eigvecs)`` of ``JᵀJ`` from the singular values of ``J``.
+
+    The verdict's decomposition in :func:`fim`: on the host, in float64,
+    of the Jacobian as the working precision computed it.  ``J = U S Vᵀ``
+    gives ``JᵀJ = V S² Vᵀ`` exactly, so the eigenvalues are ``S**2`` and
+    the eigenvectors the right singular vectors; they are returned
+    ascending, as ``eigh`` orders them, and at ``J``'s precision, which
+    is the report's.  Nothing on this route sums over the ``m`` rows at
+    the working precision, which is the point
+    (:func:`_resolve_rank_rtol` has the bound this buys).
+
+    ``R`` first (Householder, backward stable), then the SVD of the
+    ``n x n`` factor: the singular values are ``J``'s, and no ``m x n``
+    ``U`` is formed.  A ``J`` with fewer rows than columns is padded with
+    zero rows, which changes neither ``JᵀJ`` nor the singular values and
+    gives the ``n - m`` directions no row reads the eigenvalue ``0`` they
+    have.
+
+    **The snap.**  A singular value at or under ``max(m, n) * n * eps64``
+    of the largest -- the float64 decomposition's own bound, in the form
+    Householder's backward error takes (``gamma_mn``, twice over), ``n``
+    times ``numpy.linalg.matrix_rank``'s tolerance -- cannot be told
+    from zero by this decomposition, and is reported as zero: two
+    columns that are exactly proportional give an eigenvalue of exactly
+    ``0.0`` and a ``cond`` of ``inf``, not ``1e-31`` and ``1e31``.  It
+    is applied **only under the cutoff in force** (``cutoff``, the
+    resolved ``rank_rtol``): at most ``sqrt(cutoff) / 2`` of the
+    largest, so a snapped value is one the verdict already calls zero
+    by a factor of four in the eigenvalue, after the cast to ``J``'s
+    precision too.  It therefore changes ``eigvals`` and ``cond`` and
+    never ``rank`` or ``crb``, and it never contradicts a caller's
+    cutoff: ``rank_rtol=0.0`` resolves every positive singular value,
+    including a real one at ``1e-12`` of the largest that the bound
+    alone would have zeroed.  Under the default it can also reach
+    values that are real: two float32 columns that differ by one
+    rounding in one entry have a ratio of
+    ``eps32 / (2 sqrt(m))`` (measured ``1.88e-10`` at 100,000 rows, over
+    the bound's ``4.4e-11`` there, so reported as computed); the bound
+    grows as ``m * n`` and passes that ratio near 260,000 rows at
+    ``n = 2``, past which such a pair reads ``0.0`` -- unresolved either
+    way, since the snap stays under the cutoff.
+
+    ``gram_is_zero`` -- ``F = J.T @ J`` came out exactly zero at the
+    working precision -- returns ``F``'s own eigenvalues, all zero: a
+    report says no more than the matrix it carries, and
+    :func:`_range_limited` flags the case where ``J`` is not zero.
+    """
+    dtype = np.asarray(J).dtype
+    Jd = np.asarray(J, dtype=np.float64)
+    m, n = Jd.shape
+    if m < n:
+        Jd = np.concatenate([Jd, np.zeros((n - m, n))], axis=0)
+    _, s, vt = np.linalg.svd(np.linalg.qr(Jd, mode="r"))
+    bound = max(m, n) * n * float(np.finfo(np.float64).eps)
+    snap = min(bound, math.sqrt(cutoff) / 2.0)
+    s = np.where(s > snap * s[0], s, np.zeros_like(s))
+    lam = np.zeros(n) if gram_is_zero else (s * s)[::-1]
+    # A largest eigenvalue past the precision's range is ``inf`` here and
+    # :func:`fim` refuses it; the cast is not what should say so.
+    with np.errstate(over="ignore"):
+        return (lam.astype(dtype),
+                np.ascontiguousarray(vt[::-1].T).astype(dtype))
+
+
+def _device_jacobian_spectrum(J):
+    """:func:`_jacobian_spectrum` on the device, at ``J``'s own precision.
+
+    The same decomposition -- ``R``, then its singular values -- with the
+    one difference :class:`FIMCore` states: there is no float64 here
+    without the global ``jax_enable_x64``, so the singular values carry
+    the decomposition's rounding at ``J``'s precision, which
+    :func:`_resolve_rank_rtol` accounts for (``decomposed_at``).
+    """
+    m, n = J.shape
+    if m < n:
+        J = jnp.concatenate([J, jnp.zeros((n - m, n), dtype=J.dtype)], axis=0)
+    # ``lax.linalg.qr`` for its return type, always ``(q, r)``; under
+    # ``jit`` the unused ``q`` is never formed.
+    _, r = jax.lax.linalg.qr(J, full_matrices=False)
+    _, s, vt = jnp.linalg.svd(r, full_matrices=False)
+    return (s * s)[::-1], vt[::-1].T
 
 
 def _value_scaled_names(nominal) -> tuple[str, ...]:
@@ -2884,7 +3109,13 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
     """The whole of :func:`fim`'s computation, with nothing read back."""
     J, zero_scaled = _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
                                    inv_sigma=inv_sigma, nominal=nominal)
-    F, finite, eigvals, eigvecs = _fim_spectrum(J)
+    F, finite, gram_nonzero = _fim_gram(J)
+    # The verdict's one decomposition: the singular values of ``J``, never
+    # the eigenvalues of ``F`` (:func:`_device_jacobian_spectrum`).  An
+    # ``F`` flushed to exactly zero from a ``J`` that is not is reported
+    # with ``F``'s own spectrum, all zero, and flagged below.
+    eigvals, eigvecs = _device_jacobian_spectrum(J)
+    eigvals = jnp.where(gram_nonzero, eigvals, jnp.zeros_like(eigvals))
     lo, hi = eigvals[0], eigvals[-1]
     # ``lo > 0`` rather than ``not (lo <= 0)``, so a ``NaN`` smallest
     # eigenvalue reads ``inf`` -- singular -- and not ``NaN``, and the
@@ -2897,23 +3128,34 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
     names = _param_names(params, differentiable_only=True)
     if idx is not None:
         names = tuple(names[i] for i in idx)
-    # The residual length ``J`` was summed over.  ``_r`` ravels its output,
-    # so this is the flattened residual row count whatever pytree shape
-    # ``residual_fn`` returns, and it is the only place ``m`` is visible:
-    # ``F`` and its decomposition have already discarded it.
+    # The residual length: ``_r`` ravels its output, so this is the
+    # flattened residual row count whatever pytree shape ``residual_fn``
+    # returns.
     n_residual = int(J.shape[0])
     n_params = int(eigvals.shape[0])
+    # ``decomposed_at``: the singular values were computed at ``J``'s own
+    # precision here, so the cutoff is never under the square of that
+    # decomposition's classical bound (:func:`_resolve_rank_rtol`).
     rtol = _resolve_rank_rtol(eigvals.dtype, n_params, rank_rtol,
-                              n_residual=n_residual)
+                              n_residual=n_residual,
+                              decomposed_at=eigvals.dtype)
     # The precision floor the band is anchored to is the *default*
-    # cutoff, which is what "the resolution of this arithmetic" means.
+    # cutoff, which is what "the resolution of this precision" means.
     # It has to move with the cutoff: anchoring to the n-only form
     # would re-impose the blind spot the sqrt(m) term removes, on the
     # warning if no longer on the rank.
     floor = _resolve_rank_rtol(eigvals.dtype, n_params, None,
-                               n_residual=n_residual)
+                               n_residual=n_residual,
+                               decomposed_at=eigvals.dtype)
     rank, crb = _device_rank_crb(eigvals, eigvecs, rtol, n_params)
-    limited, ratio = _device_precision_limited(eigvals, rtol, floor)
+    # Under the default, every ratio between ``fim``'s cutoff and this
+    # one is a direction the two routes may disagree on, and is flagged:
+    # the margin the device term adds is never a silent withdrawal.
+    host = (_resolve_rank_rtol(eigvals.dtype, n_params, None,
+                               n_residual=n_residual)
+            if rank_rtol is None else None)
+    limited, ratio = _device_precision_limited(eigvals, rtol, floor,
+                                               band_from=host)
     # A cutoff below the range ``F`` can be formed in (:func:`_range_limited`)
     # leaves the verdict as unavailable as one at the noise floor -- and so
     # does an ``F`` flushed to exactly zero from a ``J`` that is not.
@@ -3258,25 +3500,40 @@ def fim(
         Relative tolerance deciding which directions the data resolves:
         an eigenvalue at or below ``rank_rtol * max(eigvals)`` counts as
         zero, and the parameters with support in the directions it
-        rejects get an infinite ``crb``.  The default is
-        ``max(n, sqrt(m)) * eps`` for ``n`` parameters and ``m`` residual
-        rows at the matrix's precision: the point below which this
-        function is reporting its own rounding error, counting both
-        stages that produce it -- ``eigh``'s ``n * eps`` (the relative
-        form ``numpy.linalg.matrix_rank`` uses) and the ``sqrt(m) * eps``
-        of forming ``F = J.T @ J`` over ``m`` rows.  Raise it to declare
-        a merely ill-conditioned direction unidentifiable too.
+        rejects get an infinite ``crb``.  The eigenvalues are those of
+        ``JᵀJ`` taken as the **squared singular values of** ``J``
+        (decomposed in float64 on the host), not the eigenvalues of the
+        ``F`` this function also returns: forming ``F`` rounds a sum
+        over ``m`` rows, and that rounding does not average out when the
+        sensitivities are constant or piecewise constant.  The default
+        is ``max(n, sqrt(m)) * eps`` for ``n`` parameters and ``m``
+        residual rows at the parameters' precision.  With it, a
+        direction that is exactly unidentifiable is never counted while
+        ``J``'s entries are right to about ``sqrt(eps)`` relative
+        (``3e-4`` in float32, ``1e-8`` in float64), whatever ``m`` is
+        and whatever the sensitivities look like
+        (:func:`~maddening.sysid._resolve_rank_rtol` has the proof and
+        what it does not cover); and a direction is counted only if it
+        is at least ``sqrt(rank_rtol)`` of the strongest in ``J``.
+        Raise it to declare a merely ill-conditioned direction
+        unidentifiable too; lower it to count a weaker one, on your own
+        knowledge of how accurate the sensitivities are.
         ``0.0`` resolves every positive eigenvalue and suppresses the
         precision warning with it: there is no threshold left to sit
         near.
 
-        **Changed in 0.4.0**: the ``sqrt(m)`` term is new.  A cutoff of
-        ``n * eps`` alone sits below the float32 noise floor whenever
-        ``sqrt(m) > n``, and there ``rank`` could count a direction the
-        data does not contain and ``crb`` report a finite bound for it.
-        Verdicts move only for ``m > n**2``, and only ever toward
-        "unresolved"; pass ``rank_rtol=n * eps`` explicitly to keep the
-        old cutoff.
+        A singular value the float64 decomposition cannot tell from
+        zero -- at or under ``max(m, n) * n * 2.2e-16`` of the largest
+        -- is reported as an eigenvalue of exactly ``0.0`` (so ``cond``
+        reads ``inf`` for two exactly proportional columns rather than
+        ``1e31``), but only where it is also under the cutoff in force,
+        by a factor of four: it never changes ``rank`` or ``crb``, and
+        under ``rank_rtol=0.0`` nothing positive is zeroed.
+
+        **Changed in 0.4.0**: the ``sqrt(m)`` term is new, and the
+        verdict reads ``J``'s singular values.  The value of the default
+        moves only for ``m > n**2``; pass ``rank_rtol=n * eps``
+        explicitly to keep the old value.
     reuse_trace : bool
         Reuse the Jacobian compiled by an earlier call with an equal
         ``residual_fn`` (same ``scale``, ``mask`` and ``specs`` record)
@@ -3325,41 +3582,42 @@ def fim(
     -----
     ~maddening.warnings.PrecisionLimitWarning
         If the eigenvalue ratio deciding ``rank`` lands within
-        ``_PRECISION_WARN_FACTOR`` of the cutoff, i.e. the verdict rests
-        on a difference the matrix's own precision cannot resolve.  The
+        ``_PRECISION_WARN_FACTOR`` of the cutoff *and* the cutoff is the
+        precision's own (the default, or one lowered under it).  The
+        eigenvalues are the squared singular values of ``J``, so the
+        decomposition itself is not what is in doubt there: a direction
+        that close to the default cutoff is ``sqrt(rank_rtol)`` of the
+        strongest in ``J`` (about ``5e-4`` in float32), and it is in the
+        data only if the model's sensitivities are right to better than
+        that at the working precision, which nothing here checks.  The
         message names the ratio, the cutoff and the remedy: re-run under
-        ``jax_enable_x64`` -- or, when x64 is already on and the
-        decomposition is float32 because the parameters are, hold the
-        parameters and the state in float64.  x64 is not the default and is not going to
+        ``jax_enable_x64`` with the parameters and the state in float64
+        -- or, when x64 is already on and the report is float32 because
+        the parameters are, hold the parameters and the state in
+        float64.  That re-run settles it either way: the sensitivities
+        are then computed to float64's precision and the cutoff moves
+        nine decades down.  x64 is not the default and is not going to
         be -- it is process-global, set before the first JAX import, and
         fp64 measures 91x slower than fp32 on the reference RTX A2000
         (155 vs 14,135 GFLOP/s, the fp32 figure being TF32 tensor
         cores).  The design goal is that the cases which need it say so.
 
-        Measured, not assumed: the factor covers the band where float32
-        and float64 verdicts were observed to diverge over 228,000
-        synthetic Fisher matrices of known rank, re-measured against the
-        ``max(n, sqrt(m)) * eps`` cutoff this release introduced; see
-        ``_PRECISION_WARN_FACTOR`` for the distribution and for the
-        false-firing cost of every wider choice.  It is quiet on
-        ordinary problems -- no fire at all above five times the cutoff
-        -- and it does **not** fire on an exactly singular ``F``, whose
-        null eigenvalue comes back at or below zero: that is a real rank
+        It is quiet on ordinary problems -- no fire at all above
+        ``_PRECISION_WARN_FACTOR`` times the cutoff -- and it does
+        **not** fire on an exactly unidentifiable direction, whose
+        squared singular value comes back at ``eps**2`` of the largest
+        or at zero, decades under the band: that is a real rank
         deficiency, not a precision-limited verdict, and
         :attr:`FIMReport.zero_scaled` already names the common cause.
         Nor does it fire on a close call against a ``rank_rtol`` the
         caller raised, which is a modelling threshold and not a
         statement about arithmetic.
 
-        Over that population it caught every precision-limited verdict,
-        which it did not before 0.4.0: against the old ``n * eps``
-        cutoff the same measurement put its recall at 0.912-0.916, and the
-        misses were the long-residual cases where the cutoff sat below
-        the arithmetic's own noise floor.  Those are now inside the
-        cutoff rather than outside the band.  "Every" is still 605
-        measured disagreements and not a proof; the one class it
-        deliberately does not cover is an eigenvalue that came back zero
-        or negative.
+        Before 0.4.0's release the verdict read the eigenvalues of the
+        stored ``F`` and this warning described that route's rounding;
+        there the re-run it named did not settle a constant sensitivity
+        (MADD-ANO-289), which now reports its rank deficiency at either
+        precision without a warning.
 
     Raises
     ------
@@ -3378,6 +3636,17 @@ def fim(
         overflowing Jacobian, a residual holding a ``NaN``.  There is no
         rank, condition number or bound to read from a NaN
         decomposition, so this raises rather than reporting one.
+
+    Notes
+    -----
+    **Memory.**  The verdict is decomposed on the host: ``J`` (``m x n``)
+    is copied back from the device and decomposed as a float64 copy
+    (Householder ``R``, then the SVD of the ``n x n`` factor), so a call
+    holds a few times ``J``'s size in host memory on top of the device
+    arrays -- measured: peak resident memory up by 690 MiB for a
+    ``4e6 x 10`` float32 ``J`` of 153 MiB, about 4.5 times its size.  A
+    ``J`` too large for that is a case for :func:`fim_core`, which
+    decomposes on the device at ``J``'s precision.
     """
     if scale not in _SCALES:
         raise ValueError(
@@ -3411,39 +3680,48 @@ def fim(
         J, zero_mask = run(params, inv_sigma)
     # Eager, and deliberately: see :func:`_fim_jacobian` for why the
     # Gram product stays off the compiler's hands in the reporting path.
-    F, finite, eigvals, eigvecs = _fim_spectrum(J)
+    F, finite, gram_nonzero = _fim_gram(J)
 
     # One blocking read, four buffers, and everything below is host
-    # numpy.  ``_rank_and_crb`` and ``_precision_limited`` re-widen to
-    # float64 and would each have pulled ``eigvals`` across on their
-    # own; handing them arrays that are already on the host means the
-    # count does not grow with the number of host-side verdicts.  It is
-    # asserted in the tests, because a stray ``float(...)`` reintroducing
-    # a sync is invisible in every other way.
-    eigvals_h, eigvecs_h, finite_h, zero_h = jax.device_get(
-        (eigvals, eigvecs, finite, zero_mask))
-    if not bool(finite_h):
+    # numpy: ``J`` itself, which the verdict is decomposed from, and
+    # three flags.  It is asserted in the tests, because a stray
+    # ``float(...)`` reintroducing a sync is invisible in every other way.
+    J_h, finite_h, gram_nonzero_h, zero_h = jax.device_get(
+        (J, finite, gram_nonzero, zero_mask))
+    # The verdict's one decomposition: the singular values of ``J``, in
+    # float64, never the eigenvalues of the ``F`` formed above
+    # (:func:`_jacobian_spectrum`).  Not attempted on a non-finite ``F``:
+    # LAPACK's answer to a ``NaN`` is not specified.  It is handed the
+    # cutoff in force, so that its snap stays under it.
+    spectrum = None
+    if bool(finite_h):
+        spectrum = _jacobian_spectrum(
+            J_h, gram_is_zero=not bool(gram_nonzero_h),
+            cutoff=_resolve_rank_rtol(J_h.dtype, int(J_h.shape[1]), rank_rtol,
+                                      n_residual=int(J_h.shape[0])))
+    if spectrum is None or not np.all(np.isfinite(spectrum[0])):
         raise FloatingPointError(
             "non-finite Fisher matrix: F = J^T J holds inf or NaN at these "
-            "params. eigh of a non-finite matrix returns NaN eigenvalues and "
-            "NaN eigenvectors, from which no rank, condition number or "
-            "Cramer-Rao bound can be read, so this raises here -- as fit() "
+            "params (or its largest eigenvalue overflows the parameters' "
+            "precision). No rank, condition number or Cramer-Rao bound can "
+            "be read from it, so this raises here -- as fit() "
             "does on a non-finite gradient -- rather than returning a report "
             "built on NaN. Check that residual_fn(params) is finite (a "
             "diverged rollout), that its Jacobian does not overflow, and that "
             "noise_std is not so small that r / sigma does."
         )
+    eigvals_h, eigvecs_h = spectrum
     names = _param_names(params, differentiable_only=True)
     if idx is not None:
         names = tuple(names[i] for i in idx)
     zero_scaled: tuple[str, ...] = tuple(
         nm for nm, at_zero in zip(names, zero_h) if bool(at_zero))
-    # float() of two float32s, divided in float64 -- as before.  Doing it
-    # on the device instead would round the quotient to float32 and move
-    # a published number for no gain; ``eigvals`` is on the host already.
+    # float() of two values at the report's precision, divided in float64:
+    # ``cond`` is ``eigvals[-1] / eigvals[0]`` of the report, as it has
+    # always been.
     lo, hi = float(eigvals_h[0]), float(eigvals_h[-1])
     cond = float("inf") if lo <= 0.0 else hi / lo
-    n_residual = int(J.shape[0])
+    n_residual = int(J_h.shape[0])
     rank, crb = _rank_and_crb(eigvals_h, eigvecs_h, rank_rtol,
                               n_residual=n_residual)
     n_params = int(eigvals_h.shape[0])
@@ -3452,7 +3730,7 @@ def fim(
         _resolve_rank_rtol(eigvals_h.dtype, n_params, rank_rtol,
                            n_residual=n_residual),
         # The precision floor the band is anchored to is the *default*
-        # cutoff, which is what "the resolution of this arithmetic" means.
+        # cutoff, which is what "the resolution of this precision" means.
         # It has to move with the cutoff: anchoring to the n-only form
         # would re-impose the blind spot the sqrt(m) term removes, on the
         # warning if no longer on the rank.
@@ -3462,27 +3740,28 @@ def fim(
     if limited is not None:
         ratio, cutoff = limited
         dtype = eigvals_h.dtype
+        floor_form = "max(n, sqrt(m))"
         # Under x64 the remedy has already been taken, and repeating it
         # would send a user round a loop they have finished.  There is
         # no third precision to escalate to, so say what is left: the
         # comparison is at the floor of the best precision available.
-        # A float32 decomposition *in an x64 process* comes from float32
+        # A float32 report *in an x64 process* comes from float32
         # leaves (the residual they make is float32 too), so turning x64
         # on -- the float32 remedy -- is already done and changes nothing:
         # what settles it there is float64 leaves (SYS-024).
         remedy = (
-            "x64 is already on, but the decomposition is float32 because "
+            "x64 is already on, but the sensitivities are float32 because "
             "the parameters (and the residual they produce) are float32: "
             "settle it by holding them in float64 -- cast the parameters "
             "and the state, e.g. jax.tree.map(lambda v: jnp.asarray(v, "
-            "jnp.float64), params) -- which moves the cutoff to "
-            "max(n, sqrt(m)) * 2.22e-16 and computes the ratio to match."
+            "jnp.float64), params) -- which computes the sensitivities in "
+            f"float64 and moves the cutoff to {floor_form} * 2.22e-16."
             if dtype == np.float32 and _x64_enabled() else
             "Settle it by re-running under x64 -- "
             "jax.config.update('jax_enable_x64', True) before the first "
-            "array is made, or JAX_ENABLE_X64=1 -- which moves the "
-            "cutoff to max(n, sqrt(m)) * 2.22e-16 and computes the "
-            "ratio to match."
+            "array is made, or JAX_ENABLE_X64=1 -- with the parameters and "
+            "the state in float64, which computes the sensitivities in "
+            f"float64 and moves the cutoff to {floor_form} * 2.22e-16."
             if dtype == np.float32 else
             "This is already the widest precision JAX offers, so no "
             "re-run settles it: the two numbers being compared are "
@@ -3495,14 +3774,14 @@ def fim(
             f"{dtype} noise floor: the eigenvalue ratio nearest the "
             f"cutoff is {ratio:.4g} against a cutoff of {cutoff:.4g}, a "
             f"factor of {max(ratio / cutoff, cutoff / ratio):.3g} -- "
-            f"within the {_PRECISION_WARN_FACTOR:g}x band where the "
-            f"float32 and float64 verdicts were measured to disagree. "
-            f"eigh returns each eigenvalue with an absolute error of "
-            f"order n * eps * max(eigvals), and forming F = J^T J over "
-            f"{n_residual} residual rows in {dtype} costs about "
-            f"sqrt(m) * eps * max(eigvals) again -- the cutoff is the "
-            f"larger of the two -- so a difference this "
-            f"size is rounding and not information: rank, crb and cond "
+            f"within the {_PRECISION_WARN_FACTOR:g}x band this report "
+            f"treats as undecided. The eigenvalues are the squared "
+            f"singular values of J over {n_residual} residual rows, so "
+            f"this direction is {math.sqrt(ratio):.3g} of the strongest "
+            f"in J: it is in the data only if the sensitivities, computed "
+            f"in {dtype}, are right to better than that, which a model's "
+            f"arithmetic at this precision need not deliver and nothing "
+            f"here checks. rank, crb and cond "
             f"all follow this one comparison and are provisional "
             f"together. {remedy} This is advisory: nothing about the "
             f"report is "
@@ -3515,9 +3794,8 @@ def fim(
         )
     rtol_in_force = _resolve_rank_rtol(eigvals_h.dtype, n_params, rank_rtol,
                                        n_residual=n_residual)
-    # Read back only when ``F`` has no positive eigenvalue -- the one case
-    # it decides -- so an ordinary report keeps its four transfers.
-    j_nonzero = (math.isfinite(hi) and hi <= 0.0) and bool(jnp.any(J != 0.0))
+    # ``J`` is on the host already, so this costs no transfer.
+    j_nonzero = (math.isfinite(hi) and hi <= 0.0) and bool(np.any(J_h != 0.0))
     if j_nonzero and _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype,
                                     j_nonzero=True):
         dtype = eigvals_h.dtype
@@ -3527,10 +3805,15 @@ def fim(
             f"product J_ij * J_ik is below {dtype}'s smallest normal number "
             f"({float(np.finfo(dtype).tiny):.4g}) and the arithmetic flushes "
             f"it to zero, so F = J^T J carries nothing of what J does, the "
+            f"report's eigenvalues are F's (all zero), the "
             f"cutoff is 0 and rank, crb and cond say nothing about the data. "
             f"Rescale the residual -- a smaller noise_std, or residual units "
             f"nearer one -- so that F's entries are normal numbers"
-            + (", or re-run under x64." if dtype == np.float32 else "."),
+            + ((", or hold the parameters and the state in float64 (x64 is "
+                "already on; the report is float32 because they are)."
+                if _x64_enabled() else ", or re-run under x64 with the "
+                "parameters and the state in float64.")
+               if dtype == np.float32 else "."),
             PrecisionLimitWarning,
             stacklevel=2,
         )
@@ -3543,21 +3826,23 @@ def fim(
             f"m * tiny = {_PRECISION_WARN_FACTOR * n_residual * float(np.finfo(dtype).tiny):.4g} "
             f"(m = {n_residual} residual rows). F = J^T J sums m products "
             f"per entry and the arithmetic flushes a subnormal product to "
-            f"zero, so the eigenvalues that decide the rank have lost what "
-            f"those products carried: rank, crb and cond depend on the "
-            f"residual's scale here, not on the data, and are provisional "
-            f"together. Rescale the residual -- a smaller noise_std, or "
+            f"zero, so the reported F has lost what those products carried, "
+            f"and the eigenvalues that decide the rank (the squared singular "
+            f"values of J) sit where {dtype} cannot hold them: rank, crb and "
+            f"cond are provisional together. Rescale the residual -- a "
+            f"smaller noise_std, or "
             f"residual units nearer one -- so that F's entries are normal "
             f"numbers"
             + ((", or hold the parameters and the state in float64 (x64 is "
-                "already on; the decomposition is float32 because they are)."
+                "already on; the report is float32 because they are)."
                 if _x64_enabled() else ", or re-run under x64.")
                if dtype == np.float32 else "."),
             PrecisionLimitWarning,
             stacklevel=2,
         )
     return FIMReport(
-        fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
+        fim=F, eigvals=jnp.asarray(eigvals_h), eigvecs=jnp.asarray(eigvecs_h),
+        rank=rank, cond=cond,
         crb=crb, param_names=names, zero_scaled=zero_scaled,
         value_scaled=_value_scaled_names(nominal),
         integer_excluded=integer_excluded,
@@ -4536,12 +4821,27 @@ def _relative_scale(theta0, selected, transformed, columns=None) -> np.ndarray:
 
 def _rotation_by_singular_values(M, k: int):
     """``(W, s)``: ``M``'s right singular vectors as a ``k x k`` rotation,
-    and its singular values padded with zeros to ``k`` -- an ``m x k``
-    ``M`` with ``m < k`` maps the missing directions to nothing."""
-    _, s, wt = np.linalg.svd(M, full_matrices=True)
-    padded = np.zeros(k, dtype=np.float64)
-    padded[:s.size] = s
-    return wt.T, padded
+    and its ``k`` singular values -- an ``m x k`` ``M`` with ``m < k`` maps
+    the missing directions to nothing, and is given the ``k - m`` zero rows
+    that say so (they change neither ``MᵀM`` nor a singular value).
+
+    The reduced decomposition: only the right singular vectors and the
+    values are read, and the left factor it forms is ``m x k``.  The full
+    one (``full_matrices=True``, which this asked for to get a square
+    ``W`` when ``m < k``) forms an ``m x m`` left factor as well, and
+    ``M`` is :func:`fit_lm`'s Jacobian over all ``m`` residual rows: 6.4 GB
+    at 20,000 rows, and at 100,000 a ``MemoryError`` raised after the fit
+    had converged.
+    """
+    M = np.asarray(M, dtype=np.float64)
+    m = M.shape[0]
+    if m < k:
+        M = np.concatenate([M, np.zeros((k - m, k))], axis=0)
+    _, s, wt = np.linalg.svd(M, full_matrices=False)
+    if m < k:
+        # Rank at most ``m``: the rest are the zeros the padding stands for.
+        s = np.concatenate([s[:m], np.zeros(k - m)])
+    return wt.T, s
 
 
 def _no_curvature(method: str, k: int, why: str) -> None:

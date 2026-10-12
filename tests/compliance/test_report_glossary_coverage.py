@@ -113,6 +113,7 @@ def test_links_comments_code_directives_and_front_matter_are_not_prose(
     found, result = _found(report, glossary, tmp_path, """\
 ---
 orphan: halo
+html_meta: {"description": "the halo"}
 ---
 See [the halo guide](halo.md) and <https://example.org/halo>.
 % a halo in a MyST comment
@@ -130,8 +131,8 @@ graph LR; halo --> spectral_radius
 A shard, in a note, and {term}`no such term <Nonexistent>`.
 ```
 """)
-    assert found == [("Shard", 17)]
-    assert result.unknown_roles == [(17, "Nonexistent")]
+    assert found == [("Shard", 18)]
+    assert result.unknown_roles == [(18, "Nonexistent")]
 
 
 def test_the_report_exits_zero_when_it_finds_candidates(report, glossary, tmp_path, capsys):

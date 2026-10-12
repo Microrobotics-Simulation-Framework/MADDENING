@@ -200,9 +200,13 @@ def _equilibrium(density, velocity, e, w, cs2):
     -------
     f_eq : (*grid_shape, Q) float32
     """
+    # Every lattice product in this module passes precision=HIGHEST: an NVIDIA
+    # GPU runs a float32 matrix product at reduced precision under JAX's
+    # default (MADD-ANO-290).  tests/nodes/test_lbm_matmul_precision.py holds
+    # each product here to it; do not write them with @.
     e_f = e.astype(np.float64)
     # e_dot_u: (*grid_shape, Q)
-    e_dot_u = velocity @ e_f.T
+    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)
     u_sq = jnp.sum(velocity ** 2, axis=-1, keepdims=True)  # (..., 1)
 
     f_eq = w * density[..., None] * (
@@ -240,7 +244,7 @@ def _compute_macroscopic(f, e, force=None):
     """
     density = jnp.sum(f, axis=-1)
     e_f = e.astype(np.float64)
-    momentum = f @ e_f  # (*grid_shape, D)
+    momentum = jnp.matmul(f, e_f, precision=jax.lax.Precision.HIGHEST)  # (*grid_shape, D)
     if force is not None:
         momentum = momentum + 0.5 * force
     velocity = momentum / jnp.maximum(density[..., None], 1e-10)
@@ -341,7 +345,7 @@ def _guo_forcing(density, velocity, force, tau, e, w, cs2):
     # Build extra dimensions for broadcasting: prepend len(grid_shape) Nones
     # We use explicit expansion: e_f -> (1,...,1, Q, D), etc.
     # Simpler approach: compute per-q and stack.
-    e_dot_u = velocity @ e_f.T  # (*grid_shape, Q)
+    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)  # (*grid_shape, Q)
 
     # (e_q - u): (*grid_shape, Q, D)
     # Expand e_f: (Q, D) -> broadcast with velocity (..., 1, D)

@@ -336,9 +336,12 @@ PER_PUSH = [
     # XLA_FLAGS it inherits.
     Run("advanced.sharding_demo", ("--n-cells", "64", "--steps", "20"),
         expect=("All checks passed",)),
-    # Skips its packaging / validation stages, saying why, when the C
-    # compiler or FMPy is missing; CI has both.
-    Run("advanced.fmu_export_demo", ("--steps", "5"), expect=("All checks passed",)),
+    # Skips its packaging / validation / master stages, saying why, when the
+    # C compiler or FMPy is missing; CI has both, and the expected lines are
+    # the ones stage 6 (FMPy's simulate_fmu against a loopback bridge) prints.
+    Run("advanced.fmu_export_demo", ("--steps", "5"), needs=("fmpy",),
+        expect=("requests over the loopback port", "spring.position: FMPy",
+                "All checks passed")),
     Run("advanced.surrogate_demo",
         ("--epochs", "10", "--train-steps", "100", "--compare-steps", "20"),
         needs=("equinox", "optax"), expect=("Done!",)),
@@ -349,6 +352,8 @@ PER_PUSH = [
         expect=("Takeaway",)),
     Run("coupling.convergence_diagnostics_demo", ("--steps", "5"),
         expect=("All demos complete",)),
+    Run("coupling.acting_on_diagnostics_demo", ("--parts", "1,2,3"),
+        expect=("not_contracting", "All checks passed")),
     Run("coupling.jacobi_vs_gauss_seidel", ("--steps", "40"), expect=("Takeaway",)),
     Run("coupling.spatial_interpolation_demo", ("--heat-steps", "2000"),
         expect=("All demos complete",)),
@@ -356,6 +361,8 @@ PER_PUSH = [
         expect=("All demos completed successfully",)),
     Run("coupling.interface_mapping_demo", ("--steps", "20"),
         expect=("All checks passed",)),
+    Run("coupling.sparse_mapping_round_trip_demo", ("--cells", "20000", "--steps", "5"),
+        expect=("states identical: True", "All checks passed")),
     # In-process TestClient: no port, no server process.
     Run("servers.rest_params_demo", ("--steps", "5"), needs=("fastapi", "httpx"),
         expect=("All checks passed",)),
@@ -380,6 +387,9 @@ SLOW = [
      "coupling.acceleration_comparison --steps 10"),
     (Run("coupling.convergence_diagnostics_demo", expect=("All demos complete",)),
      "nine graphs, diagnostics read every step", "--steps 5"),
+    (Run("coupling.acting_on_diagnostics_demo", expect=("It decays", "All checks passed")),
+     "part 4 compiles a second graph with diagnostics=True (~4 s more)",
+     "coupling.acting_on_diagnostics_demo --parts 1,2,3"),
     (Run("coupling.jacobi_vs_gauss_seidel", expect=("Takeaway", "Settled")),
      "1000 steps x 7 graphs; also checks the cycle comes to rest",
      "coupling.jacobi_vs_gauss_seidel --steps 40"),
@@ -387,6 +397,9 @@ SLOW = [
      "20 000 coupled heat steps", "--heat-steps 2000"),
     (Run("coupling.flux_coupling_demo", expect=("All demos completed successfully",)),
      "all seven sections, 13 graphs", "--sections 1,2,3"),
+    (Run("coupling.sparse_mapping_round_trip_demo", expect=("All checks passed",)),
+     "rods of 200 000 and 100 000 cells, the sizes its memory figures are for",
+     "coupling.sparse_mapping_round_trip_demo --cells 20000 --steps 5"),
     (Run("servers.lbm_pipe_interactive", ("--frames", "2"), needs=("pyvista",),
          expect=("Rendered 2 frames",)),
      "3-D LBM plus off-screen VTK rendering", "none: needs pyvista, absent in CI"),

@@ -1721,6 +1721,19 @@ argument to `super().__init__(...)`.
 coupled run depends on the units one field is written in* — **open**, since 0.3.0:
 write a group's quantities in comparable units, or use `"none"` or `"fixed"`.
 
+`MADD-ANO-292` — *SelkiesSession.update_framebuffer_gpu drops every frame, with
+a warning, where cupy is not installed, and no extra or image installs it* —
+**open**.
+
+`MADD-ANO-293` — *SelkiesSession.update_framebuffer_gpu ignores
+GPUFramebuffer.stride_bytes, so a frame with padded rows raises ValueError on
+every frame* — **open**.
+
+`MADD-ANO-294` — *The sharded wrappers place a node's static arrays on the
+devices again at every eager update() when its static_data builds new array
+objects on each access: correct results, about 50 times slower per step at 10^7
+cells* — **open**.
+
 **Resolved.**  `MADD-ANO-006`, `019`, `020`, `024`, `025`, `026`, `028`,
 `029`, `030`, `049`, `062` and `063` above, `064`, `065`, `066` and `067`
 in "[What the differential sharding harness

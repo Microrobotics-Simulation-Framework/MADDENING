@@ -20264,10 +20264,15 @@ anomalies:
       first STUN URL, every TURN URL with credentials).  Verified by a
       GStreamer WebRTC peer that signals as the browser client does and
       decodes the frames, on CPU in a network-less container (CI job
-      `test-streaming`).  What remains untested: a GPU encoder (the encoder
-      is x264enc), a real browser, and NAT traversal -- on a cloud host the
-      media travels over UDP, which a provider may not expose, so a viewer
-      outside its network needs a reachable TURN server.  Frames are let
+      `test-streaming`).  The stream encodes in software (`x264enc`) on
+      every host; it was tested from a GPU host, with the simulation on
+      CUDA, on 2026-10-12.  The same day it was viewed over the internet,
+      from a four-GPU cloud host to a laptop, through a TURN relay over TCP
+      carried by an SSH tunnel, both by a scripted viewer and in a real
+      browser.  What remains untested: media over UDP across a provider's
+      network with no relay -- a provider may not expose UDP (the one used
+      on 2026-10-12 did not), so a viewer outside its network needs a
+      reachable TURN server.  Frames are let
       into a viewer's pipeline only once its answer has been applied: a
       frame that reached `webrtcbin` before the offer was applied made it
       answer with an inactive m-line (ICE connected, DTLS never did, no
@@ -20517,4 +20522,148 @@ anomalies:
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float32_verdict_changes_at_the_stated_cutoff"
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_report_carries_the_gram_product_and_decides_nothing_from_it"
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_x64_rerun_agrees_with_float32_on_the_audited_record"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-292"
+    title: "SelkiesSession.update_framebuffer_gpu drops every frame, with a warning, where cupy is not installed, and no extra or image installs it"
+    description: >
+      `update_framebuffer_gpu` first tries a zero-copy push, which raises
+      `NotImplementedError` on every call (`_push_gpu_buffer`), and then
+      copies the frame to the host with `cupy`.  Where `cupy` cannot be
+      imported it logs "Neither GstCudaMemory nor cupy available for GPU
+      buffer" at WARNING and returns: the frame is not encoded, and the
+      viewer sees nothing.  No extra of `pyproject.toml` and no file under
+      `docker/` installs `cupy`, so this is the outcome everywhere the
+      library is installed as documented.  Measured on a GPU host
+      (RTX A2000 laptop GPU, jax 0.11.2, GStreamer 1.24.2, the cloud image
+      at the tree of 0.4.0's release branch): a JAX array on the device
+      pushed through this method, 145 frames pushed, 0 decoded by the
+      viewer, 145 warnings; with `cupy` installed the same push decoded
+      20 of 20 frames.  Reproduced on CPU at the release branch's tip: with
+      no `cupy` the call warns and returns on every frame.  The path is
+      reached only by a renderer of the user's own that provides
+      `read_framebuffer_gpu` (`SelkiesRenderer` then pushes through this
+      method); no renderer MADDENING ships provides it, and neither class
+      carries a stability label.  0.4.0 has no GPU encoder: a frame that
+      does reach the session is encoded in software (`x264enc`).  The
+      method is unchanged at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1;
+      before 0.4.0 no frame reached a viewer by any path (MADD-ANO-286).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: every dropped frame logs a warning, and the viewer has no
+      picture rather than a wrong one.  The defect is in the delivery of
+      rendered frames to a remote viewer; no simulated state, output, saved
+      file or reported result is affected.
+    affected_components:
+      - "maddening.cloud.selkies_session.SelkiesSession.update_framebuffer_gpu"
+      - "maddening.viz.backends.selkies_renderer.SelkiesRenderer"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Install `cupy` for the CUDA version in use and pass frames with
+      unpadded rows (MADD-ANO-293), or read the frame to the host in
+      your renderer and push it with `update_framebuffer_cpu`, which needs
+      neither.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A renderer that provides `read_framebuffer_gpu`
+      streams nothing unless `cupy` is installed beside MADDENING.
+    verification: []
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-293"
+    title: "SelkiesSession.update_framebuffer_gpu ignores GPUFramebuffer.stride_bytes, so a frame with padded rows raises ValueError on every frame"
+    description: >
+      The host-copy fallback of `update_framebuffer_gpu` copies
+      `height * stride_bytes` bytes from the device and hands them to
+      `update_framebuffer_cpu` as an unpadded `width x height` frame.  Where
+      the rows are padded (`stride_bytes` larger than `width` times the
+      bytes per pixel, as a GPU framebuffer's often are) the byte count is
+      wrong, and since 0.4.0 `update_framebuffer_cpu` refuses it:
+      `ValueError: frame holds 322560 bytes; 320x240 RGBA needs 307200` on
+      every frame (stride 1344 bytes for a 320-pixel RGBA row).  Measured
+      on a GPU host with `cupy` installed (RTX A2000 laptop GPU, jax 0.11.2,
+      GStreamer 1.24.2) and reproduced on CPU at the release branch's tip
+      with a stand-in for `cupy`'s copy.  The same frame with unpadded rows
+      is accepted.  At v0.1.0 to v0.3.1 the copy was the same and the bytes
+      were pushed to the encoder as they were, with no size check; no
+      viewer received any frame before 0.4.0 (MADD-ANO-286), and what a
+      padded frame would have shown was not measured.  Reached only through
+      a renderer of the user's own that provides `read_framebuffer_gpu`,
+      and only with `cupy` installed (MADD-ANO-292).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: every padded frame raises `ValueError` naming both byte counts,
+      and no frame is encoded from the wrong bytes.  The defect is in the
+      delivery of rendered frames to a remote viewer; no simulated state,
+      output, saved file or reported result is affected.
+    affected_components:
+      - "maddening.cloud.selkies_session.SelkiesSession.update_framebuffer_gpu"
+      - "maddening.viz.backends.selkies_renderer.SelkiesRenderer"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Hand `update_framebuffer_gpu` a framebuffer whose rows are not padded
+      (`stride_bytes == width * 4` for RGBA), or copy the frame to the host
+      yourself, drop the padding, and push it with `update_framebuffer_cpu`.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A renderer whose GPU framebuffer has padded rows
+      cannot stream through the GPU-buffer path.
+    verification: []
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-294"
+    title: "The sharded wrappers place a node's static arrays on the devices again at every eager update() when its static_data builds new array objects on each access: correct results, about 50 times slower per step at 10^7 cells"
+    description: >
+      `ShardedStencilNode` and `ShardedUnstructuredNode` keep the per-device
+      copy of a node's sharded or partitioned static arrays in a cache keyed
+      on the identity of each array (`id(value)`, with its shape and dtype).
+      A node whose `static_data` property builds a new array on every
+      access (a `StaticArray(np.ones(n), ...)` written inside the property)
+      hands back a different object each time, so the cache misses at every
+      public `update()`: the unstructured wrapper copies each partitioned
+      static to the host, gathers it through the layout and copies it back,
+      and the stencil wrapper places each sharded static on the mesh again.
+      `SimulationNode.static_data` asks for a dict that is stable across
+      calls ("build it once in `__init__`"), but nothing checks it and
+      nothing warns.  Measured on four NVIDIA RTX PRO 6000 Blackwell cards
+      (jax and jaxlib 0.11.2, commit `c0c6add8`) with the multi-GPU
+      runner's test node, which had this shape, on a 10,004,569-cell mesh
+      under `ShardedUnstructuredNode`: 242.5 ms per eager `update()`, with
+      40 re-partitions in 20 steps, against 4.45 ms and none when the node
+      returns the same objects; the fields were identical bit for bit.
+      Reproduced on CPU at the release branch's tip on four virtual
+      devices, for both wrappers: 20 eager updates made 20 `device_put`
+      calls (and 20 `device_get` under the unstructured wrapper) where the
+      same node returning cached objects made none.  A compiled graph pays
+      it once, when the step is traced: `gm.step()` made no transfer in 20
+      steps on CPU; on the GPUs it re-partitioned twice at compile and
+      never after (7.23 ms per step; `run_scan` 0.81 ms per step).  Before
+      0.4.0 the wrappers placed the statics again at every eager `update()`
+      for every node (the stencil wrapper from 0.2.1, the unstructured
+      wrapper from 0.3.0); the cache added in 0.4.0 removes that cost only
+      for a node that returns the same objects.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The results are the same bit for bit; only the time an eager step
+      takes changes.  No simulated state, output, saved file or reported
+      result is affected.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.core.node.SimulationNode.static_data"
+    affected_versions: ">=0.2.1"
+    workaround: >
+      Build the static arrays once (in `__init__`, or at the first access)
+      and return the same objects from `static_data` at every access; or
+      step the node inside a compiled graph (`gm.step()`, `run_scan`),
+      which places the statics once, when it is traced.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A node that builds its static arrays anew at each
+      access pays a full re-partition at every eager sharded step, and
+      nothing warns.
+    verification: []
     github_issue: null

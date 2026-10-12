@@ -205,6 +205,7 @@ from maddening.fmi.sidecar import (
     _checked_value,
     _declared_inputs_resolver,
     _key_set_error,
+    _is_report_slot,
     _restored_leaf,
     _step_compile,
 )
@@ -2344,7 +2345,10 @@ class FmuTcpBridge:
         :func:`checked_value` (finite, and representable in the live
         array's dtype, unless it is the value the FMU was instantiated
         with: :meth:`FmuSidecar._initial_state_leaf
-        <maddening.fmi.sidecar.FmuSidecar._initial_state_leaf>`) and the
+        <maddening.fmi.sidecar.FmuSidecar._initial_state_leaf>`, or a
+        non-finite reading in a coupling group's report slot, which is
+        not what the model continues from:
+        :func:`maddening.fmi.sidecar._is_report_slot`) and the
         restored parameter tree through
         the sidecar's restore check (tunability, and the declared
         ``ParamSpec`` bounds of the values it would install:
@@ -2380,7 +2384,8 @@ class FmuTcpBridge:
                     # function, so the two restore paths cannot drift apart.
                     new_state[node][field] = jnp.asarray(_restored_leaf(
                         data[f"s/{node}/{field}"], live, what=f"FMU state {node}.{field}",
-                        initial=self._sidecar._initial_state_leaf(node, field)))  # noqa: SLF001
+                        initial=self._sidecar._initial_state_leaf(node, field),  # noqa: SLF001
+                        report=_is_report_slot(node, field)))
             params = self._sidecar.params
             new_params = None
             if params is not None:

@@ -225,3 +225,28 @@ def test_nearest_neighbor_consistent_selects_nearest():
     m = nearest_neighbor_mapping(src, tgt)
     np.testing.assert_array_equal(np.asarray(m.apply(jnp.array([10.0, 20.0, 30.0]))),
                                   [10.0, 30.0, 20.0])
+
+
+@pytest.mark.parametrize("build", [
+    lambda H, mode: matrix_mapping(H, mode=mode),
+    lambda H, mode: StaticLinearMapping(jnp.asarray(H), mode=mode),
+], ids=["matrix_mapping", "StaticLinearMapping"])
+def test_the_mode_of_a_matrix_of_your_own_is_a_label(build):
+    """``H`` is applied as given under either mode: ``"conservative"``
+    neither transposes nor rescales a matrix the caller brought (the
+    factories that build theirs from two point sets build another one for
+    it: :func:`test_conservative_mode_preserves_total`).  The label is what
+    the mapping reports."""
+    # Neither the rows nor the columns sum to one, and it is not square:
+    # a transpose or a normalisation would show.
+    H = np.array([[1, 2, 0], [0, 3, 4]], np.float32)
+    for mode in ("consistent", "conservative"):
+        m = build(H, mode)
+        assert m.mode == mode and m.describe()["mode"] == mode
+        np.testing.assert_array_equal(np.asarray(m.params_pytree()["H"]), H)
+        # H @ [1, 10, 100] = [1 + 20, 30 + 400]
+        np.testing.assert_array_equal(
+            np.asarray(m.apply(jnp.array([1.0, 10.0, 100.0], jnp.float32))), [21.0, 430.0])
+        # H.T @ [1, 10] = [1, 2 + 30, 40]
+        np.testing.assert_array_equal(
+            np.asarray(m.apply_T(jnp.array([1.0, 10.0], jnp.float32))), [1.0, 32.0, 40.0])

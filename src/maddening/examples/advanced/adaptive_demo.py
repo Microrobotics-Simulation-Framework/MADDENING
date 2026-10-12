@@ -10,6 +10,16 @@ A ball in free fall (no table collision) is simulated with different
 tolerances, showing how tighter tolerances require more steps for
 the same end time.
 
+What the tolerance controls: the error **estimate of each step** (one
+step against two half steps, measured against ``atol + rtol * |y|``),
+which decides whether the step is accepted and how long the next one is.
+It is not a bound on the error at the end of the run, which is what the
+steps left behind, added up: here the final position is off by 0.3, 2.6
+and 12 times ``atol + rtol * |y|`` in the three runs.  The first two
+runs are the same run: at both tolerances every step is as long as the
+controller's growth limit and ``dt_max=0.5`` allow, so the tolerance
+decides none of them.
+
 Usage
 -----
     python -m maddening.examples.advanced.adaptive_demo
@@ -112,13 +122,31 @@ def main() -> None:
     )
     print(f"Check: tighter tolerance uses more steps ({steps_tight} >= {steps_loose}).")
 
-    # 2. All results should be reasonably close to analytical.
-    #    Semi-implicit Euler is first-order, so with large adaptive steps
-    #    the position error can be a few metres — that's expected.
+    # 2. All results should be reasonably close to analytical: within two
+    #    fixed thresholds, which are not the runs' tolerances.  ``atol``
+    #    and ``rtol`` bound the error ESTIMATE OF EACH STEP (one step
+    #    against two half steps); the error at the end of the run is what
+    #    the steps left behind, added up.  Semi-implicit Euler is
+    #    first-order, so with large adaptive steps the position error is a
+    #    few metres -- several times ``atol + rtol * |y|`` -- and that's
+    #    expected.
+    pos_limit, vel_limit = 5.0, 1.0  # units: m, m/s
     for label, _, _, _, _, pos_err, vel_err, _ in results:
-        assert pos_err < 5.0, f"{label}: position error {pos_err:.2e} too large"
-        assert vel_err < 1.0, f"{label}: velocity error {vel_err:.2e} too large"
-    print("Check: all position and velocity errors are within tolerance.")
+        assert pos_err < pos_limit, f"{label}: position error {pos_err:.2e} too large"
+        assert vel_err < vel_limit, f"{label}: velocity error {vel_err:.2e} too large"
+    print(f"Check: all position errors are under {pos_limit} m and all velocity "
+          f"errors under {vel_limit} m/s.")
+    ratios = ", ".join(f"{label} {pos_err / (atol + rtol * abs(y_exact)):.1f}"
+                       for label, atol, rtol, _, _, pos_err, _, _ in results)
+    print("  (Fixed thresholds, not the runs' tolerances: atol and rtol bound the error")
+    print("   estimate of each step, not the error at the end of the run.  Final position")
+    print(f"   error over atol + rtol * |exact position|: {ratios}.)")
+    if results[0][7] == results[1][7]:
+        # Neither tolerance decides a step: each is as long as the
+        # controller's growth limit and dt_max allow.
+        print(f"  ({results[0][0]} and {results[1][0]} took the same steps: at both tolerances "
+              "every step is as long")
+        print("   as the controller's growth limit and dt_max=0.5 allow.)")
 
     # 3. Tight tolerance should have smaller error than loose
     err_loose = results[0][5]  # pos error

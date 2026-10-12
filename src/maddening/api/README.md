@@ -348,6 +348,15 @@ the live field before converting them; the whole graph's state is held to
 `MAX_GRAPH_STATE_ELEMENTS` (10^8) as well as each node's to
 `MAX_NODE_STATE_ELEMENTS`; and nodes are built one at a time.
 
+A 422 echoes the value it refused (`input`) when that value is at most 1024
+characters of JSON: a number, a name, a short body.  A larger one is left
+out, and the error carries `input_omitted` in its place, with a sentence
+that says so; a reply lists at most 64 errors and counts the rest in a
+last entry.  A refused body just under the limit used to be encoded and
+sent back whole, 32 MiB of it.  Refusing such a body still costs what
+parsing and counting it costs, a peak of 2.4 to 2.6 GiB and 4 to 13 s
+measured at the limit, on the event loop.
+
 The runner routes (`/sim/start`, `/sim/stop`, `/sim/pause`,
 `/sim/resume`, `/sim/reset`, surrogate activate and deactivate) answer
 within about one `_GRAPH_LOCK_TIMEOUT` of their arrival, a 503 past it: the

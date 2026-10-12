@@ -446,6 +446,52 @@ jobs:
             tests/test_examples_smoke.py::test_example_imports_resolve_against_the_library \
             tests/test_examples_smoke.py::test_usd_example_runs_headless
 
+  test-streaming:
+    # The loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py): a
+    # SelkiesSession and a GStreamer webrtcbin peer that signals as the
+    # browser client does, negotiating and decoding real H.264 on CPU; and
+    # the cloud entry point run as the container runs it, its simulation
+    # built over REST and watched by that peer
+    # (tests/cloud/test_entrypoint_streams.py).  They
+    # need GStreamer, its WebRTC plugins and PyGObject from apt, which the
+    # sharded lanes do not install (the module skips there, and their
+    # selection is held whole by tests/compliance/test_ci_sharding.py), so
+    # this is the only job that runs them: inside the image built from
+    # docker/Dockerfile.streaming-test, with no network (--network none).
+    # NET_ADMIN (the only capability left by --cap-drop ALL) lets the
+    # image's entry point add a veth pair inside that network-less
+    # container, because libnice never gathers ICE candidates on the
+    # loopback interface, which is all --network none leaves; the entry
+    # point then runs pytest with every capability set cleared and
+    # no_new_privs set (docker/README.md says why).
+    # MADDENING_REQUIRE_STREAMING_TESTS=1 makes a missing dependency fail
+    # the job: a skip here would mean the tests ran nowhere.
+    #
+    # No layer cache: the image is about 2 GB, and caching it would compete
+    # with the per-shard JAX compilation caches for the repository's Actions
+    # cache.  Measured on a laptop: a cold build in about 100 s, the tests in
+    # about 30 s.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the streaming test image
+        # The build runs apt and pip: a mirror that stops answering must
+        # cost minutes, not the job's whole limit.
+        timeout-minutes: 15
+        run: docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test:ci .
+
+      - name: Run the loopback WebRTC tests
+        timeout-minutes: 10
+        run: |
+          docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
+            -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
+            -v "$PWD":/src:ro maddening-streaming-test:ci \
+            python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py -v -rs --tb=short -p no:cacheprovider
+
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the
     # pyright run is BLOCKING, in two tiers defined by typing_tiers.json.

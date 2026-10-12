@@ -40,6 +40,11 @@ from maddening.core._graph_specs import (
     _node_update,
 )
 from maddening.core.coupling._interface_plan import KERNEL_LENGTH, interface_plan
+from maddening.core.coupling._carried_fields import (
+    CarriedChain,
+    carried_nonfloat_chain,
+    nonfloat_loop_refusal,
+)
 from maddening.core.coupling._group_layout import (
     _group_accel_fields,
     _group_dividers,
@@ -189,7 +194,7 @@ def _run_coupled_block_impl(
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
     multigpu_device_map=None, node_params=None, fires=None,
-    strict_sink=None, probe_sink=None, strict_mesh=None,
+    strict_sink=None, probe_sink=None, strict_mesh=None, carried_only=False,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -230,6 +235,14 @@ def _run_coupled_block_impl(
     device (:func:`_multi_device_mesh`), on every device of which
     ``strict_convergence`` raises (:func:`_strict_error_if`); ``None`` on
     one device.
+
+    ``carried_only=True`` solves nothing: the block is set up as for a
+    step, and returns the group's carried non-floating fields
+    (``_carried_fields.CarriedChain``) as one abstract trace of its Jacobi
+    pass at *new_state* gives them.  ``compile()`` and ``validate()`` ask
+    it of a group whose edges allow a closed loop of such fields, so that
+    what they refuse is decided on the pass the step will run and not on
+    a second description of it.
     """
     from maddening.core.coupling.acceleration import (
         aitken_relaxation,
@@ -755,6 +768,25 @@ def _run_coupled_block_impl(
 
     one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
 
+    def _carried_chain_at(state):
+        """The group's carried non-floating fields, from its Jacobi pass at *state*.
+
+        Which non-floating fields a pass reads from the iterate, and which
+        of them is computed from which, read from one abstract trace of
+        ``one_pass_jacobi`` as a function of the members' iterate
+        (``_carried_fields.carried_nonfloat_chain``): the pass itself, with
+        every input it hands a hook and every flux it computes.  Not traced
+        for a group whose edges allow no such field.
+        """
+        def evaluate(members):
+            out = one_pass_jacobi({**state, **members})
+            return {nn: out[nn] for nn in group_node_names}
+
+        return carried_nonfloat_chain(plan, state, evaluate)
+
+    if carried_only:
+        return _carried_chain_at(new_state)
+
     def _compute_residual(s_new, s_old):
         # In the group's residual dtype (``_group_residual_dtype``: the
         # promotion of its floating fields, at least float32), which every
@@ -884,6 +916,76 @@ def _run_coupled_block_impl(
         # every other group, whose compiled step is the one it was.
         refreshed_fields = _fields_the_interface_norm_misses(
             group, plan, group_node_names, state_after_first)
+
+        # The non-floating fields a pass reads from the iterate (a flag one
+        # member computes and another reads across an internal edge), and
+        # the rule both solvers iterate by: every pass a solve measures
+        # starts from those fields *evaluated at its floating iterate*.
+        # Stated and proved in ``coupling/_carried_fields.py``.  Static: a
+        # group that carries no such field builds none of this, and its
+        # compiled step is the one it was (a step counter or a PRNG key
+        # that a member advances from its pre-step state is not carried
+        # unless another member reads it or a flux is computed from it,
+        # whatever other edges and fluxes the member has: the trace of the
+        # pass says so).  ``max_iterations=1`` iterates nothing and takes
+        # none of it either.
+        if max_iters > 1:
+            carried_chain = _carried_chain_at(state_after_first)
+        else:
+            carried_chain = CarriedChain((), 0, None)
+        if carried_chain.loop is not None:
+            # ``compile()`` asks this block the same question of the state
+            # it holds (``GraphManager._nonfloat_loop_refusals``), and a
+            # loop here is always a loop of the edges' bound, which is
+            # where compile() traces (``_carried_fields``: a read counts
+            # only where the edges allow it too).  So this fires only for a
+            # state compile() did not see: a write that gave a field
+            # another dtype after it, or a pass that returns a field in
+            # another dtype than it is stored in.  ``validate()`` lists the
+            # same refusal for such a state.
+            raise ValueError(nonfloat_loop_refusal(
+                group.nodes, carried_chain, state_after_first))
+        carried_by_node: dict[str, list] = {}
+        for _nn, _fld in carried_chain.fields:
+            carried_by_node.setdefault(_nn, []).append(_fld)
+
+        def _carried_nonfloat_at(s_full):
+            """*s_full* with the carried non-floating fields evaluated at its floating fields.
+
+            ``carried_chain.depth`` evaluations of the members as a *Jacobi*
+            pass makes them -- every member reading the same frozen state,
+            whatever the group's own sweep -- of which only the carried
+            fields are kept (XLA keeps only the arithmetic that feeds them).
+            After that many they hold the values the members compute from
+            the floating fields of *s_full*, whatever they held on the way
+            in (``_carried_fields``, Lemma 1), so this is a function of the
+            floating iterate and applying it twice changes nothing.
+
+            The group's own pass will not do for the evaluation: a
+            Gauss-Seidel sweep hands a producer the reader's *updated*
+            state, so a reader swept before its producer was given the
+            producer's value one pass ahead of the iterate, the floating map
+            no longer depended on the iterate at all, and the solve stopped
+            on its second pass with ``residual=0.0`` far from the fixed
+            point.  And one evaluation settles one field: a flag relayed
+            through a second non-floating field needs two.
+
+            The floating inputs go in through ``stop_gradient``: nothing
+            kept has a derivative.
+            """
+            if not carried_by_node:
+                return s_full
+            s = dict(s_full)
+            for _ in range(carried_chain.depth):
+                frozen = jax.tree.map(
+                    lambda v: (jax.lax.stop_gradient(v)
+                               if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
+                    s,
+                )
+                s_eval = one_pass_jacobi(frozen)
+                for nn, fields in carried_by_node.items():
+                    s[nn] = {**s[nn], **{f: s_eval[nn][f] for f in fields}}
+            return s
 
         def _with_nonfloat_fields_at(s_full):
             """*s_full* with the group's non-floating fields recomputed at it.
@@ -1190,35 +1292,20 @@ def _run_coupled_block_impl(
                     s[nn] = {**s[nn], **part[nn]}
                 return s
 
-            # Non-floating fields a group-internal edge carries (a flag
-            # one member computes and another reads).  ``_embed`` holds
-            # every non-floating field at its first-pass value, and a
-            # reader that takes such a field from the iterate -- under
-            # Jacobi, or scheduled before its producer -- then iterated a
-            # map with the field frozen: on a pair whose flag flips during
-            # the solve, ``"ift"`` converged to the fixed point of the
-            # frozen map with ``converged=True``, where ``"fori"``, which
-            # carries the whole state, found the consistent one.  So such
-            # fields are evaluated at the iterate itself: one more pass,
-            # of which only those fields are kept (XLA keeps only what
-            # feeds them).  At a fixed point that is the value the pass
-            # gives there, so the fixed point is the consistent one.
-            # Static: without such an edge the map is the one it always
-            # was.
-            live_nonfloat = sorted(
-                (nn, fld) for nn, fld in plan.source_fields()
-                if fld in template_state.get(nn, {})
-                and fld not in float_fields.get(nn, ())
-            )
-
+            # Non-floating fields a pass reads from the iterate (a flag one
+            # member computes and another reads across an internal edge).
+            # ``_embed`` holds every non-floating field at its first-pass
+            # value, and a reader that takes such a field from the iterate
+            # then iterated a map with the field frozen: on a pair whose
+            # flag flips during the solve, ``"ift"`` converged to the fixed
+            # point of the frozen map with ``converged=True``.  So such
+            # fields are evaluated at the iterate itself
+            # (``_carried_nonfloat_at``): the fixed points of the map this
+            # loop iterates are then exactly the pass's own, and the map is
+            # the one ``"fori"`` iterates.  Static: without such a field
+            # the map is the one it always was.
             def _embed_live(x_full):
-                s = _embed(x_full)
-                if not live_nonfloat:
-                    return s
-                s_nf = one_pass(s)
-                for nn, fld in live_nonfloat:
-                    s[nn] = {**s[nn], fld: s_nf[nn][fld]}
-                return s
+                return _carried_nonfloat_at(_embed(x_full))
 
             def _step_flat(x_full):
                 s = _embed_live(x_full)
@@ -1872,6 +1959,19 @@ def _run_coupled_block_impl(
         # deprecated).  Runs ``max_iterations`` passes regardless of
         # convergence, freezing the state once converged, and
         # differentiates straight through the iterates. ----
+        #
+        # Every body starts by evaluating the carried non-floating fields
+        # at the iterate (``_carried_nonfloat_at``; a no-op for a group
+        # without one).  The loop carries the whole state, and used to
+        # carry such a field as the previous pass left it: one pass behind
+        # the floating fields, where the norm does not read it.  Under
+        # Jacobi a float that reads an integer that reads the float then
+        # saw two lagged reads in series, its residual was the change of
+        # the float over a pass on which only the integer had moved --
+        # exactly zero -- and the loop latched ``converged`` after one
+        # pass.  Evaluated at the iterate, the field is a function of the
+        # floating fields the residual measures, and a zero residual is a
+        # fixed point of the pass (``_carried_fields``).
 
         if group.acceleration == "aitken":
             # Aitken is in ``_TWO_PASS_EXIT``, so it latches
@@ -1888,6 +1988,7 @@ def _run_coupled_block_impl(
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_below, prev_res, prev_res2,
                      icount, fres, fprev, omega, prev_r) = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     below = residual <= conv_threshold
@@ -1933,6 +2034,7 @@ def _run_coupled_block_impl(
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_below, prev_res, prev_res2,
                      omega, prev_r) = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     below = residual <= conv_threshold
@@ -1994,6 +2096,7 @@ def _run_coupled_block_impl(
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
                      fprev, V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
@@ -2040,6 +2143,7 @@ def _run_coupled_block_impl(
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2,
                      V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
@@ -2082,6 +2186,7 @@ def _run_coupled_block_impl(
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
                      fprev) = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2,
@@ -2113,6 +2218,7 @@ def _run_coupled_block_impl(
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     s_cur, converged, prev_res, prev_res2 = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2,
@@ -2139,6 +2245,7 @@ def _run_coupled_block_impl(
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
                      fprev) = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
@@ -2164,6 +2271,7 @@ def _run_coupled_block_impl(
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     s_cur, converged, prev_res, prev_res2 = carry
+                    s_cur = _carried_nonfloat_at(s_cur)
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
@@ -2191,6 +2299,7 @@ def _run_coupled_block_impl(
             loop_res = final_res
 
             def _measure_at_cap(_s):
+                _s = _carried_nonfloat_at(_s)
                 r = _compute_residual(one_pass(_s), _s)
                 return r, error_amplification(r, loop_res, prev_loop_res)
 
@@ -2232,8 +2341,11 @@ def _run_coupled_block_impl(
         # The non-floating fields of the returned state, by the rule the
         # ift path applies (``_with_nonfloat_fields_at``): the raw pass
         # they came from preceded the returned iterate, which under an
-        # acceleration is not that pass's output.
-        final_state = _with_nonfloat_fields_at(final_state)
+        # acceleration is not that pass's output.  From the carried
+        # fields at the returned iterate, as every pass of the loop above
+        # started (``_carried_nonfloat_at``; the ift path's ``_embed_live``
+        # has applied it already).
+        final_state = _with_nonfloat_fields_at(_carried_nonfloat_at(final_state))
         if refreshed_fields and group.diagnostics:
             # ... and the verdict over the recomputed fields
             # (``_recomputed_finite``), as the ift path takes it.

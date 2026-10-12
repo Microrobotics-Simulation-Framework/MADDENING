@@ -111,7 +111,7 @@ The first implementation is a dense matrix `H` (`n_target × n_source`),
 | `rbf_mapping(src_pts, tgt_pts, kernel=, epsilon=, polynomial=True, ridge=1e-8, mode=)` | radial-basis interpolation; kernels `gaussian`, `multiquadric`, `inverse_multiquadric`, `thin_plate_spline` |
 | `nearest_neighbor_mapping(src_pts, tgt_pts, mode=)` | 0/1 selection matrix |
 | `projection_1d_mapping(src_boundaries, tgt_boundaries)` | cell-average projection between 1D grids (conservative) |
-| `matrix_mapping(H, mode=)` | bring your own weights (e.g. supermesh weights precomputed offline) |
+| `matrix_mapping(H, mode=)` | bring your own weights (e.g. supermesh weights precomputed offline); `mode` is a label here, `H` is applied as given |
 
 **The dtype of the weights** is each factory's own, and only one follows
 `jax_enable_x64`:
@@ -633,7 +633,7 @@ small interfaces and for RBF interpolation, whose matrix is full.
 |---------|----------------|
 | `sparse_nearest_neighbor_mapping(src_pts, tgt_pts, mode=, transpose=)` | the matrix of `nearest_neighbor_mapping`, found with a k-d tree instead of an `n_target × n_source` distance table |
 | `sparse_projection_1d_mapping(src_boundaries, tgt_boundaries)` | the matrix of `projection_1d_mapping`, found with a sorted sweep instead of a double loop |
-| `sparse_matrix_mapping(indices, values, n_source=, mode=, name=)` | bring your own rows: `target[i] = sum_j values[i, j] * source[indices[i, j]]` |
+| `sparse_matrix_mapping(indices, values, n_source=, mode=, name=)` | bring your own rows: `target[i] = sum_j values[i, j] * source[indices[i, j]]`; `mode` is a label here, the rows are applied as given |
 
 The first two hold float32 weights under either setting of
 `jax_enable_x64`, as the dense kinds they reproduce do (see the table of

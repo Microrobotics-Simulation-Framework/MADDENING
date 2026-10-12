@@ -288,6 +288,40 @@ and recompiled went on at 72 -- and then for a time it reached the
 entry points that ran the graph but not the code that read
 `gm.params`.)
 
+All of this holds for a node inside a wrapper as for a node on its own.
+A wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`,
+`ShardedUnstructuredNode`, `HybridNode`, and one of them around another)
+has no `params` of its own: `gm.get_node(name).params` *is* the wrapped
+node's mapping, so a keyed write, an assignment and an element written in
+place are the same write whether you make them on the wrapper or on the
+node you wrapped.  (Until 0.4.0's fix the two only shared a mapping from
+construction on, and an assignment on the wrapper replaced the wrapper's
+alone: the step went on with the old value, `node.params` read the new
+one back, and every later keyed write through the wrapper was lost:
+MADD-ANO-278.)
+
+**A constant belongs in `params`.**  One a node keeps as an attribute
+(`self.stiffness = stiffness`) is outside everything above.  Writing it
+after `compile()` (`node.stiffness = 40.0`) is not a counted write, so
+nothing sees it until the next compile, and each entry point differently:
+`step()` and a `run_scan` length already traced go on with the old value,
+while a `run_scan` at a length not traced before runs the new one.  Call
+`gm.compile()` after such a write, or move the constant into `params`;
+no save carries it either (see [where a constant
+belongs](../developer_guide/node_authoring.md#where-a-constant-belongs-and-what-a-saved-graph-carries)).
+And `node.params` takes any key: a misspelt one
+(`node.params["stifness"] = 40.0`) is accepted, changes nothing the step
+reads, and after the recompile it causes is a new leaf of `gm.params` and
+an entry of every config saved from then on, where the same key written
+into `gm.params` or passed to `step(params=)` is a `ValueError`.  Such a
+config no longer loads: `from_dict` hands the key to the node's
+constructor, which raises `TypeError` naming it (`SpringDamperNode.__init__()
+got an unexpected keyword argument 'stifness'`) unless the class takes
+`**kwargs`.  Delete the key (`del node.params["stifness"]`) before saving;
+the recompile that follows says, with a `RuntimeWarning`, that it drops the
+leaf.
+`gm.params_table()` lists the keys there are.
+
 <!-- snippet: continues -->
 ```python
 gm.get_node("ball").params["elasticity"] = 0.6    # on the node, after compile

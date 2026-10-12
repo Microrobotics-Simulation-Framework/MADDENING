@@ -38,7 +38,7 @@ stand in for the tested one.
 | JAX | evidence generated at `0.10.2`, `0.11.2`, the 2 versions CI installs; `jax>=0.10,<0.13` is the *declared* range and no other point in it has been exercised |
 | Other base dependencies | `lineax>=0.0.7`, `numpy>=1.24`, `pyyaml>=6.0`, `scipy>=1.14` — installed from these ranges, not pinned, so the resolved version differs between runs and **is not recorded** |
 | Backend | CPU (GPU tests are not run in CI — MADD-ANO-001) |
-| Test packages | 13 — listed below; the CI test lanes collect 12 of them, and no lane collects `tests/viz/` |
+| Test packages | 13 — listed below; the CI test lanes collect 12 of them, and no lane collects `tests/viz/`; every lane skips `tests/api/test_frame_renderer_3d.py` |
 <!-- END GENERATED: test-suite -->
 
 ## Test Organization
@@ -47,7 +47,7 @@ stand in for the tested one.
 | Directory | Scope |
 |---|---|
 | `tests/adaptive/` | Adaptive timestepping: Richardson extrapolation, PI controller |
-| `tests/api/` | FastAPI server, WebSocket, binary encoding, server-side rendering |
+| `tests/api/` | FastAPI server, WebSocket, binary encoding, server-side rendering — **not run by CI**: `tests/api/test_frame_renderer_3d.py` (it skips itself where `pyvista` is not installed, and no CI job installs it) |
 | `tests/cloud/` | Distributed execution: multi-GPU sharding, halo exchange, resume transport, checkpoint download |
 | `tests/compliance/` | Compliance infrastructure: metadata, anomaly validator, stability decorator, benchmark registry, provenance |
 | `tests/core/` | Core framework: GraphManager, scheduling, coupling, params, checkpoint, sweep, solver utilities |

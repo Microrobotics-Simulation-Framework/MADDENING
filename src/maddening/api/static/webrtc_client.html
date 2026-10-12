@@ -56,7 +56,10 @@ function setStatus(text, cls) {
   el.className = cls;
 }
 
+let serverError = null;
+
 function connect() {
+  serverError = null;
   const url = document.getElementById('signaling-url').value.trim();
   if (!url) {
     setStatus('Enter a signaling URL', 'error');
@@ -121,13 +124,20 @@ function connect() {
     } else if (msg.type === 'ice' && msg.candidate) {
       pc.addIceCandidate(new RTCIceCandidate(msg.candidate))
         .catch(err => console.error('ICE error:', err));
+    } else if (msg.type === 'error') {
+      // The server refused (e.g. no video format it can send in the
+      // offer) and closes next: keep its reason on screen.
+      serverError = String(msg.message || 'the server refused the stream');
+      setStatus('Server refused: ' + serverError, 'error');
     }
   };
 
   ws.onerror = () => setStatus('Signaling error', 'error');
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    if (serverError) return;
     if (pc && pc.connectionState !== 'connected') {
-      setStatus('Signaling closed', 'disconnected');
+      setStatus('Signaling closed' + (event.reason ? ': ' + event.reason : ''),
+                'disconnected');
     }
   };
 }

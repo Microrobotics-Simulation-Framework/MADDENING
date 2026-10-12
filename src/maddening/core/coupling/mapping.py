@@ -153,6 +153,9 @@ class StaticLinearMapping:
     back as ``weights`` on every step.  Compared and hashed by identity
     (``eq=False``): an ``EdgeSpec`` holding a mapping must stay hashable,
     and two mappings with equal matrices are still two edges' weights.
+    ``mode`` is a label here: ``apply`` is ``H @ source`` under either
+    value (a factory that takes ``mode`` with two point sets has already
+    built the ``H`` for it).
 
     Each delivered value is a sum over the matrix's width.  A coupling
     report's float floor does not count that sum's rounding, and
@@ -656,6 +659,13 @@ def matrix_mapping(
     own kind stays ``"matrix"`` so the rebuild finds this factory.  The
     asset reference records the content hash of ``H``, so the file read
     back must hold exactly this matrix.
+
+    ``mode`` is a label too: ``H`` is applied as given under either
+    value, and ``mode="conservative"`` neither transposes nor rescales
+    it (the factories that build their matrix from two point sets do
+    build another one for it).  The label is what ``describe()`` and the
+    spec record, and what :func:`maddening.testing.mapping.verify_mapping`
+    takes the matrix to claim.
 
     ``H`` must be finite: a NaN or an infinity is a ``ValueError`` naming
     its index (``PUT /graph/params`` and ``POST /checkpoint/load`` refuse

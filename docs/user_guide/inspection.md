@@ -17,6 +17,15 @@ not ready" below).
 on every kind of graph by fingerprinting the whole graph around each
 call.
 
+One thing does run.  Where a coupling group has a transform or a mapping
+on an edge between its members, `coupling_report()` asks that edge what
+it delivers, and traces the edge's rule once on **every** call to find
+out (under `jax.eval_shape`: shapes and dtypes, never values).  The step
+is not compiled or traced again and nothing on the graph changes, but a
+transform is your code and runs as Python once per report: one with a
+side effect (a counter, a `print`) shows it each time.  The other
+methods on this page run no transform.
+
 Output is **plain text by default, and deterministic**: the same graph
 prints the same text on every machine, wrapped at `width` characters
 (default 100) rather than at the terminal's width.  Pass `rich=True` to

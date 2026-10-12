@@ -57,6 +57,39 @@ class CouplingGroup:
         A member's edge to itself is iterated with the group, which makes
         the term it carries implicit; a group of one node is allowed for
         this.
+
+        The group iterates its floating-point fields and reads
+        convergence from them.  An integer, Boolean or key field that
+        a pass reads from the iterate -- a flag one member computes and
+        another reads across an edge of the group, or one a member's
+        boundary flux is computed from -- is evaluated at every iterate
+        from the fields it is computed from (as a Jacobi pass computes
+        it, whatever ``iteration_mode``; once per link where such
+        fields are handed on in a chain), so a solve that reports a
+        zero residual has returned a state the pass leaves unchanged,
+        such fields included, under either ``solver``.  Which fields
+        those are is read from a trace of the group's pass: a step
+        counter or a PRNG key that a node advances from its pre-step
+        state is not one unless another member reads it or a boundary
+        flux is computed from it, and is on no loop either way,
+        whatever edges and fluxes the node has (printing it with
+        ``jax.debug.print`` or ``jax.debug.callback`` changes none of
+        this: an operation with no result feeds nothing).
+        At an iteration cap the solve has not converged at, it returns
+        its last floating iterate with the non-floating fields one pass
+        computes there from those fields evaluated at it; under
+        ``"gauss-seidel"`` a member swept after the floats it reads were
+        moved in that pass computes them from the moved floats, so they
+        need not be what the returned floats give (measured on a chain
+        of three such fields capped at two passes: ``q = 10`` returned
+        beside ``p = 15`` for ``p = floor(q)``; ``p = 10`` under
+        ``"jacobi"``).
+        Where the trace shows such fields computed from one another in
+        a closed loop (two members that each compute a flag from the
+        flag the other hands them) they have no value at an iterate,
+        and ``GraphManager.compile()`` refuses the group
+        (``ValueError``; ``validate()`` lists it): store one of them in
+        floating point, or compute it in a node outside the group.
     max_iterations : int
         Upper bound on coupling passes per timestep.
 
@@ -65,7 +98,12 @@ class CouplingGroup:
         accelerator is built and before the IFT solver is entered.  So
         ``acceleration``, ``relaxation``, ``jacobian_reuse``,
         ``accelerated_fields`` and ``linear_solver`` are all inert there
-        and warn (``UserWarning``), and ``solver="ift"`` differentiates
+        and warn (``UserWarning``).  ``predictor`` is **not** inert
+        there, and does not warn: the extrapolated guess is the state
+        the single pass starts from, so it changes what the step returns
+        at order one (see ``predictor``).  An integer or Boolean field an
+        edge of the group carries is read by that pass as it is stored,
+        one step behind.  ``solver="ift"`` differentiates
         straight through that single pass rather than through a fixed
         point -- the same derivative ``"fori"`` would give, since there
         is no fixed point to apply the implicit function theorem at.
@@ -97,12 +135,25 @@ class CouplingGroup:
         (``UserWarning``).
     convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  All three scale each field's
-        change by the field's own magnitude, so a group's verdict does
-        not depend on the units its quantities are written in.  (To the
-        bit for a power-of-two factor.  A decimal one rounds the inputs
-        differently and moves the error estimate by rounding, so a
-        verdict taken at the iteration cap with the estimate within a
-        few float floors of the threshold can differ.)  ``"l2"``
+        change by the field's own magnitude, so the *norm* of a given
+        change does not depend on the units any quantity is written in.
+        The *run* it is taken on is the same run under one common factor
+        on every quantity (to the bit for a power-of-two factor; a
+        decimal one rounds the inputs differently and moves the error
+        estimate by rounding, so a verdict taken at the iteration cap
+        with the estimate within a few float floors of the threshold can
+        differ).  Under a change of the units of **one** field it is the
+        same run only with ``acceleration="none"`` or ``"fixed"``:
+        ``"aitken"``, ``"iqn-ils"`` and ``"iqn-imvj"`` form their step
+        from sums over all the accelerated fields together, in which a
+        field written in much smaller units carries no weight, so the
+        iteration takes another path and can reach the cap where the
+        same problem in comparable units converges (measured under
+        Jacobi: a pair that ``"iqn-ils"`` converges in 8 passes took 25
+        and stopped unconverged with one field in units ``2**20`` smaller;
+        MADD-ANO-285).  Write a group's quantities in units that
+        make them comparable in size, or use ``"none"`` or ``"fixed"``.
+        ``"l2"``
         uses a global L2 norm with ``tolerance`` as threshold;
         ``"mixed"`` a per-field RMS of ``|dx| / (rtol * |v|)`` over
         every float field, and ``"interface"`` the same over what the
@@ -331,10 +382,20 @@ class CouplingGroup:
         converged states, ``"quadratic"`` uses quadratic extrapolation
         from the last three converged states.  Reduces iteration count
         for smoothly varying problems.  Only floating fields are
-        extrapolated.  The fixed point does not move; the returned
-        iterate, which starts the solve from another guess, moves within
-        the solve's tolerance (measured up to 4.5e-5 relative on a linear
-        group converged to ``tolerance=1e-4`` with ``"linear"``).
+        extrapolated.  The fixed point does not move; where the solve
+        converges, the returned iterate, which starts the solve from
+        another guess, moves within the solve's tolerance (measured up to
+        4.5e-5 relative on a linear group converged to
+        ``tolerance=1e-4`` with ``"linear"``).  A solve that does not
+        converge returns wherever its passes took the guess, and with
+        ``max_iterations=1`` there is no solve at all: the guess is what
+        the one staggered pass starts from, so the predictor is another
+        time-stepping scheme and moves the result at order one (measured
+        on the affine pair of ``tests/core/test_coupling_units_of_one_field.py``,
+        three entries a member under ``"jacobi"``, after four steps: the
+        first entry of ``a`` at ``-12.07`` with ``"none"``, ``-20.00``
+        with ``"linear"`` and ``-22.08`` with ``"quadratic"``, where the
+        converged solve gives ``-76.54``).  Nothing warns of it.
     solver : {"ift", "fori"}
         How the fixed-point iteration is solved.  ``"ift"`` (default)
         runs a ``jax.lax.while_loop`` that exits as soon as the

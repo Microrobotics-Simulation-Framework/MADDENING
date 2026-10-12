@@ -3977,7 +3977,8 @@ claims:
     value."
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-    - src/maddening/core/node.py:148 (_ParamsDict, _succeed)
+    - src/maddening/core/node.py::_ParamsDict
+    - src/maddening/core/node.py::SimulationNode
     - src/maddening/core/graph_manager.py::GraphManager._sync_node_param_writes
   conditions: >-
     a calibrated constant beside the key assigned; a key handed back with
@@ -3987,12 +3988,24 @@ claims:
     after it, replaced by an equal one and by a different one; a counting
     mapping from elsewhere stored as it is; 400 generated sequences of
     keyed writes, replacements, gm.params writes and reads against "the
-    later write wins".  Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, multi-rate graphs, sub-cycled groups or sharded graphs.
+    later write wins".  On a node inside a wrapper -- ShardedStencilNode,
+    ShardedPointwiseNode and ShardedUnstructuredNode on 1, 2 and 4 devices,
+    HybridNode, and a HybridNode around each sharded wrapper -- the
+    assignment (and the keyed write, an element written in place, a
+    counting mapping assigned) made on the wrapper or on the wrapped node,
+    before the first step and after steps, on both parameter contracts;
+    a calibrated constant beside the key assigned on a wrapper.  Not
+    claimed for float64 (x64), mixed dtypes, 16-bit floats, multi-rate
+    graphs or sub-cycled groups, nor for a wrapper written outside the
+    package when the assignment is made on the node it wraps.
   oracle: >-
     gm.params, the value the next step integrates with and the saved
     configuration; a reference model of the two stores and the keys
-    written since the last sync.
+    written since the last sync.  For a wrapped node: the same wrapper
+    around a node constructed with the value, started from the state the
+    written graph was in (bit for bit), an unsharded twin given the same
+    statements (the sharded-equivalence tolerance), gm.params,
+    params_table(), the saved configuration and a checkpoint.
   tests:
     - tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_that_hands_a_key_back_unchanged_is_not_a_write_of_it
@@ -4000,11 +4013,21 @@ claims:
     - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_and_an_in_place_write_do_not_hide_each_other
     - tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes
     - tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_every_spelling_of_a_write_on_every_wrapper_is_the_write_the_step_runs
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_every_entry_point_runs_the_value_assigned_on_a_wrapper
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_checkpoint_carries_the_value_assigned_on_a_wrapper
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_leaves_the_other_calibrated_constants_alone
+    - tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_wrapper_has_no_mapping_of_its_own
   status: verified
   notes: >-
     Round 9 (B1, on e301c41): node.params = {**node.params, "damping": 5.0}
     after a stiffness calibrated to 45 put the stiffness back to the node's
-    30, with no warning (MADD-ANO-203).
+    30, with no warning (MADD-ANO-203).  Whole-tree audit of 2026-10-10
+    (B1): the assignment on a sharded wrapper replaced the wrapper's
+    mapping alone, so the step ran the old value while node.params read
+    the new one (MADD-ANO-278); this row said "not claimed for sharded
+    graphs" and nothing a user reads did.
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     f64: narrowed
@@ -4017,9 +4040,191 @@ claims:
     sub_cycled: narrowed
     predictors_warm_starts: n/a
     adaptive: n/a
-    checkpoint_restart: n/a
-    sharded: narrowed
+    checkpoint_restart: tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_a_checkpoint_carries_the_value_assigned_on_a_wrapper
+    sharded: tests/cloud/multigpu/test_a_params_write_on_a_wrapper_is_the_write_the_step_runs.py::test_an_assignment_on_a_wrapper_or_on_its_node_is_the_write_the_step_runs
 
+- id: SYS-148
+  area: params persistence
+  claim: >-
+    "A saved graph holds, for each node, its class name, name, timestep and
+    params, and nothing else ... A constructor argument the class keeps
+    anywhere else is therefore dropped by the save ... every door that
+    saves a node's constants says so ... The rule goes by the name.  The
+    warning is given when the node was constructed with an argument for a
+    named parameter of its class's __init__ (its own, or the one it
+    inherits), at a value that is not exactly that parameter's default, and
+    node.params has no key of that name ... The warning is not proof of a
+    loss ... Such a class says that it answers for its own saving by
+    overriding to_dict() ... Only a config honours an override of
+    to_dict() ... save_graph_to_usd writes params and never calls to_dict,
+    so it asks such a class like any other ... Silence is not proof that
+    everything is saved."
+  sources:
+    - docs/developer_guide/node_authoring.md (Where a constant belongs, and what a saved graph carries)
+    - docs/user_guide/quickstart.md (Coupled Simulation)
+    - src/maddening/core/node.py::SimulationNode
+    - src/maddening/core/node.py::_unsaved_constructor_arguments
+    - src/maddening/core/node.py::_is_the_default
+    - src/maddening/core/graph_manager.py::GraphManager.to_dict
+    - src/maddening/usd/serialization.py::save_graph_to_usd
+  conditions: >-
+    the quickstart's spring as it was taught, built with a stiffness off
+    its default, saved through GraphManager.to_dict and reloaded through
+    JSON, and saved to a USD stage and reloaded (the warning's whole text,
+    the same from both doors; the reloaded graph is the default graph);
+    the same node handing its constants to super().__init__ (no warning,
+    the reload steps bit for bit); an argument at exactly its default (the
+    same float or an equal one built at run time, the same tuple of floats
+    or an equal one built at run time, None: not reported); an argument
+    that is not exactly its default -- another number, a NaN, a NaN of
+    the other sign or another payload for a NaN default, an int or a
+    NumPy scalar or a bool for a float, a zero of the other sign, a list or
+    an array for a tuple, another length, an array where the default is
+    None, a required argument (reported; for the zero of the other sign and
+    the int, the reload's wrong sign and its failure to step are shown); a
+    class that inherits its parent's constructor (reported); a node that
+    saves an argument under another spelling or reads it through a flag
+    (reported although it reloads bit for bit; silent at the config door
+    once its class overrides to_dict); a class whose override of to_dict
+    saves the argument in the entry's params (silent at the config door,
+    which reloads it bit for bit; named at the USD door, whose warning says
+    the override does not reach a stage, and whose stage reloads the
+    default), bare and inside a HybridNode; a NaN or a complex NaN built at
+    run time with the default's bits (not reported, the complex one
+    reloading bit for bit); every concrete node class that maddening.nodes and
+    maddening.nodes.adaptive export, with every named constructor
+    parameter off its default (the wavelet node's included), inherited ones
+    included (a test holds the table to that), and an LBMNode with no
+    wall_mask (not reported); a HybridNode around such a node, by to_dict
+    and by the USD writer, and the sharded wrappers by to_dict (the wrapped
+    node is named).  Silent, as the guide says, with the loss shown where
+    there is one: an argument a **kwargs took in, one a subclass's **kwargs
+    hands to a parent that keeps it, what an *args took in, a class whose
+    own __new__ hands no arguments on, a deep copy, an unpickled node, and
+    an attribute written after construction.  Outside this row:
+    geometry_source, which nothing saves.
+  oracle: >-
+    The warnings raised (every test runs with warnings as errors, so an
+    unexpected one fails it), the saved entry, and the trajectory of the
+    reloaded graph against the saved graph and the default graph.
+  tests:
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_quickstart_idiom_is_named_and_reloads_as_the_default_model
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_warning_reads_as_written
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_corrected_quickstart_node_round_trips_at_the_value_it_was_built_with
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_at_exactly_its_default_is_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_that_is_not_exactly_its_default_and_outside_params_is_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_zero_of_the_other_sign_and_an_int_for_a_float_are_not_the_default
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_node_that_saves_an_argument_another_way_says_so_by_overriding_to_dict
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_an_argument_a_parent_keeps_is_lost_through_the_childs_kwargs_and_nothing_says_so
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_what_the_rule_cannot_tell_is_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_base_constructors_own_arguments_are_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_table_moves_every_argument_of_every_built_in_node
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_no_built_in_node_is_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_built_in_argument_saved_only_when_given_is_not_reported
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_passes_on_what_its_node_cannot_save
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_noting_the_arguments_changes_nothing_else_about_a_node
+    - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_the_stage_door_gives_the_warning_the_config_door_gives
+    - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_node_that_hands_its_constants_on_is_saved_to_a_stage_without_a_word
+    - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_a_wrapper_saved_to_a_stage_is_told_of_the_node_it_wraps
+    - tests/usd/test_usd_save_says_which_constructor_arguments_it_does_not_save.py::test_an_override_of_to_dict_is_honoured_by_a_config_and_not_by_a_stage
+    - tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_a_nan_is_its_default_only_with_the_same_bits
+  status: verified
+  notes: >-
+    Whole-tree audit of 2026-10-10 (C, H1): the quickstart's own graph built
+    with SpringNode(stiffness=40.0) saved 'params': {} and reloaded as the
+    k = 12 graph with no warning, at every tag from v0.1.0 (MADD-ANO-277).
+    The rule is by instance and not by parameter names alone, because
+    LBMNode writes no wall_mask key for a node built without one.  Audit of
+    2026-10-11: the first rule took -0.0 for the default 0.0 and 2 for 2.0
+    (two silent losses), the guide called the rule exact where it names
+    four nodes that reload bit for bit, the USD writer did not warn, and
+    the table behind "every built-in node" left 15 parameters at their
+    default and had no wavelet case.
+  domains:
+    f32: tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_the_quickstart_idiom_is_named_and_reloads_as_the_default_model
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: tests/core/test_to_dict_says_which_constructor_arguments_it_does_not_save.py::test_no_built_in_node_is_reported
+    checkpoint_restart: n/a
+    sharded: tests/cloud/multigpu/test_exchange_ppermute.py::test_wrapper_matches_unsharded_under_both_transports
+- id: SYS-149
+  area: params pytree
+  claim: >-
+    "copy.deepcopy and pickle carry the counts and the lineage with the
+    items ... A graph copied with its nodes holds, beside each node's
+    mapping, the counts it last saw there; those are copied as they are, so
+    the mapping's own counts must be too, or the copy's first sync reads
+    'fewer writes than I saw' as a write and puts the node's value over a
+    leaf calibrated in gm.params since ... copy.copy(p) and dict(p) are
+    another matter: a second mapping beside this one ... it starts at zero
+    with a lineage of its own."
+  sources:
+    - src/maddening/core/node.py::_ParamsDict
+    - src/maddening/core/graph_manager.py::GraphManager._sync_node_param_writes
+  conditions: >-
+    a deep copy of the graph, a deep copy of a deep copy, and the node's
+    mapping deep-copied, pickled or shallow-copied and assigned back, each after eight orders of node write and
+    calibration: a node write taken in then a calibration; a calibration
+    then a node write taken in, or pending; a calibration then an
+    assignment pending; the node's own value written back over a
+    calibration, pending; a calibration only; an element written in place
+    pending beside a calibration; two node writes with a calibration
+    between.  On a node on its own (every order with every copy, per push)
+    and behind HybridNode, the three sharded wrappers on two devices and a
+    HybridNode around the stencil wrapper (the deep copy in two orders per
+    push, all of it slow).  A graph built around a deep copy, a shallow
+    copy or an unpickled copy of a written node, on both parameter
+    contracts; a graph pickled before compile(); a three-argument node's
+    write pending at the copy; one deep copy's mapping assigned into
+    another deep copy's node, and the original's into a copy's, with the
+    write counts coinciding (taken in: each copy has a lineage of its
+    own).  A compiled graph cannot be pickled and says so.  A shallow copy
+    of the graph (copy.copy) is refused with a TypeError naming
+    copy.deepcopy, behind every wrapper, on both contracts, compiled or
+    not: it shared the graph's record of the writes seen and not its
+    compiled step, and the graph that stepped second after a write to a
+    three-argument node ran the old value.
+  oracle: >-
+    The value each order leaves in force, stated per order; gm.params, the
+    saved configuration and the state after three steps of the copy against
+    a second graph given the same statements, bit for bit.
+  tests:
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_copy_runs_and_reports_what_the_original_does
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_deep_copy_of_a_graph_of_a_wrapped_node_runs_what_the_original_does
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_every_copy_in_every_order_behind_every_wrapper
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_graph_built_around_a_copy_of_a_written_node_runs_the_written_value
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_graph_not_yet_compiled_is_pickled_with_its_writes_and_a_compiled_one_refuses
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_three_argument_node_write_pending_at_the_copy_is_run_by_the_copy
+    - tests/core/test_node_params_writes_are_observed.py::test_a_copy_carries_its_counts_where_a_graph_may_be_copied_with_it
+    - tests/core/test_node_params_writes_are_observed.py::test_a_copys_mapping_assigned_into_another_copys_node_is_taken_in
+    - tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_shallow_copy_of_a_graph_is_refused_and_names_the_deep_copy
+  status: verified
+  notes: >-
+    Audit of 2026-10-11 (Q9): copy.deepcopy(gm) after a counted node write
+    and a later calibration ran, reported and saved the node's value (2.0)
+    where the original ran the calibrated one (5.0), on a node on its own,
+    a hybrid and a pointwise wrapper (MADD-ANO-279; never released).
+  domains:
+    f32: tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_copy_runs_and_reports_what_the_original_does
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: tests/cloud/multigpu/test_a_copy_of_a_graph_runs_and_reports_what_the_original_does.py::test_a_deep_copy_of_a_graph_of_a_wrapped_node_runs_what_the_original_does
 - id: SYS-117
   area: params pytree
   claim: >-
@@ -4445,15 +4650,23 @@ claims:
     "Every start, min and max is written in its type's lexical form, which
     FMI 3.0's schema requires ... An integer's bounds are the integers
     inside the declared interval, and a Boolean carries no min / max.  A
-    Boolean or integer input or output is variability="discrete"".
+    Boolean or integer input or output is variability="discrete"".  "A
+    unit is written on a Float32 or Float64 variable only ... and a unit
+    that no float variable carries is not listed in <UnitDefinitions>".
   sources:
     - docs/user_guide/fmu_export.md (Variables)
     - src/maddening/fmi/model_description.py:83 (FMIVariable, start)
+    - src/maddening/fmi/model_description.py::_writes_unit
   conditions: >-
     Boolean, integer and float variables; a hand-built start in float form;
     the DefaultExperiment attributes and a clock's interval from NumPy
     scalars of every float and integer type, and non-finite ones (written
-    with repr until 0.4.0, MADD-ANO-219); FMPy and the FMI 3.0 schema. Not claimed for 16-bit floats.
+    with repr until 0.4.0, MADD-ANO-219); a unit-bearing input of every
+    type of the writer's table (the 64-bit ones under x64), unit-bearing
+    integer and Boolean parameters, the built-in nodes' int32 and int8
+    inputs, and a hand-built description with a unit on every type and on
+    a clock (written on every type until 0.4.0, MADD-ANO-273); FMPy and the
+    FMI 3.0 schema. Not claimed for 16-bit floats.
   oracle: the XML attributes; schema validation; simulate_fmu with its default validation.
   tests:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -4463,6 +4676,11 @@ claims:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_hand_built_start_in_float_form_is_written_in_the_types_form
     - tests/fmi/test_default_step_is_one_graph_step.py::test_every_number_a_hand_built_description_writes_is_an_xs_double
     - tests/fmi/test_default_step_is_one_graph_step.py::test_a_non_finite_experiment_time_is_written_in_the_schemas_spelling
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_unit_bearing_descriptions_hold_every_type_with_a_unit
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_unit_is_written_on_a_float_variable_and_on_no_other
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_units_definition_is_left_out_with_its_last_float_variable
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_fmpy_validates_a_unit_bearing_variable_of_every_type
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_fmi3_schema_validates_a_unit_bearing_variable_of_every_type
   status: verified
   domains:
     f32: tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -5749,11 +5967,23 @@ claims:
     "An archive must carry its time, and exactly the model's state fields,
     parameters and pending inputs"; "a snapshot of a diverged model ...
     does not restore.  The error names the field.  A non-finite value the
-    FMU was instantiated with is not a divergence and restores".
+    FMU was instantiated with is not a divergence and restores".  "Nor is
+    a non-finite reading in a coupling group's report ... A snapshot
+    holding one restores on both doors ... A non-finite value in a node's
+    field, or in a group's warm starts, is still refused."
   sources:
     - docs/user_guide/fmu_export.md (The trust boundary)
     - src/maddening/fmi/sidecar.py:675 (FmuSidecar.set_fmu_state)
-  conditions: a missing and an extra input member; a model with no inputs; clocks; NaN-seeded diagnostics slots; a field that became non-finite.
+    - src/maddening/fmi/sidecar.py::_is_report_slot
+  conditions: >-
+    a missing and an extra input member; a model with no inputs; clocks;
+    NaN-seeded diagnostics slots; a field that became non-finite; NaN and
+    both infinities in every floating report slot of a group, through the
+    sidecar and the bridge, with the snapshot the FMU then hands out rolled
+    back to and the step after it the same to the bit; the same values in
+    a node's field, a warm start and an integer report slot (refused by
+    both in the same words).  The reported group, whose step writes the inf
+    itself, and the experimental geometry slots are slow tests.
   oracle: the refusal; the restore.
   tests:
     - tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing
@@ -5762,6 +5992,13 @@ claims:
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_snapshot_of_the_nan_seeded_diagnostics_restores_on_both_paths
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_field_that_became_non_finite_still_does_not_restore
     - tests/fmi/test_params_causality.py::TestSnapshotValues::test_set_fmu_state_refuses_a_snapshot_whose_keys_differ_as_the_bridge_does
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_snapshot_whose_report_holds_a_non_finite_reading_rolls_back_to_the_bit
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_non_finite_reading_forged_into_any_floating_report_slot_restores
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_non_finite_value_in_anything_that_is_not_a_report_slot_is_still_refused
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_groups_warm_starts_are_state_and_take_no_non_finite_value
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_an_integer_report_slot_takes_no_non_finite_value_on_either_path
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_group_stopped_at_its_cap_writes_inf_and_its_snapshot_rolls_back_to_the_bit
+    - tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_the_geometry_slots_read_inf_on_an_ordinary_step_and_the_snapshot_rolls_back
   status: verified
   domains:
     f32: n/a
@@ -5773,7 +6010,7 @@ claims:
     vmap: n/a
     multi_rate: n/a
     sub_cycled: n/a
-    predictors_warm_starts: n/a
+    predictors_warm_starts: tests/fmi/test_an_fmu_restores_a_snapshot_whose_report_reads_inf.py::test_a_groups_warm_starts_are_state_and_take_no_non_finite_value
     adaptive: n/a
     checkpoint_restart: tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing
     sharded: n/a

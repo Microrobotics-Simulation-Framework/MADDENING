@@ -2065,6 +2065,10 @@ stream_config.ice_servers reached the log; credentials are now redacted.
 F = J^T J, whose rounding a constant or piecewise constant sensitivity aligns:
 two parameters that enter a residual only through their sum could report rank
 2 of 2 and a finite Cramer-Rao bound, with no warning (never released).
+`290` (resolved): 0.1.0 to 0.3.1: on an NVIDIA GPU at JAX's default matmul
+precision, LBMNode's and LBMPipeNode's lattice products ran at reduced
+precision, and the multi-GPU stencil check's LBM gradients were off by 1.6e-3
+relative with no warning; each product now pins `Precision.HIGHEST`.
 
 ## The account of each area
 

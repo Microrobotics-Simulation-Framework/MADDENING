@@ -20595,3 +20595,82 @@ anomalies:
       - "tests/nodes/test_lbm_matmul_precision.py::test_the_scan_finds_the_lattice_products_it_guards"
       - "tests/nodes/test_lbm_matmul_precision.py::test_every_dot_in_the_traced_lbm_step_and_its_gradient_is_highest"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-295"
+    title: "compile_cache reported one cache directory while JAX wrote to another: enable(b) after a compile kept JAX writing to the first directory, and with MADDENING_COMPILATION_CACHE_DIR set every GraphManager.compile() re-pointed an explicit enable() or warm_cache(cache_dir=) at the variable (never released)"
+    description: >
+      `maddening.core.simulation.compile_cache` (new in 0.4.0) points JAX's
+      persistent compilation cache at a directory and reports it.  JAX
+      opens that cache once, at the first compile that finds a directory
+      set, and ignores a later change of `jax_compilation_cache_dir`.  Two
+      routes made the module report a directory JAX was not using.  (A)
+      `enable(b)` after the process had compiled with directory `a`
+      returned `b` and `enabled_dir()` said `b`, while JAX kept writing to
+      `a` (measured: 2 entries in `a`, 0 in `b`).  (B) With
+      `MADDENING_COMPILATION_CACHE_DIR=a` set, the `enable_from_env()` that
+      every `GraphManager.compile()` calls re-read the variable and
+      re-pointed the setting and the module's record at `a`, over an
+      explicit `enable(b)` or `warm_cache(..., cache_dir=b)`.  Where the
+      entries then went depended on whether an eager operation had
+      compiled in between: with one (a `HeatNode` constructor's), JAX had
+      already opened `b`, so `warm_cache` returned `cache_dir == b`,
+      `enabled_dir()` said `a`, and the 5 entries were in `b`; without
+      one, they went to `a`, so a script that asked for a temporary
+      directory wrote into the directory of the user's variable (a draft
+      example wrote all 7 of its entries there).  Nothing warned.  Resolved
+      before release: an explicit directory wins over the variable
+      (`enable_from_env()` changes nothing once a directory is enabled, and
+      `enable()` / `warm_cache()` without a directory keep the one already
+      enabled); `enable()` drops JAX's open cache with the public
+      `jax.experimental.compilation_cache.compilation_cache.reset_cache`
+      when it moves the directory, so the next compile opens the new one
+      (on a JAX without that call the move is refused with a
+      `RuntimeError`); `enabled_dir()` reads where JAX's cache actually is
+      and returns `None` rather than a directory JAX is not using;
+      `warm_cache` raises if the cache was re-pointed during the warm-up;
+      the directory is made absolute; and a `min_compile_time_secs` passed
+      for the directory already enabled is applied (it was ignored).
+      Measured on jax 0.10.2, 0.11.0 and 0.11.2.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A silent wrong report, so not `minor`: the module named a directory
+      that did not hold the entries, and a script that asked for a
+      temporary directory could write compiled programs into the user's
+      own cache directory.  Not safety relevant: a cache entry is keyed on
+      the XLA version, backend and traced program, so whichever directory
+      held it, a hit was the right executable and no simulation result
+      changed; what was wrong was where files went and what was reported.
+    affected_components:
+      - "maddening.core.simulation.compile_cache.enable"
+      - "maddening.core.simulation.compile_cache.enable_from_env"
+      - "maddening.core.simulation.compile_cache.enabled_dir"
+      - "maddening.core.simulation.compile_cache.warm_cache"
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: "none"
+    workaround: >
+      Not needed: never released.  (Before the fix: call
+      `compile_cache.enable(dir)` before anything compiles and leave
+      `MADDENING_COMPILATION_CACHE_DIR` unset.)
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `enabled_dir()` reads private JAX state
+      (`jax._src.compilation_cache._cache`) to learn where the open cache
+      is; a JAX with another layout falls back to the setting, which
+      `enable()` keeps in step with the open cache, and a test fails on
+      every CI lane if the probe stops reading the running JAX.
+      Re-pointing while another thread is compiling may let that compile
+      use either directory; `enabled_dir()` then answers `None` if it is
+      not the enabled one.  Programs already compiled in the process stay
+      in memory after a move and are not written to the new directory.
+    verification:
+      - "tests/core/test_compile_cache.py::test_a_move_after_the_cache_opened_writes_to_the_new_directory"
+      - "tests/core/test_compile_cache.py::test_an_explicit_directory_wins_over_the_variable_in_graph_compile"
+      - "tests/core/test_compile_cache.py::test_an_explicit_directory_wins_after_an_eager_op_opened_the_cache"
+      - "tests/core/test_compile_cache.py::test_warm_cache_writes_to_the_directory_it_was_given_whatever_the_variable_says"
+      - "tests/core/test_compile_cache.py::test_graph_compile_moves_an_already_open_cache_to_the_variable"
+      - "tests/core/test_compile_cache.py::test_enabled_dir_never_names_a_directory_jax_is_not_using"
+      - "tests/core/test_compile_cache.py::test_a_jax_that_cannot_reopen_its_cache_refuses_the_move"
+      - "tests/core/test_compile_cache.py::test_only_compile_cache_points_jax_at_a_cache_directory"
+    github_issue: null

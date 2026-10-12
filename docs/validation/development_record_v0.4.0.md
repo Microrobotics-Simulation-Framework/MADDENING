@@ -2069,6 +2069,11 @@ two parameters that enter a residual only through their sum could report rank
 precision, LBMNode's and LBMPipeNode's lattice products ran at reduced
 precision, and the multi-GPU stencil check's LBM gradients were off by 1.6e-3
 relative with no warning; each product now pins `Precision.HIGHEST`.
+`295` (resolved): compile_cache reported one cache directory while JAX wrote to
+another: enable(b) after a compile kept JAX writing to the first directory, and
+with MADDENING_COMPILATION_CACHE_DIR set every GraphManager.compile() re-
+pointed an explicit enable() or warm_cache(cache_dir=) at the variable (never
+released).
 
 ## The account of each area
 

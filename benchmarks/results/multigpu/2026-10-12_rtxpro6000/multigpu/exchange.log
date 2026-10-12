@@ -1,0 +1,5 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[exchange] cells=  100489 rcm        a2a    3.529 ms  ppermute    3.342 ms  x1.06  identical=True
+[exchange] cells=  300304 rcm        a2a    3.899 ms  ppermute    3.745 ms  x1.04  identical=True
+[exchange] cells= 1000000 rcm        a2a    3.148 ms  ppermute    3.780 ms  x0.83  identical=True
+wrote results/multigpu/exchange.json (23.5 s)  checks 6/6 passed

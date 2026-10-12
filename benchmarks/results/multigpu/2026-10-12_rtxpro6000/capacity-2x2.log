@@ -1,0 +1,58 @@
+[capacity] --- rung 1: K=(37, 23, 27), 176463360 cells, target fill 0.25 (a priori: 582 bytes per cell = 97 of state x 6); time box 360 s
+[capacity] rung 1 mesh 2x2 K=(37, 23, 27) grid 592x552x540 = 176463360 cells, 10 steps
+[capacity] rung 1: checks 17/17 passed
+[capacity] rung 1: passed; fill 0.184; largest max_rel 0.00e+00
+[capacity] --- rung 2: K=(49, 33, 38), 471905280 cells, target fill 0.5 (rung 1 measured 430.1 bytes per cell, fill 0.184); time box 360 s
+[capacity] rung 2 mesh 2x2 K=(49, 33, 38) grid 784x792x760 = 471905280 cells, 10 steps
+[capacity] rung 2: checks 17/17 passed
+[capacity] rung 2: passed; fill 0.486; largest max_rel 1.23e-06
+[capacity] --- rung 3: K=(57, 37, 44), 712673280 cells, target fill 0.75 (rung 2 measured 424.7 bytes per cell, fill 0.486); time box 360 s
+[capacity] rung 3 mesh 2x2 K=(57, 37, 44) grid 912x888x880 = 712673280 cells, 10 steps
+[capacity] --- soak: K=(45, 29, 35), 350784000 cells (0.75 of the ceiling's) for 3 min; time box 900 s
+[capacity] soak mesh 2x2 K=(45, 29, 35) = 350784000 cells, blocks of 10 steps for 3.0 min
+[capacity] soak block 1: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 2: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 3: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 4: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 5: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 6: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 7: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 8: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 9: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 10: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 11: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 12: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 13: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 14: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 15: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 16: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 17: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 18: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 19: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 20: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 21: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 22: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 23: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 24: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 25: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 26: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 27: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 28: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 29: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 30: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 31: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 32: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 33: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 34: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak block 35: passed, largest max_rel 0.00e+00, host RSS 9.09 GiB
+[capacity] soak: passed after 35 blocks; device bytes in use grew by 0 after the first block; host RSS grew by 2.4 MiB after the first block
+
+rung  target        cells  K            outcome                     fill   B/cell  steps/s   max_rel
+   1    0.25    176463360  37x23x27     passed                     0.184   430.1     9.48   0.0e+00
+   2    0.50    471905280  49x33x38     passed                     0.486   424.7     3.28   1.2e-06
+   3    0.75    712673280  57x37x44     out of memory              0.175   101.4        -         -
+CEILING: rung 2, 471905280 cells (K = 49x33x38), fill 0.486
+  the allocator's own limit there: 96877936640 bytes (the peak was 0.517 of it)
+STOPPED BY: rung 3 (712673280 cells): out of memory -- while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 37.46GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']
+SOAK: 350784000 cells: passed; device bytes in use grew by 0 after the first block; host RSS grew by 2.4 MiB after the first block
+wrote results/capacity-2x2/capacity_summary.json; exit 0

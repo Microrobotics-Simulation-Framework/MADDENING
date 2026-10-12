@@ -1,0 +1,47 @@
+Mon Oct 12 15:33:10 UTC 2026
+Python 3.12.3
+c0c6add8a355e4753f7cabec555b5a751a03262f
+/root/sky_workdir/src/maddening/__init__.py
+Mon Oct 12 15:33:10 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.91.07              Driver Version: 595.91.07      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:BA:00.0 Off |                    0 |
+| N/A   27C    P0             70W /  600W |       0MiB /  97887MiB |      1%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:BB:00.0 Off |                    0 |
+| N/A   27C    P0             71W /  600W |       0MiB /  97887MiB |      1%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:CC:00.0 Off |                    0 |
+| N/A   27C    P0             71W /  600W |       0MiB /  97887MiB |      1%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:CD:00.0 Off |                    0 |
+| N/A   27C    P0             70W /  600W |       0MiB /  97887MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+equinox==0.13.8
+jax==0.11.2
+jax-cuda12-pjrt==0.11.2
+jax-cuda12-plugin==0.11.2
+jaxlib==0.11.2
+jaxtyping==0.3.11
+lineax==0.1.1
+numpy==2.5.4
+scipy==1.18.1
+XLA_PYTHON_CLIENT_PREALLOCATE=false
+JAX_DEFAULT_MATMUL_PRECISION=highest

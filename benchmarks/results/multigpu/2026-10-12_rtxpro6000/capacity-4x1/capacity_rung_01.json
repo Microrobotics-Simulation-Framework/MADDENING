@@ -1,0 +1,638 @@
+{
+  "schema_version": 1,
+  "kind": "capacity rung",
+  "gating": false,
+  "dry_run": false,
+  "rung": 1,
+  "target_fill": 0.25,
+  "mesh": {
+    "label": "4x1",
+    "shape": [
+      4,
+      1
+    ],
+    "devices_per_spatial_axis": [
+      4,
+      1,
+      1
+    ],
+    "n_devices": 4
+  },
+  "lattice": "D3Q19",
+  "viscosity": 0.1,
+  "tile": [
+    16,
+    24,
+    20
+  ],
+  "k": [
+    35,
+    24,
+    27
+  ],
+  "shape": [
+    560,
+    576,
+    540
+  ],
+  "cells": 174182400,
+  "steps": 10,
+  "state_bytes_per_cell": 97,
+  "limit": 1e-05,
+  "config": {
+    "out": null,
+    "summarise": null,
+    "dry_run": false,
+    "mesh": "4x1",
+    "device_memory_gb": 96.0,
+    "ramp": null,
+    "cells": null,
+    "k": [
+      35,
+      24,
+      27
+    ],
+    "tile": [
+      16,
+      24,
+      20
+    ],
+    "steps": 10,
+    "rung_timeout_s": 300.0,
+    "bytes_per_cell": null,
+    "soak_minutes": 0.0,
+    "soak_at": 0.75,
+    "check_chunk_mb": 128.0,
+    "child": "rung",
+    "record": "results/capacity-4x1/capacity_rung_01.json",
+    "rung_index": 1,
+    "target_fill": 0.25
+  },
+  "phase": "done",
+  "pid": 82211,
+  "outcome": "passed",
+  "memory": {
+    "device_memory_gb": 96.0,
+    "readings": [
+      {
+        "at": "after the build",
+        "devices": [
+          {
+            "device": "cuda:0",
+            "measured": true,
+            "bytes_in_use": 4630519296,
+            "peak_bytes_in_use": 4631270656,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 3309465600,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 134217728,
+            "pool_bytes": 4833935360,
+            "peak_pool_bytes": 4833935360
+          },
+          {
+            "device": "cuda:1",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 4339263744,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 3309465600,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 4251421696,
+            "pool_bytes": 8592031744,
+            "peak_pool_bytes": 8592031744
+          },
+          {
+            "device": "cuda:2",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 4339263744,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 3309465600,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 4251421696,
+            "pool_bytes": 8592031744,
+            "peak_pool_bytes": 8592031744
+          },
+          {
+            "device": "cuda:3",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 4339263744,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 3309465600,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 4251421696,
+            "pool_bytes": 8592031744,
+            "peak_pool_bytes": 8592031744
+          }
+        ]
+      },
+      {
+        "at": "after the first compiled step",
+        "devices": [
+          {
+            "device": "cuda:0",
+            "measured": true,
+            "bytes_in_use": 8969032192,
+            "peak_bytes_in_use": 18870452480,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34898706432,
+            "peak_pool_bytes": 34898706432
+          },
+          {
+            "device": "cuda:1",
+            "measured": true,
+            "bytes_in_use": 8633480192,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:2",
+            "measured": true,
+            "bytes_in_use": 8633480192,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:3",
+            "measured": true,
+            "bytes_in_use": 8633480192,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          }
+        ]
+      },
+      {
+        "at": "after the last step",
+        "devices": [
+          {
+            "device": "cuda:0",
+            "measured": true,
+            "bytes_in_use": 4630519296,
+            "peak_bytes_in_use": 18870452480,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34898706432,
+            "peak_pool_bytes": 34898706432
+          },
+          {
+            "device": "cuda:1",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:2",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:3",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          }
+        ]
+      },
+      {
+        "at": "after the check",
+        "devices": [
+          {
+            "device": "cuda:0",
+            "measured": true,
+            "bytes_in_use": 4630519296,
+            "peak_bytes_in_use": 18870452480,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34898706432,
+            "peak_pool_bytes": 34898706432
+          },
+          {
+            "device": "cuda:1",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:2",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:3",
+            "measured": true,
+            "bytes_in_use": 4338512896,
+            "peak_bytes_in_use": 18534900224,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 9901419776,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 17179869184,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          }
+        ]
+      }
+    ],
+    "fill": 0.18306748320659003,
+    "fill_by_device": {
+      "cuda:0": 0.18306748320659003,
+      "cuda:1": 0.17981219788392386,
+      "cuda:2": 0.17981219788392386,
+      "cuda:3": 0.17981219788392386
+    },
+    "peak_bytes": 18870452480,
+    "bytes_limit": 96877936640,
+    "why_not": null,
+    "peak_bytes_per_cell": 433.3492357436802
+  },
+  "environment": {
+    "hostname": "1cf35f3dc52f",
+    "timestamp_utc": "2026-10-12T16:20:33Z",
+    "python": "3.12.3",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "platform": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kinds": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "n_devices_visible": 4,
+    "xla_flags": "",
+    "jax_platforms": "",
+    "allocator": {
+      "found": {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.95",
+        "XLA_PYTHON_CLIENT_ALLOCATOR": null
+      },
+      "used": {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.95",
+        "XLA_PYTHON_CLIENT_ALLOCATOR": null
+      }
+    },
+    "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f"
+  },
+  "host": {
+    "needed_bytes": 4240700416,
+    "available_bytes": 738068856832,
+    "available_read_from": "the control group's memory.max less memory.current",
+    "devices_are_host_memory": false,
+    "refused": false,
+    "vm_hwm_bytes": 7011418112
+  },
+  "on_one_device": [
+    {
+      "what": "LBMNode's own wall mask, a bool per cell its constructor builds on the default device and the sharded step does not read",
+      "bytes": 174182400,
+      "device": "cuda:0"
+    }
+  ],
+  "seconds": {
+    "build": 0.8950581699609756,
+    "first_step": 9.649204709101468,
+    "steps_after_the_first": 0.9655586299486458,
+    "check": 2.734567509032786,
+    "total": 18.902930778916925
+  },
+  "steps_per_second": 9.32102900937116,
+  "cell_updates_per_second": 1623559203.321891,
+  "builder_requests": [
+    {
+      "device": "cuda:0",
+      "ranges": [
+        [
+          0,
+          140
+        ],
+        [
+          0,
+          576
+        ],
+        [
+          0,
+          540
+        ]
+      ],
+      "cells": 43545600
+    },
+    {
+      "device": "cuda:1",
+      "ranges": [
+        [
+          140,
+          280
+        ],
+        [
+          0,
+          576
+        ],
+        [
+          0,
+          540
+        ]
+      ],
+      "cells": 43545600
+    },
+    {
+      "device": "cuda:2",
+      "ranges": [
+        [
+          280,
+          420
+        ],
+        [
+          0,
+          576
+        ],
+        [
+          0,
+          540
+        ]
+      ],
+      "cells": 43545600
+    },
+    {
+      "device": "cuda:3",
+      "ranges": [
+        [
+          420,
+          560
+        ],
+        [
+          0,
+          576
+        ],
+        [
+          0,
+          540
+        ]
+      ],
+      "cells": 43545600
+    }
+  ],
+  "check_chunk_bytes": 120683520,
+  "check_chunk_planes": 4,
+  "check_chunks": 140,
+  "results": {
+    "fields": {
+      "density": {
+        "max_abs": 4.76837158203125e-07,
+        "reference_scale": 1.11444890499115,
+        "finite": true,
+        "cells_compared": 174182400,
+        "max_rel": 4.2786812034860556e-07,
+        "exact": false
+      },
+      "f": {
+        "max_abs": 1.7881393432617188e-07,
+        "reference_scale": 0.3732001483440399,
+        "finite": true,
+        "cells_compared": 174182400,
+        "max_rel": 4.791368254262581e-07,
+        "exact": false
+      },
+      "pressure": {
+        "max_abs": 1.4901161193847656e-07,
+        "reference_scale": 0.3714829683303833,
+        "finite": true,
+        "cells_compared": 174182400,
+        "max_rel": 4.011263628268177e-07,
+        "exact": false
+      },
+      "velocity": {
+        "max_abs": 8.940696716308594e-08,
+        "reference_scale": 0.07280824333429337,
+        "finite": true,
+        "cells_compared": 174182400,
+        "max_rel": 1.227978633581102e-06,
+        "exact": false
+      },
+      "wall_mask": {
+        "max_abs": 0.0,
+        "reference_scale": 0.0,
+        "finite": true,
+        "cells_compared": 174182400,
+        "max_rel": 0.0,
+        "exact": true
+      }
+    },
+    "mass": 174179200.57617188,
+    "least_plane_difference": 0.010726253440126489
+  },
+  "checks": [
+    {
+      "name": "the tile: no two planes along a split axis are alike",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "smallest plane-to-plane difference 1.073e-02 of the largest population, against 100 times the limit",
+      "passed": true
+    },
+    {
+      "name": "the builder was asked for 4 blocks, one per device, none larger than a shard",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[43545600, 43545600, 43545600, 43545600] cells against 43545600",
+      "passed": true
+    },
+    {
+      "name": "the state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "a step returns the state in the layout it was given",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "f vs the tiled reference max_rel",
+      "value": 4.791368254262581e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "f finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "density vs the tiled reference max_rel",
+      "value": 4.2786812034860556e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "density finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "velocity vs the tiled reference max_rel",
+      "value": 1.227978633581102e-06,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "velocity finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "pressure vs the tiled reference max_rel",
+      "value": 4.011263628268177e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "pressure finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "wall_mask vs the tiled reference max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "wall_mask finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "every cell of every field was compared",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[174182400] of 174182400",
+      "passed": true
+    },
+    {
+      "name": "total mass vs prod(K) times the tile's rel",
+      "value": 5.390272162064611e-09,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "peak device memory read on every device (the fill)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "fill 0.1831",
+      "passed": true
+    }
+  ],
+  "launch": {
+    "returncode": 0,
+    "timed_out": false,
+    "wall_s": 20.585184318944812,
+    "time_box_s": 360.0,
+    "stderr_log": "capacity_rung_01.stderr.log",
+    "stderr_tail": ""
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "kind": "capacity summary",
+  "gating": false,
+  "dry_run": false,
+  "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f",
+  "mesh": "4x1",
+  "tile": [
+    16,
+    24,
+    20
+  ],
+  "device_memory_gb": 96.0,
+  "config": {
+    "out": "results/capacity-4x1",
+    "summarise": null,
+    "dry_run": false,
+    "mesh": "4x1",
+    "device_memory_gb": 96.0,
+    "ramp": [
+      0.25,
+      0.85
+    ],
+    "cells": null,
+    "k": null,
+    "tile": [
+      16,
+      24,
+      20
+    ],
+    "steps": 10,
+    "rung_timeout_s": 360.0,
+    "bytes_per_cell": null,
+    "soak_minutes": 0.0,
+    "soak_at": 0.75,
+    "check_chunk_mb": 128.0,
+    "child": null,
+    "record": null,
+    "rung_index": 0,
+    "target_fill": null
+  },
+  "rungs": [
+    {
+      "rung": 1,
+      "file": "capacity_rung_01.json",
+      "target_fill": 0.25,
+      "sized_from": "a priori: 582 bytes per cell = 97 of state x 6",
+      "k": [
+        35,
+        24,
+        27
+      ],
+      "shape": [
+        560,
+        576,
+        540
+      ],
+      "cells": 174182400,
+      "outcome": "passed",
+      "detail": "",
+      "fill": 0.18306748320659003,
+      "peak_bytes": 18870452480,
+      "peak_bytes_per_cell": 433.3492357436802,
+      "bytes_limit": 96877936640,
+      "wall_s": 20.585184318944812,
+      "steps_per_second": 9.32102900937116,
+      "largest_max_rel": 1.227978633581102e-06,
+      "exact": false
+    },
+    {
+      "rung": 2,
+      "file": "capacity_rung_02.json",
+      "target_fill": 0.85,
+      "sized_from": "rung 1 measured 433.3 bytes per cell, fill 0.183",
+      "k": [
+        57,
+        39,
+        47
+      ],
+      "shape": [
+        912,
+        936,
+        940
+      ],
+      "cells": 802414080,
+      "outcome": "out of memory",
+      "detail": "while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 42.23GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']",
+      "fill": 0.19725064933300018,
+      "peak_bytes": 20332442112,
+      "peak_bytes_per_cell": 101.3563576152602,
+      "bytes_limit": 96877936640,
+      "wall_s": 38.44324378995225,
+      "steps_per_second": null,
+      "largest_max_rel": null,
+      "exact": null
+    }
+  ],
+  "notes": [],
+  "ceiling": {
+    "rung": 1,
+    "file": "capacity_rung_01.json",
+    "target_fill": 0.25,
+    "sized_from": "a priori: 582 bytes per cell = 97 of state x 6",
+    "k": [
+      35,
+      24,
+      27
+    ],
+    "shape": [
+      560,
+      576,
+      540
+    ],
+    "cells": 174182400,
+    "outcome": "passed",
+    "detail": "",
+    "fill": 0.18306748320659003,
+    "peak_bytes": 18870452480,
+    "peak_bytes_per_cell": 433.3492357436802,
+    "bytes_limit": 96877936640,
+    "wall_s": 20.585184318944812,
+    "steps_per_second": 9.32102900937116,
+    "largest_max_rel": 1.227978633581102e-06,
+    "exact": false
+  },
+  "stopped_by": {
+    "rung": 2,
+    "outcome": "out of memory",
+    "cells": 802414080,
+    "target_fill": 0.85,
+    "detail": "while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 42.23GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']"
+  },
+  "soak": null,
+  "exit_status": 0
+}

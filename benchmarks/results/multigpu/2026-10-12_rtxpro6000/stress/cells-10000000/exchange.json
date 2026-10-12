@@ -1,0 +1,135 @@
+{
+  "schema_version": 12,
+  "goal": "exchange",
+  "dry_run": false,
+  "allow_fewer_devices": false,
+  "n_devices": 4,
+  "environment": {
+    "hostname": "1cf35f3dc52f",
+    "timestamp_utc": "2026-10-12T16:03:26Z",
+    "python": "3.12.3",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "platform": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kinds": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "n_devices_visible": 4,
+    "nvidia_smi": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07"
+    ],
+    "xla_flags": "",
+    "jax_platforms": "",
+    "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f"
+  },
+  "config": {
+    "goal": "exchange",
+    "out": "results/stress/cells-10000000",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": false,
+    "cells": [
+      10000000
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 1,
+    "repeats": 3,
+    "steps": 20,
+    "grad_steps": 5,
+    "cg_max_iters": 3000,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "contiguous"
+  },
+  "results": [
+    {
+      "cells": 10004569,
+      "requested_cells": 10000000,
+      "mesh": "grid",
+      "partition": "contiguous",
+      "n_devices": 4,
+      "fields_per_cell": 1,
+      "n_local_max": 2501143,
+      "n_ghost_max": 6326,
+      "layout_build_s": 92.23410708969459,
+      "traffic_cells_per_shard": {
+        "all_to_all": 25304,
+        "ppermute": 6326,
+        "useful": 4744,
+        "ppermute_messages": 2
+      },
+      "input_sharding": "NamedSharding(mesh=Mesh('devices': 4, axis_types=(Auto,)), spec=P('devices',), memory_kind=device)",
+      "input_presharded": true,
+      "methods": {
+        "all_to_all": {
+          "warmup": 1,
+          "repeats": 3,
+          "ms": [
+            2.9800059273838997,
+            2.740222029387951,
+            2.8011701069772243
+          ],
+          "min_ms": 2.740222029387951,
+          "median_ms": 2.8011701069772243,
+          "mean_ms": 2.8404660212496915,
+          "compile_s": 0.8263370962813497,
+          "bytes_per_shard": 101216,
+          "bytes_total": 404864,
+          "messages": 1,
+          "bandwidth_GBps": 0.1477486114840225
+        },
+        "ppermute": {
+          "warmup": 1,
+          "repeats": 3,
+          "ms": [
+            2.418436110019684,
+            1.386258751153946,
+            1.2381416745483875
+          ],
+          "min_ms": 1.2381416745483875,
+          "median_ms": 1.386258751153946,
+          "mean_ms": 1.680945511907339,
+          "compile_s": 0.5691936039365828,
+          "bytes_per_shard": 25304,
+          "bytes_total": 101216,
+          "messages": 2,
+          "bandwidth_GBps": 0.0817483185330294
+        }
+      },
+      "bit_identical": true,
+      "ppermute_speedup_median": 2.02066901626084,
+      "ppermute_speedup_min": 2.2131732464198395
+    }
+  ],
+  "checks": [
+    {
+      "name": "10004569 cells: all_to_all == ppermute bit for bit",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells: timed input pre-placed on the mesh",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "wall_s": 99.79913825588301
+}

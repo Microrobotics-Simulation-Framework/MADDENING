@@ -768,6 +768,49 @@ def test_exchange_timing_input_is_presharded_on_the_mesh():
     assert entry["bit_identical"] is True
 
 
+def test_the_unstructured_goals_node_keeps_its_statics_so_the_wrapper_partitions_them_once(
+        monkeypatch):
+    """``NeighbourMeanNode.static_data`` hands back the same arrays on every
+    access, as ``SimulationNode.static_data`` requires, so the wrapper's
+    cache of partitioned statics (keyed on the arrays' identity) holds: the
+    first public ``update()`` partitions the two statics and the ones after
+    it partition nothing.  The node used to build ``own`` afresh on every
+    access, and every public ``update()`` re-partitioned both on the host,
+    about 25 ns a cell (242 ms a step at 1e7 cells on four GPUs, against
+    4.45 with the statics held): the ``forward`` goal's wrapper column
+    timed that, not the wrapper."""
+    import jax
+
+    from maddening.cloud.multigpu import sharded_unstructured
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    rp._load_backend()
+    mesh = rp._mesh_for(_N_DEV)
+    n, edges = rp.grid_edges(_CELLS)
+    pa, _ = rp.partition_cells(n, edges, _N_DEV, "contiguous")
+    node = rp.NeighbourMeanNode("mesh", n, rp.neighbour_table(n, edges), partition_assignment=pa)
+    first, again = node.static_data, node.static_data
+    assert sorted(first) == ["nbr", "own"]
+    assert all(first[k].value is again[k].value for k in first)
+    assert rp.NeighbourMeanNode("mesh", n, rp.neighbour_table(n, edges)).static_data == {}
+
+    _ref, sharded, layout = rp.build_pair(n, edges, mesh, pa, "ppermute")
+    _, inputs, params = rp.node_inputs(n, layout, mesh)
+    state = sharded.initial_state()
+    calls = []
+    real = sharded_unstructured.partition_value
+    monkeypatch.setattr(sharded_unstructured, "partition_value",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    per_call = []
+    for _ in range(3):
+        before = len(calls)
+        state = {"x": sharded.update(state, inputs, 1.0, params=params)["x"]}
+        per_call.append(len(calls) - before)
+    assert per_call == [2, 0, 0], per_call
+
+
 def test_neighbour_and_slab_tables_agree_with_the_layout():
     from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
 

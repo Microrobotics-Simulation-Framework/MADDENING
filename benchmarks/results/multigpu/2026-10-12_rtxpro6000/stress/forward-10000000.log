@@ -1,0 +1,4 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[forward] cells=10004569 all_to_all wrapper  250.791 ms/step  device    3.392 ms/step  compile   0.45 s  max|dx|=8.34e-07
+[forward] cells=10004569 ppermute   wrapper  284.694 ms/step  device    4.265 ms/step  compile   0.27 s  max|dx|=8.34e-07
+wrote results/stress/cells-10000000/forward.json (96.4 s)  checks 14/14 passed

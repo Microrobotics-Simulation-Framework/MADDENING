@@ -20518,3 +20518,80 @@ anomalies:
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_report_carries_the_gram_product_and_decides_nothing_from_it"
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_x64_rerun_agrees_with_float32_on_the_audited_record"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-290"
+    title: "LBMNode and LBMPipeNode formed their lattice products at JAX's default matmul precision: on an NVIDIA GPU the products ran at reduced precision, and the LBM gradients of the multi-GPU stencil check were off by 1.6e-3 relative"
+    description: >
+      `LBMNode` and `LBMPipeNode` form four quantities of each step as
+      float32 matrix products whose inner dimension is the lattice's: the
+      equilibrium's `e . u` (`velocity @ e.T`, inner size 2 or 3), the
+      momentum `sum_q f_q e_q` (`f @ e`, inner size 9 or 19), Guo forcing's
+      `e . u`, and `LBMPipeNode`'s D3Q7 tracer equilibrium: three products
+      in `lbm.py`, four in `lbm_pipe.py`.  An `@` takes JAX's global
+      `jax_default_matmul_precision`, which on an NVIDIA GPU runs a float32
+      matrix-matrix product at reduced precision.  Measured on an RTX A2000
+      (Ampere, jax 0.11.2) against float64: a `(1e5, 3) @ (3, 19)` product
+      was off by 3.4e-4 relative at the default and by 5.9e-8 at `highest`,
+      a `(1e5, 2) @ (2, 9)` one by 2.9e-4 against 3.6e-8; vector dot
+      products and matrix-vector products were identical at both settings,
+      so the class is small matrix-matrix products.  On four RTX PRO 6000
+      Blackwell GPUs (jax 0.11.2), the multi-GPU runner's `stencil` goal (a
+      D2Q9 `LBMNode` on 316 x 320 = 101,120 cells, sharded four ways on four
+      meshes and compared with the unsharded node) failed 8 of its 356
+      checks at the default precision, every one an LBM gradient:
+      d loss / d initial f differed from the unsharded node's by 1.6e-3
+      relative where the limit is 1e-5, and d loss / d viscosity by 4.7e-5
+      to 5.0e-5.  Nothing warned.  The CPU backend is unaffected: XLA's CPU
+      backend computes these products in full float32 whatever precision is
+      asked.  No release pinned a precision on these products or set the
+      global default: `git show <tag>:src/maddening/nodes/lbm.py` and
+      `lbm_pipe.py` hold the same three and four `@` products, and no
+      `precision` argument or `jax_default_matmul_precision` setting in the
+      package, at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1.  Resolved in
+      0.4.0: each product is
+      `jnp.matmul(a, b, precision=jax.lax.Precision.HIGHEST)`, so it no
+      longer depends on the global setting.  On the same four GPUs at the
+      default setting the stencil goal then passes 356 of 356, its LBM
+      gradients at 2.0e-6 to 2.1e-6 (initial f) and 0.9e-6 to 1.4e-6
+      (viscosity), equal to a run with the global setting at `highest`, and
+      at no measured cost in speed (0.395 ms per sharded step against 0.386
+      at `highest`).  On CPU the patched step is bit-identical to the
+      unpatched one (D2Q9 and D3Q19).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, so never `minor`: the step and its gradient
+      run to completion with finite values and no warning, and a gradient
+      off by 1.6e-3 relative misleads an optimiser or a parameter fit far
+      beyond the tolerance a user sets for float32 (the stencil check's
+      limit is 1e-5).  Not `critical`: it needs an NVIDIA GPU at the
+      default matmul precision, and the forward state is off by the
+      rounding of a reduced-precision product (3.4e-4 relative per product
+      in the measurement), not by a different model.  `context_dependent`
+      because whether an LBM result or its gradient feeds a decision is the
+      program's choice.
+    affected_components:
+      - "maddening.nodes.lbm.LBMNode"
+      - "maddening.nodes.lbm_pipe.LBMPipeNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On releases before 0.4.0, set `JAX_DEFAULT_MATMUL_PRECISION=highest`
+      in the environment (or call
+      `jax.config.update("jax_default_matmul_precision", "highest")` before
+      building the graph), or run the LBM nodes on CPU.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Other float32 matrix-matrix products a graph runs on an NVIDIA GPU
+      still take the global setting, among them the MLP and FNO surrogates
+      and a user's own nodes; the user guide recommends
+      `jax_default_matmul_precision=highest` for them.  The guard holds
+      `lbm.py` and `lbm_pipe.py` only, and a CPU test cannot measure the
+      reduced precision itself: it pins the cause (every product of the
+      two nodes' steps and gradients carries `Precision.HIGHEST`).
+    verification:
+      - "tests/nodes/test_lbm_matmul_precision.py::test_no_matmul_operator_remains_in_the_lbm_sources"
+      - "tests/nodes/test_lbm_matmul_precision.py::test_every_matrix_product_call_in_the_lbm_sources_pins_highest"
+      - "tests/nodes/test_lbm_matmul_precision.py::test_the_scan_finds_the_lattice_products_it_guards"
+      - "tests/nodes/test_lbm_matmul_precision.py::test_every_dot_in_the_traced_lbm_step_and_its_gradient_is_highest"
+    github_issue: null

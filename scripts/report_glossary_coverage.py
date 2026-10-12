@@ -33,9 +33,10 @@ How a term is matched
     Case-insensitively, as whole words, with an optional plural ``s`` or
     ``es``.  The parts of a term may be joined by any whitespace (a line
     break included), a hyphen or an en dash: ``sub-cycling`` matches
-    ``sub cycling``, and ``Cramér-Rao`` matches ``Cramér–Rao``.  A term written inside a longer term (``UMR``
-    in ``Helical UMR``) counts as the longer term only.  A role counts for
-    the term it names, compared case-insensitively, as Sphinx compares it.
+    ``sub cycling``, and ``Cramér-Rao`` matches ``Cramér–Rao``.  A term
+    written inside a longer term (``UMR`` in ``Helical UMR``) counts as the
+    longer term only.  A role counts for the term it names, compared
+    case-insensitively, as Sphinx compares it.
 
 The glossary pages themselves and anything under ``release_notes/`` are
 not scanned.
@@ -43,7 +44,7 @@ not scanned.
 Usage::
 
     python scripts/report_glossary_coverage.py                # docs/, docs/glossary.md
-    python scripts/report_glossary_coverage.py --context      # with each source line
+    python scripts/report_glossary_coverage.py --context      # an excerpt per match
     python scripts/report_glossary_coverage.py --by-term      # pages per term
     python scripts/report_glossary_coverage.py --glossary docs/glossary.md \\
         --glossary draft_terms.md                             # extra terms, same markup
@@ -414,7 +415,7 @@ def main(argv=None) -> int:
                         help="a file holding a MyST {glossary} block; repeatable "
                              "(default: docs/glossary.md)")
     parser.add_argument("--context", action="store_true",
-                        help="print each candidate's source line under it")
+                        help="print an excerpt of each candidate's line under it")
     parser.add_argument("--by-term", action="store_true",
                         help="print, per term, the pages that name it in prose")
     args = parser.parse_args(argv)

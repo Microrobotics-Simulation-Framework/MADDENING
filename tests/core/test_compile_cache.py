@@ -368,6 +368,24 @@ def test_enabled_dir_never_names_a_directory_jax_is_not_using(tmp_path, no_direc
     assert cc.enabled_dir() is None
 
 
+def test_enable_moves_a_cache_open_elsewhere_even_when_the_setting_already_names_its_directory(
+        tmp_path, no_directory_enabled):
+    """JAX's setting can name the directory while the cache JAX opened is
+    somewhere else (the setting was changed after the cache opened):
+    ``enable`` must go by the open cache, not by the setting."""
+    outer, mine = tmp_path / "outer", tmp_path / "mine"
+    jax.config.update("jax_compilation_cache_dir", str(outer))
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    _compile_new_program(25.5)
+    in_outer = _entries(outer)
+    assert in_outer, "the outer cache is not in use: the checks below prove nothing"
+    jax.config.update("jax_compilation_cache_dir", str(mine))   # the open cache stays at outer
+    assert cc.enable(str(mine)) == str(mine) == cc.enabled_dir()
+    _compile_new_program(27.25)
+    assert _entries(mine) and _entries(outer) == in_outer
+
+
 def test_the_open_cache_probe_reads_this_jax(tmp_path, no_directory_enabled):
     """``_open_cache_dir`` reads private JAX state.  On a JAX whose layout
     differs it answers "unknown" and the module falls back to the setting;

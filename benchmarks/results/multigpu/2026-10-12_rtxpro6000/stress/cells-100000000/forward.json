@@ -1,0 +1,226 @@
+{
+  "schema_version": 12,
+  "goal": "forward",
+  "dry_run": false,
+  "allow_fewer_devices": false,
+  "n_devices": 4,
+  "environment": {
+    "hostname": "1cf35f3dc52f",
+    "timestamp_utc": "2026-10-12T16:38:31Z",
+    "python": "3.12.3",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "platform": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kinds": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "n_devices_visible": 4,
+    "nvidia_smi": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07"
+    ],
+    "xla_flags": "",
+    "jax_platforms": "",
+    "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f"
+  },
+  "config": {
+    "goal": "forward",
+    "out": "results/stress/cells-100000000",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": false,
+    "cells": [
+      100000000
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 1,
+    "repeats": 3,
+    "steps": 20,
+    "grad_steps": 5,
+    "cg_max_iters": 3000,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "contiguous"
+  },
+  "results": [
+    {
+      "cells": 100000000,
+      "mesh": "grid",
+      "partition": "contiguous",
+      "renumbered": false,
+      "n_devices": 4,
+      "steps": 20,
+      "methods": {
+        "all_to_all": {
+          "compile_s": 0.5668819271959364,
+          "wrapper_first_call_s": 3.972602999769151,
+          "input_presharded": true,
+          "wrapper_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              49907.91278379038,
+              48745.84707990289,
+              51181.57872976735
+            ],
+            "min_ms": 48745.84707990289,
+            "median_ms": 49907.91278379038,
+            "mean_ms": 49945.11286448687,
+            "ms_per_step": 2495.395639189519
+          },
+          "device_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              80.9220070950687,
+              80.63837792724371,
+              81.57184207811952
+            ],
+            "min_ms": 80.63837792724371,
+            "median_ms": 80.9220070950687,
+            "mean_ms": 81.04407570014398,
+            "ms_per_step": 4.046100354753435
+          },
+          "parity_x": {
+            "max_abs": 8.344650268554688e-07,
+            "max_rel": 4.780754267796409e-07,
+            "reference_scale": 1.7454673051834106,
+            "finite": true
+          },
+          "parity_total": {
+            "max_abs": 0.00594329833984375,
+            "max_rel": 0.00022872565165523673,
+            "reference_scale": 25.984397888183594,
+            "finite": true
+          }
+        },
+        "ppermute": {
+          "compile_s": 0.2754800138063729,
+          "wrapper_first_call_s": 2.5628756466321647,
+          "input_presharded": true,
+          "wrapper_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              48687.74880701676,
+              48485.47569895163,
+              48961.29785198718
+            ],
+            "min_ms": 48485.47569895163,
+            "median_ms": 48687.74880701676,
+            "mean_ms": 48711.50745265186,
+            "ms_per_step": 2434.387440350838
+          },
+          "device_step": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              84.23086814582348,
+              90.52486484870315,
+              91.65598312392831
+            ],
+            "min_ms": 84.23086814582348,
+            "median_ms": 90.52486484870315,
+            "mean_ms": 88.8039053728183,
+            "ms_per_step": 4.526243242435157
+          },
+          "parity_x": {
+            "max_abs": 8.344650268554688e-07,
+            "max_rel": 4.780754267796409e-07,
+            "reference_scale": 1.7454673051834106,
+            "finite": true
+          },
+          "parity_total": {
+            "max_abs": 0.00594329833984375,
+            "max_rel": 0.00022872565165523673,
+            "reference_scale": 25.984397888183594,
+            "finite": true
+          }
+        }
+      },
+      "n_local_max": 25000000,
+      "n_ghost_max": 20000,
+      "n_local": [
+        25000000,
+        25000000,
+        25000000,
+        25000000
+      ],
+      "traffic_cells_per_shard": {
+        "all_to_all": 80000,
+        "ppermute": 20000,
+        "useful": 15000,
+        "ppermute_messages": 2
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "100000000 cells all_to_all x vs unsharded max_rel",
+      "value": 4.780754267796409e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "100000000 cells all_to_all x vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "100000000 cells all_to_all total vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "100000000 cells ppermute x vs unsharded max_rel",
+      "value": 4.780754267796409e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "100000000 cells ppermute x vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "100000000 cells ppermute total vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "100000000 cells ones: total == cells, sharded and unsharded, and per-shard (offset, cells), exactly",
+      "value": null,
+      "limit": null,
+      "sense": null,
+      "passed": false,
+      "not_run": true,
+      "detail": "a float32 sum of ones is exact only under 2**24 = 16777216 cells"
+    }
+  ],
+  "passed": false,
+  "wall_s": 1749.9098915909417
+}

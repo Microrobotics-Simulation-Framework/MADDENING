@@ -1,0 +1,1143 @@
+{
+  "schema_version": 12,
+  "goal": "hybrid",
+  "dry_run": false,
+  "allow_fewer_devices": false,
+  "n_devices": 4,
+  "environment": {
+    "hostname": "1cf35f3dc52f",
+    "timestamp_utc": "2026-10-12T15:42:16Z",
+    "python": "3.12.3",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "platform": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kinds": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "n_devices_visible": 4,
+    "nvidia_smi": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07"
+    ],
+    "xla_flags": "",
+    "jax_platforms": "",
+    "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f"
+  },
+  "config": {
+    "goal": "hybrid",
+    "out": "results/multigpu",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": false,
+    "cells": [
+      100000,
+      300000,
+      1000000
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 5,
+    "repeats": 20,
+    "steps": 20,
+    "grad_steps": 5,
+    "cg_max_iters": 3000,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "auto"
+  },
+  "results": [
+    {
+      "mesh": "1d",
+      "mesh_shape": [
+        4,
+        1
+      ],
+      "cells": 101120,
+      "shape": [
+        316,
+        320
+      ],
+      "n_devices": 4,
+      "steps": 20,
+      "grad_steps": 5,
+      "correction_shift": [
+        39,
+        40
+      ],
+      "unsharded": {
+        "run_scan_first_call_s": 0.8593980679288507,
+        "partitioned": false,
+        "compile_s": 2.4052104824222624,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            1.5249797143042088,
+            1.2808581814169884,
+            0.9497348219156265,
+            1.2425873428583145,
+            1.2116427533328533,
+            1.154803205281496,
+            1.0910192504525185,
+            0.9773178026080132,
+            1.0730070061981678,
+            1.5185759402811527,
+            1.5231920406222343,
+            1.5157000161707401,
+            1.9376850686967373,
+            2.0264568738639355,
+            2.0411768928170204,
+            2.001785207539797,
+            2.0181918516755104,
+            2.0619635470211506,
+            2.039275597780943,
+            1.998253632336855
+          ],
+          "min_ms": 0.9497348219156265,
+          "median_ms": 1.5208839904516935,
+          "mean_ms": 1.5594103373587132
+        },
+        "loss": 0.973420262336731,
+        "grad": [
+          -0.00038666403270326555,
+          -0.9850560426712036
+        ]
+      },
+      "sharded": {
+        "run_scan_first_call_s": 4.7527675200253725,
+        "partitioned": true,
+        "compile_s": 2.7137136361561716,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            9.435764979571104,
+            9.117495268583298,
+            8.971297182142735,
+            9.543272200971842,
+            9.274135809391737,
+            9.28047625347972,
+            9.027399122714996,
+            8.621914312243462,
+            8.373065385967493,
+            9.075791109353304,
+            9.276723023504019,
+            9.414036758244038,
+            9.896901901811361,
+            9.565276559442282,
+            9.352952241897583,
+            8.948476053774357,
+            8.762966841459274,
+            8.879854809492826,
+            8.943170309066772,
+            8.927390910685062
+          ],
+          "min_ms": 8.373065385967493,
+          "median_ms": 9.0966431889683,
+          "mean_ms": 9.134418051689863
+        },
+        "loss": 0.9734203815460205,
+        "grad": [
+          -0.00038666403270326555,
+          -0.9850560426712036
+        ]
+      },
+      "correction_rel": 0.007226047106087208,
+      "parity_f": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 2.321242332458496,
+        "finite": true
+      },
+      "parity_averages": {
+        "max_abs": 1.1920928955078125e-07,
+        "max_rel": 1.5053045426779427e-07,
+        "reference_scale": 0.7919280529022217,
+        "finite": true
+      },
+      "parity_loss": 1.224643601157582e-07,
+      "parity_grad": 0.0
+    },
+    {
+      "mesh": "1d-axis1",
+      "mesh_shape": [
+        1,
+        4
+      ],
+      "cells": 101120,
+      "shape": [
+        316,
+        320
+      ],
+      "n_devices": 4,
+      "steps": 20,
+      "grad_steps": 5,
+      "correction_shift": [
+        39,
+        40
+      ],
+      "unsharded": {
+        "run_scan_first_call_s": 0.8593980679288507,
+        "partitioned": false,
+        "compile_s": 2.4052104824222624,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            1.5249797143042088,
+            1.2808581814169884,
+            0.9497348219156265,
+            1.2425873428583145,
+            1.2116427533328533,
+            1.154803205281496,
+            1.0910192504525185,
+            0.9773178026080132,
+            1.0730070061981678,
+            1.5185759402811527,
+            1.5231920406222343,
+            1.5157000161707401,
+            1.9376850686967373,
+            2.0264568738639355,
+            2.0411768928170204,
+            2.001785207539797,
+            2.0181918516755104,
+            2.0619635470211506,
+            2.039275597780943,
+            1.998253632336855
+          ],
+          "min_ms": 0.9497348219156265,
+          "median_ms": 1.5208839904516935,
+          "mean_ms": 1.5594103373587132
+        },
+        "loss": 0.973420262336731,
+        "grad": [
+          -0.00038666403270326555,
+          -0.9850560426712036
+        ]
+      },
+      "sharded": {
+        "run_scan_first_call_s": 1.3434844207949936,
+        "partitioned": true,
+        "compile_s": 2.9044205979444087,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            9.95795801281929,
+            9.733149316161871,
+            9.841180872172117,
+            9.762412868440151,
+            9.654236026108265,
+            9.736014064401388,
+            9.968878235667944,
+            10.32077381387353,
+            9.418895933777094,
+            9.506039787083864,
+            9.410280268639326,
+            9.570925030857325,
+            8.967774920165539,
+            9.589696768671274,
+            9.039518889039755,
+            9.675113018602133,
+            8.459372911602259,
+            9.122851304709911,
+            8.92186677083373,
+            9.326439816504717
+          ],
+          "min_ms": 8.459372911602259,
+          "median_ms": 9.5803108997643,
+          "mean_ms": 9.499168931506574
+        },
+        "loss": 0.973420262336731,
+        "grad": [
+          -0.0003866640035994351,
+          -0.9850560426712036
+        ]
+      },
+      "correction_rel": 0.007226047106087208,
+      "parity_f": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 2.321242332458496,
+        "finite": true
+      },
+      "parity_averages": {
+        "max_abs": 1.1920928955078125e-07,
+        "max_rel": 1.5053045426779427e-07,
+        "reference_scale": 0.7919280529022217,
+        "finite": true
+      },
+      "parity_loss": 0.0,
+      "parity_grad": 7.526903977404234e-08
+    },
+    {
+      "mesh": "2d-flat",
+      "mesh_shape": [
+        1,
+        4
+      ],
+      "cells": 101120,
+      "shape": [
+        316,
+        320
+      ],
+      "n_devices": 4,
+      "steps": 20,
+      "grad_steps": 5,
+      "correction_shift": [
+        39,
+        40
+      ],
+      "unsharded": {
+        "run_scan_first_call_s": 0.8593980679288507,
+        "partitioned": false,
+        "compile_s": 2.4052104824222624,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            1.5249797143042088,
+            1.2808581814169884,
+            0.9497348219156265,
+            1.2425873428583145,
+            1.2116427533328533,
+            1.154803205281496,
+            1.0910192504525185,
+            0.9773178026080132,
+            1.0730070061981678,
+            1.5185759402811527,
+            1.5231920406222343,
+            1.5157000161707401,
+            1.9376850686967373,
+            2.0264568738639355,
+            2.0411768928170204,
+            2.001785207539797,
+            2.0181918516755104,
+            2.0619635470211506,
+            2.039275597780943,
+            1.998253632336855
+          ],
+          "min_ms": 0.9497348219156265,
+          "median_ms": 1.5208839904516935,
+          "mean_ms": 1.5594103373587132
+        },
+        "loss": 0.973420262336731,
+        "grad": [
+          -0.00038666403270326555,
+          -0.9850560426712036
+        ]
+      },
+      "sharded": {
+        "run_scan_first_call_s": 1.2684341883286834,
+        "partitioned": true,
+        "compile_s": 4.515230917837471,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            9.749892633408308,
+            7.9843210987746716,
+            8.19686520844698,
+            7.65853188931942,
+            9.720611851662397,
+            9.936139918863773,
+            9.159816429018974,
+            9.413731750100851,
+            8.917754981666803,
+            8.5989311337471,
+            9.383727796375751,
+            9.060279931873083,
+            9.206620045006275,
+            8.408001158386469,
+            9.515587706118822,
+            9.803276974707842,
+            9.189036209136248,
+            9.922258090227842,
+            8.716458920389414,
+            9.294862858951092
+          ],
+          "min_ms": 7.65853188931942,
+          "median_ms": 9.197828127071261,
+          "mean_ms": 9.091835329309106
+        },
+        "loss": 0.973420262336731,
+        "grad": [
+          -0.0003866640035994351,
+          -0.9850560426712036
+        ]
+      },
+      "correction_rel": 0.007226047106087208,
+      "parity_f": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 2.321242332458496,
+        "finite": true
+      },
+      "parity_averages": {
+        "max_abs": 1.1920928955078125e-07,
+        "max_rel": 1.5053045426779427e-07,
+        "reference_scale": 0.7919280529022217,
+        "finite": true
+      },
+      "parity_loss": 0.0,
+      "parity_grad": 7.526903977404234e-08
+    },
+    {
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 101120,
+      "shape": [
+        316,
+        320
+      ],
+      "n_devices": 4,
+      "steps": 20,
+      "grad_steps": 5,
+      "correction_shift": [
+        39,
+        40
+      ],
+      "unsharded": {
+        "run_scan_first_call_s": 0.8593980679288507,
+        "partitioned": false,
+        "compile_s": 2.4052104824222624,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            1.5249797143042088,
+            1.2808581814169884,
+            0.9497348219156265,
+            1.2425873428583145,
+            1.2116427533328533,
+            1.154803205281496,
+            1.0910192504525185,
+            0.9773178026080132,
+            1.0730070061981678,
+            1.5185759402811527,
+            1.5231920406222343,
+            1.5157000161707401,
+            1.9376850686967373,
+            2.0264568738639355,
+            2.0411768928170204,
+            2.001785207539797,
+            2.0181918516755104,
+            2.0619635470211506,
+            2.039275597780943,
+            1.998253632336855
+          ],
+          "min_ms": 0.9497348219156265,
+          "median_ms": 1.5208839904516935,
+          "mean_ms": 1.5594103373587132
+        },
+        "loss": 0.973420262336731,
+        "grad": [
+          -0.00038666403270326555,
+          -0.9850560426712036
+        ]
+      },
+      "sharded": {
+        "run_scan_first_call_s": 1.357359604910016,
+        "partitioned": true,
+        "compile_s": 3.234540813602507,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            10.68530697375536,
+            11.01371692493558,
+            10.677726939320564,
+            10.475769639015198,
+            11.24653685837984,
+            11.147495824843645,
+            11.00016525015235,
+            11.261498089879751,
+            10.927567724138498,
+            11.261672247201204,
+            11.414600070565939,
+            10.911192279309034,
+            10.69321483373642,
+            11.200049426406622,
+            11.188484728336334,
+            10.696394834667444,
+            11.051532812416553,
+            10.955075733363628,
+            10.866427794098854,
+            10.653287172317505
+          ],
+          "min_ms": 10.475769639015198,
+          "median_ms": 10.977620491757989,
+          "mean_ms": 10.966385807842016
+        },
+        "loss": 0.9734202027320862,
+        "grad": [
+          -0.0003866640035994351,
+          -0.9850559830665588
+        ]
+      },
+      "correction_rel": 0.007226047106087208,
+      "parity_f": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 2.321242332458496,
+        "finite": true
+      },
+      "parity_averages": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 0.7919280529022217,
+        "finite": true
+      },
+      "parity_loss": 6.12321800578791e-08,
+      "parity_grad": 7.526903977404234e-08
+    },
+    {
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 302496,
+      "shape": [
+        548,
+        552
+      ],
+      "n_devices": 4,
+      "steps": 20,
+      "grad_steps": 5,
+      "correction_shift": [
+        68,
+        69
+      ],
+      "unsharded": {
+        "run_scan_first_call_s": 1.046680798754096,
+        "partitioned": false,
+        "compile_s": 1.9357553008012474,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            3.0996203422546387,
+            3.130543977022171,
+            2.6925471611320972,
+            2.5747939944267273,
+            2.8112437576055527,
+            3.159835934638977,
+            2.8780107386410236,
+            2.8516361489892006,
+            2.688635140657425,
+            2.754095010459423,
+            2.8151506558060646,
+            2.633222844451666,
+            2.642318606376648,
+            2.7234628796577454,
+            2.8441627509891987,
+            2.4617700837552547,
+            2.234369982033968,
+            2.299373969435692,
+            2.7828188613057137,
+            2.5190217420458794
+          ],
+          "min_ms": 2.234369982033968,
+          "median_ms": 2.738778945058584,
+          "mean_ms": 2.7298317290842533
+        },
+        "loss": 0.9735048413276672,
+        "grad": [
+          -0.00012961693573743105,
+          -0.9851327538490295
+        ]
+      },
+      "sharded": {
+        "run_scan_first_call_s": 1.621058066841215,
+        "partitioned": true,
+        "compile_s": 5.443023530766368,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            10.241306386888027,
+            9.432532824575901,
+            10.523033794015646,
+            10.62929118052125,
+            9.992989245802164,
+            10.832428000867367,
+            10.988809168338776,
+            10.989971924573183,
+            10.949456132948399,
+            10.483195073902607,
+            10.81831194460392,
+            10.085694026201963,
+            11.104128323495388,
+            11.481836903840303,
+            11.060473043471575,
+            11.18205999955535,
+            10.591687168926,
+            11.409628670662642,
+            11.480282060801983,
+            10.913628153502941
+          ],
+          "min_ms": 9.432532824575901,
+          "median_ms": 10.873028077185154,
+          "mean_ms": 10.75953720137477
+        },
+        "loss": 0.9735048413276672,
+        "grad": [
+          -0.00012961695028934628,
+          -0.9851327538490295
+        ]
+      },
+      "correction_rel": 0.007233021780848503,
+      "parity_f": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 2.3217949867248535,
+        "finite": true
+      },
+      "parity_averages": {
+        "max_abs": 4.172325134277344e-07,
+        "max_rel": 5.267818527865969e-07,
+        "reference_scale": 0.7920404076576233,
+        "finite": true
+      },
+      "parity_loss": 0.0,
+      "parity_grad": 1.1226862558952256e-07
+    },
+    {
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 1004000,
+      "shape": [
+        1000,
+        1004
+      ],
+      "n_devices": 4,
+      "steps": 20,
+      "grad_steps": 5,
+      "correction_shift": [
+        125,
+        125
+      ],
+      "unsharded": {
+        "run_scan_first_call_s": 0.9532147217541933,
+        "partitioned": false,
+        "compile_s": 2.149711024016142,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            2.3155780509114265,
+            2.862627152353525,
+            2.6979870162904263,
+            2.879410982131958,
+            2.601774875074625,
+            2.737998031079769,
+            2.6876190677285194,
+            2.35080998390913,
+            2.9649948701262474,
+            2.7186181396245956,
+            2.287569921463728,
+            2.693559043109417,
+            2.6157312095165253,
+            2.726570703089237,
+            2.7912911027669907,
+            2.5624227710068226,
+            2.346677705645561,
+            2.2506900131702423,
+            2.6116962544620037,
+            2.1278411149978638
+          ],
+          "min_ms": 2.1278411149978638,
+          "median_ms": 2.6516751386225224,
+          "mean_ms": 2.5915734004229307
+        },
+        "loss": 0.9736248254776001,
+        "grad": [
+          -3.9130263758124784e-05,
+          -0.9852434396743774
+        ]
+      },
+      "sharded": {
+        "run_scan_first_call_s": 1.6787781631574035,
+        "partitioned": true,
+        "compile_s": 3.750728376209736,
+        "value_and_grad": {
+          "warmup": 5,
+          "repeats": 20,
+          "ms": [
+            11.063703801482916,
+            11.591502930969,
+            11.380481068044901,
+            10.851747822016478,
+            11.350749991834164,
+            11.117320042103529,
+            11.79437804967165,
+            12.11462588980794,
+            11.40954066067934,
+            12.81738094985485,
+            11.083832010626793,
+            10.574634652584791,
+            11.403765063732862,
+            11.03146793320775,
+            10.981813073158264,
+            11.362785007804632,
+            10.756080038845539,
+            11.412945110350847,
+            11.177001055330038,
+            10.252767242491245
+          ],
+          "min_ms": 10.252767242491245,
+          "median_ms": 11.2638755235821,
+          "mean_ms": 11.276426119729877
+        },
+        "loss": 0.9736248254776001,
+        "grad": [
+          -3.9130263758124784e-05,
+          -0.9852433204650879
+        ]
+      },
+      "correction_rel": 0.00723308464512229,
+      "parity_f": {
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "reference_scale": 2.322178602218628,
+        "finite": true
+      },
+      "parity_averages": {
+        "max_abs": 1.7881393432617188e-07,
+        "max_rel": 2.2571731269093333e-07,
+        "reference_scale": 0.7922030091285706,
+        "finite": true
+      },
+      "parity_loss": 0.0,
+      "parity_grad": 1.2099475596628168e-07
+    }
+  ],
+  "checks": [
+    {
+      "name": "1d 4x1 316x320: the field inside the hybrid is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320: the correction is not negligible (> 100x the forward limit)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "7.226e-03",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 run_scan f vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 run_scan f vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 run_scan domain integral averages vs HybridNode(inner) max_rel",
+      "value": 1.5053045426779427e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 run_scan domain integral averages vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 loss vs HybridNode(inner) rel",
+      "value": 1.224643601157582e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d 4x1 316x320 both gradient components are non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.00038666403270326555, -0.9850560426712036]",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320: the field inside the hybrid is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320: the correction is not negligible (> 100x the forward limit)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "7.226e-03",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 run_scan f vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 run_scan f vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 run_scan domain integral averages vs HybridNode(inner) max_rel",
+      "value": 1.5053045426779427e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 run_scan domain integral averages vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 loss vs HybridNode(inner) rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+      "value": 7.526903977404234e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d-axis1 1x4 316x320 both gradient components are non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.00038666403270326555, -0.9850560426712036]",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320: the field inside the hybrid is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320: the correction is not negligible (> 100x the forward limit)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "7.226e-03",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 run_scan f vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 run_scan f vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 run_scan domain integral averages vs HybridNode(inner) max_rel",
+      "value": 1.5053045426779427e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 run_scan domain integral averages vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 loss vs HybridNode(inner) rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+      "value": 7.526903977404234e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat 1x4 316x320 both gradient components are non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.00038666403270326555, -0.9850560426712036]",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320: the field inside the hybrid is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320: the correction is not negligible (> 100x the forward limit)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "7.226e-03",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 run_scan f vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 run_scan f vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 run_scan domain integral averages vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 run_scan domain integral averages vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 loss vs HybridNode(inner) rel",
+      "value": 6.12321800578791e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+      "value": 7.526903977404234e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 316x320 both gradient components are non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.00038666403270326555, -0.9850560426712036]",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552: the field inside the hybrid is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552: the correction is not negligible (> 100x the forward limit)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "7.233e-03",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 run_scan f vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 run_scan f vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 run_scan domain integral averages vs HybridNode(inner) max_rel",
+      "value": 5.267818527865969e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 run_scan domain integral averages vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 loss vs HybridNode(inner) rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+      "value": 1.1226862558952256e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 548x552 both gradient components are non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.00012961693573743105, -0.9851327538490295]",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004: the field inside the hybrid is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004: the correction is not negligible (> 100x the forward limit)",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "7.233e-03",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 run_scan f vs HybridNode(inner) max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 run_scan f vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 run_scan domain integral averages vs HybridNode(inner) max_rel",
+      "value": 2.2571731269093333e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 run_scan domain integral averages vs HybridNode(inner) finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 loss vs HybridNode(inner) rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+      "value": 1.2099475596628168e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 1000x1004 both gradient components are non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-3.9130263758124784e-05, -0.9852434396743774]",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "wall_s": 54.11344561120495
+}

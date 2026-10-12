@@ -1,0 +1,30 @@
+START exchange-f5 16:01:28Z
+END exchange-f5 rc=0 16:01:41Z
+START forward-10000000 16:01:41Z
+END forward-10000000 rc=0 16:03:21Z
+START exchange-10000000 16:03:21Z
+END exchange-10000000 rc=0 16:05:09Z
+START gradient-10000000 16:05:09Z
+END gradient-10000000 rc=124 16:09:10Z
+START forward-30000000 16:09:10Z
+END forward-30000000 rc=124 16:13:12Z
+START exchange-30000000 16:13:12Z
+END exchange-30000000 rc=0 16:15:32Z
+START capacity-2x2 16:15:32Z
+END capacity-2x2 rc=0 16:20:30Z
+START capacity-4x1 16:20:30Z
+END capacity-4x1 rc=0 16:21:29Z
+SUMMARY capacity-2x2 rc=0
+SUMMARY capacity-4x1 rc=0
+START stencil-default-precision 16:21:30Z
+END stencil-default-precision rc=1 16:26:10Z
+START forward-100000000 16:26:10Z
+END forward-100000000 rc=143 16:26:59Z
+ALL DONE 16:26:59Z
+START gradient-10000000-rerun 16:27:00Z
+END gradient-10000000-rerun rc=0 16:34:04Z
+START forward-30000000-rerun 16:34:04Z
+END forward-30000000-rerun rc=0 16:38:26Z
+START forward-100000000-rerun 16:38:26Z
+END forward-100000000-rerun rc=0 17:07:42Z
+RERUNS DONE 17:07:42Z

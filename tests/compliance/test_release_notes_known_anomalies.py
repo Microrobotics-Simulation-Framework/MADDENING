@@ -25,6 +25,9 @@ registry".  Of that section two things are required:
   "**Resolved.**" paragraph's three-digit shorthand;
 * that paragraph names no reachable entry, so a live defect cannot be filed
   among the closed ones.
+
+The changelog's ``[Unreleased]`` section gives the reachable entries as a
+count; the count is held to the registry here, so it cannot go stale.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTES = REPO_ROOT / "docs" / "release_notes" / "v0.4.0.md"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 RECORD = REPO_ROOT / "docs" / "validation" / "development_record_v0.4.0.md"
 REGISTRY = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
 
@@ -206,3 +210,38 @@ def test_a_section_at_the_end_of_a_file_is_read_to_the_end():
     assert "MADD-ANO-001" in section(text, NOTES_HEADING)
     with pytest.raises(AssertionError):
         section(text, INDEX_HEADING)
+
+
+_COUNT = re.compile(r"(\d+) registry entries are reachable in 0\.4\.0: (\d+) open and (\d+) partly resolved")
+
+
+def changelog_count_findings(changelog: str, registry: dict) -> list[str]:
+    """Whether the changelog's count of reachable entries is the registry's."""
+    unreleased = changelog[changelog.index("## [Unreleased]"):]
+    unreleased = unreleased[:unreleased.index("\n## [", 1)]
+    match = _COUNT.search(" ".join(unreleased.split()))
+    if match is None:
+        return ["the changelog's [Unreleased] section gives no count of reachable entries"]
+    reachable = _reachable(registry).values()
+    n_open = sum(a.get("resolution_status") == "open" for a in reachable)
+    said = tuple(int(x) for x in match.groups())
+    true = (len(reachable), n_open, len(reachable) - n_open)
+    return [] if said == true else [f"the changelog says {said} (reachable, open, partly resolved); "
+                                    f"the registry has {true}"]
+
+
+def test_the_changelog_counts_the_reachable_entries(registry):
+    assert changelog_count_findings(CHANGELOG.read_text(), registry) == []
+
+
+def test_a_stale_changelog_count_is_found(registry):
+    grown = {**registry, "anomalies": [*registry["anomalies"], _entry(status="open")]}
+    findings = changelog_count_findings(CHANGELOG.read_text(), grown)
+    assert len(findings) == 1 and findings[0].startswith("the changelog says"), findings
+
+
+def test_a_changelog_without_the_count_is_found(registry):
+    text = CHANGELOG.read_text()
+    stripped = _COUNT.sub("some entries are reachable", " ".join(text.split()))
+    assert changelog_count_findings(stripped.replace(" ## [", "\n## ["), registry) == [
+        "the changelog's [Unreleased] section gives no count of reachable entries"]

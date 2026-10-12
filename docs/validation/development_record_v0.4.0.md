@@ -1084,11 +1084,11 @@ settings), and in float64 every product was (below 1.4e-15). The fix is in the
 two precision changes: the lattice nodes pin their own products (#327), and a
 graph pins the setting for its compiled programs.
 
-**Graph against eager.** `graph_vs_eager.py` stepped a 10,004,569-cell mesh on
-the four cards, 20 steps each way. The runner's node built a new `StaticArray`
-at every `static_data` access, so the wrapper's static cache missed at every
-eager `update()`: 242.5 ms per step, with 40 re-partitions, against 4.45 ms and
-none when the node returned the same objects. The fields were identical bit for
+**Graph against eager.** `gve_results/graph_vs_eager.py`, filed with the
+results, stepped a 10,004,569-cell mesh on the four cards, 20 steps each way.
+The runner's node built a new `StaticArray` at every `static_data` access, so
+the wrapper's static cache missed at every eager `update()`: 242.5 ms per step,
+with 40 re-partitions, against 4.45 ms and none when the node returned the same objects. The fields were identical bit for
 bit. In a graph, `gm.step()` took 7.23 ms per step, with two re-partitions at
 compile and none after, and `run_scan` 0.81 ms per step; the graph's field was
 within 2.4e-7 of the eager one. This is `MADD-ANO-294`. It also explains the

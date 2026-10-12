@@ -37,9 +37,14 @@ ICE, decodes the frames that were pushed (size and colour), and that its
 input events reach the input handler.  The encoder is ``x264enc``, in
 software, on every host: there is no GPU encoder, and a frame
 pushed with :meth:`SelkiesSession.update_framebuffer_gpu` is copied to the
-host first.  The stream was tested from a GPU host, with the simulation
-on CUDA, on 2026-10-12.  Not tested: a real browser, and NAT traversal
-(see the ``ice_servers`` note on :class:`SelkiesSession`).
+host first.  On 2026-10-12 the stream ran from a GPU host, with the
+simulation on CUDA, and was watched live in a real browser on a laptop
+it reached over the internet through a TURN relay over TCP (the TURN
+server beside the browser, reached from the host through an SSH tunnel;
+see the ``ice_servers`` note on :class:`SelkiesSession`).  The loopback
+test covers neither the browser nor that relay.
+``maddening.examples.cloud.streaming.09_local_webrtc_viewer`` streams to
+a browser on the same machine, with no cloud and no GPU.
 """
 
 from __future__ import annotations

@@ -1,0 +1,14 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[coupled]          1d 4x1 316x320 ift max_rel f 0.0e+00  u 0.0e+00  grad 1.1e-07  vs model grad 2.3e-06  value+grad   432.40 ms (unsharded    83.56)  compile  14.3 s  pinned ops 2
+[coupled]         1d 4x1 316x320 fori max_rel f 0.0e+00  u 0.0e+00  grad 0.0e+00  vs model grad 2.2e-06  value+grad   101.14 ms (unsharded    19.46)  compile   7.1 s  pinned ops 0
+[coupled]    1d-axis1 1x4 316x320 ift max_rel f 1.5e-07  u 0.0e+00  grad 1.1e-07  vs model grad 2.3e-06  value+grad   199.85 ms (unsharded    83.56)  compile  12.4 s  pinned ops 2
+[coupled]   1d-axis1 1x4 316x320 fori max_rel f 1.5e-07  u 0.0e+00  grad 2.1e-07  vs model grad 2.2e-06  value+grad    92.87 ms (unsharded    19.46)  compile   7.2 s  pinned ops 0
+[coupled]     2d-flat 1x4 316x320 ift max_rel f 1.5e-07  u 0.0e+00  grad 1.1e-07  vs model grad 2.3e-06  value+grad   173.52 ms (unsharded    83.56)  compile  12.5 s  pinned ops 2
+[coupled]    2d-flat 1x4 316x320 fori max_rel f 1.5e-07  u 0.0e+00  grad 2.1e-07  vs model grad 2.2e-06  value+grad    81.61 ms (unsharded    19.46)  compile   7.7 s  pinned ops 0
+[coupled]          2d 2x2 316x320 ift max_rel f 0.0e+00  u 0.0e+00  grad 2.1e-07  vs model grad 2.3e-06  value+grad   286.40 ms (unsharded    83.56)  compile  14.2 s  pinned ops 2
+[coupled]         2d 2x2 316x320 fori max_rel f 1.5e-07  u 9.1e-08  grad 2.1e-07  vs model grad 2.2e-06  value+grad   110.01 ms (unsharded    19.46)  compile   7.8 s  pinned ops 0
+[coupled]          2d 2x2 548x552 ift max_rel f 1.5e-07  u 9.1e-08  grad 1.1e-07  vs model grad 2.2e-07  value+grad   377.35 ms (unsharded    92.33)  compile  15.0 s  pinned ops 2
+[coupled]         2d 2x2 548x552 fori max_rel f 1.5e-07  u 9.1e-08  grad 1.7e-07  vs model grad 3.0e-07  value+grad   110.16 ms (unsharded    23.40)  compile   7.8 s  pinned ops 0
+[coupled]        2d 2x2 1000x1004 ift max_rel f 1.5e-07  u 0.0e+00  grad 5.8e-07  vs model grad 3.8e-07  value+grad   438.84 ms (unsharded   261.82)  compile  18.4 s  pinned ops 2
+[coupled]       2d 2x2 1000x1004 fori max_rel f 1.5e-07  u 0.0e+00  grad 0.0e+00  vs model grad 5.1e-08  value+grad   148.06 ms (unsharded    37.90)  compile   8.8 s  pinned ops 0
+wrote results/multigpu/coupled.json (283.2 s)  checks 210/210 passed

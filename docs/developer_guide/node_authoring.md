@@ -572,6 +572,84 @@ constant's own dtype (a float16 state built from its dtype, say) does not,
 in either mode: the reloaded node computes in float32 or float64 (4e-4 off
 for float16 and 2e-3 for bfloat16 after five steps in the case measured).
 
+### An array computed from a constant: `static_data_deps`
+
+Some nodes compute an array from their constants once, in `__init__`, and
+read it in every step: a lookup table, a grid, a basis. Publish such an
+array in the `static_data` property, each array wrapped in
+`StaticArray`. The compiled step closes over it, so it is baked into the
+compiled program as a constant, and that has two consequences for the
+constants it was computed from:
+
+- **a gradient cannot pass through it.** If such a constant is trainable,
+  a fit moves the constant while the step goes on reading the array built
+  from its old value, and the gradient leaves out the term through the
+  array;
+- **the step never reads the constant itself**, so a new value written to
+  `gm.params` would change nothing and then be saved by `to_dict()`.
+
+`static_data_deps()` writes the link down. It returns
+`{static_data_key: (param_key, ...)}`: for each static whose *contents*
+the step reads, the `self.params` keys those contents were computed from.
+The graph then holds you to both consequences:
+
+- `compile()` raises a `ValueError`, naming the static and the
+  parameter, when a declared parameter is a float leaf of `gm.params` left
+  trainable, by the node's `param_specs()` or by a `gm.set_param_spec`
+  override. Declare it `ParamSpec(trainable=False)`, or stop baking it and
+  compute the quantity inside `update()` from the injected `params`, so
+  the gradient reaches it.
+- Every run method, `check_params`, `to_dict()` and `save_state` refuse a
+  `gm.params` whose value for a declared parameter differs from the
+  node's own (`gm.reset_params()` drops the edit). The declaration does not
+  rebuild the array: to change such a constant, build the node again with
+  the new value.
+
+Declare nothing for a static built from literals, read from a file or
+passed in by the caller (it has no parameter to name), or for one whose
+values the step never reads: `HeatNode` builds `grid_x` from `length` on
+a uniform grid but computes its spacing from the traced `length`, so
+`length` stays trainable. A structural parameter (an `int`, `str` or
+`bool`, never a leaf of `gm.params`) is never refused; baking it is what
+the static channel is for.
+
+<!-- snippet: no-run, reason: fragment: three methods of the example's node, without its constructor and update -->
+```python
+from maddening.core.node import SimulationNode
+from maddening.core.params import ParamSpec
+from maddening.core.static_data import StaticArray
+
+
+class HeatedBody(SimulationNode):
+    # __init__ tabulates self._power, the heater's power against the grid
+    # self._grid, from heater_power and setpoint; update() reads the table.
+
+    def param_specs(self):
+        positive = ParamSpec(bounds=(0.0, None), transform="log")
+        baked = ParamSpec(trainable=False, description="tabulated into power_table")
+        return {**super().param_specs(),
+                "conductance": positive, "heat_capacity": positive,
+                "heater_power": baked, "setpoint": baked}
+
+    @property
+    def static_data(self):
+        return {"temperature_grid": StaticArray(self._grid, replication="replicate"),
+                "power_table": StaticArray(self._power, replication="replicate")}
+
+    def static_data_deps(self):
+        # The grid is built from literals and declares nothing.
+        return {"power_table": ("heater_power", "setpoint")}
+```
+
+`python -m maddening.examples.advanced.calibrated_node` is the whole node,
+about forty lines, followed by what a node author checks before handing it
+to `maddening.sysid`: `gm.nodes_without_params()` is empty (a node on the
+three-argument `update` is listed), `verify_node` passes, `compile()`
+refuses the node with `heater_power` made trainable, a run refuses a new
+`heater_power` written to `gm.params`, and `fit_lm` recovers the
+conductance and the heat capacity from a noisy temperature record, each
+within four Cramér–Rao standard deviations of the value that made the data.
+
 ## Boundary Input Specification
 
 Override `boundary_input_spec()` to declare what {term}`boundary inputs <Boundary inputs>` your node expects. This enables validation, documentation generation, and correct initialization for additive inputs.

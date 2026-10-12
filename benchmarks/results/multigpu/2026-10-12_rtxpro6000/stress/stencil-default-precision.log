@@ -1,0 +1,45 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[stencil]      field 1d 4x1 316x320 periodic fwd    0.412 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00
+[stencil]          field 1d 4x1 316x320 edge fwd    0.413 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 7.3e-08  grad f0 2.1e-07  grad diffusivity 7.1e-08
+[stencil]     field 1d 4x1 316x320 dirichlet fwd    0.408 ms/step (unsharded    0.085)  max_rel f 0.0e+00 averages 2.2e-07  grad f0 2.1e-07  grad diffusivity 1.1e-07
+[stencil]        lbm 1d 4x1 316x320 periodic fwd    0.438 ms/step (unsharded    0.291)  max_rel f 0.0e+00 velocity 0.0e+00  grad f0 1.6e-03  grad viscosity 4.7e-05
+[stencil] field-halo2 1d 4x1 316x320 periodic fwd    0.421 ms/step (unsharded    0.117)  max_rel f 0.0e+00 averages 1.9e-07  grad f0 2.8e-07  grad diffusivity 7.0e-08
+[stencil]    field-halo2 1d 4x1 316x320 edge fwd    0.403 ms/step (unsharded    0.104)  max_rel f 0.0e+00 averages 6.4e-07  grad f0 2.4e-07  grad diffusivity 0.0e+00
+[stencil] field-halo2 1d 4x1 316x320 dirichlet fwd    0.555 ms/step (unsharded    0.111)  max_rel f 0.0e+00 averages 1.9e-07  grad f0 2.4e-07  grad diffusivity 7.5e-08
+[stencil]   field-shares 1d 4x1 316x320 zero fwd    0.442 ms/step (unsharded    0.144)  max_rel f 1.4e-07 averages 4.4e-07 shares 3.4e-08 strips 0.0e+00  grad f0 7.0e-07  grad diffusivity 0.0e+00
+[stencil] field 1d-axis1 1x4 316x320 periodic fwd    0.418 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 1.5e-07  grad f0 2.8e-07  grad diffusivity 0.0e+00
+[stencil]    field 1d-axis1 1x4 316x320 edge fwd    0.434 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 7.3e-08  grad f0 2.8e-07  grad diffusivity 7.1e-08
+[stencil] field 1d-axis1 1x4 316x320 dirichlet fwd    0.417 ms/step (unsharded    0.085)  max_rel f 0.0e+00 averages 3.6e-07  grad f0 2.8e-07  grad diffusivity 0.0e+00
+[stencil]  lbm 1d-axis1 1x4 316x320 periodic fwd    0.433 ms/step (unsharded    0.291)  max_rel f 0.0e+00 velocity 0.0e+00  grad f0 1.6e-03  grad viscosity 5.0e-05
+[stencil] field-halo2 1d-axis1 1x4 316x320 periodic fwd    0.404 ms/step (unsharded    0.117)  max_rel f 0.0e+00 averages 5.7e-07  grad f0 2.1e-07  grad diffusivity 7.0e-08
+[stencil] field-halo2 1d-axis1 1x4 316x320 edge fwd    0.416 ms/step (unsharded    0.104)  max_rel f 0.0e+00 averages 6.4e-07  grad f0 2.1e-07  grad diffusivity 0.0e+00
+[stencil] field-halo2 1d-axis1 1x4 316x320 dirichlet fwd    0.450 ms/step (unsharded    0.111)  max_rel f 0.0e+00 averages 1.3e-07  grad f0 2.1e-07  grad diffusivity 0.0e+00
+[stencil] field-shares 1d-axis1 1x4 316x320 zero fwd    0.426 ms/step (unsharded    0.150)  max_rel f 1.4e-07 averages 3.3e-07 shares 2.3e-07 strips 1.1e-07  grad f0 6.6e-07  grad diffusivity 6.4e-08
+[stencil] field 2d-flat 1x4 316x320 periodic fwd    0.426 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 1.5e-07  grad f0 2.8e-07  grad diffusivity 0.0e+00
+[stencil]     field 2d-flat 1x4 316x320 edge fwd    0.386 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 7.3e-08  grad f0 2.8e-07  grad diffusivity 7.1e-08
+[stencil] field 2d-flat 1x4 316x320 dirichlet fwd    0.398 ms/step (unsharded    0.085)  max_rel f 0.0e+00 averages 3.6e-07  grad f0 2.8e-07  grad diffusivity 0.0e+00
+[stencil]   lbm 2d-flat 1x4 316x320 periodic fwd    0.484 ms/step (unsharded    0.291)  max_rel f 0.0e+00 velocity 0.0e+00  grad f0 1.6e-03  grad viscosity 5.0e-05
+[stencil] field-halo2 2d-flat 1x4 316x320 periodic fwd    0.404 ms/step (unsharded    0.117)  max_rel f 0.0e+00 averages 5.7e-07  grad f0 2.1e-07  grad diffusivity 7.0e-08
+[stencil] field-halo2 2d-flat 1x4 316x320 edge fwd    0.416 ms/step (unsharded    0.104)  max_rel f 0.0e+00 averages 6.4e-07  grad f0 2.1e-07  grad diffusivity 0.0e+00
+[stencil] field-halo2 2d-flat 1x4 316x320 dirichlet fwd    0.398 ms/step (unsharded    0.111)  max_rel f 0.0e+00 averages 1.3e-07  grad f0 2.1e-07  grad diffusivity 0.0e+00
+[stencil] field-shares 2d-flat 1x4 316x320 zero fwd    0.397 ms/step (unsharded    0.141)  max_rel f 1.4e-07 averages 3.3e-07 shares 2.3e-07 strips 2.4e-07  grad f0 4.7e-07  grad diffusivity 6.3e-08
+[stencil]      field 2d 2x2 316x320 periodic fwd    0.596 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00
+[stencil]          field 2d 2x2 316x320 edge fwd    0.482 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 7.3e-08  grad f0 1.8e-07  grad diffusivity 7.1e-08
+[stencil]     field 2d 2x2 316x320 dirichlet fwd    0.504 ms/step (unsharded    0.085)  max_rel f 0.0e+00 averages 2.2e-07  grad f0 1.8e-07  grad diffusivity 0.0e+00
+[stencil]        lbm 2d 2x2 316x320 periodic fwd    0.522 ms/step (unsharded    0.291)  max_rel f 0.0e+00 velocity 0.0e+00  grad f0 1.6e-03  grad viscosity 4.8e-05
+[stencil] field-halo2 2d 2x2 316x320 periodic fwd    0.472 ms/step (unsharded    0.117)  max_rel f 0.0e+00 averages 3.8e-07  grad f0 2.1e-07  grad diffusivity 0.0e+00
+[stencil]    field-halo2 2d 2x2 316x320 edge fwd    0.472 ms/step (unsharded    0.104)  max_rel f 0.0e+00 averages 4.5e-07  grad f0 1.4e-07  grad diffusivity 0.0e+00
+[stencil] field-halo2 2d 2x2 316x320 dirichlet fwd    0.493 ms/step (unsharded    0.111)  max_rel f 0.0e+00 averages 1.9e-07  grad f0 2.1e-07  grad diffusivity 7.5e-08
+[stencil]   field-shares 2d 2x2 316x320 zero fwd    0.559 ms/step (unsharded    0.157)  max_rel f 1.4e-07 averages 4.4e-07 shares 7.9e-08 strips 0.0e+00  grad f0 5.1e-07  grad diffusivity 0.0e+00
+[stencil] field-mask1 2d 2x2 316x320 periodic fwd    0.503 ms/step (unsharded    0.105)  max_rel f 0.0e+00 averages 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00
+[stencil] field 2d-crossed 2x2 316x320 periodic fwd    0.469 ms/step (unsharded    0.080)  max_rel f 0.0e+00 averages 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00
+wrote results/stress/stencil-default-precision/stencil.json (273.5 s)  checks 348/356 passed
+CHECK FAILED [stencil] lbm 1d 4x1 316x320 periodic d loss / d initial f vs unsharded max_rel: 1.637e-03 (limit 1e-05)
+CHECK FAILED [stencil] lbm 1d 4x1 316x320 periodic d loss / d viscosity vs unsharded rel: 4.741e-05 (limit 1e-05)
+CHECK FAILED [stencil] lbm 1d-axis1 1x4 316x320 periodic d loss / d initial f vs unsharded max_rel: 1.637e-03 (limit 1e-05)
+CHECK FAILED [stencil] lbm 1d-axis1 1x4 316x320 periodic d loss / d viscosity vs unsharded rel: 5.018e-05 (limit 1e-05)
+CHECK FAILED [stencil] lbm 2d-flat 1x4 316x320 periodic d loss / d initial f vs unsharded max_rel: 1.637e-03 (limit 1e-05)
+CHECK FAILED [stencil] lbm 2d-flat 1x4 316x320 periodic d loss / d viscosity vs unsharded rel: 5.018e-05 (limit 1e-05)
+CHECK FAILED [stencil] lbm 2d 2x2 316x320 periodic d loss / d initial f vs unsharded max_rel: 1.637e-03 (limit 1e-05)
+CHECK FAILED [stencil] lbm 2d 2x2 316x320 periodic d loss / d viscosity vs unsharded rel: 4.755e-05 (limit 1e-05)
+FAILED: stencil

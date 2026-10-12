@@ -1,0 +1,71 @@
+diff --git a/src/maddening/nodes/lbm.py b/src/maddening/nodes/lbm.py
+index cbbb4a85..f8a7f811 100644
+--- a/src/maddening/nodes/lbm.py
++++ b/src/maddening/nodes/lbm.py
+@@ -202,7 +202,7 @@ def _equilibrium(density, velocity, e, w, cs2):
+     """
+     e_f = e.astype(np.float64)
+     # e_dot_u: (*grid_shape, Q)
+-    e_dot_u = velocity @ e_f.T
++    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)
+     u_sq = jnp.sum(velocity ** 2, axis=-1, keepdims=True)  # (..., 1)
+ 
+     f_eq = w * density[..., None] * (
+@@ -240,7 +240,7 @@ def _compute_macroscopic(f, e, force=None):
+     """
+     density = jnp.sum(f, axis=-1)
+     e_f = e.astype(np.float64)
+-    momentum = f @ e_f  # (*grid_shape, D)
++    momentum = jnp.matmul(f, e_f, precision=jax.lax.Precision.HIGHEST)  # (*grid_shape, D)
+     if force is not None:
+         momentum = momentum + 0.5 * force
+     velocity = momentum / jnp.maximum(density[..., None], 1e-10)
+@@ -341,7 +341,7 @@ def _guo_forcing(density, velocity, force, tau, e, w, cs2):
+     # Build extra dimensions for broadcasting: prepend len(grid_shape) Nones
+     # We use explicit expansion: e_f -> (1,...,1, Q, D), etc.
+     # Simpler approach: compute per-q and stack.
+-    e_dot_u = velocity @ e_f.T  # (*grid_shape, Q)
++    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)  # (*grid_shape, Q)
+ 
+     # (e_q - u): (*grid_shape, Q, D)
+     # Expand e_f: (Q, D) -> broadcast with velocity (..., 1, D)
+diff --git a/src/maddening/nodes/lbm_pipe.py b/src/maddening/nodes/lbm_pipe.py
+index f88e9904..3506e6a1 100644
+--- a/src/maddening/nodes/lbm_pipe.py
++++ b/src/maddening/nodes/lbm_pipe.py
+@@ -158,7 +158,7 @@ def _equilibrium(density, velocity):
+     f_eq : (nx, ny, nz, 19) float32
+     """
+     # e_dot_u: (nx, ny, nz, 19)  —  velocity @ E^T
+-    e_dot_u = velocity @ _E.astype(np.float32).T
++    e_dot_u = jnp.matmul(velocity, _E.astype(np.float32).T, precision=jax.lax.Precision.HIGHEST)
+     u_sq = jnp.sum(velocity ** 2, axis=-1, keepdims=True)  # (..., 1)
+ 
+     # f_eq_q = w_q * rho * (1 + e·u/cs2 + (e·u)^2/(2*cs4) - u·u/(2*cs2))
+@@ -185,7 +185,7 @@ def _compute_macroscopic(f):
+     """
+     density = jnp.sum(f, axis=-1)
+     # momentum = sum_q f_q * e_q  —  f @ E
+-    momentum = f @ _E.astype(np.float32)
++    momentum = jnp.matmul(f, _E.astype(np.float32), precision=jax.lax.Precision.HIGHEST)
+     # Avoid division by zero for empty cells (shouldn't happen in practice)
+     velocity = momentum / jnp.maximum(density[..., None], 1e-10)
+     return density, velocity
+@@ -245,7 +245,7 @@ def _guo_forcing(density, velocity, force, tau):
+     # (e_q - u): broadcast to (nx, ny, nz, 19, 3)
+     e_minus_u = e_f[None, None, None, :, :] - velocity[..., None, :]
+     # (e_q · u): (nx, ny, nz, 19)  —  velocity @ E^T
+-    e_dot_u = velocity @ e_f.T
++    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)
+     # e_q scaled by e·u / cs4: (nx, ny, nz, 19, 3)
+     e_scaled = e_f[None, None, None, :, :] * (e_dot_u / (_CS2 ** 2))[..., None]
+ 
+@@ -271,7 +271,7 @@ def _tracer_equilibrium(tracer, velocity):
+     -------
+     g_eq : (nx, ny, nz, 7) float32
+     """
+-    e_dot_u = velocity @ _E7.astype(np.float32).T  # (nx, ny, nz, 7)
++    e_dot_u = jnp.matmul(velocity, _E7.astype(np.float32).T, precision=jax.lax.Precision.HIGHEST)  # (nx, ny, nz, 7)
+     return _W7 * tracer[..., None] * (1.0 + e_dot_u / _CS2)
+ 
+ 

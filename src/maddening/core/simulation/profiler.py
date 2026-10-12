@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core import _matmul_precision
 from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -1042,7 +1043,9 @@ def profile_graph(
         # declared input -- ``boundary_inputs["u"]``, as the graph always
         # supplies it -- raised ``KeyError`` and took the profile with it.
         bi = _declared_inputs(spec.node)
-        update_fn = jax.jit(spec.update_fn)
+        # Timed at the precision the graph's step runs it at
+        # (``GraphManager.matmul_precision``), not at JAX's default.
+        update_fn = jax.jit(_matmul_precision.pinned(spec.update_fn, _matmul_precision.of(gm)))
         # Warmup
         _ = update_fn(node_state, bi, spec.timestep)
         jax.block_until_ready(_)

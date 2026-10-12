@@ -1,0 +1,38 @@
+=== Graph Profile:  ===
+
+  Nodes: 1
+  Total state: 10,004,572 elements (39080 KB float32)
+
+  Device:       cuda:0
+  JIT compile:    3327.0 ms
+  Mean step:        3.79 ms (+/- 0.28; median 3.82, p95 4.15)
+  Dispatch floor:   2.41 ms (jitted identity on the state)
+  Throughput:        264 steps/s
+
+  Per-node estimated cost:
+    mesh                    3.44 ms ( 90.9%)  [10,004,572 elems]
+
+  Compile counts (deterministic; no wall-clock):
+    step retraces:           1
+    jaxpr primitives:      307
+    lowered HLO ops:       302
+
+  Trace (20 steps, /root/gve_results/profile/4_cards_sharded):
+    device busy: 1.10 ms/step (29% of wall step); 43 kernels/step; host dispatch 7.54 ms/step
+    device time by scope:
+      node:mesh                          0.899 ms/step
+      unscoped                           0.199 ms/step
+    top kernels:
+      ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<   0.706 ms/step
+      input_reduce_fusion                                0.169 ms/step
+      loop_compare_fusion                                0.092 ms/step
+      loop_add_fusion                                    0.077 ms/step
+      input_scatter_fusion_1                             0.027 ms/step
+      loop_select_fusion                                 0.015 ms/step
+      loop_broadcast_fusion                              0.009 ms/step
+      MemcpyP2P                                          0.001 ms/step
+
+  Bottleneck: mesh (3.44ms, 91% of step)
+
+  Recommendations:
+    - Dispatch floor (2.41 ms) is more than half the step: batch steps with run_scan instead of calling step() per timestep.

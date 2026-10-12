@@ -1,0 +1,4 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[forward] cells= 1001664 all_to_all wrapper  126.746 ms/step  device    5.061 ms/step  compile   1.83 s  max|dx|=8.34e-07
+[forward] cells= 1001664 ppermute   wrapper  126.516 ms/step  device    5.369 ms/step  compile   1.32 s  max|dx|=8.34e-07
+wrote results/multigpu-mesh/forward.json (171.6 s)  checks 14/14 passed

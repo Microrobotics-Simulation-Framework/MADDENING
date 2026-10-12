@@ -27,7 +27,14 @@ _SCAN = ("src", "docker", "docs", "benchmarks/multigpu", "pyproject.toml", "READ
 #: that a stale pin was corrected has to name the pin it corrected.  Scanning
 #: them turns "we fixed this" into a failure, so they are excluded by path
 #: rather than by trying to tell prose from a dependency declaration.
-_HISTORY = ("docs/release_notes/", "CHANGELOG.md")
+#: A release's development record (``docs/validation/development_record_v*.md``)
+#: holds the text moved out of that release's notes, old pins included.
+_HISTORY = ("docs/release_notes/", "CHANGELOG.md", "docs/validation/development_record_v")
+
+
+def _is_history(rel: str) -> bool:
+    """Whether a repository-relative path is a historical record the scan skips."""
+    return any(rel.startswith(h) for h in _HISTORY)
 
 
 def test_no_stale_jax_pins_in_tree():
@@ -44,9 +51,20 @@ def test_no_stale_jax_pins_in_tree():
             except (UnicodeDecodeError, OSError):
                 continue
             rel = path.relative_to(_ROOT).as_posix()
-            if any(rel.startswith(h) for h in _HISTORY):
+            if _is_history(rel):
                 continue
             for lineno, line in enumerate(text.splitlines(), 1):
                 if _STALE.search(line):
                     offenders.append(f"{path.relative_to(_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, "\n".join(offenders)
+
+
+def test_only_the_historical_records_are_skipped():
+    """The exemption covers the records by path, and nothing beside them."""
+    for rel in ("docs/release_notes/v0.4.0.md", "CHANGELOG.md",
+                "docs/validation/development_record_v0.4.0.md"):
+        assert _is_history(rel), rel
+    for rel in ("docs/validation/soup_package.md", "docs/validation/known_anomalies.yaml",
+                "docs/user_guide/installation.md", "docs/validation/development_notes.md",
+                "README.md", "pyproject.toml"):
+        assert not _is_history(rel), rel

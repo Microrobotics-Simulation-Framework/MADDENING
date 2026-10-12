@@ -48,7 +48,7 @@ install, and of the extras listed in §6, is in the SBOMs described there.
 - Patient data processing
 - Medical device functionality
 - Real-time safety monitoring (HealthCheckNode provides infrastructure only; configuration and response logic are downstream responsibilities)
-- Input validation or sanitization (assumes trusted inputs)
+- General input validation or sanitization: data a program passes to the API (parameters, graph topology, boundary conditions, external inputs) is assumed valid and non-malicious (§2 of `docs/regulatory/intended_use.md`). The exception is what the library reads from outside the program, which it treats as untrusted where its guides say so: a config, a USD stage and a checkpoint (node classes and mapping kinds come from explicit registries only; see `docs/user_guide/parameters.md` and `docs/algorithm_guide/coupling/interface_mapping.md`), and the peer of the FMU importer's TCP bridge ("The trust boundary" in `docs/user_guide/fmu_export.md`)
 
 ### Infrastructure Nodes
 

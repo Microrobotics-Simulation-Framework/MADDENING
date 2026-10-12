@@ -136,11 +136,15 @@ Both messages are designed to surface unintentional graph mistakes
 without breaking deliberate constructions.
 
 One construction is an error.  A field takes an edge or a declared
-external input (`gm.add_external_input`), not both: the input would
-replace whatever the edge delivers on every step, with zeros when it is
-not fed, so `gm.compile()` raises a `ValueError` naming the pair and
-`gm.validate()` lists it.  Keep one of the two: leave the declaration
-out where the graph is built, or `gm.remove_edge(...)`.
+external input (`gm.add_external_input`), not both.  An external input
+replaces whatever any edge delivers to its field on every step, an
+additive edge included, with zeros when it is not fed, so the edge would
+never reach the node.  `gm.compile()` therefore raises a `ValueError`
+naming the edge and the input, whichever was added first, and
+`gm.validate()` lists the same text as an `ERROR:` entry.  Keep one of the
+two.  To keep the edge, leave the `add_external_input` call out where the
+graph is built (there is no `remove_external_input`); to keep the input,
+`gm.remove_edge(...)`.
 
 A field also has one declaration.  `gm.add_external_input` for a field
 that is already declared with another shape or dtype raises a

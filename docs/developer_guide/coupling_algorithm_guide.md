@@ -827,7 +827,9 @@ it; and Newton-Kantorovich takes the full-operator resolvent norm.
 size, so the worst is taken over the probes that have one: a probe whose
 tangent is exactly zero is left out (the fixed point does not respond to
 it), and so is a probe the pass does not *resolve* — moving the constant
-by the probe's whole size (its own magnitude) moves one pass from `x_k`
+by the probe's whole size (its own magnitude; an entry that is exactly
+zero is probed at the largest magnitude among its constant's entries,
+or at 1.0 where every entry is zero) moves one pass from `x_k`
 by no more than the floor the distance carries, `‖s · F_c ċ‖ ≤ floor` in
 the bound's own norm. Its right-hand side can then be what the iterate's last rounding,
 or a cancellation inside the node's own derivative, left of it, and so is
@@ -854,6 +856,19 @@ for the saturating curve above, whose relative error is 113%), so the
 rule is the magnitude's. On 108 drawn float32 and float64 rings of three
 members the bound moved on two (2.3e-5 to 6.8e-6, 1.8e-2 to 2.5e-4: a
 weak gain was its worst probe) and no flag changed.
+
+**An entry of exactly zero is in the bound; a tiny one is not.**  An
+offset that happens to sit at `0.0` has no magnitude to probe it by, so
+it is probed at its constant's largest magnitude and is in the bound
+wherever that moves the pass.  An entry of `1e-30` is probed by its own
+magnitude, which moves nothing, and is left out.  Measured on a float32
+pair whose only parameter is an offset `c` (jax 0.11.0, caps 3 and 4):
+at `c = 0.0` the bound read 1.38e-2 and 1.84e-3 for true relative errors
+of 1.25e-2 and 1.74e-3, usable; at `c = 1e-30` no probe was left and the
+bound read NaN, not usable.  With `c = (1e-30, 0.2, 0.4)` the bound read
+4.5e-3, usable: it covers the two resolved entries (4.2e-3 at most) and
+says nothing of the first, whose relative error is 1.25e-2.  Give a
+constant you want covered a value the pass resolves, or a zero.
 
 Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
 gradient from tight `ift` and `fori` arms that agree, every point a
@@ -1962,6 +1977,18 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   the order the map reads its constants, which follows the build order;
   it stays a bound in every order (see
   [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
+* **How a mapping holds its weights reaches the gradient bound.**  The
+  weights are constants of the pass, so a mapping held as a dense matrix
+  of more than 64 entries is probed along one direction and the same
+  operator held sparsely is probed entry by entry.  On a pair of three
+  markers and a 30-cell grid (jax 0.11.0, float32) the two layouts gave
+  bit-identical states and spectral keys, and gradient bounds 0.63 to
+  1.17 times one another.  Both held against the true error with respect
+  to the nodes' parameters, and the sparse one with respect to each
+  weight.  For the dense layout the bound covers the derivative along its
+  probe only: it read 0.79 to 0.82 times the error with respect to the
+  weight entry worst off under Gauss-Seidel (each field weighted by its
+  own largest magnitude, as the `"l2"` norm weights it).
 
 ## An edge from a node to itself
 

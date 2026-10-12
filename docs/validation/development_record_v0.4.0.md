@@ -987,7 +987,8 @@ mesh generator. `--summarise` closed all six checklist items.
   3×10⁵ cells, and 20% more at 10⁶, with identical results. The runner's rule
   keeps `all_to_all` as the default.
 - `gradient`: the gradient through `sharded_cg` agrees with the unsharded solve
-  to 5.8e-7 relative, in the same 56 iterations.
+  to 4.5e-7 to 6.8e-7 relative at 10⁵ to 10⁶ unknowns, in the same 56
+  iterations.
 
 **The stress tail.** Nothing in it was gated. It ran from 16:01 UTC.
 
@@ -1058,9 +1059,9 @@ of the two lattice nodes were given `precision=jax.lax.Precision.HIGHEST`
 (three in `lbm.py`, four in `lbm_pipe.py`). The same goal at the default
 precision then passed 356 of 356. The derivative in the initial populations
 came to 2.0e-6 to 2.1e-6 (it was 1.6e-3), and in the viscosity to 0.9e-6 to
-1.4e-6 (it was 4.7e-5 to 5.0e-5): the same as with `highest` set. A step took
-0.395 ms, against 0.386 ms with `highest` and 0.438 ms unpatched. The patch
-became #327.
+1.4e-6 (it was 4.7e-5 to 5.0e-5), as small as with `highest` set (2.1e-6, and
+1.6e-6 to 1.8e-6). A sharded step on the 1d 4x1 layout took 0.395 ms, against
+0.386 ms with `highest` and 0.438 ms unpatched. The patch became #327.
 
 **The A2000 precision sweep.** After the session, on one NVIDIA RTX A2000 8GB
 Laptop GPU with jax 0.11.2, float32 products were compared with float64 at

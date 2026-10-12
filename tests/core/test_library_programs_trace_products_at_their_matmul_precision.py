@@ -138,6 +138,18 @@ def lowered_dots(call) -> list[Dot]:
     return [d for d in found if d.float32]
 
 
+def assert_inherited(dots: list[Dot], what: str) -> None:
+    """With ``matmul_precision=None`` the library enters nothing, so the
+    products take the global ``bfloat16`` (``DEFAULT``).  Products that pass
+    their own precision keep it -- JAX's ``lstsq`` pins its matrix-vector
+    products to ``HIGHEST`` -- so the rule is held on the matrix products, and
+    at least one product must show the inherited setting."""
+    assert any(d.precision == DEFAULT for d in dots), (
+        f"{what}: no product inherited the global setting: {dots[:6]}")
+    wrong = [d for d in dots if d.matrix_matrix and d.precision != DEFAULT]
+    assert not wrong, f"{what}: matrix products not at the inherited setting: {wrong[:6]}"
+
+
 def assert_all(dots: list[Dot], precision: tuple, what: str) -> None:
     # The programs hold products to check: an entry point whose modules
     # held none would pass vacuously.
@@ -180,14 +192,17 @@ class Vec(SimulationNode):
 
 
 def coupled(precision=_matmul_precision.DEFAULT, linear_solver="dense",
-            diagnostics=False) -> GraphManager:
+            diagnostics=False, acceleration="iqn-ils") -> GraphManager:
     """Two :class:`Vec` members coupled through ``(N, N)`` interface mappings
     applied to their ``(N, C)`` fields (``H @ field``, a matrix product), the
     implicit-function adjoint solved by ``linear_solver``.  IQN-ILS
     accelerates the solve: its least-squares step forms matrix products in
     the forward step and again in the implicit-function rule, which re-solves
     for its primal when JAX traces it (the members' own products reach the
-    rule pre-traced, at the step's setting).  With
+    rule pre-traced, at the step's setting).  ``jnp.linalg.pinv`` in that
+    step pins one product of its own to ``HIGHEST`` whatever the setting, so
+    the tests of ``None`` turn the acceleration off (:data:`INHERITING`).
+    With
     ``diagnostics`` the step also forms the group's Krylov basis
     (``U.T @ JU``), spectral and gradient bounds: five seconds of compile
     here, so only the slow test turns them on."""
@@ -200,7 +215,7 @@ def coupled(precision=_matmul_precision.DEFAULT, linear_solver="dense",
         H = jnp.asarray(rng.uniform(0.1, 0.3, (N, N)), jnp.float32)
         gm.add_edge(source, target, "x", "u", mapping=matrix_mapping(H))
     gm.add_coupling_group(["a", "b"], max_iterations=30, tolerance=1e-6,
-                          acceleration="iqn-ils", diagnostics=diagnostics,
+                          acceleration=acceleration, diagnostics=diagnostics,
                           linear_solver=linear_solver)
     return gm
 
@@ -280,29 +295,38 @@ def test_every_graph_entry_point_traces_its_products_at_highest(entry):
     assert_all(lowered_dots(lambda: call(gm)), HIGHEST, entry)
 
 
+#: The graphs of the tests of ``None``: no product of theirs pins its own
+#: precision, so every one must inherit the global setting.
+INHERITING = {coupled: {"acceleration": "none"}, heat: {}}
+
+
 @pytest.mark.parametrize("entry", sorted(ENTRY_POINTS))
 def test_with_none_every_graph_entry_point_inherits_jax_s_setting(entry):
     build, call = ENTRY_POINTS[entry]
-    gm = build(precision=None)
-    assert_all(lowered_dots(lambda: call(gm)), DEFAULT, entry)
+    gm = build(precision=None, **INHERITING[build])
+    assert_inherited(lowered_dots(lambda: call(gm)), entry)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("precision, expected", [("highest", HIGHEST), (None, DEFAULT)])
-def test_the_coupling_bounds_trace_their_products_at_the_graph_s_setting(precision, expected):
+@pytest.mark.parametrize("precision", ["highest", None])
+def test_the_coupling_bounds_trace_their_products_at_the_graph_s_setting(precision):
     """With the group's diagnostics on, the step forms the Krylov basis of the
     Jacobian's range (``U.T @ JU``, ``U @ M``), the squarings of the spectral
     estimate and the full resolvent norm: in the step and in its gradient.
     CPU results do not move: the step and the report are bit-identical at
     either setting."""
     # Per push: tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_every_graph_entry_point_traces_its_products_at_highest[compile+step]
-    gm = coupled(precision, diagnostics=True)
+    gm = coupled(precision, diagnostics=True, acceleration="none")
     dots = lowered_dots(lambda: (gm.compile(), gm.step()))
     stepped = jax.tree.map(np.asarray, gm._state)          # the report included
     dots += lowered_dots(lambda: jax.grad(_scan_loss(gm))(gm.params))
     assert sum(d.matrix_matrix for d in dots) > 20, "the bounds' products are missing"
-    assert_all(dots, expected, "coupling diagnostics")
-    other = _compiled(coupled("highest" if precision is None else None, diagnostics=True))
+    if precision is None:
+        assert_inherited(dots, "coupling diagnostics")
+    else:
+        assert_all(dots, HIGHEST, "coupling diagnostics")
+    other = _compiled(coupled("highest" if precision is None else None, diagnostics=True,
+                              acceleration="none"))
     other.step()
     for x, y in zip(jax.tree.leaves(stepped), jax.tree.leaves(other._state)):
         np.testing.assert_array_equal(x, np.asarray(y))
@@ -405,7 +429,7 @@ def test_every_sysid_entry_point_traces_its_products_at_highest(entry):
 
 @pytest.mark.parametrize("entry", sorted(SYSID))
 def test_with_none_every_sysid_entry_point_inherits_jax_s_setting(entry):
-    assert_all(lowered_dots(lambda: SYSID[entry](None)), DEFAULT, entry)
+    assert_inherited(lowered_dots(lambda: SYSID[entry](None)), entry)
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +440,7 @@ def test_a_new_matmul_precision_recompiles_every_program_of_the_graph():
     """No program traced at the previous setting runs again: the graph is
     marked for recompilation, the next entry point recompiles it (a new
     generation, an empty scan cache) and keeps its state."""
-    gm = _compiled(coupled())
+    gm = _compiled(coupled(acceleration="none"))
     gm.run_scan(2)
     generation = gm._compile_generation
     before = jax.tree.map(np.asarray, gm._user_state(gm._state))
@@ -427,7 +451,7 @@ def test_a_new_matmul_precision_recompiles_every_program_of_the_graph():
     for x, y in zip(jax.tree.leaves(before), jax.tree.leaves(gm._user_state(gm._state))):
         np.testing.assert_array_equal(x, np.asarray(y))
     assert gm._compile_generation == generation + 1
-    assert_all(lowered_dots(lambda: gm.run_scan(2)), DEFAULT, "run_scan after the change")
+    assert_inherited(lowered_dots(lambda: gm.run_scan(2)), "run_scan after the change")
     # Setting the value it holds changes nothing.
     gm.matmul_precision = None
     assert not gm._dirty

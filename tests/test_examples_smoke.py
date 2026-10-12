@@ -38,6 +38,8 @@ error.
 from __future__ import annotations
 
 import ast
+import difflib
+import html
 import importlib
 import importlib.util
 import os
@@ -431,6 +433,11 @@ LOOPBACK = {
     "servers/lbm_pipe_server.py", "servers/vessel_flow_server.py",
     "cloud/server/04_server_test.py", "cloud/server/05_websocket_test.py",
     "cloud/multijob/08_two_vm_test.py",
+    # A SelkiesSession on 127.0.0.1.  Its stream needs GStreamer, so its
+    # --self-check and its viewer page run in CI's streaming container
+    # (tests/cloud/test_local_webrtc_viewer_example.py); the two tests at
+    # the end of this file cover what runs without GStreamer.
+    "cloud/streaming/09_local_webrtc_viewer.py",
 }
 
 
@@ -848,3 +855,65 @@ def test_example_guard_refuses_cloud_imports_and_off_loopback_traffic(
     for line in ("blocked sky", "blocked maddening.cloud.launcher",
                  "blocked network", "blocked deprecation"):
         assert line in out, (line, out, result.stderr[-2000:])
+
+
+# ---------------------------------------------------------------------------
+# The local WebRTC viewer, where GStreamer is absent (its stream runs in the
+# streaming container: tests/cloud/test_local_webrtc_viewer_example.py)
+# ---------------------------------------------------------------------------
+
+WEBRTC_VIEWER = "maddening.examples.cloud.streaming.09_local_webrtc_viewer"
+
+
+def test_local_webrtc_viewer_without_gstreamer_says_how_to_get_it(tmp_path, example_env):
+    """Without PyGObject the example exits 2 with what to install, or which
+    image to run it in -- never a traceback.  ``gi`` is hidden by a package
+    of that name that raises, so the test means the same with or without
+    GStreamer on the machine."""
+    shadow = tmp_path / "shadow"
+    (shadow / "gi").mkdir(parents=True)
+    (shadow / "gi" / "__init__.py").write_text(
+        'raise ImportError("gi is hidden from this run")\n')
+    env = dict(example_env)
+    guard, *rest = env["PYTHONPATH"].split(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([guard, str(shadow), *rest])
+    result = subprocess.run(
+        [sys.executable, "-m", WEBRTC_VIEWER, "--self-check"], cwd=tmp_path, env=env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    output = result.stdout + result.stderr
+    assert result.returncode == 2, output[-3000:]
+    assert "Traceback" not in output, output[-3000:]
+    assert "Cannot stream: PyGObject" in result.stderr and "gi is hidden" in result.stderr
+    assert "apt install python3-gi" in result.stderr
+    assert "docker build -f docker/Dockerfile.streaming-test" in result.stderr
+
+
+def test_local_webrtc_viewer_page_is_the_shipped_client_with_the_url_filled_in(
+    tmp_path, example_env,
+):
+    """The viewer page is the shipped browser client with three edits: the
+    signaling URL (HTML-escaped) in the input, no STUN server, and a
+    connect on load.  It holds a token, so only its owner can read it."""
+    url = "ws://127.0.0.1:9/signaling/abc?token=example-token-not-a-secret&x=<1>"
+    probe = textwrap.dedent(f'''
+        import importlib, sys
+        from pathlib import Path
+        viewer = importlib.import_module("{WEBRTC_VIEWER}")
+        print(viewer.write_viewer_page(sys.argv[1], Path(sys.argv[2])))
+    ''')
+    result = subprocess.run(
+        [sys.executable, "-c", probe, url, str(tmp_path)], cwd=tmp_path, env=example_env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    page = Path(result.stdout.strip().splitlines()[-1])
+    assert page.parent == tmp_path and (page.stat().st_mode & 0o777) == 0o600
+    text = page.read_text(encoding="utf-8")
+    value = re.search(r'<input id="signaling-url" type="text"\s+value="([^"]*)">', text)
+    assert value and html.unescape(value.group(1)) == url, text[:2000]
+    assert "iceServers: []" in text and "stun:" not in text
+    assert text.count("window.addEventListener('load', connect);") == 1
+    shipped = (EXAMPLES_ROOT.parent / "api" / "static" / "webrtc_client.html").read_text(
+        encoding="utf-8")
+    changed = [line for line in difflib.ndiff(shipped.splitlines(), text.splitlines())
+               if line[:2] in ("- ", "+ ")]
+    assert len(changed) == 5, changed     # two lines replaced, one line added

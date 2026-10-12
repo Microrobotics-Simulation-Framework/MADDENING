@@ -84,6 +84,7 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `profiling_demo.py` | The whole `ProfileReport` on a coupled pair: measured coupling overhead and cost per iteration, bottleneck, compile counts (checked identical on a fresh graph), a `trace=True` summary, Perfetto JSON; all output in a temporary directory | `... advanced.profiling_demo [--n-cells N] [--out-dir DIR]` |
 | `sysid_demo.py` | Calibration: `fim` finds the spring's scale degeneracy, `fit` holds it (`excited_rank`, `hold_declined`), `fit_lm` recovers k and c under a `ParamSpec` freeze and a mask, Cramér–Rao bounds, `params_table()` before and after | `... advanced.sysid_demo [--samples N] [--n-iter N]` |
 | `sharding_demo.py` | `ShardedStencilNode(HeatNode)` over four emulated CPU devices (sets `XLA_FLAGS` itself): `print_graph()` shows the wrapper, `memory_estimate()` a quarter per device, the result matches the unsharded rod; CPU emulation, not a speed test | `... advanced.sharding_demo [--n-cells N] [--steps N]` |
+| `unstructured_sharding_demo.py` | `ShardedUnstructuredNode(exchange="ppermute")` over four emulated CPU devices: a diffusion node on an irregular graph matches the unsharded node and the `all_to_all` transport, `exchange_traffic` for a compact and a random partition, `sharded_cg(differentiable=True)` with a Jacobi preconditioner and its gradient against a dense solve; why `static_data` must return the same arrays | `... advanced.unstructured_sharding_demo [--n-cells N] [--steps N]` |
 | `fmu_export_demo.py` | FMI 3.0 export: `build_model_description` (tunable and fixed parameters), `build_fmu_binary` + `write_fmu` into a temporary directory, FMPy's `validate_fmu`, and the sidecar driven in-process; stages needing a C compiler or FMPy skip with the reason | `... advanced.fmu_export_demo [--steps N]` |
 | `checkpoint_resume_demo.py` | `save_state` / `load_state`: a coupled run resumed in a fresh graph is bitwise identical, `_meta` warm starts and calibrated params included; a cold restart is not | `... advanced.checkpoint_resume_demo [--warmup N] [--steps N]` |
 | `live_stage_bouncing_ball_demo.py` | `LiveStage` writing a time-sampled USD stage `[usd]` | `... advanced.live_stage_bouncing_ball_demo [--steps N]` |
@@ -112,4 +113,6 @@ sides (`MADDENING_TRANSPORT_TOKEN`, falling back to `MADDENING_API_TOKEN`).
 Scripts that provision billable VMs on RunPod, Lambda, AWS or GCP; see
 [`cloud/README.md`](cloud/README.md).  Three of them have a `--local` mode
 (above) that runs their payload on this machine, and
-`cloud/streaming/08_subscribe_lbm_velocity.py` runs entirely locally.
+`cloud/streaming/08_subscribe_lbm_velocity.py` runs entirely locally, as does
+`cloud/streaming/09_local_webrtc_viewer.py` (a WebRTC stream to a browser on
+this machine; it needs GStreamer, and `--self-check` runs it headless).

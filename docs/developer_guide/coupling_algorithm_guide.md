@@ -827,7 +827,9 @@ it; and Newton-Kantorovich takes the full-operator resolvent norm.
 size, so the worst is taken over the probes that have one: a probe whose
 tangent is exactly zero is left out (the fixed point does not respond to
 it), and so is a probe the pass does not *resolve* — moving the constant
-by the probe's whole size (its own magnitude) moves one pass from `x_k`
+by the probe's whole size (its own magnitude; an entry that is exactly
+zero is probed at the largest magnitude among its constant's entries,
+or at 1.0 where every entry is zero) moves one pass from `x_k`
 by no more than the floor the distance carries, `‖s · F_c ċ‖ ≤ floor` in
 the bound's own norm. Its right-hand side can then be what the iterate's last rounding,
 or a cancellation inside the node's own derivative, left of it, and so is
@@ -854,6 +856,19 @@ for the saturating curve above, whose relative error is 113%), so the
 rule is the magnitude's. On 108 drawn float32 and float64 rings of three
 members the bound moved on two (2.3e-5 to 6.8e-6, 1.8e-2 to 2.5e-4: a
 weak gain was its worst probe) and no flag changed.
+
+**An entry of exactly zero is in the bound; a tiny one is not.**  An
+offset that happens to sit at `0.0` has no magnitude to probe it by, so
+it is probed at its constant's largest magnitude and is in the bound
+wherever that moves the pass.  An entry of `1e-30` is probed by its own
+magnitude, which moves nothing, and is left out.  Measured on a float32
+pair whose only parameter is an offset `c` (jax 0.11.0, caps 3 and 4):
+at `c = 0.0` the bound read 1.38e-2 and 1.84e-3 for true relative errors
+of 1.25e-2 and 1.74e-3, usable; at `c = 1e-30` no probe was left and the
+bound read NaN, not usable.  With `c = (1e-30, 0.2, 0.4)` the bound read
+4.5e-3, usable: it covers the two resolved entries (4.2e-3 at most) and
+says nothing of the first, whose relative error is 1.25e-2.  Give a
+constant you want covered a value the pass resolves, or a zero.
 
 Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
 gradient from tight `ift` and `fori` arms that agree, every point a
@@ -1796,6 +1811,47 @@ is also what an honest Krylov iteration gives, its first basis vector
 being `b / ||b||`.  The check is per right-hand side: under `jacfwd` or
 `jacrev` only the column with the non-finite entry is NaN.
 
+## A member with a reverse-mode-only derivative
+
+The default solver differentiates a group in forward mode, whatever
+derivative you ask for.  `solver="ift"`'s rule is a `jax.custom_jvp`: it
+solves for the tangent from a forward-mode product of the members' pass,
+and `jax.grad` transposes that.  So every member of a group needs a
+forward-mode derivative that JAX can transpose.
+
+A node whose only derivative rule is reverse mode does not have one.  That
+is a `jax.custom_vjp`, which is what a reverse-mode bridge to an external
+kernel usually provides.  Such a node works under `jax.grad` in a plain
+graph and fails inside a group.  Measured on a two-node group with one
+`custom_vjp` member under `jax.grad` (jax 0.11.0), every `solver="ift"`
+configuration raised the same error when the gradient was traced:
+`linear_solver="gmres"` and `"dense"`, Gauss-Seidel and Jacobi, and
+`acceleration="aitken"` and `"iqn-ils"`.
+
+```text
+NotImplementedError: Differentiation rule for 'custom_lin' not implemented
+```
+
+The same node outside a group gave the gradient (0.456861, against a
+central difference of 0.456810).  The deprecated `solver="fori"`, which
+differentiates through the iterates, gave it too.  `jax.jvp` fails for
+such a node everywhere: `TypeError: can't apply forward-mode autodiff (jvp)
+to a custom_vjp function`.
+
+What to do instead: give the node a `jax.custom_jvp` whose tangent is
+linear in the tangents and written in operations JAX can transpose,
+such as `jnp` arithmetic.  JAX then derives the
+reverse mode from it.  With the same function written that way, every
+configuration above, `"fori"` included, gave the same gradient
+(0.645956, against a central difference of 0.645876) and the same
+`jax.jvp`.  The tangent may use values computed from the primals by code
+JAX cannot differentiate, such as a Jacobian an external kernel returns.
+Such a rule is first order only, and `diagnostics=True` needs more (see
+"`diagnostics=True` needs second derivatives" in
+[Inspecting a graph](../user_guide/inspection.md)).  The
+[node-authoring guide](node_authoring.md#derivative-rules-and-coupling-groups)
+shows the pattern.
+
 ## `linear_solver="dense"` is not an escape hatch on a grid
 
 When the GMRES adjoint fails to converge — an ill-conditioned
@@ -1921,6 +1977,18 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   the order the map reads its constants, which follows the build order;
   it stays a bound in every order (see
   [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
+* **How a mapping holds its weights reaches the gradient bound.**  The
+  weights are constants of the pass, so a mapping held as a dense matrix
+  of more than 64 entries is probed along one direction and the same
+  operator held sparsely is probed entry by entry.  On a pair of three
+  markers and a 30-cell grid (jax 0.11.0, float32) the two layouts gave
+  bit-identical states and spectral keys, and gradient bounds 0.63 to
+  1.17 times one another.  Both held against the true error with respect
+  to the nodes' parameters, and the sparse one with respect to each
+  weight.  For the dense layout the bound covers the derivative along its
+  probe only: it read 0.79 to 0.82 times the error with respect to the
+  weight entry worst off under Gauss-Seidel (each field weighted by its
+  own largest magnitude, as the `"l2"` norm weights it).
 
 ## An edge from a node to itself
 

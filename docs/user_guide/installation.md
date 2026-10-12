@@ -34,7 +34,9 @@ pip install maddening[cuda12,runpod]      # GPU + RunPod cloud deploy
 
 > **Note**: The `cuda12` extra upgrades the base JAX installation to the CUDA 12 variant. You must have CUDA 12 drivers installed on your system. Check with `nvidia-smi`.
 
-> **Float32 matrix products on NVIDIA GPUs**: JAX computes float32 matrix products (`@`, `jnp.matmul`, `jnp.dot`, `jnp.einsum`) at reduced precision by default on these cards. Nodes that use them are affected: the lattice Boltzmann nodes (`LBMNode`, `LBMPipeNode`) compute momentum and velocity with matrix products, and so does any MLP surrogate. Set the environment variable `JAX_DEFAULT_MATMUL_PRECISION=highest` before the first JAX call, or call `jax.config.update("jax_default_matmul_precision", "highest")`, to compute them in float32. On CPU the setting changes nothing, so a result checked on CPU says nothing about it.
+> **Float32 matrix products on NVIDIA GPUs**: JAX computes float32 matrix products (`@`, `jnp.matmul`, `jnp.dot`, `jnp.einsum`) at reduced precision by default on these cards. Nodes that use them are affected: the lattice Boltzmann nodes (`LBMNode`, `LBMPipeNode`) compute the momentum (`f @ E`) and the products `e·u` of their equilibrium with matrix products, and an MLP surrogate's layers are matrix products. Set the environment variable `JAX_DEFAULT_MATMUL_PRECISION=highest` before the first JAX call, or call `jax.config.update("jax_default_matmul_precision", "highest")`, to compute them in float32. On CPU the setting changes nothing (the same products gave the same bits with and without it, set either way), so a result checked on CPU says nothing about it.
+
+<!-- The measured effect on a GPU (the lattice nodes' results with and without the setting, and the jaxlib it was measured on) goes here after the 2026-10-12 hardware session records it. -->
 
 ## Feature Extras
 
@@ -115,9 +117,14 @@ pip install maddening[client,viz]
 ## Everything
 
 ```bash
-pip install maddening[all]       # all features + supported cloud providers
-pip install maddening[dev]       # all + pytest (for development)
+pip install maddening[all]       # every feature extra but usd, + the RunPod and Lambda cloud providers
+pip install maddening[all,usd]   # the same, with OpenUSD (usd-core)
+pip install maddening[dev]       # all + pytest and the other test tools (still without usd)
 ```
+
+`all` installs every package of the feature extras in the table above except
+`usd-core`, the one package of the `usd` extra; name `usd` beside it to get
+OpenUSD.
 
 ## Using uv
 

@@ -97,6 +97,17 @@ one your own code consumes (a residual that seeds the initial state from
 `initial_velocity`); the live leaves a partial pytree is completed from are
 checked as `gm.params`.
 
+A misspelt key written to the node itself is not caught.
+`gm.get_node("spring").params["stiffnes"] = 45.0` is accepted with no
+warning and changes nothing in the step: five steps gave a state bit for
+bit equal to an untouched graph's.  The key then appears as a new leaf of
+`gm.params["nodes"]["spring"]`, and `to_dict()` saves it.  The same key
+written to `gm.params`, or passed in `step(params=)`, is refused when the
+graph next runs:
+`ValueError: params['nodes']['spring'] has unknown key(s) ['stiffnes']; SpringDamperNode.params_pytree() exposes [...]`.
+So write constants through `gm.params` when a misspelling must not pass
+silently.
+
 A value that carries a floating dtype of its own (an array, a numpy
 scalar) keeps it; a value that carries none (a Python float, a list of
 them) is placed at JAX's canonical float precision — float32, or float64

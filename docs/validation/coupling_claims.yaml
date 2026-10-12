@@ -3781,6 +3781,20 @@ claims:
     (MADD-ANO-213).  Such a group is analysed on the reading too (1.001x to
     1.010x on the same stars), and each cell below also runs a pair in
     which one member feeds two ports of the other (0.741x before, 1.016x).
+    A 16-bit cell's flag verdict depends on the processor.  Half-precision
+    arithmetic is native on some processors and goes through float32 on
+    others, so the rounding the certificate measures, and with it a verdict
+    near the flag's margin, can differ between machines on the same radius:
+    float16 Gauss-Seidel on the transformed reading was refused on most CI
+    runners and set on two of about fourteen on 2026-10-08, the radius read
+    right either way, and that test now asserts what the flag stands for
+    rather than the verdict.  The 16bit cells below that pin a verdict
+    (usable in both 16-bit dtypes behind a mapped edge; usable in float16
+    and withdrawn in bfloat16 where a node reads a field twice) and the
+    float16 transformed reading under Jacobi (usable) are verdicts of that
+    kind.  Each also asserts the bound against the distance, which is the
+    claim; a verdict that differs on another machine is to be read against
+    that.
   domains:
     f32:
       - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -4100,7 +4114,13 @@ claims:
     right-hand side does not depend on the state.  A constant the pass
     resolves: moving it by its own magnitude moves one pass from x_k by
     more than the residual's float floor, in the bound's norm, and its
-    tangent is not exactly zero.  A constant below that (the centre or the
+    tangent is not exactly zero.  An entry that is exactly zero has no
+    magnitude of its own and is moved by the largest magnitude among its
+    constant's entries, or by 1.0 where every entry is zero, so a
+    zero-valued offset is in the bound wherever that moves the pass, while
+    an entry of 1e-30, moved by its own magnitude, is not (float32 pair,
+    jaxlib 0.11.0: at an offset of 0.0 the bound read 1.38e-2 for a true
+    1.25e-2; at 1e-30 it read NaN, no probe resolved).  A constant below that (the centre or the
     curve of a nonlinearity evaluated on its centre: the fixed point does
     not respond to it, and its gradient at x_k is rounding; and a gain or
     forcing so weak that its whole value moves the pass by less than the
@@ -4535,6 +4555,16 @@ claims:
     - tests/core/test_coupling_floor_at_the_groups_coarsest_dtype.py::test_the_analysis_of_a_reading_counts_what_an_edge_delivers_at_the_groups_coarsest_eps
     - tests/property/test_coupling_geometry_interface_norm.py::test_a_narrowing_transform_on_a_geometry_edge_raises_the_values_and_not_the_positions
   status: verified
+  notes: >-
+    The 16bit cell test_a_float16_field_beside_a_float32_one_is_floored_at_float16
+    pins a flag verdict in each row: usable at g = 0.95, withdrawn at
+    g = 0.99, where float16 products leave 1 - rho known to 7% against the
+    flag's 5% margin.  A 16-bit verdict depends on the processor's
+    half-precision rounding (CPL-088's notes: float16 Gauss-Seidel flipped
+    on two of about fourteen CI runners on 2026-10-08).  Both rows also
+    assert the spectral and the gradient bound against the true error,
+    which is the claim; a verdict that differs on another machine is to be
+    read against that.
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-100]'

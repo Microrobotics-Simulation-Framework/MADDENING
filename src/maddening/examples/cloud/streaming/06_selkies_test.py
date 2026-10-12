@@ -8,7 +8,9 @@ missing GStreamer element), and that frames can be pushed.  It does NOT
 connect a viewer, so it checks neither the WebRTC negotiation nor the
 stream.  Those are tested on CPU, with no cloud, by
 ``tests/cloud/test_webrtc_loopback.py`` (a GStreamer WebRTC peer in a
-network-less container: no browser, no GPU encoder, no NAT traversal).
+network-less container: no browser, no NAT traversal).  The stream is
+encoded in software (``x264enc``) on every host, a GPU VM included:
+there is no GPU encoder.
 
 Interpreter note (read before running).  On ``runpod/base`` the system
 ``python3`` is 3.10 and carries the apt ``python3-gi`` bindings, but

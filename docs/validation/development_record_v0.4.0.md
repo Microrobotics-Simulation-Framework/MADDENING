@@ -2022,9 +2022,8 @@ constructor's refusals of a non-positive length or timestep, a negative
 diffusivity and `grid_points` out of order.  `063` is the refusal of a
 write that moves the points a mapped edge was built from.  `069` is the
 identifiability guard that held directions the data determined and moved a
-fit uphill (see "[The guard holds only what the curvature confirms, and
-never raises the
-loss](#the-guard-holds-only-what-the-curvature-confirms-and-never-raises-the-loss)").
+fit uphill (see "The guard holds only what the curvature confirms, and never
+raises the loss" under "[System identification](#system-identification)").
 `075` to `082` were registered after the round-3 confirmation audit found
 fixed defects with no entry: opening a USD stage imported the module it
 named (`075`, since 0.1.0), a surrogate swap dropped edges' `additive` flag
@@ -2607,7 +2606,7 @@ models.  Where a user does state a precision JAX cannot honour — an explicit
 
 The other side of the same coin.  `FIMReport.rank` counts the eigenvalues
 above `rank_rtol * max(eigvals)` — `n * eps` when this was written, and see
-[the next section](#the-rank-cutoff-now-sees-the-residual-length) for the term
+the next section, "The rank cutoff now sees the residual length", for the term
 it has gained since — and in float32 that comparison can be between
 two numbers that differ by less than the decomposition resolves.  The case
 this came from reported `rank=1`, `crb=[inf, inf]` and a condition number, as

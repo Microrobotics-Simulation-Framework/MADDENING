@@ -30,10 +30,10 @@ codes, not on the sentence in ``not_usable_reason``.
    for a contraction that may be high), ``strict_convergence=True``,
    ``diagnostics=True``, and ``tolerance=1e-4``, which leaves the
    residual above its float floor.  Both flags are ``True``, and the two
-   bounds can be read.  The floor is measured at each step's state: as
-   the pair settles and its velocities shrink, the floor of the velocity
-   rises, and the same residual is at its floor again.  The flags are per
-   step.
+   bounds can be read.  The floor is measured at each step's state, and
+   it rises as the pair settles: a velocity becomes small beside the
+   positions it is computed from, so their rounding weighs more in it,
+   and the same residual is at its floor again.  The flags are per step.
 3. **A worry that ``converged`` does not show.**  The stiffness written
    up to 48 000 through ``gm.params``, as a fit's step writes it, with no
    recompile: a plain pass now *grows* the error 1.44 times, which
@@ -215,10 +215,10 @@ def part_2() -> None:
         usable.append(bool(e["spectral_usable"]))
         floors.append(e["residual_precision_floor"])
     first_down = usable.index(False) if False in usable else None
-    print("  The floor is measured at each step's state.  As the pair settles its velocities")
-    print("  shrink, while the spring forces that set them, and their rounding, do not; and")
-    print(f"  the norm measures each field against its own size.  Over the next {len(usable)} steps the")
-    print(f"  floor rose from {floors[0]:.1e} to {max(floors):.1e}, and from step "
+    print("  The floor is measured at each step's state, and counts how much each read can")
+    print("  amplify a rounding.  As the pair settles, a velocity becomes small beside the")
+    print("  positions it is computed from, so their rounding weighs more in it.  Over the")
+    print(f"  next {len(usable)} steps the floor rose from {floors[0]:.1e} to {max(floors):.1e}, and from step "
           f"{4 + first_down if first_down is not None else '-'} the same residual was")
     print("  at its floor again (at_float_floor).  The flags are per step: read them on every")
     print("  step you rely on.")

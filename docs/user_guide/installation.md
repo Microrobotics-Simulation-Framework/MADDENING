@@ -115,9 +115,14 @@ pip install maddening[client,viz]
 ## Everything
 
 ```bash
-pip install maddening[all]       # all features + supported cloud providers
-pip install maddening[dev]       # all + pytest (for development)
+pip install maddening[all]       # every feature extra but usd, + the RunPod and Lambda cloud providers
+pip install maddening[all,usd]   # the same, with OpenUSD (usd-core)
+pip install maddening[dev]       # all + pytest and the other test tools (still without usd)
 ```
+
+`all` installs every package of the feature extras in the table above except
+`usd-core`, the one package of the `usd` extra; name `usd` beside it to get
+OpenUSD.
 
 ## Using uv
 

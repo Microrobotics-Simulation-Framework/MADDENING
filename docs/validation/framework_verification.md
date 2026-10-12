@@ -17,7 +17,8 @@ version CI had not used alone since 0.2, and "JAX: 0.4+" against a 0.10.2 pin.
 hard-pins `jax` and `jaxlib`; every other base dependency is installed from
 its range, so the resolved version differs between runs and no run records
 it.  Reading `jax>=0.10,<0.13` in the table below as "verified across that
-range" would be wrong — one point in it has been exercised.  Closing this
+range" would be wrong — only the versions the table names, the ones CI
+installs, have been exercised.  Closing this
 properly needs a lock file or an SBOM captured per CI run.  The committed
 CycloneDX SBOMs (§6 of `soup_package.md`) do not close it: each records one
 clean resolution on the date it names, not the environment a CI run

@@ -34,8 +34,11 @@ What is tested, and what is not
 that signals as the browser client does, on the loopback interface of
 a CPU-only container, and checks that it receives the answer, completes
 ICE, decodes the frames that were pushed (size and colour), and that its
-input events reach the input handler.  Not tested: a GPU encoder (the
-encoder is ``x264enc``, in software), a real browser, and NAT traversal
+input events reach the input handler.  The encoder is ``x264enc``, in
+software, on every host: there is no GPU encoder, and a frame
+pushed with :meth:`SelkiesSession.update_framebuffer_gpu` is copied to the
+host first.  The stream was tested from a GPU host, with the simulation
+on CUDA, on 2026-10-12.  Not tested: a real browser, and NAT traversal
 (see the ``ice_servers`` note on :class:`SelkiesSession`).
 """
 

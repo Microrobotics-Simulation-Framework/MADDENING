@@ -61,6 +61,98 @@ time, planned for 0.5.0), do one of the following:
   pattern: it has a strict `xfail` against the exact derivative and a
   plain test that pins today's value.
 
+### Derivative rules and coupling groups
+
+Most nodes need no derivative rule: JAX differentiates `update()` as it
+is.  A node that wraps code JAX cannot trace (an external kernel, a
+callback) needs one, and the kind of rule decides where the node can go.
+
+- **A reverse-mode-only rule (`jax.custom_vjp`) cannot be differentiated
+  inside a coupling group on the default solver.**  `solver="ift"`
+  differentiates a group in forward mode, also under `jax.grad`, and
+  JAX cannot run a `custom_vjp` forward.  The gradient raises
+  `NotImplementedError: Differentiation rule for 'custom_lin' not
+  implemented` when it is traced.  The same node works under `jax.grad`
+  in a plain graph.
+- **Write a `jax.custom_jvp` instead, with a tangent that is linear in
+  the tangents and made of operations JAX can transpose.**  JAX derives
+  the reverse mode from it, so the node works in a group under
+  `jax.grad`, `jax.jvp`, `jacfwd` and `jacrev`.  The tangent's
+  coefficients may come from code JAX cannot differentiate, such as a
+  Jacobian an external kernel returns.
+- **A first-order rule is not enough for `diagnostics=True`.**  The
+  gradient-error bound differentiates the group's linearisation once
+  more.  A member whose rule cannot be differentiated again makes the
+  step raise when it is traced with `diagnostics=True`; with
+  `diagnostics=False` it steps and differentiates as usual.  See
+  [Inspecting a graph](../user_guide/inspection.md).
+
+The pattern, on a two-node group differentiated by `jax.grad`:
+
+```python
+import jax
+import jax.numpy as jnp
+from maddening import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+
+@jax.custom_jvp
+def squash(g, u):
+    return jnp.tanh(g * u)
+
+
+@squash.defjvp
+def _squash_jvp(primals, tangents):
+    g, u = primals
+    g_dot, u_dot = tangents
+    y = jnp.tanh(g * u)
+    slope = 1.0 - y * y  # the coefficient; an external kernel may supply it
+    # Linear in (g_dot, u_dot) and written in jnp, so JAX can transpose it.
+    return y, slope * (g_dot * u + g * u_dot)
+
+
+class Squash(SimulationNode):
+    """``x <- squash(g, u) + c`` on a 3-entry field."""
+
+    def __init__(self, name, g, c):
+        super().__init__(name, 1.0, g=g, c=c)
+
+    def initial_state(self):
+        return {"x": jnp.zeros(3)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(3,), default=jnp.zeros(3))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": squash(p["g"], boundary_inputs["u"]) + p["c"]}
+
+
+def loss(g):
+    gm = GraphManager()  # a fresh graph: run_scan leaves a graph at its final state
+    gm.add_node(Squash("a", 0.8, 0.3))
+    gm.add_node(Squash("b", 0.5, 0.1))
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_coupling_group(["a", "b"], tolerance=1e-7, max_iterations=200)
+    gm.compile()
+    p = jax.tree.map(lambda v: v, gm.params)
+    p["nodes"]["a"]["g"] = g
+    return jnp.sum(gm.run_scan(3, params=p)["a"]["x"] ** 2)
+
+
+g0 = jnp.float32(0.8)
+grad = float(jax.grad(loss)(g0))
+central = float((loss(g0 + 1e-3) - loss(g0 - 1e-3)) / 2e-3)
+assert abs(grad - central) < 1e-3 * abs(central), (grad, central)
+```
+
+The same `squash` written as a `jax.custom_vjp` fails in that group,
+under `linear_solver="gmres"` and `"dense"`, both iteration modes and the
+accelerations.  The [coupling algorithm
+guide](coupling_algorithm_guide.md#a-member-with-a-reverse-mode-only-derivative)
+has the measurements.
+
 ## Directory Structure
 
 ```

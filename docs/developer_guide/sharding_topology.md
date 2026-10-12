@@ -296,6 +296,39 @@ the two transports' bit identity.  How it performs at real-mesh sizes
 (10⁴–10⁶ cells) under NCCL on actual GPUs has not been measured; the
 tooling for that session is `benchmarks/multigpu/run_pod.py`.
 
+## Sharding spreads the work, not the size limit, in 0.4.0
+
+In 0.4.0 `ShardedStencilNode` spreads a grid that fits on one device
+across the mesh.  It does not let you run a grid that one device cannot
+hold, because it builds the wrapped node's whole initial state on one
+device before it places the state on the mesh.  Measured on four CPU
+virtual devices (jax 0.11.0):
+
+- constructing the wrapper around an `LBMNode` called the node's
+  `initial_state()` twice, and each call returned every field whole on
+  `cpu:0`;
+- the wrapper's own `initial_state()` called it a third time, whole on
+  `cpu:0`, and only then placed the state across the four devices;
+- around a `HeatNode`, `GraphManager.add_node` and `compile()` called it
+  twice more, again whole on `cpu:0`.
+
+So the largest grid a sharded stencil node can be constructed around, or
+started from its own `initial_state()`, is set by one device's memory, not
+by the mesh's.  Going past it fails loudly, with the runtime's
+out-of-memory error, before the first step.  This is MADD-ANO-262, open in
+0.4.0.
+
+For a grid larger than one device, build the state one device's block at
+a time and assemble it with `jax.make_array_from_single_device_arrays`
+under the sharding the wrapper steps; give the wrapped node a
+`state_fields()` that returns the field names outright, and an
+`initial_state()` that raises (the wrapper then skips its
+construction-time check that the grid divides by the device count, so
+check that yourself); and step it with the wrapper's `update()`, without
+calling its `initial_state()`.
+`benchmarks/multigpu/run_capacity.py` does exactly this (`build_state`,
+`_make_lattice_class`).  The registry entry has the details.
+
 ## What 0.4.0 does with the unstructured contract
 
 The surface documented above has been `@stability(STABLE)` since v0.3.0:

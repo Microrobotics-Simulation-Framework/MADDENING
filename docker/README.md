@@ -99,6 +99,9 @@ dependency fail the run instead of skipping it, as the `test-streaming`
 job in `.github/workflows/ci.yml` does.  Outside the container the
 module skips, since GStreamer and PyGObject are not pip-installable.
 
-What these tests do not cover: a provider's network and NAT traversal
-(both ends are in one container), a GPU encoder (the encoder is
-`x264enc`), and a real browser.
+The stream is encoded in software (`x264enc`) on every host; 0.4.0 has
+no GPU encoder.  The same two test files passed, 39 of 39, in the cloud
+image (with the test peer's packages added) on a GPU host on 2026-10-12,
+and the entry point streamed with the simulation on CUDA.  What they do
+not cover: a provider's network and NAT traversal
+(both ends are in one container), and a real browser.

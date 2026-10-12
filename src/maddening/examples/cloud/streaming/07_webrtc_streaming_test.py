@@ -8,10 +8,11 @@ WebSocket's port answers, then prints the URL for manual browser
 testing.  It connects no viewer, so it checks neither the WebRTC
 negotiation nor the stream; those are tested on CPU, with no cloud, by
 ``tests/cloud/test_webrtc_loopback.py`` (a GStreamer peer, not a
-browser; no GPU encoder; no NAT).  A browser outside the provider's
-network also needs the media to get through: WebRTC sends it over UDP,
-which a pod may not expose, so it may need a TURN server
-(``StreamConfig.ice_servers``).
+browser; no NAT).  The stream is encoded in software (``x264enc``) on
+every host, a GPU VM included: there is no GPU encoder.  A browser
+outside the provider's network also needs the media to get through:
+WebRTC sends it over UDP, which a pod may not expose, so it may need a
+TURN server (``StreamConfig.ice_servers``).
 
 Also profiles rendering performance (matplotlib render time vs
 GStreamer encode/push overhead) to quantify streaming cost.

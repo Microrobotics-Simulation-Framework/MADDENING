@@ -177,6 +177,56 @@ Three settings that are nearly always right and are not in the table:
   See [`linear_solver="dense"` is not an escape hatch on a
   grid](#linear_solverdense-is-not-an-escape-hatch-on-a-grid).
 
+**Checking a group before you rely on it.**  Build the group from one of
+the rows above with `diagnostics=True` and `strict_convergence=True`, step
+it, and read its report by its reason codes rather than by `converged`
+alone.  Here two masses joined by one spring (two `SpringDamperNode`s
+anchored on each other) use the first row:
+
+```python
+from maddening.core.coupling import reason_codes
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.spring import SpringDamperNode
+
+gm = GraphManager()
+for name, rest, start in (("A", 1.0, 0.0), ("B", -1.0, 5.0)):
+    gm.add_node(SpringDamperNode(name, 0.005, stiffness=4000.0, damping=150.0,
+                                 rest_length=rest, initial_position=start))
+gm.add_edge("A", "B", "position", "anchor_position")
+gm.add_edge("B", "A", "position", "anchor_position")
+gm.add_coupling_group(["A", "B"], iteration_mode="gauss-seidel",
+                      acceleration="aitken", convergence_norm="l2",
+                      tolerance=1e-4, diagnostics=True,
+                      strict_convergence=True)
+gm.compile()
+gm.step()          # strict_convergence: a step that does not converge raises
+
+entry = gm.coupling_diagnostics()["A+B"]
+codes = entry["reason_codes"]["spectral_usable"]
+assert not set(codes) & reason_codes.WORRY, entry["not_usable_reason"]
+if entry["spectral_usable"]:
+    print(f"{entry['iterations']} passes; distance to the fixed point "
+          f"<= {entry['spectral_error_bound']:.1e}")
+else:            # only settings, or what the group is: see the table of codes
+    print(f"{entry['iterations']} passes; no bound to read: {codes}")
+```
+
+It prints `4 passes; no bound to read: ['at_float_floor']`: Aitken takes
+this linear pair's residual to its float32 floor, where the bound is not
+certified because no stock node declares `update_evaluations()`.  That
+code is a setting, not a fault of the solve; plain Gauss-Seidel
+(`acceleration="none"`) stops at the same tolerance above the floor, and
+there `spectral_usable` is `True`.  `strict_convergence` checks that the
+step converged, not that its bounds hold: a group whose plain pass does
+not contract can converge under an accelerator and report
+`not_contracting`, a worry.  [The reason codes of
+a report](#the-reason-codes-of-a-report) says what to change for each
+code, and `python -m maddening.examples.coupling.acting_on_diagnostics_demo`
+acts on the codes of each kind: the default group's settings, a float
+floor that moves with the state, and a stiffness written after
+`compile()` that makes this pair grow every step while every step
+converges.
+
 ## Reading `coupling_diagnostics()`
 
 Each group reports fourteen fields: nine for every group, and five --

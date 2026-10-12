@@ -16,7 +16,8 @@ Under the default ``solver="ift"`` these are recorded on every step
 whatever ``diagnostics`` says.  ``diagnostics=True`` adds the spectral
 keys (``rho_spectral``, the estimated contraction rate per pass, and its
 bounds), which cost extra Jacobian-vector products per step -- Part 4
-shows them.
+shows them, with ``spectral_usable`` and the ``reason_codes`` behind it.
+``acting_on_diagnostics_demo.py`` acts on those codes.
 
 **Convergence norms**: all three scale each field's change by that
 field's own magnitude, so the norm of a change does not depend on the
@@ -198,11 +199,18 @@ def demo_spectral_keys():
     print(f"  rho_spectral (measured contraction per pass): {info['rho_spectral']:.5f}")
     print(f"  predicted (k*dt^2/m)^2:                       {predicted:.5f}")
     print(f"  spectral_error_bound:                         {info['spectral_error_bound']:.2e}")
+    print(f"  spectral_usable:                              {info['spectral_usable']} "
+          f"{info['reason_codes']['spectral_usable']}")
     assert abs(info["rho_spectral"] - predicted) < 1e-3, info["rho_spectral"]
+    assert bool(info["spectral_usable"]) == (not info["reason_codes"]["spectral_usable"])
     print()
     print("  The spectral estimate matches the analytic rate of this linear")
     print("  problem.  It costs extra Jacobian-vector products every step, so")
     print("  switch it on while investigating, not for production runs.")
+    if not info["spectral_usable"]:
+        print("  The bound is printed, and spectral_usable says not to rely on it:")
+        print("  reason_codes says why.  acting_on_diagnostics_demo.py reads the codes")
+        print("  and shows what to change for each.")
     print()
 
 

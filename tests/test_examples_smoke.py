@@ -332,9 +332,12 @@ PER_PUSH = [
     # XLA_FLAGS it inherits.
     Run("advanced.sharding_demo", ("--n-cells", "64", "--steps", "20"),
         expect=("All checks passed",)),
-    # Skips its packaging / validation stages, saying why, when the C
-    # compiler or FMPy is missing; CI has both.
-    Run("advanced.fmu_export_demo", ("--steps", "5"), expect=("All checks passed",)),
+    # Skips its packaging / validation / master stages, saying why, when the
+    # C compiler or FMPy is missing; CI has both, and the expected lines are
+    # the ones stage 6 (FMPy's simulate_fmu against a loopback bridge) prints.
+    Run("advanced.fmu_export_demo", ("--steps", "5"), needs=("fmpy",),
+        expect=("requests over the loopback port", "spring.position: FMPy",
+                "All checks passed")),
     Run("advanced.surrogate_demo",
         ("--epochs", "10", "--train-steps", "100", "--compare-steps", "20"),
         needs=("equinox", "optax"), expect=("Done!",)),

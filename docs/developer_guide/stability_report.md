@@ -72,6 +72,8 @@ import time.  Levels:
 | `maddening.core.coupling.sparse_mapping.sparse_projection_1d_mapping` | experimental |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
+| `maddening.core.graph_manager.GraphManager.check_params` | evolving |
+| `maddening.core.graph_manager.GraphManager.constrain` | evolving |
 | `maddening.core.graph_manager.GraphManager.coupling_report` | experimental |
 | `maddening.core.graph_manager.GraphManager.format_graph` | experimental |
 | `maddening.core.graph_manager.GraphManager.memory_estimate` | experimental |
@@ -89,6 +91,7 @@ import time.  Levels:
 | `maddening.core.graph_manager.GraphManager.to_dot` | experimental |
 | `maddening.core.graph_manager.GraphManager.to_mermaid` | experimental |
 | `maddening.core.graph_manager.GraphManager.trainable_mask` | evolving |
+| `maddening.core.graph_manager.GraphManager.unconstrain` | evolving |
 | `maddening.core.graph_manager.ShardingIssue` | evolving |
 | `maddening.core.inspection.InspectionTable` | experimental |
 | `maddening.core.inspection.coupling_report` | experimental |
@@ -104,6 +107,7 @@ import time.  Levels:
 | `maddening.core.node.BoundaryInputSpec` | evolving |
 | `maddening.core.node.SimulationNode` | stable |
 | `maddening.core.node.SimulationNode.invalidate_static_cache` | stable |
+| `maddening.core.node.SimulationNode.param_specs` | evolving |
 | `maddening.core.node.SimulationNode.static_data_deps` | stable |
 | `maddening.core.params.ParamSpec` | evolving |
 | `maddening.core.params.check_bounds` | evolving |
@@ -235,4 +239,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*215 API surfaces registered.*
+*219 API surfaces registered.*

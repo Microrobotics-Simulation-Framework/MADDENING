@@ -36,6 +36,15 @@ use `rich`, and without the package it raises an `ImportError` naming
 the extra.  The one exception to plain text is `print_graph_diagram()`
 (at the end of this page), a drawing that needs the same extra.
 
+The first `print_*(rich=True)` in a process imports `rich`, and importing
+`rich` draws once from Python's global `random` (`random.getrandbits(24)`,
+rich 15.0.0).  A sequence seeded with `random.seed()` before that call
+therefore changes: the `random.random()` draws that follow are not the
+seeded ones, not even shifted by one.  NumPy's global generator and the
+graph's state are untouched.  If a
+seeded `random` sequence matters, seed it after the first rich print, or
+import `rich` before seeding.
+
 ## The graph at a glance
 
 ```python
@@ -469,6 +478,16 @@ cells in float32, 14 passes per step (CPU, 4 cores, jax 0.11.0; the pair of
 | 1e5 | 2.2 ms | 0.44 s | 0.28 GB | 0.73 GB |
 | 1e6 | 23 ms | 3.9 s | 0.31 GB | 1.9 GB |
 
+**Against the same step without diagnostics,** measured as each process's own peak (`VmHWM`, one
+fresh process per measurement; CPU, 4 cores, float32, jax 0.11.0): one step of a group of 2,000 to
+10,000 unknowns (two fields coupled cell by cell through a three-point stencil, two scalar
+parameters per node) peaked at **2.1 to 2.3 times** the memory with diagnostics on, 0.61 to 0.62 GB
+against 0.27 to 0.29 GB.  What the step adds to the built graph was 6 to 7 times larger (0.40 GB
+against 0.06 to 0.07 GB), most of it compiling the analysis, which did not grow between 2,000 and
+10,000 unknowns.  So plan for at least twice the memory of the step without diagnostics, and more on
+a large group (six times in the table's last row): a group that nearly fills a device's memory
+without diagnostics will not fit with them.
+
 So on a large group take the report every so often (a second graph with `diagnostics=True`, or a
 restart from a checkpoint), not in every step.  The first step also compiles the analysis: about
 6 s more here.  Measured
@@ -476,6 +495,27 @@ once on a two-spring pair in float32 (an RTX A2000 laptop GPU, jax 0.11.0,
 `benchmarks/results/gpu_eigvals_probe/RESULT.md`): a step takes 0.3 ms with diagnostics off and
 6 to 8 ms with them on, about 4 ms of it the eigenvalue solve; on CPU the same diagnostics-on step
 takes 0.25 to 0.5 ms.
+
+**`diagnostics=True` needs second derivatives of the members.**  The gradient-error bound
+differentiates the group's linearisation, which is a second derivative of every member's pass.  A
+member whose derivative rule is first order only cannot supply it: a `jax.custom_jvp` whose
+tangent uses a coefficient JAX cannot differentiate, such as one from `jax.pure_callback` or from a
+`jax.custom_vjp` function.  With `diagnostics=True` the step then raises when it is traced, so the
+group reports no key at all.  Measured on a two-node group (jax 0.11.0):
+
+```text
+ValueError: Pure callbacks do not support JVP. Please use `jax.custom_jvp` to use callbacks while taking gradients.
+TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function.
+```
+
+the first for a coefficient from a callback, the second for one from a `custom_vjp`.  With
+`diagnostics=False` the same group steps and converges in as many passes as its twin written in
+plain `jnp`, and `jax.grad` and `jax.jvp` through it equal the twin's.  There is no setting that
+keeps the spectral keys and leaves out the gradient bound: run such a group with
+`diagnostics=False`, or give the member a rule JAX can differentiate twice.  A member whose rule
+is reverse mode only cannot be differentiated in a group at all; see "A member with a
+reverse-mode-only derivative" in [the algorithm
+guide](../developer_guide/coupling_algorithm_guide.md#a-member-with-a-reverse-mode-only-derivative).
 
 **Why a flag is `False`: `reason_codes`** (experimental).  Every entry of `coupling_diagnostics()`
 has a `reason_codes` dict with a list of codes for `spectral_usable`, for `gradient_bound_usable`

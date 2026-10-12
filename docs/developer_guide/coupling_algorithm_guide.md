@@ -1796,6 +1796,47 @@ is also what an honest Krylov iteration gives, its first basis vector
 being `b / ||b||`.  The check is per right-hand side: under `jacfwd` or
 `jacrev` only the column with the non-finite entry is NaN.
 
+## A member with a reverse-mode-only derivative
+
+The default solver differentiates a group in forward mode, whatever
+derivative you ask for.  `solver="ift"`'s rule is a `jax.custom_jvp`: it
+solves for the tangent from a forward-mode product of the members' pass,
+and `jax.grad` transposes that.  So every member of a group needs a
+forward-mode derivative that JAX can transpose.
+
+A node whose only derivative rule is reverse mode does not have one.  That
+is a `jax.custom_vjp`, which is what a reverse-mode bridge to an external
+kernel usually provides.  Such a node works under `jax.grad` in a plain
+graph and fails inside a group.  Measured on a two-node group with one
+`custom_vjp` member under `jax.grad` (jax 0.11.0), every `solver="ift"`
+configuration raised the same error when the gradient was traced:
+`linear_solver="gmres"` and `"dense"`, Gauss-Seidel and Jacobi, and
+`acceleration="aitken"` and `"iqn-ils"`.
+
+```text
+NotImplementedError: Differentiation rule for 'custom_lin' not implemented
+```
+
+The same node outside a group gave the gradient (0.456861, against a
+central difference of 0.456810).  The deprecated `solver="fori"`, which
+differentiates through the iterates, gave it too.  `jax.jvp` fails for
+such a node everywhere: `TypeError: can't apply forward-mode autodiff (jvp)
+to a custom_vjp function`.
+
+What to do instead: give the node a `jax.custom_jvp` whose tangent is
+linear in the tangents and written in operations JAX can transpose
+(`jnp` arithmetic, `lax.custom_linear_solve`).  JAX then derives the
+reverse mode from it.  With the same function written that way, every
+configuration above, `"fori"` included, gave the same gradient
+(0.645956, against a central difference of 0.645876) and the same
+`jax.jvp`.  The tangent may use values computed from the primals by code
+JAX cannot differentiate, such as a Jacobian an external kernel returns.
+Such a rule is first order only, and `diagnostics=True` needs more (see
+"`diagnostics=True` needs second derivatives" in
+[Inspecting a graph](../user_guide/inspection.md)).  The
+[node-authoring guide](node_authoring.md#derivative-rules-and-coupling-groups)
+shows the pattern.
+
 ## `linear_solver="dense"` is not an escape hatch on a grid
 
 When the GMRES adjoint fails to converge — an ill-conditioned

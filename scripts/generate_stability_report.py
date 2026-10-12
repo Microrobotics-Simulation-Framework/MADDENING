@@ -170,10 +170,11 @@ import time.  Levels:
 |---|---|
 | ``stable`` | Locked at 1.0.0 — backwards-incompatible change needs a major bump. |
 | ``evolving`` | Settled wire format / signature, additions allowed. |
-| ``provisional`` | Synonym for ``evolving``, retained for pre-v0.3.0 surfaces. |
 | ``experimental`` | May break in any minor release. Opt-in only. |
-| ``internal`` | Implementation detail. Not part of the public API. |
 | ``deprecated`` | Scheduled for removal. |
+
+``provisional`` (a synonym for ``evolving``) and ``internal`` are
+deprecated since 0.4.0: they still work, and no surface carries them.
 
 """
 

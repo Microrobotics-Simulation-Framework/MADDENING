@@ -244,8 +244,8 @@ ran `float32(0.1)` (MADD-ANO-218); a graph whose supplied values the cast
 changes says so once per input, with a `UserWarning` naming the keyword.
 
 The stability filter is by node: a node's outputs, parameters and external
-inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` /
-`PROVISIONAL` with `include_evolving=True`.  An input of any other node is
+inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` with
+`include_evolving=True`.  An input of any other node is
 held at zero and listed in `md.held_inputs`, like an input
 `selected_inputs` leaves out, and the builder warns.  Naming it in
 `selected_inputs` is a `ValueError`.  Until 0.4.0's fix an `EXPERIMENTAL`

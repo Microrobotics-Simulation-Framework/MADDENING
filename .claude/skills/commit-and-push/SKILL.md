@@ -160,7 +160,7 @@ If the commit changes a public API surface, follow
       on a `STABLE` surface outside a major release
 - [ ] If `STABLE`: change is backward-compatible (or this is a major version
       bump).  Lowering a surface's level is itself a breaking change
-- [ ] If `EVOLVING` / `PROVISIONAL`: an incompatible change ships the
+- [ ] If `EVOLVING`: an incompatible change ships the
       replacement first and gives one minor release of `DeprecationWarning`
       at `stacklevel=2`; `STABLE` gives two
 - [ ] Deprecations retag to `DEPRECATED`, name the replacement and the removal

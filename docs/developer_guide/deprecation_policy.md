@@ -21,10 +21,18 @@ level; see [Untagged surfaces](#untagged-surfaces).
 |---|---|---|---|
 | `stable` | The signature and the documented behaviour hold for the life of the major version. | A major release. | Two minor releases of `DeprecationWarning`. |
 | `evolving` | The signature and wire format are settled; additions are expected. | A minor release. | One minor release of `DeprecationWarning`. |
-| `provisional` | Synonym for `evolving`, kept for surfaces tagged before v0.3.0. Do not use it on anything new. | As `evolving`. | As `evolving`. |
 | `experimental` | Opt-in. May change or disappear in any minor release. | Any minor release. | None, but a CHANGELOG entry is mandatory. |
-| `internal` | Not public. No promise of any kind. | Any release. | None. |
 | `deprecated` | Scheduled for removal; the replacement is named in the docstring. | — | Already given. |
+
+`StabilityLevel` has two more members, both `DEPRECATED` since 0.4.0. Each
+shipped in earlier releases (`PROVISIONAL` since 0.1.0, `INTERNAL` since
+0.3.0), so both stay and keep working, but no surface in `src/` carries either,
+and nothing new should:
+
+- `PROVISIONAL` is a synonym for `evolving` and is treated as `evolving`
+  everywhere, the FMU export's `include_evolving` included. Use `EVOLVING`.
+- `INTERNAL` meant "not public, no promise". Leave such a surface untagged
+  and give it a private, underscored name.
 
 Two rules that are easy to miss:
 
@@ -126,7 +134,8 @@ entry, because "opt-in" means someone opted in. Prefer a one-release
 `DeprecationWarning` anyway when the change is cheap to soften — the level
 sets the floor, not the ceiling.
 
-`internal` surfaces change freely and are not mentioned in the CHANGELOG.
+A private surface (an underscored name, no tag) changes freely and is not
+mentioned in the CHANGELOG.
 
 ## Recording it in the CHANGELOG
 

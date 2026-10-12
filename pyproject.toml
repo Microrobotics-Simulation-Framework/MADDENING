@@ -263,7 +263,7 @@ packages = ["src/maddening"]
 [tool.hatch.build.targets.wheel.force-include]
 # PEP 561 marker.  Without it a downstream type checker MUST ignore every
 # annotation in the package, so the whole typing effort is invisible to
-# users of the wheel.  `tests/test_py_typed_marker.py` builds the wheel and
+# users of the wheel.  `tests/test_packaging_py_typed.py` builds the wheel and
 # asserts the member is present -- a force-include that looks right and
 # ships nothing is indistinguishable from no marker at all.
 "src/maddening/py.typed" = "maddening/py.typed"

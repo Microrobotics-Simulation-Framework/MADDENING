@@ -12,6 +12,7 @@ user would start it; nothing imports JAX.
 """
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -103,6 +104,14 @@ radius of the coupling groups is small, and so is a {term}`shard`'s.
 """)
     assert sorted(found) == [("Coupling group", 3), ("Halo", 1), ("Shard", 1),
                              ("Spectral radius", 2)]
+
+
+def test_the_parts_of_a_term_may_be_joined_by_a_space_hyphen_dash_or_line_break(report):
+    pattern = re.compile(report.term_pattern("Cramér-Rao bound"), re.I)
+    for text in ("the Cramér–Rao bounds", "a cramér-rao\nbound", "Cramér Rao bound"):
+        assert pattern.search(text), text
+    for text in ("Cramér-Raobound", "xCramér-Rao bound", "Cramér-Rao boundary"):
+        assert not pattern.search(text), text
 
 
 def test_links_comments_code_directives_and_front_matter_are_not_prose(

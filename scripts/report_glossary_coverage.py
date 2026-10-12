@@ -30,8 +30,9 @@ What is not read
 
 How a term is matched
     Case-insensitively, as whole words, with an optional plural ``s`` or
-    ``es``; the words of a multi-word term may be split by any whitespace,
-    a line break included.  A term written inside a longer term (``UMR``
+    ``es``.  The parts of a term may be joined by any whitespace (a line
+    break included), a hyphen or an en dash: ``sub-cycling`` matches
+    ``sub cycling``, and ``Cramér-Rao`` matches ``Cramér–Rao``.  A term written inside a longer term (``UMR``
     in ``Helical UMR``) counts as the longer term only.  A role counts for
     the term it names, compared case-insensitively, as Sphinx compares it.
 
@@ -164,16 +165,21 @@ def _key(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+#: Between the parts of a term: whitespace, a hyphen or an en dash, so
+#: "sub-cycling" matches "sub cycling" and "Cramér-Rao" "Cramér–Rao".
+_JOINER = "[\\s\\-\u2010\u2011\u2013]+"
+
+
 def term_pattern(term: str) -> str:
-    """A regex for ``term``: whole words, any whitespace between words, plurals."""
-    words = term.split()
-    escaped = [re.escape(w) for w in words]
-    last = words[-1]
+    """A regex for ``term``: whole words, any joiner between parts, plurals."""
+    parts = [p for p in re.split(_JOINER, term) if p]
+    escaped = [re.escape(p) for p in parts]
+    last = parts[-1]
     # A term written in the plural ("Boundary inputs") also matches its
     # singular: drop the final "s" and let the plural suffix put it back.
     if last[-1:] == "s" and last[-2:-1].islower() and not last.endswith("ss"):
         escaped[-1] = re.escape(last[:-1])
-    return r"(?<!\w)" + r"\s+".join(escaped) + r"(?:s|es)?(?!\w)"
+    return r"(?<!\w)" + _JOINER.join(escaped) + r"(?:s|es)?(?!\w)"
 
 
 # ---------------------------------------------------------------------------

@@ -130,7 +130,8 @@ whose build would exceed 2 GiB, or that would take the graph past 10^8
 state elements, is a 400 naming the size: those caps are server constants
 (`MAX_NODE_STATE_ELEMENTS`, `MAX_NODE_BUILD_BYTES`,
 `MAX_GRAPH_STATE_ELEMENTS`), not part of the schema.  A non-finite
-constructor constant remains the 400 it has always been.
+constructor constant is a 400 for every node class (before 0.4.0 the LBM
+constructors accepted one, MADD-ANO-058; other classes already refused it).
 
 ### Who the server is for, and what it defends against
 

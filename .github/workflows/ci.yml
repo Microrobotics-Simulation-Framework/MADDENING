@@ -452,7 +452,9 @@ jobs:
     # browser client does, negotiating and decoding real H.264 on CPU; and
     # the cloud entry point run as the container runs it, its simulation
     # built over REST and watched by that peer
-    # (tests/cloud/test_entrypoint_streams.py).  They
+    # (tests/cloud/test_entrypoint_streams.py); and the local WebRTC viewer
+    # example, its --self-check and its viewer page
+    # (tests/cloud/test_local_webrtc_viewer_example.py).  They
     # need GStreamer, its WebRTC plugins and PyGObject from apt, which the
     # sharded lanes do not install (the module skips there, and their
     # selection is held whole by tests/compliance/test_ci_sharding.py), so
@@ -490,7 +492,7 @@ jobs:
           docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
             -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
             -v "$PWD":/src:ro maddening-streaming-test:ci \
-            python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py -v -rs --tb=short -p no:cacheprovider
+            python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py tests/cloud/test_local_webrtc_viewer_example.py -v -rs --tb=short -p no:cacheprovider
 
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the

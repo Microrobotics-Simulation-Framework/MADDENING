@@ -205,6 +205,7 @@ developer_guide/wavelet_adaptive_node
 validation/cou_template
 validation/framework_verification
 validation/soup_package
+validation/development_record_v0.4.0
 ```
 
 ```{toctree}

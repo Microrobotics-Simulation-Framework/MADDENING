@@ -183,7 +183,11 @@ def coupled(precision=_matmul_precision.DEFAULT, linear_solver="dense",
             diagnostics=False) -> GraphManager:
     """Two :class:`Vec` members coupled through ``(N, N)`` interface mappings
     applied to their ``(N, C)`` fields (``H @ field``, a matrix product), the
-    implicit-function adjoint solved by ``linear_solver``.  With
+    implicit-function adjoint solved by ``linear_solver``.  IQN-ILS
+    accelerates the solve: its least-squares step forms matrix products in
+    the forward step and again in the implicit-function rule, which re-solves
+    for its primal when JAX traces it (the members' own products reach the
+    rule pre-traced, at the step's setting).  With
     ``diagnostics`` the step also forms the group's Krylov basis
     (``U.T @ JU``), spectral and gradient bounds: five seconds of compile
     here, so only the slow test turns them on."""
@@ -196,7 +200,8 @@ def coupled(precision=_matmul_precision.DEFAULT, linear_solver="dense",
         H = jnp.asarray(rng.uniform(0.1, 0.3, (N, N)), jnp.float32)
         gm.add_edge(source, target, "x", "u", mapping=matrix_mapping(H))
     gm.add_coupling_group(["a", "b"], max_iterations=30, tolerance=1e-6,
-                          diagnostics=diagnostics, linear_solver=linear_solver)
+                          acceleration="iqn-ils", diagnostics=diagnostics,
+                          linear_solver=linear_solver)
     return gm
 
 
@@ -260,7 +265,7 @@ ENTRY_POINTS = {
     "FMU reverse derivative": (coupled, lambda gm: get_directional_derivative(
         _member_step(_compiled(gm)), kind=DirectionalDerivativeKind.REVERSE,
         x=jnp.ones((N, C), jnp.float32), v=jnp.ones((N, C), jnp.float32))),
-    "profile_graph": (coupled, lambda gm: profile_graph(
+    "profile_graph": (heat, lambda gm: profile_graph(
         _compiled(gm), n_steps=2, n_warmup=1, measure_coupling=False, counts=False)),
     "heat step": (heat, lambda gm: (gm.compile(), gm.step())),
     "heat run_sweep": (heat, lambda gm: _compiled(gm).run_sweep(2, _batched(gm, 3))),
@@ -378,7 +383,7 @@ SYSID = {
     "fit": lambda prec: (lambda gm: sysid.fit(
         gm, lambda p: jnp.sum(_residual(p) ** 2), mask=_mask(gm), n_iter=3))(spring(precision=prec)),
     "fit_lm": lambda prec: (lambda gm: sysid.fit_lm(
-        gm, _residual, mask=_mask(gm), n_iter=3))(spring(precision=prec)),
+        gm, _residual, mask=_mask(gm), n_iter=20))(spring(precision=prec)),
     "fit_multiple_shooting": lambda prec: (lambda gm: sysid.fit_multiple_shooting(
         gm, _observations(), obs_fn=_obs_fn, window=6, mask=_mask(gm), n_iter=3))(
         spring(precision=prec)),

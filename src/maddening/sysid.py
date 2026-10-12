@@ -650,10 +650,10 @@ def windowed_loss(
         )
         return final, ok, sim
 
-    # Both scans below trace their bodies at the graph's
-    # ``matmul_precision``: the step inside is pinned by its builder, and
-    # this reaches ``obs_fn`` and the loss around it, under the caller's own
-    # ``jax.jit`` / ``jax.grad`` too.
+    # The windows' scan traces its body at the graph's ``matmul_precision``:
+    # the step inside is pinned by its builder, and this reaches ``obs_fn``
+    # and the loss around it, under the caller's own ``jax.jit`` /
+    # ``jax.grad`` too.  (The verdict pass below runs the step alone.)
     precision = _matmul_precision.of(gm)
 
     # A masked window is cut out of the loss *and* out of its gradient.
@@ -692,8 +692,7 @@ def windowed_loss(
             return (w + 1, _next_warm(final, ok)), ok
 
         _, window_ok = jax.lax.scan(
-            _matmul_precision.pinned(_verdict, precision), (jnp.int32(0), cold),
-            None, length=n_windows)
+            _verdict, (jnp.int32(0), cold), None, length=n_windows)
 
     def _window(carry, _):
         w, warm = carry

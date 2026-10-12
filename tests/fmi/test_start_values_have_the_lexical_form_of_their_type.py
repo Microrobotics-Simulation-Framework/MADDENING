@@ -11,6 +11,14 @@ model-structure check refused the next thing: a Boolean or integer variable
 may not be ``continuous``.  The same graph is checked here against FMPy's
 validator, against the FMI 3.0 XSD FMPy ships (when ``lxml`` is there), and
 end to end through ``simulate_fmu`` with its default ``validate=True``.
+
+The ``unit`` attribute was the next thing of the same kind.  The writer set
+it on every element, and FMI 3.0's schema has it on ``<Float32>`` and
+``<Float64>`` only: an ``int32`` input into a field whose node declares
+``expected_units`` gave ``Element 'Int32', attribute 'unit': The attribute
+'unit' is not allowed``.  The last section holds a unit-bearing input of
+every type the writer knows, and unit-bearing integer and Boolean
+parameters, to the same validators.
 """
 
 from __future__ import annotations
@@ -19,16 +27,25 @@ import os
 import xml.etree.ElementTree as ET
 import zipfile
 
+import jax
 import jax.numpy as jnp
 import pytest
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import GraphManager
-from maddening.core.node import SimulationNode
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.params import ParamSpec
 from maddening.fmi import build_model_description
-from maddening.fmi.model_description import FMIVariable, ModelDescription, _parse_xs_value
+from maddening.fmi.model_description import (
+    _DTYPE_TO_FMI_TYPE,
+    FMIVariable,
+    ModelDescription,
+    _fmi_kind,
+    _parse_xs_value,
+    _xs_value,
+)
+from maddening.nodes import BallNode, SpringDamperNode
 from maddening.fmi.package import MODEL_IDENTIFIER, build_fmu_binary, find_c_compiler, write_fmu
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.fmi.tcp_bridge import FmuTcpBridge, values_of
@@ -221,3 +238,205 @@ def test_a_start_token_that_is_not_a_value_of_its_type_is_refused(token, dtype):
     with pytest.raises(ValueError):
         _parse_xs_value(token, dtype)
 
+
+
+# ------------------------------------------------------------------ the unit
+#
+# FMI 3.0's schema gives ``unit`` to ``<Float32>`` and ``<Float64>`` and to
+# no other variable element.  The dtypes below are read from the writer's own
+# table, so a type added to it is held to the rule here without being named.
+
+#: The dtype of every FMI type the writer knows (``bool_`` is its second
+#: spelling of ``bool``).
+WRITTEN = sorted({"bool" if name == "bool_" else name for name in _DTYPE_TO_FMI_TYPE})
+#: The ones a process has only under ``jax_enable_x64``.
+NEED_X64 = ("float64", "int64", "uint64")
+
+
+def _unit_of(dtype):
+    return f"{dtype}_unit"
+
+
+@stability(StabilityLevel.STABLE)
+class Metered(SimulationNode):
+    """A boundary field per dtype in ``WRITTEN``, each declared with a unit
+    of its own, and a float, an Int32 and a Boolean parameter whose
+    ``ParamSpec`` names a unit."""
+
+    def __init__(self, name, timestep, rate=1.0, enabled=True, gain=3):
+        super().__init__(name, timestep, rate=rate, enabled=enabled, gain=gain)
+
+    def params_pytree(self):
+        return {"rate": jnp.asarray(self.params["rate"], jnp.float32),
+                "enabled": jnp.asarray(self.params["enabled"]),
+                "gain": jnp.asarray(self.params["gain"], jnp.int32)}
+
+    def param_specs(self):
+        return {"rate": ParamSpec(units="1/s"), "gain": ParamSpec(units="counts"),
+                "enabled": ParamSpec(units="flag")}
+
+    def boundary_input_spec(self):
+        return {f"u_{d}": BoundaryInputSpec(expected_units=_unit_of(d)) for d in WRITTEN}
+
+    def initial_state(self):
+        return {"level": jnp.asarray(0.0, jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        fed = sum(jnp.asarray(v, jnp.float32) for v in boundary_inputs.values())
+        return {"level": state["level"] + jnp.where(p["enabled"], p["rate"] * dt, 0.0)
+                + p["gain"] * fed}
+
+
+def _metered(dtypes):
+    gm = GraphManager()
+    gm.add_node(Metered("meter", DT))
+    for d in dtypes:
+        gm.add_external_input("meter", f"u_{d}", dtype=d)
+    gm.compile()
+    return build_model_description(gm, model_name="M", model_identifier=MODEL_IDENTIFIER)
+
+
+def _built_in_nodes_with_integer_inputs():
+    """Two built-in nodes whose fields declare ``expected_units``, fed
+    through an ``int32`` and an ``int8`` input: the graph the defect was
+    reported on."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("spring", DT, stiffness=15.0, rest_length=0.3))
+    gm.add_node(BallNode("ball", DT, initial_position=0.6))
+    gm.add_external_input("spring", "anchor_position", dtype=jnp.int32)
+    gm.add_external_input("ball", "table_position", dtype=jnp.int8)
+    gm.compile()
+    return build_model_description(gm, model_name="B", model_identifier=MODEL_IDENTIFIER)
+
+
+def _hand_built():
+    """An input, a parameter and an output of every key of the writer's
+    table, each with a unit, and a clock with one."""
+    variables = [FMIVariable(name="time", value_reference=1, dtype="float64",
+                             causality="independent", variability="continuous", unit="s")]
+    for name in sorted(_DTYPE_TO_FMI_TYPE):
+        moving = "continuous" if _fmi_kind(name) == "float" else "discrete"
+        for causality, variability in (("input", moving), ("parameter", "tunable"),
+                                       ("output", moving)):
+            variables.append(FMIVariable(
+                name=f"{causality}_{name}", value_reference=len(variables) + 1, dtype=name,
+                causality=causality, variability=variability, unit=_unit_of(name),
+                start=None if causality == "output" else _xs_value(0, name)))
+    variables.append(FMIVariable(
+        name="tick", value_reference=len(variables) + 1, dtype="clock", causality="input",
+        variability="discrete", interval_decimal=0.5, unit="tick_unit"))
+    return ModelDescription(model_name="H", instantiation_token="tok", variables=variables,
+                            co_simulation_model_identifier=MODEL_IDENTIFIER)
+
+
+@pytest.fixture(scope="module")
+def unit_bearing():
+    """Descriptions that hold a unit-bearing variable of every type the
+    writer knows: an input of each dtype a default process has, an input of
+    all of them under ``jax_enable_x64`` (process-global, so it is on for
+    that build alone), the built-in nodes' integer inputs, and a hand-built
+    description."""
+    cases = {"default": _metered([d for d in WRITTEN if d not in NEED_X64]),
+             "built-in nodes": _built_in_nodes_with_integer_inputs(),
+             "hand-built": _hand_built()}
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        cases["x64"] = _metered(WRITTEN)
+    finally:
+        jax.config.update("jax_enable_x64", previous)
+    return cases
+
+
+def test_the_unit_bearing_descriptions_hold_every_type_with_a_unit(unit_bearing):
+    """What the tests below read is there to be read: every type of the
+    writer's table is a variable that carries a unit in the description
+    (``FMIVariable.unit`` keeps what the graph declares, whatever the XML
+    may say), an input of each among them, and so are an integer and a
+    Boolean parameter."""
+    for label in ("x64", "hand-built"):
+        md = unit_bearing[label]
+        with_unit = {_DTYPE_TO_FMI_TYPE[v.dtype] for v in md.variables
+                     if v.unit and v.causality == "input" and not v.is_clock}
+        assert with_unit == set(_DTYPE_TO_FMI_TYPE.values()), label
+    default = {v.dtype for v in unit_bearing["default"].variables if v.unit and
+               v.causality == "input"}
+    assert default == set(WRITTEN) - set(NEED_X64)
+    for label in ("default", "x64"):
+        unit = {v.name: (v.dtype, v.unit) for v in unit_bearing[label].variables}
+        for d in WRITTEN if label == "x64" else sorted(default):
+            assert unit[f"meter.u_{d}"] == (d, _unit_of(d))
+        assert unit["meter.params.gain"] == ("int32", "counts")
+        assert unit["meter.params.enabled"] == ("bool", "flag")
+        assert unit["meter.params.rate"] == ("float32", "1/s")
+    built_in = {v.name: (v.dtype, bool(v.unit)) for v in unit_bearing["built-in nodes"].variables}
+    assert built_in["spring.anchor_position"] == ("int32", True)
+    assert built_in["ball.table_position"] == ("int8", True)
+    assert any(v.is_clock and v.unit for v in unit_bearing["hand-built"].variables)
+
+
+def test_a_unit_is_written_on_a_float_variable_and_on_no_other(unit_bearing):
+    for label, md in unit_bearing.items():
+        root = ET.fromstring(md.to_xml())
+        declared = {v.name: v.unit for v in md.variables}
+        written, kept_out = set(), 0
+        for el in root.find("ModelVariables"):
+            name = el.get("name")
+            if el.tag in ("Float32", "Float64"):
+                assert el.get("unit") == (declared[name] or None), (label, name)
+                written.add(el.get("unit"))
+            else:
+                assert el.get("unit") is None, (label, el.tag, name)
+                kept_out += bool(declared[name])
+        assert kept_out, label
+        # ... and a unit no element carries is not defined: the units of the
+        # integers, the Booleans and the clock are in no <Unit>
+        defined = [u.get("name") for u in root.find("UnitDefinitions")]
+        assert sorted(defined) == sorted(written - {None}), label
+
+
+def test_a_units_definition_is_left_out_with_its_last_float_variable():
+    """``<UnitDefinitions>`` goes when no element carries a unit, and a
+    unit an integer shares with a float stays for the float."""
+    def description(*variables):
+        return ET.fromstring(ModelDescription(
+            model_name="m", instantiation_token="tok", variables=list(variables)).to_xml())
+
+    count = FMIVariable(name="n", value_reference=1, dtype="int32", causality="output",
+                        variability="discrete", unit="m")
+    flag = FMIVariable(name="b", value_reference=2, dtype="bool", causality="output",
+                       variability="discrete", unit="m")
+    length = FMIVariable(name="x", value_reference=3, dtype="float32", causality="output",
+                         variability="continuous", unit="m")
+    assert description(count, flag).find("UnitDefinitions") is None
+    shared = description(count, flag, length)
+    assert [u.get("name") for u in shared.find("UnitDefinitions")] == ["m"]
+    assert {el.get("name"): el.get("unit") for el in shared.find("ModelVariables")} == {
+        "n": None, "b": None, "x": "m"}
+
+
+def test_fmpy_validates_a_unit_bearing_variable_of_every_type(unit_bearing, tmp_path):
+    pytest.importorskip("fmpy")
+    from fmpy.model_description import read_model_description
+    from fmpy.validation import validate_fmu
+
+    for i, (label, md) in enumerate(unit_bearing.items()):
+        fmu = tmp_path / f"case{i}.fmu"
+        with zipfile.ZipFile(fmu, "w") as zf:
+            zf.writestr("modelDescription.xml", md.to_xml())
+        assert validate_fmu(str(fmu)) == [], label
+        read_model_description(str(fmu), validate=True)
+
+
+def test_the_fmi3_schema_validates_a_unit_bearing_variable_of_every_type(unit_bearing):
+    fmpy = pytest.importorskip("fmpy")
+    etree = pytest.importorskip("lxml.etree")
+    xsd = os.path.join(os.path.dirname(fmpy.__file__), "schema", "fmi3",
+                       "fmi3ModelDescription.xsd")
+    if not os.path.exists(xsd):
+        pytest.skip(f"FMPy {fmpy.__version__} ships no FMI 3.0 schema at {xsd}")
+    schema = etree.XMLSchema(etree.parse(xsd))
+    for label, md in unit_bearing.items():
+        doc = etree.fromstring(md.to_xml().encode())
+        assert schema.validate(doc), (label, [e.message for e in schema.error_log])

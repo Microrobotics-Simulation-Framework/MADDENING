@@ -883,14 +883,31 @@ _TEST_CLASS_PREFIX = "Test"
 _TEST_FUNCTION_PREFIX = "test"
 
 
-#: Test paths that no CI lane collects: every pytest run over ``tests/`` in
-#: ``.github/workflows`` passes ``--ignore=tests/viz``, and no job targets
-#: the directory itself.  A test there runs on nobody's machine but the
-#: author's, so it evidences nothing the release can point to
-#: (audit_040_p4_1, A23).  Repository-relative POSIX paths.  Kept in step
-#: with the workflows by ``tests/compliance/test_gate_scripts.py``, which
-#: derives the same set from them and fails when the two differ.
-PATHS_CI_NEVER_RUNS = ("tests/viz",)
+#: Test paths that no CI lane runs.  Two kinds:
+#:
+#: * a directory every pytest run over ``tests/`` in ``.github/workflows``
+#:   passes ``--ignore=`` for, which no job targets itself (``tests/viz``);
+#: * a test file that skips itself whole when it is imported -- a
+#:   ``pytest.importorskip`` in its top-level code, a class body, a
+#:   decorator or a default value -- waiting for a package that no job
+#:   which runs the file installs (:data:`IMPORTS_NO_CI_JOB_INSTALLS` says
+#:   which; a package that only a workflow step under an ``if:`` installs
+#:   counts as not installed).  Every lane collects such a file and reports
+#:   it skipped.
+#:
+#: A test there runs on nobody's machine but the author's, so it evidences
+#: nothing the release can point to (audit_040_p4_1, A23).
+#: Repository-relative POSIX paths.  Kept in step with the workflows, the
+#: extras each job installs and the test files by
+#: ``tests/compliance/test_gate_scripts.py``, which derives the same set
+#: from them and fails when the two differ.
+PATHS_CI_NEVER_RUNS = ("tests/viz", "tests/api/test_frame_renderer_3d.py")
+
+#: The files of :data:`PATHS_CI_NEVER_RUNS`, with the modules each waits
+#: for at import that no job running it installs (``pyvista`` is in the
+#: ``viz3d`` and ``all`` extras only; the jobs install ``ci`` or
+#: ``ci,usd``).  The derivation holds this equal too.
+IMPORTS_NO_CI_JOB_INSTALLS = {"tests/api/test_frame_renderer_3d.py": ("pyvista",)}
 
 
 def _ci_never_runs(rel):
@@ -1250,9 +1267,10 @@ def _reference_findings(aid, status, ref, repo_root):
     * The file must be one pytest collects, and each component a name it
       collects: a ``Test*`` class without ``__init__``, a ``test*``
       function.  A module or class entry must hold at least one test.
-    * The file must not be under a path no CI lane collects
-      (:data:`PATHS_CI_NEVER_RUNS`): evidence has to run where the release
-      is tested.
+    * The file must not be a path no CI lane runs
+      (:data:`PATHS_CI_NEVER_RUNS`: a directory every lane ignores, or a
+      file that skips itself at import for want of a package no job
+      installs): evidence has to run where the release is tested.
     * An unconditional ``skip`` anywhere on the path (the function, a class
       it sits in, the module) is an error: evidence that never runs.  A
       mark (aliases resolved), a ``skipif`` whose condition is fixed in the
@@ -1283,6 +1301,13 @@ def _reference_findings(aid, status, ref, repo_root):
         return [f"{where}: '{rel}' is not a file pytest collects (test_*.py "
                 f"or *_test.py), so nothing in it runs as a test"], []
     ignored = _ci_never_runs(rel)
+    if ignored in IMPORTS_NO_CI_JOB_INSTALLS:
+        needs = ", ".join(IMPORTS_NO_CI_JOB_INSTALLS[ignored])
+        return [f"{where}: '{rel}' skips itself whole where {needs} is not "
+                f"installed (a module-level pytest.importorskip), and no CI "
+                f"job that runs it installs {needs}, so it never runs where "
+                f"the release is tested and evidences nothing; cite a test "
+                f"that CI runs"], []
     if ignored:
         return [f"{where}: '{rel}' is under {ignored}/, which every CI lane "
                 f"excludes (--ignore={ignored} in .github/workflows), so it "
@@ -1453,6 +1478,9 @@ def main(argv=None):
         repo_root=repo_root,
         resolve_references=not args.no_resolve,
         notes=notes,
+        # This gate's version-range rule reads ``maddening_version``, so the
+        # header must carry that field and no other project's.
+        version_field="maddening_version",
     )
     n_anomalies, declared, anomalies, data = _census(args.path)
     # Evidence rules run whether or not the schema passed and whether or

@@ -16,6 +16,8 @@ wrapper is covered by adding one entry to that mapping.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -109,7 +111,16 @@ def test_a_sharded_wrapper_reports_the_interface_of_its_inner_node(
     assert wrapped.boundary_input_spec() == inner.boundary_input_spec()
     assert wrapped.name == inner.name
     assert wrapped.delta_t == inner.delta_t
-    serialised = wrapped.to_dict()
+    # Some of the family's inner nodes keep a mask, an edge list or a layout
+    # outside ``params``; their saved entry cannot rebuild it, and the
+    # wrapper passes on what the node's ``to_dict()`` says.  Nothing else
+    # may be said.
+    with warnings.catch_warnings(record=True) as said:
+        warnings.simplefilter("always")
+        serialised = wrapped.to_dict()
+    assert all(issubclass(w.category, UserWarning)
+               and "does not save the constructor argument" in str(w.message)
+               for w in said), [str(w.message) for w in said]
     assert serialised["sharded"] is True
     # The wrapper is a wrapper, not a node type of its own: the config
     # records the physics node's type (see the round-trip module for

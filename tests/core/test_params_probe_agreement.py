@@ -683,6 +683,12 @@ _ALLOWED = {
     # not, for the refusal of a hook that names ``params`` where no keyword
     # reaches it.  The test below the matrix holds the two to each other.
     ("core/node.py", "_named_where_no_keyword_reaches"),
+    # Not a keyword probe: reads a node class's constructor signature to
+    # bind the arguments a node is being constructed with, so that
+    # ``to_dict()`` can name the ones it does not save (a named parameter
+    # given a value other than its default, and no key of ``params``).  It
+    # never decides whether a callable takes ``params``.
+    ("core/node.py", "_init_signature"),
 }
 
 

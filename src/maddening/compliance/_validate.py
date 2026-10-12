@@ -5,6 +5,15 @@ Validates a ``known_anomalies.yaml`` file against the MADDENING anomaly schema.
 Usable both as a library function and via the CLI
 (``python -m maddening.compliance check-anomalies``).
 
+The schema is shared by MADDENING and by every downstream library that keeps
+its own registry.  The top level holds ``schema_version``, ``generated_date``,
+``anomalies`` and exactly one *project version field*: a key named
+``<project>_version`` whose ``<project>`` part matches ``[a-z][a-z0-9_]*``
+(``maddening_version`` in MADDENING's registry, ``my_lib_version`` in a
+library called ``my_lib``), never ``schema_version``.  Its value is a
+non-empty string.  ``version_field=`` (``--version-field`` on the CLI) pins
+the exact name.
+
 Also hosts :func:`resolve_dotted_name`, the shared symbol resolver used both
 here (for ``affected_components``) and by ``scripts/check_impl_mapping.py``
 (for algorithm-guide Implementation Mapping tables), so that the two gates
@@ -18,6 +27,7 @@ import functools
 import importlib
 import inspect
 import os
+import re
 from types import ModuleType
 from typing import NamedTuple, Optional
 
@@ -55,9 +65,70 @@ _OPTIONAL_ANOMALY_FIELDS = (
 _KNOWN_ANOMALY_FIELDS = frozenset(
     _REQUIRED_ANOMALY_FIELDS + _OPTIONAL_ANOMALY_FIELDS
 )
+#: The fixed top-level keys.  Besides these a registry carries exactly one
+#: project version field (``_is_version_field_name``); every other key is
+#: refused.
 _KNOWN_TOPLEVEL_FIELDS = frozenset(
-    {"schema_version", "maddening_version", "generated_date", "anomalies"}
+    {"schema_version", "generated_date", "anomalies"}
 )
+#: A project version field is ``<project>_version`` with ``<project>`` a
+#: lowercase identifier, ``[a-z][a-z0-9_]*``.  ``schema_version`` matches
+#: the pattern and is excluded by name: it versions the schema, not a project.
+_VERSION_FIELD_PATTERN = r"[a-z][a-z0-9_]*_version"
+_VERSION_FIELD_RE = re.compile(_VERSION_FIELD_PATTERN)
+_VERSION_FIELD_RULE = (
+    "exactly one project version field, a key named '<project>_version' "
+    "with <project> matching [a-z][a-z0-9_]* and the key not "
+    "'schema_version' (e.g. 'maddening_version', 'my_lib_version')"
+)
+
+
+def _is_version_field_name(key: object) -> bool:
+    """Whether ``key`` names a project version field (see the module doc)."""
+    return (
+        isinstance(key, str)
+        and key != "schema_version"
+        and _VERSION_FIELD_RE.fullmatch(key) is not None
+    )
+
+
+def _version_field_errors(
+    data: dict, version_field: Optional[str]
+) -> list[str]:
+    """The project-version-field rule, applied to a registry's top level."""
+    found = sorted(k for k in data if _is_version_field_name(k))
+    wanted = (f" ({version_field!r} is required here)"
+              if version_field is not None else "")
+    if not found:
+        example = version_field or "my_lib_version"
+        return [
+            f"Missing project version field{wanted}: the registry must "
+            f"carry {_VERSION_FIELD_RULE}; add one, e.g. "
+            f"'{example}: \"0.1.0\"'"
+        ]
+    if len(found) > 1:
+        return [
+            f"{len(found)} project version fields found "
+            f"({', '.join(found)}){wanted}: a registry carries exactly one; "
+            f"keep the one naming this project and remove the others"
+        ]
+    (key,) = found
+    errors: list[str] = []
+    if version_field is not None and key != version_field:
+        errors.append(
+            f"Project version field is {key!r} but {version_field!r} is "
+            f"required (version_field / --version-field): rename the key, "
+            f"or require the field this registry is meant to carry"
+        )
+    value = data[key]
+    if not (isinstance(value, str) and value.strip()):
+        errors.append(
+            f"Project version field {key!r} must be a non-empty string, "
+            f"found {value!r} ({type(value).__name__}); quote it in the "
+            f"YAML, e.g. '{key}: \"0.10\"' (unquoted, 0.10 loads as the "
+            f"number 0.1)"
+        )
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +500,17 @@ def validate_anomaly_registry(
     repo_root: Optional[str] = None,
     resolve_references: bool = True,
     notes: Optional[list[str]] = None,
+    version_field: Optional[str] = None,
 ) -> list[str]:
     """Validate a known_anomalies.yaml file against the anomaly schema.
+
+    The top level must hold ``schema_version``, ``generated_date``,
+    ``anomalies`` and exactly one project version field: a key named
+    ``<project>_version``, the whole key matching
+    ``[a-z][a-z0-9_]*_version`` and not equal to ``schema_version``
+    (``maddening_version``, ``my_lib_version``), whose value is a non-empty
+    string.  No version field, two or more, or a non-string value is an
+    error; so is any other top-level key.
 
     Parameters
     ----------
@@ -455,12 +535,31 @@ def validate_anomaly_registry(
         ``usd`` extra -- is recorded here rather than in the returned
         errors, because "I could not look" is not "this is broken".
         Callers that care about coverage should surface these.
+    version_field : str, optional
+        The exact name the registry's project version field must have
+        (e.g. ``"maddening_version"``).  When ``None`` (the default), any
+        one name that follows the rule above is accepted.  The value itself
+        is not held to PEP 440 here: MADDENING's own registry is, by
+        ``scripts/check_anomalies.py``, because its ``affected_versions``
+        convention is read against that version.
 
     Returns
     -------
     list[str]
         List of validation errors.  Empty list means the file is valid.
+
+    Raises
+    ------
+    ValueError
+        If ``version_field`` is given and is not itself a project version
+        field name.
     """
+    if version_field is not None and not _is_version_field_name(version_field):
+        raise ValueError(
+            f"version_field {version_field!r} is not a project version field "
+            f"name: it must be a key named '<project>_version' with <project> "
+            f"matching [a-z][a-z0-9_]*, and not 'schema_version'"
+        )
     with open(path) as f:
         data = yaml.safe_load(f)
 
@@ -474,10 +573,20 @@ def validate_anomaly_registry(
         if required not in data:
             errors.append(f"Missing top-level field: {required}")
 
-    for key in sorted(set(data) - _KNOWN_TOPLEVEL_FIELDS):
+    errors += _version_field_errors(data, version_field)
+
+    # ``key=str``: YAML keys need not be strings (``1:``, ``null:``), and
+    # sorting a mix of types raised ``TypeError`` instead of reporting them.
+    unknown = [k for k in set(data) - _KNOWN_TOPLEVEL_FIELDS
+               if not _is_version_field_name(k)]
+    for key in sorted(unknown, key=str):
+        hint = ""
+        if isinstance(key, str) and key.lower().endswith("version"):
+            hint = "; it is not a valid project version field name"
         errors.append(
-            f"Unknown top-level field: {key} "
-            f"(known: {', '.join(sorted(_KNOWN_TOPLEVEL_FIELDS))})"
+            f"Unknown top-level field: {key}{hint} "
+            f"(known: {', '.join(sorted(_KNOWN_TOPLEVEL_FIELDS))}, plus "
+            f"{_VERSION_FIELD_RULE})"
         )
 
     if "anomalies" not in data:
@@ -499,6 +608,11 @@ def validate_anomaly_registry(
             continue
 
         aid = a.get("anomaly_id", "<missing>")
+        # A YAML list or mapping is unhashable: ``aid in ids_seen`` raised
+        # ``TypeError`` instead of reporting it (the class of MADD-ANO-130).
+        if isinstance(aid, (list, dict)):
+            errors.append(f"anomaly_id must be a string, found {aid!r}")
+            aid = repr(aid)
 
         # Uniqueness
         if aid in ids_seen:
@@ -516,7 +630,7 @@ def validate_anomaly_registry(
 
         # Unknown fields.  A typo like ``workaroud:`` silently drops the
         # workaround from an anomaly a reader is relying on.
-        for key in sorted(set(a) - _KNOWN_ANOMALY_FIELDS):
+        for key in sorted(set(a) - _KNOWN_ANOMALY_FIELDS, key=str):
             errors.append(f"{aid}: unknown field '{key}'")
 
         # Valid enums

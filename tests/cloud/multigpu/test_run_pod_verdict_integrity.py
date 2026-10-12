@@ -9,7 +9,7 @@ checks, all but one check deleted, the stencil cases of an older runner,
 a goal from another commit, ``n_devices`` 4 on an environment that saw one
 device, or ``schema_version`` 99 all read ``CLOSED``.
 
-``run_pod_record/`` is a real ``--goal all --dry-run --cells 256 1024``
+``run_pod_record/`` is a real ``--goal all --dry-run`` (its default sizes, 256 and 961)
 output of this runner (``environment.hostname`` and ``config.out``
 replaced).  Relabelled as a real 4-GPU run it must close all six items --
 the control that shows the rules are not simply refusing everything.  Each
@@ -22,7 +22,7 @@ first test fails: the recorded files are no longer what the runner would
 write, which is exactly what ``--summarise`` now refuses.  Regenerate them::
 
     JAX_PLATFORMS=cpu python benchmarks/multigpu/run_pod.py --goal all --dry-run \\
-        --cells 256 1024 --out tests/cloud/multigpu/run_pod_record
+        --out tests/cloud/multigpu/run_pod_record
 
 and replace ``environment.hostname`` and ``config.out`` in each file.
 """
@@ -330,6 +330,46 @@ def _a_forward_file_of_schema_8_relabelled(rp, d):
     return ["forward"]
 
 
+def _as_the_runner_wrote_its_unstructured_goals_before_schema_10(docs: dict) -> None:
+    """``forward.json``, ``gradient.json`` and ``indivisible.json`` in the
+    layout of schema 9, whose node read no per-cell source and no injected
+    weight: no record of how the cells were numbered, and no derivative
+    with respect to the source or the weight.  Every check such a file
+    records passes."""
+    for r in docs["forward"][0]["results"]:
+        del r["renumbered"]
+    gradient = docs["gradient"][0]
+    for r in gradient["results"]:
+        del r["renumbered"]
+        for method in ("all_to_all", "ppermute"):
+            del r["rollout"][method]["parity_source"], r["rollout"][method]["parity_weight"]
+    gradient["checks"] = [c for c in gradient["checks"] if " grad wrt the " not in c["name"]]
+    del docs["indivisible"][0]["results"][0]["unstructured"]["renumbered"]
+
+
+def _the_unstructured_files_of_schema_9_relabelled(rp, d):
+    """Until schema 10 the node of the ``forward``, ``gradient`` and
+    ``indivisible`` goals read no boundary input and took no ``params``, and
+    a wrapper that zeroed the one or doubled the other passed all three.
+    Such files, their schema number edited to the current one, must not
+    close items 1, 3 or 5 -- ``forward.json`` and ``indivisible.json`` with
+    the very checks this schema derives."""
+    _as_the_runner_wrote_its_unstructured_goals_before_schema_10(d)
+    return ["forward", "gradient", "indivisible"]
+
+
+def _the_cases_with_a_halo_of_two_left_out(rp, d):
+    """A stencil file as the schema-9 runner wrote it: every node's halo
+    one cell wide -- results and checks consistent, every check passing.
+    The ``field-halo2`` cases are the ones a fault of a wider halo fails; a
+    file without them must not decide item 1 or 3."""
+    st = d["stencil"][0]
+    st["results"] = [r for r in st["results"] if r["node"] != "field-halo2"]
+    st["checks"] = rp.stencil_checks(st["results"], 4)
+    assert len(st["checks"]) == 246 and all(c["passed"] for c in st["checks"])
+    return ["stencil"]
+
+
 def _the_exact_count_checks_deleted_from_forward(rp, d):
     f = d["forward"][0]
     f["checks"] = [c for c in f["checks"] if not _is_ones_check(c)]
@@ -345,14 +385,14 @@ _SEEDS = [
      "max_rel' records limit 1.0, the runner holds it to 1e-05"),
     (_r3_results_disagree_with_checks, "check value(s) disagree with its results"),
     (_r4_all_but_one_check_deleted,
-     "lacks case(s) the runner runs for cells [256, 1024] on 4 devices: field 1d 4x1 "
-     "16x20 edge, field 1d 4x1 16x20 dirichlet, lbm 1d 4x1 16x20 periodic (+13 more)"),
-    (_r5_an_older_runner_and_commit, "schema_version 3, not 9"),
+     "lacks case(s) the runner runs for cells [256, 961] on 4 devices: field 1d 4x1 "
+     "16x20 edge, field 1d 4x1 16x20 dirichlet, lbm 1d 4x1 16x20 periodic (+31 more)"),
+    (_r5_an_older_runner_and_commit, "schema_version 3, not 12"),
     (_r6_one_goal_from_another_commit_and_host, "its files come from 2 commits"),
     (_r7_more_devices_than_the_environment_saw,
      "n_devices 4, but its environment saw 1 device(s)"),
     (_r8_partitioned_checks_deleted, "check(s) the runner derives from its results"),
-    (_r9_schema_from_the_future, "schema_version 99, not 9"),
+    (_r9_schema_from_the_future, "schema_version 99, not 12"),
     (_config_says_fewer_sizes_than_were_run,
      "holds case(s) the runner does not run for its config: field 2d 2x2 32x36 periodic"),
     (_a_check_the_runner_never_emits,
@@ -368,13 +408,19 @@ _SEEDS = [
     (_a_case_the_runner_does_not_run, "holds case(s) the runner does not run"),
     (_the_pencil_mesh_cases_left_out, "case(s) the runner"),
     (_the_cases_on_spatial_axis_1_left_out,
-     "lacks case(s) the runner runs for cells [256, 1024] on 4 devices"),
+     "lacks case(s) the runner runs for cells [256, 961] on 4 devices"),
     (_a_gradient_file_of_schema_7_relabelled,
      "gradient.json cannot decide it (its results cannot be read (KeyError: 'solve'))"),
     (_a_forward_file_of_schema_8_relabelled,
      "forward.json cannot decide it (its results cannot be read (KeyError: 'ones'))"),
+    (_the_unstructured_files_of_schema_9_relabelled,
+     ".json cannot decide it (its results cannot be read (KeyError: 'renumbered'))"),
+    (_the_cases_with_a_halo_of_two_left_out,
+     "lacks case(s) the runner runs for cells [256, 961] on 4 devices: field-halo2 1d 4x1 "
+     "16x20 periodic, field-halo2 1d 4x1 16x20 edge, field-halo2 1d 4x1 16x20 dirichlet "
+     "(+9 more)"),
     (_the_exact_count_checks_deleted_from_forward,
-     "lacks 12 check(s) the runner derives from its results: '256 cells all_to_all ones: "
+     "lacks 16 check(s) the runner derives from its results: '256 cells all_to_all ones: "
      "|total - cells|'"),
     (_the_convergence_checks_deleted_from_gradient,
      "lacks 16 check(s) the runner derives from its results: '256 dof sharded_cg sharded "
@@ -599,7 +645,7 @@ def test_the_hybrid_goal_fails_a_correction_too_small_to_matter(rp, recorded):
 
 @pytest.mark.parametrize("which", ["solve", "adjoint", "tangent"])
 @pytest.mark.parametrize("side", ["unsharded", "sharded"])
-@pytest.mark.parametrize("dof", [256, 1024])
+@pytest.mark.parametrize("dof", [256, 960])
 def test_the_gradient_goal_fails_a_cg_solve_that_did_not_converge(rp, recorded, dof, side,
                                                                   which):
     """Two solves that failed alike agree with each other: until schema 7
@@ -692,13 +738,13 @@ def test_a_gradient_file_written_before_schema_8_is_refused_twice_over(rp, recor
     assert rp.goal_verdict([old]) == "INVALID"
     old["schema_version"] = 7
     assert rp.record_problems(old) == [
-        "schema_version 7, not 9: written by another version of this runner",
+        "schema_version 7, not 12: written by another version of this runner",
         "its results cannot be read (KeyError: 'solve')"]
     # the current record with only its schema number taken back is refused for that alone
     relabelled = copy.deepcopy(recorded["gradient"][0])
     relabelled["schema_version"] = 7
     assert rp.record_problems(relabelled) == [
-        "schema_version 7, not 9: written by another version of this runner"]
+        "schema_version 7, not 12: written by another version of this runner"]
     assert rp.goal_verdict([relabelled]) == "INVALID"
 
 
@@ -712,19 +758,58 @@ def test_a_forward_file_written_before_schema_9_is_refused_twice_over(rp, record
     old = copy.deepcopy(recorded["forward"][0])
     _as_the_runner_wrote_forward_before_it_counted_its_cells(old)
     assert all(c["passed"] for c in old["checks"]) and old["passed"] is True
-    assert len(old["checks"]) == 16 and len(recorded["forward"][0]["checks"]) == 24
+    assert len(old["checks"]) == 16 and len(recorded["forward"][0]["checks"]) == 28
     assert rp.record_problems(old) == ["its results cannot be read (KeyError: 'ones')"]
     assert rp.goal_verdict([old]) == "INVALID"
     old["schema_version"] = 8
     assert rp.record_problems(old) == [
-        "schema_version 8, not 9: written by another version of this runner",
+        "schema_version 8, not 12: written by another version of this runner",
         "its results cannot be read (KeyError: 'ones')"]
     # the current record with only its schema number taken back is refused for that alone
     relabelled = copy.deepcopy(recorded["forward"][0])
     relabelled["schema_version"] = 8
     assert rp.record_problems(relabelled) == [
-        "schema_version 8, not 9: written by another version of this runner"]
+        "schema_version 8, not 12: written by another version of this runner"]
     assert rp.goal_verdict([relabelled]) == "INVALID"
+
+
+@pytest.mark.parametrize("goal", ["forward", "gradient", "indivisible"])
+def test_an_unstructured_goals_file_written_before_schema_10_is_refused_twice_over(
+        rp, recorded, goal):
+    """A file of schema 9 of a goal that builds the unstructured wrapper ran
+    a node that read no per-cell source and no injected weight.  It is
+    refused for its schema number, as every older file is -- and, were that
+    number edited, because its results do not record how the cells were
+    numbered, which this runner reads before it derives a check.  For
+    ``forward`` and ``indivisible`` that second refusal is the only one
+    there could be: the checks such a file records are, name for name and
+    limit for limit, the ones this schema derives."""
+    docs = copy.deepcopy(recorded)
+    _as_the_runner_wrote_its_unstructured_goals_before_schema_10(docs)
+    old, now = docs[goal][0], recorded[goal][0]
+    assert all(c["passed"] for c in old["checks"]) and old["passed"] is True
+    assert (len(old["checks"]), len(now["checks"])) == {
+        "forward": (28, 28), "gradient": (32, 48), "indivisible": (13, 13)}[goal]
+    if goal != "gradient":
+        assert [c["name"] for c in old["checks"]] == [c["name"] for c in now["checks"]]
+    unreadable = "its results cannot be read (KeyError: 'renumbered')"
+    assert rp.record_problems(old) == [unreadable]
+    assert rp.goal_verdict([old]) == "INVALID"
+    old["schema_version"] = 9
+    assert rp.record_problems(old) == [
+        "schema_version 9, not 12: written by another version of this runner", unreadable]
+    # the current record with only its schema number taken back is refused for that alone
+    relabelled = copy.deepcopy(now)
+    relabelled["schema_version"] = 9
+    assert rp.record_problems(relabelled) == [
+        "schema_version 9, not 12: written by another version of this runner"]
+    assert rp.goal_verdict([relabelled]) == "INVALID"
+    # and a record that says something other than yes or no is no record of it
+    odd = copy.deepcopy(now)
+    (odd["results"][0]["unstructured"] if goal == "indivisible"
+     else odd["results"][0])["renumbered"] = "no"
+    assert rp.record_problems(odd) == [
+        "its results cannot be read (TypeError: renumbered is 'no', not a bool)"]
 
 
 @pytest.mark.parametrize("side", ["all_to_all", "ppermute", "unsharded"])
@@ -811,8 +896,8 @@ def test_at_the_float32_integer_limit_the_count_is_a_check_not_run(rp, recorded,
     assert np.float32(2 ** 24) + np.float32(1) == np.float32(2 ** 24)       # why
     (doc,) = recorded["forward"]
     results = copy.deepcopy(doc["results"])
-    assert [r["cells"] for r in results] == [256, 1024]
-    monkeypatch.setattr(rp, "EXACT_COUNT_CELLS", 1024)       # 256 under it, 1024 at it
+    assert [r["cells"] for r in results] == [256, 961]
+    monkeypatch.setattr(rp, "EXACT_COUNT_CELLS", 961)        # 256 under it, 961 at it
     for r in results[1:]:
         del r["ones_unsharded"]
         for m in r["methods"].values():
@@ -820,9 +905,9 @@ def test_at_the_float32_integer_limit_the_count_is_a_check_not_run(rp, recorded,
     checks = rp.forward_checks(results, doc["n_devices"])
     not_run = [c for c in checks if rp.check_status(c) == "not run"]
     assert [c["name"] for c in not_run] == [
-        "1024 cells ones: total == cells exactly, sharded and unsharded"]
+        "961 cells ones: total == cells, sharded and unsharded, and per-shard (offset, cells), exactly"]
     assert "2**24" in not_run[0]["detail"]
-    assert sum(" ones: " in c["name"] for c in checks) == 6 + 1
+    assert sum(" ones: " in c["name"] for c in checks) == 8 + 1
     assert all(rp.check_status(c) == "passed" for c in checks if c not in not_run)
     out = rp.finish_checks({}, checks)
     assert out["passed"] is False            # for a reader of the flag alone: not complete

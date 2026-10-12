@@ -73,6 +73,7 @@ oracles and do not import this module.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -140,6 +141,23 @@ def is_internal(edge, members) -> bool:
     ``_group_layout._loop_through_outside_nodes``.
     """
     return edge.source_node in members and edge.target_node in members
+
+
+def by_target(edges, external_inputs) -> tuple:
+    """``({node: edges into it}, {node: external inputs of it})``, each in the order declared.
+
+    The two indexes a step builder makes to resolve one node's boundary
+    inputs at a time (a node with neither reads as an empty list, as
+    theirs does).  Read by ``GraphManager._traced_carried_chain``, which
+    hands a coupling group's pass these indexes without building a step.
+    """
+    edges_into: defaultdict = defaultdict(list)
+    for edge in edges:
+        edges_into[edge.target_node].append(edge)
+    inputs_of: defaultdict = defaultdict(list)
+    for ei in external_inputs:
+        inputs_of[ei.target_node].append(ei)
+    return edges_into, inputs_of
 
 
 def internal_edges(edges, members) -> list:
@@ -966,6 +984,43 @@ class InterfaceEdge:
         return tuple((leaf.dtype, int(np.prod(leaf.shape, dtype=np.int64)))
                      for leaf in jax.tree_util.tree_leaves(out))
 
+    @property
+    def additive(self) -> bool:
+        """Is what this edge delivers added to what an earlier edge into
+        the same input delivered (``EdgeSpec.additive``)?"""
+        return bool(getattr(self.edge, "additive", False))
+
+    def delivered_abstract(self, source, state, mappings=None):
+        """The shapes and dtypes of what this edge hands its target for a
+        source value of the shapes and dtypes of *source*.
+
+        The edge's own rule (``maddening.core.edge._delivered``), under
+        :func:`jax.eval_shape` as in :meth:`delivered_leaves`: never run
+        on numbers.  *source* stands for the value read at the source: a
+        state field, or a boundary flux, which is not in *state* and which
+        the caller therefore passes.  A geometry-dependent mapping is
+        handed the abstract value of its geometry field in *state*;
+        ``None`` where *state* does not hold that field.
+
+        Read by ``_flux_loops._handed`` for the inputs a coupling pass
+        hands a member's ``compute_boundary_fluxes``, declared in
+        ``boundary_input_spec()`` or not.
+        """
+        geom: tuple = ()
+        if self.anchor is not None:
+            side, field = self.anchor
+            holder = (state.get(self.source[0] if side == "source" else self.target[0])
+                      or {})
+            if field not in holder:
+                return None
+            geom = (holder[field],)
+        edge = self.edge
+
+        def rule(value, *geometry):
+            return _delivered(edge, value, mappings, *geometry)
+
+        return jax.eval_shape(rule, source, *geom)
+
 
 def _edge_record(edge, state=None, nodes=None, *, declared: int = 0,
                  role: str = INTERNAL) -> InterfaceEdge:
@@ -1093,8 +1148,9 @@ class InterfacePlan:
 
         Read by the spectrum's weights under the interface norm
         (``_read_fields`` in ``_run_coupled_block_impl``, which keeps
-        the floating state fields among them) and by the non-floating
-        fields the IFT solve evaluates at the iterate (``live_nonfloat``).
+        the floating state fields among them).  The non-floating fields a
+        solve evaluates at the iterate are not read from here: see
+        :meth:`iterate_reads`.
 
         **Differs from** :meth:`iqn_fields`: no geometry field is here,
         and a flux edge contributes its flux's name, which is no state
@@ -1103,6 +1159,48 @@ class InterfacePlan:
         read is here once.
         """
         return frozenset(rec.source for rec in self.internal)
+
+    def iterate_reads(self) -> dict:
+        """``{member: the (node, field) state fields a pass may hand it from the iterate}``.
+
+        The most one evaluation of the member can depend on, among the
+        iterate's state fields, as far as the edges say: the source field
+        of each internal edge into it and the geometry a mapping on that
+        edge reads from its source; and, for an edge whose source is not a
+        state field (a boundary flux), the producer's whole state together
+        with everything the producer may be handed in turn, since a pass
+        computes a flux from the producer's state and from the producer's
+        own boundary inputs.  An upper bound: which of these a node's
+        ``update`` or its flux function really uses is not the edges' to
+        say.
+
+        Read by ``_carried_fields.possible_chain``: the non-floating
+        fields a coupling group *may* carry, before a trace of its pass
+        says which it does.
+
+        **Differs from** :meth:`iqn_fields` in following a flux into what
+        its producer reads, and in being per reader, not per producer.
+        """
+        direct: dict[str, set] = {nn: set() for nn in self.members}
+        flux_from: dict[str, set] = {nn: set() for nn in self.members}
+        for rec in self.internal:
+            (src, fld), tgt = rec.source, rec.target[0]
+            if rec.read_from_state:
+                direct[tgt].add((src, fld))
+            else:
+                flux_from[tgt].add(src)
+            if rec.anchor is not None and rec.anchor[0] == "source":
+                direct[tgt].add((src, rec.anchor[1]))
+
+        def through(nn, seen):
+            out = set(direct[nn])
+            for src in sorted(flux_from[nn]):
+                out.update((src, fld) for fld in self.member_fields.get(src, ()))
+                if src not in seen:
+                    out |= through(src, seen | {src})
+            return out
+
+        return {nn: through(nn, frozenset((nn,))) for nn in self.members}
 
     def iqn_fields(self) -> Optional[dict]:
         """Per-node state fields a quasi-Newton acceleration acts on by default.
@@ -1249,6 +1347,41 @@ class InterfacePlan:
         """
         return any(rec.source_kind == FLUX and rec.target[0] in self.flux_members
                    for rec in self._declared(INTERNAL, INBOUND))
+
+    def edges_into(self, member) -> tuple:
+        """The records of the edges into *member*, in the order a pass
+        applies them.
+
+        Every edge whose target is *member*, from another member or from
+        outside the group, in the order of the ``add_edge`` calls: the
+        order in which a pass composes a member's boundary inputs
+        (``_coupled_block._run_coupled_block_impl._resolve_boundary``
+        walks ``edges_by_target[member]``, which
+        ``GraphManager._build_step_fn`` fills from every edge of the
+        graph in that order; an additive edge adds to what an earlier
+        edge into the same input delivered, any other edge replaces it).
+
+        Read by ``_flux_loops._refuse_unsolved_fluxes``: what a pass
+        hands a member's ``compute_boundary_fluxes``.  **Differs from**
+        :attr:`internal`, the canonical order the interface norm sums
+        in, which sorts by the source's place in the sweep and by the
+        source field.
+        """
+        return tuple(r for r in self._declared(INTERNAL, INBOUND) if r.target[0] == member)
+
+    def external_inputs(self, external_inputs) -> tuple:
+        """``(member, field, value)`` of each declared external input into
+        a member, *value* being the shape and dtype the step hands.
+
+        Read by ``GraphManager._refuse_unsolved_group_fluxes`` for
+        ``_flux_loops._refuse_unsolved_fluxes``: the inputs a pass hands
+        a member's hooks beside what the edges deliver.  *external_inputs*
+        are the graph's ``ExternalInputSpec``, in the order declared.
+        """
+        return tuple(
+            (ei.target_node, ei.target_field,
+             jax.ShapeDtypeStruct(tuple(ei.shape), jnp.dtype(ei.dtype)))
+            for ei in external_inputs if ei.target_node in self.members)
 
     # -- geometry -----------------------------------------------------------
 

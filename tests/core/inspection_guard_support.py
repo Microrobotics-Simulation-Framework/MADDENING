@@ -109,23 +109,46 @@ def fingerprint(gm: Any) -> dict[str, Any]:
     return out
 
 
-def assert_read_only(gm: Any, call: Callable[[Any], Any], *, allow_eager_compile: bool = False):
-    """Call ``call(gm)`` and assert that the graph is exactly as it was and
-    that nothing was compiled or traced.
+#: The last component of the event JAX fires for tracing a function to a
+#: jaxpr (``jax.eval_shape`` fires this one and no other).
+TRACE_EVENT = "jaxpr_trace_duration"
 
-    ``allow_eager_compile`` permits JAX compile events (and nothing else):
-    for a method documented to read through code that dispatches eager
-    ``jax.numpy`` operations, which JAX compiles once per shape.  The
-    graph's trace counters, compiled step and every other attribute are
-    still checked.
-    """
+
+def read_only_call(gm: Any, call: Callable[[Any], Any]) -> tuple[Any, list[str]]:
+    """Call ``call(gm)``, assert that the graph is exactly as it was (every
+    attribute, the step's trace counters among them), and return the
+    call's result with the JAX trace / lowering / compile events it fired."""
     before = fingerprint(gm)
     with compile_events() as events:
         result = call(gm)
     after = fingerprint(gm)
     changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
     assert not changed, f"the call changed the graph: {changed}"
-    if not allow_eager_compile:
+    return result, events
+
+
+def assert_read_only(gm: Any, call: Callable[[Any], Any], *, allow_eager_compile: bool = False,
+                     allow_trace: bool = False):
+    """Call ``call(gm)`` and assert that the graph is exactly as it was and
+    that nothing was compiled or traced.
+
+    ``allow_eager_compile`` permits JAX compile events (and nothing else):
+    for a method documented to read through code that dispatches eager
+    ``jax.numpy`` operations, which JAX compiles once per shape.
+
+    ``allow_trace`` permits trace events alone, no lowering and no backend
+    compile: for ``coupling_report`` on a group with a transform or a
+    mapping on an internal edge, which asks the edge what it delivers
+    under ``jax.eval_shape`` on every call.
+
+    Under either, the graph's trace counters, compiled step and every
+    other attribute are still checked.
+    """
+    result, events = read_only_call(gm, call)
+    if allow_trace and not allow_eager_compile:
+        beyond = sorted({e for e in events if not e.endswith(TRACE_EVENT)})
+        assert not beyond, f"the call compiled or lowered: {beyond}"
+    elif not allow_eager_compile:
         assert not events, f"the call compiled or traced: {sorted(set(events))}"
     return result
 

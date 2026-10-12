@@ -307,6 +307,7 @@ def test_with_none_every_graph_entry_point_inherits_jax_s_setting(entry):
     assert_inherited(lowered_dots(lambda: call(gm)), entry)
 
 
+# Per push: tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_every_graph_entry_point_traces_its_products_at_highest[compile+step]
 @pytest.mark.slow
 @pytest.mark.parametrize("precision", ["highest", None])
 def test_the_coupling_bounds_trace_their_products_at_the_graph_s_setting(precision):
@@ -315,7 +316,6 @@ def test_the_coupling_bounds_trace_their_products_at_the_graph_s_setting(precisi
     estimate and the full resolvent norm: in the step and in its gradient.
     CPU results do not move: the step and the report are bit-identical at
     either setting."""
-    # Per push: tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_every_graph_entry_point_traces_its_products_at_highest[compile+step]
     gm = coupled(precision, diagnostics=True, acceleration="none")
     dots = lowered_dots(lambda: (gm.compile(), gm.step()))
     stepped = jax.tree.map(np.asarray, gm._state)          # the report included

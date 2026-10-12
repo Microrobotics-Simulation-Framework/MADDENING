@@ -355,6 +355,10 @@ PER_PUSH = [
     # In-process TestClient: no port, no server process.
     Run("servers.rest_params_demo", ("--steps", "5"), needs=("fastapi", "httpx"),
         expect=("All checks passed",)),
+    # uvicorn in a thread on a loopback port the OS picks; the server is told
+    # a network bind, so the token is enforced.  Stops itself.
+    Run("servers.serve_with_token", needs=("fastapi", "uvicorn"),
+        expect=("All checks passed",)),
     Run("cloud.streaming.08_subscribe_lbm_velocity", ("--n-frames", "5"),
         needs=("fastapi", "uvicorn", "websockets", "zstandard"),
         expect=("End-to-end reduction",)),

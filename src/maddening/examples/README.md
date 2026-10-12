@@ -29,6 +29,9 @@ python -m maddening.examples.servers.api_server --port 0
 # The REST parameter rules, in-process: no port at all
 python -m maddening.examples.servers.rest_params_demo
 
+# The bearer token a network deployment needs, served on loopback
+python -m maddening.examples.servers.serve_with_token
+
 # The cloud examples' server and rendezvous checks, without a cloud account
 python -m maddening.examples.cloud.server.04_server_test --local
 python -m maddening.examples.cloud.server.05_websocket_test --local
@@ -95,6 +98,7 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `remote_viz_client.py` + `remote_sim_server.py` | A simulation streaming state over ZMQ to a viewer (terminal, plain text or matplotlib) `[network]` | `... servers.remote_viz_client --local` |
 | `api_server.py` | The REST/WebSocket API (`SimulationServer`), docs at `/docs` `[api]` | `... servers.api_server [--port 0]` |
 | `rest_params_demo.py` | `PUT /graph/params/{node}` in-process (FastAPI `TestClient`, no port): a write honoured on the next step without a recompile, refusals with the reason (a `ParamSpec` bound, a value the constructor rejects), an initial condition applied at reset `[api]` | `... servers.rest_params_demo [--steps N]` |
+| `serve_with_token.py` | The API as a network deployment serves it: uvicorn in this process on a loopback port, told `bind_host="0.0.0.0"` so the bearer token is on; a request refused without the token and served with it, `checkpoint_root`, and a generated token logged once `[api]` | `... servers.serve_with_token` |
 | `interactive_graph_server.py` | Graph topology page at `/viz/graph` `[api]` | `... servers.interactive_graph_server [--port 0]` |
 | `launch_app.py` | Interactive demo app at `/viz/app`; opens a browser `[api]` | `... servers.launch_app [--port 0] [--no-browser]` |
 | `launch_server_render.py` | Server-side matplotlib frames streamed to `/viz/render` `[api, viz]` | `... servers.launch_server_render [--port 0]` |

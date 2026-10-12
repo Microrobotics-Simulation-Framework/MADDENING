@@ -942,9 +942,9 @@ fails them, and now do.
 ## Index of the anomaly registry
 
 Every entry of the registry is named below, reachable in 0.4.0 or not.
-`tests/compliance/test_release_notes_known_anomalies.py` checks that: an entry
-the paragraphs describe is named by its full number, and the closing
-"**Resolved.**" paragraph names no entry a user can still reach. The release
+`tests/compliance/test_release_notes_known_anomalies.py` checks that, and
+that the closing paragraph of resolved entries names no entry a user can still
+reach. The release
 notes' "Known anomalies" section lists only the entries a user can reach. The
 text below is moved; the registry is the authority on each entry's status.
 

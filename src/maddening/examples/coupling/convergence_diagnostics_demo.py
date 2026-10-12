@@ -19,8 +19,10 @@ bounds), which cost extra Jacobian-vector products per step -- Part 4
 shows them.
 
 **Convergence norms**: all three scale each field's change by that
-field's own magnitude, so a group's verdict does not depend on the units
-its fields are written in.  ``"l2"`` (the default) compares a global
+field's own magnitude, so the norm of a change does not depend on the
+units a field is written in.  (The accelerated iterations do, beyond one
+common factor: see ``CouplingGroup.convergence_norm``.)  ``"l2"`` (the
+default) compares a global
 norm with ``tolerance``; ``"mixed"`` takes a per-field RMS of
 ``|dx| / (rtol * |x|)`` and converges when that is <= 1; ``"interface"``
 does the same over the coupling-edge fields only.  Part 3 runs all

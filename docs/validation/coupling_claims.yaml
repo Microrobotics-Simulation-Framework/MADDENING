@@ -407,8 +407,10 @@ claims:
   area: configuration
   claim: >-
     convergence_norm: "All three scale each field's change by the field's own
-    magnitude, so a group's verdict does not depend on the units its
-    quantities are written in."
+    magnitude, so the *norm* of a given change does not depend on the units
+    any quantity is written in.  The *run* it is taken on is the same run
+    under one common factor on every quantity"; under a change of the units
+    of one field, only with acceleration "none" or "fixed".
   sources:
     - src/maddening/core/coupling/group.py:80 (CouplingGroup, convergence_norm)
     - docs/developer_guide/coupling_algorithm_guide.md#reading-coupling_diagnostics
@@ -425,6 +427,10 @@ claims:
     iteration cap with the estimate inside that band about the threshold
     (measured: 0.85 to 1.51 thresholds over eleven decimal factors, two
     verdicts differing).  Anywhere else the verdict is the unscaled one.
+    One field rescaled by itself (the other fields left): the same run, bit
+    for bit, under acceleration "none" and "fixed" only; NOT claimed under
+    "aitken", "iqn-ils" and "iqn-imvj", whose passes, state and verdict
+    move (MADD-ANO-285, open).
   oracle: the same group at another scale (bit-identity for powers of two; the stated band for decimal factors).
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in
@@ -452,18 +458,22 @@ claims:
 - id: CPL-010
   area: configuration
   claim: >-
-    "Aitken and IQN do not depend on units ... Each now works on the vectors
-    rescaled by one exact power of two, which leaves every configuration at
-    ordinary scales bit-identical (125 dumped) and makes a group at any
-    power-of-two scale reproduce the unscaled run bit for bit -- which the
-    new units oracle in the coupling differential harness now checks for
-    every acceleration, norm and solver."
+    "Aitken and IQN do not depend on the one unit a group is written in ...
+    Each now works on the vectors rescaled by one exact power of two, which
+    leaves every configuration at ordinary scales bit-identical (125 dumped)
+    and makes a group at any power-of-two scale, the same on every field,
+    reproduce the unscaled run bit for bit -- which the new units oracle in
+    the coupling differential harness now checks for every acceleration,
+    norm and solver."
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
     - src/maddening/core/_pow2_frame.py (pow2_frame)
     - src/maddening/core/coupling/acceleration.py:1702 (aitken_relaxation)
   conditions: >-
-    "any power-of-two scale", every acceleration, norm and solver; the
+    "any power-of-two scale", ONE factor on every field, every acceleration,
+    norm and solver; NOT claimed for a factor on one field alone, under which
+    "aitken" and the IQN accelerations take another path (MADD-ANO-285,
+    open; "none" and "fixed" are bit-identical there, CPL-009).  The
     harness checks 2**-53 to 2**66 only.  Below about 2**-115 the node
     arithmetic of the fixture itself underflows (products of O(1e-3) gains
     and O(1e-35) states), so a scale must keep the map's own operands
@@ -910,12 +920,18 @@ claims:
     converged states, "quadratic" uses quadratic extrapolation from the last
     three converged states.  Reduces iteration count for smoothly varying
     problems"; only floating fields are extrapolated; the fixed point does
-    not move, and the returned iterate moves within the solve's tolerance.
+    not move, and where the solve converges the returned iterate moves
+    within the solve's tolerance.
   sources:
     - src/maddening/core/coupling/group.py:223 (CouplingGroup, predictor)
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl (predictor)
   conditions: >-
-    any acceleration; a multi-rate group learns only from applied solves
+    any acceleration; a solve that converges (max_iterations >= 2 and
+    converged=True): at max_iterations=1 nothing is solved, the guess is the
+    state the single staggered pass starts from, and the predictor moves the
+    result at order one without a warning (documented on
+    CouplingGroup.predictor and max_iterations; not a claim).  A multi-rate
+    group learns only from applied solves
     (CPL-073). Not claimed for mixed dtypes, 16-bit floats, vmap,
     run_adaptive or sharded graphs.
   oracle: iteration counts with and without; converged state against the predictor-free run; closed-form leaves.
@@ -2682,17 +2698,69 @@ claims:
   area: loop
   claim: >-
     The group's non-floating fields are "the ones the pass computes at that
-    state", on both solvers, and an edge-carried one is evaluated at the
-    iterate on every ift pass.
+    state", on both solvers; and "every pass a solve measures starts from
+    carried fields evaluated at its floating iterate" (the non-floating
+    fields a pass reads from the iterate, as one abstract trace of the
+    group's Jacobi pass shows them), on both solvers and both sweeps, so a
+    residual of exactly zero is reported only at a fixed point of the group's
+    pass, non-floating fields included, and the two solvers take the same
+    passes.  A group in which that trace shows carried fields computed from
+    one another in a closed loop is refused at compile() and listed by
+    validate(); a step counter or a PRNG key a member advances from its
+    pre-step state is on no such loop, and is not carried unless another
+    member reads it or a flux is computed from it, whatever other edges and
+    fluxes the member has; a pair exchanging fluxes both ways with such a
+    leaf steps as it did.  A jax.debug.print or jax.debug.callback in member
+    code makes no field carried and closes no loop.  compile() and the step
+    refuse the same groups at the same state (a read counts only where the
+    edges allow it too); the step's own refusal is reached only for a state
+    compile() did not see, such as one a write gave another dtype.
   sources:
     - src/maddening/core/coupling/_coupled_block.py::_run_coupled_block_impl._run_coupling_inner
-    - docs/validation/known_anomalies.yaml (MADD-ANO-070)
+    - src/maddening/core/coupling/_carried_fields.py::carried_nonfloat_chain
+    - src/maddening/core/coupling/_carried_fields.py::traced_reads
+    - src/maddening/core/graph_manager.py::GraphManager._nonfloat_loop_refusals
+    - docs/validation/known_anomalies.yaml (MADD-ANO-070, MADD-ANO-284)
   conditions: >-
-    integer, boolean and key leaves; every acceleration. Not claimed for
+    integer, boolean and key leaves; every acceleration; max_iterations >= 2
+    (one staggered pass reads a carried field as stored).  Exact at a zero
+    residual.  Under a non-zero tolerance converged=True says the floating
+    fields move by no more than the tolerance over a pass started from the
+    carried fields at the returned iterate: under Gauss-Seidel a carried
+    field the sweep recomputes from floats it has already moved can come
+    back different (not under Jacobi).  What a field is computed from is
+    read from the traced pass, which can overstate only through an
+    operation the walk does not look inside (a custom_jvp or custom_vjp
+    function, a callback, a primitive with several operands and several
+    results, or an effect whose result is used), taken to use all of its
+    operands; the refusal's message calls each such link of the loop
+    ASSUMED and names the primitive, and every other link established
+    through operands.  An operation with no result feeds nothing.  Where
+    the pass cannot be traced on its own, dependence is assumed from the
+    edges and the refusal's message says so.  Not claimed for
     float64 (x64), mixed dtypes, 16-bit floats, predictors or warm starts,
     checkpoint restarts or sharded graphs.
-  oracle: closed form; fori against ift.
+  oracle: closed form (fixtures exact in binary floating point, one fixed point); fori against ift; the same passes on every route.
   tests:
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_an_integer_on_the_loop_reaches_the_fixed_point_on_every_route
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_field_relayed_through_more_non_floating_fields_is_settled_at_the_iterate
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_boolean_on_the_loop_reaches_the_fixed_point_on_every_route
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_that_flips_on_every_pass_reaches_the_cap_unconverged
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_flag_a_flux_is_computed_from_is_evaluated_at_the_iterate
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_the_solvers_agree_under_every_acceleration
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_non_floating_fields_computed_from_one_another_in_a_loop_are_refused
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_counter_and_a_key_beside_fluxes_both_ways_are_not_carried
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_counter_its_flux_reads_is_carried_and_evaluated_at_the_iterate
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_count_computed_from_a_flux_that_reads_it_is_a_loop_and_is_refused
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_flags_handed_both_ways_but_computed_from_floats_are_solved
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_where_the_pass_cannot_be_traced_the_refusal_says_the_loop_is_assumed
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_side_effect_in_the_pass_makes_nothing_a_read
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_printed_field_steps_as_the_same_pair_unprinted
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_printed_counter_beside_fluxes_both_ways_steps_as_without_the_print
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_reads_through_an_operation_the_walk_does_not_look_inside_are_assumed
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_loop_through_a_custom_jvp_is_refused_as_assumed_and_says_through_what
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_compile_and_the_step_decide_alike_where_the_walk_overstates
+    - tests/core/test_coupling_carried_nonfloat_fields.py::test_a_write_that_makes_a_loop_of_non_floating_fields_is_refused_at_the_step
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_an_iterate_dependent_flag_is_the_one_the_returned_state_computes
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_flag_read_across_an_internal_edge_iterates_with_the_solve
     - tests/property/test_differential_coupling_solvers.py::test_a_flag_reading_a_coupled_input_agrees_between_the_solvers

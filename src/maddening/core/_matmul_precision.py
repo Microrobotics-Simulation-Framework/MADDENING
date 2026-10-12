@@ -134,7 +134,10 @@ def pins_the_built_step(build: Callable) -> Callable:
 def _in_force() -> Optional[str]:
     """The ``jax_default_matmul_precision`` in force here: a context's value
     inside one (a :func:`pinned` body), else the global setting."""
-    return jax.config.jax_default_matmul_precision
+    # Read by name: JAX registers its config options at run time, and the
+    # 0.10 stubs do not declare this one (pyright reports the attribute as
+    # unknown there, although every supported JAX has it).
+    return getattr(jax.config, "jax_default_matmul_precision")
 
 
 def custom_jvp_at_call_precision(

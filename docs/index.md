@@ -161,6 +161,9 @@ user_guide/cloud_resume
 user_guide/inspection
 user_guide/geometry_dependent_mappings
 user_guide/moving_a_sampling_onto_an_edge
+user_guide/upgrading_from_0_3_1
+user_guide/serving_the_rest_api
+user_guide/zeromq_transports
 glossary
 ```
 

@@ -843,8 +843,29 @@ For noisy data, `fit_multiple_shooting` replaces teacher forcing with
 free per-window initial states and a continuity penalty
 (`windowed_loss(..., window_states=, continuity_weight=)`), so the
 optimum is one continuous trajectory rather than windows each seeded
-with measurement error.  All three fitters emit a `"fit_progress"` event
-to `gm.add_observer` callbacks every `notify_every` iterations.
+with measurement error.  It returns the fit and the window states, both
+from its lowest-loss iterate:
+
+<!-- snippet: continues -->
+```python
+from maddening.sysid import fit_multiple_shooting
+
+mask = jax.tree.map(lambda _: False, gm.params)
+mask["nodes"]["spring"]["stiffness"] = mask["nodes"]["spring"]["damping"] = True
+ms, window_states = fit_multiple_shooting(
+    gm, obs, obs_fn=lambda h: h["spring"]["position"], window=50,
+    params=start, mask=mask, n_iter=300, lr=0.1)
+ms.params["nodes"]["spring"]                # stiffness ~30, damping ~2
+window_states["spring"]["position"].shape   # (20,): one free start per window
+```
+
+The record above has no noise, so this lands where `fit` did.
+`python -m maddening.examples.advanced.multiple_shooting_fit` runs both
+fitters on a noisy record of a coupled pair (two masses joined by one
+spring, in a coupling group): teacher forcing misses the far mass by 9%
+on that record, and multiple shooting by 0.4%.  All three fitters emit a
+`"fit_progress"` event to `gm.add_observer` callbacks every `notify_every`
+iterations.
 
 `fit` runs Adam in the unconstrained coordinates under the trainable
 mask, so positive constants stay positive.  Every leaf *outside* the

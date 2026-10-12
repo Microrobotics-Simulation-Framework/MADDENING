@@ -898,6 +898,20 @@ def _make_node_class(SimulationNode, StaticArray, BoundaryInputSpec, jnp):  # no
             self._n = int(n)
             self._tbl = np.asarray(tbl, dtype=np.int32)
             self._pa = partition_assignment
+            # Built once: ``static_data`` hands back the same objects on
+            # every access, as ``SimulationNode.static_data`` requires.  The
+            # wrapper keys its cache of partitioned statics on the arrays'
+            # identity, and a new array per access made every public
+            # ``update()`` re-partition both on the host, about 25 ns a cell
+            # (the 2026-10-12 session: 242 ms a step at 1e7 cells, 4.45 with
+            # the statics held), which the ``forward`` goal's wrapper column
+            # then timed in place of the wrapper.
+            self._static = {} if partition_assignment is None else {
+                "nbr": StaticArray(self._tbl, replication="partition",
+                                   partition_assignment=partition_assignment),
+                "own": StaticArray(np.ones(self._n, np.float32), replication="partition",
+                                   partition_assignment=partition_assignment),
+            }
 
         def state_fields(self) -> list[str]:
             return ["x"]
@@ -914,14 +928,7 @@ def _make_node_class(SimulationNode, StaticArray, BoundaryInputSpec, jnp):  # no
 
         @property
         def static_data(self) -> dict:
-            if self._pa is None:
-                return {}
-            return {
-                "nbr": StaticArray(self._tbl, replication="partition",
-                                   partition_assignment=self._pa),
-                "own": StaticArray(np.ones(self._n, np.float32), replication="partition",
-                                   partition_assignment=self._pa),
-            }
+            return self._static
 
         def initial_state(self) -> dict:
             i = np.arange(self._n, dtype=np.float32)
@@ -1932,9 +1939,12 @@ def run_forward(args, out: dict) -> dict:
 
             device = timed(device_block, warmup=args.warmup, repeats=args.repeats)
 
-            # The public ``update()`` re-partitions the static arrays on the
-            # host every call; its first call is host work only (the
-            # executable is already compiled).
+            # The public ``update()`` partitions the static arrays on the
+            # host at its first call and keeps them (the wrapper's cache,
+            # keyed on the arrays' identity, which ``NeighbourMeanNode``
+            # holds stable), so the first call is that host work (the
+            # executable is already compiled) and the timed calls below are
+            # the wrapper's own cost per call over the compiled step.
             t0 = time.perf_counter()
             jax.block_until_ready(sharded.update(state, bi, dt, params=params)["x"])
             wrapper_first_call_s = time.perf_counter() - t0

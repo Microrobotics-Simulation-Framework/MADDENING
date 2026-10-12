@@ -1,0 +1,11 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[gradient] cells=  100489 rollout all_to_all grad     5.72 ms (unsharded     1.14)  compile   2.96 s  max|dg|=5.96e-07  rel: start 1.80e-07 source 2.18e-07 weight 0.00e+00
+[gradient] cells=  100489 rollout ppermute   grad     6.86 ms (unsharded     1.14)  compile   1.51 s  max|dg|=7.15e-07  rel: start 2.16e-07 source 1.63e-07 weight 0.00e+00
+[gradient] dof=  100488 sharded_cg grad    61.48 ms (unsharded    10.41)  rel grad=4.49e-07 jvp=5.34e-07  iterations 56/56 of 3000  true residual <= 8.97e-05
+[gradient] cells=  300304 rollout all_to_all grad     6.31 ms (unsharded     1.93)  compile   4.23 s  max|dg|=1.43e-06  rel: start 2.45e-07 source 1.91e-07 weight 0.00e+00
+[gradient] cells=  300304 rollout ppermute   grad     6.70 ms (unsharded     1.93)  compile   3.90 s  max|dg|=1.19e-06  rel: start 2.04e-07 source 2.55e-07 weight 0.00e+00
+[gradient] dof=  300304 sharded_cg grad    61.09 ms (unsharded    10.24)  rel grad=6.84e-07 jvp=5.34e-07  iterations 56/56 of 3000  true residual <= 8.85e-05
+[gradient] cells= 1000000 rollout all_to_all grad     6.29 ms (unsharded     2.49)  compile   5.47 s  max|dg|=1.91e-06  rel: start 3.12e-07 source 2.45e-07 weight 0.00e+00
+[gradient] cells= 1000000 rollout ppermute   grad     6.97 ms (unsharded     2.49)  compile   5.76 s  max|dg|=2.38e-06  rel: start 3.90e-07 source 2.45e-07 weight 0.00e+00
+[gradient] dof= 1000000 sharded_cg grad    63.72 ms (unsharded    10.23)  rel grad=5.78e-07 jvp=4.90e-07  iterations 56/56 of 3000  true residual <= 8.90e-05
+wrote results/multigpu/gradient.json (125.6 s)  checks 72/72 passed

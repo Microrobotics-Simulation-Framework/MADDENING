@@ -1,0 +1,8 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[hybrid]         1d 4x1 316x320 max_rel f 0.0e+00  averages 1.5e-07  grad 0.0e+00  value+grad     9.10 ms (unsharded     1.52)
+[hybrid]   1d-axis1 1x4 316x320 max_rel f 0.0e+00  averages 1.5e-07  grad 7.5e-08  value+grad     9.58 ms (unsharded     1.52)
+[hybrid]    2d-flat 1x4 316x320 max_rel f 0.0e+00  averages 1.5e-07  grad 7.5e-08  value+grad     9.20 ms (unsharded     1.52)
+[hybrid]         2d 2x2 316x320 max_rel f 0.0e+00  averages 0.0e+00  grad 7.5e-08  value+grad    10.98 ms (unsharded     1.52)
+[hybrid]         2d 2x2 548x552 max_rel f 0.0e+00  averages 5.3e-07  grad 1.1e-07  value+grad    10.87 ms (unsharded     2.74)
+[hybrid]       2d 2x2 1000x1004 max_rel f 0.0e+00  averages 2.3e-07  grad 1.2e-07  value+grad    11.26 ms (unsharded     2.65)
+wrote results/multigpu/hybrid.json (54.1 s)  checks 54/54 passed

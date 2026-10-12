@@ -1,0 +1,6 @@
+rung  target        cells  K            outcome                     fill   B/cell  steps/s   max_rel
+   1    0.25    174182400  35x24x27     passed                     0.183   433.3     9.32   1.2e-06
+   2    0.85    802414080  57x39x47     out of memory              0.197   101.4        -         -
+CEILING: rung 1, 174182400 cells (K = 35x24x27), fill 0.183
+  the allocator's own limit there: 96877936640 bytes (the peak was 0.195 of it)
+STOPPED BY: rung 2 (802414080 cells): out of memory -- while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 42.23GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']

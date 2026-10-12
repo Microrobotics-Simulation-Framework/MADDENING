@@ -161,15 +161,16 @@ def _point_jax_at(target: str, min_compile_time_secs: Optional[float]) -> str:
             f"writing to {opened!r} while the cache was reported at {target!r}.  Call "
             f"compile_cache.enable({target!r}) before the process compiles anything, or "
             f"set {ENV_VAR} (or JAX_COMPILATION_CACHE_DIR) before it starts.")
-    if min_compile_time_secs is None:
-        # Keep a threshold an earlier enable() chose; JAX's own default
-        # (1 s) would skip most MADDENING steps.
-        min_compile_time_secs = (
-            _setting("jax_persistent_cache_min_compile_time_secs")
-            if _enabled_dir is not None else 0.0)
+    if min_compile_time_secs is not None:
+        secs = float(min_compile_time_secs)
+    elif _enabled_dir is not None:
+        # Keep the threshold an earlier enable() chose.
+        secs = float(_setting("jax_persistent_cache_min_compile_time_secs"))
+    else:
+        secs = 0.0  # JAX's own default (1 s) would skip most MADDENING steps
     jax.config.update("jax_enable_compilation_cache", True)
     jax.config.update("jax_compilation_cache_dir", target)
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", float(min_compile_time_secs))
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", secs)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
     if must_reopen and reset is not None:
         # After the setting moved, so the next compile (in any thread)

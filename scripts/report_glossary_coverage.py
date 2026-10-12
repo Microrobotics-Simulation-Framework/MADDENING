@@ -25,8 +25,9 @@ What is not read
     lines; MyST comments (``%``) and targets (``(label)=``); HTML
     comments; link reference definitions.  Inside prose: inline code,
     the content of every MyST role (``{term}`` included), inline math,
-    links and images (text and target), autolinks and bare URLs, HTML
-    tags, citations (``[@Key]``) and footnote references.
+    links and images (text and target), autolinks and bare URLs, file
+    paths written without backticks (``src/pkg/fno.py``), HTML tags,
+    citations (``[@Key]``) and footnote references.
 
 How a term is matched
     Case-insensitively, as whole words, with an optional plural ``s`` or
@@ -92,6 +93,7 @@ INLINE = re.compile(
                (?:\((?:[^()]|\([^()]*\))*\)|\[[^\[\]]*\]))
     | (?P<cite>\[(?:[^\[\]]*@|\^)[^\[\]]*\])
     | (?P<url><(?:https?|ftp|mailto):[^>\s]+>|\b(?:https?://|www\.)[^\s<>]+)
+    | (?P<path>(?<![\w/.-])(?:[\w.-]+/)+[\w.-]+\.[A-Za-z]\w*(?![\w/]))
     | (?P<tag></?[A-Za-z][\w:-]*(?:\s[^<>]*)?/?>)
     | (?P<subst>\{\{.*?\}\})
     """,

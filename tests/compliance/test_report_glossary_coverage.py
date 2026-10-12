@@ -124,7 +124,7 @@ def test_links_comments_code_directives_and_front_matter_are_not_prose(
 orphan: halo
 html_meta: {"description": "the halo"}
 ---
-See [the halo guide](halo.md) and <https://example.org/halo>.
+See [the halo guide](halo.md), <https://example.org/halo> and src/shard/halo.py.
 % a halo in a MyST comment
 <!-- a halo in an HTML comment -->
 (halo-target)=

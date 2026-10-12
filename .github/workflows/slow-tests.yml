@@ -111,6 +111,12 @@ jobs:
           # This job's share of the suite (tests/_sharding.py), dealt by
           # measured time.
           MADDENING_TEST_SHARD: "${{ matrix.shard }}/10:weighted"
+          # Release each test file's caches and JAX's compiled programs when
+          # its last test has run (tests/_release_between_files.py): the
+          # shards are dealt by time, not memory, and without it a deal that
+          # puts several files holding compiled graphs on one shard runs the
+          # runner out of memory (an abort inside an XLA compile).
+          MADDENING_TEST_RELEASE_BETWEEN_FILES: "1"
         run: |
           # Wrap pytest with GNU ``timeout`` so we exit with code 124
           # on time-out (instead of GitHub killing the job with a

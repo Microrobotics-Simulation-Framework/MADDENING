@@ -131,7 +131,9 @@ def pytest_configure(config):
     (``tests/_sharding.py``).  ``MADDENING_TEST_JAX_TIMING=1`` records each
     test's JAX trace / lower / compile times into the JUnit XML
     (``tests/_jax_timing.py``), which ``scripts/report_test_durations.py``
-    reads.
+    reads.  ``MADDENING_TEST_RELEASE_BETWEEN_FILES=1`` releases each test
+    file's caches and JAX's compiled programs when the file's last test has
+    run (``tests/_release_between_files.py``).
     """
     spec = os.environ.get("MADDENING_TEST_SHARD")
     if spec:
@@ -140,6 +142,9 @@ def pytest_configure(config):
     if os.environ.get("MADDENING_TEST_JAX_TIMING") == "1":
         from tests import _jax_timing
         _jax_timing.register(config)
+    if os.environ.get("MADDENING_TEST_RELEASE_BETWEEN_FILES") == "1":
+        from tests import _release_between_files
+        _release_between_files.register(config)
 
 
 def pytest_report_header(config):

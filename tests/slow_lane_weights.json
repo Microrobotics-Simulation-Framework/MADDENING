@@ -4,7 +4,7 @@
  "runs": [
   {
    "run": "38182068116",
-   "commit": "unknown",
+   "commit": "e69536b30191b0985ff44484d4538a86e87ad06e",
    "artifacts": [
     "slow-durations-py3.12-jax0.10.2-shard10of10",
     "slow-durations-py3.12-jax0.10.2-shard1of10",

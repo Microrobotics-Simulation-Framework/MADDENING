@@ -1,0 +1,15 @@
+Runs (one line per JSON file)
+goal         platform dev  device kind                jax / jaxlib      dry run  checks  commit        verdict
+forward      gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no        14/14  c0c6add8a355  PASS
+
+Checklist (CLOSED needs a PASS from real GPUs, not a dry run, on >= 4 devices, with every check run, every file valid and one commit)
+1  sharded == unsharded, stencil and unstructured wrappers                    open  [stencil not run, forward PASS]  commit c0c6add8a355
+2  halo exchange at the shard and global boundaries                           open  [halo not run]
+3  sharded adjoint == unsharded adjoint                                       open  [stencil not run, gradient not run, coupled not run]
+4  HybridNode(ShardedStencilNode(inner))                                      open  [hybrid not run]
+5  an indivisible grid is refused                                             open  [indivisible not run]
+6  a sharded and a replicated member in one coupling group, with its adjoint  open  [coupled not run]
+
+Forward run (ms per step; wrapper = public update(), device = compiled step)
+  1001664 cells file:/root/vessel_tet_1001664.npz all_to_all wrapper   126.746  device     5.061  compile   1.83 s  max|dx| 8.34e-07  finite=True
+  1001664 cells file:/root/vessel_tet_1001664.npz ppermute   wrapper   126.516  device     5.369  compile   1.32 s  max|dx| 8.34e-07  finite=True

@@ -2290,6 +2290,15 @@ stream_config.ice_servers reached the log; credentials are now redacted.
 F = J^T J, whose rounding a constant or piecewise constant sensitivity aligns:
 two parameters that enter a residual only through their sum could report rank
 2 of 2 and a finite Cramer-Rao bound, with no warning (never released).
+`290` (resolved): 0.1.0 to 0.3.1: on an NVIDIA GPU at JAX's default matmul
+precision, LBMNode's and LBMPipeNode's lattice products ran at reduced
+precision, and the multi-GPU stencil check's LBM gradients were off by 1.6e-3
+relative with no warning; each product now pins `Precision.HIGHEST`.
+`291` (resolved): 0.1.0 to 0.3.1: on an NVIDIA GPU at JAX's default matmul
+precision, a graph's programs formed their float32 matrix products at reduced
+precision (an interface mapping on a multi-component field, IQN-ILS, the FNO
+surrogate), off by up to about 4e-4 relative with no warning; every program the
+library builds now traces at `gm.matmul_precision`, `"highest"` unless set.
 
 ## The account of each area
 
@@ -9015,6 +9024,7 @@ version written for a user of 0.3.1.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The cycle's own float32 matrix products trace at the graph's `matmul_precision`** (never released; the class is MADD-ANO-291): `StaticLinearMapping.apply` / `apply_T` on a multi-component field, the coupling bounds' Krylov basis (`jacobian_range_basis`: `U.T @ JU`, `U @ M`), the spectral estimate's squaring and the full resolvent norm (`_bounds._full_resolvent_norm_and_rows`), the heat rod's 4th-order ghosts in `update_padded` (`w @ cells`), and sysid's `J.T @ J` (`_fim_gram`) and `Jh.T @ Jh` (`_marquardt_step`) were written during the cycle and took JAX's default, reduced on an NVIDIA GPU (measured 3.0e-4, 4.0e-4 and 9.0e-6 relative for the basis, the ghosts and the Gram matrix, against 4.9e-7, 7.3e-8 and 1.1e-7 at `highest`).
 - **`matrix_mapping` and `StaticLinearMapping` say that `mode` is a label**: `matrix_mapping(H, mode="conservative")` applies `H` as given (it neither transposes nor rescales a matrix you bring); the sparse forms said so, the dense ones did not. Docstrings and the mapping guide's table only.
 - **An FMU's description carries `unit` on float variables only** (MADD-ANO-273, in 0.3.0 and 0.3.1 on a hand-built variable): `unit` was written on every variable element, and FMI 3.0's schema has it on `Float32` and `Float64` alone, so an `int32` input into a field whose node declares `expected_units`, or an integer or Boolean parameter whose `ParamSpec` names units, gave a description FMPy refuses (`Element 'Int32', attribute 'unit': The attribute 'unit' is not allowed`). The attribute and its `<UnitDefinitions>` entry are now written for the two float types; `FMIVariable.unit` keeps what the graph declares. Nothing to do.
 - **A 422 no longer sends a refused request body back** (MADD-ANO-274, since 0.1.0): a validation error's `input` is echoed when it is at most 1024 characters of JSON and is otherwise left out, with `input_omitted` in its place saying so, and a reply lists at most 64 errors. A `PUT /graph/params` just under the 32 MiB limit was answered after 22 s with a 422 of 32 MiB; it is now under 1 kB after 13 s (refusing such a body still peaks at 2.4 to 2.6 GiB: the entry's residual). A client that read `input` from a 422 for a large value finds `input_omitted` there.

@@ -234,6 +234,41 @@ layout.  Which transport is *faster* under NCCL is hardware-dependent
 and is measured in the real multi-GPU session; the correctness and the
 byte counts are settled here.
 
+The counts come from the layout alone, so they can be read on the host
+before any device is involved.  A 64-cell ring split into four
+contiguous blocks: each block reads one cell from each neighbouring
+block.
+
+```python
+import numpy as np
+
+from maddening.cloud.multigpu.halo_unstructured import (
+    build_unstructured_partition,
+    exchange_traffic,
+)
+
+n_cells, n_devices = 64, 4
+ring = np.array([[i, (i + 1) % n_cells] for i in range(n_cells)])
+layout = build_unstructured_partition(
+    partition_assignment=np.arange(n_cells) * n_devices // n_cells,
+    edges=ring,
+    n_devices=n_devices,
+)
+traffic = exchange_traffic(layout)
+print(traffic)
+# all_to_all sends n_devices * n_ghost_max = 4 * 2 cells per device;
+# ppermute sends one cell to each of the two neighbouring devices.
+assert traffic == {"all_to_all": 8, "ppermute": 2, "useful": 2, "ppermute_messages": 2}
+```
+
+`python -m maddening.examples.advanced.unstructured_sharding_demo` runs
+the whole unstructured path on four emulated CPU devices: a diffusion
+node on an irregular graph wrapped with `exchange="ppermute"` and checked
+against the unsharded node, the traffic of a compact and of a random
+partition, and `sharded_cg(differentiable=True)` with a Jacobi
+preconditioner, its gradient checked against a dense solve.  It takes
+about ten seconds on three cores.
+
 ## Partition-assignment handoff (unstructured path)
 
 The contract for unstructured sharding has **three** participants:
@@ -270,6 +305,14 @@ row per cell of the layout: since v0.4.0 a node with more or fewer cells
 is refused at construction, naming both counts, where before the cells
 past the layout's count were silently dropped (`partition_value` refuses
 the same thing for any other caller).
+
+Build the inner node's `static_data` once, in its constructor, and
+return the same `StaticArray` objects on every access.  The wrapper keeps
+its per-device copy of each partitioned static keyed on the identity of
+its array, so a `static_data` property that builds new arrays each time
+makes every eager `update()` partition them again: on four GPUs at 10⁷
+cells that cost 242 ms a step against 4.45 ms.  After rewriting a
+static's buffer in place, call `invalidate_static_cache()`.
 
 Reproducibility: the partition assignment is part of the experiment's
 reproducibility bundle (alongside seeds and version pins).  It is not

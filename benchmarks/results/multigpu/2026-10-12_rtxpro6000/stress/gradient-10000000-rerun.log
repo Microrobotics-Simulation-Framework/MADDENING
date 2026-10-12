@@ -1,0 +1,5 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[gradient] cells=10004569 rollout all_to_all grad     7.43 ms (unsharded     7.91)  compile  31.90 s  max|dg|=2.38e-06  rel: start 4.01e-07 source 3.06e-07 weight 7.76e-08
+[gradient] cells=10004569 rollout ppermute   grad     7.62 ms (unsharded     7.91)  compile  38.19 s  max|dg|=2.38e-06  rel: start 4.01e-07 source 3.06e-07 weight 7.76e-08
+[gradient] dof=10004568 sharded_cg grad    62.23 ms (unsharded    26.90)  rel grad=7.83e-07 jvp=4.38e-07  iterations 56/56 of 3000  true residual <= 8.89e-05
+wrote results/stress/cells-10000000/gradient.json (418.4 s)  checks 24/24 passed

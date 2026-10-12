@@ -1,0 +1,9 @@
+devices [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3)]  cells 10004569  partition contiguous  host setup 0.2 s
+[A] eager update: 242.50 ms/step, re-partitions in 20 steps: 40
+[B] eager update: 4.45 ms/step, re-partitions in 20 steps: 0
+[C] gm.step(): 7.23 ms/step, re-partitions: 2 at compile+first step, 0 during 19 steps (compile+first step 3.5 s)
+[C] gm.run_scan(20): 0.81 ms/step, re-partitions: 0
+final field: A vs B max|dx| 0.000e+00; A vs graph step max|dx| 2.384e-07
+[profile 4_cards_sharded] median 3.819 ms/step, compile 3327 ms, dispatch floor 2.408 ms
+[profile 1_card_unsharded] median 1.255 ms/step, compile 1677 ms, dispatch floor 0.904 ms
+wrote /root/gve_results/gve.json

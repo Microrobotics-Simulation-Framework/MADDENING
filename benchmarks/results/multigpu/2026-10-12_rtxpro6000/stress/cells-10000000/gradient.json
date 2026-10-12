@@ -1,0 +1,399 @@
+{
+  "schema_version": 12,
+  "goal": "gradient",
+  "dry_run": false,
+  "allow_fewer_devices": false,
+  "n_devices": 4,
+  "environment": {
+    "hostname": "1cf35f3dc52f",
+    "timestamp_utc": "2026-10-12T16:27:02Z",
+    "python": "3.12.3",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "platform": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kinds": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "n_devices_visible": 4,
+    "nvidia_smi": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07"
+    ],
+    "xla_flags": "",
+    "jax_platforms": "",
+    "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f"
+  },
+  "config": {
+    "goal": "gradient",
+    "out": "results/stress/cells-10000000",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": false,
+    "cells": [
+      10000000
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 1,
+    "repeats": 3,
+    "steps": 20,
+    "grad_steps": 5,
+    "cg_max_iters": 3000,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "contiguous"
+  },
+  "results": [
+    {
+      "cells": 10004569,
+      "mesh": "grid",
+      "partition": "contiguous",
+      "renumbered": false,
+      "n_devices": 4,
+      "grad_steps": 5,
+      "rollout": {
+        "unsharded": {
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              7.91303301230073,
+              7.868584711104631,
+              8.0330241471529
+            ],
+            "min_ms": 7.868584711104631,
+            "median_ms": 7.91303301230073,
+            "mean_ms": 7.938213956852754
+          },
+          "compile_s": 19.814750455785543
+        },
+        "all_to_all": {
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              7.433995604515076,
+              7.172719109803438,
+              7.724725175648928
+            ],
+            "min_ms": 7.172719109803438,
+            "median_ms": 7.433995604515076,
+            "mean_ms": 7.443813296655814
+          },
+          "compile_s": 31.897608565632254,
+          "input_presharded": true,
+          "parity": {
+            "max_abs": 2.384185791015625e-06,
+            "max_rel": 4.0096951220294576e-07,
+            "reference_scale": 5.946052551269531,
+            "finite": true
+          },
+          "parity_source": {
+            "max_abs": 9.5367431640625e-06,
+            "max_rel": 3.057596059272356e-07,
+            "reference_scale": 31.190330505371094,
+            "finite": true
+          },
+          "parity_weight": {
+            "max_abs": 0.125,
+            "max_rel": 7.764840862692456e-08,
+            "reference_scale": 1609820.5,
+            "finite": true
+          }
+        },
+        "ppermute": {
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              7.622603792697191,
+              7.818780839443207,
+              7.549608126282692
+            ],
+            "min_ms": 7.549608126282692,
+            "median_ms": 7.622603792697191,
+            "mean_ms": 7.663664252807696
+          },
+          "compile_s": 38.19299857178703,
+          "input_presharded": true,
+          "parity": {
+            "max_abs": 2.384185791015625e-06,
+            "max_rel": 4.0096951220294576e-07,
+            "reference_scale": 5.946052551269531,
+            "finite": true
+          },
+          "parity_source": {
+            "max_abs": 9.5367431640625e-06,
+            "max_rel": 3.057596059272356e-07,
+            "reference_scale": 31.190330505371094,
+            "finite": true
+          },
+          "parity_weight": {
+            "max_abs": 0.125,
+            "max_rel": 7.764840862692456e-08,
+            "reference_scale": 1609820.5,
+            "finite": true
+          }
+        }
+      },
+      "sharded_cg": {
+        "dof": 10004568,
+        "shift": 0.03,
+        "rtol": 0.0001,
+        "max_iters": 3000,
+        "input_presharded": true,
+        "grad_sharded": {
+          "warmup": 1,
+          "repeats": 3,
+          "ms": [
+            60.94494881108403,
+            64.27370617166162,
+            62.230344861745834
+          ],
+          "min_ms": 60.94494881108403,
+          "median_ms": 62.230344861745834,
+          "mean_ms": 62.48299994816383
+        },
+        "grad_unsharded": {
+          "warmup": 1,
+          "repeats": 3,
+          "ms": [
+            26.89648512750864,
+            26.740882080048323,
+            28.62615790218115
+          ],
+          "min_ms": 26.740882080048323,
+          "median_ms": 26.89648512750864,
+          "mean_ms": 27.42117503657937
+        },
+        "compile_s": {
+          "sharded": 3.8868347788229585,
+          "unsharded": 2.32887315005064
+        },
+        "grad_parity": {
+          "max_abs": 0.0013427734375,
+          "max_rel": 7.834549136654052e-07,
+          "reference_scale": 1713.912841796875,
+          "finite": true
+        },
+        "jvp_parity": {
+          "max_abs": 1.71661376953125e-05,
+          "max_rel": 4.382155512181954e-07,
+          "reference_scale": 39.17281723022461,
+          "finite": true
+        },
+        "solve": {
+          "sharded": {
+            "converged": true,
+            "iterations": 56,
+            "true_residual": {
+              "solve": 8.769415774909427e-05,
+              "adjoint": 8.89068125908367e-05,
+              "tangent": 8.771637820692725e-05
+            }
+          },
+          "unsharded": {
+            "converged": true,
+            "iterations": 56,
+            "true_residual": {
+              "solve": 8.76937526109256e-05,
+              "adjoint": 8.890446853859257e-05,
+              "tangent": 8.77165261838374e-05
+            }
+          }
+        }
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "10004569 cells rollout all_to_all grad vs unsharded max_rel",
+      "value": 4.0096951220294576e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout all_to_all grad vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout all_to_all grad wrt the per-cell source vs unsharded max_rel",
+      "value": 3.057596059272356e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout all_to_all grad wrt the per-cell source vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout all_to_all grad wrt the injected weight vs unsharded max_rel",
+      "value": 7.764840862692456e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout all_to_all grad wrt the injected weight vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout ppermute grad vs unsharded max_rel",
+      "value": 4.0096951220294576e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout ppermute grad vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout ppermute grad wrt the per-cell source vs unsharded max_rel",
+      "value": 3.057596059272356e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout ppermute grad wrt the per-cell source vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout ppermute grad wrt the injected weight vs unsharded max_rel",
+      "value": 7.764840862692456e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004569 cells rollout ppermute grad wrt the injected weight vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg grad vs unsharded max_rel",
+      "value": 7.834549136654052e-07,
+      "limit": 0.0004,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg grad vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg jvp vs unsharded max_rel",
+      "value": 4.382155512181954e-07,
+      "limit": 0.0004,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg jvp vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg sharded solve stopped on its tolerance, not on the iteration cap",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "56 iterations, cap 3000",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg sharded solve true residual",
+      "value": 8.769415774909427e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg sharded adjoint true residual",
+      "value": 8.89068125908367e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg sharded tangent true residual",
+      "value": 8.771637820692725e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg unsharded solve stopped on its tolerance, not on the iteration cap",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "56 iterations, cap 3000",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg unsharded solve true residual",
+      "value": 8.76937526109256e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg unsharded adjoint true residual",
+      "value": 8.890446853859257e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "10004568 dof sharded_cg unsharded tangent true residual",
+      "value": 8.77165261838374e-05,
+      "limit": 0.0002,
+      "sense": "<=",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "wall_s": 418.3622552040033
+}

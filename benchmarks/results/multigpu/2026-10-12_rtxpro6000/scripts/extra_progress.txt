@@ -1,0 +1,9 @@
+START precision-fix 17:08:55Z
+ src/maddening/nodes/lbm.py      | 6 +++---
+ src/maddening/nodes/lbm_pipe.py | 8 ++++----
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+imports /root/precision_fix/src/maddening/__init__.py
+END precision-fix rc=0 17:10:29Z
+START graph-vs-eager 17:10:29Z
+END graph-vs-eager rc=0 17:12:26Z
+ALL DONE 17:12:26Z

@@ -1,0 +1,3 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[exchange] cells=30008484 contiguous a2a    3.160 ms  ppermute    2.787 ms  x1.13  identical=True
+wrote results/stress/cells-30000000/exchange.json (131.9 s)  checks 2/2 passed

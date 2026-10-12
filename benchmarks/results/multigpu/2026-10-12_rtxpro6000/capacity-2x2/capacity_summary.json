@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "kind": "capacity summary",
+  "gating": false,
+  "dry_run": false,
+  "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f",
+  "mesh": "2x2",
+  "tile": [
+    16,
+    24,
+    20
+  ],
+  "device_memory_gb": 96.0,
+  "config": {
+    "out": "results/capacity-2x2",
+    "summarise": null,
+    "dry_run": false,
+    "mesh": "2x2",
+    "device_memory_gb": 96.0,
+    "ramp": [
+      0.25,
+      0.5,
+      0.75,
+      0.85,
+      0.9
+    ],
+    "cells": null,
+    "k": null,
+    "tile": [
+      16,
+      24,
+      20
+    ],
+    "steps": 10,
+    "rung_timeout_s": 360.0,
+    "bytes_per_cell": null,
+    "soak_minutes": 3.0,
+    "soak_at": 0.75,
+    "check_chunk_mb": 128.0,
+    "child": null,
+    "record": null,
+    "rung_index": 0,
+    "target_fill": null
+  },
+  "rungs": [
+    {
+      "rung": 1,
+      "file": "capacity_rung_01.json",
+      "target_fill": 0.25,
+      "sized_from": "a priori: 582 bytes per cell = 97 of state x 6",
+      "k": [
+        37,
+        23,
+        27
+      ],
+      "shape": [
+        592,
+        552,
+        540
+      ],
+      "cells": 176463360,
+      "outcome": "passed",
+      "detail": "",
+      "fill": 0.18407912304004034,
+      "peak_bytes": 18974731520,
+      "peak_bytes_per_cell": 430.11153182167675,
+      "bytes_limit": 96877936640,
+      "wall_s": 36.63798963604495,
+      "steps_per_second": 9.476320621149528,
+      "largest_max_rel": 0.0,
+      "exact": true
+    },
+    {
+      "rung": 2,
+      "file": "capacity_rung_02.json",
+      "target_fill": 0.5,
+      "sized_from": "rung 1 measured 430.1 bytes per cell, fill 0.184",
+      "k": [
+        49,
+        33,
+        38
+      ],
+      "shape": [
+        784,
+        792,
+        760
+      ],
+      "cells": 471905280,
+      "outcome": "passed",
+      "detail": "",
+      "fill": 0.486079362531503,
+      "peak_bytes": 50104679168,
+      "peak_bytes_per_cell": 424.7011533161909,
+      "bytes_limit": 96877936640,
+      "wall_s": 44.4009917890653,
+      "steps_per_second": 3.279046391167597,
+      "largest_max_rel": 1.227978633581102e-06,
+      "exact": false
+    },
+    {
+      "rung": 3,
+      "file": "capacity_rung_03.json",
+      "target_fill": 0.75,
+      "sized_from": "rung 2 measured 424.7 bytes per cell, fill 0.486",
+      "k": [
+        57,
+        37,
+        44
+      ],
+      "shape": [
+        912,
+        888,
+        880
+      ],
+      "cells": 712673280,
+      "outcome": "out of memory",
+      "detail": "while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 37.46GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']",
+      "fill": 0.17531635115544,
+      "peak_bytes": 18071471872,
+      "peak_bytes_per_cell": 101.42920959236749,
+      "bytes_limit": 96877936640,
+      "wall_s": 28.906763049773872,
+      "steps_per_second": null,
+      "largest_max_rel": null,
+      "exact": null
+    }
+  ],
+  "notes": [],
+  "ceiling": {
+    "rung": 2,
+    "file": "capacity_rung_02.json",
+    "target_fill": 0.5,
+    "sized_from": "rung 1 measured 430.1 bytes per cell, fill 0.184",
+    "k": [
+      49,
+      33,
+      38
+    ],
+    "shape": [
+      784,
+      792,
+      760
+    ],
+    "cells": 471905280,
+    "outcome": "passed",
+    "detail": "",
+    "fill": 0.486079362531503,
+    "peak_bytes": 50104679168,
+    "peak_bytes_per_cell": 424.7011533161909,
+    "bytes_limit": 96877936640,
+    "wall_s": 44.4009917890653,
+    "steps_per_second": 3.279046391167597,
+    "largest_max_rel": 1.227978633581102e-06,
+    "exact": false
+  },
+  "stopped_by": {
+    "rung": 3,
+    "outcome": "out of memory",
+    "cells": 712673280,
+    "target_fill": 0.75,
+    "detail": "while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 37.46GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']"
+  },
+  "soak": {
+    "rung": 0,
+    "file": "capacity_soak.json",
+    "target_fill": null,
+    "sized_from": "0.75 of rung 2's cells",
+    "k": [
+      45,
+      29,
+      35
+    ],
+    "shape": [
+      720,
+      696,
+      700
+    ],
+    "cells": 350784000,
+    "outcome": "passed",
+    "detail": "",
+    "fill": 0.36218028018871945,
+    "peak_bytes": 37333259008,
+    "peak_bytes_per_cell": 425.7122218573253,
+    "bytes_limit": 96877936640,
+    "wall_s": 187.61590385483578,
+    "steps_per_second": null,
+    "largest_max_rel": null,
+    "exact": null,
+    "growth": {
+      "blocks": 35,
+      "bytes_in_use": {
+        "cuda:0": {
+          "first_to_last": 0,
+          "after_first": 0
+        },
+        "cuda:1": {
+          "first_to_last": 0,
+          "after_first": 0
+        },
+        "cuda:2": {
+          "first_to_last": 0,
+          "after_first": 0
+        },
+        "cuda:3": {
+          "first_to_last": 0,
+          "after_first": 0
+        }
+      },
+      "peak_bytes_in_use": {
+        "cuda:0": {
+          "first_to_last": 256,
+          "after_first": 256
+        },
+        "cuda:1": {
+          "first_to_last": 0,
+          "after_first": 0
+        },
+        "cuda:2": {
+          "first_to_last": 0,
+          "after_first": 0
+        },
+        "cuda:3": {
+          "first_to_last": 0,
+          "after_first": 0
+        }
+      },
+      "host_rss_bytes": {
+        "first_to_last": 3416064,
+        "after_first": 2486272
+      }
+    }
+  },
+  "exit_status": 0
+}

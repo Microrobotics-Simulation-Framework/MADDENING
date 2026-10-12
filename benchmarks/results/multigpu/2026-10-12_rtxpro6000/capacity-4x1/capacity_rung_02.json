@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "kind": "capacity rung",
+  "gating": false,
+  "dry_run": false,
+  "rung": 2,
+  "target_fill": 0.85,
+  "mesh": {
+    "label": "4x1",
+    "shape": [
+      4,
+      1
+    ],
+    "devices_per_spatial_axis": [
+      4,
+      1,
+      1
+    ],
+    "n_devices": 4
+  },
+  "lattice": "D3Q19",
+  "viscosity": 0.1,
+  "tile": [
+    16,
+    24,
+    20
+  ],
+  "k": [
+    57,
+    39,
+    47
+  ],
+  "shape": [
+    912,
+    936,
+    940
+  ],
+  "cells": 802414080,
+  "steps": 10,
+  "state_bytes_per_cell": 97,
+  "limit": 1e-05,
+  "config": {
+    "out": null,
+    "summarise": null,
+    "dry_run": false,
+    "mesh": "4x1",
+    "device_memory_gb": 96.0,
+    "ramp": null,
+    "cells": null,
+    "k": [
+      57,
+      39,
+      47
+    ],
+    "tile": [
+      16,
+      24,
+      20
+    ],
+    "steps": 10,
+    "rung_timeout_s": 300.0,
+    "bytes_per_cell": null,
+    "soak_minutes": 0.0,
+    "soak_at": 0.75,
+    "check_chunk_mb": 128.0,
+    "child": "rung",
+    "record": "results/capacity-4x1/capacity_rung_02.json",
+    "rung_index": 2,
+    "target_fill": 0.85
+  },
+  "phase": "running",
+  "pid": 84124,
+  "outcome": "out of memory",
+  "memory": {
+    "device_memory_gb": 96.0,
+    "readings": [
+      {
+        "at": "after the build",
+        "devices": [
+          {
+            "device": "cuda:0",
+            "measured": true,
+            "bytes_in_use": 20331687424,
+            "peak_bytes_in_use": 20332442112,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 15245867520,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 14772626944,
+            "pool_bytes": 35704012800,
+            "peak_pool_bytes": 35704012800
+          },
+          {
+            "device": "cuda:1",
+            "measured": true,
+            "bytes_in_use": 19587111424,
+            "peak_bytes_in_use": 19587865600,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 15245867520,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 14772626944,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:2",
+            "measured": true,
+            "bytes_in_use": 19587111424,
+            "peak_bytes_in_use": 19587865600,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 15245867520,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 14772626944,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          },
+          {
+            "device": "cuda:3",
+            "measured": true,
+            "bytes_in_use": 19587111424,
+            "peak_bytes_in_use": 19587865600,
+            "bytes_limit": 96877936640,
+            "largest_alloc_size": 15245867520,
+            "bytes_reserved": 0,
+            "peak_bytes_reserved": 0,
+            "largest_free_block_bytes": 14772626944,
+            "pool_bytes": 34361835520,
+            "peak_pool_bytes": 34361835520
+          }
+        ]
+      }
+    ],
+    "fill": 0.19725064933300018,
+    "fill_by_device": {
+      "cuda:0": 0.19725064933300018,
+      "cuda:1": 0.1900273064772288,
+      "cuda:2": 0.1900273064772288,
+      "cuda:3": 0.1900273064772288
+    },
+    "peak_bytes": 20332442112,
+    "bytes_limit": 96877936640,
+    "why_not": null,
+    "peak_bytes_per_cell": 101.3563576152602
+  },
+  "environment": {
+    "hostname": "1cf35f3dc52f",
+    "timestamp_utc": "2026-10-12T16:20:54Z",
+    "python": "3.12.3",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "platform": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kinds": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "n_devices_visible": 4,
+    "xla_flags": "",
+    "jax_platforms": "",
+    "allocator": {
+      "found": {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.95",
+        "XLA_PYTHON_CLIENT_ALLOCATOR": null
+      },
+      "used": {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.95",
+        "XLA_PYTHON_CLIENT_ALLOCATOR": null
+      }
+    },
+    "git_commit": "c0c6add8a355e4753f7cabec555b5a751a03262f"
+  },
+  "host": {
+    "needed_bytes": 19475318656,
+    "available_bytes": 738068393984,
+    "available_read_from": "the control group's memory.max less memory.current",
+    "devices_are_host_memory": false,
+    "refused": false
+  },
+  "on_one_device": [
+    {
+      "what": "LBMNode's own wall mask, a bool per cell its constructor builds on the default device and the sharded step does not read",
+      "bytes": 802414080,
+      "device": "cuda:0"
+    }
+  ],
+  "raised": {
+    "type": "JaxRuntimeError",
+    "message": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 42.23GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']",
+    "phase": "running"
+  },
+  "outcome_detail": "while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 42.23GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']",
+  "launch": {
+    "returncode": 7,
+    "timed_out": false,
+    "wall_s": 38.44324378995225,
+    "time_box_s": 360.0,
+    "stderr_log": "capacity_rung_02.stderr.log",
+    "stderr_tail": "W1012 16:21:24.277401   84844 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 42.23GiB (rounded to 45344465664) from the lower end requested by op \nIf this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.\nCurrent allocation summary follows.\nW1012 16:21:24.278384   84844 bfc_allocator.cc:609] ************************************______________***********************__________________________*\nW1012 16:21:26.693456   84847 bfc_allocator.cc:598] Allocator (GPU_1_bfc) ran out of memory trying to allocate 42.23GiB (rounded to 45344465664) from the lower end requested by op \nIf this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.\nCurrent allocation summary follows.\nW1012 16:21:26.694264   84847 bfc_allocator.cc:609] ***********************************______________************************__________________________*\nW1012 16:21:26.726855   84853 bfc_allocator.cc:598] Allocator (GPU_3_bfc) ran out of memory trying to allocate 42.23GiB (rounded to 45344465664) from the lower end requested by op \nIf this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.\nCurrent allocation summary follows.\nW1012 16:21:26.727417   84853 bfc_allocator.cc:609] ***********************************______________************************__________________________*\nW1012 16:21:26.735762   84850 bfc_allocator.cc:598] Allocator (GPU_2_bfc) ran out of memory trying to allocate 42.23GiB (rounded to 45344465664) from the lower end requested by op \nIf this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.\nCurrent allocation summary follows.\nW1012 16:21:26.736321   84850 bfc_allocator.cc:609] ***********************************______________************************__________________________*\n[capacity] OUT OF MEMORY while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 42.23GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']"
+  }
+}

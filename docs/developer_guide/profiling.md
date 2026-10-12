@@ -5,9 +5,14 @@ faster without changing the answer?*
 
 ## `profile_graph`
 
-<!-- snippet: no-run, reason: fragment: gm is the reader's compiled graph -->
 ```python
+from maddening import GraphManager
 from maddening.core.simulation.profiler import profile_graph
+from maddening.nodes import SpringDamperNode
+
+gm = GraphManager()
+gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, initial_position=0.5))
+gm.compile()
 
 report = profile_graph(gm, n_steps=200, n_warmup=5, trace=True)
 print(report)

@@ -24,6 +24,13 @@ uvicorn module:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 
 ## Security: a loopback bind is open, anything else needs a token
 
+**A walk-through of a network deployment** -- the bind address, the
+token, `checkpoint_root`, a client call with `Authorization: Bearer` and
+in-process tests -- is the user guide's
+[Serving the REST API on a network](../../../docs/user_guide/serving_the_rest_api.md).
+`python -m maddening.examples.servers.serve_with_token` runs it on a
+loopback port.
+
 **Binding `127.0.0.1` changes nothing** — no login, no header, exactly as
 before.  **Binding anything else requires a bearer token on every route**
 except `/healthz` and the static `/viz/*` pages, because those routes

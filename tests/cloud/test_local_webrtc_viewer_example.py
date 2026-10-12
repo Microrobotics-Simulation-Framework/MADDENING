@@ -90,8 +90,8 @@ def test_the_self_check_decodes_the_frames_the_simulation_pushed(tmp_path):
                      result.stdout), result.stdout
 
 
-def _lines(proc: subprocess.Popen) -> queue.Queue:
-    """The process's output, line by line, read on a thread."""
+def _lines(proc: subprocess.Popen) -> tuple[queue.Queue, threading.Thread]:
+    """The process's output, line by line, read on a thread (``None`` at the end)."""
     lines: queue.Queue = queue.Queue()
 
     def read() -> None:
@@ -100,8 +100,9 @@ def _lines(proc: subprocess.Popen) -> queue.Queue:
             lines.put(line)
         lines.put(None)
 
-    threading.Thread(target=read, daemon=True).start()
-    return lines
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    return lines, reader
 
 
 def test_the_viewer_page_connects_and_ctrl_c_stops_the_stream_and_removes_it(tmp_path):
@@ -111,8 +112,8 @@ def test_the_viewer_page_connects_and_ctrl_c_stops_the_stream_and_removes_it(tmp
         text=True)
     seen: list[str] = []
     peer = None
+    lines, reader = _lines(proc)
     try:
-        lines = _lines(proc)
         deadline = time.monotonic() + RUN_TIMEOUT_S
         uri = None
         while uri is None and time.monotonic() < deadline:
@@ -164,4 +165,7 @@ def test_the_viewer_page_connects_and_ctrl_c_stops_the_stream_and_removes_it(tmp
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=30)
+        reader.join(timeout=30)
+        assert proc.stdout is not None
+        proc.stdout.close()
 

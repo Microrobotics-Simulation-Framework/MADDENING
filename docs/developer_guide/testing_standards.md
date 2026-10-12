@@ -114,6 +114,7 @@ python scripts/check_numeric_constants.py
 | `MADDENING_SEARCH_ENTROPY` | Unset: every slow hunt of the targeted searches draws under its own fixed seed. `fresh`: the hunts explore under one integer of entropy, which each prints. That integer: replays the exploring run (see *Targeted searches* below). CI leaves it unset | unset, `fresh` |
 | `MADDENING_TEST_SHARD` | Keep only shard `i` of `N` of the test files (`tests/_sharding.py`); CI sets it per job. `i/N:weighted` deals the files by measured time, as the slow lane does. Unset: every file | `2/4`, `2/6:weighted` |
 | `MADDENING_TEST_JAX_TIMING` | Record each test's JAX trace / lower / compile / cache-read time and processes started into the JUnit XML (`tests/_jax_timing.py`), for the time budget. CI sets it | `1` |
+| `MADDENING_TEST_RELEASE_BETWEEN_FILES` | When a test file's last test has run, clear the caches the test modules define, JAX's compiled programs and the freed heap, and print the resident size before and after (`tests/_release_between_files.py`). The slow lane sets it; unset, nothing is released | `1` |
 | `MADDENING_REQUIRE_PACKAGING_TESTS` | Fail, rather than skip, the wheel test when the build backend is missing. CI's test lanes set it | `1` |
 | `JAX_COMPILATION_CACHE_DIR` | JAX's persistent compilation cache directory; the test lanes point it at the restored or empty cache (see *The compilation cache* below). Unset locally: no cache | `$RUNNER_TEMP/jax-cache` |
 
@@ -560,6 +561,20 @@ table does not list (a new one, or one under ten seconds) goes by the hash
 of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 64
 minutes of test time on every shard (eight shards held 79 each); the
 heaviest file alone is 49.
+
+The table deals by time, not memory. Each shard runs in one process, and
+JAX keeps every program it compiles; a file that keeps graphs in a
+module-level `functools.lru_cache` keeps them and their programs too. So
+the slow lane sets `MADDENING_TEST_RELEASE_BETWEEN_FILES=1`
+(`tests/_release_between_files.py`). When a file's last test has run, the
+caches defined in modules under `tests/` are cleared, then JAX's compiled
+programs, then the freed heap goes back to the OS, and the log gets one
+line with the resident size before and after. A shard then holds about as
+much as its largest file, not the sum of its files. Without the release, a
+re-dealt table put three such files on one shard, and the runner ran out of
+memory (an abort inside an XLA compile, 2026-10-12). Within a file nothing
+is released, so a file's tests still share their module fixtures and
+caches.
 
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The

@@ -363,9 +363,13 @@ def test_enabled_dir_never_names_a_directory_jax_is_not_using(tmp_path, no_direc
     _compile_new_program(17.125)
     assert _entries(other) == in_other
     assert cc.enabled_dir() == str(mine)
-    # A cache switched off is no directory at all.
+    # A cache switched off is no directory at all, and enable() switches it on.
     jax.config.update("jax_enable_compilation_cache", False)
     assert cc.enabled_dir() is None
+    in_mine = _entries(mine)
+    assert cc.enable(str(mine)) == str(mine) == cc.enabled_dir()
+    _compile_new_program(29.5)
+    assert len(_entries(mine)) > len(in_mine), "enable() left the cache switched off"
 
 
 def test_enable_moves_a_cache_open_elsewhere_even_when_the_setting_already_names_its_directory(

@@ -9,7 +9,7 @@ something 0.3.1 accepted, the refusal's text is quoted as 0.4.0 raises it,
 and a short block shows the refusal and then the fix.  Every Python block
 on this page runs as written on 0.4.0.
 
-Most graphs need only the first section and the coupling notes under
+Most graphs need only the first section and the {term}`coupling <Coupling>` notes under
 [Compiling](#compiling).  The [release notes](../release_notes/v0.4.0.md)
 list what is new.
 
@@ -20,7 +20,7 @@ list what is new.
 | Python | 3.10 or later | 3.12 or later |
 | `jax` and `jaxlib` | 0.4 or 0.5 | 0.10 or 0.11 (`>=0.10,<0.13`; there is no 0.12) |
 | `lineax` | the `[ift]` extra | a base dependency |
-| `scipy` | not declared | a base dependency (JAX already installed it) |
+| `scipy` | not declared | a base dependency ({term}`JAX` already installed it) |
 
 The two JAX ranges do not overlap, so move your project to Python 3.12
 and JAX 0.10 or 0.11 first, then install 0.4.0:
@@ -41,7 +41,7 @@ python -m maddening info        # the versions and devices JAX sees
 
 ## Building a graph
 
-The blocks in this section and the next three share one small node, a
+The blocks in this section and the next three share one small {term}`node <Node>`, a
 relaxation `x <- gain * x_in + 1`, written as a 0.3.1 node would be:
 
 ```python
@@ -78,6 +78,24 @@ def pair(dt_a=0.01, dt_b=0.01):
     gm.add_edge("a", "b", source_field="x", target_field="x_in")
     gm.add_edge("b", "a", source_field="x", target_field="x_in")
     return gm
+
+
+class refused:
+    """`with refused(ValueError) as r:` -- the block must raise; r.text is why."""
+
+    def __init__(self, error):
+        self.error, self.text = error, ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, err, traceback):
+        if kind is None:
+            raise AssertionError(f"no {self.error.__name__} was raised")
+        if not issubclass(kind, self.error):
+            return False                     # another error: let it through
+        self.text = str(err)
+        return True
 ```
 
 Your own nodes keep working.  Their constants are not parameters a fit or
@@ -92,7 +110,8 @@ A node's timestep must be a finite number above zero, and some names are
 refused: `_meta`, `_params`, `_params_mappings` and `_reports` (keys the
 graph keeps for itself), an empty name, one containing `/`, `#` or `->`,
 the spellings `NaN`, `Infinity` and `-Infinity`, and one holding a control
-character other than tab, line feed and carriage return.
+character other than tab, line feed and carriage return.  0.3.1 refused
+only a name already in the graph.
 
 ```text
 ValueError: Node 'b1' has timestep 0.0: a node's timestep must be a finite number > 0.
@@ -102,11 +121,13 @@ ValueError: Node name '_meta' is invalid: it is a key the graph reserves for its
 <!-- snippet: continues -->
 ```python
 gm = GraphManager()
-for node in (Relax("b1", 0.0), Relax("_meta", 0.01)):
-    try:
-        gm.add_node(node)
-    except ValueError as err:
-        print(err)
+with refused(ValueError) as r:
+    gm.add_node(Relax("b1", 0.0))
+assert "must be a finite number > 0" in r.text
+with refused(ValueError) as r:
+    gm.add_node(Relax("_meta", 0.01))
+assert "reserves for its own state" in r.text
+
 gm.add_node(Relax("b1", 0.01))           # a positive timestep
 gm.add_node(Relax("meta", 0.01))         # another spelling
 assert gm.node_names == ["b1", "meta"]
@@ -130,10 +151,9 @@ gm = GraphManager()
 gm.add_node(Relax("a", 0.01))
 gm.add_external_input("a", "x_in", shape=())
 gm.add_external_input("a", "x_in", shape=())          # the same: accepted
-try:
+with refused(ValueError) as r:
     gm.add_external_input("a", "x_in", shape=(3,))
-except ValueError as err:
-    assert "is already declared, with shape ()" in str(err)
+assert "is already declared, with shape ()" in r.text
 ```
 
 ### Coupling-group options are checked
@@ -151,13 +171,12 @@ ValueError: CouplingGroup.waveform_iterations=0: it must be an integer >= 1. A s
 
 <!-- snippet: continues -->
 ```python
-for options in ({"diagnostics": 1},
-                {"convergence_norm": "mixed", "rtol": 0.0},
-                {"waveform_iterations": 0}):
-    try:
+for error, options in ((TypeError, {"diagnostics": 1}),
+                       (ValueError, {"convergence_norm": "mixed", "rtol": 0.0}),
+                       (ValueError, {"waveform_iterations": 0})):
+    with refused(error) as r:
         pair().add_coupling_group(["a", "b"], **options)
-    except (TypeError, ValueError) as err:
-        print(type(err).__name__, str(err).split(":")[0])
+    print(error.__name__, r.text.split(":")[0])
 
 pair().add_coupling_group(["a", "b"], diagnostics=True,
                           convergence_norm="mixed", rtol=1e-6,
@@ -176,10 +195,9 @@ TypeError: copy.copy() of a GraphManager is refused: a shallow copy would share 
 <!-- snippet: continues -->
 ```python
 gm = pair()
-try:
+with refused(TypeError) as r:
     copy.copy(gm)
-except TypeError as err:
-    assert "copy.deepcopy(gm)" in str(err)
+assert "copy.deepcopy(gm)" in r.text
 twin = copy.deepcopy(gm)
 assert twin.node_names == gm.node_names
 ```
@@ -239,16 +257,14 @@ ValueError: propeller_x=10 is outside the grid: the pipe has nx=8 planes along x
 ```python
 from maddening.nodes import HeatNode, LBMPipeNode
 
-try:
+with refused(ValueError) as r:
     HeatNode("rod", 1.0, n_cells=10, length=1.0, thermal_diffusivity=1.0)
-except ValueError as err:
-    assert "Use timestep <= 0.005" in str(err)
+assert "Use timestep <= 0.005" in r.text
 HeatNode("rod", 0.005, n_cells=10, length=1.0, thermal_diffusivity=1.0)
 
-try:
+with refused(ValueError) as r:
     LBMPipeNode("pipe", 1.0, nx=8, ny=8, nz=8)
-except ValueError as err:
-    assert "propeller_x=10 is outside the grid" in str(err)
+assert "propeller_x=10 is outside the grid" in r.text
 LBMPipeNode("pipe", 1.0, nx=8, ny=8, nz=8, propeller_x=4)
 ```
 
@@ -279,10 +295,9 @@ def chain(declare_input):
     return gm
 
 
-try:
+with refused(ValueError) as r:
     chain(declare_input=True).compile()
-except ValueError as err:
-    assert "target the same field" in str(err)
+assert "target the same field" in r.text
 chain(declare_input=False).compile()       # keep the edge: no declaration
 ```
 
@@ -374,10 +389,9 @@ def spring_loop(**options):
     return gm
 
 
-try:
+with refused(RuntimeError) as r:
     spring_loop(convergence_norm="interface").compile()
-except RuntimeError as err:
-    assert "carries the boundary flux 'spring_force'" in str(err)
+assert "carries the boundary flux 'spring_force'" in r.text
 spring_loop(convergence_norm="mixed").compile()
 
 
@@ -405,10 +419,9 @@ def counters(**options):
     return gm
 
 
-try:
+with refused(ValueError) as r:
     counters().compile()
-except ValueError as err:
-    assert "computed from one another in a closed loop" in str(err)
+assert "computed from one another in a closed loop" in r.text
 counters(max_iterations=1).compile()        # one staggered pass
 ```
 
@@ -436,10 +449,9 @@ ValueError: nodes 'fast' (timestep 1e-10) and 'slow' (timestep 1.0) cannot be sc
 ```python
 gm = pair(0.01, 0.003)
 gm.add_coupling_group(["a", "b"], subcycling=True)
-try:
+with refused(RuntimeError) as r:
     gm.compile()
-except RuntimeError as err:
-    assert "does not divide the group's macro timestep" in str(err)
+assert "does not divide the group's macro timestep" in r.text
 
 gm = pair(0.01, 0.0025)                     # 0.0025 divides 0.01
 gm.add_coupling_group(["a", "b"], subcycling=True)
@@ -450,10 +462,9 @@ gm = GraphManager()
 gm.add_node(Relax("slow", 1.0))
 gm.add_node(Relax("fast", 1e-10))
 gm.add_edge("slow", "fast", source_field="x", target_field="x_in")
-try:
+with refused(ValueError) as r:
     gm.compile()
-except ValueError as err:
-    assert "cannot be scheduled together" in str(err)
+assert "cannot be scheduled together" in r.text
 ```
 
 ## Stepping
@@ -483,10 +494,9 @@ class Grow(SimulationNode):
 gm = GraphManager()
 gm.add_node(Grow("g", 0.01))
 gm.compile()
-try:
+with refused(ValueError) as r:
     gm.step()
-except ValueError as err:
-    assert "'g/x' has shape (2,) before the update and (3,) after it" in str(err)
+assert "'g/x' has shape (2,) before the update and (3,) after it" in r.text
 assert gm.get_node_state("g")["x"].shape == (2,)      # nothing was stored
 ```
 
@@ -495,14 +505,14 @@ assert gm.get_node_state("g")["x"].shape == (2,)      # nothing was stored
 These change numbers without raising anything:
 
 - **`run_sweep` and `run_scan` may differ by about one ulp.**  Constants
-  are no longer compiled into the step, so XLA may fuse a product
+  are no longer compiled into the step, so {term}`XLA` may fuse a product
   differently in the two compiled shapes.  Loosen a test that asserts the
   two are bitwise equal to a few ulps.
 - **Coupling groups** iterate to a different stopping point (see
   [above](#the-default-coupling-solver-and-what-converged-means)), and
   under `convergence_norm="interface"` every member is computed from
   readings that met the criterion.
-- **On a multi-rate graph a slow node's flux** is the flux of the state it
+- **On a {term}`multi-rate <Multi-rate>` graph a slow node's flux** is the flux of the state it
   holds.
 - **`HeatNode`** boundary values and fluxes (see
   [Built-in nodes](#built-in-nodes)).
@@ -591,10 +601,9 @@ config = {
         {"target_node": "a", "target_field": "x_in", "shape": [3], "dtype": "float32"},
     ],
 }
-try:
+with refused(ValueError) as r:
     GraphManager.from_dict(config, {"Relax": Relax})
-except ValueError as err:
-    assert "is already declared" in str(err)
+assert "is already declared" in r.text
 del config["external_inputs"][1]          # the shape the graph is to run with
 gm = GraphManager.from_dict(config, {"Relax": Relax})
 gm.compile()
@@ -640,6 +649,8 @@ try:
     load_graph_from_usd(stage)
 except KeyError as err:
     assert "is not allowed by this load" in str(err)
+else:
+    raise AssertionError("the stage's own class was built")
 loaded = load_graph_from_usd(stage, node_registry={"Relax": Relax})
 assert loaded.get_node("a").params["gain"] == 0.25
 ```
@@ -671,14 +682,13 @@ deployment with the token.
   or `geometry` is added in Python with `gm.add_edge`.
 - **`POST /graph/nodes` answers 400 where 0.3.1 answered 201** for a name
   containing `/`, `#` or `->`, an empty name, the names `NaN`, `Infinity`
-  and `-Infinity`, a `HeatNode` timestep above its stencil's stability
-  limit, and a non-finite constructor constant; a repeated request for
-  one of them is a 400, not a 409.  An array dimension over the cap is a
+  and `-Infinity`, and a `HeatNode` timestep above its stencil's stability
+  limit; a repeated request for one of them is a 400, not a 409.  An array dimension over the cap is a
   422.
 - **A cloud launch opens no API port by default** (`JobConfig.ports` is
   `[]`).  Reach the API over `ssh -L 8000:127.0.0.1:8000`, or set
   `ports=[8000]` and `MADDENING_API_TOKEN`.
-- **The WebRTC signaling server checks the client's token**; in 0.3.1 it
+- **The {term}`WebRTC` signaling server checks the client's token**; in 0.3.1 it
   admitted every client.
 
 ```text
@@ -743,7 +753,7 @@ checkpoint path must stay under the checkpoint root, naming a file inside it (go
 `NetworkRelay`, `CommandPublisher` and the multi-job `Coordinator` bind to
 `127.0.0.1` by default; 0.3.1 bound every interface.  A remote subscriber
 stops receiving until you either tunnel to the loopback port over SSH or
-bind a non-loopback address.  Such a bind is encrypted with ZMQ CURVE and
+bind a non-loopback address.  Such a bind is encrypted with {term}`ZMQ` CURVE and
 refuses to start without a shared secret: set `MADDENING_TRANSPORT_TOKEN`
 on both ends, to a value different from `MADDENING_API_TOKEN`.
 [ZeroMQ transports](zeromq_transports.md) covers both routes.
@@ -775,10 +785,28 @@ from maddening import GraphManager
 from maddening.fmi.model_description import FMIVariable, build_model_description
 from maddening.nodes import BallNode, TableNode
 
-try:
+
+class refused:
+    """`with refused(ValueError) as r:` -- the block must raise; r.text is why."""
+
+    def __init__(self, error):
+        self.error, self.text = error, ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, err, traceback):
+        if kind is None:
+            raise AssertionError(f"no {self.error.__name__} was raised")
+        if not issubclass(kind, self.error):
+            return False                     # another error: let it through
+        self.text = str(err)
+        return True
+
+
+with refused(TypeError) as r:
     FMIVariable("plant.x", 1, "float32", "output", "continuous", "", "m", (3,))
-except TypeError as err:
-    print(err)
+print(r.text)
 variable = FMIVariable(name="plant.x", value_reference=1, dtype="float32",
                        causality="output", variability="continuous",
                        unit="m", shape=(3,))
@@ -791,10 +819,9 @@ gm.add_edge("table", "ball", source_field="position", target_field="table_positi
 gm.compile()
 for kwargs in ({"selected_outputs": [("ball", "height")]},
                {"default_step_size": 0.015}):
-    try:
+    with refused(ValueError) as r:
         build_model_description(gm, model_name="Ball", **kwargs)
-    except ValueError as err:
-        print(str(err).split(":")[0])
+    print(r.text.split(":")[0])
 build_model_description(gm, model_name="Ball", selected_outputs=[("ball", "position")],
                         default_step_size=0.02)
 ```
@@ -837,10 +864,9 @@ def rod():
 
 
 for boundary in ("zero", {"devices": "edge"}):
-    try:
+    with refused(ValueError) as r:
         ShardedStencilNode(rod(), mesh, axis_map={"devices": 0}, boundary=boundary)
-    except ValueError as err:
-        print(str(err)[:90], "...")
+    print(r.text[:90], "...")
 
 gm = GraphManager()
 gm.add_node(ShardedStencilNode(rod(), mesh, axis_map={"devices": 0}))   # "edge"
@@ -886,10 +912,9 @@ def total(b, **options):
     return sharded_cg(lambda x: A @ x, b, **options).value.sum()
 
 
-try:
+with refused(ValueError) as r:
     jax.grad(total)(jnp.ones(8))
-except ValueError as err:
-    assert "differentiable=True" in str(err)
+assert "without differentiable=True" in r.text
 grad = jax.grad(lambda b: total(b, differentiable=True))(jnp.ones(8))
 assert jnp.allclose(grad, 1.0 / jnp.arange(1.0, 9.0), rtol=1e-5)
 ```

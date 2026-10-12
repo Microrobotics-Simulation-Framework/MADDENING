@@ -43,7 +43,8 @@ forgetting `bind_host` costs a 401, not an open API.
 
 The token is `MADDENING_API_TOKEN` when that variable is set.  Otherwise
 the server generates one at start-up (32 random bytes, 43 URL-safe
-characters) and `server.auth.announce(port)` logs it once.  A token that
+characters), and on a network bind `server.auth.announce(port)` logs it
+once.  A token that
 is set but blank is refused, as is one with whitespace around it or a
 character outside printable ASCII: no client could present it.
 
@@ -201,7 +202,7 @@ the variable instead.  The other clients:
 | Browser WebSocket | the subprotocols `maddening.api.auth.websocket_credentials(token)` returns, `["maddening.bearer.<base64url(token)>", "maddening.v1"]` |
 | Bundled pages | open `http://sim-host:8000/viz/app#token=<token>`; the fragment never reaches the server's access log |
 
-No route accepts the token in a query string.  `/docs` and
+No API route accepts the token in a query string.  `/docs` and
 `/openapi.json` are not served while the token is enforced; read them
 from a loopback-bound instance.
 

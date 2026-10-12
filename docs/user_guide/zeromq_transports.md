@@ -122,7 +122,7 @@ simulation.
 ## A network bind, with `MADDENING_TRANSPORT_TOKEN`
 
 Giving a socket an address another machine can reach (`tcp://*:5555`,
-`tcp://0.0.0.0:5555`, a LAN or public address) turns on ZMQ CURVE: the
+`tcp://0.0.0.0:5555`, a LAN or public address) turns on {term}`ZMQ` CURVE: the
 stream is encrypted, and only a peer holding the same secret can connect.
 Set the secret on both machines, then bind and connect:
 
@@ -196,9 +196,9 @@ export MADDENING_TRANSPORT_TOKEN="<another secret>"  # CURVE seed, never sent
 ```
 
 An SSH tunnel to loopback ports needs neither variable.  Both ends must
-read the secret from the same variable: a relay that reads
-`MADDENING_TRANSPORT_TOKEN` and a receiver that falls back to
-`MADDENING_API_TOKEN` derive different keys and will not connect.  A
+hold the same secret: a relay that reads `MADDENING_TRANSPORT_TOKEN` and a
+receiver on a machine where only `MADDENING_API_TOKEN` is set, to another
+value, derive different keys and will not connect.  A
 `MADDENING_TRANSPORT_TOKEN` that is set but blank is an error, and does
 not fall back:
 

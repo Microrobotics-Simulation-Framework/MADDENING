@@ -35,7 +35,13 @@ Two rules that are easy to miss:
   CHANGELOG entry.
 - **A `stable` class promises the whole object**, not just its constructor:
   every public method and property an instance answers to, including the ones
-  it inherits. `docs/developer_guide/stable_api.json` records them all.
+  it inherits. The exception is a member with a lower tag of its own: it
+  promises that level. `GraphManager` is `stable` and
+  `GraphManager.set_param_spec` is `evolving`. An override with no tag takes
+  the level of the method it overrides.
+  `docs/developer_guide/stable_api.json` records every member except those.
+  Tagging a member lower after it has shipped in a `stable` class is lowering
+  a level, as above.
 
 ## What counts as a breaking change
 
@@ -153,7 +159,7 @@ against it. It runs as the **Check STABLE API signatures** step of the
 
 ```console
 $ python scripts/check_stable_signatures.py
-OK: 17 STABLE surface(s), 248 member(s) (4 of them tagged in their own right) unchanged
+OK: 17 STABLE surface(s), 242 member(s) (4 of them tagged in their own right) unchanged
 ```
 
 A difference fails with the recorded and current signatures side by side.
@@ -191,7 +197,7 @@ What the snapshot does **not** cover, and therefore what review still has to
 catch by reading: behaviour, exceptions, the contents of `dict`-shaped
 arguments and returns (until the PEP 589 phase gives them `TypedDict`s — see
 [typing.md](typing.md)), instance attributes assigned in `__init__`
-(`gm.params` is one), and module-level constants.
+(`SimulationNode.name` is one), and module-level constants.
 
 ## Untagged surfaces
 

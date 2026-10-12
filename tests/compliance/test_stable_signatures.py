@@ -121,6 +121,226 @@ class TestTheTreeMatchesTheSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# A member tagged below STABLE promises its own level, not the class's
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def registry_restored():
+    """``@stability`` writes to a process-global registry; put it back."""
+    from maddening.core.compliance import stability as stab
+
+    before = dict(stab._STABILITY_REGISTRY)
+    yield
+    stab._STABILITY_REGISTRY.clear()
+    stab._STABILITY_REGISTRY.update(before)
+
+
+def _maddening_classes(source: str) -> dict:
+    """Execute *source* as if it were a module inside the package.
+
+    The guard records only members defined inside ``maddening`` (their
+    ``__module__``), so a class defined in this file would have no members
+    to record at all and every assertion below would pass on nothing.
+    """
+    from maddening.core.compliance.metadata import StabilityLevel
+    from maddening.core.compliance.stability import stability
+
+    namespace = {"__name__": "maddening._stability_member_probe",
+                 "stability": stability, "StabilityLevel": StabilityLevel}
+    exec(compile(source, "<maddening._stability_member_probe>", "exec"), namespace)
+    return namespace
+
+
+_PROBE_SOURCE = '''
+@stability(StabilityLevel.STABLE)
+class Base:
+    def untagged(self, x): ...
+
+    @stability(StabilityLevel.STABLE)
+    def tagged_stable(self, x): ...
+
+    @stability(StabilityLevel.EVOLVING)
+    def evolving(self, x): ...
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def experimental(self, x): ...
+
+    @property
+    @stability(StabilityLevel.EVOLVING)
+    def evolving_property(self): ...
+
+    @classmethod
+    @stability(StabilityLevel.EVOLVING)
+    def evolving_classmethod(cls): ...
+
+    @stability(StabilityLevel.EVOLVING)
+    @staticmethod
+    def evolving_staticmethod(): ...
+
+
+@stability(StabilityLevel.STABLE)
+class UntaggedOverride(Base):
+    def evolving(self, x): ...
+
+
+@stability(StabilityLevel.STABLE)
+class PromotedOverride(Base):
+    @stability(StabilityLevel.STABLE)
+    def evolving(self, x): ...
+
+
+@stability(StabilityLevel.STABLE)
+class DemotedOverride(Base):
+    @stability(StabilityLevel.EVOLVING)
+    def untagged(self, x): ...
+'''
+
+
+class TestAMemberTaggedBelowStableIsNotRecorded:
+    """``GraphManager`` is ``STABLE``, and the snapshot recorded every public
+    member it resolves whatever the member's own tag: ``set_param_spec``
+    (``EVOLVING``) and ``format_graph`` (``EXPERIMENTAL``) were promised as
+    ``STABLE`` against their own decorators.  A member is recorded only when
+    the nearest tagged definition along the MRO is ``STABLE``, or there is
+    none."""
+
+    def test_only_untagged_and_stable_tagged_members_are_recorded(
+        self, guard, registry_restored
+    ):
+        ns = _maddening_classes(_PROBE_SOURCE)
+        assert set(guard.class_members(ns["Base"])) == {"untagged", "tagged_stable"}
+
+    def test_an_untagged_override_keeps_the_level_it_overrides(
+        self, guard, registry_restored
+    ):
+        """``BallNode.param_specs`` is the ``EVOLVING`` hook of
+        ``SimulationNode``, not a new ``STABLE`` method."""
+        ns = _maddening_classes(_PROBE_SOURCE)
+        assert "evolving" not in guard.class_members(ns["UntaggedOverride"])
+
+    def test_an_override_tagged_stable_is_recorded(self, guard, registry_restored):
+        ns = _maddening_classes(_PROBE_SOURCE)
+        assert "evolving" in guard.class_members(ns["PromotedOverride"])
+
+    def test_an_override_tagged_lower_is_left_out(self, guard, registry_restored):
+        ns = _maddening_classes(_PROBE_SOURCE)
+        members = guard.class_members(ns["DemotedOverride"])
+        assert "untagged" not in members
+        assert "tagged_stable" in members
+        # the base still records its own, untagged definition
+        assert "untagged" in guard.class_members(ns["Base"])
+
+    def test_no_recorded_member_carries_a_lower_tag(self, guard):
+        """The committed snapshot and the decorators say the same thing."""
+        from maddening.core.compliance.metadata import StabilityLevel
+
+        guard.load_registry()                    # imports the tagged modules
+        surfaces = json.loads(SNAPSHOT.read_text())["surfaces"]
+        classes = {name: rec for name, rec in surfaces.items()
+                   if rec["kind"] == "class"}
+        assert classes, "the snapshot records no class; this test is vacuous"
+        lower = []
+        for name, record in classes.items():
+            cls = guard.resolve(name)
+            for member in record["members"]:
+                level = guard.member_level(cls, member)
+                if level is not None and level is not StabilityLevel.STABLE:
+                    lower.append(f"{name}.{member}: {level.value}")
+        assert not lower, lower
+
+    def test_a_registered_lower_member_of_a_stable_class_is_absent(self, guard):
+        """Every ``@stability``-tagged method below ``STABLE`` on a recorded
+        class is missing from that class's members, and the check is not
+        vacuous: there are such methods today."""
+        from maddening.core.compliance.metadata import StabilityLevel
+
+        registry, _ = guard.load_registry()
+        surfaces = json.loads(SNAPSHOT.read_text())["surfaces"]
+        seen = []
+        for key, level in registry.items():
+            owner, _, member = key.rpartition(".")
+            if owner in surfaces and surfaces[owner]["kind"] == "class" \
+                    and level is not StabilityLevel.STABLE:
+                seen.append(key)
+                assert member not in surfaces[owner]["members"], key
+        assert "maddening.core.graph_manager.GraphManager.set_param_spec" in seen
+        assert "maddening.core.graph_manager.GraphManager.format_graph" in seen
+
+
+class TestTheParameterApiCarriesTheMaintainersSplit:
+    """``gm.params`` and the ``params=`` argument of the run methods are
+    ``STABLE``; the methods that take, return or are defined by a
+    :class:`~maddening.core.params.ParamSpec` are ``EVOLVING``, as
+    ``ParamSpec`` is (maintainer's decision, 2026-10-07)."""
+
+    GM = "maddening.core.graph_manager.GraphManager"
+    SPEC_METHODS = ("param_specs", "set_param_spec", "param_spec_overrides",
+                    "trainable_mask", "unconstrain", "constrain", "check_params")
+    RUN_METHODS = ("step", "run", "run_scan", "run_scan_with_history",
+                   "run_sweep", "run_adaptive", "run_adaptive_scan")
+    NODE_CLASSES = (
+        "maddening.core.node.SimulationNode",
+        "maddening.nodes.ball.BallNode",
+        "maddening.nodes.heat.HeatNode",
+        "maddening.nodes.spring.SpringDamperNode",
+        "maddening.nodes.table.TableNode",
+        "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode",
+        "maddening.cloud.multigpu.sharded_node.ShardedStencilNode",
+        "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode",
+    )
+
+    def _members(self, surface: str) -> dict:
+        return json.loads(SNAPSHOT.read_text())["surfaces"][surface]["members"]
+
+    def test_the_spec_methods_are_evolving_and_not_recorded(self):
+        from maddening.core.compliance.metadata import StabilityLevel
+        from maddening.core.graph_manager import GraphManager
+
+        members = self._members(self.GM)
+        for name in self.SPEC_METHODS:
+            assert getattr(GraphManager, name)._stability_level \
+                is StabilityLevel.EVOLVING, name
+            assert name not in members, name
+
+    def test_a_nodes_param_specs_is_evolving_on_every_recorded_node(self, guard):
+        from maddening.core.compliance.metadata import StabilityLevel
+        from maddening.core.node import SimulationNode
+
+        guard.load_registry()
+        assert SimulationNode.param_specs._stability_level is StabilityLevel.EVOLVING
+        for surface in self.NODE_CLASSES:
+            assert "param_specs" not in self._members(surface), surface
+            assert guard.member_level(guard.resolve(surface), "param_specs") \
+                is StabilityLevel.EVOLVING, surface
+
+    def test_gm_params_is_recorded_as_a_settable_property(self):
+        record = self._members(self.GM)["params"]
+        assert record["kind"] == "property" and record["settable"] is True
+
+    def test_every_other_method_taking_params_records_it(self):
+        """The run methods by name, and any other public method that takes
+        ``params``: a new one lands in the snapshot or in ``SPEC_METHODS``,
+        never in neither."""
+        from maddening.core.graph_manager import GraphManager
+
+        members = self._members(self.GM)
+        taking = {
+            name for name in dir(GraphManager)
+            if not name.startswith("_")
+            and callable(getattr(GraphManager, name))
+            and "params" in inspect.signature(getattr(GraphManager, name)).parameters
+        }
+        assert set(self.RUN_METHODS) <= taking
+        for name in sorted(taking - set(self.SPEC_METHODS)):
+            assert name in members, name
+            params = {p["name"]: p for p in members[name]["parameters"]}["params"]
+            assert params.get("default") == "None", name
+        for name in self.RUN_METHODS:
+            params = {p["name"]: p for p in members[name]["parameters"]}["params"]
+            assert params["kind"] == "KEYWORD_ONLY", name
+
+
+# ---------------------------------------------------------------------------
 # A changed signature is caught
 # ---------------------------------------------------------------------------
 

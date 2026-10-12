@@ -26,8 +26,9 @@ incompatibly before the next major version. The mechanics are in
   hard to take back — which is why a level is cheap to set *before* the
   release that first ships it and expensive afterwards;
 - a `stable` *class* promises every public method and property an instance
-  answers to, inherited ones included. `stable_api.json` records 248 members
-  behind today's 17 tagged surfaces, and
+  answers to, inherited ones included, except a member with a lower tag of
+  its own. `stable_api.json` records 242 members behind the 17 tagged
+  surfaces, and
   `scripts/check_stable_signatures.py` fails on any change to any of them —
   **distinguishing a break from a compatible widening**. A new parameter with
   a default, added after the existing ones, is classified `COMPATIBLE` and
@@ -155,6 +156,7 @@ should take the level on the surrounding functions as speaking for them.
 | `api.server.origin_is_same_site` | `evolving` | **Zero tests name it.** It is exercised only through `SimulationServer` in `tests/api/test_cross_origin_requests.py`. Criterion 1 is not met: the integration test pins the behaviour of the server, not the contract of the function. | A direct test of the function's own contract — which is worth writing regardless of the level. |
 | `api.server.warn_if_publicly_bound` | `evolving` | 18 tests, but the warning text and category are the observable behaviour and neither is pinned by the signature. | Nothing this release; it is a diagnostic, and `evolving` is the right resting place. |
 | `serialization.json_codec.dumps_encoded` and the other four | `evolving` | The *wire format* (quoted `"NaN"`/`"Infinity"` tokens) is settled and 35 tests cover the round trip. The **reserved literals are a trap**: adding one changes every `st.text()` draw in the package, which has already caught three property tests this release. Freezing the function does not freeze the token set. | Either the token set becomes part of the frozen contract explicitly, or it is documented as outside it. |
+| `GraphManager`'s `ParamSpec` methods (`param_specs`, `set_param_spec`, `param_spec_overrides`, `trainable_mask`, `constrain`, `unconstrain`, `check_params`) and `SimulationNode.param_specs` | `evolving` | Methods of `stable` classes that take, return or are defined by a `ParamSpec`, which is `evolving`; a method cannot promise more than the type it is built on. `gm.params` and the `params=` argument of `step`, `run` and the `run_scan*` / `run_adaptive*` / `run_sweep` methods are `stable`. All of them are new in 0.4.0, so no release carried a stronger promise. | `ParamSpec` reaching `stable`. |
 | `core.params.*` (5) | `evolving` | Best-documented addition in the set (7 doc pages) and `ParamSpec` is named in 38 test files. Fails criterion 2 outright: 6 commits this cycle, and the params pytree is the direct input to the PEP 589 `TypedDict` phase, which is *designed* to change these annotations. | The `TypedDict` conversion landing, then a cycle of quiet. |
 | `core.coupling.mapping_spec.build_mapping` | `evolving` | **Zero tests name it.** Exercised only through `MappingSpec.build()`. The free function is public API with no direct coverage at all. | A direct test, or making it private and keeping `MappingSpec.build` as the entry point. The second is probably the right answer. |
 | `core.simulation.profiler.count_hlo_ops` | `evolving` | **Zero tests name it**; reached only from inside `compile_counts()`. Same shape as `build_mapping`. | As above. |

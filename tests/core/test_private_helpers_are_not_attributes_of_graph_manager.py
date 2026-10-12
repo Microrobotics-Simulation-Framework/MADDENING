@@ -26,6 +26,7 @@ from maddening.core import graph_manager
 HELPER_MODULES = (
     "maddening.core._adaptive_scan",
     "maddening.core._graph_specs",
+    "maddening.core._matmul_precision",
     "maddening.core._param_probes",
     "maddening.core.coupling._bounds",
     "maddening.core.coupling._carried_fields",

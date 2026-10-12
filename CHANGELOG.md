@@ -16,6 +16,7 @@ checked, with the defects found and fixed before it, is in
 
 ### Added
 
+- **`gm.matmul_precision`** (`EXPERIMENTAL`): set it to `None` to trace a graph's programs at JAX's own `jax_default_matmul_precision` instead of `"highest"` (reduced-precision tensor-core speed for MLP or FNO surrogate nodes); `sysid.fim` and `sysid.fim_core` take a `matmul_precision=` keyword (`EXPERIMENTAL`), and the fitters follow the graph's setting.
 - **Node constants are parameters**: `gm.params` holds every node's constants as one tree of arrays that the compiled step takes as an argument, so `jax.grad` reaches them and a change does not recompile; the run methods take `params=` (`STABLE`). All eleven shipped node classes and both sharded wrappers take part; `gm.nodes_without_params()` lists your own nodes that do not.
 - **`ParamSpec`** (`EVOLVING`): trainable, bounds and transform per parameter, with `gm.set_param_spec`, `gm.param_specs`, `gm.trainable_mask`, `gm.unconstrain`, `gm.constrain` and `gm.check_params`.
 - **`maddening.sysid`** (`EVOLVING`): `fit`, `fit_lm`, `fit_multiple_shooting`, `windowed_loss`, `observations_from_history`, and `fim` (Fisher information, rank, Cramér-Rao bounds); the fitters hold the directions the data cannot determine. `fim_core` / `FIMCore`, with no host round trip, are `EXPERIMENTAL`.
@@ -48,6 +49,7 @@ checked, with the defects found and fixed before it, is in
 
 ### Changed
 
+- **Graphs trace their float32 matrix products at full precision by default** (MADD-ANO-291): the compiled step, every scan, sweep and adaptive program, the implicit-function gradient, the sysid fits and the Fisher information run under `jax.default_matmul_precision("highest")`. On NVIDIA GPUs results in the affected paths (interface mappings on multi-component fields, the coupling bounds, IQN, FNO surrogates, `J.T @ J`) move by up to about 1e-4 relative; on CPU nothing changes, bit for bit.
 - **`LBMNode` and `LBMPipeNode` compute their lattice products at `Precision.HIGHEST`** (MADD-ANO-290): on an NVIDIA GPU at JAX's default matmul precision they ran at reduced precision, and LBM gradients were off by up to 1.6e-3 relative. GPU results change by up to that much; CPU results are bit-identical. On 0.3.1, set `JAX_DEFAULT_MATMUL_PRECISION=highest`.
 - **Python `>=3.12` and `jax` / `jaxlib` `>=0.10,<0.13`** (0.3.1: `>=3.10`, `>=0.4,<0.6`). The ranges do not overlap: migrate JAX first. `lineax` and `scipy` are base dependencies; the `[ift]` extra is empty; the `terminal` extra adds `termaid`.
 - **Coupling groups default to `solver="ift"`, and `converged=True` means within tolerance of the fixed point** (MADD-ANO-005, partly resolved; MADD-ANO-114). Tolerances are relative; `atol` is a dead band defaulting to `0.0`, and `compile()` warns for a group that sets it. Expect more passes; recorded Aitken and IQN trajectories move.

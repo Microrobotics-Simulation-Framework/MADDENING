@@ -34,7 +34,9 @@ Then, on a graph holding the node:
   ``params_*`` checks are the ones that catch a constant read from
   ``self.params`` instead of the injected ``params``);
 * making ``heater_power`` trainable makes ``compile()`` raise, naming the
-  static and the parameter;
+  static and the parameter, and a new ``heater_power`` written to
+  ``gm.params`` is refused by the next run (the step reads the table, not
+  the parameter; build the node again to change it);
 * :func:`~maddening.sysid.fit_lm` recovers ``h`` and ``C`` from a noisy
   temperature record, from a start 50% off, and each lands within four
   Cramér-Rao standard deviations of the value that made the data (the
@@ -228,6 +230,20 @@ def main(argv=None) -> int:
                       ParamSpec(trainable=False, description="tabulated into power_table"))
     gm.compile()
     print("  Frozen again, the graph compiles.")
+    # The declaration also tells the graph that the step never reads the
+    # parameter itself, so a new value written to gm.params would be ignored
+    # by the step and then saved: the run refuses it.  To change the heater,
+    # build the node again with the new value.
+    gm.params = with_values(gm.params, heater_power=300.0)
+    try:
+        gm.run(1)
+    except ValueError as exc:
+        print(f"  a run after writing heater_power to gm.params is refused: "
+              f"{str(exc)[:110]}...")
+        assert "power_table" in str(exc)
+    else:
+        raise AssertionError("a write to a baked parameter was run")
+    gm.reset_params()
 
     # -- 4. calibrate h and C from a noisy record ---------------------------
     section("4. Recover h and C with fit_lm from a noisy record")

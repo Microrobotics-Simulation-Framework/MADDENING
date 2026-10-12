@@ -2948,6 +2948,55 @@ def _ci_jobs(root):
     return jobs
 
 
+#: CI jobs whose tests run inside a container image the job builds, with the
+#: Dockerfile that declares the image's packages.  Such a job installs no
+#: extra of the project: the image installs its packages by name (its
+#: ``pip3 install`` lines, and PyGObject from apt as ``python3-gi``), so
+#: :func:`_installed_by_image` reads what it installs.  A job that runs
+#: pytest through ``docker run`` and is not named here is refused
+#: (``test_a_job_that_runs_its_tests_in_an_image_is_read_from_the_image``).
+_IMAGE_JOBS = {"ci.yml:test-streaming": "docker/Dockerfile.streaming-test"}
+
+#: Python distributions an image takes from apt rather than pip.
+_APT_PYTHON_DISTRIBUTIONS = {"python3-gi": "pygobject"}
+
+
+def _installed_by_image(root, dockerfile):
+    """The distributions a Dockerfile installs by name: every requirement
+    of its ``pip install`` / ``pip3 install`` commands (up to a ``&&``;
+    options and paths are not requirements) and the Python packages of its
+    ``apt-get install`` commands that :data:`_APT_PYTHON_DISTRIBUTIONS`
+    names.  As for an extra, a package that only arrives as a dependency
+    is not counted."""
+    import re
+    import shlex
+
+    text = (Path(root) / dockerfile).read_text(encoding="utf-8").replace("\\\n", " ")
+    name = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+    found = set()
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for command in line.split("&&"):
+            tokens = shlex.split(command, comments=True)
+            for i, token in enumerate(tokens):
+                if token in ("pip", "pip3") and tokens[i + 1:i + 2] == ["install"]:
+                    found |= {_distribution(name.match(t).group(0)) for t in tokens[i + 2:]
+                              if not t.startswith(("-", "/", ".")) and name.match(t)}
+                elif token == "apt-get" and tokens[i + 1:i + 2] == ["install"]:
+                    found |= {_APT_PYTHON_DISTRIBUTIONS[t] for t in tokens[i + 2:]
+                              if t in _APT_PYTHON_DISTRIBUTIONS}
+    return found
+
+
+def _jobs_that_install_nothing(root):
+    """The jobs that run tests but install no extra of the project and are
+    not in :data:`_IMAGE_JOBS`: what such a job imports is decided by
+    nothing this derivation reads."""
+    return [job for job, extras, invs in _ci_jobs(root)
+            if invs and not extras and job not in _IMAGE_JOBS]
+
+
 def _installed_by(pyproject, extras):
     """The distributions a job that installs the project with ``extras``
     asks for by name: the base dependencies and the extras' own lists (an
@@ -3054,7 +3103,9 @@ def _paths_no_ci_lane_runs(root, gate):
             for targets, ignores in invocations)
     }
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    installed = {job: _installed_by(pyproject, extras) for job, extras, _invs in jobs}
+    installed = {job: (_installed_by_image(root, _IMAGE_JOBS[job]) if job in _IMAGE_JOBS
+                       else _installed_by(pyproject, extras))
+                 for job, extras, _invs in jobs}
     waits = {}
     conftests = {}
     for path in sorted((root / "tests").rglob("*.py")):
@@ -3304,9 +3355,55 @@ class TestAnomalyGateRefusesEvidenceCINeverRuns:
             "ci.yml:test": {"ci"}, "ci.yml:test-usd": {"ci", "usd"}}
         (_, _, (smoke,)), = [j for j in _ci_jobs(tmp_path) if j[0] == "ci.yml:test-usd"]
         assert smoke == (["tests/usd", "tests/test_smoke.py"], [])
-        # The real tree: every job that runs tests installs the project with an extra.
-        real = [(job, extras) for job, extras, invs in _ci_jobs(REPO_ROOT) if invs]
-        assert real and all(extras for _job, extras in real), real
+        # The real tree: every job that runs tests installs the project with an
+        # extra, or runs them in an image whose Dockerfile says what it installs.
+        assert any(invs for _job, _extras, invs in _ci_jobs(REPO_ROOT))
+        assert _jobs_that_install_nothing(REPO_ROOT) == []
+
+    def test_a_job_that_runs_tests_with_nothing_installed_is_named(self, tmp_path):
+        """The rule the real tree is held to, on a seeded workflow: a job that
+        runs pytest with no extra installed is named; an image job is not."""
+        workflows = tmp_path / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "ci.yml").write_text(_SEEDED_WORKFLOW + """
+  bare:
+    steps:
+      - run: python -m pytest tests/core
+  test-streaming:
+    steps:
+      - run: docker build -f docker/Dockerfile.streaming-test -t img .
+      - run: docker run --rm img python3 -m pytest tests/cloud/test_webrtc_loopback.py
+""")
+        assert _jobs_that_install_nothing(tmp_path) == ["ci.yml:bare"]
+
+    def test_a_job_that_runs_its_tests_in_an_image_is_read_from_the_image(self):
+        """A job named in ``_IMAGE_JOBS`` builds its image from the Dockerfile
+        named there in a step without an ``if:`` and runs its tests through
+        ``docker run``; every job that runs pytest through ``docker run`` is
+        named there; and what the image installs is read from its Dockerfile
+        (the streaming image's JAX, pytest and PyGObject among it)."""
+        import yaml
+
+        through_docker = set()
+        builds = {}
+        for wf in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            data = yaml.safe_load(wf.read_text()) or {}
+            for job_id, job in (data.get("jobs") or {}).items():
+                for step in (job or {}).get("steps") or []:
+                    run = (step or {}).get("run")
+                    if not isinstance(run, str):
+                        continue
+                    run = run.replace("\\\n", " ")
+                    if "docker run" in run and "pytest" in run:
+                        through_docker.add(f"{wf.name}:{job_id}")
+                    if "docker build" in run and "if" not in step:
+                        builds.setdefault(f"{wf.name}:{job_id}", []).append(run)
+        assert through_docker == set(_IMAGE_JOBS), (through_docker, _IMAGE_JOBS)
+        for job, dockerfile in _IMAGE_JOBS.items():
+            assert any(f"-f {dockerfile}" in run for run in builds.get(job, [])), (job, builds)
+        streaming = _installed_by_image(REPO_ROOT, _IMAGE_JOBS["ci.yml:test-streaming"])
+        assert {"jax", "jaxlib", "pytest", "hypothesis", "websockets", "pygobject"} <= streaming
+        assert "src" not in streaming and "e" not in streaming, streaming
 
 
 class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:

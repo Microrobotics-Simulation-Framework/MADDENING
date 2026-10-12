@@ -1,0 +1,111 @@
+# MADDENING WebRTC streaming test image (CPU only, no GPU, no network at run time)
+#
+# Runs the loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py,
+# tests/cloud/test_entrypoint_streams.py):
+# a SelkiesSession and a second GStreamer webrtcbin (the test's peer) in
+# one container, with no network.  Ubuntu 24.04's system Python 3.12 is
+# used because PyGObject (python3-gi) is a compiled extension built for
+# that interpreter; the apt packages below are the GStreamer set webrtcbin
+# needs (the list docker/Dockerfile.cloud uses on a pod, plus
+# gstreamer1.0-libav for the peer's H.264 decoder).
+#
+# Build (from the repository root; the build context is cut down to
+# pyproject.toml, README.md, src/ and the entry point by
+# Dockerfile.streaming-test.dockerignore):
+#
+#   docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test .
+#
+# Run the tests against the working tree (mounted read-only over the
+# copy baked into the image, so an edit needs no rebuild):
+#
+#   docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
+#     --cpuset-cpus=0-3 --memory=8g \
+#     -v "$PWD":/src:ro maddening-streaming-test \
+#     python3 -m pytest tests/cloud/test_webrtc_loopback.py \
+#       tests/cloud/test_entrypoint_streams.py -q -p no:cacheprovider
+#
+# --network none keeps the container off every network; no STUN or TURN
+# server is contacted, and the cloud entry point the second module runs
+# serves its API and signaling socket on loopback inside the container.
+# --cap-add NET_ADMIN (after --cap-drop ALL, the only capability) lets the
+# entry point (docker/streaming-test-entrypoint.sh) add a veth pair inside
+# that network-less container, because libnice never gathers ICE
+# candidates on the loopback interface, which is all --network none
+# leaves; the entry point then runs the tests with every capability set
+# cleared and no_new_privs set (docker/README.md says why).  No GPU is
+# used or needed (x264enc is a software encoder).
+
+FROM ubuntu:24.04
+
+# The tree is mounted read-only at /src, so nothing may need to write
+# there: no bytecode, Hypothesis's files under /tmp, and pytest's plugin
+# autoload off as on every CI lane (the Hypothesis plugin's report header
+# otherwise opens the example database in the tree, and an existing but
+# read-only .hypothesis/ there is a warning, hence an error).
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    JAX_PLATFORMS=cpu \
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+    HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis
+
+# GStreamer with the plugins webrtcbin and the test's peer need:
+#   base   appsrc, videoconvert, videotestsrc, appsink, the GstSdp/GstApp typelibs
+#   good   rtph264pay / rtph264depay, rtpjitterbuffer
+#   bad    webrtcbin, the GstWebRTC typelib, dtls/srtp/sctp
+#   ugly   x264enc (the encoder SelkiesSession uses)
+#   nice   the ICE transport webrtcbin is built on
+#   libav  avdec_h264 (the peer's decoder)
+# and, for the entry point, iproute2 (`ip`, the test interface) and
+# libcap2-bin (`capsh`, which clears the capabilities before the tests).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-gi \
+        gir1.2-gstreamer-1.0 \
+        gir1.2-gst-plugins-base-1.0 \
+        gir1.2-gst-plugins-bad-1.0 \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly \
+        gstreamer1.0-nice \
+        gstreamer1.0-libav \
+        gstreamer1.0-tools \
+        iproute2 \
+        libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Third-party Python dependencies first, in their own layer, so an edit
+# under src/ does not reinstall them.  jax is pinned to one of the two
+# versions CI tests (the streaming code does not depend on which);
+# the next two lines are the `server` extra, which docker/Dockerfile.cloud
+# installs for the cloud entry point (tests/cloud/test_entrypoint_streams.py
+# runs that entry point: FastAPI and uvicorn serve its API, matplotlib
+# draws the frames it streams); pytest and hypothesis are what
+# tests/conftest.py imports.  PyGObject comes from apt (python3-gi) above,
+# not from pip: the `streaming` extra's PyGObject would otherwise be built
+# from source.
+ARG JAX_VERSION=0.11.2
+RUN pip3 install --break-system-packages \
+        "jax==${JAX_VERSION}" "jaxlib==${JAX_VERSION}" \
+        "lineax>=0.0.7" "numpy>=1.24" "pyyaml>=6.0" "scipy>=1.14" \
+        "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0" "pyzmq>=25.0" \
+        "rich>=12.0" "matplotlib>=3.5" "zstandard>=0.22" \
+        "pytest>=7.0" "hypothesis>=6.165,<7"
+
+# MADDENING itself, installed editable from the tree at /src.  At run
+# time the working tree is mounted over /src, so the editable install
+# then imports the mounted sources.
+WORKDIR /src
+COPY pyproject.toml README.md /src/
+COPY src/ /src/src/
+RUN pip3 install --break-system-packages --no-deps -e /src \
+    && python3 -c "import gi; gi.require_version('Gst', '1.0'); gi.require_version('GstWebRTC', '1.0'); from gi.repository import Gst; Gst.init(None); print(Gst.version_string()); assert Gst.ElementFactory.find('webrtcbin') and Gst.ElementFactory.find('x264enc') and Gst.ElementFactory.find('avdec_h264')" \
+    && python3 -c "import maddening, jax; print('maddening', maddening.__file__, 'jax', jax.__version__)"
+
+# Adds the in-container test interface (see the script), then runs the
+# command given to `docker run` with no capability.
+COPY docker/streaming-test-entrypoint.sh /usr/local/bin/streaming-test-entrypoint
+ENTRYPOINT ["/usr/local/bin/streaming-test-entrypoint"]

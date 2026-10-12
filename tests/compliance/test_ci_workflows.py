@@ -432,6 +432,7 @@ GATED_ON_CODE = {
     "test-durations": (["changes", "test"],
                        "${{ !cancelled() && needs.changes.outputs.code == 'true' }}"),
     "test-usd": ("changes", "needs.changes.outputs.code == 'true'"),
+    "test-streaming": ("changes", "needs.changes.outputs.code == 'true'"),
     "typecheck": ("changes", "needs.changes.outputs.code == 'true'"),
     "verify-hypothesis": ("changes", "needs.changes.outputs.code == 'true'"),
 }
@@ -1012,6 +1013,183 @@ def test_every_test_that_needs_usd_core_runs_in_the_job_that_installs_it():
             f"{smoke}")
     for rel in USD_NOT_NEEDED:
         assert (REPO_ROOT / rel).is_file(), f"USD_NOT_NEEDED names a file that is gone: {rel}"
+
+
+
+# ---------------------------------------------------------------------------
+# Tests that need GStreamer run in the streaming container, with no network
+# ---------------------------------------------------------------------------
+
+STREAMING_DOCKERFILE = "docker/Dockerfile.streaming-test"
+
+#: ``docker run`` options the streaming job may pass, each with the reason.
+#: Anything else (``--gpus``, ``--privileged``, ``-p``/``--publish``,
+#: ``--network host``, another capability, another mount) fails the test
+#: below: the job runs a container that must stay off every network and
+#: away from the runner's devices.
+STREAMING_RUN_OPTIONS = {
+    "--rm": "nothing is kept",
+    "--network": "must be 'none': the server and the peer need no network",
+    "--cap-drop": "must be ALL: no capability but the one added below",
+    "--cap-add": "must be NET_ADMIN, for the entry point's in-container veth pair",
+    "-e": "MADDENING_REQUIRE_STREAMING_TESTS=1 only",
+    "-v": "the checkout, read-only, at /src",
+}
+
+
+def _streaming_job() -> tuple[str, list[str], list[str]]:
+    """The streaming job's image tag, its ``docker run`` options, and the command run."""
+    job = _workflow("ci.yml")["jobs"]["test-streaming"]
+    lines = [line for s in job["steps"] for line in _logical_lines(s.get("run", ""))]
+    builds = [shlex.split(line) for line in lines if line.startswith("docker build")]
+    runs = [shlex.split(line) for line in lines if line.startswith("docker run")]
+    assert len(builds) == 1 and len(runs) == 1, f"test-streaming runs {lines}"
+    build = builds[0]
+    assert build[build.index("-f") + 1] == STREAMING_DOCKERFILE, build
+    tag = build[build.index("-t") + 1]
+    run = runs[0]
+    assert run.count(tag) == 1, f"test-streaming does not run the image it built ({tag}): {run}"
+    return tag, run[2:run.index(tag)], run[run.index(tag) + 1:]
+
+
+#: The variable that turns a streaming module's skip into a failure.
+STREAMING_REQUIRE_ENV = "MADDENING_REQUIRE_STREAMING_TESTS"
+
+
+def _tests_imported(rel: str) -> set[str]:
+    """The files under tests/ that module *rel* imports, relative imports included."""
+    tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+    package = rel.rsplit("/", 1)[0].split("/")
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = package[:len(package) - node.level + 1] if node.level else []
+            module = base + (node.module.split(".") if node.module else [])
+            names.add(".".join(module))
+            names.update(".".join(module + [a.name]) for a in node.names)
+    found = set()
+    for name in names:
+        for candidate in (name.replace(".", "/") + ".py", name.replace(".", "/") + "/__init__.py"):
+            if candidate.startswith("tests/") and (REPO_ROOT / candidate).is_file():
+                found.add(candidate)
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def _gstreamer_modules() -> frozenset[str]:
+    """Every file under tests/ that needs GStreamer: imports ``gi``, or imports one that does.
+
+    A module that reaches PyGObject through another test module or a
+    helper (the entry point's test imports the loopback module's peer)
+    needs GStreamer as much as one that imports ``gi`` itself.
+    """
+    modules = _test_modules()
+    needing = {rel for rel, (_s, imports) in modules.items()
+               if any(m == "gi" or m.startswith("gi.") for m in imports)}
+    imported = {rel: _tests_imported(rel) for rel in modules}
+    while True:
+        more = {rel for rel, deps in imported.items() if rel not in needing and deps & needing}
+        if not more:
+            return frozenset(needing)
+        needing |= more
+
+
+def _is_test_module(rel: str) -> bool:
+    name = rel.rsplit("/", 1)[-1]
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def _unguarded_skips(rel: str) -> list[int]:
+    """Lines of *rel* that skip or xfail outside a function reading STREAMING_REQUIRE_ENV.
+
+    In the streaming job a skip would pass the job without running the
+    test; ``MADDENING_REQUIRE_STREAMING_TESTS`` turns the module's skip into
+    a failure only where the skip goes through a function that reads it.
+    """
+    tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+    guarded = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                (isinstance(n, ast.Constant) and n.value == STREAMING_REQUIRE_ENV)
+                or (isinstance(n, ast.Name) and n.id == "_REQUIRED_ENV")
+                for n in ast.walk(fn)):
+            guarded.update(id(n) for n in ast.walk(fn))
+    return sorted(n.lineno for n in ast.walk(tree)
+                  if isinstance(n, ast.Attribute)
+                  and n.attr in ("skip", "skipif", "importorskip", "xfail")
+                  and id(n) not in guarded)
+
+
+def test_the_streaming_job_runs_its_container_with_no_network_and_no_device():
+    _tag, options, _command = _streaming_job()
+    pairs, i = [], 0
+    while i < len(options):
+        name, _, value = options[i].partition("=")
+        if not value and name in ("--network", "--cap-drop", "--cap-add", "-e", "-v"):
+            i += 1
+            value = options[i]
+        pairs.append((name, value))
+        i += 1
+    unknown = [n for n, _v in pairs if n not in STREAMING_RUN_OPTIONS]
+    assert not unknown, f"test-streaming's docker run passes {unknown}: see STREAMING_RUN_OPTIONS"
+    assert ("--network", "none") in pairs, f"test-streaming must run --network none: {pairs}"
+    assert [v for n, v in pairs if n == "--network"] == ["none"], pairs
+    assert [v for n, v in pairs if n == "--cap-drop"] == ["ALL"], (
+        f"test-streaming must drop every capability Docker grants by default: {pairs}")
+    assert [v for n, v in pairs if n == "--cap-add"] == ["NET_ADMIN"], pairs
+    assert [v for n, v in pairs if n == "-e"] == ["MADDENING_REQUIRE_STREAMING_TESTS=1"], (
+        "without it a missing GStreamer would skip the tests and the job would pass")
+    assert [v for n, v in pairs if n == "-v"] == ["$PWD:/src:ro"], pairs
+
+
+def test_every_test_that_needs_gstreamer_runs_in_the_streaming_job():
+    """Only ``test-streaming`` has GStreamer; a test that needs it skips everywhere else.
+
+    Every test module that imports ``gi`` must be in the job's pytest
+    selection, which may not narrow itself with ``-m``, ``-k``,
+    ``--deselect`` or ``--ignore``.
+    """
+    _tag, _options, command = _streaming_job()
+    assert command[:3] == ["python3", "-m", "pytest"], command
+    args = command[3:]
+    assert not any(a in ("-m", "-k") or a.startswith(("-m=", "-k=", "--deselect", "--ignore"))
+                   for a in args), f"test-streaming narrows its selection: {args}"
+    targets = [a for a in args if not a.startswith("-") and a != "no:cacheprovider"]
+    needing = sorted(rel for rel in _gstreamer_modules() if _is_test_module(rel))
+    assert needing, "no test module imports gi: the scan is broken, or the tests are gone"
+    assert "tests/cloud/test_entrypoint_streams.py" in needing, (
+        f"the scan misses a module that needs GStreamer through another one: {needing}")
+    missing = [rel for rel in needing if not _selected(rel, targets)]
+    assert not missing, f"these need GStreamer but test-streaming does not run them: {missing}"
+    assert all((REPO_ROOT / t.split("::")[0]).exists() for t in targets), targets
+    skipping = {rel: lines for rel in needing if (lines := _unguarded_skips(rel))}
+    assert not skipping, (
+        f"these skip without reading {STREAMING_REQUIRE_ENV}, so the streaming job could pass "
+        f"without running them: {skipping}")
+
+
+def test_the_streaming_job_cannot_pass_without_running_its_tests():
+    """No ``if:`` on a step, and the run step is the ``docker run`` and nothing else.
+
+    A step skipped by ``if:`` reports success, so ``if: false`` on the run
+    step would leave the job green with no test run; a second command or
+    ``|| true`` after the run could hide its exit status.  pytest itself
+    exits 5 when the selection collects no test, and the require variable
+    (pinned above) turns a module's skip into a failure.
+    """
+    job = _workflow("ci.yml")["jobs"]["test-streaming"]
+    conditional = [s.get("name") for s in job["steps"] if "if" in s]
+    assert not conditional, f"test-streaming has steps that can be skipped: {conditional}"
+    assert job.get("if") == GATED_ON_CODE["test-streaming"][1], job.get("if")
+    runs = [s for s in job["steps"] if "docker run" in s.get("run", "")]
+    assert len(runs) == 1, runs
+    assert "shell" not in runs[0], f"the run step overrides its shell: {runs[0]['shell']!r}"
+    lines = _logical_lines(runs[0]["run"])
+    assert len(lines) == 1 and lines[0].startswith("docker run"), (
+        f"the run step must be one docker run command: {lines}")
+    assert not re.search(r"\|\||;|&&|\||\bset\s+\+e\b|\bexit\b", lines[0]), lines[0]
 
 
 

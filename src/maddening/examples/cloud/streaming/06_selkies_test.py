@@ -2,9 +2,13 @@
 """Test SelkiesSession GStreamer/WebRTC on a cloud GPU.
 
 Provisions a VM, installs GStreamer system packages + PyGObject,
-verifies that SelkiesSession can be constructed and a GStreamer
-pipeline can be built. Does NOT test full WebRTC streaming (that
-requires a browser client), but validates the GStreamer layer.
+and checks on it that SelkiesSession can be constructed, started and
+stopped (``start()`` builds a viewer's pipeline once, to fail early on a
+missing GStreamer element), and that frames can be pushed.  It does NOT
+connect a viewer, so it checks neither the WebRTC negotiation nor the
+stream.  Those are tested on CPU, with no cloud, by
+``tests/cloud/test_webrtc_loopback.py`` (a GStreamer WebRTC peer in a
+network-less container: no browser, no GPU encoder, no NAT traversal).
 
 Interpreter note (read before running).  On ``runpod/base`` the system
 ``python3`` is 3.10 and carries the apt ``python3-gi`` bindings, but
@@ -156,7 +160,8 @@ try:
         def teardown(self):
             pass
         def read_framebuffer_cpu(self):
-            return b"\xFF" * (64 * 32 * 4), 64, 32, "RGBA"
+            # The PREVIEW preset's size: a frame of another size is refused.
+            return b"\xFF" * (854 * 480 * 4), 854, 480, "RGBA"
 
     inner = DummyRenderer()
     session2 = SelkiesSession(secret="test2", signaling_port=18444)

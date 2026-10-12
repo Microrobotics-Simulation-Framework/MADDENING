@@ -326,6 +326,9 @@ PER_PUSH = [
         expect=("All checks passed",)),
     Run("advanced.sysid_demo", ("--samples", "100", "--n-iter", "150"),
         expect=("All checks passed",)),
+    # verify_node needs Hypothesis (the verify extra), which CI installs.
+    Run("advanced.calibrated_node", ("--samples", "80", "--max-examples", "10"),
+        needs=("hypothesis",), expect=("All checks passed",)),
     Run("advanced.checkpoint_resume_demo", ("--warmup", "20", "--steps", "20"),
         expect=("All checks passed",)),
     # Pins its own device count (4) before importing JAX, whatever

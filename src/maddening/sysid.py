@@ -52,6 +52,7 @@ from maddening.core.coupling.acceleration import (
     convergence_criterion,
     estimated_error,
 )
+from maddening.core import _matmul_precision
 from maddening.core._pow2_frame import pow2_exponent, pow2_frame, pow2_rescale
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -649,6 +650,12 @@ def windowed_loss(
         )
         return final, ok, sim
 
+    # Both scans below trace their bodies at the graph's
+    # ``matmul_precision``: the step inside is pinned by its builder, and
+    # this reaches ``obs_fn`` and the loss around it, under the caller's own
+    # ``jax.jit`` / ``jax.grad`` too.
+    precision = _matmul_precision.of(gm)
+
     # A masked window is cut out of the loss *and* out of its gradient.
     # Multiplying its loss by 0 did neither reliably: a window whose
     # coupling diverged holds inf / NaN, and ``0 * inf`` is NaN.  The
@@ -685,7 +692,8 @@ def windowed_loss(
             return (w + 1, _next_warm(final, ok)), ok
 
         _, window_ok = jax.lax.scan(
-            _verdict, (jnp.int32(0), cold), None, length=n_windows)
+            _matmul_precision.pinned(_verdict, precision), (jnp.int32(0), cold),
+            None, length=n_windows)
 
     def _window(carry, _):
         w, warm = carry
@@ -738,7 +746,8 @@ def windowed_loss(
             loss_w = loss_w + continuity_weight * pen * (w < n_windows - 1)
         return (w + 1, _next_warm(final, window_ok[w] if mask_unconverged else None)), loss_w
 
-    _, losses = jax.lax.scan(_window, (jnp.int32(0), cold), None, length=n_windows)
+    _, losses = jax.lax.scan(_matmul_precision.pinned(_window, precision),
+                             (jnp.int32(0), cold), None, length=n_windows)
     return jnp.sum(losses)
 
 
@@ -1466,6 +1475,9 @@ class _PhysicalMap:
 
     def __init__(self, gm, start: dict, flat_u, idx) -> None:
         specs = _resolve_specs(start, gm.param_specs())
+        #: The precision the fit's programs trace their float32 matrix
+        #: products at: the graph's ``matmul_precision``.
+        self.matmul_precision = _matmul_precision.of(gm)
         leaves, self.treedef = jax.tree.flatten(start)
         self._start_leaves = list(leaves)
         #: The dtype of ``theta`` (``ravel_pytree`` promotes across leaves).
@@ -3271,6 +3283,7 @@ def fim_core(
     noise_std: Optional[Any] = None,
     rank_rtol: Optional[float] = None,
     specs: Optional[dict] = None,
+    matmul_precision: Optional[str] = _matmul_precision.DEFAULT,
 ) -> FIMCore:
     """:func:`fim`'s computation with no host round trip -- jit this.
 
@@ -3349,14 +3362,18 @@ def fim_core(
     if scale not in _SCALES:
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
+    precision = _matmul_precision.validated(matmul_precision)
     idx, integer_excluded = _fim_indices(params, mask)
-    return _fim_core_traced(
-        residual_fn, params, scale=scale, idx=idx,
-        inv_sigma=_resolved_noise(residual_fn, params, noise_std),
-        rank_rtol=rank_rtol,
-        nominal=_resolve_nominal(params, specs, idx, scale),
-        integer_excluded=integer_excluded,
-    )
+    inv_sigma = _resolved_noise(residual_fn, params, noise_std)
+    nominal = _resolve_nominal(params, specs, idx, scale)
+    # The Jacobian, ``F = J.T @ J`` and the decomposition trace at
+    # ``matmul_precision`` (``fim``'s argument), under the caller's ``jit``.
+    with _matmul_precision.traced_at(precision):
+        return _fim_core_traced(
+            residual_fn, params, scale=scale, idx=idx, inv_sigma=inv_sigma,
+            rank_rtol=rank_rtol, nominal=nominal,
+            integer_excluded=integer_excluded,
+        )
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -3370,6 +3387,7 @@ def fim(
     rank_rtol: Optional[float] = None,
     specs: Optional[dict] = None,
     reuse_trace: bool = False,
+    matmul_precision: Optional[str] = _matmul_precision.DEFAULT,
 ) -> FIMReport:
     """Fisher information matrix ``J^T J`` of ``residual_fn`` at ``params``.
 
@@ -3558,6 +3576,17 @@ def fim(
         ``residual_fn`` cannot key it and is traced afresh.  For a loop
         that needs no host-side report, :func:`fim_core` under your own
         ``jax.jit`` is the faster path and states the same contract.
+    matmul_precision : str or None, default "highest"
+        **EXPERIMENTAL.**  The precision the Jacobian and ``F = J.T @ J``
+        trace their float32 matrix products at
+        (``jax.default_matmul_precision``).  On NVIDIA GPUs JAX's own default
+        runs them at reduced precision: ``J.T @ J`` for a ``(2e4, 12)``
+        float32 ``J`` measured 9.0e-6 relative error against 1.1e-7 at
+        ``"highest"`` (RTX A2000).  ``None`` inherits JAX's setting.  On CPU
+        it changes nothing.  :func:`fit`, :func:`fit_lm` and
+        :func:`fit_multiple_shooting` take theirs from the graph
+        (:attr:`GraphManager.matmul_precision
+        <maddening.core.graph_manager.GraphManager.matmul_precision>`).
 
     Returns
     -------
@@ -3652,6 +3681,7 @@ def fim(
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
     _check_flag("reuse_trace", reuse_trace)
+    precision = _matmul_precision.validated(matmul_precision)
     idx, integer_excluded = _fim_indices(params, mask)
     nominal = _resolve_nominal(params, specs, idx, scale)
     inv_sigma = _resolved_noise(residual_fn, params, noise_std,
@@ -3667,20 +3697,23 @@ def fim(
             # cache.  That is a reason to skip the cache, not to refuse
             # the call.
             run = None
-    if run is None:
-        # The default, and deliberately not jitted-and-cached: this
-        # traces ``residual_fn`` now, so everything it reads from outside
-        # its argument is read as it stands at this call.  ``J`` is
-        # bit-for-bit the jitted one (see :func:`_fim_jacobian`), so the
-        # report does not depend on which branch built it.
-        J, zero_mask = _fim_jacobian(residual_fn, params, scale=scale,
-                                     idx=idx, inv_sigma=inv_sigma,
-                                     nominal=nominal)
-    else:
-        J, zero_mask = run(params, inv_sigma)
-    # Eager, and deliberately: see :func:`_fim_jacobian` for why the
-    # Gram product stays off the compiler's hands in the reporting path.
-    F, finite, gram_nonzero = _fim_gram(J)
+    # Everything computed on the device -- the Jacobian, traced or run
+    # eagerly, and ``F = J.T @ J`` -- at ``matmul_precision``.
+    with _matmul_precision.traced_at(precision):
+        if run is None:
+            # The default, and deliberately not jitted-and-cached: this
+            # traces ``residual_fn`` now, so everything it reads from outside
+            # its argument is read as it stands at this call.  ``J`` is
+            # bit-for-bit the jitted one (see :func:`_fim_jacobian`), so the
+            # report does not depend on which branch built it.
+            J, zero_mask = _fim_jacobian(residual_fn, params, scale=scale,
+                                         idx=idx, inv_sigma=inv_sigma,
+                                         nominal=nominal)
+        else:
+            J, zero_mask = run(params, inv_sigma)
+        # Eager, and deliberately: see :func:`_fim_jacobian` for why the
+        # Gram product stays off the compiler's hands in the reporting path.
+        F, finite, gram_nonzero = _fim_gram(J)
 
     # One blocking read, four buffers, and everything below is host
     # numpy: ``J`` itself, which the verdict is decomposed from, and
@@ -3998,6 +4031,10 @@ def _model_loss_and_gradient(pmap: "_PhysicalMap", objective, n_extra: int = 0):
         grads = pullback(cot)
         return (loss, pmap.ravel(grads[0]), *grads[1:])
 
+    # Traced at the graph's ``matmul_precision``: the objective's own
+    # products, not only the graph's step inside it.
+    plain, scaled = (_matmul_precision.pinned(f, pmap.matmul_precision)
+                     for f in (plain, scaled))
     return _compile_model(plain), _compile_model(scaled)
 
 
@@ -5979,7 +6016,7 @@ def _half_squared_norm(r) -> float:
     return 0.5 * float(jnp.sum(framed * framed)) / scale / scale
 
 
-def _framed_gradient(J, r) -> np.ndarray:
+def _framed_gradient(J, r, precision: Optional[str] = _matmul_precision.DEFAULT) -> np.ndarray:
     """``Jᵀr`` in float64, from ``J`` and ``r`` framed by powers of two
     (every column's largest entry, and the residual's, into ``[0.5, 1)``)
     and unframed in float64.
@@ -5993,7 +6030,9 @@ def _framed_gradient(J, r) -> np.ndarray:
     """
     c = _column_frame(J)
     f = pow2_frame(r)
-    g = (J * c[None, :]).T @ (r * f)
+    # Eager on the device, at the fit's ``matmul_precision`` (``precision``).
+    with _matmul_precision.traced_at(precision):
+        g = (J * c[None, :]).T @ (r * f)
     # One frame at a time: their product can leave float64's range (a
     # float64 residual near 1e-170) where each frame, and the result, is in it.
     return np.asarray(g, dtype=np.float64) / np.asarray(c, dtype=np.float64) / float(f)
@@ -6514,13 +6553,17 @@ def fit_lm(
     # ``losses``, the acceptance test and ``best_loss`` are values of one
     # function at the trees ``pmap.params`` returned; the Jacobian is its own
     # program and gives no loss.
-    residual_only = _compile_model(_residual)
-    jacobian = _compile_model(_jacobian)
+    # Traced at the graph's ``matmul_precision`` (``_PhysicalMap``), as the
+    # Marquardt and Gauss-Newton steps below: ``Jh.T @ Jh`` in float32 is a
+    # matrix product a GPU otherwise runs at reduced precision.
+    residual_only = _compile_model(_matmul_precision.pinned(_residual, pmap.matmul_precision))
+    jacobian = _compile_model(_matmul_precision.pinned(_jacobian, pmap.matmul_precision))
 
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
     unresolved: set = set()
     _warn_unresolved_values("fit_lm", pmap, start, "at the start of the fit", unresolved)
-    _lm_step = _marquardt_step
+    _lm_step = _matmul_precision.pinned(_marquardt_step, pmap.matmul_precision)
+    gauss_newton = _matmul_precision.pinned(_gauss_newton_step, pmap.matmul_precision)
 
     # The step test, on the physical trainable entries (see ``step_tol``):
     # per entry, a relative tolerance -- ``step_tol``, or ``2**4`` ulps of
@@ -6649,7 +6692,7 @@ def fit_lm(
         on a spring -- so the second test evaluates the step.
         """
         candidate, ok = _stepped(
-            th, lambda origin, lo, hi, held: _gauss_newton_step(origin, r, J, lo, hi, held))
+            th, lambda origin, lo, hi, held: gauss_newton(origin, r, J, lo, hi, held))
         verdict["representable"] &= ok
         candidate_params = pmap.params(candidate)
         if _within_step_tol(before, pmap.physical(candidate_params)):
@@ -6698,7 +6741,7 @@ def fit_lm(
         rJ, rJ_iteration = (r, J), i - 1
         # ``Jᵀr`` framed (``_framed_gradient``), in float64, for the tracker
         # and the on-bound test: bare, it flushed to zero with the residual.
-        grad = _framed_gradient(J, r)
+        grad = _framed_gradient(J, r, pmap.matmul_precision)
         if tracker is not None:
             # The same ``g`` ``_lm_step`` forms, recomputed here rather than
             # returned from it: the tracker must not change the step, and
@@ -6822,7 +6865,7 @@ def fit_lm(
             # parameters' units happened to round to (MADD-ANO-174).
             if _within_step_tol(here, there):
                 gn_cand, gn_ok = _stepped(
-                    theta, lambda origin, lo, hi, held: _gauss_newton_step(
+                    theta, lambda origin, lo, hi, held: gauss_newton(
                         origin, r, J, lo, hi, held))
                 verdict["representable"] &= gn_ok
                 gn_params = pmap.params(gn_cand)
@@ -6911,7 +6954,7 @@ def fit_lm(
             # the same ``J`` (``_rj_selected``), so it is formed once.
             r_end, J_end = theta_r, jacobian(theta_params, pmap.slope(theta))
             if bool(jnp.all(jnp.isfinite(r_end))) and bool(jnp.all(jnp.isfinite(J_end))):
-                tracker.observe(_framed_gradient(J_end, r_end))
+                tracker.observe(_framed_gradient(J_end, r_end, pmap.matmul_precision))
                 rJ, rJ_iteration = (r_end, J_end), theta_iteration
         if stationary or not accepted:
             converged = stationary
@@ -6939,7 +6982,7 @@ def fit_lm(
 
     def _reference():
         r_sel, J_sel = _rj_selected()
-        return _half_squared_norm(r_sel), _framed_gradient(J_sel, r_sel)
+        return _half_squared_norm(r_sel), _framed_gradient(J_sel, r_sel, pmap.matmul_precision)
 
     def _flatness(candidates, spanned, scale):
         return _gauss_newton_flatness(_rj_selected()[1], candidates, coarse,

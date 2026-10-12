@@ -1839,8 +1839,8 @@ such a node everywhere: `TypeError: can't apply forward-mode autodiff (jvp)
 to a custom_vjp function`.
 
 What to do instead: give the node a `jax.custom_jvp` whose tangent is
-linear in the tangents and written in operations JAX can transpose
-(`jnp` arithmetic, `lax.custom_linear_solve`).  JAX then derives the
+linear in the tangents and written in operations JAX can transpose,
+such as `jnp` arithmetic.  JAX then derives the
 reverse mode from it.  With the same function written that way, every
 configuration above, `"fori"` included, gave the same gradient
 (0.645956, against a central difference of 0.645876) and the same

@@ -41,9 +41,8 @@ The first `print_*(rich=True)` in a process imports `rich`, and importing
 rich 15.0.0).  A sequence seeded with `random.seed()` before that call
 therefore changes: the `random.random()` draws that follow are not the
 seeded ones, not even shifted by one.  NumPy's global generator and the
-graph's state are untouched.  If a
-seeded `random` sequence matters, seed it after the first rich print, or
-import `rich` before seeding.
+graph's state are untouched.  If a seeded `random` sequence matters, seed
+it after the first rich print, or import `rich` before seeding.
 
 ## The graph at a glance
 
@@ -483,8 +482,8 @@ fresh process per measurement; CPU, 4 cores, float32, jax 0.11.0): one step of a
 10,000 unknowns (two fields coupled cell by cell through a three-point stencil, two scalar
 parameters per node) peaked at **2.1 to 2.3 times** the memory with diagnostics on, 0.61 to 0.62 GB
 against 0.27 to 0.29 GB.  What the step adds to the built graph was 6 to 7 times larger (0.40 GB
-against 0.06 to 0.07 GB), most of it compiling the analysis, which did not grow between 2,000 and
-10,000 unknowns.  So plan for at least twice the memory of the step without diagnostics, and more on
+against 0.06 to 0.07 GB), most of it a fixed cost that did not grow between 2,000 and 10,000
+unknowns.  So plan for at least twice the memory of the step without diagnostics, and more on
 a large group (six times in the table's last row): a group that nearly fills a device's memory
 without diagnostics will not fit with them.
 
@@ -513,7 +512,7 @@ the first for a coefficient from a callback, the second for one from a `custom_v
 plain `jnp`, and `jax.grad` and `jax.jvp` through it equal the twin's.  There is no setting that
 keeps the spectral keys and leaves out the gradient bound: run such a group with
 `diagnostics=False`, or give the member a rule JAX can differentiate twice.  A member whose rule
-is reverse mode only cannot be differentiated in a group at all; see "A member with a
+is reverse mode only cannot be differentiated in a group on the default solver; see "A member with a
 reverse-mode-only derivative" in [the algorithm
 guide](../developer_guide/coupling_algorithm_guide.md#a-member-with-a-reverse-mode-only-derivative).
 

@@ -290,11 +290,26 @@ the equivalent expressed as a graph with the same number of cells.
 For the MICROROBOTICA Light cloud-rendered demos at 30 fps the gap is
 load-bearing — that's why we keep both paths.
 
-The unstructured path is tested on CPU virtual devices only: a 16-cell
-toy mesh, a 1024-cell smoke, and a 10⁵-cell ring in the slow lane for
-the two transports' bit identity.  How it performs at real-mesh sizes
-(10⁴–10⁶ cells) under NCCL on actual GPUs has not been measured; the
-tooling for that session is `benchmarks/multigpu/run_pod.py`.
+CI tests the unstructured path on CPU virtual devices: a 16-cell toy
+mesh, a 1024-cell smoke, and a 10⁵-cell ring in the slow lane for the
+two transports' bit identity.  It was checked once on GPUs, on
+2026-10-12, with `benchmarks/multigpu/run_pod.py`: four NVIDIA RTX PRO
+6000 Blackwell cards joined by PCIe, jax and jaxlib 0.11.2.
+
+- Sharded and unsharded results agreed from 10⁵ to 10⁸ cells and on a
+  body-fitted tetrahedral mesh of 1,001,664 cells, and `all_to_all`
+  and `ppermute` gave identical results at every size.
+- Per exchange, `ppermute` took 4–5% less time than `all_to_all` at
+  10⁵ and 3×10⁵ cells, and `all_to_all` 17% less at 10⁶.  With five
+  fields per cell `all_to_all` was faster at every size from 10⁵ to
+  10⁶; with one field at 10⁷ cells `ppermute` took half the time.
+  `all_to_all` stays the default.
+- The compiled step of a cheap neighbour-mean node took 3.4 ms at 10⁷
+  cells and 4.0 ms at 10⁸.  At 10⁷ cells the sharded step took 3.82 ms
+  against 1.25 ms on one card: for a node this cheap the step is bound
+  by dispatch and by the halo exchange (43 kernels a step against 2).
+
+The files are in `benchmarks/results/multigpu/2026-10-12_rtxpro6000/`.
 
 ## Sharding spreads the work, not the size limit, in 0.4.0
 
@@ -327,7 +342,11 @@ construction-time check that the grid divides by the device count, so
 check that yourself); and step it with the wrapper's `update()`, without
 calling its `initial_state()`.
 `benchmarks/multigpu/run_capacity.py` does exactly this (`build_state`,
-`_make_lattice_class`).  The registry entry has the details.
+`_make_lattice_class`).  The registry entry has the details.  Built this
+way, a 471,905,280-cell D3Q19 `LBMNode` ran on four 96 GB cards on
+2026-10-12 (jax and jaxlib 0.11.2) and stayed within 1.2e-6 of its
+reference.  The sharded lattice step peaked at about 4.3 times its
+state on each device: size a run on that.
 
 ## What 0.4.0 does with the unstructured contract
 

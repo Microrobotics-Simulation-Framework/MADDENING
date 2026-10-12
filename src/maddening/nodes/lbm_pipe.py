@@ -157,6 +157,10 @@ def _equilibrium(density, velocity):
     -------
     f_eq : (nx, ny, nz, 19) float32
     """
+    # Every lattice product in this module passes precision=HIGHEST: an NVIDIA
+    # GPU runs a float32 matrix product at reduced precision under JAX's
+    # default (MADD-ANO-290).  tests/nodes/test_lbm_matmul_precision.py holds
+    # each product here to it; do not write them with @.
     # e_dot_u: (nx, ny, nz, 19)  —  velocity @ E^T
     e_dot_u = jnp.matmul(velocity, _E.astype(np.float32).T, precision=jax.lax.Precision.HIGHEST)
     u_sq = jnp.sum(velocity ** 2, axis=-1, keepdims=True)  # (..., 1)

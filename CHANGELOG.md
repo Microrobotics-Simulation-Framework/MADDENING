@@ -48,6 +48,7 @@ checked, with the defects found and fixed before it, is in
 
 ### Changed
 
+- **`LBMNode` and `LBMPipeNode` compute their lattice products at `Precision.HIGHEST`** (MADD-ANO-290): on an NVIDIA GPU at JAX's default matmul precision they ran at reduced precision, and LBM gradients were off by up to 1.6e-3 relative. GPU results change by up to that much; CPU results are bit-identical. On 0.3.1, set `JAX_DEFAULT_MATMUL_PRECISION=highest`.
 - **Python `>=3.12` and `jax` / `jaxlib` `>=0.10,<0.13`** (0.3.1: `>=3.10`, `>=0.4,<0.6`). The ranges do not overlap: migrate JAX first. `lineax` and `scipy` are base dependencies; the `[ift]` extra is empty; the `terminal` extra adds `termaid`.
 - **Coupling groups default to `solver="ift"`, and `converged=True` means within tolerance of the fixed point** (MADD-ANO-005, partly resolved; MADD-ANO-114). Tolerances are relative; `atol` is a dead band defaulting to `0.0`, and `compile()` warns for a group that sets it. Expect more passes; recorded Aitken and IQN trajectories move.
 - **`run_sweep` and `run_scan` may differ by about one ulp**: constants are no longer compiled in.

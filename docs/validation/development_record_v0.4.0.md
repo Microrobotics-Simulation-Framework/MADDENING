@@ -37,6 +37,8 @@ disagree, the tree is right:
   [engineering notes](#engineering-notes).
 - [The multi-GPU session runner](#the-multi-gpu-session-runner): development
   tooling in `benchmarks/multigpu/`, not part of the installed package.
+- [Hardware session, 2026-10-12](#hardware-session-2026-10-12): what the
+  runner measured on four GPUs, and how the session was run.
 - [Index of the anomaly registry](#index-of-the-anomaly-registry): every entry,
   reachable in 0.4.0 or not.
 - [The account of each area](#the-account-of-each-area): the release notes'
@@ -770,7 +772,10 @@ multi-GPU machine and summarise what it measured. They are development tooling:
 they live in the repository, not in the installed package, and carry no
 stability label. Their guide is `benchmarks/multigpu/README.md`.
 
-<!-- after the hardware session: name the session's date, the machine, the jaxlib it recorded and where its summary is filed; the measured results themselves go to the release notes' multi-GPU item and to docs/developer_guide/sharding_topology.md. -->
+The tooling ran once on hardware, on 2026-10-12: four NVIDIA RTX PRO 6000
+Blackwell cards with jax and jaxlib 0.11.2. The files are in
+`benchmarks/results/multigpu/2026-10-12_rtxpro6000/`, and the account is in
+"[Hardware session, 2026-10-12](#hardware-session-2026-10-12)".
 
 ### Session tooling for the hardware run
 
@@ -938,6 +943,213 @@ fails them, and now do.
   `stencil`, `hybrid`), each against its unsharded, NumPy or float64 reference; every goal records pass/fail `checks`
   (schema 4), stops the session on a failure; `--summarise` re-derives every verdict and closes an item only on >= 4 real GPUs
 - **A capacity test for the multi-GPU session** (`benchmarks/multigpu/run_capacity.py`, not a gate): a sharded D3Q19 lattice larger than one card, compared with a small tile's own unsharded run, tiled, and ramped towards a target fill of every card with one process per rung; the runbook's new section "After the checklist: the stress tail" gives the commands, and `--dry-run --cells ...` proves it on a laptop.  It found MADD-ANO-262 (open): `ShardedStencilNode` builds the wrapped node's whole initial state on the default device.
+
+## Hardware session, 2026-10-12
+
+The multi-GPU checklist ran on rented GPUs on 2026-10-12, from 15:31 to 17:16
+UTC. The result files, with a README that traces each number to its file, are
+in `benchmarks/results/multigpu/2026-10-12_rtxpro6000/`. Item 22 of the
+[release notes](../release_notes/v0.4.0.md) is the summary for users.
+
+**The machine.** One RunPod pod with four NVIDIA RTX PRO 6000 Blackwell Server
+Edition cards, 97,887 MiB each, driver 595.91.07. They are joined by PCIe, with
+no NVLink: GPUs 0 and 1 share a PCIe switch, as do GPUs 2 and 3, and the two
+pairs meet at the host bridge. The host had 1,511 GB of memory and a quota of
+163 CPUs. The software was the cloud image built from the session commit:
+Python 3.12.3, jax, jaxlib and the CUDA 12 plugin 0.11.2, lineax 0.1.1, equinox
+0.13.8, numpy 2.5.4 and scipy 1.18.1, with `XLA_PYTHON_CLIENT_PREALLOCATE=false`
+and `JAX_DEFAULT_MATMUL_PRECISION=highest`. Every result file records commit
+`c0c6add8a355`. It was the project's first JAX run on Blackwell cards.
+
+**The goals.** `run_pod.py` ran the runbook's eight goals in order, from 15:33:43
+to 15:50:43 UTC, each with exit code 0.
+
+| Goal | Checks passed |
+|---|---|
+| `indivisible` | 13 of 13 |
+| `halo` | 52 of 52 |
+| `coupled` | 210 of 210 |
+| `stencil` | 376 of 376 |
+| `hybrid` | 54 of 54 |
+| `exchange` | 6 of 6 |
+| `forward` | 42 of 42 |
+| `gradient` | 72 of 72 |
+| `forward --mesh`, 1,001,664 cells | 14 of 14 |
+
+That is 825 of 825 checks on the runner's grids and synthetic meshes, and 14 of
+14 on a body-fitted tetrahedral mesh of a vessel segment, generated with MIME's
+mesh generator. `--summarise` closed all six checklist items.
+
+- On the GPUs the sharded field differs from the one-card field by 4.8e-7 to
+  8.3e-7: both are float32, computed by different GPU programs. On CPU the two
+  are identical bit for bit. The checks' limits hold.
+- `exchange`: `ppermute` took 5% and 4% less time than `all_to_all` at 10⁵ and
+  3×10⁵ cells, and 20% more at 10⁶, with identical results. The runner's rule
+  keeps `all_to_all` as the default.
+- `gradient`: the gradient through `sharded_cg` agrees with the unsharded solve
+  to 4.5e-7 to 6.8e-7 relative at 10⁵ to 10⁶ unknowns, in the same 56
+  iterations.
+
+**The stress tail.** Nothing in it was gated. It ran from 16:01 UTC.
+
+- `exchange` with five fields per cell, at 10⁵ to 10⁶ cells: `all_to_all` was
+  faster at every size (`ppermute`'s speed-up 0.99, 0.84 and 0.85), with
+  identical results.
+- `forward` at 10⁷ cells: 14 of 14. The compiled step took 3.4 ms; the
+  wrapper's public `update()` took 251 ms (see "Graph against eager" below).
+- `exchange` at 10⁷ and 3×10⁷ cells, one field: 2 of 2 each. `ppermute` was
+  2.02 and 1.13 times as fast as `all_to_all`.
+- **Two time-outs.** `gradient` at 10⁷ cells and `forward` at 3×10⁷ cells
+  overran the runbook's 4-minute limits. Those limits came from CPU estimates
+  that left out the host-side setup: building the layout alone took 92 s at
+  10⁷ cells and 120 s at 3×10⁷. Their logs were empty, because the output was
+  buffered and died with the process. Rerun with `python3 -u` under 15- and
+  30-minute limits:
+  - `gradient` at 10⁷ cells: 24 of 24, in 418 s. The sharded rollout gradient
+    took 7.43 ms against 7.91 ms unsharded.
+  - `forward` at 3×10⁷ cells: 6 of 6, in 256 s.
+  - `forward` at 10⁸ cells: 6 of 6, in 1,750 s. The compiled step took 4.0 ms.
+  - Each `forward` run above 2²⁴ cells records one check as not run: a float32
+    sum of ones is exact only below 2²⁴ = 16,777,216 cells.
+
+**Capacity.** `benchmarks/multigpu/run_capacity.py`, which is not gated, ran a
+periodic D3Q19 `LBMNode` under `ShardedStencilNode` against a tiled reference,
+with `--device-memory-gb 96` and 360 s per rung.
+
+| Mesh | Cells | Outcome | Peak fill of a card | Largest relative error |
+|---|---|---|---|---|
+| 2x2 | 176,463,360 | passed | 0.184 | 0 |
+| 2x2 | 471,905,280 | passed | 0.486 | 1.2e-6 |
+| 2x2 | 712,673,280 | out of memory | | |
+| 4x1 | 174,182,400 | passed | 0.183 | 1.2e-6 |
+| 4x1 | 802,414,080 | out of memory | | |
+
+- The ceiling was 471,905,280 cells: a peak of 50.1 GB per card, about 200 GB in
+  all, about twice one card.
+- A soak at 350,784,000 cells on the 2x2 mesh ran for three minutes. Device
+  memory grew by 0 after the first block, and the host's resident memory by
+  2.4 MiB.
+- The step's peak is about 4.3 times the state, per device: 10.66 GiB after the
+  build, 46.15 GiB at the peak of the first step (the 471,905,280-cell rung,
+  device 1). Device 0 peaked 0.3 to 0.5 GiB higher, because it also holds
+  `LBMNode`'s wall mask, a bool per cell that its constructor builds on the
+  default device.
+- The test builds the state one device's block at a time itself
+  (`build_state`), the workaround `MADD-ANO-262` describes. In 0.4.0 a run
+  started through the wrapper's own `initial_state()` is still bounded by one
+  card.
+- Both out-of-memory rungs failed on one large allocation in the step (37.46
+  GiB at 712,673,280 cells, 42.23 GiB at 802,414,080), where the bytes per cell
+  measured at the rung before predicted a peak of 0.78 and 0.90 of the
+  allocator's limit. That points at fragmentation in XLA's GPU allocator. It
+  was not reproduced off the pod, and it is not registered: the failure is
+  loud, it comes from the runtime's allocator rather than from MADDENING's
+  code, and the range that worked is stated above.
+
+**Default matmul precision.** The `stencil` goal at 10⁵ cells, run without
+`JAX_DEFAULT_MATMUL_PRECISION=highest`, passed 348 of 356 checks. All eight
+failures were `LBMNode` gradient checks, two on each layout (1d 4x1, 1d-axis1
+1x4, 2d-flat 1x4, 2d 2x2): the derivative in the initial populations at 1.6e-3
+relative, and in the viscosity at 4.7e-5 to 5.0e-5, against a limit of 1e-5.
+The forward and halo checks passed. With the setting, the gated run passed 376
+of 376.
+
+**The precision patch.** On a copy of the checkout, the seven matrix products
+of the two lattice nodes were given `precision=jax.lax.Precision.HIGHEST`
+(three in `lbm.py`, four in `lbm_pipe.py`). The same goal at the default
+precision then passed 356 of 356. The derivative in the initial populations
+came to 2.0e-6 to 2.1e-6 (it was 1.6e-3), and in the viscosity to 0.9e-6 to
+1.4e-6 (it was 4.7e-5 to 5.0e-5), as small as with `highest` set (2.1e-6, and
+1.6e-6 to 1.8e-6). A sharded step on the 1d 4x1 layout took 0.395 ms, against
+0.386 ms with `highest` and 0.438 ms unpatched. The patch became #327.
+
+**The A2000 precision sweep.** After the session, on one NVIDIA RTX A2000 8GB
+Laptop GPU with jax 0.11.2, float32 products were compared with float64 at
+JAX's default precision and at `highest`. Vector products (`vdot` at 10³ to
+10⁶ elements, as in the CG and GMRES solvers; `dot(q, v)`, as in the coupling
+acceleration) and matrix-vector products gave the same error at both settings,
+3.3e-8 to 1.4e-7. Matrix-matrix products did not:
+
+| Product | Where | Default | `highest` |
+|---|---|---|---|
+| `(1e5, 3) @ (3, 19)` | LBM, D3Q19 | 3.4e-4 | 5.9e-8 |
+| `(1e5, 2) @ (2, 9)` | LBM, D2Q9 | 2.9e-4 | 3.6e-8 |
+| `J.T @ J`, `J` of `(2e4, 12)` | sysid: Fisher information, Levenberg-Marquardt | 9.0e-6 | 1.1e-7 |
+| `U.T @ JU`, `(1e5, 8)` | coupling acceleration and bounds | 3.0e-4 | 4.9e-7 |
+| `H @ field`, three components | interface mappings | 2.5e-4 | 6.5e-7 |
+| `w @ cells`, `(2, 3) @ (3, 1e5)` | `HeatNode` | 4.0e-4 | 7.3e-8 |
+
+A mapping applied to a one-component field was unaffected (1.2e-7 at both
+settings), and in float64 every product was (below 1.4e-15). The fix is in the
+two precision changes: the lattice nodes pin their own products (#327), and a
+graph pins the setting for its compiled programs.
+
+**Graph against eager.** `gve_results/graph_vs_eager.py`, filed with the
+results, stepped a 10,004,569-cell mesh on the four cards, 20 steps each way.
+The runner's node built a new `StaticArray` at every `static_data` access, so
+the wrapper's static cache missed at every eager `update()`: 242.5 ms per step,
+with 40 re-partitions, against 4.45 ms and none when the node returned the same objects. The fields were identical bit for
+bit. In a graph, `gm.step()` took 7.23 ms per step, with two re-partitions at
+compile and none after, and `run_scan` 0.81 ms per step; the graph's field was
+within 2.4e-7 of the eager one. This is `MADD-ANO-294`. It also explains the
+`forward` goal's wrapper times: 251 ms at 10⁷ cells and 2.5 s at 10⁸. The
+runner's node is fixed separately.
+
+**The profiler.** `profile_graph` with a trace, at 10⁷ cells, on four cards
+sharded against one card unsharded:
+
+| | Four cards, sharded | One card |
+|---|---|---|
+| median step | 3.82 ms | 1.25 ms |
+| dispatch floor | 2.41 ms | 0.90 ms |
+| device busy per step | 1.10 ms (29%) | 0.28 ms (22%) |
+| kernels per step | 43 | 2 |
+| compile | 3.3 s | 1.7 s |
+
+The largest kernel of the sharded step is NCCL's send and receive (0.71 ms per
+step). For a node this cheap the sharded step is bound by dispatch and by the
+halo exchange; `run_scan` avoids the dispatch floor. Fewer halo kernels, and the
+four-device dispatch floor, are 0.5.0 work.
+
+**Streaming over the internet.** RunPod exposes TCP ports and no UDP, so the
+media went as TURN over TCP. A TURN server ran on the laptop and was reached
+from the pod through a reverse forward of the session's SSH connection; the
+API and signaling ports were forwarded the other way. The cloud entry point ran
+on GPU 0, bound to loopback.
+
+- A scripted viewer passed every check at 320x240: the answer after 1.87 s, ICE
+  connected after 4.04 s, the first frame after 4.74 s, 14.0 frames a second of
+  15 configured, 119 frames, a picture that changed while the simulation ran
+  and held while it was paused, and constrained-baseline H.264. The server's
+  relay candidate on the laptop's TURN server carried the media.
+- A real browser then showed the stream moving at 640x480: the shipped client
+  page, set to use that TURN server only.
+- The renderer read its frames on the host, and the stream was encoded in
+  software (`x264enc`).
+
+**Launch and teardown.** What matters for the next session:
+
+- The pod was launched with `maddening.cloud.launcher.CloudLauncher` on RunPod:
+  four cards on demand (`use_spot=False`), the cloud image of the session
+  commit, `auto_teardown=True` with a 20-minute autostop (SkyPilot can tear a
+  RunPod pod down but cannot stop it), a cap of $12 an hour and a budget of
+  $40. SkyPilot found no cards in 13 regions and launched in the fourteenth,
+  in the US.
+- `CloudLauncher` needs `~/.maddening/cloud_credentials.yaml`. Its dry run
+  returns before SkyPilot answers; the session's script waited for the answer.
+- On the pod, the checkout was a fresh clone of the public repository at
+  `c0c6add8`. Syncing a git worktree does not work: its `.git` is a pointer
+  file. The mesh file was copied beside the clone.
+- RunPod's telemetry showed the CPUs at 100% before any goal ran: SkyPilot's
+  Ray runtime starting its workers.
+- Before the teardown every result was copied back and compared by SHA-256,
+  file by file: 86 files, 1.3 GB with the traces. The pod was then torn down
+  once, through the launcher, at 17:16:38 UTC, and its cluster read as not
+  found.
+- The launcher's `cost_so_far()` and `status()["hourly_cost"]` read 0.0 for
+  the reconnected job, so the budget guard SkyPilot tracks does not see RunPod's
+  charges. Its docstring warns of this.
+- The session cost about $17.4: 1 hour 45 minutes at $9.96 an hour.
 
 ## Index of the anomaly registry
 
@@ -1720,6 +1932,19 @@ argument to `super().__init__(...)`.
 `MADD-ANO-285` — *under `acceleration="aitken"`, `"iqn-ils"` and `"iqn-imvj"` a
 coupled run depends on the units one field is written in* — **open**, since 0.3.0:
 write a group's quantities in comparable units, or use `"none"` or `"fixed"`.
+
+`MADD-ANO-292` — *SelkiesSession.update_framebuffer_gpu drops every frame, with
+a warning, where cupy is not installed, and no extra or image installs it* —
+**open**.
+
+`MADD-ANO-293` — *SelkiesSession.update_framebuffer_gpu ignores
+GPUFramebuffer.stride_bytes, so a frame with padded rows raises ValueError on
+every frame* — **open**.
+
+`MADD-ANO-294` — *The sharded wrappers place a node's static arrays on the
+devices again at every eager update() when its static_data builds new array
+objects on each access: correct results, about 50 times slower per step at 10^7
+cells* — **open**.
 
 **Resolved.**  `MADD-ANO-006`, `019`, `020`, `024`, `025`, `026`, `028`,
 `029`, `030`, `049`, `062` and `063` above, `064`, `065`, `066` and `067`
@@ -8330,10 +8555,12 @@ This release runs the first such round; the judgements, the evidence for each
 and the surfaces deliberately left alone are in
 [`docs/developer_guide/api_freeze_proposal.md`](../developer_guide/api_freeze_proposal.md).
 
-**Nothing was promoted to `stable`.** The set stays at 17 surfaces, with 260
-members as `scripts/check_stable_signatures.py` counts them (the twelve
-`experimental` inspection methods are members of the `stable`
-`GraphManager`, so the snapshot records them too). Everything this release added is days old: it has no usage history,
+**Nothing was promoted to `stable`.** The set stays at 17 surfaces, with 242
+members as `scripts/check_stable_signatures.py` counts them. The signature
+snapshot used to record as `STABLE` the members that carry a lower tag of their
+own (28 records, among them `GraphManager`'s `EXPERIMENTAL` inspection methods
+and its `EVOLVING` `ParamSpec` methods); the checker now follows each member's
+own tag (#325). Everything this release added is days old: it has no usage history,
 and lowering a level again is itself a breaking change, so a promotion made
 now is expensive to take back and cheap to defer.
 

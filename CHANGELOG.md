@@ -18,7 +18,7 @@ checked, with the defects found and fixed before it, is in
 
 - **`gm.matmul_precision`** (`EXPERIMENTAL`): set it to `None` to trace a graph's programs at JAX's own `jax_default_matmul_precision` instead of `"highest"` (reduced-precision tensor-core speed for MLP or FNO surrogate nodes); `sysid.fim` and `sysid.fim_core` take a `matmul_precision=` keyword (`EXPERIMENTAL`), and the fitters follow the graph's setting.
 - **Node constants are parameters**: `gm.params` holds every node's constants as one tree of arrays that the compiled step takes as an argument, so `jax.grad` reaches them and a change does not recompile; the run methods take `params=` (`STABLE`). All eleven shipped node classes and both sharded wrappers take part; `gm.nodes_without_params()` lists your own nodes that do not.
-- **`ParamSpec`** (`EVOLVING`): trainable, bounds and transform per parameter, with `gm.set_param_spec`, `gm.param_specs`, `gm.trainable_mask`, `gm.unconstrain`, `gm.constrain` and `gm.check_params`.
+- **`ParamSpec`** (`EVOLVING`): trainable, bounds and transform per parameter. The methods that take, return or are defined by it are `EVOLVING` too: `gm.set_param_spec`, `gm.param_specs`, `gm.param_spec_overrides`, `gm.trainable_mask`, `gm.unconstrain`, `gm.constrain`, `gm.check_params` and `SimulationNode.param_specs`.
 - **`maddening.sysid`** (`EVOLVING`): `fit`, `fit_lm`, `fit_multiple_shooting`, `windowed_loss`, `observations_from_history`, and `fim` (Fisher information, rank, Cramér-Rao bounds); the fitters hold the directions the data cannot determine. `fim_core` / `FIMCore`, with no host round trip, are `EXPERIMENTAL`.
 - **Parameters follow the graph**: configs, USD stages and checkpoints store values and `ParamSpec` overrides; `PUT /graph/params/{node}` writes any parameter of a running graph after checking it; an exported FMU exposes each parameter as an FMI parameter.
 - **Interface mappings on edges** (`EVOLVING`): `add_edge(..., mapping=)` with `rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping` and `matrix_mapping`, weights in `gm.params["mappings"]`, saved as a `MappingSpec`.
@@ -46,6 +46,7 @@ checked, with the defects found and fixed before it, is in
 - **CycloneDX SBOMs** for the base install and the `server`, `surrogates` and `usd` extras in `docs/validation/sbom/`.
 - **Registries of other projects validate**: `python -m maddening.compliance check-anomalies` accepts one `<project>_version` field (`--version-field NAME`); `ResolutionStatus.PARTIALLY_RESOLVED`.
 - **Guides**: geometry-dependent mappings, moving a node's own sampling onto an edge, a node that draws random numbers, profiling, typing, verification, and algorithm pages for seven existing nodes and the explicit integrators.
+- **`scripts/report_glossary_coverage.py`**, for contributors: lists, page by page, the glossary terms a documentation page uses without a tooltip. It is a report and always exits 0.
 
 ### Changed
 
@@ -189,7 +190,7 @@ One line per defect that a released version had, with its registry entry and the
 
 ### Known Anomalies
 
-- 54 registry entries are reachable in 0.4.0: 43 open and 11 partly resolved. The release notes' "Known anomalies" section lists each with what to do; the registry is `docs/validation/known_anomalies.yaml`.
+- 57 registry entries are reachable in 0.4.0: 46 open and 11 partly resolved. The release notes' "Known anomalies" section lists each with what to do; the registry is `docs/validation/known_anomalies.yaml`.
 
 ## [0.3.1] - 2026-06-22
 

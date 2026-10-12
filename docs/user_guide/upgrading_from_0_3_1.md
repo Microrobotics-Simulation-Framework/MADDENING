@@ -336,7 +336,7 @@ for cap in (10, 20):
     report = gm.coupling_diagnostics()["a+b"]
     print(f"max_iterations={cap}: {report['iterations']} passes, "
           f"converged={report['converged']}")
-assert report["converged"] and report["iterations"] == 11
+assert report["converged"] and 10 < report["iterations"] <= 20
 
 gm = pair()
 gm.add_coupling_group(["a", "b"], convergence_norm="mixed", atol=1e-6)

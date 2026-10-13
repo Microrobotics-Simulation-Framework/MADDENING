@@ -3040,7 +3040,7 @@
         "websockets==17.2",
         "zstandard==0.25.0"
       ],
-      "ref": "maddening==0.4.1"
+      "ref": "maddening==0.4.2.dev0"
     },
     {
       "dependsOn": [
@@ -3182,7 +3182,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.1",
+      "bom-ref": "maddening==0.4.2.dev0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -3215,9 +3215,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.1",
+      "purl": "pkg:pypi/maddening@0.4.2.dev0",
       "type": "library",
-      "version": "0.4.1"
+      "version": "0.4.2.dev0"
     },
     "properties": [
       {
@@ -3266,7 +3266,7 @@
       },
       {
         "name": "maddening:sbom:marker:python_full_version",
-        "value": "3.12.3"
+        "value": "3.12.15"
       },
       {
         "name": "maddening:sbom:marker:python_version",
@@ -3393,7 +3393,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:870ae85b-b2c7-5913-a932-9a7ebb609206",
+  "serialNumber": "urn:uuid:1448d73d-abaf-5894-b6eb-7e423ba3a66a",
   "specVersion": "1.6",
   "version": 1
 }

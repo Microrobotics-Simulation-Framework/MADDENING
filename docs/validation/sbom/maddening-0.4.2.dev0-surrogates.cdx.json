@@ -3,6 +3,50 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
+      "bom-ref": "absl-py==2.5.1",
+      "description": "Abseil Python Common Libraries, see https://github.com/abseil/abseil-py.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://abseil.io/docs/python/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Issues",
+          "type": "issue-tracker",
+          "url": "https://github.com/abseil/abseil-py/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/abseil/abseil-py"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changelog",
+          "type": "release-notes",
+          "url": "https://github.com/abseil/abseil-py/blob/main/CHANGELOG.md"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "absl-py",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/absl-py@2.5.1",
+      "type": "library",
+      "version": "2.5.1"
+    },
+    {
       "bom-ref": "equinox==0.13.8",
       "description": "Elegant easy-to-use neural networks in JAX.",
       "externalReferences": [
@@ -448,6 +492,121 @@
       "version": "3.4.0"
     },
     {
+      "bom-ref": "optax==0.2.8",
+      "description": "A gradient processing and optimization library in JAX.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: documentation",
+          "type": "documentation",
+          "url": "https://optax.readthedocs.io/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/google-deepmind/optax"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: homepage",
+          "type": "website",
+          "url": "https://github.com/google-deepmind/optax"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "optax",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "absl-py>=0.7.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "flax ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "flax>=0.5.3 ; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ipython>=8.8.0 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax>=0.5.3"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib>=0.5.3"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib>=3.5.0 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "myst-nb>=1.0.0 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=1.18.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scikit-learn ; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy>=1.7.1 ; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "setuptools ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-autodoc-typehints ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-book-theme>=1.0.1 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-collections>=0.0.1 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-gallery>=0.14.0 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx>=6.0.0 ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx_contributors ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinxcontrib-katex ; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "19"
+        }
+      ],
+      "purl": "pkg:pypi/optax@0.2.8",
+      "type": "library",
+      "version": "0.2.8"
+    },
+    {
       "bom-ref": "PyYAML==6.0.3",
       "description": "YAML parser and emitter for Python",
       "externalReferences": [
@@ -844,6 +1003,9 @@
       "ref": "PyYAML==6.0.3"
     },
     {
+      "ref": "absl-py==2.5.1"
+    },
+    {
       "dependsOn": [
         "jax==0.11.2",
         "jaxtyping==0.3.11",
@@ -888,16 +1050,19 @@
     {
       "dependsOn": [
         "PyYAML==6.0.3",
+        "equinox==0.13.8",
         "jax==0.11.2",
         "jaxlib==0.11.2",
         "lineax==0.1.1",
         "numpy==2.5.4",
+        "optax==0.2.8",
         "scipy==1.18.1"
       ],
-      "ref": "maddening==0.4.1"
+      "ref": "maddening==0.4.2.dev0"
     },
     {
       "dependsOn": [
+        "absl-py==2.5.1",
         "numpy==2.5.4"
       ],
       "ref": "ml_dtypes==0.6.0"
@@ -907,6 +1072,16 @@
     },
     {
       "ref": "opt_einsum==3.4.0"
+    },
+    {
+      "dependsOn": [
+        "absl-py==2.5.1",
+        "jax==0.11.2",
+        "jaxlib==0.11.2",
+        "numpy==2.5.4",
+        "scipy==1.18.1"
+      ],
+      "ref": "optax==0.2.8"
     },
     {
       "dependsOn": [
@@ -927,7 +1102,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.1",
+      "bom-ref": "maddening==0.4.2.dev0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -960,9 +1135,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.1",
+      "purl": "pkg:pypi/maddening@0.4.2.dev0",
       "type": "library",
-      "version": "0.4.1"
+      "version": "0.4.2.dev0"
     },
     "properties": [
       {
@@ -983,7 +1158,7 @@
       },
       {
         "name": "maddening:sbom:install",
-        "value": "core"
+        "value": "surrogates"
       },
       {
         "name": "maddening:sbom:libc",
@@ -1011,7 +1186,7 @@
       },
       {
         "name": "maddening:sbom:marker:python_full_version",
-        "value": "3.12.3"
+        "value": "3.12.15"
       },
       {
         "name": "maddening:sbom:marker:python_version",
@@ -1027,7 +1202,7 @@
       },
       {
         "name": "maddening:sbom:requirement",
-        "value": "maddening"
+        "value": "maddening[surrogates]"
       },
       {
         "name": "maddening:sbom:resolver",
@@ -1138,7 +1313,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:9b64cc95-f1f7-596b-a76d-0d6a49fd5168",
+  "serialNumber": "urn:uuid:7a2d2fca-fd72-5da2-b7a0-ef52c1bbdd59",
   "specVersion": "1.6",
   "version": 1
 }

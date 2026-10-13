@@ -119,7 +119,7 @@ def warning(result: dict, shard_spec: str) -> str:
     pred, meas = result["predicted"], result["measured"]
     files = "; ".join(named) if named else "no file stands out: look at the runner (speeds differ by up to 1.6x)"
     return ("::warning title=Slow-lane weights are stale::" + (
-        f"shard {shard_spec} ran {meas / 60:.0f} min against {pred / 60:.0f} predicted. Files the "
+        f"shard {shard_spec} ran {meas / 60:.1f} min against {pred / 60:.1f} predicted. Files the "
         f"weights table has not measured, or has far too low: {files}. Refresh tests/slow_lane_weights.json "
         "with scripts/slow_lane_weights.py.").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
 

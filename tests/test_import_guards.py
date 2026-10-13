@@ -169,6 +169,65 @@ class TestPackagingConsistency:
         for pkg in expected_packages:
             assert pkg in all_deps, f"'{pkg}' missing from 'all' extra"
 
+    def test_all_is_every_feature_extra_that_installs_from_wheels(self):
+        """'all' is the feature extras but usd and streaming, plus the cloud.
+
+        PyGObject (the streaming extra) is published on PyPI as source only,
+        so ``pip install maddening[all]`` compiled it and failed wherever the
+        cairo and GObject-introspection headers were missing, and so did
+        ``[dev]``, which includes ``all`` (MADD-ANO-296).  Streaming needs
+        GStreamer from the system package manager anyway.  CI's compliance job
+        resolves ``all`` and ``dev`` from wheels alone; this pins the
+        composition offline.
+        """
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        with open("pyproject.toml", "rb") as f:
+            extras = tomllib.load(f)["project"]["optional-dependencies"]
+        features = ("viz", "terminal", "network", "api", "surrogates", "viz3d",
+                    "gpu-viz", "compression", "cloud")
+        expected = {dep for name in features for dep in extras[name]}
+        assert set(extras["all"]) == expected
+        assert not any(dep.lower().startswith("pygobject") for dep in extras["all"])
+        assert "maddening[all]" in extras["dev"]
+        # Streaming keeps PyGObject: that extra is what its name promises.
+        assert any(dep.lower().startswith("pygobject") for dep in extras["streaming"])
+
+    def test_dev_installs_every_package_the_ci_extra_tests_with(self):
+        """A ``pip install -e ".[dev]"`` checkout can collect and run the tests.
+
+        ``tests/conftest.py`` imports hypothesis, which ``dev`` did not install
+        until 0.4.1; nor did it carry the starlette floor ``tests/api`` needs or
+        the build backend the packaging test uses.  Every package ``ci`` names
+        must reach ``dev``, directly or through ``all`` / ``verify`` (ci pins
+        pyright exactly where dev keeps a floor, so names are compared).
+        """
+        import re
+
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        with open("pyproject.toml", "rb") as f:
+            extras = tomllib.load(f)["project"]["optional-dependencies"]
+
+        def names(deps):
+            out = set()
+            for dep in deps:
+                match = re.match(r"maddening\[([^\]]+)\]", dep)
+                if match:
+                    for extra in match.group(1).split(","):
+                        out |= names(extras[extra.strip()])
+                else:
+                    out.add(re.split(r"[\[<>=!~ ;]", dep, maxsplit=1)[0].lower())
+            return out
+
+        missing = names(extras["ci"]) - names(extras["dev"])
+        assert not missing, f"dev does not install what ci tests with: {sorted(missing)}"
+        assert "hypothesis" in names(extras["dev"])
+
     def test_ci_excludes_display_deps(self):
         """CI extra doesn't include display-dependent packages."""
         try:

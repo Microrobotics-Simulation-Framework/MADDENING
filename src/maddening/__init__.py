@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 #: installed version -- ``PYTHONPATH`` over a stale editable install --
 #: called itself that version: ``GET /healthz`` on the 0.4.0 tree answered
 #: 0.3.1, as did every record that stores ``maddening.__version__``.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 def __getattr__(name: str) -> Any:

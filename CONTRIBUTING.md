@@ -73,7 +73,7 @@ Because a silent wrong result is at least `major`, it is always Tier 2 or Tier 1
 ## Installation for Development
 
 ```bash
-pip install -e ".[dev]"        # all features + pytest
+pip install -e ".[dev]"        # all features + verify + the test tools
 # Or for GPU development:
 pip install -e ".[dev,cuda12]"
 ```

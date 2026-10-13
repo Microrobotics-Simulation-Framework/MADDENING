@@ -44,7 +44,7 @@
 #
 #   An empty or unparseable range fails the gate, as does a missing one.
 schema_version: "1.0"
-maddening_version: "0.4.0"
+maddening_version: "0.4.1"
 generated_date: "2026-09-24"
 
 anomalies:
@@ -20923,4 +20923,50 @@ anomalies:
       - "tests/core/test_compile_cache.py::test_enabled_dir_never_names_a_directory_jax_is_not_using"
       - "tests/core/test_compile_cache.py::test_a_jax_that_cannot_reopen_its_cache_refuses_the_move"
       - "tests/core/test_compile_cache.py::test_only_compile_cache_points_jax_at_a_cache_directory"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-296"
+    title: "pip install maddening[all] and maddening[dev] failed without the cairo and GObject-introspection C headers: the all extra held PyGObject, which PyPI ships as source only"
+    description: >
+      The `all` extra listed every package of the feature extras, including
+      the `streaming` extra's `PyGObject`.  PyPI publishes PyGObject as a
+      source distribution only for Linux, so pip compiles it, and its build
+      (with pycairo's) needs the cairo and GObject-introspection development
+      headers.  Where they were missing, `pip install maddening[all]` stopped
+      with `Dependency "cairo" not found` and installed nothing, and so did
+      `pip install maddening[dev]` (CONTRIBUTING's development install), which
+      includes `all`.  Measured on 0.4.0 with pip restricted to wheels: every
+      other package of every extra resolves from wheels; PyGObject is the only
+      one that needs a build.  Resolved in 0.4.1: `all` no longer holds
+      PyGObject (it is every feature extra but `usd` and `streaming`, plus
+      the RunPod and Lambda cloud providers), `streaming` keeps it, and the
+      installation guide states streaming's system prerequisites.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An installation that fails loudly and installs nothing: no simulation
+      ran with a wrong result.  Streaming itself also needs GStreamer from
+      the system package manager, so PyGObject from pip never made it work
+      on its own.
+    affected_components:
+      - "pyproject.toml [project.optional-dependencies] all"
+      - "pyproject.toml [project.optional-dependencies] dev"
+    affected_versions: ">=0.1.0, <0.4.1"
+    workaround: >
+      On 0.4.0 and earlier, name the extras of `all` but `streaming`:
+      `pip install "maddening[viz,terminal,network,api,surrogates,viz3d,gpu-viz,compression,cloud]"`
+      (measured to resolve from wheels alone on 0.4.0); or install the
+      headers first (on Ubuntu 24.04 `libcairo2-dev libgirepository-2.0-dev
+      pkg-config python3-dev`) and keep `[all]`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.1"
+    residual_risk: >
+      `pip install maddening[streaming]` still compiles PyGObject and fails
+      the same way without the headers: the installation guide states the
+      prerequisites, and streaming needs GStreamer's system packages in any
+      case.  CI resolves `all` and `dev` from wheels alone on every push, so
+      a dependency that needs a build cannot re-enter them unnoticed; the
+      other extras are not checked that way.
+    verification:
+      - "tests/test_import_guards.py::TestPackagingConsistency::test_all_is_every_feature_extra_that_installs_from_wheels"
     github_issue: null

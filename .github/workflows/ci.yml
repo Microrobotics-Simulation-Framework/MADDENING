@@ -616,6 +616,16 @@ jobs:
           pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci,usd]"
 
+      # `all` and `dev` (which includes `all`) must install from wheels
+      # alone.  Until 0.4.1 `all` held PyGObject, which PyPI ships as source
+      # only, so `pip install maddening[all]` compiled it and failed wherever
+      # the cairo and GObject-introspection headers were missing
+      # (MADD-ANO-296).  `streaming` is not checked: it needs GStreamer from
+      # the system package manager anyway (docs/user_guide/installation.md).
+      # A dry run resolves without installing anything.
+      - name: The all and dev extras install from wheels alone
+        run: pip install --dry-run --quiet --only-binary=:all: --ignore-installed ".[all]" ".[dev]"
+
       - name: Validate anomaly registry
         run: python scripts/check_anomalies.py --prefix MADD-ANO-
 

@@ -169,6 +169,32 @@ class TestPackagingConsistency:
         for pkg in expected_packages:
             assert pkg in all_deps, f"'{pkg}' missing from 'all' extra"
 
+    def test_all_is_every_feature_extra_that_installs_from_wheels(self):
+        """'all' is the feature extras but usd and streaming, plus the cloud.
+
+        PyGObject (the streaming extra) is published on PyPI as source only,
+        so ``pip install maddening[all]`` compiled it and failed wherever the
+        cairo and GObject-introspection headers were missing, and so did
+        ``[dev]``, which includes ``all`` (MADD-ANO-296).  Streaming needs
+        GStreamer from the system package manager anyway.  CI's compliance job
+        resolves ``all`` and ``dev`` from wheels alone; this pins the
+        composition offline.
+        """
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        with open("pyproject.toml", "rb") as f:
+            extras = tomllib.load(f)["project"]["optional-dependencies"]
+        features = ("viz", "terminal", "network", "api", "surrogates", "viz3d",
+                    "gpu-viz", "compression", "cloud")
+        expected = {dep for name in features for dep in extras[name]}
+        assert set(extras["all"]) == expected
+        assert not any(dep.lower().startswith("pygobject") for dep in extras["all"])
+        assert "maddening[all]" in extras["dev"]
+        # Streaming keeps PyGObject: that extra is what its name promises.
+        assert any(dep.lower().startswith("pygobject") for dep in extras["streaming"])
+
     def test_ci_excludes_display_deps(self):
         """CI extra doesn't include display-dependent packages."""
         try:

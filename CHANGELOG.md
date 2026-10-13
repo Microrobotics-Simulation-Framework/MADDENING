@@ -9,6 +9,18 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-13
+
+A packaging fix. No code changed.
+
+### Fixed
+
+- **`pip install maddening[all]` and `maddening[dev]` install again on a machine without the cairo and GObject-introspection C headers.** `all` held PyGObject, which PyPI ships as source only, so pip had to compile it and stopped where the headers were missing. `all` is now every feature extra but `usd` and `streaming`, plus the RunPod and Lambda cloud providers; `streaming` keeps PyGObject, and the installation guide gives its system prerequisites (GStreamer and its WebRTC plugins come from the system package manager in any case).
+
+### Known Anomalies
+
+- MADD-ANO-296 (`minor`, `not_safety_relevant`): the `all` and `dev` extras needed a PyGObject build in 0.1.0 to 0.4.0. Resolved in 0.4.1; on an older version, name the extras of `all` but `streaming` instead.
+
 ## [0.4.0] - 2026-10-13
 
 The release notes, [`docs/release_notes/v0.4.0.md`](docs/release_notes/v0.4.0.md),
